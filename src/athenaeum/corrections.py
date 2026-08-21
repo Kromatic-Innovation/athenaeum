@@ -103,6 +103,7 @@ from athenaeum.models import (
     WikiEntity,
     coerce_bucket,
     generate_uid,
+    load_schema_list,
     parse_frontmatter,
     render_frontmatter,
     slugify,
@@ -111,8 +112,9 @@ from athenaeum.models import (
 from athenaeum.precedence import source_rank
 from athenaeum.provenance import parse_source
 from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
-from athenaeum.schemas import validate_wiki_meta
+from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.storage import surface_root_for_class
+from athenaeum.store import FilesystemStore, Store
 
 log = logging.getLogger(__name__)
 
@@ -1230,6 +1232,32 @@ def process_correction_record(
         assert resolution.entity_type is not None
         assert resolution.handle_key is not None
         assert resolution.handle_value is not None
+
+        # Issue athenaeum#971: gate the create branch's declared ``type`` the
+        # same way the two other deterministic (non-LLM) create/upsert paths
+        # already do — ``intake.py``'s tier0_passthrough eligibility check
+        # and ``librarian.py``'s tier0_handle_upsert (both: unrecognized type
+        # -> reject, i.e. this record is not eligible here and must fall
+        # through to a higher tier). This is the closer precedent than
+        # ``tiers.py``'s post-LLM tier-2 classify path, which COERCES an
+        # unrecognized ``entity_type`` to ``"reference"`` -- that coercion is
+        # safe there because tier-2 is the last stop for an already
+        # LLM-judged entity. Here ``resolution.entity_type`` is an externally
+        # declared string with zero LLM judgment in between (the same shape
+        # as a raw frontmatter ``type:``), AND coercing would misfile a athenaeum#970
+        # fold (e.g. a stale writer still declaring ``type: user``) into the
+        # wrong bucket ("reference") instead of preserving it for correct
+        # reclassification. Reject-and-escalate (this module's own idiom for
+        # "not eligible here", per the module docstring's "every failure to
+        # conform is a fallthrough to a higher tier, never a rejection") is
+        # the matching semantics, not a fourth variant.
+        schema_path = index.wiki_root / "_schema"
+        valid_types = load_schema_list(schema_path, "types.md") or sorted(KNOWN_TYPES)
+        if resolution.entity_type not in valid_types:
+            return _raised(
+                f"unrecognized entity type on create: {resolution.entity_type!r}"
+            )
+
         today = date.today().isoformat()
         created_meta = _build_created_entity_meta(
             entity_type=resolution.entity_type,
@@ -1929,51 +1957,70 @@ def _git(knowledge_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def retire_batch(knowledge_root: Path, batch_path: Path) -> bool:
+def retire_batch(
+    knowledge_root: Path,
+    batch_path: Path,
+    *,
+    store: Store | None = None,
+) -> bool:
     """§5.4: once every record in a batch is terminal, retire it — a
     ``git rm`` after a provenance-snapshot commit, recoverable from git
     history, never hard-deleted (mirrors ``adapter-contract.md`` §4.5 /
     ``retire.py``'s exact two-commit pattern).
 
-    Best-effort: when *knowledge_root* is not a git repository (a bare
-    filesystem test fixture), falls back to a plain ``unlink`` — the batch
-    is still removed from ``raw/`` (which is what actually prevents
-    re-processing; retirement's git-recoverability is a nice-to-have on top
-    of that, not the mechanism that stops the re-read). Returns ``True`` on
-    success.
+    Refuses (returns ``False``) against a store that is not versioned
+    (design note §4.4 R1; issue athenaeum#978): the plain-``unlink``
+    fallback this used to fall through to when *knowledge_root* was not a
+    git repository (documented as best-effort for "a bare filesystem test
+    fixture") is REMOVED — that was exactly the silent degradation to an
+    unrecoverable delete R1 prohibits. A ``git rm`` that itself fails
+    (rather than "no git repo" at all) also now refuses rather than falling
+    through to ``unlink`` — the old fallback covered both cases identically,
+    so removing it removes both.
+
+    *store* is the Tier-B recoverability gate, injectable so a test can
+    supply a fake declaring ``capabilities.versioned=False`` without a real
+    git repo. Defaults to a :class:`~athenaeum.store.FilesystemStore` over
+    *knowledge_root*. Returns ``True`` on success.
     """
     if not batch_path.exists():
         return True
-    if (knowledge_root / ".git").is_dir():
-        try:
-            rel = str(batch_path.resolve().relative_to(knowledge_root.resolve()))
-        except ValueError:
-            rel = str(batch_path)
-        _git(knowledge_root, "add", "--", rel)
-        staged = _git(knowledge_root, "diff", "--cached", "--quiet")
-        if staged.returncode != 0:
-            _git(
-                knowledge_root,
-                "commit",
-                "-m",
-                f"librarian: field-correction batch provenance snapshot ({rel})",
-            )
-        rm_result = _git(knowledge_root, "rm", "--quiet", "-f", "--", rel)
-        if rm_result.returncode == 0:
-            _git(
-                knowledge_root,
-                "commit",
-                "-m",
-                f"librarian: field-correction batch retired ({rel})",
-            )
-            return True
-        # git rm failed for some reason (e.g. not actually tracked) -- fall
-        # through to the plain-unlink fallback below rather than leaving the
-        # batch stuck forever.
-    try:
-        batch_path.unlink()
-    except OSError:
+    store = store if store is not None else FilesystemStore(knowledge_root, {})
+    if not store.capabilities.versioned:
+        log.warning(
+            "corrections: store at %s is not versioned — refusing to "
+            "retire batch %s (recovery is git-only)",
+            knowledge_root,
+            batch_path,
+        )
         return False
+    try:
+        rel = str(batch_path.resolve().relative_to(knowledge_root.resolve()))
+    except ValueError:
+        rel = str(batch_path)
+    _git(knowledge_root, "add", "--", rel)
+    staged = _git(knowledge_root, "diff", "--cached", "--quiet")
+    if staged.returncode != 0:
+        _git(
+            knowledge_root,
+            "commit",
+            "-m",
+            f"librarian: field-correction batch provenance snapshot ({rel})",
+        )
+    rm_result = _git(knowledge_root, "rm", "--quiet", "-f", "--", rel)
+    if rm_result.returncode != 0:
+        log.warning(
+            "corrections: git rm failed for %s — refusing to retire (no "
+            "unlink fallback)",
+            batch_path,
+        )
+        return False
+    _git(
+        knowledge_root,
+        "commit",
+        "-m",
+        f"librarian: field-correction batch retired ({rel})",
+    )
     return True
 
 

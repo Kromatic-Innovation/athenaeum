@@ -6,6 +6,7 @@ field-correction fast path, docs/field-corrections.md).
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,18 @@ from athenaeum.models import EntityIndex, parse_frontmatter
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args], cwd=str(root), capture_output=True, text=True, check=True
+    )
+
+
+def _git_init(root: Path) -> None:
+    _git(root, "init", "-b", "develop")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Corrections Test")
 
 
 def _write_page(wiki: Path, filename: str, meta: dict, body: str = "Body.\n") -> Path:
@@ -1192,6 +1205,147 @@ class TestCreateByHandle:
         assert len(list((tmp_path / "real" / "wiki").glob("*.md"))) == 1
 
 
+class TestCreateTypeGate971:
+    """Issue athenaeum#971 AC3: the create branch's declared ``type`` gets the
+    same unknown-type handling as the two other deterministic (non-LLM)
+    create/upsert paths (``intake.py`` tier0_passthrough,
+    ``librarian.py`` tier0_handle_upsert) — reject-and-escalate
+    (``disposition="raised-tier"``), never silently mint a page under an
+    unrecognized or athenaeum#970-folded type.
+    """
+
+    def _envelope(self, **overrides: object) -> dict:
+        return _envelope(submitter="employer-feed", **overrides)
+
+    def test_unrecognized_type_raises_tier_and_writes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        cfg = _fields_config(
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        record = {
+            "record": "correction",
+            "target": {
+                "type": "totally-bogus-type",
+                "handle": {"domains": "acme.example"},
+            },
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=cfg,
+        )
+        assert result.disposition == "raised-tier"
+        assert "totally-bogus-type" in (result.reason or "")
+        assert list(wiki.glob("*.md")) == []
+
+    def test_folded_type_user_raises_tier_and_writes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        # athenaeum#970's fold enforcement teeth: `type: user` on a NEW create is no
+        # longer minted verbatim — it must raise a tier, exactly like a
+        # never-declared type, so the folded value cannot recur.
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        cfg = _fields_config(
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        record = {
+            "record": "correction",
+            "target": {"type": "user", "handle": {"domains": "acme.example"}},
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=cfg,
+        )
+        assert result.disposition == "raised-tier"
+        assert list(wiki.glob("*.md")) == []
+
+    def test_recognized_type_still_creates(self, tmp_path: Path) -> None:
+        # Control: a currently-valid type (in KNOWN_TYPES, since this test's
+        # tmp wiki has no `_schema/types.md`) is unaffected by the new gate.
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        cfg = _fields_config(
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        record = {
+            "record": "correction",
+            "target": {"type": "company", "handle": {"domains": "acme.example"}},
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=cfg,
+        )
+        assert result.disposition == "applied"
+        assert len(list(wiki.glob("*.md"))) == 1
+
+    def test_declared_types_md_gates_over_the_known_types_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        # When a deployment DOES have a `_schema/types.md`, that declared
+        # list — not the code-side KNOWN_TYPES fallback — is authoritative.
+        # A type present in KNOWN_TYPES but ABSENT from this deployment's
+        # types.md must still raise a tier.
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        schema_dir = wiki / "_schema"
+        schema_dir.mkdir()
+        (schema_dir / "types.md").write_text(
+            "| Type | Description |\n|---|---|\n| company | ... |\n"
+        )
+        cfg = _fields_config(
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        record = {
+            "record": "correction",
+            "target": {"type": "principle", "handle": {"domains": "acme.example"}},
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=cfg,
+        )
+        assert result.disposition == "raised-tier"
+        assert list(wiki.glob("*.md")) == []
+
+
 class TestMixedDispositionBatch:
     def test_conformant_record_still_applies_alongside_a_fallthrough_record(
         self, tmp_path: Path
@@ -2080,11 +2234,34 @@ class TestFallthroughHandoff:
 
 
 class TestRetirement:
-    def test_retire_without_git_unlinks(self, tmp_path: Path) -> None:
+    def test_retire_without_git_refuses(self, tmp_path: Path) -> None:
+        """issue athenaeum#978 (S3, Tier B): the old silent-``unlink``
+        fallback for a non-git *knowledge_root* is REMOVED (design note
+        §4.4 R1) — retirement now refuses, leaving the batch in place,
+        rather than silently discarding it unrecoverably."""
         batch = tmp_path / "batch.jsonl"
         batch.write_text("x\n")
-        assert retire_batch(tmp_path, batch) is True
-        assert not batch.exists()
+        assert retire_batch(tmp_path, batch) is False
+        assert batch.exists()
+
+    def test_retire_refuses_against_fake_declaring_no_recovery_capability(
+        self, tmp_path: Path
+    ) -> None:
+        """issue athenaeum#978 (S3, Tier B AC5): even with a REAL git repo
+        present, an injected store fake declaring neither ``versioned`` nor
+        ``purgeable`` (design note §4.4 R1) makes retirement refuse — proving
+        the gate is driven by the declared capability, not by probing
+        ``knowledge_root / ".git"`` directly."""
+        from tests.store_fakes import NoRecoveryStore
+
+        _git_init(tmp_path)
+        batch = tmp_path / "batch.jsonl"
+        batch.write_text("x\n")
+        _git(tmp_path, "add", "-A")
+        _git(tmp_path, "commit", "-m", "seed")
+
+        assert retire_batch(tmp_path, batch, store=NoRecoveryStore()) is False
+        assert batch.exists()
 
     def test_retire_with_git_removes_and_commits(self, tmp_path: Path) -> None:
         import subprocess
@@ -2274,6 +2451,10 @@ class TestVolumeBounds:
         assert batch.exists()
 
     def test_over_max_records_per_run_carries_second_batch(self, tmp_path: Path) -> None:
+        # issue athenaeum#978 (S3): retirement now refuses against a store
+        # that is not versioned rather than falling back to a silent
+        # unlink, so this needs a real git repo to observe batch1 retired.
+        _git_init(tmp_path)
         wiki = tmp_path / "wiki"
         _write_page(wiki, "p.md", {"uid": "person-a", "type": "person", "name": "A"})
         _write_page(wiki, "q.md", {"uid": "person-b", "type": "person", "name": "B"})

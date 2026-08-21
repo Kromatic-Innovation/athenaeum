@@ -184,6 +184,55 @@ class TestManifestSchema:
             parse_authority_manifest(text)
 
 
+class TestNeverIngestClassesSchema:
+    """Issue athenaeum#968: the ``never_ingest_classes:`` manifest key."""
+
+    def test_absent_key_defaults_to_empty(self) -> None:
+        manifest = parse_authority_manifest(_VALID_MANIFEST_YAML)
+        assert manifest.never_ingest_classes == ()
+
+    def test_valid_classes_parse(self) -> None:
+        text = _VALID_MANIFEST_YAML + (
+            "never_ingest_classes:\n"
+            "  - mirror-of-live-source\n"
+            "  - pending-state-todo\n"
+        )
+        manifest = parse_authority_manifest(text)
+        assert manifest.never_ingest_classes == (
+            "mirror-of-live-source",
+            "pending-state-todo",
+        )
+
+    def test_empty_list_is_legal_and_inert(self) -> None:
+        text = _VALID_MANIFEST_YAML + "never_ingest_classes: []\n"
+        manifest = parse_authority_manifest(text)
+        assert manifest.never_ingest_classes == ()
+
+    def test_not_a_list_raises(self) -> None:
+        text = _VALID_MANIFEST_YAML + "never_ingest_classes: mirror-of-live-source\n"
+        with pytest.raises(AuthorityManifestError, match="never_ingest_classes"):
+            parse_authority_manifest(text)
+
+    def test_unrecognised_class_raises(self) -> None:
+        text = _VALID_MANIFEST_YAML + "never_ingest_classes:\n  - some-made-up-class\n"
+        with pytest.raises(AuthorityManifestError, match="not a recognised class"):
+            parse_authority_manifest(text)
+
+    def test_non_string_entry_raises(self) -> None:
+        text = _VALID_MANIFEST_YAML + "never_ingest_classes:\n  - 1\n"
+        with pytest.raises(AuthorityManifestError, match="non-empty string"):
+            parse_authority_manifest(text)
+
+    def test_duplicate_class_raises(self) -> None:
+        text = _VALID_MANIFEST_YAML + (
+            "never_ingest_classes:\n"
+            "  - mirror-of-live-source\n"
+            "  - mirror-of-live-source\n"
+        )
+        with pytest.raises(AuthorityManifestError, match="duplicate never_ingest_classes"):
+            parse_authority_manifest(text)
+
+
 class TestManifestLoader:
     def test_load_missing_file_returns_empty_manifest(self, tmp_path: Path) -> None:
         manifest = load_authority_manifest(tmp_path / "nope.yaml")

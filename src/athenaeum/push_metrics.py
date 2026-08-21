@@ -340,6 +340,16 @@ def read_push_records(cache_dir: Path | None = None) -> list[dict[str, Any]]:
     return _read_jsonl(path)
 
 
+def read_reference_records(cache_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Read every reference-determination record. Tolerates a torn trailing
+    line; never raises. Public counterpart to :func:`read_push_records`
+    (issue athenaeum#968): both are the sanctioned way to read these ledgers —
+    :mod:`athenaeum.usage_report` and :mod:`athenaeum.ingestion_gate` use
+    this instead of reaching for the private :func:`_read_jsonl` helper.
+    """
+    return _read_jsonl(reference_records_path(cache_dir))
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         return []

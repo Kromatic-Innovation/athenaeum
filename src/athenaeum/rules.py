@@ -126,6 +126,7 @@ from athenaeum.models import (
     parse_frontmatter,
 )
 from athenaeum.provenance import parse_source
+from athenaeum.store import FilesystemStore, Store
 
 log = logging.getLogger(__name__)
 
@@ -831,7 +832,13 @@ def write_correction_batch(
     return out_path
 
 
-def retire_compiled_raw_file(knowledge_root: Path, raw_path: Path, *, rule_tag: str) -> bool:
+def retire_compiled_raw_file(
+    knowledge_root: Path,
+    raw_path: Path,
+    *,
+    rule_tag: str,
+    store: Store | None = None,
+) -> bool:
     """Retire a raw intake file the shape-rule engine has fully compiled
     into a correction batch (`emit`, live mode) — `git rm` after a
     provenance-snapshot commit, recoverable from git history, never
@@ -840,18 +847,28 @@ def retire_compiled_raw_file(knowledge_root: Path, raw_path: Path, *, rule_tag: 
     commit wording (see module docstring "Decisions" for why this is not a
     call to `corrections.retire_batch`).
 
-    Best-effort: falls back to a plain unlink outside a git repo (test
-    fixtures), same fallback `retire_batch` uses. Returns `True` on success.
+    Refuses (returns `False`) against a store that is not versioned (design
+    note §4.4 R1; issue athenaeum#978) — no unlink fallback outside a git
+    repo. *store* is injectable for tests; defaults to a
+    :class:`~athenaeum.store.FilesystemStore` over *knowledge_root*. Returns
+    `True` on success.
     """
     return _retire_raw_file(
         knowledge_root,
         raw_path,
         snapshot_reason="before compile",
         retire_reason=f"compiled into a correction batch by {rule_tag}",
+        store=store,
     )
 
 
-def drop_raw_file(knowledge_root: Path, raw_path: Path, *, rule_tag: str) -> bool:
+def drop_raw_file(
+    knowledge_root: Path,
+    raw_path: Path,
+    *,
+    rule_tag: str,
+    store: Store | None = None,
+) -> bool:
     """Retire a raw intake file a `drop` rule judged information-free
     (issue athenaeum#903) — the SAME two-commit provenance-snapshot-then-`git rm`
     convention :func:`retire_compiled_raw_file` uses, with drop wording.
@@ -862,12 +879,18 @@ def drop_raw_file(knowledge_root: Path, raw_path: Path, *, rule_tag: str) -> boo
     recoverable from history (athenaeum#903 AC: "the discard is recoverable from
     history") and the audit counter in the ledger says how many were discarded
     and by which rule.
+
+    Refuses (returns `False`) against a store that is not versioned (design
+    note §4.4 R1; issue athenaeum#978) — no unlink fallback outside a git
+    repo. *store* is injectable for tests; defaults to a
+    :class:`~athenaeum.store.FilesystemStore` over *knowledge_root*.
     """
     return _retire_raw_file(
         knowledge_root,
         raw_path,
         snapshot_reason="before drop",
         retire_reason=f"dropped as information-free by {rule_tag}",
+        store=store,
     )
 
 
@@ -1003,44 +1026,65 @@ def _retire_raw_file(
     *,
     snapshot_reason: str,
     retire_reason: str,
+    store: Store | None = None,
 ) -> bool:
     """Shared two-commit retirement: snapshot the content, then `git rm` it.
 
     Committing BEFORE the removal is what makes every retirement recoverable —
     a file that was never committed would be unrecoverable once unlinked, which
     is the difference between an audited discard and a deletion.
+
+    Refuses (returns ``False``) against a store that is not versioned
+    (design note §4.4 R1; issue athenaeum#978): the plain-``unlink`` fallback
+    this used to fall through to when ``knowledge_root`` was not a git repo
+    is REMOVED — that was exactly the silent degradation to an unrecoverable
+    delete R1 prohibits, "documented as a best-effort fallback for test
+    fixtures" until a non-git surface became the normal case. A ``git rm``
+    that itself fails (rather than "no git repo" at all) also now refuses
+    rather than falling through to ``unlink`` — the old fallback covered
+    both cases identically, so removing it removes both. *store* is
+    injectable for tests; defaults to a
+    :class:`~athenaeum.store.FilesystemStore` over *knowledge_root*.
     """
     if not raw_path.exists():
         return True
-    if (knowledge_root / ".git").is_dir():
-        try:
-            rel = str(raw_path.resolve().relative_to(knowledge_root.resolve()))
-        except ValueError:
-            rel = str(raw_path)
-        _git(knowledge_root, "add", "--", rel)
-        staged = _git(knowledge_root, "diff", "--cached", "--quiet")
-        if staged.returncode != 0:
-            _git(
-                knowledge_root,
-                "commit",
-                "-m",
-                f"shape-rules: raw-intake provenance snapshot {snapshot_reason} ({rel})",
-            )
-        rm_result = _git(knowledge_root, "rm", "--quiet", "-f", "--", rel)
-        if rm_result.returncode == 0:
-            _git(
-                knowledge_root,
-                "commit",
-                "-m",
-                f"shape-rules: {rel} {retire_reason}",
-            )
-            return True
-    try:
-        raw_path.unlink()
-        return True
-    except OSError:
-        log.warning("shape-rules: failed to retire raw file %s", raw_path)
+    store = store if store is not None else FilesystemStore(knowledge_root, {})
+    if not store.capabilities.versioned:
+        log.warning(
+            "shape-rules: store at %s is not versioned — refusing to retire "
+            "%s (recovery is git-only)",
+            knowledge_root,
+            raw_path,
+        )
         return False
+    try:
+        rel = str(raw_path.resolve().relative_to(knowledge_root.resolve()))
+    except ValueError:
+        rel = str(raw_path)
+    _git(knowledge_root, "add", "--", rel)
+    staged = _git(knowledge_root, "diff", "--cached", "--quiet")
+    if staged.returncode != 0:
+        _git(
+            knowledge_root,
+            "commit",
+            "-m",
+            f"shape-rules: raw-intake provenance snapshot {snapshot_reason} ({rel})",
+        )
+    rm_result = _git(knowledge_root, "rm", "--quiet", "-f", "--", rel)
+    if rm_result.returncode != 0:
+        log.warning(
+            "shape-rules: git rm failed for %s — refusing to retire (no "
+            "unlink fallback)",
+            raw_path,
+        )
+        return False
+    _git(
+        knowledge_root,
+        "commit",
+        "-m",
+        f"shape-rules: {rel} {retire_reason}",
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1070,6 +1114,87 @@ def _append_jsonl_line(path: Path, line: str) -> None:
 def append_shape_rules_ledger(wiki_root: Path, record: dict[str, Any]) -> None:
     path = default_shape_rules_ledger_path(wiki_root)
     _append_jsonl_line(path, json.dumps(record, sort_keys=True) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Per-record disposition rows (issue athenaeum#975, athenaeum#905 prerequisite)
+# ---------------------------------------------------------------------------
+#
+# `_shape_rules_applied.jsonl` above is a per-`(rule, mode)` AGGREGATE: it
+# answers "how often did this rule fire", not "which record got what
+# treatment". This ledger is the per-record complement -- one row per
+# candidate the shape-rules pass evaluates, including the ones no rule
+# matched at all, so athenaeum#905's shape-frequency detector has a real per-record
+# data source (athenaeum#923: "everything is dispositioned and the
+# disposition is audited"). Same `_`-prefixed, wiki-root, append-only-JSONL
+# discipline as the aggregate above -- every corpus walker in this repo
+# skips `_`-prefixed files, so this file can never become a claim or enter
+# the embedded index.
+
+SHAPE_RULE_DISPOSITIONS_FILENAME = "_shape_rule_dispositions.jsonl"
+
+
+def default_shape_rule_dispositions_path(wiki_root: Path) -> Path:
+    return wiki_root / SHAPE_RULE_DISPOSITIONS_FILENAME
+
+
+def append_shape_rule_disposition_row(wiki_root: Path, row: dict[str, Any]) -> None:
+    path = default_shape_rule_dispositions_path(wiki_root)
+    _append_jsonl_line(path, json.dumps(row, sort_keys=True) + "\n")
+
+
+#: Dispositions the shape-rules pass -- the deterministic, no-LLM layer,
+#: tier 0 on the ladder in `docs/field-corrections.md` §2 -- actually
+#: resolved a record with. Everything else (no rule matched at all, a rule
+#: that explicitly deferred via `fallthrough`/`observed-fallthrough`, or a
+#: soft failure that degrades to fallthrough -- `transform-error`,
+#: `preserve-unconfigured`, `preserve-failed`) is tier `None`: "not handled
+#: here", deferred to the reasoning ladder (tier >=1). This pass genuinely
+#: does not know which reasoning tier will handle a deferred record, so
+#: `None` is the honest encoding rather than a guessed number.
+_TIER_0_DISPOSITIONS: frozenset[str] = frozenset(
+    {
+        "emit",
+        "observed-emit",
+        "drop",
+        "observed-drop",
+        "retain",
+        "observed-retain",
+        "preserve",
+        "observed-preserve",
+        "rollup",
+        "observed-rollup",
+    }
+)
+
+
+def _disposition_tier(disposition: str) -> int | None:
+    """Map a shape-rules disposition to its reasoning-ladder tier -- see
+    :data:`_TIER_0_DISPOSITIONS`."""
+    return 0 if disposition in _TIER_0_DISPOSITIONS else None
+
+
+def _shape_rule_disposition_row(
+    *, raw: RawFile, record: dict[str, Any], rule_id: str | None, disposition: str
+) -> dict[str, Any]:
+    """Build one `_shape_rule_dispositions.jsonl` row.
+
+    `key_fingerprint` is the record's top-level KEY SET fingerprint
+    (:func:`record_key_fingerprint`) -- never raw values, per athenaeum#975 AC2.
+    `source`/`source_ref` come from `RawFile.source`/`RawFile.ref`, both
+    already non-sensitive (a raw source directory name and a
+    `source/filename` ref) -- no raw record VALUE ever lands in a row.
+    """
+    return {
+        "schema_version": 1,
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": raw.source,
+        "source_ref": raw.ref,
+        "key_fingerprint": record_key_fingerprint(record),
+        "tier": _disposition_tier(disposition),
+        "rule_id": rule_id,
+        "disposition": disposition,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1150,6 +1275,13 @@ def run_shape_rule_phase(
     rule matched but a value expression failed to resolve — degrades to
     fallthrough, the original raw file is left untouched).
 
+    Issue athenaeum#975: alongside that per-`(rule, mode)` aggregate, this also
+    appends one PER-RECORD disposition row (:func:`append_shape_rule_disposition_row`,
+    `wiki_root/_shape_rule_dispositions.jsonl`) for every candidate this phase
+    evaluates -- including the ones no rule matched (`rule_id: null`,
+    `disposition: "no-match"`) -- unless `dry_run` is set, mirroring the
+    aggregate's own dry-run behaviour.
+
     Returns a summary dict: `rules_loaded`, `rules_skipped_malformed`,
     `files_evaluated`, `files_matched`, `dispositions` (disposition ->
     count across the whole run).
@@ -1188,10 +1320,29 @@ def run_shape_rule_phase(
     # tautology and could never catch a disposition that forgot to tally.
     counts_seen: dict[tuple[str, str], int] = {}
 
-    def _tally(rule_tag: str, mode: str, disposition: str) -> None:
+    def _tally(
+        rule_tag: str,
+        mode: str,
+        disposition: str,
+        *,
+        raw: RawFile,
+        record: dict[str, Any],
+    ) -> None:
         counts = tallies.setdefault((rule_tag, mode), {})
         counts[disposition] = counts.get(disposition, 0) + 1
         summary["dispositions"][disposition] = summary["dispositions"].get(disposition, 0) + 1
+        # Issue athenaeum#975: every disposition this loop reaches funnels through
+        # here except the `matched_rule is None` early-continue (handled
+        # separately below) -- so a per-record row is appended in exactly one
+        # place, structurally, rather than at each of the dispositions' many
+        # call sites.
+        if not dry_run:
+            append_shape_rule_disposition_row(
+                wiki_root,
+                _shape_rule_disposition_row(
+                    raw=raw, record=record, rule_id=rule_tag, disposition=disposition
+                ),
+            )
 
     evaluated = 0
     for raw in candidates:
@@ -1207,6 +1358,16 @@ def run_shape_rule_phase(
             (r for r in rules if r.match.matches(raw=raw, record=record, fmt=fmt)), None
         )
         if matched_rule is None:
+            # Issue athenaeum#975: the interesting shapes for athenaeum#905's detector are
+            # precisely the ones no rule claims -- so this candidate still gets
+            # a disposition row, just with no rule/tier to attribute it to.
+            if not dry_run:
+                append_shape_rule_disposition_row(
+                    wiki_root,
+                    _shape_rule_disposition_row(
+                        raw=raw, record=record, rule_id=None, disposition="no-match"
+                    ),
+                )
             continue
         summary["files_matched"] += 1
         rule_tag = matched_rule.qualified_name
@@ -1217,7 +1378,7 @@ def run_shape_rule_phase(
 
         if matched_rule.disposition == "fallthrough":
             disposition = "fallthrough" if is_live else "observed-fallthrough"
-            _tally(rule_tag, matched_rule.mode, disposition)
+            _tally(rule_tag, matched_rule.mode, disposition, raw=raw, record=record)
             # Nothing written -- the file is left exactly as discovery
             # found it, for the ordinary tiered ladder to process normally.
             continue
@@ -1227,10 +1388,10 @@ def run_shape_rule_phase(
         # so it stays recoverable from history.
         if matched_rule.disposition == "drop":
             if not is_live:
-                _tally(rule_tag, matched_rule.mode, "observed-drop")
+                _tally(rule_tag, matched_rule.mode, "observed-drop", raw=raw, record=record)
                 continue
             drop_raw_file(knowledge_root, raw.path, rule_tag=rule_tag)
-            _tally(rule_tag, matched_rule.mode, "drop")
+            _tally(rule_tag, matched_rule.mode, "drop", raw=raw, record=record)
             log.info(
                 "shape-rules: %s dropped %s as information-free "
                 "(recoverable from git history)",
@@ -1244,10 +1405,10 @@ def run_shape_rule_phase(
         # deleted and NOT compiled. Discovery skips it from the next run on.
         if matched_rule.disposition == "retain":
             if not is_live:
-                _tally(rule_tag, matched_rule.mode, "observed-retain")
+                _tally(rule_tag, matched_rule.mode, "observed-retain", raw=raw, record=record)
                 continue
             mark_exempt(knowledge_root, [raw.ref])
-            _tally(rule_tag, matched_rule.mode, "retain")
+            _tally(rule_tag, matched_rule.mode, "retain", raw=raw, record=record)
             log.info(
                 "shape-rules: %s retained %s as a preserved source document "
                 "(compiled-exempt; file left in place)",
@@ -1270,7 +1431,7 @@ def run_shape_rule_phase(
         # move is the mechanism; the manifest is not involved.
         if matched_rule.disposition == "preserve":
             if not is_live:
-                _tally(rule_tag, matched_rule.mode, "observed-preserve")
+                _tally(rule_tag, matched_rule.mode, "observed-preserve", raw=raw, record=record)
                 continue
             preserved_dir = resolve_preserved_log_dir(config)
             if preserved_dir is None:
@@ -1282,7 +1443,7 @@ def run_shape_rule_phase(
                     rule_tag,
                     raw.ref,
                 )
-                _tally(rule_tag, matched_rule.mode, "preserve-unconfigured")
+                _tally(rule_tag, matched_rule.mode, "preserve-unconfigured", raw=raw, record=record)
                 continue
             # Build the correction BEFORE moving: a transform that cannot
             # resolve must leave the raw file exactly where it was, so the
@@ -1303,7 +1464,7 @@ def run_shape_rule_phase(
                         raw.ref,
                         exc,
                     )
-                    _tally(rule_tag, matched_rule.mode, "transform-error")
+                    _tally(rule_tag, matched_rule.mode, "transform-error", raw=raw, record=record)
                     continue
             dest = preserve_raw_file(
                 knowledge_root,
@@ -1313,7 +1474,7 @@ def run_shape_rule_phase(
                 rule_tag=rule_tag,
             )
             if dest is None:
-                _tally(rule_tag, matched_rule.mode, "preserve-failed")
+                _tally(rule_tag, matched_rule.mode, "preserve-failed", raw=raw, record=record)
                 continue
             if corr_record is not None and corr_spec is not None:
                 # Point the fact at the artifact WITHOUT disturbing its
@@ -1344,7 +1505,7 @@ def run_shape_rule_phase(
                     submitter=f"shape-rule:{rule_tag}",
                     records=[corr_record],
                 )
-            _tally(rule_tag, matched_rule.mode, "preserve")
+            _tally(rule_tag, matched_rule.mode, "preserve", raw=raw, record=record)
             log.info(
                 "shape-rules: %s preserved %s as a log artifact at %s%s",
                 rule_tag,
@@ -1372,7 +1533,7 @@ def run_shape_rule_phase(
                     raw.ref,
                     exc,
                 )
-                _tally(rule_tag, matched_rule.mode, "transform-error")
+                _tally(rule_tag, matched_rule.mode, "transform-error", raw=raw, record=record)
                 continue
             rollup_groups.setdefault(
                 (rule_tag, matched_rule.mode, _group_key_repr(group_key)), []
@@ -1381,6 +1542,8 @@ def run_shape_rule_phase(
                 rule_tag,
                 matched_rule.mode,
                 "rollup" if is_live else "observed-rollup",
+                raw=raw,
+                record=record,
             )
             continue
 
@@ -1398,11 +1561,11 @@ def run_shape_rule_phase(
                 raw.ref,
                 exc,
             )
-            _tally(rule_tag, matched_rule.mode, "transform-error")
+            _tally(rule_tag, matched_rule.mode, "transform-error", raw=raw, record=record)
             continue
 
         if matched_rule.mode != "live" or dry_run:
-            _tally(rule_tag, matched_rule.mode, "observed-emit")
+            _tally(rule_tag, matched_rule.mode, "observed-emit", raw=raw, record=record)
             continue
 
         batch_path = write_correction_batch(
@@ -1412,7 +1575,7 @@ def run_shape_rule_phase(
             records=[corr_record],
         )
         retire_compiled_raw_file(knowledge_root, raw.path, rule_tag=rule_tag)
-        _tally(rule_tag, matched_rule.mode, "emit")
+        _tally(rule_tag, matched_rule.mode, "emit", raw=raw, record=record)
         log.info(
             "shape-rules: %s compiled %s into correction batch %s",
             rule_tag,

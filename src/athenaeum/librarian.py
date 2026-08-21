@@ -92,6 +92,7 @@ from typing import Any, Callable
 from athenaeum import detection_state, spend, zero_yield
 from athenaeum._retry import TransientAPIError
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.authority import AuthorityManifest, load_authority_manifest
 from athenaeum.bounce_contract import check_tier0_bounce_conformance
 from athenaeum.clusters import (
     cluster_auto_memory_files,
@@ -107,6 +108,7 @@ from athenaeum.config import (
 from athenaeum.config import (
     load_config,
     preflight_model_rates,
+    resolve_authority_manifest_path,
     resolve_corrections_max_escalations_per_run,
     resolve_corrections_runtime_share,
     resolve_delta_enabled,
@@ -137,6 +139,7 @@ from athenaeum.delta import (
     compute_affected_clusters,
     splice_cluster_report,
 )
+from athenaeum.ingestion_gate import check_ingestion_gate
 from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE re-exported for back-compat
     _AUTO_MEMORY_SKIP_NAMES,
     AUTO_MEMORY_FILE_RE,
@@ -169,6 +172,11 @@ from athenaeum.models import (
     parse_frontmatter,
     render_frontmatter,
 )
+from athenaeum.never_ingest import (
+    NEVER_INGEST_TIER_ENTITY,
+    check_and_refuse,
+    filter_never_ingest,
+)
 from athenaeum.pii import (
     ExcludedRecordIndex,
     HardBounceFact,
@@ -189,6 +197,7 @@ from athenaeum.registry import collect_handles
 from athenaeum.rules import run_shape_rule_phase
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
+from athenaeum.store import FilesystemStore
 from athenaeum.tiers import (
     Tier2ParseStats,
     partition_code_artifact_classifications,
@@ -487,35 +496,6 @@ def rebuild_index(wiki_root: Path) -> None:
     log.info(
         "Rebuilt _index.md with %d entities", sum(len(v) for v in by_type.values())
     )
-
-
-def git_snapshot(knowledge_root: Path, message: str) -> bool:
-    """Stage all changes and commit if there are any. Returns True if committed."""
-    if not (knowledge_root / ".git").exists():
-        log.warning("No .git in %s — skipping git snapshot", knowledge_root)
-        return False
-
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=str(knowledge_root),
-        capture_output=True,
-        text=True,
-    )
-    if not result.stdout.strip():
-        return False
-
-    subprocess.run(
-        ["git", "add", "-A"],
-        cwd=str(knowledge_root),
-        check=True,
-    )
-    subprocess.run(
-        ["git", "commit", "-m", message],
-        cwd=str(knowledge_root),
-        check=True,
-    )
-    log.info("Git commit: %s", message)
-    return True
 
 
 def _maybe_pull_before_run(
@@ -1073,6 +1053,7 @@ def process_one(
     calls_before_file: int = 0,
     started_at_file: float | None = None,
     write_client: LLMBackend | None = None,
+    never_ingest_manifest: AuthorityManifest | None = None,
 ) -> ProcessingResult:
     """Process a single raw file through all tiers.
 
@@ -1107,6 +1088,17 @@ def process_one(
     ``started_at_file`` is ``time.monotonic()``, both snapshotted by the
     caller at the moment THIS file started, so the deltas measured here are
     this file's own spend, not the phase's running total.
+
+    ``never_ingest_manifest`` (issue athenaeum#968) is the authority manifest
+    loaded ONCE for the whole ``ctx.raw_files`` loop, same threading shape as
+    ``excluded_index`` above. Checked HERE, at the per-file COMPILE choke
+    point, deliberately never at discovery -- :func:`athenaeum.intake.
+    discover_raw_files`'s return value must stay byte-identical for
+    ``backlog_price_sheet.py`` / ``ordinary_night_table.py`` (issue athenaeum#713,
+    held pending an operator decision), which call it directly for their own
+    backlog counts. ``None`` (every pre-athenaeum#968 caller, and any caller that
+    does not thread a manifest) disables the check entirely -- matching an
+    empty/absent ``never_ingest_classes`` manifest key exactly.
     """
     effective_write_client = write_client if write_client is not None else client
     result = ProcessingResult(raw_file=raw)
@@ -1119,8 +1111,31 @@ def process_one(
     # below touches raw._content. Tier 0 already honors raw `access:` verbatim;
     # this pins the same guarantee onto the Tier-2/3 LLM path for the unstructured
     # medical notes that never reach Tier 0. Empty when the raw carries none.
-    raw_meta, _ = parse_frontmatter(raw.content)
+    raw_meta, raw_body = parse_frontmatter(raw.content)
     sticky_access = parse_access(raw_meta)
+
+    # Issue athenaeum#968: the never-ingest class gate, entity tier. A no-op
+    # unless a manifest was threaded in AND it declares at least one
+    # never_ingest_classes entry -- dark by default, identical contract to
+    # the auto-memory gate. A refused file is excluded from compilation this
+    # run and ledgered ids-only to ``_never_ingest_refusals.jsonl``; it is
+    # NEVER deleted from disk (see ``athenaeum.never_ingest``'s module
+    # docstring) and is simply re-evaluated (and, if still matching,
+    # re-refused) idempotently the next run.
+    if never_ingest_manifest is not None and never_ingest_manifest.never_ingest_classes:
+        ni_refusal = check_and_refuse(
+            raw_meta,
+            raw_body,
+            manifest=never_ingest_manifest,
+            origin_scope=raw.source,
+            filename=raw.path.name,
+            tier=NEVER_INGEST_TIER_ENTITY,
+            cache_dir=_resolve_cache_dir(None),
+            dry_run=dry_run,
+        )
+        if ni_refusal is not None:
+            result.skipped.append(f"never-ingest:{ni_refusal.class_slug}")
+            return result
 
     # --- Tier 0: passthrough for pre-structured raw-intake ---
     # When upstream producers already emit valid wiki-schema frontmatter,
@@ -2835,6 +2850,18 @@ class RunContext:
     # discovery path claimed this run, and how many pending decisions were
     # raised (vs. already open/resolved) for them.
     intake_audit_summary: dict[str, Any] | None = None
+    # Issue athenaeum#968: run-summary counts from the never-ingest gate applied
+    # in ``_run_auto_memory_phase`` (``None`` until that phase runs) -- how
+    # many auto-memory candidates were excluded this run because they
+    # matched a manifest-declared ``never_ingest_classes`` entry. Empty/zero
+    # when the manifest declares no classes (the dark-by-default case).
+    never_ingest_summary: dict[str, Any] | None = None
+    # Issue athenaeum#968: the ingestion gate's verdict for this run (``None``
+    # until ``_run_auto_memory_phase`` runs). ``blocked=True`` means
+    # auto-memory compilation was skipped this run because push-metrics
+    # precision instrumentation looked unhealthy while the gate was enabled
+    # (see ``athenaeum.ingestion_gate``).
+    ingestion_gate_status: dict[str, Any] | None = None
     # Issue athenaeum#440: absolute monotonic instant after which the entity phase stops
     # CLAIMING new files, reserving the remainder of ``run_deadline`` for the
     # phases downstream of it (auto-memory C2/C3 and the C4 contradiction
@@ -3009,8 +3036,7 @@ class RunContext:
             phase,
         )
         if not self.dry_run:
-            git_snapshot(
-                self.knowledge_root,
+            FilesystemStore(self.knowledge_root, {}).snapshot(
                 f"librarian: partial run (deadline {self.max_runtime}s exceeded "
                 f"during {phase})",
             )
@@ -3300,9 +3326,10 @@ def _run_git_vcs_io(ctx: RunContext) -> None:
 
     # Issue athenaeum#284: capture HEAD at run-start (before ANY commit site fires)
     # so the post-run push can detect whether the run produced any commit
-    # across librarian.git_snapshot, retire._commit_paths_if_staged, and
-    # the merge-only / cluster-only early-return paths. Per-call-site
-    # tracking would miss the commits inside the retire pass.
+    # across FilesystemStore.snapshot (issue athenaeum#978 — formerly
+    # librarian.git_snapshot), retire._commit_paths_if_staged, and the
+    # merge-only / cluster-only early-return paths. Per-call-site tracking
+    # would miss the commits inside the retire pass.
     ctx.head_at_start = _capture_head(ctx.knowledge_root) if not ctx.dry_run else None
 
 
@@ -3955,7 +3982,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             write_client = ctx.write_client
 
             if not ctx.dry_run:
-                git_snapshot(ctx.knowledge_root, "librarian: pre-processing snapshot")
+                FilesystemStore(ctx.knowledge_root, {}).snapshot(
+                    "librarian: pre-processing snapshot"
+                )
 
             # Issue athenaeum#337: a wall-clock timeout (the pre-dawn sweep's
             # `timeout`, which SIGTERMs then, after a grace, KILLs) would
@@ -4008,8 +4037,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     default_provider=ctx.provider,
                     files_processed=ctx.processed_count,
                 )
-                git_snapshot(
-                    ctx.knowledge_root,
+                FilesystemStore(ctx.knowledge_root, {}).snapshot(
                     f"librarian: partial run (interrupted after {ctx.processed_count} "
                     f"file(s), {ctx.total_created}C {ctx.total_updated}U "
                     f"{ctx.total_escalated}E {len(ctx.failed_files)}F)",
@@ -4133,6 +4161,20 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # `mark_bounced` registers each record it writes back onto it.
                     excluded_index = ExcludedRecordIndex(
                         contacts_surface_root(ctx.wiki_root.parent, ctx.config)
+                    )
+                    # Issue athenaeum#968: the never-ingest class gate, entity tier.
+                    # Loaded ONCE per run (mirrors excluded_index above) and
+                    # threaded down through process_one, which checks it at the
+                    # COMPILE choke point for each raw file -- never at discovery.
+                    # ctx.raw_files (this loop's own iterand, set by
+                    # discover_raw_files above) is deliberately left untouched:
+                    # backlog_price_sheet.py / ordinary_night_table.py (issue
+                    # athenaeum#713, held pending an operator decision) both call
+                    # discover_raw_files directly for their own backlog counts, and
+                    # must keep seeing the exact same set/count this gate does not
+                    # exist for them.
+                    never_ingest_manifest = load_authority_manifest(
+                        resolve_authority_manifest_path(ctx.knowledge_root, ctx.config)
                     )
                     for i, raw in enumerate(ctx.raw_files):
                         # Issue athenaeum#526 (H10): heartbeat at every per-file boundary
@@ -4290,6 +4332,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 # falls back to *client* (``classify``)
                                 # unchanged.
                                 write_client=write_client,
+                                never_ingest_manifest=never_ingest_manifest,
                             )
                         except RawFileTooLargeError as exc:
                             # Issue athenaeum#898: the per-file BYTE bound (checked by
@@ -4575,7 +4618,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         f"({ctx.total_created}C {ctx.total_updated}U "
                         f"{ctx.total_escalated}E {len(ctx.failed_files)}F)"
                     )
-                    git_snapshot(ctx.knowledge_root, msg)
+                    FilesystemStore(ctx.knowledge_root, {}).snapshot(msg)
             finally:
                 for _s, _prev in _prev_handlers:
                     signal.signal(_s, _prev)
@@ -4727,6 +4770,21 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     early return check (cluster_only never reaches merged_entries use) and
     reads it isn't needed there — retire below is the only consumer.
     """
+    # Issue athenaeum#968 part 3: the ingestion gate. Checked BEFORE discovery --
+    # when enabled (off by default) and push-metrics precision instrumentation
+    # looks unhealthy, auto-memory compilation is skipped entirely this run so
+    # intake cannot silently keep degrading push quality with no visibility.
+    # Nothing on disk is touched either way; a blocked run simply re-checks
+    # (and, if still unhealthy, re-skips) next time.
+    gate_status = check_ingestion_gate(config=ctx.config, cache_dir=_resolve_cache_dir(None))
+    ctx.ingestion_gate_status = gate_status.to_dict()
+    if gate_status.blocked:
+        log.warning(
+            "ingestion gate: auto-memory phase SKIPPED this run -- %s",
+            gate_status.reason,
+        )
+        return None
+
     # C1 + C2: auto-memory discovery followed by the C2 cluster pass.
     # Clustering must run BEFORE any tier routing so that downstream C3
     # merge has a fresh grouping to consume. Scope identity is preserved
@@ -4735,6 +4793,38 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     auto_memory_files = discover_auto_memory_files(ctx.knowledge_root, config=ctx.config)
     if not auto_memory_files:
         return None
+
+    # Issue athenaeum#968 part 2: the never-ingest class gate. A no-op (returns
+    # every file unchanged) unless the authority manifest declares at least
+    # one ``never_ingest_classes`` entry -- dark by default. A refused file
+    # is excluded from THIS run's compilation and ledgered
+    # (``_never_ingest_refusals.jsonl``); it is never deleted from disk (see
+    # ``athenaeum.never_ingest``'s module docstring).
+    manifest = load_authority_manifest(
+        resolve_authority_manifest_path(ctx.knowledge_root, ctx.config)
+    )
+    auto_memory_files, never_ingest_refusals = filter_never_ingest(
+        auto_memory_files,
+        manifest,
+        cache_dir=_resolve_cache_dir(None),
+        dry_run=ctx.dry_run,
+    )
+    ctx.never_ingest_summary = {
+        "refused": len(never_ingest_refusals),
+        "by_class": {
+            slug: sum(1 for r in never_ingest_refusals if r.class_slug == slug)
+            for slug in sorted({r.class_slug for r in never_ingest_refusals})
+        },
+    }
+    if never_ingest_refusals:
+        log.info(
+            "never-ingest: refused %d auto-memory file(s) this run: %s",
+            len(never_ingest_refusals),
+            ctx.never_ingest_summary["by_class"],
+        )
+    if not auto_memory_files:
+        return None
+
     by_scope: dict[str, int] = {}
     for am in auto_memory_files:
         by_scope[am.origin_scope] = by_scope.get(am.origin_scope, 0) + 1

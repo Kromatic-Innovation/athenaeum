@@ -1074,6 +1074,23 @@ class TestTier3MergePatchOps:
         with pytest.raises(MergeOpsError):
             apply_merge_ops("body", [{"op": "replace", "text": "x"}])
 
+    def test_missing_op_field_raises(self) -> None:
+        # M17 phase 2a (athenaeum#1035): the one missing-required mismatch in the
+        # measured window ("0.op: Field required") — pinning that a wholly
+        # absent `op` key (not just an unrecognized value) is caught here,
+        # same as test_unknown_op_kind_raises above.
+        with pytest.raises(MergeOpsError):
+            apply_merge_ops("body", [{"anchor": "body", "text": "x"}])
+
+    def test_extra_key_on_an_op_is_tolerated(self) -> None:
+        # athenaeum#1035: the two extra-key shapes actually observed in the
+        # measured window ([].text2, [].append_section) must not block
+        # application — extra="allow" is the decided (unchanged) posture for
+        # tiers.tier3-merge.
+        existing = "# Acme\n\nFintech."
+        ops = [{"op": "append_section", "text": "Raised Series C.[^2]", "text2": "unused"}]
+        assert apply_merge_ops(existing, ops) == "# Acme\n\nFintech.\n\nRaised Series C.[^2]"
+
     # --- parse_merge_ops_response: the fallback-signalling contract ----------
 
     def test_parse_signals_fallback_on_unparseable(self) -> None:
@@ -1092,6 +1109,37 @@ class TestTier3MergePatchOps:
     def test_parse_applies_valid_ops(self) -> None:
         body, esc, needs_fallback = parse_merge_ops_response(
             json.dumps({"ops": [{"op": "append_section", "text": "New.[^2]"}]}),
+            self._action(),
+            "ref",
+            "# Acme\n\nOld.",
+        )
+        assert needs_fallback is False
+        assert esc is None
+        assert body == "# Acme\n\nOld.\n\nNew.[^2]"
+
+    def test_parse_signals_fallback_on_op_missing_the_op_key(self) -> None:
+        # M17 phase 2a (athenaeum#1035): a JSON-valid ops list whose single op is
+        # missing "op" entirely — the measured window's one missing-required
+        # mismatch. Reaches apply_merge_ops, which raises MergeOpsError; the
+        # caller turns that into the same reject-and-degrade-to-full-echo
+        # fallback as any other unusable ops list.
+        body, esc, needs_fallback = parse_merge_ops_response(
+            json.dumps({"ops": [{"anchor": "Old.", "text": "New.[^2]"}]}),
+            self._action(),
+            "ref",
+            "# Acme\n\nOld.",
+        )
+        assert (body, esc) == (None, None)
+        assert needs_fallback is True
+
+    def test_parse_applies_ops_with_extra_key_from_the_measured_window(self) -> None:
+        # athenaeum#1035: [].append_section as an unexpected key (distinct from
+        # the "append_section" op KIND) is one of the two extra-key shapes
+        # actually observed — must still apply cleanly (extra="allow").
+        body, esc, needs_fallback = parse_merge_ops_response(
+            json.dumps(
+                {"ops": [{"op": "append_section", "text": "New.[^2]", "text2": "unused"}]}
+            ),
             self._action(),
             "ref",
             "# Acme\n\nOld.",

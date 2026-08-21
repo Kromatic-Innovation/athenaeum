@@ -590,7 +590,7 @@ reconstructible from raw + wiki**:
 | `_quarantine.jsonl` (`quarantine.py:59-75`) | wiki root | no |
 | `_merge_provenance.jsonl` (`provenance.py:427-431`) | wiki root | no |
 | `_pending_retractions.jsonl` (`retraction_cascade.py:26-28`) | wiki root | no |
-| `_calibration.jsonl`, `_reasoning_tier_decisions.jsonl`, `_axiom_governance.jsonl`, `_corrections_applied.jsonl`, `_shape_rules_applied.jsonl` | wiki root | no |
+| `_calibration.jsonl`, `_reasoning_tier_decisions.jsonl`, `_axiom_governance.jsonl`, `_corrections_applied.jsonl`, `_shape_rules_applied.jsonl`, `_shape_rule_dispositions.jsonl` | wiki root | no |
 | `_resolved_contradictions.jsonl` (`fingerprint.py:61`) | `raw/` | no |
 | `_observations.jsonl` / `_observation_supersessions.jsonl` (`pii.py:1309-1314`) | excluded surface root | no |
 | `observations.jsonl`, `spend.jsonl`, `_push_records.jsonl` (`llm_schemas.py:391-394`, `config.py:1449`, `push_metrics.py:132`) | **cache dir** | no |

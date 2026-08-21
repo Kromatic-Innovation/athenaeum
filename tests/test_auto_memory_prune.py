@@ -255,6 +255,29 @@ class TestApplyPrune:
         assert report.errors  # refused: no git repo
         assert (wiki / "auto-cctest-scratch.md").exists()  # nothing removed
 
+    def test_refuses_against_fake_declaring_no_recovery_capability(
+        self, wiki_with_auto_pages: Path
+    ) -> None:
+        """issue athenaeum#978 (S3, Tier A AC5): even with a REAL git repo
+        present (``wiki_with_auto_pages`` is git-init'd), an injected store
+        fake declaring neither ``versioned`` nor ``purgeable`` (design note
+        §4.4 R1) makes the gate refuse — proving it is driven by the
+        declared capability, not by probing ``knowledge_root / ".git"``
+        directly."""
+        from tests.store_fakes import NoRecoveryStore
+
+        knowledge_root = wiki_with_auto_pages
+        wiki = knowledge_root / "wiki"
+        report = build_prune_report(
+            wiki, ephemeral_scopes=_scopes(), operational_markers=[]
+        )
+        report = apply_prune(knowledge_root, report, store=NoRecoveryStore())
+
+        assert report.committed is False
+        assert report.errors
+        assert (wiki / "auto-cctest-scratch.md").exists()
+        assert (wiki / "auto-install-token.md").exists()
+
 
 class TestPruneCli:
     def test_dry_run_default_prints_lists_exit_2(

@@ -18,7 +18,7 @@ Design:
 - ``validate_wiki_meta`` dispatches a frontmatter dict to the right model
   by ``type``. Unknown types fall through to ``WikiBase`` rather than
   raising — the live wiki has 13+ types (tool, reference, principle,
-  auto-memory, feedback, preference, user, …) and Lane A is not retyping
+  auto-memory, incident, preference, …) and Lane A is not retyping
   them.
 
 Out of scope here (Lane B / athenaeum#90, Lane G / athenaeum#91):
@@ -173,6 +173,60 @@ class WikiBase(BaseModel):
             return None
         return str(v)
 
+    # Issue athenaeum#714 (dimension registry): four NEW fields, read-side
+    # counterparts to the write-side fields added to ``models.WikiEntity``.
+    # None collide with any existing key — see ``athenaeum/dimensions.py``'s
+    # module docstring for why the kernel ``scope`` dimension's coordinate is
+    # ``claimed_scope`` rather than reusing THIS class's existing ``scope``
+    # field (which a different subsystem, ``scoped_claims.py``/athenaeum#329,
+    # already reads as an incompatible nested ``{org, locale}`` shape).
+    recorded_at: str | None = None
+    provenance_scope: str | None = None
+    claimed_scope: str | None = None
+    subject: str | None = None
+
+    @field_validator("recorded_at", "provenance_scope", "claimed_scope", "subject", mode="before")
+    @classmethod
+    def _validate_dimension_coordinate_str(cls, v: Any) -> Any:
+        if v is None or v == "":
+            return None
+        return str(v)
+
+    @model_validator(mode="after")
+    def _validate_intake_temporal(self) -> "WikiBase":
+        """Enforce the athenaeum#714 intake temporal-validation AC at the schema
+        boundary (the same choke point every other intake path already
+        validates through — see :func:`athenaeum.intake.tier0_passthrough`'s
+        ``validate_wiki_meta`` call).
+
+        ``recorded_at`` is a NEW field (see above), so most frontmatter this
+        validates today carries none — and this validator does NOT only run
+        at intake: ``validate_wiki_meta`` is also the gate on read/merge
+        paths over pages already on disk (``librarian.merge``,
+        ``corrections``, ``batch``). Rejecting a page that simply lacks the
+        new coordinate would therefore break existing data, and would break
+        it on the very paths that could repair it (``corrections`` re-
+        validates a merged read). It would also contradict athenaeum#714's own
+        "a claim missing a coordinate is not rejected" AC.
+
+        So the hard reject
+        (:class:`athenaeum.dimensions.ObservedAfterRecordedError`, a
+        :class:`ValueError` subclass pydantic wraps into
+        :class:`pydantic.ValidationError`) fires here only when the page
+        carries a REAL ``recorded_at`` anchor of its own. A page without one
+        gets a soft :class:`UserWarning` instead — the signal is kept, not
+        dropped. The AC's intake-side rejection is enforced where the AC
+        scopes it, at the intake boundary itself: see
+        :func:`athenaeum.intake.tier0_passthrough`, which passes an explicit
+        now-anchor to :func:`athenaeum.dimensions.validate_intake_temporal`.
+        Deep back-dates soft-flag in both cases. All tested — see
+        ``tests/test_dimensions.py``.
+        """
+        from athenaeum.dimensions import validate_intake_temporal
+
+        validate_intake_temporal(observed_at=self.observed_at, recorded_at=self.recorded_at)
+        return self
+
     @field_validator("source", mode="before")
     @classmethod
     def _validate_source(cls, v: Any) -> Any:
@@ -307,15 +361,25 @@ _BY_TYPE: dict[str, type[WikiBase]] = {
 # :class:`WikiBase` for validation; the allowlist exists so unknown
 # types (typos, drift) emit a warning instead of being silently
 # accepted. See issue athenaeum#93.
+#
+# Issue athenaeum#971 (follow-up to the ``_schema/types.md`` reconciliation in
+# athenaeum#970): ``incident`` added — the 10th declared type per athenaeum#970's audit, absent
+# here meant every incident page warned as "unknown". ``user`` and
+# ``feedback`` REMOVED — athenaeum#970 folds them (``user`` -> ``preference``); they
+# stay non-raising (fall through to the ordinary "unknown wiki type"
+# :class:`UserWarning` below, same as any other out-of-registry value, never
+# an exception — a page in the wild with ``type: user`` keeps validating) but
+# no longer count as a currently-valid type for a NEW write, which is what
+# lets :func:`athenaeum.corrections.process_correction_record` gate a create
+# against the fold (see that module's ``valid_types`` check).
 FALLBACK_TYPES: frozenset[str] = frozenset(
     {
         "auto-memory",
         "tool",
         "reference",
         "principle",
-        "feedback",
         "preference",
-        "user",
+        "incident",
     }
 )
 

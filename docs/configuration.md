@@ -163,6 +163,34 @@ is its own self-contained YAML file, not a config-table entry.
 | Records per run | `ATHENAEUM_SHAPE_RULES_MAX_RECORDS_PER_RUN` | `librarian.shape_rules.max_records_per_run` | `50000` | Run-level cap on candidate raw files the engine evaluates against rules, mirroring `librarian.corrections.max_records_per_run`. Files beyond the cap are untouched and retried next run. |
 | Phase runtime share | `ATHENAEUM_SHAPE_RULES_RUNTIME_SHARE` | `librarian.shape_rules.runtime_share` | `0.05` | Fraction of `librarian.max_runtime` this phase may spend, mirroring `librarian.corrections.runtime_share`'s mechanism exactly (own budget — an overrun in one deterministic phase never starves the other). Checked at FILE boundaries only (never mid-file). |
 
+### Rule proposals (`librarian.rule_proposals.*`, athenaeum#905)
+
+The librarian's rule-proposal detector/drafter (`athenaeum.rule_proposals`,
+see [`shape-rules.md` §10](shape-rules.md)) — counts records the shape-rule
+engine above deferred to the reasoning tiers, drafts a candidate rule from
+exemplars once a shape crosses threshold, and puts it on the
+`list_pending_decisions` surface for a human to approve or reject. Not wired
+into the nightly `athenaeum run` loop by athenaeum#905 (see that section's "Not
+wired" note) — these knobs govern `run_rule_proposal_detection` whenever/
+however it is invoked.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Threshold | `ATHENAEUM_RULE_PROPOSALS_THRESHOLD` | `librarian.rule_proposals.threshold` | `50` | Deferred-record count (per `(source, key_fingerprint)` shape, within the window below) that must be crossed before a shape is drafted. |
+| Window | `ATHENAEUM_RULE_PROPOSALS_WINDOW_DAYS` | `librarian.rule_proposals.window_days` | `30` | Only disposition rows whose `at` timestamp falls within this many days of "now" count toward the threshold. |
+| Exemplar count (K) | `ATHENAEUM_RULE_PROPOSALS_EXEMPLAR_COUNT` | `librarian.rule_proposals.exemplar_count` | `5` | How many readable raw records of a detected shape are embedded in the one drafting call. |
+
+The drafting call's model/`max_tokens`/`thinking` route through the standard
+`resolve_model`/`resolve_max_tokens`/`resolve_thinking` knobs under knob name
+`rule_proposals` — same precedence as every other stage above (env > yaml >
+code default):
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Model | `ATHENAEUM_RULE_PROPOSALS_MODEL` | `models.rule_proposals` | `claude-opus-4-8` | Drafting-call model — T2's tier: drafting a rule is a judgment call, not cheap classification. |
+| Max tokens | `ATHENAEUM_RULE_PROPOSALS_MAX_TOKENS` | `max_tokens.rule_proposals` | `4096` | Output-token budget for the drafting call. |
+| Thinking | `ATHENAEUM_RULE_PROPOSALS_THINKING` | `thinking.rule_proposals` | `adaptive` | Thinking posture for the drafting call. |
+
 ### Run lock (single-machine concurrency guard, athenaeum#309)
 
 Every **mutating** command acquires an exclusive advisory
@@ -326,7 +354,7 @@ athenaeum surface-divergence --field do_not_email --path ~/knowledge
 | Field | Registered by | Tolerated residual |
 |---|---|---|
 | `bounced` | issue athenaeum#853 | Wiki-surface entries with no pii mark are TOLERATED — the documented evidence-class asymmetry, [bounce-surface-convergence.md](bounce-surface-convergence.md). Pii marks with no wiki entry are NOT tolerated (zero). |
-| `do_not_email` | issue athenaeum#960 | Zero, in either direction — one operator-directed fact with one meaning. |
+| `do_not_email` | issue athenaeum#960 | The excluded surface newly carrying the field (`marked_on_excluded_not_wiki`) is NOT tolerated (zero). The wiki carrying a mark the excluded surface does not (`marked_on_wiki_not_excluded`) is the design's only legal steady state and is TOLERATED — the wiki page is the sole authoring surface; athenaeum#960's design forbids backfilling marks onto the excluded surface (narrowed by athenaeum#1039, which had alerted on this legal state). |
 
 Exit codes (shared with `bounce-divergence` / `do-not-email-divergence`):
 `0` clean (or `--report-only`, which reports and never fails on divergence —
@@ -966,6 +994,49 @@ the ledger opts back in explicitly (see `tests/test_llm_schemas.py`'s
 wins over the env var per `resolve_cache_dir`'s precedence) and/or
 `monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1")`.
 
+### Per-contract strictness decision (M17 phase 2a, athenaeum#1035)
+
+Phase 1 above validates every in-scope contract against a uniform
+`extra="allow"` posture and never changes pipeline behavior. athenaeum#1035 (split
+from athenaeum#608) decides a per-contract posture for the two contracts with a
+measured, representative window — `tiers.tier2` and `tiers.tier3-merge` —
+recorded in code as `athenaeum.llm_schemas.STRICT_CONTRACTS`. The other four
+contracts (`query_topics`, `claim_kind`, `contradictions`, `resolutions`)
+remain phase 1 observe-only; the three C4-downstream ones are still starved of
+a representative sample and stay on athenaeum#608.
+
+Window measured: `~/.cache/athenaeum/_llm_schema_observations.jsonl`,
+2026-08-05T13:12Z to 2026-08-20T10:58Z, 3,634 records, 0 unparseable:
+
+| contract | records | mismatches | rate | mismatch classes |
+|---|---:|---:|---:|---|
+| `tiers.tier3-merge` | 2,961 | 4 | 0.135% | extra-keys 3 (`[].text2`, `[].append_section` x2), missing-required 1 (`0.op: Field required`) |
+| `tiers.tier2` | 150 | 0 | 0% | — |
+
+Decision, applying athenaeum#608's framework ("only missing-required mismatches
+justify rejection; extra keys are a different signal"):
+
+- **`tiers.tier2`** — 0% mismatch of any class at n=150: `Tier2Entity` tightens
+  from `extra="allow"` to `extra="forbid"`. Forbidding costs nothing observed
+  today and gives real protection against a silently-added field going
+  unnoticed. `name` stays the only required field.
+- **`tiers.tier3-merge`** — the two extra-key shapes observed (`[].text2`,
+  `[].append_section`) are real, repeated traffic, not sampling noise — the
+  framework's "different signal", not grounds for rejection. `MergeOp` stays
+  `extra="allow"`. The single missing-required hit (`0.op: Field required`)
+  confirms `op` stays required; that class is already enforced downstream —
+  `apply_merge_ops` raises `MergeOpsError` on a missing/unrecognized `op`
+  kind, and `parse_merge_ops_response` turns that into the guaranteed
+  no-worse-than-status-quo full-echo fallback.
+
+This is a schema-shape decision only: `observe()` for these two contracts
+still never raises to its caller and never gates the pipeline — the tightened
+`tiers.tier2` schema changes how a *future* mismatch is classified in the
+observation log, not whether today's response is accepted. No new
+`athenaeum.yaml` key or env var is introduced; the decision is a hardcoded,
+documented constant (`STRICT_CONTRACTS`), matching how `INSTRUMENTED_CONTRACTS`
+above is expressed.
+
 ## Contradiction detection and resolver
 
 Detection knobs live under the `contradiction:` yaml block; resolver behavior
@@ -1142,11 +1213,188 @@ build time, never a silent fallback:
 deployment with no `sensitivity:` block behaves exactly as it does today.
 The example at the end of this file is not amended for this section.
 
+### `storage.mapping` completeness lint + the deferred pair check (athenaeum#993)
+
+S5 of the design note's §9 — a lint over `storage.mapping`, not a new config
+knob. `src/athenaeum/sensitivity_lint.py` implements two checks the note
+defers rather than enforcing inside the resolver:
+
+1. **Completeness** — every sensitivity class name a scanned corpus's
+   content still carries (its own `sensitivity_class:` frontmatter field —
+   this lint's own scanning convention, see the module docstring) must have
+   a live `storage.mapping` entry naming a real adapter
+   (`athenaeum.storage.available_adapters`). A class with no entry falls
+   through, silently, to the default `wiki-markdown-embedded` surface at
+   read time — the exact footgun §6 point 2 (below) names; a class mapped to
+   an adapter name that does not exist already raises `StorageConfigError`
+   at read time, and this lint catches both earlier, at config-change time.
+2. **The deferred `(read_policy, storage adapter)` pair check** (§7
+   Decision D4) — a class whose resolved `read_policy.access` is
+   `confidential` or `personal` but whose mapped adapter's
+   `corpus_policy.embedded` is `True` is reported as advisory: the
+   read-policy layer believes the class is restricted while storage routes
+   it into the ordinary embedded corpus.
+
+Completeness findings and the D4 pair-check finding are kept as **distinct,
+separately-severity kinds** — the pair check is advisory and never blocks a
+gate on its own. `athenaeum storage lint-mapping --path <knowledge-root>
+[--corpus <root>] [--json]` is the CLI entry point (`src/athenaeum/
+_cmd_storage.py`); it exits non-zero only on a completeness finding. It is
+standalone — not wired into any existing CI check by this slice. The lint
+never scans a hardcoded or environment-derived path (`--corpus` always comes
+from the caller, defaulting to `--path`'s knowledge root) and never writes
+anything — both checks are read-only over config and the corpus tree.
+Committed synthetic fixtures under `tests/fixtures/sensitivity_mapping/`
+drive `tests/test_sensitivity_lint.py`. See
+[`docs/sensitivity-class-vocabulary.md`](sensitivity-class-vocabulary.md) §6
+point 2 / §7 Decision D4 / §9 S5 for the full rationale.
+
+## Sensitivity routing (athenaeum#949, slice 1/4 — config)
+
+The routing config surface specified in
+[`docs/sensitivity-value-routing.md`](sensitivity-value-routing.md) §8 — a
+deliberately separate axis from the "Sensitivity classes" section above.
+That section defines *which classes exist*; this one decides *whether a
+matched class gets intercepted at intake*, so a class can be defined without
+being routed. **Slice 1 (athenaeum#1022) adds no behavior on its own** —
+`resolve_sensitivity_routing` in `config.py` resolves this surface, but
+nothing reads it from anywhere reachable in a running deployment yet.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Routing switch | `ATHENAEUM_SENSITIVITY_ROUTING_ENABLED` | `sensitivity.routing.enabled` | `false` | Global on/off for the routing stage. `false` (default) is dark by design — byte-identical to pre-athenaeum#949 behavior. **Fails loudly** — a yaml value that isn't a boolean, or an env value that isn't `true`/`false` (case-insensitive), raises `SensitivityRoutingConfigError` rather than silently falling back. |
+| Per-class action | — | `sensitivity.routing.classes.<name>.action` | `route` when the class block is present but `action` is unset | Per-class override once routing is globally enabled: `route` or `off`. Defining a class under `sensitivity.routing.classes` and turning routing on is read as "protect it" unless the operator explicitly opts the class out. An unknown action raises `SensitivityRoutingConfigError`. |
+
+**Example `athenaeum.yaml`: unchanged.** The defaults need no config — a
+deployment with no `sensitivity.routing` block behaves exactly as it does
+today. The example at the end of this file is not amended for this section.
+
+## Sensitivity routing/redaction mechanism (athenaeum#1023, slice 2/4 — standalone, not wired)
+
+`src/athenaeum/sensitivity_routing.py`'s `route_sensitive_values()`
+implements the mechanism the design note's §2/§4/§6/§7 specify: scan text
+via `sensitivity.classify()` (unchanged, athenaeum#910), route each
+configured-on match's value to the secret vault (the built-in `excluded`
+storage surface, or an operator's own safe `storage.mapping` target),
+substitute a resolvable pointer for the matched span, and return the
+redacted text. **Not called from anywhere in this repo yet** — no config
+knob added by this slice, and no behavior change for any running
+deployment. That wiring is athenaeum#1025 (slice 4); reading a pointer's
+value back is athenaeum#1024 (slice 3) and is not implemented here either
+— the pointer text names the read function the design proposes
+(`resolve_sensitive_record`) because the design note's pointer format
+fixes that name, not because slice 2 implements it.
+
+**Pointer format**, substituted for each routed span, byte-for-byte per the
+design note §1:
+
+```
+[sensitive:<class>:<record_id> — value withheld; resolve via
+athenaeum.sensitivity_routing.resolve_sensitive_record()]
+```
+
+`record_id` is a deterministic `uuid5` derived from the raw file's own
+reference, the sensitivity class, and the match's character span — **never
+from the matched value itself** — so re-scanning identical input mints the
+identical id and overwrites the same vault record rather than duplicating
+it (§7.1/AC11), and the id cannot be used to infer anything about the value
+it names (§2/AC3, §8/AC12). See the module's docstring for the full
+disposition of every criterion, including the deliberate choice **not** to
+deduplicate a value across raw files: a vault record count is not a proxy
+for distinct-secret count.
+
+Fails closed (raises `SensitivityRoutingError`, built only from non-secret
+metadata) on: a malformed `sensitivity.*` config; a match with no character
+span (a hypothetical frontmatter-`field` recogniser — none ships today); an
+operator `storage.mapping` entry routing the class onto an adapter that
+participates in the corpus; or any exception writing the vault record
+itself. With no explicit `storage.mapping` entry for a routed class, the
+vault root resolves directly to the built-in `excluded` adapter — not the
+storage layer's own "undeclared maps to wiki" default, which is correct for
+every other class but unsafe here.
+
 ## Authority manifest (athenaeum#426)
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
 | Authority manifest path | `ATHENAEUM_AUTHORITY_MANIFEST` | `librarian.authority_manifest_path` | `<knowledge_root>/authority-manifest.yaml` | Path to the authority manifest mapping authoritative LIVE sources. Relative yaml values resolve against the knowledge root; a missing file is treated as "no manifest configured". Full reference: [`docs/authority-manifest.md`](authority-manifest.md). |
+
+### Never-ingest classes (athenaeum#968)
+
+The authority manifest also carries an optional `never_ingest_classes:` list
+— write-refusal classes BOTH intake paths (auto-memory and entity tier)
+consult, extending the manifest mechanism above rather than adding a second
+config surface. Empty or absent by default (a manifest written before
+athenaeum#968, or one that never mentions the key, enforces nothing new). Two
+classes are recognised:
+
+- `mirror-of-live-source` — reuses the manifest's own topic-index lookup
+  (the same one `authority lint` uses) to refuse an intake file whose
+  `topics`/`tags`/`name` names a topic a `sources:` entry already owns.
+- `pending-state-todo` — refuses an intake file that asserts the current
+  presence/absence of something in an external artifact (an explicit
+  `pending_state: true` flag, or a phrase like "has it been added" / "still
+  needs" / "todo:").
+
+Enforced at each tier's own COMPILE choke point, never at discovery:
+auto-memory in `_run_auto_memory_phase` (`src/athenaeum/librarian.py`), right
+after `discover_auto_memory_files` and before clustering; entity tier in
+`process_one`, right after each raw file's frontmatter is parsed and before
+Tier 0 passthrough. Deliberately never inside
+`athenaeum.intake.discover_raw_files` itself — that function's return value
+is read directly, unmodified, by `backlog_price_sheet.py` /
+`ordinary_night_table.py` (issue athenaeum#713's backlog-count instruments, held
+pending an operator decision), so gating at discovery would silently move
+those numbers. A refused file (either tier) is excluded from that run's
+compilation and appended, ids-only, to
+`<cache_dir>/_never_ingest_refusals.jsonl` (never deleted from disk; it is
+re-evaluated on the next run). See `athenaeum.never_ingest` and
+[`docs/authority-manifest.md`](authority-manifest.md#never-ingest-classes-athenaeum968)
+for the full mechanism.
+
+## Usage report (athenaeum#968)
+
+A per-claim usage signal computed from the push-metrics ledgers
+(`athenaeum#711`/`athenaeum#734`): how many times a pushed id has been pushed, how
+many times it was actually referenced afterward, and when it was last
+referenced. Purely a REPORT — it makes no tier-movement decision itself.
+
+```
+athenaeum usage-report [--claim-id ID] [--since 7d] [--json]
+```
+
+ids-only output (same redaction discipline as `push-metrics`): every field
+is an id, a count, or a timestamp, never claim content.
+
+**The interface issue athenaeum#718's tier-movement rules must consume** —
+`athenaeum.usage_report.get_claim_usage(claim_id, cache_dir=...)` (single
+claim) or `compute_usage_report(cache_dir=...)` (bulk). Neither reads
+`_push_records.jsonl`/`_push_references.jsonl` directly, and no other module
+should either — this is the one seam through which usage data crosses to a
+tier-movement consumer.
+
+## Ingestion gate (athenaeum#968) — off by default
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Ingestion gate enabled | `ATHENAEUM_INGESTION_GATE_ENABLED` | `librarian.ingestion_gate_enabled` | `false` | When `true`, `_run_auto_memory_phase` checks push-metrics precision instrumentation before compiling any auto-memory intake this run — see below for "healthy". |
+
+"Healthy" is a **liveness** check, not a quality bar: push-metrics
+instrumentation is enabled (`push_metrics.enabled`) AND at least one
+reference-determination record exists in the ledger ever (precision is
+therefore computable, whatever its value). A fresh install with the gate
+turned on and zero sessions run yet reads as unhealthy until its first
+session completes — intentional and self-healing, not a bug; the gate stays
+off until an operator opts in. When unhealthy, the WHOLE auto-memory
+compilation phase is skipped for that run (no partial-volume throttle is
+implemented — the issue names no threshold to throttle against); nothing on
+disk is touched, and the same raw intake is re-evaluated next run. See
+`athenaeum.ingestion_gate`.
+
+```yaml
+librarian:
+  ingestion_gate_enabled: false   # off by default; see docs/configuration.md
+```
 
 ## Reasoning-tier screening (T1/T2) — off by default
 
@@ -1295,6 +1543,173 @@ thread through the SAME lock the CLI command already holds.
 **How to inspect it.** `athenaeum verdicts {count,list-by-verdict,show-one-pair,show-stale}`
 is the sanctioned read path (mirrors `athenaeum merges`) — hand-parsing
 `wiki/_verdicts/*.jsonl` directly is not supported.
+
+## Dimension registry (athenaeum#714)
+
+Root of the memory-model v6 dimension chain (child of epic athenaeum#709;
+athenaeum#715/athenaeum#716/athenaeum#719 depend on this). A **dimension** is a
+declared, typed axis a claim takes a coordinate on. Two claims' coordinates on
+one axis compare to exactly one of `equal | contains | overlaps | disjoint |
+unknown` (`src/athenaeum/dimensions.py`). Athenaeum ships **six kernel
+dimensions unconditionally** — built in, not deletable, need no config:
+
+| Dimension | Kind | `null_means` | `separates` | Bound to |
+|---|---|---|---|---|
+| `recorded-time` | `interval` | `unknown` | `false` (precedence-only) | New `recorded_at` frontmatter key; system transaction time, stamped once at first `WikiEntity` construction — never writer-supplied. |
+| `observed-time` | `interval` | `unknown` | `false` (sequencer) | Existing `observed_at` (athenaeum#424). |
+| `valid-time` | `interval` | `universal` | `true` | Existing `valid_from` / `valid_until` (athenaeum#308). |
+| `scope` | `hierarchy` | `universal` | `true` | New `claimed_scope` frontmatter key — see "Ambiguity resolved" below for why not the existing `scope:` key. |
+| `subject` | `identity` | `unknown` | `true` | New `subject` frontmatter key. |
+| `memory-class` | `enum` | `unknown` | `true` | Existing `memory_class` (athenaeum#424/athenaeum#996). Ships at `state: backfill`, not `enforced` — see the athenaeum#972 disposition comment on athenaeum#714. |
+
+**Comparators.** `interval` is **half-open `[from, until)`** — abutting
+windows ("2020–2022" then "2022–") compare `disjoint`, not a zero-width
+`overlaps` (a known failure mode of the collapsed/inclusive algebra used
+elsewhere in this repo; the on-disk `valid_until` field stays INCLUSIVE and
+unchanged for every other reader — the half-open conversion happens only at
+the dimension-registry coordinate boundary, `dimensions.parsed_coordinate`).
+`hierarchy` is prefix-subsumption (`kromatic` `contains` `kromatic/platform`;
+siblings `disjoint`). `enum` is closed-vocabulary same/different. `identity`
+returns `disjoint` **only when the caller passes `ratified=True`** (distinct
+uids each backed by human confirmation, independent provenance, or a prior
+ledgered verdict) — there is no confidence/threshold parameter; an unratified
+mismatch is `unknown`, never a false separation.
+
+**Null semantics are per-dimension.** `null_means: universal` — an absent
+coordinate asserts "applies across this whole axis"; the comparator treats it
+as containing any value. `null_means: unknown` — absence means "not
+captured"; the comparator returns `unknown`. Two claims BOTH null on a
+dimension are never separable by it (`unknown`) regardless of `null_means`. A
+claim may write the literal `*` to explicitly assert universal, independent
+of the dimension's configured `null_means`.
+
+**`separates` vs. sequencer.** Separators (`valid-time`, `scope`, `subject`,
+`memory-class`) partition territory — a `disjoint` relation there means the
+two claims cannot conflict. Sequencers (`recorded-time`, `observed-time`)
+order beliefs about ONE territory and never separate, even on `disjoint` —
+they feed supersession ordering instead (`dimensions.can_separate`).
+
+**`applies_to` bounds blast radius.** A selector (e.g.
+`{memory_class: [entity]}`) determining which claims carry the axis at all —
+a dimension outside its `applies_to` on either side of a comparison is simply
+not consulted (`unknown`), so a CRM-only axis never touches dev-rig pages.
+
+**Lifecycle: `backfill -> enforced`.** In `backfill`, a dimension is
+consulted only for pairs where BOTH sides already carry a coordinate.
+`dimensions.maybe_flip_to_enforced` flips a dimension to `enforced` once
+coverage crosses `coverage_threshold`, wired to athenaeum#712's targeted
+stale-marking (`verdicts.select_stale_for_dimension_change` +
+`verdicts.mark_pairs_stale`) so affected ledger entries are marked stale in
+the same transition. Retiring a dimension re-nulls its coordinates
+(`dimensions.retire_dimension_coordinate`) rather than deleting them —
+coordinates are additive metadata.
+
+**Corpus namespacing.** `org:maturity` and `personal:maturity` are different
+axes unless a ratified mapping declares a translation
+(`dimensions.cross_corpus_compare`); an unmapped or kind-mismatched pair
+degrades to `unknown`, never a false `disjoint`/`equal` from colliding
+vocabularies that happen to share a name or value set.
+
+**Write-side discipline (the highest-risk item this issue names).** Origin
+scope is PROVENANCE (`WikiEntity.provenance_scope` — where/what context wrote
+the claim, free the way `source`/`source_type` are; named `provenance_scope`,
+not `origin_scope`, to avoid colliding with `AutoMemoryFile.origin_scope`, an
+unrelated pre-existing field — see "Ambiguity resolved" below). Claimed scope
+is an ASSERTED coordinate (`WikiEntity.claimed_scope` — where the claim
+APPLIES). They are never the same field and provenance is never auto-copied
+into the coordinate — guarded by a regression test
+(`tests/test_dimensions.py::TestProvenanceScopeNeverPopulatesClaimedScope`). A
+claim missing a coordinate is not rejected; it lands per the dimension's null
+semantics.
+
+**Ambiguity resolved (dispatch aperture, reversible).** The `scope` dimension
+reads/writes a NEW `claimed_scope` frontmatter key rather than the existing
+`scope:` key (`schemas.WikiBase.scope`, athenaeum#434). `scope:` is already
+read as an incompatible nested `{org, locale}` shape by two live consumers
+(`athenaeum.scoped_claims`, athenaeum#329, and `athenaeum.contradictions`'
+scope-block advisory line) — stacking a third, string-shaped reader onto the
+same key would compound an existing collision rather than "match existing
+frontmatter conventions." `claimed_scope` is zero-collision, additive, and
+trivially reversible: retargeting the reader/writer to a different key is a
+one-line change (`dimensions.coordinate_value` / `parsed_coordinate`,
+`models.WikiEntity`'s field), with no data migration since coordinates are
+additive metadata.
+
+The provenance field went through the same check for a different reason: an
+early draft named it `origin_scope`, which collides with a real, heavily-used
+PRE-EXISTING field — `AutoMemoryFile.origin_scope` (issue athenaeum#167, the
+raw-intake scope-directory identifier consumed across `merge.py`,
+`cross_scope.py`, `clusters.py`, `resolutions.py`, `tiers.py`, and more) —
+that `resolutions.py` documents as "NEVER stored in frontmatter." Storing a
+NEW frontmatter key with that exact identifier would have directly
+contradicted that documented invariant for anyone grepping the name, even
+though the two fields live on different dataclasses and never share data at
+runtime. Renamed to `provenance_scope` before this landed — verified
+zero-collision the same way as `claimed_scope`/`subject`/`recorded_at`.
+
+**Intake temporal validation** (`dimensions.validate_intake_temporal`, wired
+into `schemas.WikiBase`'s model validator — the same choke point every
+intake path already validates frontmatter through): hard-rejects
+`observed_at` later than `recorded_at` ("cannot have observed the future");
+soft-flags (`UserWarning`) an `observed_at` more than
+`DEEP_BACKDATE_THRESHOLD_DAYS` (730, i.e. 2 years) before `recorded_at` for
+review — the value is kept (fail-open, matching every other temporal parser
+in this repo).
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Deployment dimensions | — | `dimensions` | _(unset = kernel-only)_ | A list of ADDITIONAL, deployment-declared dimension entries (see field reference below). No env var — this is a structural block, not a scalar knob. See [`resolve_dimensions`](../src/athenaeum/config.py). |
+| Registry epoch | `ATHENAEUM_DIMENSION_REGISTRY_EPOCH` | `librarian.dimensions_registry_epoch` | `1` | Bump on a dimension-definition change that should invalidate verdicts justified by the old definition — feeds `verdicts.Basis.registry_epoch`. |
+| Tree epoch | `ATHENAEUM_DIMENSION_TREE_EPOCH` | `librarian.dimensions_tree_epoch` | `1` | Bump on a scope-tree reorg (renamed subtree) — feeds `verdicts.Basis.tree_epoch` and athenaeum#712's `select_stale_for_tree_epoch_bump`. |
+
+**`dimensions:` entry field reference** (each entry validated by
+`dimensions.parse_dimension_entry`; a malformed entry raises
+`DimensionRegistryError` naming the field):
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string | yes | kebab-case, unique, must not collide with a kernel dimension name. |
+| `kind` | string | yes | one of `interval \| hierarchy \| enum \| identity`. |
+| `null_means` | string | no (default `unknown`) | `universal \| unknown`. |
+| `values` | list of strings | required when `kind: enum` | closed vocabulary. |
+| `separates` | bool | no (default `true`) | separator vs. sequencer. |
+| `applies_to` | mapping | no (default `{}` = applies everywhere) | `{frontmatter_key: value_or_list}`, conjunctive. |
+| `state` | string | no (default `enforced`) | `backfill \| enforced`. |
+| `origin` | string | no (default `operator`) | `builtin \| operator \| proposed:<id>`. |
+| `since` | ISO date | no | when the dimension was declared. |
+| `coverage_threshold` | number | no (default `1.0`) | consulted only while `state: backfill`. |
+
+```yaml
+dimensions:
+  - name: engagement          # kebab-case, unique
+    kind: identity            # interval | hierarchy | enum | identity
+    null_means: unknown       # universal | unknown
+    separates: true           # separator vs sequencer
+    applies_to:                # selector bounding which claims carry this axis
+      memory_class: [entity]
+    state: backfill            # backfill | enforced
+    origin: operator           # builtin | operator | proposed:<id>
+    since: 2026-08-01
+librarian:
+  dimensions_registry_epoch: 1
+  dimensions_tree_epoch: 1
+```
+
+**Behavior with no `dimensions:` key set.** `athenaeum run` completes
+unchanged — the kernel-only registry participates in nothing the librarian
+pipeline runs today beyond `WikiEntity` construction stamping `recorded_at`
+(a new, additive frontmatter key on newly-written pages) and the intake
+temporal check above (fail-open; a no-op unless `observed_at` is genuinely
+set to a future date or a deep back-date). `engagement`, `repo`, `maturity`,
+`environment` and similar are deployment-declared EXAMPLES, never shipped
+defaults — time is universal, engagements are a CRM's business.
+
+**How to inspect it.** `athenaeum dimensions show <page.md>` prints one
+page's coordinates across every registered dimension; `athenaeum dimensions
+compare <page-a.md> <page-b.md>` prints the axis-by-axis relation for a pair.
+Both accept `--json`. This is the registry's consumer for this issue — the
+five-verdict comparator that will consume the full algebra automatically is
+a separate, future child of epic athenaeum#709.
 
 ## Recall and search
 
@@ -1447,6 +1862,7 @@ librarian:
   audit_sample_rate_t1_rejects: 0.075       # share of T1 rejects sampled for human audit (athenaeum#438)
   verdict_ledger_enabled: false              # off by default; verdict ledger + basis (athenaeum#712)
   verdict_epoch_batch_interval_days: 30      # comparator-epoch bump batching interval (athenaeum#712)
+  ingestion_gate_enabled: false               # off by default; skip auto-memory phase if push-metrics precision is unhealthy (athenaeum#968)
   delta:
     enabled: true               # delta-scoped incremental compile on client=None path (athenaeum#370)
     max_affected_clusters: 8    # > this many clusters touched => full compile (athenaeum#370)

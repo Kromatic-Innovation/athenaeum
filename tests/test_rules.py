@@ -618,6 +618,10 @@ class TestRecordExtraction:
 
 class TestEmitDisposition:
     def test_emit_writes_conformant_batch(self, tmp_path: Path) -> None:
+        # issue athenaeum#978 (S3): retirement now refuses against a store that
+        # is not versioned rather than falling back to a silent unlink, so
+        # this needs a real git repo to observe the compiled-away raw file.
+        _git_init(tmp_path)
         _write_rule(tmp_path / "rules", "r1.yaml", _rule_dict())
         raw_path = _write_raw_jsonl(
             tmp_path / "raw", "delivery-monitor", "20260806T140211Z-9f3ac1d2.jsonl", _record()
@@ -710,6 +714,32 @@ class TestEmitDisposition:
         rel = str(raw_path.relative_to(tmp_path))
         show = _git(tmp_path, "show", f"HEAD~1:{rel}")
         assert "bounced" in show.stdout
+
+    def test_retire_refuses_against_fake_declaring_no_recovery_capability(
+        self, tmp_path: Path
+    ) -> None:
+        """issue athenaeum#978 (S3, Tier B AC5): even with a REAL git repo
+        present, an injected store fake declaring neither ``versioned`` nor
+        ``purgeable`` (design note §4.4 R1) makes ``retire_compiled_raw_file``
+        refuse — proving the gate is driven by the declared capability, not
+        by probing ``knowledge_root / ".git"`` directly. The old silent
+        ``unlink`` fallback is also gone: refusal leaves the file in place
+        rather than discarding it unrecoverably."""
+        from athenaeum.rules import retire_compiled_raw_file
+        from tests.store_fakes import NoRecoveryStore
+
+        _git_init(tmp_path)
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "delivery-monitor", "20260806T140211Z-9f3ac1d2.jsonl", _record()
+        )
+        _git(tmp_path, "add", "-A")
+        _git(tmp_path, "commit", "-m", "seed")
+
+        ok = retire_compiled_raw_file(
+            tmp_path, raw_path, rule_tag="test-rule@1", store=NoRecoveryStore()
+        )
+        assert ok is False
+        assert raw_path.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1083,6 +1113,10 @@ class TestPhaseWiring:
         claim, not merely "eventually, next run"."""
         from athenaeum.librarian import _run_correction_phase, _run_shape_rule_phase
 
+        # issue athenaeum#978 (S3): retirement now refuses against a store
+        # that is not versioned rather than falling back to a silent
+        # unlink, so both phases' retirement need a real git repo.
+        _git_init(tmp_path)
         rule = _rule_dict(mode="live")
         _write_rule(tmp_path / "rules", "r1.yaml", rule)
         _write_raw_jsonl(

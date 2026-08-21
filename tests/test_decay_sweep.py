@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the deterministic decay sweep (issue athenaeum#904, AC6/AC7).
+"""Tests for the deterministic decay sweep (issue athenaeum#904, AC6/AC7;
+issue athenaeum#969, AC1 sweep ledger).
 
 Mirrors ``tests/test_auto_memory_prune.py``'s structure closely — same
 dry-run-report / apply split, same git-recoverability assertions — since
@@ -13,7 +14,10 @@ Acceptance:
     sequence and refuses without a ``.git`` (AC6/AC7);
   - archived pages remain recoverable from git history (AC7);
   - the sweep makes zero LLM calls, structurally (no ``client``/model
-    parameter anywhere in this module's public signatures).
+    parameter anywhere in this module's public signatures);
+  - every archived page gets exactly one durable sweep-ledger record, the
+    ledger write happens BEFORE ``git rm``, and a ledger-write failure
+    refuses the archival entirely (issue athenaeum#969, AC1).
 """
 
 from __future__ import annotations
@@ -26,9 +30,13 @@ from pathlib import Path
 import pytest
 
 from athenaeum.decay_sweep import (
+    SweepLedgerRecord,
     apply_sweep,
     build_sweep_report,
     discover_daily_bucket_pages,
+    read_sweep_ledger,
+    sweep_ledger_path,
+    write_sweep_ledger,
 )
 
 
@@ -285,6 +293,256 @@ class TestApplySweep:
         # carrying the EDITED content -- not the stale initial-commit body.
         show = _git(knowledge_root, "show", "HEAD~1:wiki/status-monday.md")
         assert "EDITED after the initial commit" in show.stdout
+
+
+class TestSweepLedger:
+    """Issue athenaeum#969 AC1: one durable ledger record per archived page,
+    written BEFORE the archival `git rm`, refusing to archive on write
+    failure. Ledger location/shape mirrors ``_push_records.jsonl``
+    (:mod:`athenaeum.push_metrics`) — JSONL under the cache dir, never
+    inside the wiki corpus.
+    """
+
+    def test_one_record_per_archived_page(self, wiki_with_bucket_pages: Path) -> None:
+        knowledge_root = wiki_with_bucket_pages
+        wiki = knowledge_root / "wiki"
+        report = build_sweep_report(wiki)
+        report = apply_sweep(knowledge_root, report)
+        assert report.committed is True
+
+        records = read_sweep_ledger()
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["page"] == "wiki/status-monday.md"
+        assert rec["bucket"] == "daily"
+        assert rec["valid_until"] == "2020-01-01"
+        assert rec["swept_at"]  # non-empty timestamp
+        assert rec["recovering_commit"]  # non-empty SHA
+
+    def test_ledger_lives_outside_the_wiki_corpus(
+        self, wiki_with_bucket_pages: Path
+    ) -> None:
+        knowledge_root = wiki_with_bucket_pages
+        wiki = knowledge_root / "wiki"
+        report = build_sweep_report(wiki)
+        apply_sweep(knowledge_root, report)
+
+        ledger_path = sweep_ledger_path()
+        assert ledger_path.is_file()
+        assert wiki not in ledger_path.parents
+        assert knowledge_root not in ledger_path.parents
+
+    def test_ledger_record_carries_no_page_content(
+        self, wiki_with_bucket_pages: Path
+    ) -> None:
+        """"That-and-why, never content" (issue athenaeum#969 AC1)."""
+        knowledge_root = wiki_with_bucket_pages
+        wiki = knowledge_root / "wiki"
+        report = build_sweep_report(wiki)
+        apply_sweep(knowledge_root, report)
+
+        raw = sweep_ledger_path().read_text(encoding="utf-8")
+        assert "Monday's status, long expired" not in raw
+
+    def test_multiple_kill_pages_get_one_record_each(self, tmp_path: Path) -> None:
+        knowledge_root = tmp_path / "knowledge"
+        wiki = knowledge_root / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "a.md").write_text(
+            _page(name="a", bucket="daily", valid_until="2020-01-01", body="a"),
+            encoding="utf-8",
+        )
+        (wiki / "b.md").write_text(
+            _page(name="b", bucket="daily", valid_until="2020-06-01", body="b"),
+            encoding="utf-8",
+        )
+        _git_init(knowledge_root)
+
+        report = build_sweep_report(wiki)
+        report = apply_sweep(knowledge_root, report)
+        assert report.committed is True
+
+        records = read_sweep_ledger()
+        assert {r["page"] for r in records} == {"wiki/a.md", "wiki/b.md"}
+        assert {r["valid_until"] for r in records} == {"2020-01-01", "2020-06-01"}
+
+    def test_recovering_commit_recovers_the_page_when_already_committed(
+        self, wiki_with_bucket_pages: Path
+    ) -> None:
+        """The recorded SHA is genuinely the one that recovers the page —
+        checked independently of the two-commit implementation detail (never
+        assumes ``HEAD~1``, just asks git to recover from the recorded SHA)."""
+        knowledge_root = wiki_with_bucket_pages
+        wiki = knowledge_root / "wiki"
+        report = build_sweep_report(wiki)
+        apply_sweep(knowledge_root, report)
+
+        rec = read_sweep_ledger()[0]
+        recovering_sha = rec["recovering_commit"]
+
+        show = _git(knowledge_root, "show", f"{recovering_sha}:wiki/status-monday.md")
+        assert "Monday" in show.stdout
+
+        # And the negative check: HEAD itself (post-archive) no longer has it.
+        head_show = subprocess.run(
+            ["git", "show", "HEAD:wiki/status-monday.md"],
+            cwd=str(knowledge_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert head_show.returncode != 0
+
+    def test_recovering_commit_recovers_an_edited_uncommitted_page(
+        self, wiki_with_bucket_pages: Path
+    ) -> None:
+        """When Commit A (the provenance snapshot) actually runs because the
+        page was edited since its last commit, the recorded SHA must be
+        Commit A's SHA -- not the earlier, stale commit."""
+        knowledge_root = wiki_with_bucket_pages
+        wiki = knowledge_root / "wiki"
+        (wiki / "status-monday.md").write_text(
+            _page(
+                name="Monday status",
+                bucket="daily",
+                valid_until="2020-01-01",
+                body="EDITED after the initial commit, never committed.",
+            ),
+            encoding="utf-8",
+        )
+
+        report = build_sweep_report(wiki)
+        apply_sweep(knowledge_root, report)
+
+        rec = read_sweep_ledger()[0]
+        recovering_sha = rec["recovering_commit"]
+        show = _git(knowledge_root, "show", f"{recovering_sha}:wiki/status-monday.md")
+        assert "EDITED after the initial commit" in show.stdout
+
+    def test_ledger_write_failure_refuses_archive(
+        self, wiki_with_bucket_pages: Path, tmp_path: Path
+    ) -> None:
+        """The teeth of AC1: a genuine OS-level ledger-write failure (the
+        cache dir's parent is a FILE, not a directory, so `mkdir` raises)
+        must abort BEFORE `git rm` -- nothing archived, nothing committed."""
+        knowledge_root = wiki_with_bucket_pages
+        wiki = knowledge_root / "wiki"
+
+        blocked_cache_parent = tmp_path / "blocked-cache-parent"
+        blocked_cache_parent.write_text("not a directory", encoding="utf-8")
+        bad_cache_dir = blocked_cache_parent / "cache"
+
+        head_before = _git(knowledge_root, "rev-parse", "HEAD").stdout.strip()
+
+        report = build_sweep_report(wiki)
+        report = apply_sweep(knowledge_root, report, cache_dir=bad_cache_dir)
+
+        assert report.committed is False
+        assert report.errors
+        assert any("ledger" in err.lower() for err in report.errors)
+        # Nothing archived: the page is untouched and HEAD did not move
+        # (Commit A was a no-op here since the fixture's page is already
+        # fully committed, so refusing before Commit B leaves HEAD alone).
+        assert (wiki / "status-monday.md").exists()
+        head_after = _git(knowledge_root, "rev-parse", "HEAD").stdout.strip()
+        assert head_after == head_before
+
+    def test_ledger_write_failure_via_monkeypatch_also_refuses(
+        self, wiki_with_bucket_pages: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same refusal, injected at the function boundary instead of the
+        filesystem -- covers ``apply_sweep``'s except-and-abort branch
+        directly regardless of what kind of exception the writer raises."""
+        import athenaeum.decay_sweep as decay_sweep_mod
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise OSError("simulated disk-full ledger write failure")
+
+        monkeypatch.setattr(decay_sweep_mod, "write_sweep_ledger", _boom)
+
+        knowledge_root = wiki_with_bucket_pages
+        wiki = knowledge_root / "wiki"
+        report = build_sweep_report(wiki)
+        report = apply_sweep(knowledge_root, report)
+
+        assert report.committed is False
+        assert report.errors
+        assert any("ledger" in err.lower() for err in report.errors)
+        assert (wiki / "status-monday.md").exists()
+
+    def test_empty_kill_list_never_writes_ledger(self, tmp_path: Path) -> None:
+        knowledge_root = tmp_path / "knowledge"
+        wiki = knowledge_root / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "status-future.md").write_text(
+            _page(name="x", bucket="daily", valid_until="2099-01-01", body="not expired"),
+            encoding="utf-8",
+        )
+        _git_init(knowledge_root)
+
+        report = build_sweep_report(wiki)
+        report = apply_sweep(knowledge_root, report)
+
+        assert report.committed is False
+        assert not sweep_ledger_path().exists()
+
+    def test_apply_sweep_threads_explicit_cache_dir(
+        self, wiki_with_bucket_pages: Path, tmp_path: Path
+    ) -> None:
+        knowledge_root = wiki_with_bucket_pages
+        wiki = knowledge_root / "wiki"
+        explicit_cache_dir = tmp_path / "explicit-cache"
+
+        report = build_sweep_report(wiki)
+        report = apply_sweep(knowledge_root, report, cache_dir=explicit_cache_dir)
+        assert report.committed is True
+
+        assert read_sweep_ledger(cache_dir=explicit_cache_dir)
+        # The default (no-arg) resolution must NOT have received a copy.
+        assert read_sweep_ledger() == []
+
+
+class TestSweepLedgerPrimitives:
+    """Direct tests of the ledger read/write primitives, independent of the
+    sweep pipeline (issue athenaeum#969 AC1)."""
+
+    def test_read_missing_ledger_is_empty(self, tmp_path: Path) -> None:
+        assert read_sweep_ledger(cache_dir=tmp_path / "nope") == []
+
+    def test_write_then_read_round_trips(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        rec = SweepLedgerRecord(
+            page="wiki/x.md",
+            bucket="daily",
+            valid_until="2020-01-01",
+            swept_at="2026-08-20T00:00:00Z",
+            recovering_commit="deadbeef",
+        )
+        write_sweep_ledger([rec], cache_dir=cache_dir)
+        got = read_sweep_ledger(cache_dir=cache_dir)
+        assert got == [
+            {
+                "v": 1,
+                "page": "wiki/x.md",
+                "bucket": "daily",
+                "valid_until": "2020-01-01",
+                "swept_at": "2026-08-20T00:00:00Z",
+                "recovering_commit": "deadbeef",
+            }
+        ]
+
+    def test_write_raises_when_parent_is_blocked(self, tmp_path: Path) -> None:
+        blocked = tmp_path / "blocked"
+        blocked.write_text("not a directory", encoding="utf-8")
+        rec = SweepLedgerRecord(
+            page="wiki/x.md",
+            bucket="daily",
+            valid_until=None,
+            swept_at="2026-08-20T00:00:00Z",
+            recovering_commit="deadbeef",
+        )
+        with pytest.raises(OSError):
+            write_sweep_ledger([rec], cache_dir=blocked / "cache")
 
 
 class TestNoLLMCalls:

@@ -91,6 +91,8 @@ from typing import Any
 
 from athenaeum.authority import is_pointer_stub
 from athenaeum.clusters import (
+    EMBEDDER_CHROMADB_DEFAULT,
+    EMBEDDER_FALLBACK_HASHING,
     Cluster,
     _fallback_embeddings,
     cluster_auto_memory_files,
@@ -128,6 +130,12 @@ DEDUPE_CANDIDATE_TYPES: frozenset[str] = frozenset(
 WIKI_ORIGIN_SCOPE = "wiki"
 
 EmbeddingProvider = Callable[[list[str]], "list[list[float]] | None"]
+
+# Issue athenaeum#1032: one-time WARNING flag — ``_resolve_wiki_embeddings`` can be
+# called many times across a run (once per ``find_wiki_page_clusters`` /
+# ``run_shadow_linkage`` call); fires at most once per process so a run that
+# repeatedly hits the no-chromadb path doesn't spam the log.
+_WIKI_FALLBACK_WARNED = False
 
 
 def discover_wiki_dedupe_candidates(
@@ -226,7 +234,7 @@ def _resolve_wiki_embeddings(
     files: Sequence[AutoMemoryFile],
     *,
     embedding_provider: EmbeddingProvider | None,
-) -> dict[str, list[float]]:
+) -> tuple[dict[str, list[float]], dict[str, str]]:
     """Embed candidate page bodies, falling back to the hashing trick.
 
     ``embedding_provider`` defaults to :func:`athenaeum.search.embed_texts`
@@ -237,15 +245,47 @@ def _resolve_wiki_embeddings(
     falls back to :func:`athenaeum.clusters._fallback_embeddings` — the
     exact no-deps degradation path ``clusters.py`` already ships, reused
     here rather than reimplemented.
+
+    Returns ``(embeddings, sources)`` (issue athenaeum#1032) — ``sources`` maps every
+    key in ``embeddings`` to :data:`athenaeum.clusters.EMBEDDER_CHROMADB_DEFAULT`
+    or :data:`athenaeum.clusters.EMBEDDER_FALLBACK_HASHING`, uniformly (this
+    resolver is all-or-nothing: either every candidate embeds via ``provider``
+    or every candidate falls back together), so
+    :func:`athenaeum.clusters.cluster_auto_memory_files` can record which
+    embedder produced each formed cluster's vectors.
     """
     if not files:
-        return {}
+        return {}, {}
     provider = embedding_provider or embed_texts
     texts = [am.content for am in files]
     vectors = provider(texts)
     if vectors is None or len(vectors) != len(files):
-        return _fallback_embeddings(files)
-    return {str(am.path): list(map(float, vec)) for am, vec in zip(files, vectors)}
+        # Issue athenaeum#1032: one-time WARNING — this fallback used to engage with
+        # no log call at all, so athenaeum#1005's over-cluster diagnosis had no way to
+        # tell from run artifacts whether the hashing-trick embedder (rather
+        # than real MiniLM vectors) produced a cluster's similarity scores.
+        _warn_wiki_fallback_engaged_once(len(files))
+        fallback = _fallback_embeddings(files)
+        sources = {str(am.path): EMBEDDER_FALLBACK_HASHING for am in files}
+        return fallback, sources
+    embeddings = {str(am.path): list(map(float, vec)) for am, vec in zip(files, vectors)}
+    sources = {str(am.path): EMBEDDER_CHROMADB_DEFAULT for am in files}
+    return embeddings, sources
+
+
+def _warn_wiki_fallback_engaged_once(n_candidates: int) -> None:
+    """One-time WARNING (issue athenaeum#1032) when the wiki-dedupe pass falls back
+    to the hashing-trick embedder. See ``_resolve_wiki_embeddings`` above."""
+    global _WIKI_FALLBACK_WARNED
+    if _WIKI_FALLBACK_WARNED:
+        return
+    _WIKI_FALLBACK_WARNED = True
+    log.warning(
+        "wiki-page dedup: embed_texts produced no usable vectors for %d "
+        "candidate page(s); falling back to the fallback-hashing embedder "
+        "(clusters._fallback_embeddings) to produce them (issue athenaeum#1032)",
+        n_candidates,
+    )
 
 
 def find_wiki_page_clusters(
@@ -270,12 +310,15 @@ def find_wiki_page_clusters(
     if len(files) < 2:
         return []
 
-    embeddings = _resolve_wiki_embeddings(files, embedding_provider=embedding_provider)
+    embeddings, embedder_sources = _resolve_wiki_embeddings(
+        files, embedding_provider=embedding_provider
+    )
     clusters = cluster_auto_memory_files(
         files,
         extra_roots=[wiki_root],
         threshold=threshold,
         embeddings=embeddings,
+        embedder_sources=embedder_sources,
     )
     return [c for c in clusters if len(c.member_paths) >= 2]
 
@@ -432,11 +475,16 @@ def propose_wiki_page_merges(
             cluster_threshold=resolved_threshold,
         )
         if suppression is not None:
+            # Issue athenaeum#1032: names the embedder that produced the suppressed
+            # cluster's vectors — the over-cluster diagnosis this gate guards
+            # against needs to know whether a coarse hashing-trick fallback
+            # (rather than real MiniLM similarity) drove the suppression.
             log.info(
                 "wiki-page dedup: SUPPRESSED degenerate merge proposal for "
-                "cluster %s (%s); not written to _pending_merges.md",
+                "cluster %s (%s); embedder=%s; not written to _pending_merges.md",
                 cluster.cluster_id,
                 suppression,
+                cluster.embedder,
             )
             continue
 

@@ -58,6 +58,9 @@ sources:
     topics:                           # slugs/topics this source OWNS
       - lean-development-workflow
       - clean-commit-discipline
+never_ingest_classes:                 # optional (issue athenaeum#968); see below
+  - mirror-of-live-source
+  - pending-state-todo
 ```
 
 `version` must be the literal integer `1` (a schema-evolution seam — a future
@@ -141,6 +144,76 @@ the named manifest source. Default is dry-run (prints the converted text to
 stdout without writing); `--apply` writes it. This command never walks the
 corpus — running the converter against the whole live corpus is operator task
 athenaeum#437, out of scope here.
+
+## Never-ingest classes (athenaeum#968)
+
+An optional `never_ingest_classes:` list — write-refusal classes the
+**auto-memory intake path** consults, extending this same manifest mechanism
+rather than adding a second config surface. Empty or absent by default: a
+manifest written before athenaeum#968, or one that never mentions the key,
+enforces nothing new (`AuthorityManifest.never_ingest_classes == ()`).
+
+Two class slugs are recognised (a closed vocabulary —
+`athenaeum.authority.NEVER_INGEST_CLASS_SLUGS`; naming anything else raises
+`AuthorityManifestError` at parse time, same "loud on malformed" contract as
+every other field):
+
+- **`mirror-of-live-source`** — the claim names a value whose system of
+  record is a repo/config/doc already declared under `sources:` above.
+  Detected by reusing `find_duplicate_source(meta, manifest)` UNCHANGED —
+  the exact deterministic topic/tag/name lookup `authority lint` already
+  uses for post-hoc wiki-page duplicates, now consulted at intake instead.
+- **`pending-state-todo`** — the claim asserts the CURRENT presence/absence
+  of something in an external artifact ("X needs updating", "has Y landed
+  yet"). Detected by an explicit `pending_state: true` frontmatter flag, or
+  a small closed phrase list (`athenaeum.never_ingest._PENDING_STATE_PHRASES`
+  — e.g. "has it been added", "still needs", "todo:").
+
+Both classes are seed evidence from athenaeum#968's own filing comment: a
+2026-08-07 operator evidence log of three witnessed live wiki pages that
+should never have been ingested as durable claims in the first place.
+
+**Enforcement points — both intake tiers, each at its own COMPILE choke
+point, never at discovery:**
+
+- **Auto-memory** (`raw/auto-memory/<scope>/...`) —
+  `athenaeum.never_ingest.filter_never_ingest`, called from
+  `athenaeum.librarian._run_auto_memory_phase` immediately after
+  `discover_auto_memory_files` and before clustering. A refused file is
+  excluded from that run's `auto_memory_files` list.
+- **Entity tier** (`raw/<source>/...`) — `athenaeum.librarian.process_one`
+  checks the SAME classifier, via the shared
+  `athenaeum.never_ingest.check_and_refuse` primitive, at the very start of
+  processing each raw file (right after its frontmatter is parsed, before
+  Tier 0 passthrough). Deliberately **not** inside
+  `athenaeum.intake.discover_raw_files` itself: that function's return value
+  is read directly by `backlog_price_sheet.py` and `ordinary_night_table.py`
+  (issue athenaeum#713's measurement instruments, held pending an operator
+  decision) for their own backlog counts, and moving what `discover_raw_files`
+  returns would silently move those numbers. `discover_raw_files` takes no
+  manifest argument and is entirely unmodified by athenaeum#968 — a refused
+  entity-tier file is still discovered and still counted in the backlog, it
+  is simply not compiled into a wiki page this run (mirrors `result.skipped`,
+  the same disposition bucket a Tier 1 old-format skip already uses).
+
+In both cases a refused file is excluded from **that run's compilation**
+only — it is **never deleted**. It stays on disk and is re-evaluated (and, if
+the class still matches, re-excluded) idempotently on every later run, the
+same non-destructive shape `athenaeum.ephemeral`'s own intake drop already
+uses.
+
+**Visibility — never a silent drop.** Every refusal, from either tier, is
+appended via the same `athenaeum.never_ingest.check_and_refuse` call,
+ids-only (a class slug, a closed-vocabulary detail token, an origin
+scope/source, a content-free hash of the file's identity — never the
+filename itself, which for an auto-memory file can carry a free-text slug —
+and a `tier` field: `auto-memory` or `entity`), to
+`<cache_dir>/_never_ingest_refusals.jsonl`. This is the OTHER rung of the
+"one-ladder rule": raw intake `athenaeum.intake_audit` cannot even
+RECOGNISE escalates to a human via the pending-question queue; raw intake
+that IS recognised but matches a DECLARED refusal class needs no human
+escalation (the class was already declared) but is still ledgered, never
+silently dropped.
 
 ## Out of scope here
 
