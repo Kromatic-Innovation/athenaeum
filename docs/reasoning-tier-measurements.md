@@ -8,6 +8,11 @@ Figures here are **measured**, never estimated. Every section records the exact
 commands that produced it so a later agent with no session memory can reproduce a
 comparable number.
 
+See [`merge-inflow-restoration.md`](merge-inflow-restoration.md) (athenaeum#1030) for
+the follow-on analysis of the `max_merge_sources` suppression this doc
+measures below — what the recorded suppression counts do and do not support,
+and a proposed cap value for athenaeum#787's operator ratification.
+
 ---
 
 ## Baseline 0 — pre-enable, 2026-08-19
