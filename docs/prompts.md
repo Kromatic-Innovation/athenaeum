@@ -663,7 +663,7 @@ Respond with JSON only, no prose. Example: ["Return Path", "lean startup"]
 ## `reasoning_tiers.t1_system_prompt`
 
 - **Constant:** `athenaeum.reasoning_tiers.T1_SYSTEM_PROMPT`
-- **Source:** `src/athenaeum/reasoning_tiers.py:521`
+- **Source:** `src/athenaeum/reasoning_tiers.py:513`
 - **Model knob:** `reasoning_t1` &middot; **max_tokens:** `256`
 - **sha256:** `416d2b124851c1701e2ab47386cd97fa2b3cd29fe52e34441284eed0cfa9739b`
 
@@ -696,7 +696,7 @@ Respond with ONLY a JSON object of the shape:
 ## `reasoning_tiers.t2_system_prompt`
 
 - **Constant:** `athenaeum.reasoning_tiers.T2_SYSTEM_PROMPT`
-- **Source:** `src/athenaeum/reasoning_tiers.py:976`
+- **Source:** `src/athenaeum/reasoning_tiers.py:968`
 - **Model knob:** `reasoning_t2` &middot; **max_tokens:** `4096`
 - **sha256:** `70c4bfc29d2d224291269fcedc44a63fd3ec76d9db29c8cf9cf40e12ece2c793`
 

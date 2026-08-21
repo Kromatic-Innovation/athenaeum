@@ -2142,3 +2142,66 @@ class TestSuiteLedgerIsolation:
             value = os.environ.get(var)
             assert value, f"{var} must be set by the autouse isolation fixtures"
             assert self._live_cache_dir() != Path(value).expanduser().resolve()
+
+
+# ---------------------------------------------------------------------------
+# durable_ledger_path / resolve_ledger_path(wiki_root=...) — issue athenaeum#980
+# AC4: the R3 operational/store-durable relocation seam. NOT wired to any
+# production caller in this slice (see athenaeum.store.ARTIFACT_REGISTRY's
+# "spend-ledger" entry) — these tests cover the resolver capability itself.
+# ---------------------------------------------------------------------------
+
+
+class TestDurableLedgerPath:
+    def test_fresh_store_resolves_to_wiki_root(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        resolved = spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
+        assert resolved == wiki_root / spend.LEDGER_FILENAME
+
+    def test_already_migrated_store_resolves_to_wiki_root(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        (wiki_root / spend.LEDGER_FILENAME).write_text('{"v":1}\n', encoding="utf-8")
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        (cache_dir / spend.LEDGER_FILENAME).write_text('{"v":1}\n', encoding="utf-8")
+        resolved = spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
+        assert resolved == wiki_root / spend.LEDGER_FILENAME
+
+    def test_legacy_store_falls_back_to_cache_dir(self, tmp_path: Path) -> None:
+        """An existing installation with ONLY the legacy cache-dir ledger
+        keeps resolving there — never silently orphaned by this slice."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        legacy = cache_dir / spend.LEDGER_FILENAME
+        legacy.write_text('{"v":1}\n', encoding="utf-8")
+        resolved = spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
+        assert resolved == legacy
+
+    def test_resolve_ledger_path_without_wiki_root_is_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A caller that does not opt in gets byte-identical resolution to
+        before issue athenaeum#980 — no existing caller's behavior changes."""
+        monkeypatch.delenv("ATHENAEUM_SPEND_LEDGER", raising=False)
+        cache_dir = tmp_path / "cache"
+        assert spend.resolve_ledger_path(cache_dir=cache_dir) == spend.default_ledger_path(
+            cache_dir
+        )
+
+    def test_resolve_ledger_path_with_wiki_root_prefers_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The session/function-scoped isolation fixtures (tests/conftest.py)
+        # already pin ATHENAEUM_SPEND_LEDGER for hermeticity; clear it here so
+        # THIS test's config-level override is what's actually exercised.
+        monkeypatch.delenv("ATHENAEUM_SPEND_LEDGER", raising=False)
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        override = tmp_path / "explicit-override.jsonl"
+        config = {"spend": {"ledger_path": str(override)}}
+        assert spend.resolve_ledger_path(config, wiki_root=wiki_root) == override

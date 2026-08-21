@@ -727,3 +727,31 @@ class TestObservationsPathIsolation:
             "nested pytest run polluted the REAL cache-dir artifact "
             f"({real_artifact}): line count went from {before} to {after}"
         )
+
+
+# ---------------------------------------------------------------------------
+# durable_observations_path — issue athenaeum#980 AC4: the R3
+# operational/store-durable relocation seam. NOT wired to observe()'s
+# scattered call sites in this slice (see athenaeum.store.ARTIFACT_REGISTRY's
+# "llm-schema-observations-ledger" entry) — this test covers the resolver
+# capability itself.
+# ---------------------------------------------------------------------------
+
+
+class TestDurableObservationsPath:
+    def test_fresh_store_resolves_to_wiki_root(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        resolved = llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
+        assert resolved == wiki_root / llm_schemas.OBSERVATIONS_FILENAME
+
+    def test_legacy_store_falls_back_to_cache_dir(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        legacy = cache_dir / llm_schemas.OBSERVATIONS_FILENAME
+        legacy.write_text('{"v":1}\n', encoding="utf-8")
+        resolved = llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
+        assert resolved == legacy
