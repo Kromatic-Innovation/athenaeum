@@ -17,10 +17,36 @@ contract this module implements verbatim from §6.2, plus the §6.1 design
 decisions D1-D6). **No existing caller is migrated onto this seam in this
 slice** — S2 (athenaeum#977), S3 (athenaeum#978), S4 (athenaeum#979) and S7
 (athenaeum#982) do that. ``snapshot`` is implemented for real as of S3
-(athenaeum#978) — see :meth:`FilesystemStore.snapshot`. Two protocol members
-remain deliberately inert here and named as such at each call site: ``lease``
-(the ``runlock`` migration lands in S4), and the R3 persistence-class
-enforcement §5.2 defines (S5, athenaeum#980).
+(athenaeum#978) — see :meth:`FilesystemStore.snapshot`. ``lease`` is
+implemented for real as of S4 (athenaeum#979) — see :meth:`FilesystemStore.lease`
+and :class:`FileLease`. One protocol member remains deliberately inert here:
+the R3 persistence-class enforcement §5.2 defines (S5, athenaeum#980).
+
+**The lease primitive and its relationship to** :mod:`athenaeum.runlock`
+**(issue athenaeum#979, S4).** The flock + heartbeat + inode-race hardening that
+used to live entirely inside :class:`athenaeum.runlock.RunLock` (the CLI's
+single-machine mutating-command mutex, issue athenaeum#309/#397/#526/#763) is
+MOVED here — :func:`lease_open_fd`, :func:`lease_try_flock`,
+:func:`lease_holds_current_inode`, :func:`lease_write_metadata`,
+:func:`lease_refresh_heartbeat`, :func:`lease_break_lockfile`, plus the
+holder-diagnostic trio :func:`read_holder`/:func:`is_stale`/
+:func:`heartbeat_age_seconds` and :func:`_pid_alive` — generalized from
+``RunLock``'s hardcoded ``knowledge_root/.athenaeum.lock`` to an arbitrary
+``lockfile: Path``, since a lease name is caller-chosen (design note §6.2)
+rather than fixed to one CLI convention. :class:`FileLease` (the
+``AbstractContextManager[Lease]`` :meth:`FilesystemStore.lease` returns) is
+built from exactly these functions — a single non-blocking attempt, with an
+optional unconditional ``force`` break, and NO poll loop or
+heartbeat-staleness auto-break of its own: those are ``RunLock``-specific
+*policy* (the ``wait``/``force``/``break_stale_after``/``warn_stale_after``
+knobs its CLI callers configure), layered on top by repeated,
+force-escalating calls into this same engine. ``athenaeum.runlock`` imports
+these names from here (a normal downward L0→L1-consumer edge — this module
+never imports ``athenaeum.runlock`` back, so there is no cycle); see that
+module's docstring for the full acquire()/release()/heartbeat() orchestration
+that stayed there. Every byte written to the lockfile, every log message, and
+every one of ``RunLock``'s existing exceptions/behaviors is unchanged — this
+is a relocation of the primitive operations, not a redesign of the lock.
 
 Like :mod:`athenaeum.storage` and :class:`athenaeum.search.SearchBackend`,
 this is an INTERNAL seam: importable but not on the stable ``__all__`` surface
@@ -65,12 +91,19 @@ asserts both the import list and the one-directional edge mechanically.
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+try:  # pragma: no cover - exercised via monkeypatch in athenaeum.runlock's tests
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX (Windows)
+    fcntl = None  # type: ignore[assignment]
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter
@@ -100,6 +133,27 @@ class StoreConflictError(RuntimeError):
     by both ``put`` and ``delete`` on any precondition mismatch, on both
     implementations in this slice.
     """
+
+
+class LeaseHeldError(RuntimeError):
+    """Raised by :class:`FileLease`/:meth:`FilesystemStore.lease` when a lease
+    cannot be acquired non-blocking and ``force`` was not requested (issue
+    athenaeum#979, S4).
+
+    Carries the same holder metadata as :class:`athenaeum.runlock.LockHeld`
+    (``holder``, parsed by :func:`read_holder`) without being that class —
+    this module cannot import :mod:`athenaeum.runlock` (see the module
+    docstring's layering note), so ``RunLock`` catches this at its own call
+    site and re-raises its own ``LockHeld`` for its callers, unchanged.
+    """
+
+    def __init__(self, name: str, holder: dict[str, str] | None = None) -> None:
+        self.name = name
+        self.holder = holder or {}
+        super().__init__(
+            f"lease {name!r} is held"
+            + (f" by {self.holder}" if self.holder else " (no holder metadata)")
+        )
 
 
 class UnknownSurfaceError(KeyError):
@@ -189,15 +243,261 @@ class Lease:
     """A held lease, returned (as a context manager value) by ``Store.lease()``.
 
     Referenced by :func:`Store.lease`'s signature in design note §6.2 but not
-    itself defined there, for the same reason as :class:`Record`. S1 stub
-    type: no implementation in this slice grants a real lease —
-    ``StoreCapabilities.leases`` is ``False`` on every store built here, and
-    both implementations' ``lease()`` raise. S4 (athenaeum#979) implements this
-    over ``runlock``'s ``flock`` + heartbeat.
+    itself defined there, for the same reason as :class:`Record`. ``token`` is
+    the ISO-8601 acquire timestamp on :class:`FilesystemStore` (S4,
+    athenaeum#979) — opaque per D3, like every other version/token this module
+    hands out; do not parse it as a timestamp.
     """
 
     name: str
     token: str
+
+
+# ---------------------------------------------------------------------------
+# Lease primitive internals (design note §6.2 ``lease``; issue athenaeum#979,
+# slice S4). MOVED (not copied) from ``athenaeum.runlock.RunLock`` — the
+# flock-open, flock-attempt, inode-race guard, and lockfile metadata read/write
+# bodies are exactly what backed ``RunLock.acquire``/``release``/``heartbeat``
+# before this slice, generalized from a hardcoded ``knowledge_root/.athenaeum.lock``
+# to an arbitrary ``lockfile: Path`` (see the module docstring's "lease
+# primitive" section for the full relationship to ``athenaeum.runlock``, which
+# imports every name below and supplies its own wait/force/staleness POLICY on
+# top of them — none of that policy is duplicated here).
+# ---------------------------------------------------------------------------
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if *pid* names a live process on this machine."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists but owned by another user — still a live process.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _parse_iso_age_seconds(iso_ts: str | None) -> float | None:
+    """Age in seconds of an ISO-8601 timestamp, or ``None`` if unparseable."""
+    if not iso_ts:
+        return None
+    try:
+        then = datetime.fromisoformat(iso_ts)
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds()
+
+
+def read_holder(lockfile: Path) -> dict[str, str] | None:
+    """Parse the ``key: value`` holder metadata from *lockfile*.
+
+    Returns ``None`` when the file is absent or carries no parseable metadata.
+    """
+    try:
+        text = lockfile.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    holder: dict[str, str] = {}
+    for line in text.splitlines():
+        if ":" in line:
+            key, _, value = line.partition(":")
+            holder[key.strip()] = value.strip()
+    return holder or None
+
+
+def is_stale(lockfile: Path) -> bool:
+    """True if *lockfile* names a PID that is no longer alive.
+
+    Diagnostic only — the kernel already released a dead holder's ``flock``,
+    so this does not gate anything here; see ``athenaeum.runlock``'s module
+    docstring ("Reading a residual lockfile") for the full reasoning this was
+    moved from verbatim.
+    """
+    holder = read_holder(lockfile)
+    if not holder:
+        return False
+    pid_raw = holder.get("pid")
+    if not pid_raw:
+        return False
+    try:
+        pid = int(pid_raw)
+    except ValueError:
+        return False
+    return not _pid_alive(pid)
+
+
+def heartbeat_age_seconds(lockfile: Path) -> float | None:
+    """Age in seconds of the holder's effective heartbeat.
+
+    Prefers the ``heartbeat:`` line; falls back to ``timestamp:`` when absent
+    (lockfiles written before the heartbeat field existed).
+    """
+    holder = read_holder(lockfile)
+    if not holder:
+        return None
+    iso_ts = holder.get("heartbeat") or holder.get("timestamp")
+    return _parse_iso_age_seconds(iso_ts)
+
+
+def lease_open_fd(lockfile: Path) -> int:
+    """Open (creating if absent) the fd a lease attempt ``flock``s."""
+    lockfile.parent.mkdir(parents=True, exist_ok=True)
+    return os.open(lockfile, os.O_RDWR | os.O_CREAT, 0o644)
+
+
+def lease_try_flock(fd: int) -> bool:
+    """Non-blocking ``flock`` attempt on *fd*; ``True`` on success."""
+    assert fcntl is not None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def lease_holds_current_inode(fd: int, lockfile: Path) -> bool:
+    """True if *fd* refers to the inode currently at *lockfile*.
+
+    After a break (``force=True``) unlinks and re-creates the lockfile, a
+    descriptor opened *before* the break refers to an orphan inode: ``flock``
+    on it still succeeds (nothing holds the orphan), but any metadata written
+    lands in a file no longer at the lock path, so two holders could each
+    believe they hold the lease on two different inodes (issue athenaeum#526,
+    finding M6). Comparing ``fstat``/``stat`` ``st_ino`` catches that. Any
+    ``OSError`` (e.g. the lockfile was unlinked mid-check) means the
+    descriptor is not the current inode.
+    """
+    try:
+        return os.fstat(fd).st_ino == os.stat(lockfile).st_ino
+    except OSError:
+        return False
+
+
+def lease_write_metadata(fd: int) -> str:
+    """Truncate *fd* and write this holder's diagnostics. Returns the ISO-8601
+    acquire timestamp written (also the ``timestamp:`` line's value)."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    payload = (
+        f"pid: {os.getpid()}\n"
+        f"timestamp: {now_iso}\n"
+        f"host: {socket.gethostname()}\n"
+        f"heartbeat: {now_iso}\n"
+    )
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+    os.write(fd, payload.encode("utf-8"))
+    os.fsync(fd)
+    return now_iso
+
+
+def lease_refresh_heartbeat(fd: int, acquired_at: str) -> None:
+    """Rewrite only the ``heartbeat:`` line on *fd*, keeping ``pid``/``timestamp``/
+    ``host`` (``timestamp`` pinned to *acquired_at*, the original acquire time)."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    payload = (
+        f"pid: {os.getpid()}\n"
+        f"timestamp: {acquired_at}\n"
+        f"host: {socket.gethostname()}\n"
+        f"heartbeat: {now_iso}\n"
+    )
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+    os.write(fd, payload.encode("utf-8"))
+    os.fsync(fd)
+
+
+def lease_break_lockfile(lockfile: Path) -> None:
+    """Unlink *lockfile* so a fresh ``flock`` inode can be acquired.
+
+    No-op (not an error) when already absent.
+    """
+    try:
+        os.unlink(lockfile)
+    except FileNotFoundError:
+        pass
+
+
+class FileLease:
+    """The concrete ``AbstractContextManager[Lease]`` :meth:`FilesystemStore.lease`
+    returns (issue athenaeum#979, S4).
+
+    A single acquire attempt per instance: non-blocking, with an optional
+    unconditional ``force`` break first. No poll loop and no
+    heartbeat-staleness auto-break — those are ``athenaeum.runlock.RunLock``'s
+    policy, layered on top by calling this repeatedly (see the module
+    docstring). Raises :class:`LeaseHeldError` from ``__enter__`` when
+    contended. ``fd`` is exposed (read-only, set only while held) so a caller
+    that needs the raw descriptor — ``RunLock`` mirrors it onto its own
+    ``_fd`` for its existing test-observable surface — can get it without
+    reaching into a private attribute.
+    """
+
+    def __init__(self, lockfile: Path, *, force: bool = False) -> None:
+        self._lockfile = lockfile
+        self._force = force
+        self._fd: int | None = None
+        self._acquired_at: str | None = None
+
+    @property
+    def fd(self) -> int | None:
+        return self._fd
+
+    def __enter__(self) -> Lease:
+        if fcntl is None:
+            raise RuntimeError(
+                "FilesystemStore.lease() requires POSIX fcntl; unavailable on "
+                "this platform"
+            )
+        if self._try_claim():
+            return Lease(name=self._lockfile.name, token=self._acquired_at or "")
+        if self._force and self._try_claim(force=True):
+            return Lease(name=self._lockfile.name, token=self._acquired_at or "")
+        raise LeaseHeldError(self._lockfile.name, read_holder(self._lockfile))
+
+    def _try_claim(self, *, force: bool = False) -> bool:
+        """One open+flock(+inode-check) attempt; optionally break first.
+
+        Returns ``True`` (and sets ``self._fd``/``self._acquired_at``) only
+        when this instance now genuinely holds the CURRENT inode's ``flock``.
+        Any failure closes its own fd before returning ``False`` — never
+        leaks a descriptor.
+        """
+        if force:
+            lease_break_lockfile(self._lockfile)
+        fd = lease_open_fd(self._lockfile)
+        if lease_try_flock(fd) and lease_holds_current_inode(fd, self._lockfile):
+            self._fd = fd
+            self._acquired_at = lease_write_metadata(fd)
+            return True
+        os.close(fd)
+        return False
+
+    def heartbeat(self) -> None:
+        """Refresh the lockfile's ``heartbeat`` line. No-op when not held."""
+        if self._fd is None:
+            return
+        lease_refresh_heartbeat(self._fd, self._acquired_at or "")
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        fd = self._fd
+        self._fd = None
+        if fd is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 #: The four R3 persistence classes (design note §5.2). Declarative in S1 —
@@ -313,10 +613,10 @@ class FilesystemStore:
     this instance to notice a ``git init`` that happened after it was built —
     consistent with D4 ("declared, not probed"): the declaration is a
     snapshot-in-time of the adapter's capability, not a live re-check on every
-    access. ``leases=False`` for the same reason ``versioned`` used to be
-    hardcoded: S4 (athenaeum#979) has not wired ``lease`` yet. Everything
-    else this slice's conformance suite exercises for real: ``compare_and_swap``,
-    ``append``, ``bulk_list``, ``bulk_read``, ``cheap_local_scan``.
+    access. ``leases`` is ``True`` unconditionally as of S4 (athenaeum#979) —
+    see :meth:`lease` and :class:`FileLease`. Every capability this slice's
+    conformance suite exercises is now real: ``compare_and_swap``, ``append``,
+    ``bulk_list``, ``bulk_read``, ``cheap_local_scan``, ``leases``.
 
     Text-only in this slice: ``put``/``append`` route through
     :func:`athenaeum.atomic_io.atomic_write_text`, which is str-based (design
@@ -343,7 +643,7 @@ class FilesystemStore:
             versioned=(self._knowledge_root / ".git").exists(),
             purgeable=True,
             compare_and_swap=True,
-            leases=False,  # S4 (athenaeum#979) wires runlock behind this
+            leases=True,  # S4 (athenaeum#979): FileLease over flock, see .lease()
             append=True,
             bulk_list=True,
             bulk_read=True,
@@ -551,11 +851,31 @@ class FilesystemStore:
         ).stdout.strip()
         return sha
 
-    def lease(self, name: str, ttl_seconds: float) -> AbstractContextManager[Lease]:
-        raise NotImplementedError(
-            "FilesystemStore.lease() is not implemented until S4 (athenaeum#979); "
-            "capabilities.leases is False"
-        )
+    def lease(
+        self, name: str, ttl_seconds: float, *, force: bool = False
+    ) -> AbstractContextManager[Lease]:
+        """A ``flock``-backed lease at ``knowledge_root/name`` (design note
+        §6.2; issue athenaeum#979, S4) — a single non-blocking attempt.
+
+        ``ttl_seconds`` is accepted for protocol conformance and is not used
+        by this adapter: the kernel already releases ``flock`` the instant a
+        holder's process dies, which is a stronger guarantee than any
+        application-level timer could give, so there is nothing here for a
+        TTL to add (§4.6: "mapping onto flock for the filesystem adapter and
+        onto a lease row / conditional put elsewhere" — this is the "onto
+        flock" half; a database/lease-row adapter is where ``ttl_seconds``
+        does real work, since IT has no kernel to release anything on death —
+        see ``tests/store_fakes.py``'s ``InMemoryStore.lease`` for that other
+        half). ``force`` is additive keyword-only surface beyond the
+        ``Store`` protocol's two positional parameters (harmless to a
+        ``runtime_checkable`` ``Protocol``, which checks attribute presence,
+        not exact signatures) — :class:`athenaeum.runlock.RunLock` is the
+        caller that uses it, to implement its own ``--force``/auto-break
+        policy on top of this one primitive (see the module docstring).
+        Raises :class:`LeaseHeldError` when contended and ``force`` is not
+        set (or the forced break still loses the race to another holder).
+        """
+        return FileLease(self._knowledge_root / name, force=force)
 
     def bootstrap(self) -> None:
         """Create *knowledge_root* if absent. Non-destructive, matching

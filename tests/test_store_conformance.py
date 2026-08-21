@@ -17,6 +17,7 @@ touched or migrated here.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from athenaeum.storage import StorageConfigError
 from athenaeum.store import (
     FilesystemStore,
     Lease,
+    LeaseHeldError,
     ObjectMeta,
     Record,
     Store,
@@ -254,9 +256,14 @@ class TestStoreConformance:
     def test_capabilities_are_declared(self, store: Store) -> None:
         caps = store.capabilities
         assert isinstance(caps, StoreCapabilities)
-        # S1 profile: neither snapshot nor lease is wired yet (S3/S4).
+        # ``versioned`` is False here because neither fixture is a git repo
+        # (FilesystemStore's `versioned` is a real, constructor-time check —
+        # see TestSnapshotAndLease below for a fixture that IS one; InMemoryStore
+        # never has a git tree to snapshot, so its `versioned` is always False).
+        # ``leases`` is real on both implementations as of S4 (athenaeum#979) —
+        # see TestSnapshotAndLease.
         assert caps.versioned is False
-        assert caps.leases is False
+        assert caps.leases is True
         assert caps.purgeable is True
         assert caps.compare_and_swap is True
         assert caps.append is True
@@ -276,15 +283,46 @@ class TestStoreConformance:
         else:
             assert caps.local_path_for is None
 
-    # -- snapshot / lease (declared-inert in S1) -------------------------
+    # -- snapshot ---------------------------------------------------------
 
     def test_snapshot_returns_none_in_s1(self, store: Store) -> None:
+        """Neither fixture here is a git repo, so both return ``None`` — see
+        ``tests/test_no_git_shelling_outside_store.py`` and the S3-specific
+        ``FilesystemStore`` git-snapshot tests for the real-commit path."""
         assert store.snapshot("pre-write") is None
 
-    def test_lease_raises_not_implemented_in_s1(self, store: Store) -> None:
-        with pytest.raises(NotImplementedError):
-            with store.lease("test-lease", ttl_seconds=5.0) as lease:
-                assert isinstance(lease, Lease)  # pragma: no cover - never reached
+    # -- lease (issue athenaeum#979, S4) -----------------------------------
+    #
+    # Shared conformance: acquiring, re-entrant contention, and release-then-
+    # reacquire are the SAME across both implementations. Expiry/renewal
+    # semantics are deliberately NOT shared here — FilesystemStore's flock has
+    # no independent TTL (the kernel already reclaims a dead holder), while
+    # InMemoryStore's lease genuinely expires — see TestFakeAdapterLeaseExpiry
+    # below for that non-filesystem-specific path (issue athenaeum#979 AC5).
+
+    def test_lease_acquire_yields_a_lease(self, store: Store) -> None:
+        with store.lease("build-index", ttl_seconds=30.0) as lease:
+            assert isinstance(lease, Lease)
+            assert lease.name == "build-index"
+            assert lease.token
+
+    def test_lease_contention_raises_while_held(self, store: Store) -> None:
+        with store.lease("build-index", ttl_seconds=30.0):
+            with pytest.raises(LeaseHeldError):
+                with store.lease("build-index", ttl_seconds=30.0):
+                    pass  # pragma: no cover - never reached
+
+    def test_lease_available_again_after_release(self, store: Store) -> None:
+        with store.lease("build-index", ttl_seconds=30.0):
+            pass
+        with store.lease("build-index", ttl_seconds=30.0) as lease:
+            assert isinstance(lease, Lease)
+
+    def test_lease_names_are_independent(self, store: Store) -> None:
+        """Holding one lease name must never block a different one."""
+        with store.lease("build-index", ttl_seconds=30.0):
+            with store.lease("gc-sweep", ttl_seconds=30.0) as other:
+                assert other.name == "gc-sweep"
 
     # -- bootstrap ----------------------------------------------------------
 
@@ -294,6 +332,58 @@ class TestStoreConformance:
         store.bootstrap()
         store.bootstrap()  # idempotent
         assert store.read(key) == b"content"
+
+
+# ---------------------------------------------------------------------------
+# Fake-adapter lease-expiry (issue athenaeum#979, S4, AC5) — the non-filesystem
+# path. FilesystemStore's lease has no independent TTL-driven expiry (the
+# kernel already reclaims a dead holder's flock — see FileLease's docstring),
+# so this genuinely-expiring behavior is specific to InMemoryStore and is NOT
+# part of the shared TestStoreConformance suite above.
+# ---------------------------------------------------------------------------
+
+
+class TestFakeAdapterLeaseExpiry:
+    def test_lease_expires_after_ttl_without_renewal(self) -> None:
+        store = InMemoryStore()
+        with store.lease("nightly-compile", ttl_seconds=0.05) as first:
+            token = first.token
+        time.sleep(0.1)  # past the TTL; the holder above never renewed
+        with store.lease("nightly-compile", ttl_seconds=0.05) as second:
+            assert second.token != token  # a genuinely new holder, not a reuse
+
+    def test_lease_contended_within_ttl_even_after_context_exit(self) -> None:
+        """Exiting the ``with`` block above releases explicitly — this proves
+        the EXPIRY case specifically: a lease still within its TTL is held
+        even though nothing has renewed it recently."""
+        store = InMemoryStore()
+        cm = store.lease("nightly-compile", ttl_seconds=30.0)
+        cm.__enter__()  # deliberately not released — simulates a crashed holder
+        with pytest.raises(LeaseHeldError):
+            with store.lease("nightly-compile", ttl_seconds=30.0):
+                pass  # pragma: no cover - never reached
+
+    def test_heartbeat_renews_and_blocks_expiry(self) -> None:
+        store = InMemoryStore()
+        cm = store.lease("nightly-compile", ttl_seconds=0.15)
+        cm.__enter__()
+        try:
+            time.sleep(0.1)
+            cm.heartbeat()  # renews for another 0.15s from now
+            time.sleep(0.1)  # 0.2s since acquire, but only 0.1s since renewal
+            with pytest.raises(LeaseHeldError):
+                with store.lease("nightly-compile", ttl_seconds=0.15):
+                    pass  # pragma: no cover - never reached
+        finally:
+            cm.__exit__(None, None, None)
+
+    def test_lease_available_once_ttl_elapses_even_without_release(self) -> None:
+        store = InMemoryStore()
+        cm = store.lease("nightly-compile", ttl_seconds=0.05)
+        cm.__enter__()  # never released — the fake-adapter equivalent of a crash
+        time.sleep(0.1)
+        with store.lease("nightly-compile", ttl_seconds=0.05) as lease:
+            assert isinstance(lease, Lease)
 
 
 # ---------------------------------------------------------------------------
