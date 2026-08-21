@@ -176,15 +176,18 @@ serve them would drag every backend into the local index libraries' own
 file-handle assumptions for no benefit.
 
 **Layering: `athenaeum.store` is L0/L1**, and it inherits none of
-`athenaeum.storage`'s upward reach — this is where the shipped module
-diverges from the whole-store design note's own §6.4 prose, deliberately, and
-the divergence is worth stating plainly here rather than silently publishing
-the note's original claim as though it still matched the code:
+`athenaeum.storage`'s upward reach. The whole-store design note's own §6.4
+originally described the opposite arrangement; that was a staleness in the
+note, not a divergence in the shipped code, and issue athenaeum#1087 corrected
+§6.4 to match what is recorded here. The account is repeated in this section
+because it is the published contract's own layering claim, not only the
+design note's:
 
 - Design note §6.4 originally described `resolve_store_for_class` as living
   IN `athenaeum.store`, reaching up to `athenaeum.storage` (L2) for adapter
   and mapping resolution — the same upward exception `storage.py` documents
-  for itself.
+  for itself. (Corrected by issue athenaeum#1087; see below for what actually
+  shipped.)
 - **What actually shipped (S1, issue athenaeum#976) is the reverse.**
   `resolve_store_for_class` lives in **`athenaeum.storage`**, which imports
   `athenaeum.store` (one direction only) to build a `FilesystemStore`.
