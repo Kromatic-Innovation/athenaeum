@@ -1185,6 +1185,42 @@ build time, never a silent fallback:
 deployment with no `sensitivity:` block behaves exactly as it does today.
 The example at the end of this file is not amended for this section.
 
+### `storage.mapping` completeness lint + the deferred pair check (athenaeum#993)
+
+S5 of the design note's §9 — a lint over `storage.mapping`, not a new config
+knob. `src/athenaeum/sensitivity_lint.py` implements two checks the note
+defers rather than enforcing inside the resolver:
+
+1. **Completeness** — every sensitivity class name a scanned corpus's
+   content still carries (its own `sensitivity_class:` frontmatter field —
+   this lint's own scanning convention, see the module docstring) must have
+   a live `storage.mapping` entry naming a real adapter
+   (`athenaeum.storage.available_adapters`). A class with no entry falls
+   through, silently, to the default `wiki-markdown-embedded` surface at
+   read time — the exact footgun §6 point 2 (below) names; a class mapped to
+   an adapter name that does not exist already raises `StorageConfigError`
+   at read time, and this lint catches both earlier, at config-change time.
+2. **The deferred `(read_policy, storage adapter)` pair check** (§7
+   Decision D4) — a class whose resolved `read_policy.access` is
+   `confidential` or `personal` but whose mapped adapter's
+   `corpus_policy.embedded` is `True` is reported as advisory: the
+   read-policy layer believes the class is restricted while storage routes
+   it into the ordinary embedded corpus.
+
+Completeness findings and the D4 pair-check finding are kept as **distinct,
+separately-severity kinds** — the pair check is advisory and never blocks a
+gate on its own. `athenaeum storage lint-mapping --path <knowledge-root>
+[--corpus <root>] [--json]` is the CLI entry point (`src/athenaeum/
+_cmd_storage.py`); it exits non-zero only on a completeness finding. It is
+standalone — not wired into any existing CI check by this slice. The lint
+never scans a hardcoded or environment-derived path (`--corpus` always comes
+from the caller, defaulting to `--path`'s knowledge root) and never writes
+anything — both checks are read-only over config and the corpus tree.
+Committed synthetic fixtures under `tests/fixtures/sensitivity_mapping/`
+drive `tests/test_sensitivity_lint.py`. See
+[`docs/sensitivity-class-vocabulary.md`](sensitivity-class-vocabulary.md) §6
+point 2 / §7 Decision D4 / §9 S5 for the full rationale.
+
 ## Sensitivity routing (athenaeum#949, slice 1/4 — config)
 
 The routing config surface specified in
