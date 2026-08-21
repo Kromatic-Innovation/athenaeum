@@ -28,6 +28,7 @@ from athenaeum.sensitivity import (
     classify,
     register_recognizer,
 )
+from tests.fixtures.street_address_fixtures import NEGATIVE_FIXTURES, POSITIVE_FIXTURES
 
 
 @pytest.fixture(autouse=True)
@@ -189,7 +190,9 @@ class TestBuiltinRegistrationCall:
         assert "phone" in sensitivity._REGISTERED_RECOGNIZERS
 
     def test_builtin_names_are_the_protected_set(self) -> None:
-        assert sensitivity._BUILTIN_RECOGNIZER_NAMES == frozenset({"email", "phone"})
+        assert sensitivity._BUILTIN_RECOGNIZER_NAMES == frozenset(
+            {"email", "phone", "street-address"}
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +283,107 @@ class TestPhoneRecognizer:
         rec = available_recognizers(None)["phone"]
         matches = rec.detect(text="realm42 917-231-6130", frontmatter=None)
         assert [m.value for m in matches] == ["917-231-6130"]
+
+
+class TestStreetAddressRecognizer:
+    """Issue athenaeum#991 (S2). Fixture-bounded — see
+    ``tests/fixtures/street_address_fixtures.py``'s header comment for the
+    in-scope forms and non-goals this class scores the recogniser against.
+    """
+
+    def test_positive_fixtures_each_match_the_expected_value(self) -> None:
+        rec = available_recognizers(None)["street-address"]
+        for fixture_id, text, expected in POSITIVE_FIXTURES:
+            values = [m.value for m in rec.detect(text=text, frontmatter=None)]
+            assert values == [expected], fixture_id
+
+    def test_negative_fixtures_never_match(self) -> None:
+        # AC: non-goals (non-US formats, PO-box-only, bare postal codes) and
+        # the named false-positive shapes (numbered list item, version/build
+        # string, date-like run, labeled record id) must not fire.
+        rec = available_recognizers(None)["street-address"]
+        for fixture_id, text in NEGATIVE_FIXTURES:
+            values = [m.value for m in rec.detect(text=text, frontmatter=None)]
+            assert values == [], fixture_id
+
+    def test_precision_and_recall_on_the_committed_fixture_set(self) -> None:
+        # Thresholds: 1.0 for both. The fixture set is small (10 positive /
+        # 13 negative) and hand-curated to be EXACTLY the forms this slice
+        # claims to cover (recall) and the exact false-positive shapes it
+        # commits not to fire on (precision) -- unlike the open-ended
+        # detection this issue explicitly scopes out, there is no accepted
+        # miss on a fixture we ourselves wrote into the corpus. A single
+        # miss here means either a claimed in-scope form silently stopped
+        # matching (recall regression) or a named non-goal/false-positive
+        # shape started firing (precision regression) -- both are real
+        # regressions this design's own "individually justified suppression"
+        # posture (design note §1, the phone-recogniser precedent) commits
+        # to catching, not noise to tolerate with a looser threshold.
+        recall_threshold = 1.0
+        precision_threshold = 1.0
+
+        rec = available_recognizers(None)["street-address"]
+
+        true_positives = 0
+        for _fixture_id, text, expected in POSITIVE_FIXTURES:
+            values = [m.value for m in rec.detect(text=text, frontmatter=None)]
+            if values == [expected]:
+                true_positives += 1
+        recall = true_positives / len(POSITIVE_FIXTURES)
+
+        false_positives = 0
+        for _fixture_id, text in NEGATIVE_FIXTURES:
+            false_positives += len(rec.detect(text=text, frontmatter=None))
+        # Precision over the combined positive+negative corpus: every
+        # positive fixture contributes exactly one true positive when
+        # matched; every match on a negative fixture is a false positive.
+        total_positive_matches = sum(
+            len(rec.detect(text=text, frontmatter=None)) for _fid, text, _exp in POSITIVE_FIXTURES
+        )
+        precision = (
+            true_positives / (total_positive_matches + false_positives)
+            if (total_positive_matches + false_positives)
+            else 1.0
+        )
+
+        assert recall >= recall_threshold, recall
+        assert precision >= precision_threshold, precision
+
+    def test_purity_and_determinism_covered_generically(self) -> None:
+        # detect()'s purity/offline/determinism is asserted generically by
+        # TestDetectIsPureAndOffline below (it iterates every registered
+        # recogniser, including this one, and this module imports nothing
+        # network/filesystem-capable). This test just pins that the
+        # recogniser participates in that generic sweep, so a future refactor
+        # that narrows the sweep's scope cannot silently stop covering it.
+        assert "street-address" in available_recognizers(None)
+
+    def test_bound_to_pii_by_default_all_three_recognizers(self) -> None:
+        classes = available_classes(None)
+        assert classes["pii"].recognizers == ("email", "phone", "street-address")
+
+    def test_partition_invariant_still_holds_on_default_config(self) -> None:
+        # AC: available_classes() on the default config raises nothing.
+        classes = available_classes(None)
+        assert set(classes) == {"pii"}
+
+    def test_frontmatter_accepted_but_not_consulted(self) -> None:
+        rec = available_recognizers(None)["street-address"]
+        assert rec.detect(text="123 Maple Street", frontmatter={"anything": "x"}) == rec.detect(
+            text="123 Maple Street", frontmatter=None
+        )
+
+    def test_no_match_returns_empty_list(self) -> None:
+        rec = available_recognizers(None)["street-address"]
+        assert rec.detect(text="nothing address-shaped here", frontmatter=None) == []
+
+    def test_matches_carry_correct_spans(self) -> None:
+        rec = available_recognizers(None)["street-address"]
+        text = "Please deliver the package to 742 Evergreen Terrace before 5pm."
+        matches = rec.detect(text=text, frontmatter=None)
+        assert len(matches) == 1
+        start, end = matches[0].span
+        assert text[start:end] == matches[0].value == "742 Evergreen Terrace"
 
 
 class TestDetectIsPureAndOffline:
@@ -424,13 +528,17 @@ class TestBuiltinPiiClass:
         pii = classes["pii"]
         assert pii == SensitivityClass(
             name="pii",
-            recognizers=("email", "phone"),
+            recognizers=("email", "phone", "street-address"),
             read_policy=ReadPolicy(access="personal", audience=()),
         )
 
     def test_pii_class_comes_from_the_module_constant(self) -> None:
         assert "pii" in sensitivity._BUILTIN_CLASSES
-        assert sensitivity._BUILTIN_CLASSES["pii"]["recognizers"] == ["email", "phone"]
+        assert sensitivity._BUILTIN_CLASSES["pii"]["recognizers"] == [
+            "email",
+            "phone",
+            "street-address",
+        ]
 
     def test_pii_not_seeded_in_config_defaults(self) -> None:
         # The shipped default lives in sensitivity._BUILTIN_CLASSES, not
@@ -440,7 +548,11 @@ class TestBuiltinPiiClass:
 
         assert resolve_sensitivity_classes({}) == {}
         assert "sensitivity" not in _DEFAULTS
-        assert available_classes({})["pii"].recognizers == ("email", "phone")
+        assert available_classes({})["pii"].recognizers == (
+            "email",
+            "phone",
+            "street-address",
+        )
 
 
 # ---------------------------------------------------------------------------
