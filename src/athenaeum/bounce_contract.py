@@ -34,19 +34,36 @@ This module is that contract, expressed as code:
 for its whole recognition decision and does nothing but write the mark on top
 of it, so the check cannot answer differently from the gate — they are the
 same code path. The body predicates are the production ones
-(:func:`athenaeum.pii.find_inline_emails`,
+(:func:`athenaeum.sensitivity.classify`,
 :func:`athenaeum.pii.find_hard_bounce_code`,
 :func:`athenaeum.pii.detect_hard_bounce_fact`) called directly, never
 re-derived here. The prose contract in ``docs/tier0-bounce-note-contract.md``
 is pinned to :data:`DECLINE_REASONS` by a test, so the documented reason list
 cannot silently fall behind this module either.
 
+**Migrated onto the sensitivity registry (issue athenaeum#992).** This module used
+to import :func:`athenaeum.pii.find_inline_emails` directly — the note at
+``docs/sensitivity-class-vocabulary.md`` §2.1/§9 originally omitted this
+module from the S3 call-site inventory entirely. The email-identifier count
+this module needs (exactly one, for :data:`NO_EMAIL_IDENTIFIER` /
+:data:`SEVERAL_EMAIL_IDENTIFIERS`) is now obtained via
+:func:`athenaeum.sensitivity.classify` with ``config=None`` — this module
+takes no ``config`` parameter of its own (it is "a pure function of the note
+text", per this docstring's opening line), so only the shipped ``pii`` class's
+``email`` recogniser is ever consulted; a deployment's own
+``sensitivity:`` config block is out of reach here, matching this module's
+pre-existing no-config-surface contract. :func:`_conforming_emails` preserves
+:func:`~athenaeum.pii.find_inline_emails`'s order-preserving dedup exactly, so
+a body repeating the same address is still counted once — behaviour is
+unchanged on every existing fixture.
+
 This module adds **no** rejection path and changes no runtime behaviour on the
 intake path: it makes the existing boundary legible and checkable in advance.
 
 Layering: L2-ish — depends on the L1 :mod:`athenaeum.models` frontmatter
-parser and the L2 :mod:`athenaeum.pii` predicates, and on nothing above it, so
-the L5 librarian gate and the L5 CLI can both call it.
+parser, the L2 :mod:`athenaeum.pii` predicates, and the L3
+:mod:`athenaeum.sensitivity` registry, and on nothing above it, so the L5
+librarian gate and the L5 CLI can both call it.
 """
 
 from __future__ import annotations
@@ -59,8 +76,31 @@ from athenaeum.pii import (
     HardBounceFact,
     detect_hard_bounce_fact,
     find_hard_bounce_code,
-    find_inline_emails,
 )
+from athenaeum.sensitivity import classify
+
+
+def _conforming_emails(body: str) -> list[str]:
+    """Email-shaped values the body names, in order, deduped.
+
+    The migrated replacement for a direct ``find_inline_emails(body)`` call
+    (issue athenaeum#992): routes through :func:`athenaeum.sensitivity.classify`
+    instead of importing the detector function by name. ``config=None`` —
+    this module has no config surface of its own, so only the shipped
+    ``email`` recogniser (bound to the built-in ``pii`` class) is ever
+    consulted, exactly as the direct import always was. Dedup is
+    order-preserving, matching :func:`~athenaeum.pii.find_inline_emails`'s
+    contract byte-for-byte (``classify`` itself reports one match per
+    occurrence with no dedup — this wrapper is what keeps this module's
+    caller-visible behaviour unchanged).
+    """
+    seen: list[str] = []
+    for classified in classify(text=body, config=None):
+        if classified.match.recognizer != "email":
+            continue
+        if classified.match.value not in seen:
+            seen.append(classified.match.value)
+    return seen
 
 #: Frontmatter parsed to something other than a YAML mapping (a list, a bare
 #: scalar), so the per-claim fields cannot be read from it at all.
@@ -231,7 +271,7 @@ def check_tier0_bounce_conformance(note_text: str) -> Tier0BounceConformance:
     # collapses both body conditions into one None, so the two are asked
     # separately here to report WHICH failed — with the same functions, not a
     # re-derivation of them.
-    emails = find_inline_emails(body)
+    emails = _conforming_emails(body)
     if len(emails) == 0:
         declines.append(
             BounceDecline(
