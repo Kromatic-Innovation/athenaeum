@@ -180,7 +180,14 @@ class TestAllowance:
         assert report.marked_not_on_wiki
         assert spec.exceeds_allowance(report) is True
 
-    def test_do_not_email_fails_on_wiki_only_mark(self, tmp_path: Path) -> None:
+    def test_do_not_email_tolerates_wiki_only_mark(self, tmp_path: Path) -> None:
+        """The design's ONLY legal steady state (issue athenaeum#1039): the
+        wiki page is the sole authoring surface, and athenaeum#960's
+        Out-of-scope forbids backfilling marks onto the excluded surface —
+        so a wiki-only mark, however many, must NOT alert. Before
+        athenaeum#1039 this asserted the opposite (`exceeds_allowance`
+        `True`) — the exact defect the issue reports, observed live as 4
+        wiki marks / 0 excluded records incorrectly exiting 3."""
         contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
         _dne_wiki_page(wiki_root, marked=True)
         contacts_root.mkdir()
@@ -188,6 +195,21 @@ class TestAllowance:
         spec = get_field("do_not_email")
         report = spec.compute(wiki_root, contacts_root, None)
 
+        assert report.marked_on_wiki_not_excluded
+        assert spec.exceeds_allowance(report) is False
+
+    def test_do_not_email_fails_on_excluded_only_mark(self, tmp_path: Path) -> None:
+        """The one direction the design actually forbids (issue
+        athenaeum#1039 / athenaeum#963's guard): the excluded surface newly
+        carrying a `do_not_email` mark the wiki does not."""
+        contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
+        wiki_root.mkdir()
+        _dne_contact_record(contacts_root, marked=True)
+
+        spec = get_field("do_not_email")
+        report = spec.compute(wiki_root, contacts_root, None)
+
+        assert report.marked_on_excluded_not_wiki
         assert spec.exceeds_allowance(report) is True
 
     def test_do_not_email_tolerates_nothing(self, tmp_path: Path) -> None:
@@ -267,10 +289,35 @@ class TestCli:
 
         assert rc == EXIT_DIVERGED
 
-    def test_do_not_email_diverged_exits_nonzero(self, tmp_path: Path, capsys) -> None:
+    def test_do_not_email_wiki_only_mark_exits_zero(self, tmp_path: Path, capsys) -> None:
+        """Issue athenaeum#1039's regression case: the design's only legal
+        steady state (wiki carries marks, excluded surface carries zero
+        records) must exit 0, not `EXIT_DIVERGED`."""
         contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
         _dne_wiki_page(wiki_root, marked=True)
         contacts_root.mkdir()
+
+        rc = main(
+            [
+                "surface-divergence",
+                "--field",
+                "do_not_email",
+                "--path",
+                str(tmp_path),
+                "--wiki-root",
+                str(wiki_root),
+                "--contacts-root",
+                str(contacts_root),
+            ]
+        )
+
+        assert rc == 0
+
+    def test_do_not_email_excluded_only_mark_exits_nonzero(self, tmp_path: Path, capsys) -> None:
+        """The real divergence: the excluded surface newly carries the field."""
+        contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
+        wiki_root.mkdir()
+        _dne_contact_record(contacts_root, marked=True)
 
         rc = main(
             [
@@ -312,10 +359,15 @@ class TestCli:
         self, tmp_path: Path, capsys
     ) -> None:
         """``--report-only`` is the ONLY way to get the pre-athenaeum#963
-        exit-0-on-divergence contract from this command."""
+        exit-0-on-divergence contract from this command. Uses the real
+        divergence direction (excluded-only mark, athenaeum#1039) so this
+        test still exercises `--report-only` suppressing a genuine
+        `EXIT_DIVERGED` — the wiki-only-mark fixture this test used before
+        athenaeum#1039 exits 0 on its own now, which would make the
+        `--report-only` flag a no-op in this test."""
         contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
-        _dne_wiki_page(wiki_root, marked=True)
-        contacts_root.mkdir()
+        wiki_root.mkdir()
+        _dne_contact_record(contacts_root, marked=True)
 
         rc = main(
             [
