@@ -2335,7 +2335,9 @@ def merge_clusters_to_wiki(
         # can now differ.
         if usage is not None and resolve_client is not None:
             usage.api_calls += 1
-        return propose_resolution(result, members, resolve_client, usage=usage)
+        return propose_resolution(
+            result, members, resolve_client, usage=usage, wiki_root=wiki_root
+        )
 
     # Issue athenaeum#462: FIRST WRITE — persist the deterministic C3 merge output to
     # disk BEFORE C4 detection runs. Until this change the page write loop sat
@@ -2535,7 +2537,7 @@ def merge_clusters_to_wiki(
             if usage is not None and client is not None:
                 usage.api_calls += 1
             result = detect_contradictions(
-                filtered, client, config=resolved_config, usage=usage
+                filtered, client, config=resolved_config, usage=usage, wiki_root=wiki_root
             )
             # Issue athenaeum#569 (H6): capture the detector's transient give-up BEFORE
             # any downgrade reassigns `result`, so a cluster whose detection was
@@ -2708,7 +2710,7 @@ def merge_clusters_to_wiki(
             if usage is not None and client is not None:
                 usage.api_calls += 1
             result = detect_contradictions(
-                pair, client, config=resolved_config, usage=usage
+                pair, client, config=resolved_config, usage=usage, wiki_root=wiki_root
             )
             if result.detected:
                 pairs_added_via_similarity += 1

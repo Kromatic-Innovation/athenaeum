@@ -1048,7 +1048,10 @@ class TestRecallPushMetricsInstrumentation:
 
         recall_search(wiki_dir, "Acme", search_backend="keyword", cache_dir=cache_dir)
 
-        rows = push_metrics.read_push_records(cache_dir=cache_dir)
+        # Issue athenaeum#980 AC4: record_push's production call site now passes
+        # wiki_root=, so the record lands behind the seam, not in cache_dir —
+        # the read must match with the same wiki_root= to find it.
+        rows = push_metrics.read_push_records(cache_dir=cache_dir, wiki_root=wiki_dir)
         assert len(rows) == 1
         assert rows[0]["session_id"] == "test-session-734"
         assert rows[0]["pushed_count"] >= 1
@@ -1073,7 +1076,7 @@ class TestRecallPushMetricsInstrumentation:
 
         recall_search(wiki_dir, "Acme", search_backend="keyword", cache_dir=cache_dir)
 
-        rows = push_metrics.read_push_records(cache_dir=cache_dir)
+        rows = push_metrics.read_push_records(cache_dir=cache_dir, wiki_root=wiki_dir)
         assert len(rows) == 1
         assert rows[0]["session_id"] == "win-code"
 
@@ -1090,7 +1093,7 @@ class TestRecallPushMetricsInstrumentation:
 
         recall_search(wiki_dir, "Acme", search_backend="keyword", cache_dir=cache_dir)
 
-        rows = push_metrics.read_push_records(cache_dir=cache_dir)
+        rows = push_metrics.read_push_records(cache_dir=cache_dir, wiki_root=wiki_dir)
         assert len(rows) == 1
         assert rows[0]["session_id"] == "legacy-fallback"
 
@@ -1102,21 +1105,27 @@ class TestRecallPushMetricsInstrumentation:
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-compare")
         monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
 
+        # Issue athenaeum#980 AC4: record_push's production call site now writes
+        # BEHIND THE SEAM (wiki_root=), not under cache_dir — so the two
+        # sub-runs below can no longer be ledger-isolated by cache_dir alone
+        # (both share the one `wiki_dir` fixture). Run the DISABLED case
+        # first and assert its empty ledger before the ENABLED case writes
+        # anything into that shared wiki_root.
+        cache_off = tmp_path / "cache_off"
+        monkeypatch.setenv("ATHENAEUM_PUSH_METRICS_ENABLED", "0")
+        out_off = recall_search(
+            wiki_dir, "Acme", search_backend="keyword", cache_dir=cache_off
+        )
+        assert push_metrics.read_push_records(cache_dir=cache_off, wiki_root=wiki_dir) == []
+
         cache_on = tmp_path / "cache_on"
         monkeypatch.delenv("ATHENAEUM_PUSH_METRICS_ENABLED", raising=False)
         out_on = recall_search(
             wiki_dir, "Acme", search_backend="keyword", cache_dir=cache_on
         )
 
-        cache_off = tmp_path / "cache_off"
-        monkeypatch.setenv("ATHENAEUM_PUSH_METRICS_ENABLED", "0")
-        out_off = recall_search(
-            wiki_dir, "Acme", search_backend="keyword", cache_dir=cache_off
-        )
-
         assert out_on == out_off
-        assert push_metrics.read_push_records(cache_dir=cache_on) != []
-        assert push_metrics.read_push_records(cache_dir=cache_off) == []
+        assert push_metrics.read_push_records(cache_dir=cache_on, wiki_root=wiki_dir) != []
 
     def test_no_push_record_when_no_session_id(
         self, wiki_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

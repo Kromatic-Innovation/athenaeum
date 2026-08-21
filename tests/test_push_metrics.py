@@ -1105,3 +1105,28 @@ class TestDurablePushRecordsPath:
         assert push_metrics.record_push(record, cache_dir=cache_dir, wiki_root=wiki_root) is True
         assert (wiki_root / push_metrics.PUSH_RECORDS_FILENAME).exists()
         assert not (cache_dir / push_metrics.PUSH_RECORDS_FILENAME).exists()
+
+    def test_no_split_brain_on_a_fresh_store(self, tmp_path: Path) -> None:
+        """The production WRITE path (record_push, as mcp_server.py calls it)
+        and the production READ path (read_push_records, as
+        build_coverage_worksheet/compute_baseline/determine_references call
+        it) must agree on where a fresh store's ledger lives — issue
+        athenaeum#980 AC4."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        record = push_metrics.build_push_record(
+            session_id="split-brain-probe-session",
+            query="q",
+            backend="fts5",
+            hits=[("p.md", {}, "snip")],
+        )
+        assert push_metrics.record_push(record, cache_dir=cache_dir, wiki_root=wiki_root) is True
+
+        records = push_metrics.read_push_records(cache_dir, wiki_root=wiki_root)
+        assert any(r.get("session_id") == "split-brain-probe-session" for r in records)
+
+        # A read that forgets wiki_root= must not silently see the same
+        # records via the old cache-dir default.
+        stale = push_metrics.read_push_records(cache_dir)
+        assert stale == []

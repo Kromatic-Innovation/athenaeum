@@ -166,7 +166,7 @@ class _DetectSpy:
         self.n_calls = 0
         self.clusters_seen: list[tuple[str, ...]] = []
 
-    def __call__(self, members, client, *, config=None, usage=None):
+    def __call__(self, members, client, *, config=None, usage=None, wiki_root=None):
         self.n_calls += 1
         self.clusters_seen.append(tuple(sorted(str(m.path) for m in members)))
         return ContradictionResult(detected=False, rationale="stub-no-conflict")

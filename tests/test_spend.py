@@ -2205,3 +2205,49 @@ class TestDurableLedgerPath:
         override = tmp_path / "explicit-override.jsonl"
         config = {"spend": {"ledger_path": str(override)}}
         assert spend.resolve_ledger_path(config, wiki_root=wiki_root) == override
+
+    def test_no_split_brain_on_a_fresh_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The production WRITE path (record_spend/record_spend_per_knob_provider,
+        as librarian.py calls them) and the production READ path
+        (resolve_ledger_path + read_ledger, as status.py/drain.py/
+        backlog_price_sheet.py/etc. call them) must agree on where a fresh
+        store's ledger lives — issue athenaeum#980 AC4. This is the assertion
+        that makes the cutover safe rather than merely intended: a write with
+        wiki_root= that a read without the matching wiki_root= would miss is
+        exactly the split-brain hazard flagged during review.
+        """
+        monkeypatch.delenv("ATHENAEUM_SPEND_LEDGER", raising=False)
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+
+        usage = TokenUsage()
+        usage.add(10, 5, 0, 0, model="split-brain-probe-model")
+        assert (
+            spend.record_spend(
+                usage,
+                run_type="librarian",
+                provider="claude-cli",
+                cache_dir=cache_dir,
+                wiki_root=wiki_root,
+            )
+            is True
+        )
+
+        # The write must have landed BEHIND THE SEAM, not in the cache dir.
+        assert (wiki_root / spend.LEDGER_FILENAME).exists()
+        assert not (cache_dir / spend.LEDGER_FILENAME).exists()
+
+        # The production read path, given the SAME wiki_root, must see it.
+        read_path = spend.resolve_ledger_path(cache_dir=cache_dir, wiki_root=wiki_root)
+        records = spend.read_ledger(read_path)
+        assert any(r.get("models") == ["split-brain-probe-model"] for r in records)
+
+        # A read that forgets wiki_root= (the un-migrated-caller shape) must
+        # NOT silently see the same records via the old cache-dir default —
+        # that would mean the two paths aren't actually the same location,
+        # which is a different bug than split-brain but worth pinning too.
+        stale_read = spend.read_ledger(spend.resolve_ledger_path(cache_dir=cache_dir))
+        assert stale_read == []
