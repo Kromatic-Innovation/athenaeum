@@ -35,6 +35,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minimal instrumentation that would make the distribution measurable going
   forward. No default or runtime behavior changes — analysis only; the
   live-config flip stays athenaeum#787's.
+- **Publish the whole-store `Store` contract (athenaeum#983 — S8 of the
+  whole-store adapter design lock, athenaeum#911).** `athenaeum.store`'s `Store`
+  protocol, its data/error types (`StoreKey`, `ObjectMeta`, `Record`,
+  `StoreCapabilities`, `Lease`, `StoreKeyError`, `StoreConflictError`,
+  `LeaseHeldError`, `UnknownSurfaceError`), and the shipped `FilesystemStore`
+  adapter are now on the package root's stable `__all__` surface. The
+  contract's prose is published as `docs/store-contract.md`, alongside the
+  existing `docs/storage-adapter-contract.md`. The S1 conformance suite ships
+  as a runnable, importable third-party harness —
+  `athenaeum.store_conformance.StoreConformanceTests` — that an adapter
+  author subclasses against their own `Store` implementation without editing
+  any athenaeum source or test file; `tests/test_store_conformance_harness.py`
+  is a complete worked example (a from-scratch minimal implementation, not
+  athenaeum's own fixtures). The bundled `adapter-authoring` skill now
+  references the store harness alongside its intake-adapter counterpart.
+  `athenaeum.store_conformance`'s internal lease-primitive/artifact-registry
+  helpers stay off the published surface — see that module's docstring and
+  `athenaeum.store`'s module docstring for the exact split.
 
 - **Shape rules: nested-key `fields` resolution + one-level source-subdir
   discovery (athenaeum#974 — unblocks athenaeum#940).** The two code gaps the

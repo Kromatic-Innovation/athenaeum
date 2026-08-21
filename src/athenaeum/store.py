@@ -49,11 +49,25 @@ that stayed there. Every byte written to the lockfile, every log message, and
 every one of ``RunLock``'s existing exceptions/behaviors is unchanged — this
 is a relocation of the primitive operations, not a redesign of the lock.
 
-Like :mod:`athenaeum.storage` and :class:`athenaeum.search.SearchBackend`,
-this is an INTERNAL seam: importable but not on the stable ``__all__`` surface
-until S8 (athenaeum#983) publishes it alongside this slice's conformance suite
-(``tests/test_store_conformance.py``) as a third-party adapter-authoring
-harness (design note §6, preamble).
+**Published, in part, as of S8 (issue athenaeum#983).** The ``Store`` protocol's
+data/error types (:class:`StoreKey`, :class:`ObjectMeta`, :class:`Record`,
+:class:`StoreCapabilities`, :class:`Lease`, :class:`Store` itself,
+:class:`StoreKeyError`, :class:`StoreConflictError`, :class:`LeaseHeldError`,
+:class:`UnknownSurfaceError`) and :class:`FilesystemStore` are now on the
+package root's stable ``__all__`` surface (see ``src/athenaeum/__init__.py``
+and ``docs/store-contract.md``, the published form of this docstring's §6).
+The rest of this module stays internal, same as :mod:`athenaeum.storage` and
+:class:`athenaeum.search.SearchBackend`: the S4 lease-primitive internals
+(:func:`lease_open_fd` and siblings, :class:`FileLease`), the S5
+artifact-registry catalogue (:data:`ARTIFACT_REGISTRY`,
+:class:`ArtifactDeclaration`, :data:`PERSISTENCE_CLASSES`,
+:data:`OPERATIONAL_SCOPES`), and :func:`append_line_durable` are importable
+but not part of the public contract; their signatures may change between
+minor releases. The S1 conformance suite is published too, as a runnable
+third-party adapter-authoring harness — see :mod:`athenaeum.store_conformance`
+(design note §6, preamble) — separately from this module because it depends
+on ``pytest``, a ``dev``-extra-only dependency this always-imported module
+must not acquire.
 
 Layering: L0/L1 (design note §6.4), and DELIBERATELY LOWER than the design
 note's own layering paragraph describes. §6.4 says this module "inherits
