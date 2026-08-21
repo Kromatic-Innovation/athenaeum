@@ -244,7 +244,7 @@ class TestPhase2aStrictness:
             {"tiers.tier2", "tiers.tier3-merge"}
         )
         # the three starved contracts and query_topics must NOT be in the
-        # decided set — AC4 (they stay observe-only, decision deferred to #608)
+        # decided set — AC4 (they stay observe-only, decision deferred to athenaeum#608)
         assert not llm_schemas.STRICT_CONTRACTS & {
             "query_topics",
             "claim_kind",
