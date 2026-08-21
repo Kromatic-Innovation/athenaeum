@@ -295,6 +295,7 @@ def classify_residual(
     client: Any,
     config: dict[str, Any] | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    wiki_root: Path | None = None,
 ) -> tuple[dict[Path, str], int, int]:
     """Class the residual in batched LLM calls.
 
@@ -446,6 +447,7 @@ def classify_residual(
                 provider=provider,
                 session_id=session_id,
                 config=config,
+                wiki_root=wiki_root,
             )
 
         parsed = extract_json_array(response_text(response)) or []
@@ -507,7 +509,7 @@ def build_backfill_report(
         return report
 
     decisions, calls, rejected = classify_residual(
-        residual, client=client, config=config, batch_size=batch_size
+        residual, client=client, config=config, batch_size=batch_size, wiki_root=wiki_root
     )
     report.classifier_calls = calls
     report.classifier_rejected = rejected

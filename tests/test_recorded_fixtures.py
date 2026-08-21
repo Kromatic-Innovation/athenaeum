@@ -331,6 +331,13 @@ def test_recall_replay(
     # requiring the CI environment to plumb a real secret. The stub
     # client short-circuits the network anyway.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fixture-replay-no-network")
+    # Issue athenaeum#980 AC4: recall_search's push-metrics instrumentation now
+    # writes behind the seam (wiki_root=), and wiki_root here is the REAL,
+    # tracked ``tests/evals/data/recall/wiki/`` fixture, not a tmp copy — this
+    # test asserts the replay pipeline runs end-to-end, not push-metrics
+    # recording, so disable instrumentation rather than let a push record
+    # land in source-controlled fixture data on every run.
+    monkeypatch.setenv("ATHENAEUM_PUSH_METRICS_ENABLED", "0")
     topics = extract_topics(case["prompt"], timeout=15.0)
 
     query = " ".join(topics) if topics else case["prompt"]
