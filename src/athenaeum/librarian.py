@@ -197,10 +197,7 @@ from athenaeum.provider import (
 )
 from athenaeum.quarantine import quarantine_file as _quarantine_file
 from athenaeum.registry import collect_handles
-from athenaeum.rule_proposals import (
-    DEFAULT_RULE_PROPOSALS_MODEL,
-    run_rule_proposal_detection,
-)
+from athenaeum.rule_proposals import DEFAULT_RULE_PROPOSALS_MODEL, run_rule_proposal_detection
 from athenaeum.rules import run_shape_rule_phase
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
@@ -835,9 +832,7 @@ def tier0_handle_upsert(
             return None
         uid = resolved_uid
 
-    existing_meta, existing_body = parse_frontmatter(
-        existing_path.read_text(encoding="utf-8")
-    )
+    existing_meta, existing_body = parse_frontmatter(existing_path.read_text(encoding="utf-8"))
     if not existing_meta:
         return None
 
@@ -879,9 +874,7 @@ def tier0_handle_upsert(
         ],
         access=str(existing_meta.get("access", "internal")),
         tags=[
-            str(t)
-            for t in (existing_tags if isinstance(existing_tags, list) else [])
-            if t
+            str(t) for t in (existing_tags if isinstance(existing_tags, list) else []) if t
         ],
         created=str(existing_meta.get("created", date.today().isoformat())),
         updated=str(existing_meta.get("updated", date.today().isoformat())),
@@ -971,9 +964,7 @@ def tier0_bounce_mark(
     # `conforms` is exactly the conjunction the eligibility list above states,
     # so these three are populated together and never None here.
     fact = check.fact
-    assert (
-        fact is not None and check.observed_at is not None and check.source is not None
-    )
+    assert fact is not None and check.observed_at is not None and check.source is not None
     source: str | dict[str, Any] = check.source
 
     if dry_run:
@@ -2328,12 +2319,7 @@ def _record_stuck_failure(
     entry = ledger.get(key)
     if not isinstance(entry, dict) or entry.get("hash") != content_hash:
         # New file, or the content changed since the last failure — fresh count.
-        entry = {
-            "hash": content_hash,
-            "failures": 0,
-            "first_failed": now,
-            "escalated": False,
-        }
+        entry = {"hash": content_hash, "failures": 0, "first_failed": now, "escalated": False}
     entry["failures"] = int(entry.get("failures", 0)) + 1
     entry["last_failed"] = now
     entry["last_error"] = error
@@ -2496,12 +2482,7 @@ def _record_bound_violation(
     entry = ledger.get(key)
     if not isinstance(entry, dict) or entry.get("hash") != content_hash:
         # New file, or the content changed since the last violation — fresh count.
-        entry = {
-            "hash": content_hash,
-            "violations": 0,
-            "first_violated": now,
-            "escalated": False,
-        }
+        entry = {"hash": content_hash, "violations": 0, "first_violated": now, "escalated": False}
     entry["violations"] = int(entry.get("violations", 0)) + 1
     entry["last_violated"] = now
     entry["last_bound"] = bound
@@ -3064,9 +3045,7 @@ class RunContext:
             frag_state: "dict[str, tuple[str, bool]] | None" = schema_fragment_state(
                 self.wiki_root
             )
-        except (
-            Exception
-        ) as exc:  # noqa: BLE001 — pragma: no cover - defensive; helper is hardened
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive; helper is hardened
             log.debug("run-summary: schema_fragment_state skipped: %s", exc)
             frag_state = None
         try:
@@ -3182,13 +3161,7 @@ def _resolve_run_models(config: dict[str, Any] | None) -> list[tuple[str, str]]:
 #: :class:`~athenaeum.provider.LLMClientCache`). ``topic`` is deliberately
 #: excluded — :mod:`athenaeum.query_topics` resolves it independently
 #: (issue athenaeum#786), outside this pipeline.
-_LIBRARIAN_ROUTED_KNOBS = (
-    "classify",
-    "write",
-    "resolve",
-    "reasoning_t1",
-    "reasoning_t2",
-)
+_LIBRARIAN_ROUTED_KNOBS = ("classify", "write", "resolve", "reasoning_t1", "reasoning_t2")
 
 
 def _run_preconditions(ctx: RunContext) -> int | None:
@@ -3558,10 +3531,7 @@ def _run_shape_rule_phase(ctx: RunContext) -> None:
         shape_rules_deadline = time.monotonic() + _shape_rules_share * ctx.max_runtime
 
     def _deadline_check() -> bool:
-        return (
-            shape_rules_deadline is not None
-            and time.monotonic() >= shape_rules_deadline
-        )
+        return shape_rules_deadline is not None and time.monotonic() >= shape_rules_deadline
 
     _shape_rules_calls_before = ctx.usage.api_calls
     summary = run_shape_rule_phase(
@@ -3735,9 +3705,7 @@ def _run_rule_proposal_phase(ctx: RunContext) -> None:
         ctx.rule_proposals_summary = {"skipped_deadline_tripped": True}
         return
 
-    _provider = resolve_provider(
-        ctx.config, knob="rule_proposals", default=ctx.provider
-    )
+    _provider = resolve_provider(ctx.config, knob="rule_proposals", default=ctx.provider)
     ctx.knob_providers["rule_proposals"] = _provider
     ctx.knob_models["rule_proposals"] = resolve_model(
         "rule_proposals",
@@ -3819,9 +3787,7 @@ def _run_correction_phase(ctx: RunContext) -> None:
             key = (outcome.submitter, str(result.field))
             cap_hits[key] = cap_hits.get(key, 0) + 1
             return False
-        target_desc = (
-            json.dumps(result.target, sort_keys=True) if result.target else "?"
-        )
+        target_desc = json.dumps(result.target, sort_keys=True) if result.target else "?"
         is_schema_proposal = result.disposition == "held-schema-proposal"
         description_lines = [
             f"Target: {target_desc}",
@@ -3837,32 +3803,21 @@ def _run_correction_phase(ctx: RunContext) -> None:
         item = EscalationItem(
             raw_ref=f"{outcome.source}/{outcome.path.name}",
             entity_name=result.entity_name or "unknown",
-            conflict_type=(
-                "schema-amendment" if is_schema_proposal else "field-correction"
-            ),
+            conflict_type="schema-amendment" if is_schema_proposal else "field-correction",
             description="\n".join(description_lines),
         )
-        tier4_escalate(
-            [item], pending_path, config=ctx.config, projects_root=ctx.projects_root
-        )
+        tier4_escalate([item], pending_path, config=ctx.config, projects_root=ctx.projects_root)
         open_ids.add(result.correction_id)
         escalated_this_run.add(result.correction_id)
         return True
 
     _corrections_share = resolve_corrections_runtime_share(ctx.config)
     corrections_deadline: float | None = None
-    if (
-        ctx.run_deadline is not None
-        and _corrections_share > 0.0
-        and ctx.max_runtime is not None
-    ):
+    if ctx.run_deadline is not None and _corrections_share > 0.0 and ctx.max_runtime is not None:
         corrections_deadline = time.monotonic() + _corrections_share * ctx.max_runtime
 
     def _deadline_check() -> bool:
-        return (
-            corrections_deadline is not None
-            and time.monotonic() >= corrections_deadline
-        )
+        return corrections_deadline is not None and time.monotonic() >= corrections_deadline
 
     index = EntityIndex(ctx.wiki_root)
     _corrections_calls_before = ctx.usage.api_calls
@@ -3893,7 +3848,8 @@ def _run_correction_phase(ctx: RunContext) -> None:
         )
     if summary["batches_processed"] or summary["batches_carried_over"]:
         log.info(
-            "corrections: %d batch(es) processed, %d carried over, " "dispositions=%s",
+            "corrections: %d batch(es) processed, %d carried over, "
+            "dispositions=%s",
             summary["batches_processed"],
             summary["batches_carried_over"],
             summary["dispositions"],
@@ -3985,7 +3941,9 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
             {
                 "detector_haiku": _merge_only_stats.get("haiku_calls", 0),
                 "resolver_opus": _merge_only_stats.get("resolve_calls", 0),
-                "sweep_pairs": _merge_only_stats.get("pairs_added_via_similarity", 0),
+                "sweep_pairs": _merge_only_stats.get(
+                    "pairs_added_via_similarity", 0
+                ),
                 "clusters_merged": _merge_only_stats.get("entries_merged", 0),
                 "escalations": _merge_only_stats.get("escalations_written", 0),
             },
@@ -4025,10 +3983,7 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
         _reresolve_start = time.monotonic()
         _reresolve_calls_before = ctx.usage.api_calls
         _run_reresolve_pass(
-            ctx.knowledge_root,
-            config=ctx.config,
-            client=ctx.resolve_client,
-            usage=ctx.usage,
+            ctx.knowledge_root, config=ctx.config, client=ctx.resolve_client, usage=ctx.usage
         )
         ctx.run_profile.append(
             (
@@ -4624,11 +4579,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     threshold=quarantine_threshold,
                                 )
                                 if _crossed is not None and _quarantine_and_surface(
-                                    ctx,
-                                    raw,
-                                    _crossed,
-                                    bound=exc.bound,
-                                    detail=exc.detail,
+                                    ctx, raw, _crossed, bound=exc.bound, detail=exc.detail
                                 ):
                                     quarantine_candidates.pop(raw.ref, None)
                             continue
@@ -4672,9 +4623,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     stuck_ledger,
                                     raw,
                                     error=f"TransientAPIError:{type(exc.last_error).__name__}",
-                                    action=getattr(
-                                        exc, "athenaeum_failing_action", None
-                                    ),
+                                    action=getattr(exc, "athenaeum_failing_action", None),
                                     threshold=stuck_threshold,
                                 )
                                 if _crossed is not None:
@@ -4707,9 +4656,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     stuck_ledger,
                                     raw,
                                     error=type(exc).__name__,
-                                    action=getattr(
-                                        exc, "athenaeum_failing_action", None
-                                    ),
+                                    action=getattr(exc, "athenaeum_failing_action", None),
                                     threshold=stuck_threshold,
                                 )
                                 if _crossed is not None:
@@ -4733,9 +4680,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # tolerate a double that predates the ``degraded`` field
                         # (the real ProcessingResult always carries it, default 0).
                         ctx.total_degraded += getattr(result, "degraded", 0)
-                        ctx.total_truncated += getattr(
-                            result, "truncated", 0
-                        )  # athenaeum#476
+                        ctx.total_truncated += getattr(result, "truncated", 0)  # athenaeum#476
 
                         # Issue athenaeum#800: tick the entity heartbeat for this file —
                         # `compiled` when it produced a create/update, `unchanged`
@@ -4766,9 +4711,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # it when empty). Durable cross-run state, committed with the
                     # run's git snapshot exactly like the deferred manifest.
                     if not ctx.dry_run:
-                        _write_quarantine_candidates(
-                            ctx.wiki_root, quarantine_candidates
-                        )
+                        _write_quarantine_candidates(ctx.wiki_root, quarantine_candidates)
                         _write_stuck_ledger(ctx.wiki_root, stuck_ledger)
 
                 # Issue athenaeum#220: a budget-tripped run must be visibly DEGRADED,
@@ -4882,11 +4825,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # athenaeum#476: a truncation drop (max_tokens) is surfaced
                     # separately from a parse ``degraded`` so the two are
                     # never conflated in the summary either.
-                    **(
-                        {"truncated": ctx.total_truncated}
-                        if ctx.total_truncated
-                        else {}
-                    ),
+                    **({"truncated": ctx.total_truncated} if ctx.total_truncated else {}),
                     # athenaeum#663: files skipped/surfaced as stuck this run. Only
                     # rendered when non-zero, so a clean run's summary line is
                     # unchanged, but a permanent no-progress loop shows "stuck=N".
@@ -4977,17 +4916,12 @@ def _stamp_unclassified_claim_kinds(
         path = getattr(am, "path", None)
         if path is None:
             continue
-        kind = stamp_claim_kind(
-            path, client, config=config, usage=usage, wiki_root=wiki_root
-        )
+        kind = stamp_claim_kind(path, client, config=config, usage=usage, wiki_root=wiki_root)
         if kind:
             am.claim_kind = kind
             stamped += 1
     if stamped:
-        log.info(
-            "claim_kind: stamped %d previously-unclassified auto-memory file(s)",
-            stamped,
-        )
+        log.info("claim_kind: stamped %d previously-unclassified auto-memory file(s)", stamped)
 
 
 def _run_auto_memory_phase(ctx: RunContext) -> int | None:
@@ -5011,9 +4945,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     # intake cannot silently keep degrading push quality with no visibility.
     # Nothing on disk is touched either way; a blocked run simply re-checks
     # (and, if still unhealthy, re-skips) next time.
-    gate_status = check_ingestion_gate(
-        config=ctx.config, cache_dir=_resolve_cache_dir(None)
-    )
+    gate_status = check_ingestion_gate(config=ctx.config, cache_dir=_resolve_cache_dir(None))
     ctx.ingestion_gate_status = gate_status.to_dict()
     if gate_status.blocked:
         log.warning(
@@ -5027,9 +4959,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     # merge has a fresh grouping to consume. Scope identity is preserved
     # on each record so the tier pipeline and the cluster pass both see
     # the same routing key.
-    auto_memory_files = discover_auto_memory_files(
-        ctx.knowledge_root, config=ctx.config
-    )
+    auto_memory_files = discover_auto_memory_files(ctx.knowledge_root, config=ctx.config)
     if not auto_memory_files:
         return None
 
@@ -5074,7 +5004,9 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     )
     if ctx.dry_run:
         for scope, count in sorted(by_scope.items()):
-            log.info("  [DRY RUN] auto-memory scope %s: %d file(s)", scope, count)
+            log.info(
+                "  [DRY RUN] auto-memory scope %s: %d file(s)", scope, count
+            )
     else:
         # Issue athenaeum#742: stamp claim_kind on every not-yet-classified member
         # BEFORE clustering, so the freshly-stamped kind is visible to C2/C3
@@ -5084,11 +5016,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         # — mirrors every other LLM-bearing step in this phase, which is
         # already skipped above for dry-run.
         _stamp_unclassified_claim_kinds(
-            auto_memory_files,
-            ctx.classify_client,
-            ctx.config,
-            ctx.usage,
-            wiki_root=ctx.wiki_root,
+            auto_memory_files, ctx.classify_client, ctx.config, ctx.usage, wiki_root=ctx.wiki_root
         )
 
     # Issue athenaeum#463 (slice D of athenaeum#460): the nightly run's own delta
@@ -5209,9 +5137,13 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 {
                     "detector_haiku": _merge_stats.get("haiku_calls", 0),
                     "resolver_opus": _merge_stats.get("resolve_calls", 0),
-                    "sweep_pairs": _merge_stats.get("pairs_added_via_similarity", 0),
+                    "sweep_pairs": _merge_stats.get(
+                        "pairs_added_via_similarity", 0
+                    ),
                     "clusters_merged": _merge_stats.get("entries_merged", 0),
-                    "escalations": _merge_stats.get("escalations_written", 0),
+                    "escalations": _merge_stats.get(
+                        "escalations_written", 0
+                    ),
                 },
             )
         )
@@ -5223,7 +5155,9 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             {
                 "detector_haiku": _merge_stats.get("haiku_calls", 0),
                 "resolver_opus": _merge_stats.get("resolve_calls", 0),
-                "sweep_pairs": _merge_stats.get("pairs_added_via_similarity", 0),
+                "sweep_pairs": _merge_stats.get(
+                    "pairs_added_via_similarity", 0
+                ),
                 "clusters_merged": _merge_stats.get("entries_merged", 0),
                 "escalations": _merge_stats.get("escalations_written", 0),
             },
@@ -5249,9 +5183,13 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             current_snapshot = _auto_memory_hash_snapshot(
                 auto_memory_files, ctx.knowledge_root
             )
-            _write_auto_memory_manifest(auto_memory_manifest_path, current_snapshot)
+            _write_auto_memory_manifest(
+                auto_memory_manifest_path, current_snapshot
+            )
         except Exception as exc:  # noqa: BLE001 — stamp write must not break the run
-            log.warning("auto-memory delta baseline write failed (non-fatal): %s", exc)
+            log.warning(
+                "auto-memory delta baseline write failed (non-fatal): %s", exc
+            )
         if not _delta_taken_out.get("taken", False):
             try:
                 _write_full_compile_stamp(
@@ -5260,7 +5198,9 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                     _capture_head(ctx.knowledge_root),
                 )
             except Exception as exc:  # noqa: BLE001 — must not break the run
-                log.warning("full-compile stamp write failed (non-fatal): %s", exc)
+                log.warning(
+                    "full-compile stamp write failed (non-fatal): %s", exc
+                )
 
     # Issue athenaeum#909: advance the C4-specific "last completed sweep" stamp
     # whenever the merge call just above actually examined the WHOLE corpus
@@ -5280,7 +5220,9 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         try:
             _write_timestamp_stamp(contradiction_sweep_stamp_path, run_now)
         except Exception as exc:  # noqa: BLE001 — must not break the run
-            log.warning("contradiction-sweep stamp write failed (non-fatal): %s", exc)
+            log.warning(
+                "contradiction-sweep stamp write failed (non-fatal): %s", exc
+            )
 
     # Issue athenaeum#396: deadline check at the post-compile phase boundary,
     # before the retire + reresolve passes (both can commit / make
@@ -5328,10 +5270,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         _reresolve_start = time.monotonic()  # issue athenaeum#464
         _reresolve_calls_before = ctx.usage.api_calls
         _run_reresolve_pass(
-            ctx.knowledge_root,
-            config=ctx.config,
-            client=ctx.resolve_client,
-            usage=ctx.usage,
+            ctx.knowledge_root, config=ctx.config, client=ctx.resolve_client, usage=ctx.usage
         )
         ctx.run_profile.append(
             (
@@ -5442,9 +5381,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
             files_processed=ctx.files_processed_count,
             wiki_root=ctx.wiki_root,
         )
-        if not _ledger_written and (
-            ctx.usage.api_calls > 0 or ctx.usage.total_tokens > 0
-        ):
+        if not _ledger_written and (ctx.usage.api_calls > 0 or ctx.usage.total_tokens > 0):
             from athenaeum.config import resolve_spend_ledger_enabled
 
             if resolve_spend_ledger_enabled(ctx.config):
@@ -5473,7 +5410,9 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         # every run.
         _zy_cache_dir = _resolve_cache_dir(None)
         _zy_previous = zero_yield.load_state(_zy_cache_dir)
-        ctx.zero_yield_tripped = _zero_yield_tripped(ctx, _zy_previous["deferred_refs"])
+        ctx.zero_yield_tripped = _zero_yield_tripped(
+            ctx, _zy_previous["deferred_refs"]
+        )
         ctx.zero_yield_consecutive = (
             _zy_previous["consecutive"] + 1 if ctx.zero_yield_tripped else 0
         )
@@ -5560,9 +5499,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
                     len(_reval.retired),
                 )
         except Exception as exc:  # noqa: BLE001 — advisor must never break a run
-            log.warning(
-                "pending-merge revalidation advisor failed (non-fatal): %s", exc
-            )
+            log.warning("pending-merge revalidation advisor failed (non-fatal): %s", exc)
 
     # Issue athenaeum#712: verdict-ledger night bookkeeping. OFF by default
     # (librarian.verdict_ledger_enabled) — with the flag off, or with no
@@ -5624,7 +5561,9 @@ def _run_finalize_phase(ctx: RunContext) -> int:
             if _advisory is not None:
                 log.warning("%s", _advisory.line)
         except Exception as exc:  # noqa: BLE001 — advisor must never break a run
-            log.debug("backlog-drain advisor skipped (%s): %s", type(exc).__name__, exc)
+            log.debug(
+                "backlog-drain advisor skipped (%s): %s", type(exc).__name__, exc
+            )
 
     # Issue athenaeum#396: the entity loop hit the wall-clock deadline and deferred the
     # remaining intake. The partial progress is committed (terminal commit
@@ -5650,9 +5589,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         return EXIT_GRACEFUL_PARTIAL
 
     if ctx.failed_files:
-        log.warning(
-            "Failed files (will retry next run): %s", ", ".join(ctx.failed_files)
-        )
+        log.warning("Failed files (will retry next run): %s", ", ".join(ctx.failed_files))
         return 1
 
     # Issue athenaeum#227: opt-in strict mode for exit-code-based alerting. The
@@ -6389,7 +6326,9 @@ def _load_timestamp_stamp(path: Path) -> datetime | None:
     if not isinstance(at, str) or not at:
         return None
     try:
-        return datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
     except ValueError:
         return None
 
