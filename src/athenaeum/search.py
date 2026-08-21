@@ -18,7 +18,8 @@ all call into this module) — resist adding capability-specific branches;
 callers adapt to the three backends' shared ``SearchBackend`` Protocol.
 
 **Layering:** L3 service. Imports only L1 (:mod:`athenaeum.models`,
-:mod:`athenaeum.store` — issue athenaeum#977, the whole-store adapter seam) and L2
+:mod:`athenaeum.store` — issue athenaeum#977, the whole-store adapter seam,
+and ``KeywordBackend``'s S6 capability gate, issue athenaeum#981) and L2
 (:mod:`athenaeum.authority`, :mod:`athenaeum.pii`) at module scope; never
 imports L4 (the domain/pipeline modules — :mod:`athenaeum.tiers`,
 :mod:`athenaeum.librarian`, etc.). ``chromadb`` (the ``vector`` backend's
@@ -83,7 +84,7 @@ from athenaeum.models import (
 )
 from athenaeum.pii import is_pii_flagged
 from athenaeum.storage import is_embedded
-from athenaeum.store import FilesystemStore, ObjectMeta, StoreKey
+from athenaeum.store import FilesystemStore, ObjectMeta, Store, StoreKey
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -2117,6 +2118,24 @@ def score_keyword_page(tokens: list[str], frontmatter: dict, body: str) -> float
     return score
 
 
+class KeywordScanNotSupportedError(RuntimeError):
+    """Raised when :class:`KeywordBackend` is queried against a surface that
+    does not declare ``cheap_local_scan`` (design note §7 honest-refusal
+    rule; issue athenaeum#981, slice S6 of the whole-store adapter design
+    lock, athenaeum#911).
+
+    ``KeywordBackend.query`` re-globs and re-reads every page on **every**
+    query (design note §3.1 walk W2) — cheap only because a local ``stat`` +
+    ``read`` is effectively free. Unlike an index *build* (where
+    incrementality amortises the cost, §3.3), the scan-on-query walk IS the
+    query, so no amount of incrementality helps on a surface where each
+    operation carries real latency: it would become an unbounded
+    full-corpus round-trip on every single call. Per R4 ("no silent
+    degradation"), the honest response is to refuse and name what is
+    missing rather than pay that cost quietly.
+    """
+
+
 class KeywordBackend:
     """Scan-on-query keyword scoring over wiki frontmatter + body.
 
@@ -2186,6 +2205,7 @@ class KeywordBackend:
         caller_audience: set[str] | None = None,
         as_of: date | None = None,
         type_filter: str | Sequence[str] | None = None,
+        store: Store | None = None,
     ) -> list[tuple[str, str, float]]:
         """Score every non-underscore wiki page and return the top-n hits.
 
@@ -2193,10 +2213,31 @@ class KeywordBackend:
         window at query time — the keyword backend scans on query, so it honors
         an as-of *rewind* directly (no as-of index build needed). ``None`` =
         today.
+
+        ``store`` (issue athenaeum#981, design note §7 honest-refusal rule): the
+        capability gate for this backend's scan-on-query walk (§3.1 W2), which
+        re-globs and re-reads every page on every call — cheap only on a
+        surface with ``cheap_local_scan``. Injectable so a test can supply a
+        fake declaring ``capabilities.cheap_local_scan=False`` without a real
+        non-filesystem adapter. Defaults to a
+        :class:`~athenaeum.store.FilesystemStore` over *wiki_root*, which
+        always declares ``cheap_local_scan=True`` — so the zero-setup
+        filesystem fallback this backend exists for is unaffected.
         """
         del cache_dir
         if wiki_root is None or not wiki_root.is_dir():
             return []
+
+        store = store if store is not None else FilesystemStore(wiki_root, {})
+        if not store.capabilities.cheap_local_scan:
+            raise KeywordScanNotSupportedError(
+                f"KeywordBackend cannot query {wiki_root}: this surface does "
+                "not declare cheap_local_scan, so a full-corpus scan on every "
+                "query (design note §3.1 W2) would be an unbounded round-trip "
+                "rather than a cheap local re-read. Use the FTS5 backend "
+                "instead — it builds a persisted index rather than "
+                "rescanning the store on every query."
+            )
 
         tokens = tokenize_keyword_query(query)
         if not tokens:

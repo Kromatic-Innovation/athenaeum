@@ -247,6 +247,25 @@ class NoRecoveryStore(InMemoryStore):
         )
 
 
+class NoCheapScanStore(InMemoryStore):
+    """An :class:`InMemoryStore` declaring ``cheap_local_scan=False`` (design
+    note §7 honest-refusal rule; issue athenaeum#981, slice S6).
+
+    Stands in for a non-filesystem adapter (remote or encrypted) where a
+    full-corpus scan-on-query is a genuine per-query round-trip rather than a
+    free local re-read. Injecting this into :meth:`~athenaeum.search.KeywordBackend.query`'s
+    ``store=`` parameter proves the backend refuses rather than silently
+    paying that cost, without needing a real non-filesystem adapter.
+    Everything else is inherited unchanged from :class:`InMemoryStore`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.capabilities = dataclasses.replace(
+            self.capabilities, cheap_local_scan=False
+        )
+
+
 class LatencyInjectingStore:
     """Wraps any :class:`~athenaeum.store.Store` implementation, counting
     ``iter_meta``/``read_many`` CALLS and optionally sleeping on each one.
