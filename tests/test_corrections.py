@@ -1900,13 +1900,14 @@ class TestSensitivityRoutingUsageClass:
             is True
         )
 
-        # And readable through `read_person`, filterable by usage_classes,
+        # And readable through `read_entity`, filterable by usage_classes,
         # exactly as a directly-classified value is.
-        read = pii.read_person(
+        read = pii.read_entity(
             tmp_path,
             self._config(),
             "person-alex",
-            include_contact=True,
+            surface_class="pii",
+            include_excluded=True,
             usage_classes=[pii.USAGE_CLASS_OBSERVED],
         )
         assert read is not None
@@ -1937,8 +1938,12 @@ class TestSensitivityRoutingUsageClass:
         assert classification.usage_class == pii.USAGE_CLASS_UNCLASSIFIED
         assert classification.outreach_eligible is False
 
-        read = pii.read_person(
-            tmp_path, self._config(), "person-alex", include_contact=True
+        read = pii.read_entity(
+            tmp_path,
+            self._config(),
+            "person-alex",
+            surface_class="pii",
+            include_excluded=True,
         )
         assert read is not None
         assert read.classifications["alt_emails"][0].usage_class == pii.USAGE_CLASS_UNCLASSIFIED

@@ -21,10 +21,10 @@ as unclassified rather than silently usable.
 - ``TestClassifyContactValueWriter`` — writer behaviour: idempotence, no
   record minting, unknown-class rejection.
 - ``TestMcpAndCliSurfaces`` — the filter is reachable from the MCP tool
-  helper and the ``athenaeum person`` CLI, not just the library call.
+  helper and the ``athenaeum entity`` CLI, not just the library call.
 
-Fixtures follow ``tests/test_person_read.py``'s ``EXCLUDED_CONFIG`` +
-tmp-path idiom rather than inventing new ones. Ordinary
+Fixtures follow this suite's usual ``EXCLUDED_CONFIG`` + tmp-path idiom
+rather than inventing new ones. Ordinary
 ``alex@example.org``-style addresses only — no ``+alias`` shape, which is not
 suppressed for this file in ``.public-safe-lintignore``.
 """
@@ -50,17 +50,8 @@ from athenaeum.pii import (
     contacts_surface_root,
     is_outreach_eligible,
     read_bounce_record,
-    read_person,
+    read_entity,
 )
-
-# Issue athenaeum#887: this module exercises the DEPRECATED person-shaped entry
-# points on purpose — they are the behaviour/parity tests that must keep
-# passing unchanged until athenaeum#888 actually removes them, which is exactly
-# what "deprecated, not changed" means. The specific warning is filtered here
-# so the suite stays readable; it is NOT filtered globally, and that it fires
-# at all (with the right message, at the caller's line, at CALL time for the
-# lazy batch form) is asserted directly in tests/test_read_person_deprecation.py.
-pytestmark = pytest.mark.filterwarnings("ignore:pii.read_p:DeprecationWarning")
 
 EXCLUDED_CONFIG = {"storage": {"mapping": {"pii": "excluded"}}}
 
@@ -160,7 +151,9 @@ class TestStoreAndReadBackBothClasses:
         """AC: a caller receiving an address always knows which kind it is."""
         knowledge, _ = _person_with_two_addresses(tmp_path)
 
-        result = read_person(knowledge, EXCLUDED_CONFIG, "alex", include_contact=True)
+        result = read_entity(
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+        )
 
         assert result is not None
         assert result.contact["emails"] == [OBSERVED_ADDRESS, PROVIDER_ADDRESS]
@@ -186,7 +179,9 @@ class TestStoreAndReadBackBothClasses:
 
     def test_to_dict_is_json_serializable(self, tmp_path: Path) -> None:
         knowledge, _ = _person_with_two_addresses(tmp_path)
-        result = read_person(knowledge, EXCLUDED_CONFIG, "alex", include_contact=True)
+        result = read_entity(
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+        )
         assert result is not None
 
         payload = json.loads(json.dumps(result.to_dict()))
@@ -210,11 +205,12 @@ class TestClassFilteredRead:
         receive one by accident."""
         knowledge, _ = _person_with_two_addresses(tmp_path)
 
-        result = read_person(
+        result = read_entity(
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            include_contact=True,
+            surface_class="pii",
+            include_excluded=True,
             usage_classes=[USAGE_CLASS_OBSERVED],
         )
 
@@ -256,11 +252,12 @@ class TestClassFilteredRead:
             observed_at="2026-08-05T00:00:00Z",
         )
 
-        result = read_person(
+        result = read_entity(
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            include_contact=True,
+            surface_class="pii",
+            include_excluded=True,
             usage_classes=OUTREACH_ELIGIBLE_CLASSES,
         )
 
@@ -290,11 +287,12 @@ class TestClassFilteredRead:
             observed_at="2026-08-05T00:00:00Z",
         )
 
-        result = read_person(
+        result = read_entity(
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            include_contact=True,
+            surface_class="pii",
+            include_excluded=True,
             usage_classes=[USAGE_CLASS_OBSERVED],
         )
 
@@ -307,7 +305,9 @@ class TestClassFilteredRead:
         behaviour is preserved)."""
         knowledge, _ = _person_with_two_addresses(tmp_path)
 
-        result = read_person(knowledge, EXCLUDED_CONFIG, "alex", include_contact=True)
+        result = read_entity(
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+        )
 
         assert result is not None
         assert result.contact["emails"] == [OBSERVED_ADDRESS, PROVIDER_ADDRESS]
@@ -317,11 +317,12 @@ class TestClassFilteredRead:
         a request for everything — the fail-safe direction."""
         knowledge, _ = _person_with_two_addresses(tmp_path)
 
-        result = read_person(
+        result = read_entity(
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            include_contact=True,
+            surface_class="pii",
+            include_excluded=True,
             usage_classes=[],
         )
 
@@ -333,11 +334,12 @@ class TestClassFilteredRead:
         redaction marker still counts what the record holds."""
         knowledge, _ = _person_with_two_addresses(tmp_path)
 
-        result = read_person(
+        result = read_entity(
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            include_contact=False,
+            surface_class="pii",
+            include_excluded=False,
             usage_classes=[USAGE_CLASS_OBSERVED],
         )
 
@@ -512,7 +514,9 @@ class TestUnclassifiedLegacyValue:
             fields=f"emails:\n  - {OBSERVED_ADDRESS}\n",
         )
 
-        result = read_person(knowledge, EXCLUDED_CONFIG, "alex", include_contact=True)
+        result = read_entity(
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+        )
 
         assert result is not None
         assert result.contact["emails"] == [OBSERVED_ADDRESS]
@@ -570,7 +574,9 @@ class TestOutreachEligibility:
 
         assert is_outreach_eligible(meta, PROVIDER_ADDRESS) is False
 
-        result = read_person(knowledge, EXCLUDED_CONFIG, "alex", include_contact=True)
+        result = read_entity(
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+        )
         assert result is not None
         assert PROVIDER_ADDRESS in result.contact["emails"]
 
@@ -677,16 +683,24 @@ class TestClassifyContactValueWriter:
 
 
 class TestMcpAndCliSurfaces:
-    def test_mcp_person_read_filters_by_class(self, tmp_path: Path) -> None:
-        from athenaeum.mcp_server import person_read
+    """The generic surfaces (issue athenaeum#886) — the filter reachable from
+    the MCP tool helper and the ``athenaeum entity`` CLI, not just the
+    library call. Formerly exercised the person-shaped ``person_read``/
+    ``cmd_person`` wrappers directly; those were removed in athenaeum#888, so
+    this now goes through their replacements, ``entity_read``/``cmd_entity``.
+    """
+
+    def test_mcp_entity_read_filters_by_class(self, tmp_path: Path) -> None:
+        from athenaeum.mcp_server import entity_read
 
         knowledge, _ = _person_with_two_addresses(tmp_path)
 
         payload = json.loads(
-            person_read(
+            entity_read(
                 knowledge,
                 "alex",
-                include_contact_data=True,
+                page_class="person",
+                include_excluded=True,
                 usage_classes=[USAGE_CLASS_OBSERVED],
                 config=EXCLUDED_CONFIG,
             )
@@ -694,16 +708,20 @@ class TestMcpAndCliSurfaces:
 
         assert payload["contact"]["emails"] == [OBSERVED_ADDRESS]
 
-    def test_mcp_person_read_exposes_classification_by_default(
+    def test_mcp_entity_read_exposes_classification_by_default(
         self, tmp_path: Path
     ) -> None:
-        from athenaeum.mcp_server import person_read
+        from athenaeum.mcp_server import entity_read
 
         knowledge, _ = _person_with_two_addresses(tmp_path)
 
         payload = json.loads(
-            person_read(
-                knowledge, "alex", include_contact_data=True, config=EXCLUDED_CONFIG
+            entity_read(
+                knowledge,
+                "alex",
+                page_class="person",
+                include_excluded=True,
+                config=EXCLUDED_CONFIG,
             )
         )
 
@@ -711,20 +729,21 @@ class TestMcpAndCliSurfaces:
             item["usage_class"] for item in payload["classifications"]["emails"]
         ] == [USAGE_CLASS_OBSERVED, USAGE_CLASS_PROVIDER]
 
-    def test_cli_person_usage_class_filter(
+    def test_cli_entity_usage_class_filter(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch
     ) -> None:
-        from athenaeum._cmd_query import cmd_person
+        from athenaeum._cmd_query import cmd_entity
 
         knowledge, _ = _person_with_two_addresses(tmp_path)
         monkeypatch.setattr(
             "athenaeum.config.load_config", lambda _root: EXCLUDED_CONFIG
         )
 
-        code = cmd_person(
+        code = cmd_entity(
             argparse.Namespace(
                 uid="alex",
-                include_contact=True,
+                entity_class="person",
+                include_excluded=True,
                 usage_class=[USAGE_CLASS_OBSERVED],
                 path=knowledge,
             )
@@ -734,20 +753,21 @@ class TestMcpAndCliSurfaces:
         payload = json.loads(capsys.readouterr().out)
         assert payload["contact"]["emails"] == [OBSERVED_ADDRESS]
 
-    def test_cli_person_without_filter_returns_both(
+    def test_cli_entity_without_filter_returns_both(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch
     ) -> None:
-        from athenaeum._cmd_query import cmd_person
+        from athenaeum._cmd_query import cmd_entity
 
         knowledge, _ = _person_with_two_addresses(tmp_path)
         monkeypatch.setattr(
             "athenaeum.config.load_config", lambda _root: EXCLUDED_CONFIG
         )
 
-        code = cmd_person(
+        code = cmd_entity(
             argparse.Namespace(
                 uid="alex",
-                include_contact=True,
+                entity_class="person",
+                include_excluded=True,
                 usage_class=[],
                 path=knowledge,
             )
