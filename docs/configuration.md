@@ -966,6 +966,49 @@ the ledger opts back in explicitly (see `tests/test_llm_schemas.py`'s
 wins over the env var per `resolve_cache_dir`'s precedence) and/or
 `monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1")`.
 
+### Per-contract strictness decision (M17 phase 2a, athenaeum#1035)
+
+Phase 1 above validates every in-scope contract against a uniform
+`extra="allow"` posture and never changes pipeline behavior. athenaeum#1035 (split
+from athenaeum#608) decides a per-contract posture for the two contracts with a
+measured, representative window — `tiers.tier2` and `tiers.tier3-merge` —
+recorded in code as `athenaeum.llm_schemas.STRICT_CONTRACTS`. The other four
+contracts (`query_topics`, `claim_kind`, `contradictions`, `resolutions`)
+remain phase 1 observe-only; the three C4-downstream ones are still starved of
+a representative sample and stay on athenaeum#608.
+
+Window measured: `~/.cache/athenaeum/_llm_schema_observations.jsonl`,
+2026-08-05T13:12Z to 2026-08-20T10:58Z, 3,634 records, 0 unparseable:
+
+| contract | records | mismatches | rate | mismatch classes |
+|---|---:|---:|---:|---|
+| `tiers.tier3-merge` | 2,961 | 4 | 0.135% | extra-keys 3 (`[].text2`, `[].append_section` x2), missing-required 1 (`0.op: Field required`) |
+| `tiers.tier2` | 150 | 0 | 0% | — |
+
+Decision, applying athenaeum#608's framework ("only missing-required mismatches
+justify rejection; extra keys are a different signal"):
+
+- **`tiers.tier2`** — 0% mismatch of any class at n=150: `Tier2Entity` tightens
+  from `extra="allow"` to `extra="forbid"`. Forbidding costs nothing observed
+  today and gives real protection against a silently-added field going
+  unnoticed. `name` stays the only required field.
+- **`tiers.tier3-merge`** — the two extra-key shapes observed (`[].text2`,
+  `[].append_section`) are real, repeated traffic, not sampling noise — the
+  framework's "different signal", not grounds for rejection. `MergeOp` stays
+  `extra="allow"`. The single missing-required hit (`0.op: Field required`)
+  confirms `op` stays required; that class is already enforced downstream —
+  `apply_merge_ops` raises `MergeOpsError` on a missing/unrecognized `op`
+  kind, and `parse_merge_ops_response` turns that into the guaranteed
+  no-worse-than-status-quo full-echo fallback.
+
+This is a schema-shape decision only: `observe()` for these two contracts
+still never raises to its caller and never gates the pipeline — the tightened
+`tiers.tier2` schema changes how a *future* mismatch is classified in the
+observation log, not whether today's response is accepted. No new
+`athenaeum.yaml` key or env var is introduced; the decision is a hardcoded,
+documented constant (`STRICT_CONTRACTS`), matching how `INSTRUMENTED_CONTRACTS`
+above is expressed.
+
 ## Contradiction detection and resolver
 
 Detection knobs live under the `contradiction:` yaml block; resolver behavior
@@ -1141,6 +1184,42 @@ build time, never a silent fallback:
 **Example `athenaeum.yaml`: unchanged.** The defaults need no config — a
 deployment with no `sensitivity:` block behaves exactly as it does today.
 The example at the end of this file is not amended for this section.
+
+### `storage.mapping` completeness lint + the deferred pair check (athenaeum#993)
+
+S5 of the design note's §9 — a lint over `storage.mapping`, not a new config
+knob. `src/athenaeum/sensitivity_lint.py` implements two checks the note
+defers rather than enforcing inside the resolver:
+
+1. **Completeness** — every sensitivity class name a scanned corpus's
+   content still carries (its own `sensitivity_class:` frontmatter field —
+   this lint's own scanning convention, see the module docstring) must have
+   a live `storage.mapping` entry naming a real adapter
+   (`athenaeum.storage.available_adapters`). A class with no entry falls
+   through, silently, to the default `wiki-markdown-embedded` surface at
+   read time — the exact footgun §6 point 2 (below) names; a class mapped to
+   an adapter name that does not exist already raises `StorageConfigError`
+   at read time, and this lint catches both earlier, at config-change time.
+2. **The deferred `(read_policy, storage adapter)` pair check** (§7
+   Decision D4) — a class whose resolved `read_policy.access` is
+   `confidential` or `personal` but whose mapped adapter's
+   `corpus_policy.embedded` is `True` is reported as advisory: the
+   read-policy layer believes the class is restricted while storage routes
+   it into the ordinary embedded corpus.
+
+Completeness findings and the D4 pair-check finding are kept as **distinct,
+separately-severity kinds** — the pair check is advisory and never blocks a
+gate on its own. `athenaeum storage lint-mapping --path <knowledge-root>
+[--corpus <root>] [--json]` is the CLI entry point (`src/athenaeum/
+_cmd_storage.py`); it exits non-zero only on a completeness finding. It is
+standalone — not wired into any existing CI check by this slice. The lint
+never scans a hardcoded or environment-derived path (`--corpus` always comes
+from the caller, defaulting to `--path`'s knowledge root) and never writes
+anything — both checks are read-only over config and the corpus tree.
+Committed synthetic fixtures under `tests/fixtures/sensitivity_mapping/`
+drive `tests/test_sensitivity_lint.py`. See
+[`docs/sensitivity-class-vocabulary.md`](sensitivity-class-vocabulary.md) §6
+point 2 / §7 Decision D4 / §9 S5 for the full rationale.
 
 ## Sensitivity routing (athenaeum#949, slice 1/4 — config)
 

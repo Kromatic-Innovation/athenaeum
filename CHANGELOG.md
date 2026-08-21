@@ -69,6 +69,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wrong bucket instead of preserving it for correct reclassification).
 ### Added
 
+- **`storage.mapping` completeness lint + the deferred `(read_policy,
+  adapter)` pair check (athenaeum#993, S5 of athenaeum#910's design note).** New
+  `src/athenaeum/sensitivity_lint.py`: given a resolved config and a
+  caller-supplied corpus root, reports every sensitivity class name a
+  scanned corpus's content still carries (via its own `sensitivity_class:`
+  frontmatter field) that has no live `storage.mapping` entry, or whose
+  entry names an adapter absent from `storage.available_adapters()` — the
+  config-change-time catch for the read-time footgun the design note's §6
+  point 2 names. Also implements Decision D4's deferred pair check: a class
+  whose resolved `read_policy.access` is `confidential`/`personal` but whose
+  mapped adapter's `corpus_policy.embedded` is `True` is reported as a
+  separate, advisory finding kind that never blocks the gate on its own.
+  Both checks are read-only (never rewrites config or content) and driven by
+  committed synthetic fixtures under `tests/fixtures/sensitivity_mapping/`.
+  New CLI: `athenaeum storage lint-mapping --path <root> [--corpus <root>]
+  [--json]` (`src/athenaeum/_cmd_storage.py`), exiting non-zero only on a
+  completeness finding — standalone, not wired into any existing CI gate.
+  Neither `athenaeum.storage.resolve_adapter_for_class` nor
+  `athenaeum.sensitivity.available_classes` changed.
+- **Per-contract LLM schema strictness for `tiers.tier2` and `tiers.tier3-merge`
+  (athenaeum#1035, M17 phase 2a, split from athenaeum#608).** Decided from the
+  measured observation window 2026-08-05T13:12Z-2026-08-20T10:58Z (3,634
+  records, 0 unparseable, recorded on athenaeum#608's 2026-08-20 comment):
+  `tiers.tier2` (150 obs, 0 mismatches) and `tiers.tier3-merge` (2,961 obs, 4
+  mismatches: extra-keys 3, missing-required 1) sit upstream of the C4
+  entity-phase bottleneck and have a representative sample. Applying
+  athenaeum#608's framework ("only missing-required mismatches justify
+  rejection; extra keys are a different signal"): `llm_schemas.Tier2Entity`
+  tightens from `extra="allow"` to `extra="forbid"` (0% mismatch of any class
+  observed — forbidding costs nothing today); `llm_schemas.MergeOp` stays
+  `extra="allow"` (its two observed extra-key shapes, `[].text2` and
+  `[].append_section`, are real repeated traffic, not grounds for rejection);
+  `op` stays required, matching the one missing-required hit in the window —
+  already enforced downstream via `apply_merge_ops`'s `MergeOpsError` ->
+  full-echo fallback. The decision is recorded in code as the new
+  `llm_schemas.STRICT_CONTRACTS` registry. The three C4-downstream contracts
+  (`contradictions`, `claim_kind`, `resolutions`) are explicitly untouched and
+  remain observe-only, decision deferred to athenaeum#608. See
+  `docs/configuration.md`'s "Per-contract strictness decision" section.
 - **`sensitivity.routing` config resolver (athenaeum#1022, slice 1/4 of
   athenaeum#949's design note).** New `resolve_sensitivity_routing` in
   `src/athenaeum/config.py`: resolves `{"enabled": bool, "classes":
