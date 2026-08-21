@@ -717,13 +717,13 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
             f"under {raw_root} (raw retention -- informational only, not "
             "gated; athenaeum#1049):"
         )
-        for f in raw_findings:
-            parts = []
-            if f.emails:
-                parts.append(f"emails={f.emails}")
-            if f.phones:
-                parts.append(f"phones={f.phones}")
-            print(f"  {f.path}: {'; '.join(parts)}")
+        for raw_finding in raw_findings:
+            raw_parts: list[str] = []
+            if raw_finding.emails:
+                raw_parts.append(f"emails={raw_finding.emails}")
+            if raw_finding.phones:
+                raw_parts.append(f"phones={raw_finding.phones}")
+            print(f"  {raw_finding.path}: {'; '.join(raw_parts)}")
     else:
         print(
             f"0 inline PII findings under {raw_root} (raw retention -- "
