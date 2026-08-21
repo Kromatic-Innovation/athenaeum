@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """MCP memory server — read/write gate for an Athenaeum knowledge base.
 
-Registers 15 tools (issue athenaeum#538 — the count was previously under-reported as 2;
+Registers 16 tools (issue athenaeum#538 — the count was previously under-reported as 2;
 issue athenaeum#864 added ``read_person``; issue athenaeum#886 added ``read_entity``;
 issue athenaeum#964 added ``entity_schema``, the ONE new schema-query tool — see that
-issue's "no proliferating typed interfaces" ratified position):
+issue's "no proliferating typed interfaces" ratified position; issue athenaeum#965 added
+``enumerate_entities``, the generalized ENUMERATION primitive — a distinct code
+path from ``recall``, not an argument on it, because it takes no query text and
+never routes through relevance ranking):
 
   Reads:  recall, list_pending_questions, list_pending_merges,
           list_pending_decisions, list_axiom_audit, scan_retraction_cascade,
-          calibration_summary, read_entity, read_person, entity_schema
+          calibration_summary, read_entity, read_person, entity_schema,
+          enumerate_entities
   Writes: remember, resolve_question, resolve_merge, review_audit_item
 
 Excluded/withheld fields (a person's contact data, and whatever else the
@@ -55,6 +59,9 @@ from typing import TYPE_CHECKING, Any
 
 from athenaeum.config import resolve_cache_dir
 from athenaeum.entity_schema import QUERYABLE_FIELDS, resolve_entity_classes
+from athenaeum.enumeration import DEFAULT_LIMIT as _ENUMERATE_DEFAULT_LIMIT
+from athenaeum.enumeration import enumerate_entities as _enumerate_entities
+from athenaeum.enumeration import predicate_from_dict as _predicate_from_dict
 from athenaeum.killswitch import is_disabled
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
@@ -1485,6 +1492,11 @@ def create_server(
     _entity_classes = resolve_entity_classes(wiki_root, caller_audience=caller_audience)
     _entity_class_names = [c.name for c in _entity_classes]
     _entity_classes_str = ", ".join(_entity_class_names) if _entity_class_names else "(none yet)"
+    # Issue athenaeum#965: same "computed once" rule as `_entity_classes` above —
+    # `enumerate_entities` reuses this set for its unrecognized-type check
+    # rather than re-scanning the wiki on every call.
+    _enumerate_known_classes = frozenset(_entity_class_names)
+    _enumerate_cache_dir = cache_dir or resolve_cache_dir(None)
 
     mcp = FastMCP(
         "athenaeum",
@@ -1496,6 +1508,10 @@ def create_server(
             "you're looking for (a person, a company, a principle, ...). Call "
             "`entity_schema` first to discover what kinds of things this deployment "
             "holds and which fields you can query on (issue athenaeum#964). "
+            "Need every entity of a type matching criteria — not a ranked search "
+            "over a phrase? Use `enumerate_entities(entity_type=..., predicates=...)` "
+            "instead of `recall`: it takes no query text and never ranks (issue "
+            "athenaeum#965) — the generalized primitive behind `athenaeum people`. "
             "Use `list_pending_questions` / `resolve_question` to triage "
             "detector-flagged contradictions, and "
             "`list_pending_merges` / `resolve_merge` to triage resolver-proposed "
@@ -1644,6 +1660,116 @@ def create_server(
             ],
             "queryable_fields": list(QUERYABLE_FIELDS),
         }
+
+    def enumerate_entities(
+        entity_type: str,
+        predicates: list[dict] | None = None,
+        sort_key: str = "name",
+        descending: bool = True,
+        limit: int = _ENUMERATE_DEFAULT_LIMIT,
+        cursor: str | None = None,
+        fields: list[str] | None = None,
+        with_pii: bool = False,
+    ) -> dict:
+        try:
+            parsed_predicates = [_predicate_from_dict(p) for p in (predicates or [])]
+            result = _enumerate_entities(
+                wiki_root,
+                _enumerate_cache_dir,
+                entity_type=entity_type,
+                predicates=parsed_predicates,
+                sort_key=sort_key,
+                descending=descending,
+                limit=limit,
+                cursor=cursor,
+                fields=fields or [],
+                with_pii=with_pii,
+                caller_audience=caller_audience,
+                extra_roots=extra_roots,
+                config=config,
+                known_classes=_enumerate_known_classes,
+            )
+        except ValueError as exc:
+            return {
+                "hits": [],
+                "next_cursor": None,
+                "known_classes": [],
+                "error": str(exc),
+            }
+        return {
+            "hits": list(result.hits),
+            "next_cursor": result.next_cursor,
+            "known_classes": list(result.known_classes),
+        }
+
+    # Issue athenaeum#965: same reason `recall`'s docstring is built above rather
+    # than written as a literal — this deployment's entity-class list is
+    # interpolated from `_entity_classes_str`, computed once at server
+    # construction. Assigned to `__doc__` (not an inline docstring literal,
+    # which an f-string never becomes — CPython only auto-populates
+    # `__doc__` from a plain string constant) and registered via an explicit
+    # `mcp.tool()(...)` call so registration happens AFTER the dynamic
+    # docstring is attached.
+    enumerate_entities.__doc__ = f"""Enumerate every entity of a declared type
+        matching field predicates.
+
+        Issue athenaeum#965: the generalized ENUMERATION primitive — a DISTINCT
+        code path from `recall`, not an argument on it. `recall` narrows a
+        RELEVANCE-RANKED search: it always needs query text to rank against, so
+        it structurally cannot answer "give me every entity of type X whose
+        field Y matches, ordered by field Z" — there is no X to rank. This
+        tool takes no query text at all and never routes through
+        BM25/vector ranking; it reads a plain type-indexed candidate set and
+        applies your predicates directly. Call `entity_schema` first to
+        discover this deployment's entity classes and their fields — this
+        deployment's classes today: {_entity_classes_str}.
+
+        Does NOT deprecate or change `athenaeum people` — see
+        docs/recall-architecture.md's capability-parity table for the
+        generalized expression that reproduces each of its surfaces.
+
+        Args:
+            entity_type: The declared entity class to enumerate (a page's
+                `type:`). Required. An unrecognized value does not error —
+                the response's `known_classes` names what this deployment
+                DOES have, exactly like `recall`'s `type` filter.
+            predicates: Field predicates, AND-combined. Each is
+                `{{"fields": "name" | ["name", "fallback_name", ...],
+                "kind": "eq" | "ne" | "substring" | "regex", "value": "..."}}`.
+                `fields` as a list is an ORDERED FALLBACK set, OR-combined —
+                the generalized form of `athenaeum people --company`'s
+                `current_company` / `linkedin_company_at_connect` shape.
+                `eq`/`substring`/`regex` all compare case-insensitively;
+                `ne` is `eq` negated (e.g. `do_not_email != true`).
+                Default: no predicates (every page of `entity_type`).
+            sort_key: Frontmatter field to sort by. Default `"name"`.
+            descending: Sort direction. Default `True`. Ties are always
+                broken by `uid` ascending, regardless of direction — the
+                documented deterministic tiebreak.
+            limit: Max rows to return. `0` = unlimited (matching
+                `athenaeum people --limit 0`). Default {_ENUMERATE_DEFAULT_LIMIT}.
+            cursor: An opaque continuation token from a prior call's
+                `next_cursor`. Must be reused with the IDENTICAL
+                `entity_type`/`sort_key`/`descending` it was minted under.
+            fields: Additional declared field names to include per hit,
+                beyond the always-present `uid`/`type`/`name`. A field
+                absent from a page is included as `null`, never silently
+                omitted, so every hit has the same shape.
+            with_pii: Required to reference `do_not_email` or
+                `google_contact_*` as a predicate field OR a requested
+                output field — the SAME flag contract `recall(with_pii=...)`
+                already uses. Default `False`.
+
+        Returns:
+            A dict with `hits` (each carrying `uid`, `type`, `name`, plus
+            any requested `fields`), `next_cursor` (a token for the next
+            page, or `null` when there is none), `known_classes` (populated
+            only when `entity_type` was not recognized), and — only on a
+            caller-input error such as a PII-gated field used without
+            `with_pii=True`, or a cursor minted under a different query
+            shape — an `error` string with `hits`/`next_cursor` empty.
+        """
+    mcp.tool()(enumerate_entities)
 
     @mcp.tool()
     def remember(

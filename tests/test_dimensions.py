@@ -713,20 +713,75 @@ class TestValidateIntakeTemporal:
     def test_missing_observed_at_is_noop(self) -> None:
         validate_intake_temporal(observed_at=None, recorded_at="2026-08-20")
 
-    def test_missing_recorded_at_falls_back_to_today(self) -> None:
+    def test_missing_recorded_at_warns_never_rejects(self) -> None:
+        """No ``recorded_at`` anchor -> soft flag, NOT a hard reject.
+
+        ``recorded_at`` is a NEW field (athenaeum#714), so effectively every page
+        already on disk lacks one. Fabricating ``date.today()`` as a
+        rejection anchor would manufacture a hard failure out of a missing
+        coordinate, contradicting athenaeum#714's own "a claim missing a
+        coordinate is not rejected" AC. The signal is still surfaced as a
+        ``UserWarning`` — degraded, not dropped.
+        """
         future = (date.today() + timedelta(days=5)).isoformat()
-        with pytest.raises(ObservedAfterRecordedError):
+        with pytest.warns(UserWarning, match="no recorded_at anchor"):
             validate_intake_temporal(observed_at=future, recorded_at=None)
 
-    def test_schema_boundary_rejects_future_observed_at(self) -> None:
+    def test_missing_recorded_at_still_flags_deep_backdate(self) -> None:
+        """Dropping the fabricated reject anchor must not also drop the
+        deep-back-date flag: with no ``recorded_at`` it falls back to today."""
+        old = (date.today() - timedelta(days=5000)).isoformat()
+        with pytest.warns(UserWarning, match="deep back-date"):
+            validate_intake_temporal(
+                observed_at=old, recorded_at=None, deep_backdate_days=730
+            )
+
+    def test_schema_boundary_rejects_future_observed_at_with_anchor(self) -> None:
+        """A page carrying a REAL ``recorded_at`` is still hard-rejected at the
+        schema boundary when ``observed_at`` postdates it."""
         meta = {
             "uid": "p-9",
             "type": "principle",
             "name": "P9",
+            "recorded_at": date.today().isoformat(),
             "observed_at": (date.today() + timedelta(days=30)).isoformat(),
         }
         with pytest.raises(Exception, match="cannot have observed the future"):
             validate_wiki_meta(meta)
+
+    def test_schema_boundary_accepts_legacy_future_observed_at(self) -> None:
+        """Regression (Seer, PR athenaeum#1034): a page with a future ``observed_at``
+        and NO ``recorded_at`` — the shape of every page written before
+        athenaeum#714 — must not raise.
+
+        ``validate_wiki_meta`` is not an intake-only gate: ``librarian.merge``,
+        ``corrections`` and ``batch`` all re-validate frontmatter read back
+        off disk. Raising here would make such a page permanently
+        un-editable through the tool — it would fail on the very path that
+        could correct the bad date.
+        """
+        meta = {
+            "uid": "p-10",
+            "type": "principle",
+            "name": "P10",
+            "observed_at": (date.today() + timedelta(days=30)).isoformat(),
+        }
+        with pytest.warns(UserWarning, match="no recorded_at anchor"):
+            model = validate_wiki_meta(meta)
+        assert model.uid == "p-10"
+
+    def test_intake_still_hard_rejects_future_observed_at(self, tmp_path: Path) -> None:
+        """The athenaeum#714 AC scopes the rejection to INTAKE, and intake keeps it:
+        ``tier0_passthrough`` supplies a real now-anchor explicitly, so a NEW
+        page claiming a future observation is still refused.
+        """
+        from athenaeum import intake as intake_mod
+
+        with pytest.raises(ObservedAfterRecordedError, match="cannot have observed"):
+            intake_mod.validate_intake_temporal(
+                observed_at=(date.today() + timedelta(days=30)).isoformat(),
+                recorded_at=intake_mod.stamp_recorded_time(),
+            )
 
 
 # ---------------------------------------------------------------------------

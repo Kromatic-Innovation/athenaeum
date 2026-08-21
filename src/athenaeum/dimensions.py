@@ -844,33 +844,65 @@ def validate_intake_temporal(
     Accepts RAW values (``str | date | datetime | None``, the on-disk
     frontmatter shape) and coerces fail-open via :func:`_coerce_date_or_none`
     — callers (e.g. ``schemas.WikiBase``'s model validator) do not need to
-    pre-parse. Hard reject: ``observed_at`` later than ``recorded_at`` —
-    raises :class:`ObservedAfterRecordedError` ("you cannot have observed
-    the future"). Soft flag: ``observed_at`` more than *deep_backdate_days*
-    before ``recorded_at`` — emits a :class:`UserWarning` for review; the
-    value is kept (fail-open, matching every other temporal parser in this
-    repo — see ``models._coerce_iso_date``'s docstring for the same posture).
-    A missing/unparseable ``observed_at`` is a no-op (a claim missing a
-    coordinate is not rejected — issue athenaeum#714 AC); a missing/unparseable
-    ``recorded_at`` falls back to :func:`datetime.date.today` (the anchor
-    ``recorded_at`` would be stamped to anyway at construction time — see
-    :meth:`athenaeum.models.WikiEntity.__post_init__`).
+    pre-parse.
+
+    Two tiers, keyed on whether a REAL recorded-time anchor is present:
+
+    * ``recorded_at`` supplied and parseable — this is the intake case (the
+      anchor is stamped by :meth:`athenaeum.models.WikiEntity.__post_init__`
+      or passed explicitly by :func:`athenaeum.intake.tier0_passthrough`).
+      ``observed_at`` later than that anchor is a HARD reject:
+      :class:`ObservedAfterRecordedError` ("you cannot have observed the
+      future") — the issue athenaeum#714 AC, which scopes the rejection to
+      *intake*.
+    * ``recorded_at`` missing or unparseable — a claim missing a coordinate
+      is **not rejected** (the other athenaeum#714 AC, stated in exactly those
+      words). ``recorded_at`` is a NEW field, so essentially every page
+      already on disk lacks one; fabricating ``date.today()`` as a
+      rejection anchor would manufacture a hard failure out of a missing
+      coordinate and break every read/merge path that re-validates existing
+      frontmatter (``librarian.merge``, ``corrections``, ``batch``) — a page
+      with a forward-dated ``observed_at`` would raise on the very path that
+      could repair it. A future ``observed_at`` therefore degrades to a
+      :class:`UserWarning` here rather than being dropped silently.
+
+    A missing/unparseable ``observed_at`` is a no-op in both tiers (same
+    missing-coordinate AC). The deep-back-date soft flag (``observed_at``
+    more than *deep_backdate_days* before the anchor) fires in both tiers,
+    falling back to today's UTC date when there is no real anchor — the
+    value is always kept (fail-open, matching every other temporal parser in
+    this repo; see ``models._coerce_iso_date``'s docstring for the same
+    posture).
     """
     observed = _coerce_date_or_none(observed_at)
-    recorded = _coerce_date_or_none(recorded_at) or date.today()
     if observed is None:
         return
-    if observed > recorded:
+    recorded = _coerce_date_or_none(recorded_at)
+    if recorded is not None and observed > recorded:
         raise ObservedAfterRecordedError(
             f"observed_at={observed.isoformat()} is later than "
             f"recorded_at={recorded.isoformat()} — cannot have observed "
             "the future"
         )
-    age_days = (recorded - observed).days
+    # No real anchor: compare against today so neither signal is lost, but
+    # only ever as a warning. UTC (not ``date.today()``'s local date) so this
+    # fallback cannot disagree by a day with the ``datetime.now(timezone.utc)``
+    # anchor ``WikiEntity.__post_init__`` and :func:`stamp_recorded_time` stamp.
+    anchor = recorded if recorded is not None else datetime.now(timezone.utc).date()
+    if observed > anchor:
+        warnings.warn(
+            f"observed_at={observed.isoformat()} is later than "
+            f"{anchor.isoformat()} and the page carries no recorded_at "
+            "anchor — flagged for review, not rejected (issue athenaeum#714)",
+            UserWarning,
+            stacklevel=2,
+        )
+        return
+    age_days = (anchor - observed).days
     if age_days > deep_backdate_days:
         warnings.warn(
             f"observed_at={observed.isoformat()} is {age_days} days before "
-            f"recorded_at={recorded.isoformat()} — flagged as a deep "
+            f"recorded_at={anchor.isoformat()} — flagged as a deep "
             "back-date for review (issue athenaeum#714)",
             UserWarning,
             stacklevel=2,

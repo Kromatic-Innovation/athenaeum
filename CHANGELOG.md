@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Aligned code-side entity-type registry mirrors with `_schema/types.md`
+  and gated the `corrections.py` write path (athenaeum#971, follow-up to
+  athenaeum#970).** `schemas.KNOWN_TYPES`/`FALLBACK_TYPES` now include `incident` (the
+  10th declared type per athenaeum#970's audit — previously every incident page
+  warned as "unknown") and no longer include `feedback`/`user` (folded away
+  by athenaeum#970); a page already on disk with one of those values keeps validating
+  without raising (athenaeum#93's non-raising design), it just now takes the
+  ordinary "unknown wiki type" path instead of the silent known-type path.
+  `corrections.py`'s tier-0 create branch (`WikiEntity(type=resolution.
+  entity_type, ...)`) previously had no `valid_types` gate at all, unlike the
+  classifier (`tiers.py`) and the other two deterministic create/upsert
+  paths (`intake.py`, `librarian.py`) — a correction batch could mint a page
+  under any string, including a athenaeum#970-folded type, with zero enforcement.
+  It now loads `_schema/types.md` (falling back to `KNOWN_TYPES`, same
+  pattern `librarian.py`/`entity_schema.py` use) and rejects-and-escalates
+  (`disposition="raised-tier"`) an unrecognized or folded `type`, matching
+  `intake.py`/`librarian.py`'s reject precedent rather than `tiers.py`'s
+  post-LLM coerce-to-`reference` (coercing here would misfile a fold into
+  the wrong bucket instead of preserving it for correct reclassification).
 ### Added
 
 - **Dimension registry + kernel dimensions (athenaeum#714).** Root of the
@@ -30,8 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the ASSERTED `scope` coordinate — never auto-copied from
   `provenance_scope`, with a regression test guarding it), and `subject`.
   Intake temporal validation
-  (`validate_intake_temporal`, wired into `schemas.WikiBase`): hard-rejects
-  `observed_at` later than `recorded_at`, soft-flags a deep back-date.
+  (`validate_intake_temporal`, wired into both `intake.tier0_passthrough` and
+  `schemas.WikiBase`): hard-rejects `observed_at` later than `recorded_at` at
+  the intake boundary, where the anchor is genuinely stamped. On the
+  read/merge paths that share the `schemas.WikiBase` gate (`librarian.merge`,
+  `corrections`, `batch`) a page carrying no `recorded_at` of its own — the
+  shape of every page written before this change — is soft-flagged rather
+  than rejected, per this issue's "a claim missing a coordinate is not
+  rejected" AC. Deep back-dates soft-flag throughout.
   Consumer for this PR: coordinate stamping at write time plus the new
   `athenaeum dimensions show|compare` CLI (axis-by-axis coordinate display and
   comparison) — the five-verdict comparator that will consume the full
@@ -40,6 +67,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployment-declared examples in `docs/configuration.md`, not shipped
   defaults); `memory-class` ships at `backfill` state (athenaeum#972 disposition).
   See `docs/configuration.md`'s "Dimension registry" section.
+- **Generalized ENUMERATION primitive: `enumerate_entities` (MCP) /
+  `athenaeum enumerate` (CLI) (athenaeum#965).** Return every entity of a
+  declared type matching field predicates, ordered by a named field — with
+  NO query text, and never routed through `recall`'s relevance ranking. A
+  distinct code path from `recall`, not an argument on it: every one of
+  `recall`'s three backends either returns nothing or meaningless
+  neighbours for empty query text, so "enumerate everything of type X" was
+  structurally unanswerable through it even after athenaeum#964's `type`
+  filter. Field predicates support exact/substring/regex match (all
+  case-insensitive) over a named field or an ORDERED FALLBACK list of
+  fields (the generalized form of `athenaeum people --company`'s
+  `current_company`/`linkedin_company_at_connect` OR-shape), AND-combined
+  and repeatable. Results are sorted by a caller-named field (descending by
+  default, deterministic `uid`-ascending tiebreak) and paginated via a
+  `limit` (`0` = unlimited) plus an opaque continuation cursor. Every hit
+  carries `uid`/`type`/`name`, plus any additionally requested declared
+  fields; `google_contact_*` and `do_not_email` are usable as predicates
+  and output fields only behind `with_pii=True` (the same flag contract
+  `recall` already uses). Permitted type values and predicable field names
+  are derived from the deployment's declared entity-class schema (the
+  athenaeum#964 resolver) rather than hardcoded, and an unrecognized type
+  returns an empty result plus this deployment's known classes rather than
+  erroring. Reads the converged filterable-metadata store athenaeum#964
+  built (`FTS5Backend.candidates_by_type` — a plain indexed `WHERE type =
+  ?`, never FTS5 `MATCH`/ranking) to narrow the candidate set, then
+  re-reads fresh frontmatter per candidate for predicates, sorting, output
+  fields, and the same fail-closed audience scoping (athenaeum#538) every
+  other read tool applies. Does NOT deprecate or change `athenaeum people`
+  (that is athenaeum#966); `docs/recall-architecture.md` documents a
+  full capability-parity table against it. See
+  `src/athenaeum/enumeration.py` for the full contract.
+- **Decay-sweep ledger (athenaeum#969).** `athenaeum.decay_sweep.apply_sweep`
+  now writes one durable, machine-readable record per archived page —
+  which page, bucket + expiry, sweep timestamp, and the recovering commit
+  SHA — to `_decay_sweep_records.jsonl` under the cache dir (same discipline
+  as `_push_records.jsonl`: JSONL, `O_APPEND` + `fsync`, never inside the
+  wiki corpus), written BEFORE the archival `git rm` so a ledger-write
+  failure refuses the archival entirely rather than deleting without a
+  record. `docs/recall-architecture.md` and `docs/provenance-shape.md` §8.8
+  now name the expired-`daily` carve-out as the sole exemption from the
+  fail-closed expiry filter, state the swept-vs-cold distinction, and record
+  the `bucket:` → policy-pack `delete-after` mapping commitment for the
+  athenaeum#718 policy-pack work to consume — a documented mapping, not a
+  migration; no sweep/currency/bucket behavior changes.
+
+### Changed
+
+- **Dropped the redundant `push: [develop]` trigger from `oss-readiness.yml`
+  (athenaeum#816).** The workflow now runs on `pull_request: branches:
+  [develop]` only. Develop's strict required-status-checks ruleset
+  (`develop-ci-required`) already guarantees a merge commit's tree is
+  identical to the tree its PR run tested, so the post-merge `push` run only
+  ever reproduced the same result — pure noise on every merge. `OSS
+  Readiness` is not in develop's required-check set and
+  `promote-main.yml`'s promotion gate never queries it (re-confirmed live:
+  `gh api repos/Kromatic-Innovation/athenaeum/rules/branches/develop` lists
+  only `CI Required`), so this is safe in isolation. `ci.yml` intentionally
+  keeps its own `push: [develop]` trigger — it is the only run that stamps
+  `CI Required` check-runs onto develop's tip SHA, which
+  `promote-main.yml`'s develop -> main gate resolves by SHA. That will be
+  revisited once athenaeum#1031 lands. The `concurrency` block (keyed on
+  `${{ github.workflow }}-${{ github.ref }}`) is unchanged.
+
+### Added
+
+- **Coarse embedding fallback is now observable (athenaeum#1032).** The chromadb
+  embedding path used to degrade silently three layers deep — no log line
+  ever recorded that the hashing-trick fallback embedder produced a
+  cluster's vectors, making the athenaeum#823/athenaeum#1005 over-cluster diagnosis
+  unfalsifiable from run artifacts. Observability only — no change to
+  clustering behaviour, thresholds, or the fallback's activation
+  conditions:
+  - `athenaeum.search._get_ef` now logs a one-time WARNING (naming the
+    exception class and message) when the chromadb embedding function
+    fails to initialize; `embed_texts` logs its own one-time WARNING when
+    it returns `None`, naming the fallback-hashing embedder as what will
+    produce vectors for callers that need them.
+  - `athenaeum.wiki_dedupe._resolve_wiki_embeddings` logs a one-time
+    WARNING when it engages `clusters._fallback_embeddings`.
+  - `clusters._resolve_embeddings`'s per-run fallback-count line is raised
+    `DEBUG` -> `WARNING` (was invisible at the deployed INFO level).
+  - `Cluster` gains an `embedder` field (`chromadb-default` /
+    `fallback-hashing` / `mixed` / `unknown`) carried through `to_row()`
+    into `raw/_librarian-clusters.jsonl`; the wiki-dedupe `SUPPRESSED` log
+    line now states the embedder that produced the suppressed cluster's
+    vectors. Pre-athenaeum#1032 JSONL rows without the field still
+    deserialize (default `unknown`).
+- **Whole-store adapter seam: `Store` protocol + `FilesystemStore` (athenaeum#976,
+  S1 of the whole-store adapter design lock, athenaeum#911).** New
+  `athenaeum/store.py` (L0/L1) defines `StoreKey`, `ObjectMeta`,
+  `StoreCapabilities`, and the `Store` protocol per
+  `docs/whole-store-adapter-design.md` §6.2, plus `FilesystemStore` — the
+  protocol implemented over `atomic_io` + `pathlib`. `resolve_store_for_class()`
+  is now available alongside the existing `surface_root_for_class()` in
+  `athenaeum.storage`, extending the seam rather than forking it (design note
+  §6.1 D5). A conformance suite (`tests/test_store_conformance.py`) exercises
+  both `FilesystemStore` and a reusable in-memory fake
+  (`tests/store_fakes.InMemoryStore`, load-bearing for later slices S2/S7).
+  **No existing caller is migrated onto the seam in this slice** — this is
+  the seam and its tests only; callers migrate in S2/S3/S7.
 
 - **v6 memory-model measurement pack: shadow-linkage count, backlog price
   sheet, ordinary-night steady-state table (athenaeum#713).** Three new

@@ -357,3 +357,54 @@ class TestCli:
         capsys.readouterr()
 
         assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# Sensitivity-registry migration (issue athenaeum#992, S3 of athenaeum#910's design note)
+# ---------------------------------------------------------------------------
+#
+# This module's email-identifier count now comes from
+# athenaeum.sensitivity.classify() (config=None — this module has no config
+# surface of its own) instead of a direct `find_inline_emails` import, which
+# the design note originally omitted from its S3 call-site inventory. AC3.
+
+
+class TestNoDirectPiiDetectorImport:
+    def test_module_does_not_import_find_inline_emails_by_name(self) -> None:
+        import athenaeum.bounce_contract as bc
+        from athenaeum.pii import find_inline_emails
+
+        assert not hasattr(bc, "find_inline_emails")
+        # athenaeum.pii's own export is untouched (AC8).
+        assert find_inline_emails("reach a@b.com") == ["a@b.com"]
+
+
+class TestSensitivityRegistryEquivalence:
+    """AC4: the migrated email-identifier count agrees with the pre-change
+    ``athenaeum.pii.find_inline_emails`` result on every fixture this module's
+    existing test suite already exercises — proven, not merely asserted.
+    Dedup is preserved (a repeated address counts once, matching the
+    pre-change contract exactly), which is what keeps a note repeating one
+    address from flipping ``SEVERAL_EMAIL_IDENTIFIERS``.
+    """
+
+    @pytest.mark.parametrize("name,note_text", list(ALL_FIXTURES.items()))
+    def test_email_identifier_count_matches_pre_change_function(
+        self, name: str, note_text: str
+    ) -> None:
+        from athenaeum.bounce_contract import _conforming_emails
+        from athenaeum.models import parse_frontmatter
+        from athenaeum.pii import find_inline_emails
+
+        _, body = parse_frontmatter(note_text or "")
+        assert _conforming_emails(body) == find_inline_emails(body), name
+
+    def test_repeated_address_in_body_still_counts_once(self) -> None:
+        note = (
+            "---\nobserved_at: 2026-08-05\nsource: script:bounce-relay\n---\n\n"
+            "alex@example.org hard-bounced, per alex@example.org's own report. "
+            "Diagnostic: 550 5.1.1 user unknown.\n"
+        )
+        result = check_tier0_bounce_conformance(note)
+        assert result.conforms is True
+        assert result.identifier == "alex@example.org"

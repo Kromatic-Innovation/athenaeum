@@ -6,10 +6,26 @@ name: OSS Readiness
 #   * secrets-scan    : Gitleaks working-tree scan
 #   * pypi-hygiene    : `python -m build` + `twine check --strict` + pyroma
 #
-# Runs on develop PRs and pushes, mirroring ci.yml. The `OSS Readiness`
-# aggregate job mirrors ci.yml's `CI Required` pattern (a single always-present
-# status) so it can later be folded into branch protection as one required
-# check without naming per-tool check-runs.
+# Runs on develop PRs only (athenaeum#816). A PR cannot merge to develop
+# without being current with it (org ruleset `develop-ci-required`, strict),
+# so the merge commit's tree is provably identical to the tree the PR's
+# `pull_request` run already tested — a post-merge `push` re-run would only
+# ever reproduce that same result, so it was dropped as redundant. `OSS
+# Readiness` is not in develop's required-check set and nothing queries its
+# push-triggered runs by SHA, so this is safe in isolation.
+#
+# `ci.yml` intentionally still differs and keeps its `push: [develop]`
+# trigger: `promote-main.yml`'s develop -> main gate resolves `CI Required`
+# check-runs on develop's tip SHA (a merge commit), and only a push-triggered
+# run ever stamps that SHA — a `pull_request` run's checks attach to the PR
+# head SHA instead. Dropping ci.yml's push trigger would leave every future
+# develop tip with zero `CI Required` check-runs and block promotion
+# permanently. This will be revisited once athenaeum#1031 (fix the promotion
+# contract to resolve by PR-head SHA, or adopt a merge queue) lands.
+#
+# The `OSS Readiness` aggregate job mirrors ci.yml's `CI Required` pattern (a
+# single always-present status) so it can later be folded into branch
+# protection as one required check without naming per-tool check-runs.
 #
 # Third-party actions are pinned to full commit SHAs for supply-chain hygiene;
 # the semver comment after each pin records the release the SHA maps to at pin
@@ -17,8 +33,6 @@ name: OSS Readiness
 # version-pinned AND checksum-verified before use.
 
 on:
-  push:
-    branches: [develop]
   pull_request:
     branches: [develop]
 

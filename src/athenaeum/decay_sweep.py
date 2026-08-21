@@ -49,6 +49,23 @@ B is the ``git rm`` + removal commit. :func:`apply_sweep` refuses outright —
 never degrades to a bare ``Path.unlink()`` — when ``knowledge_root`` is not a
 git repository, exactly like :func:`athenaeum.auto_memory_prune.apply_prune`.
 
+**Sweep ledger (issue athenaeum#969, reconciling athenaeum#904 with the memory
+model).** The two-commit pattern above is *recoverability*, not a ledger —
+"zero destructive operations without a ledger entry" needs its own durable,
+append-only record, sibling in shape to :mod:`athenaeum.push_metrics`'s
+``_push_records.jsonl`` (JSONL, ``O_APPEND`` + ``fsync``, under the cache
+dir, never inside the wiki corpus). :func:`apply_sweep` writes one
+:class:`SweepLedgerRecord` per kill-list page — which page, why (bucket +
+``valid_until``), the sweep timestamp, and the RECOVERING commit SHA (the
+commit whose tree still holds the page's full content, i.e. ``HEAD`` right
+after Commit A / its no-op) — via :func:`write_sweep_ledger`, and does so
+**before** Commit B ever runs. A ledger-write failure is never swallowed: it
+aborts the sweep before ``git rm``, so a page can never be archived without a
+durable record of why (see :func:`write_sweep_ledger`'s docstring for why
+this, unlike :func:`athenaeum.push_metrics.record_push`, must not be
+best-effort). "That-and-why, never content" — the ledger records metadata
+about the archival, never the page's body text.
+
 **Sweeps ONLY expired ``daily``-bucket pages** (AC6 is explicit). ``weekly``/
 ``durable``/unbucketed pages are never touched — this module has no code
 path that can select one. "Expired" reuses the EXISTING athenaeum#308
@@ -62,23 +79,43 @@ labeled commit pair, refuse-without-git).
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import subprocess
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Any
 
+from athenaeum.config import resolve_cache_dir
 from athenaeum.models import parse_bucket, parse_frontmatter, valid_until_expired
 
 log = logging.getLogger(__name__)
 
+#: Filename under the cache dir. Never under the wiki/raw corpus (issue
+#: athenaeum#969 acceptance: "a durable, machine-readable location outside
+#: the wiki corpus") — same discipline as ``_push_records.jsonl``
+#: (:data:`athenaeum.push_metrics.PUSH_RECORDS_FILENAME`).
+SWEEP_LEDGER_FILENAME = "_decay_sweep_records.jsonl"
+
+#: Schema version stamped on every sweep-ledger record.
+SWEEP_LEDGER_SCHEMA_VERSION = 1
+
 
 @dataclass
 class SweepCandidate:
-    """One expired ``bucket: daily`` page slated for archival, with its reason."""
+    """One expired ``bucket: daily`` page slated for archival, with its reason.
+
+    ``bucket``/``valid_until`` (issue athenaeum#969) carry the same "why" the
+    human-readable *reason* string already states, structured for the sweep
+    ledger — never parsed back out of *reason* at ledger-write time.
+    """
 
     path: Path
     reason: str
+    bucket: str = "daily"
+    valid_until: str | None = None
 
 
 @dataclass
@@ -91,6 +128,31 @@ class SweepReport:
     applied: bool = False
     committed: bool = False
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SweepLedgerRecord:
+    """One archived-page ledger row (issue athenaeum#969, AC1).
+
+    "That-and-why, never content": every field is an identifier, a
+    classification token, or a timestamp — never the page's body text.
+    """
+
+    page: str
+    bucket: str
+    valid_until: str | None
+    swept_at: str
+    recovering_commit: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "v": SWEEP_LEDGER_SCHEMA_VERSION,
+            "page": self.page,
+            "bucket": self.bucket,
+            "valid_until": self.valid_until,
+            "swept_at": self.swept_at,
+            "recovering_commit": self.recovering_commit,
+        }
 
 
 def discover_daily_bucket_pages(wiki_root: Path) -> list[Path]:
@@ -143,13 +205,101 @@ def build_sweep_report(
             continue
         meta, _body = parse_frontmatter(text)
         if valid_until_expired(meta, as_of):
-            reason = (
-                f"bucket: daily, expired (valid_until={meta.get('valid_until')!r})"
+            raw_valid_until = meta.get("valid_until")
+            reason = f"bucket: daily, expired (valid_until={raw_valid_until!r})"
+            report.kill.append(
+                SweepCandidate(
+                    path,
+                    reason,
+                    bucket="daily",
+                    valid_until=str(raw_valid_until) if raw_valid_until else None,
+                )
             )
-            report.kill.append(SweepCandidate(path, reason))
         else:
             report.retained.append((path, "bucket: daily, not yet expired"))
     return report
+
+
+def sweep_ledger_path(cache_dir: Path | None = None) -> Path:
+    """Resolve the sweep-ledger path: ``<cache_dir>/_decay_sweep_records.jsonl``.
+
+    Same resolver as every other cache-dir ledger
+    (:func:`athenaeum.push_metrics.push_records_path`): ``arg >
+    ATHENAEUM_CACHE_DIR env > ~/.cache/athenaeum`` — durable, and outside the
+    wiki corpus by construction.
+    """
+    return resolve_cache_dir(cache_dir) / SWEEP_LEDGER_FILENAME
+
+
+def _now_iso() -> str:
+    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _append_ledger_line(path: Path, line: str) -> None:
+    """Append one line durably (``O_APPEND`` + ``fsync``).
+
+    Mirrors :func:`athenaeum.push_metrics._append_line` byte-for-byte, with
+    one deliberate difference in the CALLER's contract, not this function's
+    body: this function still raises on failure, and :func:`write_sweep_ledger`
+    (unlike :func:`athenaeum.push_metrics.record_push`) does NOT catch and
+    swallow that exception — see :func:`write_sweep_ledger`'s docstring for
+    why a ledger write on this path must be allowed to fail loudly.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, line.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_sweep_ledger(
+    records: list[SweepLedgerRecord],
+    *,
+    cache_dir: Path | None = None,
+) -> None:
+    """Append *records* to the durable sweep ledger. Raises on failure.
+
+    Deliberately NOT best-effort, unlike every other ledger writer in this
+    codebase (:func:`athenaeum.push_metrics.record_push`,
+    :func:`athenaeum.push_metrics.record_reference_result`): those protect a
+    live, non-destructive read path from ever breaking because telemetry
+    failed to write. This ledger sits upstream of a DESTRUCTIVE operation
+    (:func:`apply_sweep`'s ``git rm``) — issue athenaeum#969 AC1 requires the
+    sweep to REFUSE to archive when the ledger write fails, which is only
+    possible if the failure propagates to the caller instead of being logged
+    and swallowed. Callers that want best-effort semantics must catch this
+    themselves; :func:`apply_sweep` deliberately does not.
+    """
+    path = sweep_ledger_path(cache_dir)
+    lines = "".join(
+        json.dumps(rec.to_dict(), separators=(",", ":")) + "\n" for rec in records
+    )
+    _append_ledger_line(path, lines)
+
+
+def read_sweep_ledger(cache_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Read every sweep-ledger record. Tolerates a torn trailing line; never raises."""
+    path = sweep_ledger_path(cache_dir)
+    if not path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    for raw_line in text.splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            row = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            out.append(row)
+    return out
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -172,6 +322,8 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def apply_sweep(
     knowledge_root: Path,
     report: SweepReport,
+    *,
+    cache_dir: Path | None = None,
 ) -> SweepReport:
     """Archive the kill-list via a two-commit git-rm (issue athenaeum#904, AC6/AC7).
 
@@ -182,6 +334,14 @@ def apply_sweep(
     :func:`athenaeum.auto_memory_prune.apply_prune`) when *knowledge_root* is
     not a git repository. A no-op (no commit) when the kill-list is empty.
     Mutates and returns *report*.
+
+    Issue athenaeum#969 AC1: between Commit A and Commit B, this function
+    writes one durable ledger record per kill-list page
+    (:func:`write_sweep_ledger`, under ``cache_dir`` /
+    :func:`sweep_ledger_path`) and REFUSES to run Commit B — the actual
+    ``git rm`` — when that write fails. *cache_dir* threads through to the
+    ledger resolver exactly like every other cache-dir-rooted artifact
+    (``arg > ATHENAEUM_CACHE_DIR env > ~/.cache/athenaeum``).
     """
     if not report.kill:
         log.info("decay-sweep: kill-list empty - nothing to archive")
@@ -197,16 +357,19 @@ def apply_sweep(
         return report
 
     kr = knowledge_root.resolve()
-    rel_paths: list[str] = []
+    pairs: list[tuple[SweepCandidate, str]] = []
     for cand in report.kill:
         try:
-            rel_paths.append(str(cand.path.resolve().relative_to(kr)))
+            rel = str(cand.path.resolve().relative_to(kr))
         except ValueError:
             report.errors.append(
                 f"{cand.path.name}: outside knowledge_root - not swept"
             )
-    if not rel_paths:
+            continue
+        pairs.append((cand, rel))
+    if not pairs:
         return report
+    rel_paths = [rel for _, rel in pairs]
 
     # Commit A — provenance snapshot BEFORE any removal (issue athenaeum#947
     # convention): stages exactly the kill-list paths (never `git add -A`, so
@@ -236,6 +399,48 @@ def apply_sweep(
             log.error("decay-sweep: %s", msg)
             report.errors.append(msg)
             return report
+
+    # The recovering commit SHA (issue athenaeum#969): the commit whose tree
+    # still holds every kill-list page's full content. This is HEAD at this
+    # exact point — either Commit A just made it so (a page edited since its
+    # last commit), or Commit A was a legitimate no-op because HEAD already
+    # carries the page byte-for-byte (the common case). Either way, `git show
+    # <this-sha>:<rel_path>` recovers the page; Commit B (below) is what
+    # makes that necessary.
+    head_result = _git(knowledge_root, "rev-parse", "HEAD")
+    if head_result.returncode != 0:
+        msg = f"could not resolve recovering commit SHA: {head_result.stderr.strip()}"
+        log.error("decay-sweep: %s", msg)
+        report.errors.append(msg)
+        return report
+    recovering_sha = head_result.stdout.strip()
+
+    # Ledger write BEFORE archival (issue athenaeum#969 AC1, fail-closed
+    # ordering): a ledger-write failure aborts HERE, before `git rm` ever
+    # runs, so a page can never be archived without a durable record of why.
+    # Deliberately not try/except-and-continue past this — see
+    # `write_sweep_ledger`'s docstring.
+    swept_at = _now_iso()
+    ledger_records = [
+        SweepLedgerRecord(
+            page=rel,
+            bucket=cand.bucket,
+            valid_until=cand.valid_until,
+            swept_at=swept_at,
+            recovering_commit=recovering_sha,
+        )
+        for cand, rel in pairs
+    ]
+    try:
+        write_sweep_ledger(ledger_records, cache_dir=cache_dir)
+    except Exception as exc:  # noqa: BLE001 — must abort archival, never proceed past it
+        msg = (
+            f"sweep-ledger write failed ({type(exc).__name__}): {exc} - "
+            "refusing to archive (issue athenaeum#969 AC1)"
+        )
+        log.error("decay-sweep: %s", msg)
+        report.errors.append(msg)
+        return report
 
     # Commit B — the archival itself.
     rm_result = _git(knowledge_root, "rm", "--quiet", "--", *rel_paths)
