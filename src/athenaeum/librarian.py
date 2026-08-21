@@ -189,6 +189,7 @@ from athenaeum.registry import collect_handles
 from athenaeum.rules import run_shape_rule_phase
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
+from athenaeum.sensitivity_routing import route_sensitive_values
 from athenaeum.store import FilesystemStore
 from athenaeum.tiers import (
     Tier2ParseStats,
@@ -1079,19 +1080,63 @@ def process_one(
     ``started_at_file`` is ``time.monotonic()``, both snapshotted by the
     caller at the moment THIS file started, so the deltas measured here are
     this file's own spend, not the phase's running total.
+
+    Raises :class:`~athenaeum.sensitivity_routing.SensitivityRoutingError`
+    (issue athenaeum#1025, uncaught — the caller's existing generic
+    exception handling covers it) when ``sensitivity.routing`` is enabled
+    and a detected sensitive value in ``raw.content``'s body cannot be
+    safely routed/redacted. See :func:`athenaeum.sensitivity_routing.route_sensitive_values`.
     """
     effective_write_client = write_client if write_client is not None else client
     result = ProcessingResult(raw_file=raw)
+
+    # --- Sensitivity routing (issue athenaeum#1025; design note
+    # docs/sensitivity-value-routing.md, the standing filter at raw-sweep
+    # intake — slice 4/4, wiring slices 2/3's already-tested mechanism in).
+    # Runs FIRST, before Tier 0's passthrough write and before Tier 1/2/3
+    # read `raw.content` at all (§0/§1/§4) — this is the ONE dispatch point
+    # every tier passes through (verified in the design note's spike:
+    # tier0_passthrough, tier1_programmatic_match, and both LLM exposures —
+    # Tier 2's classify prompt, Tier 3's `raw.content[:2000]` fallback
+    # observation — all read this same in-memory `RawFile.content`), so one
+    # hook here is structurally sufficient for all four tiers. Scoped to the
+    # BODY only, never the frontmatter block (§4's YAML-safety argument):
+    # ``preamble`` below is the untouched slice up to and including the
+    # frontmatter delimiter (or the whole string, unstructured raw with no
+    # frontmatter at all), spliced back onto the redacted body so a routed
+    # value's substitution can never corrupt frontmatter. Fails closed by
+    # construction (§6/AC10): a `SensitivityRoutingError` propagates out of
+    # this function uncaught, straight into the entity-tier sweep loop's
+    # existing generic exception handler — unmodified by this slice — which
+    # already leaves the raw file untouched on disk and writes no wiki page
+    # for it. Skipped under `dry_run`, matching every other side-effecting
+    # Tier-0 step below (`tier0_passthrough`/`tier0_handle_upsert`/
+    # `tier0_bounce_mark` all take a `dry_run` flag and avoid writes) — a
+    # vault record is itself a disk write this preview mode must not make,
+    # and `dry_run`'s own early return before Tier 2/3 (below) means no LLM
+    # call is at risk from skipping this either way.
+    raw_meta, raw_body = parse_frontmatter(raw.content)
+    if not dry_run:
+        preamble = raw.content[: len(raw.content) - len(raw_body)]
+        redacted_body = route_sensitive_values(
+            raw_ref=raw.ref,
+            text=raw_body,
+            frontmatter=raw_meta,
+            config=config,
+            knowledge_root=wiki_root.parent,
+        )
+        if redacted_body != raw_body:
+            raw._content = preamble + redacted_body
 
     # Sticky intake access (issue athenaeum#320 §5): an `access:` stamped on the raw
     # file at remember() time by the intake screener is CALLER-AUTHORITATIVE —
     # it must survive compile onto the wiki page, not be re-guessed by the LLM
     # tiers (which classify access from scratch and can drop or widen it). Read
-    # it from the ORIGINAL content before the self-resolving-claims mutation
-    # below touches raw._content. Tier 0 already honors raw `access:` verbatim;
-    # this pins the same guarantee onto the Tier-2/3 LLM path for the unstructured
-    # medical notes that never reach Tier 0. Empty when the raw carries none.
-    raw_meta, _ = parse_frontmatter(raw.content)
+    # from the frontmatter parsed above, before the self-resolving-claims
+    # mutation below touches raw._content again. Tier 0 already honors raw
+    # `access:` verbatim; this pins the same guarantee onto the Tier-2/3 LLM
+    # path for the unstructured medical notes that never reach Tier 0. Empty
+    # when the raw carries none.
     sticky_access = parse_access(raw_meta)
 
     # --- Tier 0: passthrough for pre-structured raw-intake ---

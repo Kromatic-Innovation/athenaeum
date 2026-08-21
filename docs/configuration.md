@@ -1162,7 +1162,7 @@ nothing reads it from anywhere reachable in a running deployment yet.
 deployment with no `sensitivity.routing` block behaves exactly as it does
 today. The example at the end of this file is not amended for this section.
 
-## Sensitivity routing/redaction mechanism (athenaeum#1023, slice 2/4 — standalone, not wired)
+## Sensitivity routing/redaction mechanism (athenaeum#1023, slice 2/4)
 
 `src/athenaeum/sensitivity_routing.py`'s `route_sensitive_values()`
 implements the mechanism the design note's §2/§4/§6/§7 specify: scan text
@@ -1170,11 +1170,11 @@ via `sensitivity.classify()` (unchanged, athenaeum#910), route each
 configured-on match's value to the secret vault (the built-in `excluded`
 storage surface, or an operator's own safe `storage.mapping` target),
 substitute a resolvable pointer for the matched span, and return the
-redacted text. **Not called from anywhere in this repo yet** — no config
-knob added by this slice, and no behavior change for any running
-deployment. Wiring this into `librarian.process_one` is athenaeum#1025
-(slice 4). Reading a pointer's value back is `resolve_sensitive_record`,
-covered in the next section (slice 3, athenaeum#1024).
+redacted text. Wired into `librarian.process_one` by slice 4
+(athenaeum#1025, see below) — see that section for the actual raw-sweep
+call site and its `dry_run`/fail-closed posture. Reading a pointer's value
+back is `resolve_sensitive_record`, covered in the next section (slice 3,
+athenaeum#1024).
 
 **Pointer format**, substituted for each routed span, byte-for-byte per the
 design note §1:
@@ -1204,16 +1204,17 @@ vault root resolves directly to the built-in `excluded` adapter — not the
 storage layer's own "undeclared maps to wiki" default, which is correct for
 every other class but unsafe here.
 
-## Sensitivity routing record-keyed read path (athenaeum#1024, slice 3/4 — standalone, not wired)
+## Sensitivity routing record-keyed read path (athenaeum#1024, slice 3/4)
 
 `src/athenaeum/sensitivity_routing.py`'s `resolve_sensitive_record()` is the
 read half of the pointer above — the design note §2's disposition (b): a
 NEW read path, keyed by `(sensitivity_class, record_id)` rather than by an
 entity `uid`, because this stage runs before most raw content has a `uid`
 to key on (§2 explains why the existing `pii.ExcludedRecordIndex.by_uid`
-path cannot be reused here). **Not called from anywhere in this repo
-yet** — same standalone posture as slice 2; `librarian.process_one` wiring
-remains athenaeum#1025.
+path cannot be reused here). Not called by `librarian.process_one` itself
+(the write half, slice 2, is what that hook calls — see slice 4 below) —
+this function's caller is whatever reads a pointer back later (an agent
+resolving `[sensitive:<class>:<record_id> ...]`), not the sweep.
 
 **Access control — no new mechanism.** Gates on the matched class's
 `read_policy.access`/`audience` (athenaeum#910's vocabulary, unchanged) by
@@ -1239,6 +1240,37 @@ requested; or a caller the class's `read_policy` does not authorize. This
 matches design note §2's requirement that "resolution failure cannot be
 used to probe the vault's contents" — every failure mode above is
 indistinguishable from every other from the return value alone.
+
+## Sensitivity routing wired into the librarian raw sweep (athenaeum#1025, slice 4/4)
+
+The final slice of athenaeum#949's design note: `librarian.process_one` now
+calls slice 2's `route_sensitive_values()` first thing — before Tier 0's
+passthrough write and before Tier 1/2/3 read `raw.content` at all (design
+note §0/§4). This is the ONE dispatch point every tier passes through, so
+this single hook protects all four tiers, including both LLM exposures
+(Tier 2's classify prompt, Tier 3's `raw.content[:2000]` fallback
+observation). Scoped to the raw file's body only — the frontmatter block is
+parsed once, untouched, and spliced back onto the redacted body, so a
+routed substitution can never corrupt frontmatter.
+
+**This is the first slice in the series with an actual runtime behavior
+change** — gated entirely behind `sensitivity.routing.enabled` (§ above,
+dark by default per athenaeum#1022). With routing unset or off,
+`process_one`'s output is byte-for-byte unchanged from pre-athenaeum#949
+behavior.
+
+**Skipped under `--dry-run`**, matching every other side-effecting Tier-0
+step in `process_one` (`tier0_passthrough`/`tier0_handle_upsert`/
+`tier0_bounce_mark` all take a `dry_run` flag and avoid writes) — a vault
+record is itself a disk write a preview run must not make, and dry-run's
+own early return before Tier 2/3 means no LLM call is at risk from
+skipping this either way.
+
+**Fail-closed at this integration level too**: `SensitivityRoutingError`
+propagates out of `process_one` uncaught, into the entity-tier sweep loop's
+existing generic exception handler — unmodified by this slice — which
+already leaves the raw file untouched on disk and writes no wiki page for
+it (§6/AC10).
 
 ## Authority manifest (athenaeum#426)
 
