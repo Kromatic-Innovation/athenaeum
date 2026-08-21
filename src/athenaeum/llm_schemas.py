@@ -23,6 +23,14 @@ load-bearing constraint:
     contracts in ``reasoning_tiers.py`` are deferred to athenaeum#609 and are NOT modeled
     here (touching them is out of scope).
 
+    **M17 phase 2a (athenaeum#1035) records a per-contract strictness decision for
+    two of the six contracts** — see :data:`STRICT_CONTRACTS` for the decided
+    posture, the measured window it is drawn from, and the reasoning. The
+    other four contracts (``query_topics``, ``claim_kind``, ``contradictions``,
+    ``resolutions``) remain phase 1 observe-only, decision deferred to
+    athenaeum#608 exactly as above — this module's behavior for them is
+    unchanged by athenaeum#1035.
+
 Convention for adding a contract (so other sites can follow this one):
 
 1. Model **the shape the site accepts today**, not a tightened ideal. A field
@@ -32,7 +40,10 @@ Convention for adding a contract (so other sites can follow this one):
    out-of-vocabulary value logs as genuine drift.
 2. Use ``extra="allow"`` — an unexpected key is signal, not an error, and
    :func:`observe` reports which keys appeared (top-level and per list item)
-   so a newly-emitted field surfaces without failing validation.
+   so a newly-emitted field surfaces without failing validation. A contract
+   may earn a per-contract exception to this default once a measured window
+   justifies one (see :data:`STRICT_CONTRACTS`) — that is a decision made
+   FROM the data this convention produces, never assumed up front.
 3. Validate the payload **after** the site's own parse/coercion, so the log
    reflects model drift rather than re-deriving what the hand-rolled checks
    already normalize.
@@ -156,6 +167,69 @@ INSTRUMENTED_CONTRACTS: tuple[str, ...] = (
     "tiers.tier3-merge",
 )
 
+#: **M17 phase 2a strictness decision (athenaeum#1035, split from athenaeum#608).**
+#: Contracts whose response model has graduated from the phase-1 uniform
+#: ``extra="allow"``/decision-deferred posture to a per-contract posture decided
+#: from a measured window, rather than the module-wide default every other
+#: contract still carries. Membership here means "the schema below is the
+#: DECIDED shape", not merely "the shape the site happens to tolerate today"
+#: (the phase-1 convention in the module docstring above).
+#:
+#: Decided from ``~/.cache/athenaeum/_llm_schema_observations.jsonl``, window
+#: 2026-08-05T13:12Z -> 2026-08-20T10:58Z (3,634 records, 0 unparseable),
+#: recorded on athenaeum#608's 2026-08-20 comment and carried into athenaeum#1035's
+#: issue body:
+#:
+#: | contract             | records | mismatches | rate   | classes                     |
+#: |-----------------------|--------:|-----------:|-------:|-------------------------------|
+#: | ``tiers.tier3-merge`` |    2961 |          4 | 0.135% | extra-keys 3, missing-required 1 |
+#: | ``tiers.tier2``       |     150 |          0 |     0% | -                            |
+#:
+#: (``tiers.tier3-merge``'s extra-keys: ``[].text2``, ``[].append_section`` x2;
+#: its missing-required: ``0.op: Field required``.)
+#:
+#: These two sit UPSTREAM of the C4 entity-phase bottleneck and have accrued a
+#: representative sample; the three C4-downstream contracts (``contradictions``,
+#: ``claim_kind``, ``resolutions``) remain starved (athenaeum#608, 2026-08-20 comment)
+#: and are deliberately NOT in this set — they stay observe-only, decision
+#: deferred to athenaeum#608, until a representative window exists for them too.
+#:
+#: **Decision, applying athenaeum#608's own framework verbatim** ("only missing-required
+#: mismatches justify rejection; extra keys are a different signal"):
+#:
+#: - ``tiers.tier2`` — measured 0% mismatch of ANY class at n=150 (no extra key
+#:   has ever appeared). "Teeth where mismatch is ~0%": :class:`Tier2Entity`
+#:   tightens from ``extra="allow"`` to ``extra="forbid"``. Forbidding costs
+#:   nothing today (nothing observed would newly fail) and gives real
+#:   protection against a future silently-added field. ``name`` stays the only
+#:   required field — unchanged, since it was already the site's own tolerance
+#:   boundary and no missing-required mismatch was ever observed on any field.
+#: - ``tiers.tier3-merge`` — the two observed extra-key shapes
+#:   (``[].text2``, ``[].append_section``) are real, repeated production
+#:   traffic, not a fluke of a thin sample (3 hits spread across the whole
+#:   13-day-active window) — exactly the "different signal" the framework says
+#:   is NOT grounds for rejection. Forbidding here WOULD newly reject
+#:   responses that pass safely today, so :class:`MergeOp` stays
+#:   ``extra="allow"``. The single missing-required hit (``0.op: Field
+#:   required``) is the one class the framework says justifies rejection:
+#:   ``op`` stays the required field it already was — confirmed, not relaxed.
+#:   Enforcement for this class already lives downstream in ``tiers.py``:
+#:   :func:`apply_merge_ops` raises :class:`~athenaeum.tiers.MergeOpsError` on
+#:   an op with a missing/unrecognized ``op`` kind, which
+#:   :func:`~athenaeum.tiers.parse_merge_ops_response` catches and turns into
+#:   a full-echo fallback (reject-this-response-and-degrade-to-the-guaranteed-
+#:   no-worse-than-status-quo path) — this issue confirms that existing
+#:   behavior IS the decided posture rather than adding a second gate.
+#:
+#: No field became required, and no contract's required set shrank — the only
+#: code change this decision makes is :class:`Tier2Entity`'s ``extra=`` value.
+#: This is a **schema-shape decision only**: :func:`observe` for these two
+#: contracts still never raises to its caller and never changes what the
+#: pipeline does with a response — the tightened schema changes how a future
+#: mismatch is *classified* in the observation log, not whether one is acted
+#: on by the pipeline today.
+STRICT_CONTRACTS: frozenset[str] = frozenset({"tiers.tier2", "tiers.tier3-merge"})
+
 #: Stated-local copies of the two vocabularies these models range over. Kept in
 #: sync with their live sources (``models.CLAIM_KINDS`` /
 #: ``resolutions._VALID_ACTIONS``) by an equivalence test rather than an import,
@@ -257,9 +331,16 @@ class Tier2Entity(BaseModel):
     The site skips any item without a truthy ``name`` and defaults/coerces
     ``entity_type`` / ``access`` / ``tags`` / ``observations`` when absent, so
     only ``name`` is required here.
+
+    ``extra="forbid"`` (M17 phase 2a, athenaeum#1035) — a deliberate exception to
+    this module's phase-1 module-wide default (see :data:`STRICT_CONTRACTS` for
+    the measured window and full reasoning). Measured 0% mismatch of any class
+    at n=150: no extra key has ever appeared on this contract, so forbidding
+    costs nothing observed today and gives real protection against a future
+    silently-added field going unnoticed.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     name: str
     entity_type: Optional[str] = None
@@ -282,6 +363,16 @@ class MergeOp(BaseModel):
     given kind actually requires is validated at apply time by
     ``apply_merge_ops``; a genuinely new field the model starts emitting is
     surfaced as an extra key.
+
+    ``extra="allow"`` stays (M17 phase 2a, athenaeum#1035 — see
+    :data:`STRICT_CONTRACTS`): the measured window shows real, repeated
+    extra-key traffic (``[].text2``, ``[].append_section``), which athenaeum#608's
+    framework treats as a different signal from a missing-required field, not
+    grounds for rejection. ``op`` stays required — the one missing-required
+    hit in the window (``0.op: Field required``) confirms it belongs there;
+    enforcement for a missing ``op`` already lives in ``apply_merge_ops``
+    (raises :class:`MergeOpsError`, which the caller turns into a full-echo
+    fallback).
     """
 
     model_config = ConfigDict(extra="allow")
