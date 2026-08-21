@@ -70,11 +70,16 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
     )
     test_mcp_parser.set_defaults(func=cmd_test_mcp)
 
-    # people command — frontmatter-only filter over type:person wikis
+    # people command — frontmatter-only filter over type:person wikis.
+    # DEPRECATED as of athenaeum#966 in favour of the generalized `enumerate`
+    # primitive (athenaeum#964/#965); retained, unchanged, until a separate
+    # follow-up removal issue (linked from athenaeum#966) takes it out.
     people_parser = subparsers.add_parser(
         "people",
-        help="List type:person wikis filtered by frontmatter (company / tag / tier / score). "
-        "No LLM, no embeddings — deterministic over the wiki tree.",
+        help="DEPRECATED (athenaeum#966; use `enumerate --type person --where "
+        "...` — see docs/recall-architecture.md's capability-parity table). "
+        "List type:person wikis filtered by frontmatter (company / tag / tier / "
+        "score). No LLM, no embeddings — deterministic over the wiki tree.",
     )
     people_parser.add_argument(
         "--path",
@@ -598,8 +603,41 @@ def _excluded_suffix_for_hit(
     return "".join(f"\t{part}" for part in parts)
 
 
+#: Issue athenaeum#966: `people` is a typed, per-consumer surface — one CLI
+#: subcommand hardcoded to `type:person`, not exposed on MCP. Now that
+#: athenaeum#964 (narrow by declared `type`) and athenaeum#965 (enumerate by
+#: declared type + field predicates) have shipped, every question `people`
+#: answers is answerable through `athenaeum enumerate` (see
+#: docs/recall-architecture.md's capability-parity table for the exact
+#: mapping, including the two rows that generalization deliberately drops:
+#: `--top-touch`'s computed composite sort, and `--format table|tsv`
+#: rendering). Deprecation only — behaviour, flags, ordering and output are
+#: unchanged. Removal is a separate, later issue with no removal date set,
+#: linked from athenaeum#966; not filed as of this notice, so it is named
+#: here by its parent issue rather than its own number.
+PEOPLE_SURFACE_DEPRECATION = (
+    "`athenaeum people` is deprecated (athenaeum#966) in favour of the "
+    "generalized `athenaeum enumerate --type person --where ...` primitive "
+    "(athenaeum#964/#965) — see docs/recall-architecture.md's "
+    "capability-parity table. Behaviour and output are unchanged for now; "
+    "removal is a separate follow-up issue linked from athenaeum#966, not "
+    "yet filed."
+)
+
+
 def cmd_people(args: argparse.Namespace) -> int:
     """List type:person wikis filtered by frontmatter — frontmatter-only, no LLM.
+
+    DEPRECATED (issue athenaeum#966) — use ``athenaeum enumerate --type
+    person --where ...``, the generalized form; see
+    docs/recall-architecture.md's capability-parity table for the exact
+    mapping from each of this command's flags to an ``enumerate``
+    expression. This command keeps working identically and is not removed
+    here (removal is a separate, later issue, linked from athenaeum#966,
+    with no removal date set). It prints a one-line migration notice to
+    **stderr**, never to stdout: stdout is a table or TSV a script may
+    parse, and a notice there would be a breaking output change dressed up
+    as a deprecation.
 
     Filters AND together. Companies match current_company OR
     linkedin_company_at_connect (case-insensitive substring). Tags must
@@ -610,6 +648,8 @@ def cmd_people(args: argparse.Namespace) -> int:
     import re
 
     from athenaeum.models import parse_frontmatter
+
+    print(f"[deprecated] {PEOPLE_SURFACE_DEPRECATION}", file=sys.stderr)
 
     knowledge_root = args.path.expanduser().resolve()
     wiki_root = knowledge_root / "wiki"
