@@ -15,9 +15,9 @@ Acceptance criteria under test (class -> AC):
   proposed-rule; a legacy no-``decision_id`` record still parses as before).
 - ``TestApplyQuestion`` / ``TestApplyMerge`` / ``TestApplyAudit`` -> AC2, AC4
   (deterministic tier-0 apply per type; each round-trips end to end).
-- ``TestApplyProposedRule`` -> AC3, AC6 (registered + schema-round-trips;
-  fails closed with zero mutation — the store itself is athenaeum#905's scope,
-  explicitly NOT built here).
+- ``TestApplyProposedRule`` -> AC3, AC6, athenaeum#921 (real applier against
+  the athenaeum#905 store: accept round-trip, reject round-trip, unknown id,
+  already-resolved id, invalid verdict — all fail-soft where applicable).
 - ``TestBatch`` -> AC5 (several answer files, mixed types, one tick).
 - ``TestFailSoft`` -> AC6 (unknown id / already-resolved id / malformed file
   — logged, uncorrupted, batch continues).
@@ -625,56 +625,189 @@ class TestApplyAudit:
 
 
 # ---------------------------------------------------------------------------
-# TestApplyProposedRule — AC3, AC6
+# TestApplyProposedRule — AC3, AC6, athenaeum#921
 # ---------------------------------------------------------------------------
+
+
+def _seed_rule_proposal(
+    wiki_root: Path,
+    *,
+    source: str = "test-source",
+    key_fingerprint: str = "a" * 16,
+) -> str:
+    """Append one ``proposal`` record directly to the rule-proposals ledger
+    (bypassing detection/drafting -- no LLM call, no exemplar plumbing) and
+    return its deterministic id. Mirrors
+    ``tests/test_rule_proposals.py::_write_proposal_record``."""
+    import json
+
+    from athenaeum.rule_proposals import (
+        PROPOSAL_KIND,
+        RULE_PROPOSALS_LEDGER_VERSION,
+        _append_jsonl_line,
+        default_rule_proposals_ledger_path,
+        proposal_item_id,
+    )
+
+    item_id = proposal_item_id(source, key_fingerprint)
+    rule_name = f"proposed-{item_id[:8]}"
+    rule_yaml = (
+        "version: 1\n"
+        f"name: {rule_name}\n"
+        "mode: observe\n"
+        f"match:\n  source: {source}\n  key_fingerprint: {key_fingerprint}\n"
+        "disposition: drop\n"
+    )
+    record = {
+        "v": RULE_PROPOSALS_LEDGER_VERSION,
+        "kind": PROPOSAL_KIND,
+        "id": item_id,
+        "created_at": "2026-08-21T12:00:00Z",
+        "source": source,
+        "key_fingerprint": key_fingerprint,
+        "count": 3,
+        "window_days": 7,
+        "threshold": 3,
+        "rule_name": rule_name,
+        "rule_yaml": rule_yaml,
+        "projected_impact": "test impact",
+        "rationale": "test rationale",
+        "exemplar_refs": [],
+        "tier3_linked": False,
+        "tier3_note": "not linkable",
+        "model": "test-model",
+    }
+    _append_jsonl_line(
+        default_rule_proposals_ledger_path(wiki_root),
+        json.dumps(record, sort_keys=True) + "\n",
+    )
+    return item_id
 
 
 class TestApplyProposedRule:
     def test_schema_round_trips(self, tmp_path: Path) -> None:
+        """The answer-FILE format round-trip -- unrelated to the store,
+        still valid coverage per athenaeum#921 AC6."""
         path = tmp_path / "rule.md"
         path.write_text(
             render_decision_answer(
                 decision_id="rule-1",
                 decision_type="proposed-rule",
-                verdict="accept",
+                verdict="approve",
             ),
             encoding="utf-8",
         )
         parsed = _load_decision_answer(path)
         assert parsed is not None
         assert parsed.decision_type == "proposed-rule"
+        assert parsed.verdict == "approve"
 
-    def test_apply_fails_closed_with_zero_mutation(
+    def test_apply_approve_round_trips_to_observe_mode_rule(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        from athenaeum.rule_proposals import list_pending_rule_proposals
+        from athenaeum.rules import load_rules
+
+        item_id = _seed_rule_proposal(wiki_root)
+        write_decision_answer(
+            raw_root, decision_id=item_id, decision_type="proposed-rule", verdict="approve"
+        )
+
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 1
+        assert report.skipped == 0
+        outcome = report.outcomes[0]
+        assert outcome.applied is True
+        assert outcome.error_code is None
+
+        # The proposal has reached its resolved state.
+        assert list_pending_rule_proposals(wiki_root) == []
+
+        # knowledge_root is derived as wiki_root.parent (see
+        # _apply_proposed_rule_answer's docstring) -- this asserts against
+        # that SAME layout, not an assumption about it.
+        knowledge_root = wiki_root.parent
+        rules, errors = load_rules(knowledge_root)
+        assert errors == []
+        assert len(rules) == 1
+        assert rules[0].mode == "observe"
+
+    def test_apply_reject_round_trips_to_resolved_state(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        from athenaeum.rule_proposals import (
+            list_pending_rule_proposals,
+            read_rule_proposals_ledger,
+        )
+
+        item_id = _seed_rule_proposal(wiki_root, source="reject-source")
+        write_decision_answer(
+            raw_root, decision_id=item_id, decision_type="proposed-rule", verdict="reject"
+        )
+
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 1
+        assert report.skipped == 0
+        assert list_pending_rule_proposals(wiki_root) == []
+        ledger = read_rule_proposals_ledger(wiki_root)
+        assert any(r["kind"] == "reject" and r["id"] == item_id for r in ledger)
+        # No rule file written on reject.
+        assert not (wiki_root.parent / "rules").exists()
+
+    def test_apply_unknown_id_skipped_without_mutation(
         self, wiki_root: Path, raw_root: Path
     ) -> None:
         write_decision_answer(
             raw_root,
-            decision_id="rule-1",
+            decision_id="no-such-proposal",
             decision_type="proposed-rule",
-            verdict="accept",
+            verdict="approve",
         )
 
-        # Snapshot every file under wiki_root/raw_root before applying —
-        # the fail-closed branch must not create/modify/delete anything
-        # beyond the answer file itself.
-        def _snapshot() -> set[tuple[str, str]]:
-            out = set()
-            for root in (wiki_root, raw_root):
-                for p in root.rglob("*"):
-                    if p.is_file():
-                        out.add((str(p), p.read_text(encoding="utf-8", errors="replace")))
-            return out
-
-        before = _snapshot()
         report = apply_decision_answers(wiki_root, raw_root)
-        after = _snapshot()
 
         assert report.applied == 0
         assert report.skipped == 1
-        outcome = report.outcomes[0]
-        assert outcome.error_code == "decision_type_unavailable"
-        assert "905" in outcome.message
-        assert before == after
+        assert report.outcomes[0].error_code == "id_not_found"
+        assert not (wiki_root.parent / "rules").exists()
+
+    def test_apply_already_resolved_id_skipped_without_corrupting_state(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        from athenaeum.rule_proposals import reject_rule_proposal
+
+        item_id = _seed_rule_proposal(wiki_root, source="already-resolved-source")
+        reject_rule_proposal(wiki_root, proposal_id=item_id)
+
+        write_decision_answer(
+            raw_root, decision_id=item_id, decision_type="proposed-rule", verdict="approve"
+        )
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 0
+        assert report.skipped == 1
+        assert report.outcomes[0].error_code == "already_resolved"
+        # The original reject stands; no approve/rule file materialized.
+        assert not (wiki_root.parent / "rules").exists()
+
+    def test_apply_invalid_verdict_skipped_without_mutation(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        from athenaeum.rule_proposals import list_pending_rule_proposals
+
+        item_id = _seed_rule_proposal(wiki_root, source="invalid-verdict-source")
+        write_decision_answer(
+            raw_root, decision_id=item_id, decision_type="proposed-rule", verdict="maybe"
+        )
+
+        report = apply_decision_answers(wiki_root, raw_root)
+
+        assert report.applied == 0
+        assert report.outcomes[0].error_code == "invalid_decision"
+        # Still pending -- nothing resolved.
+        assert len(list_pending_rule_proposals(wiki_root)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -696,6 +829,8 @@ class TestBatch:
     def test_mixed_batch_applies_in_one_tick(
         self, wiki_root: Path, raw_root: Path
     ) -> None:
+        """AC5: a ``proposed-rule`` answer participates in a mixed-type
+        batch applied in one tick, alongside question/merge/audit."""
         pending_path = wiki_root / "_pending_questions.md"
         qid = _write_question_block(pending_path)
 
@@ -708,6 +843,7 @@ class TestBatch:
         )
 
         audit_id = _seed_audit_item(wiki_root, pid="batch-proposal")
+        rule_id = _seed_rule_proposal(wiki_root, source="batch-rule-source")
 
         write_decision_answer(
             raw_root, decision_id=qid, decision_type="question", verdict="Series B."
@@ -718,14 +854,21 @@ class TestBatch:
         write_decision_answer(
             raw_root, decision_id=audit_id, decision_type="audit", verdict="approve"
         )
+        write_decision_answer(
+            raw_root, decision_id=rule_id, decision_type="proposed-rule", verdict="approve"
+        )
 
         report = apply_decision_answers(wiki_root, raw_root)
 
-        assert report.applied == 3
+        assert report.applied == 4
         assert report.skipped == 0
         assert "- [x]" in pending_path.read_text(encoding="utf-8")
         assert "- [x]" in merges_path.read_text(encoding="utf-8")
         assert (wiki_root / "batch-topic.md").exists()
+
+        from athenaeum.rule_proposals import list_pending_rule_proposals
+
+        assert list_pending_rule_proposals(wiki_root) == []
 
     def test_batch_via_cmd_ingest_answers_end_to_end(self, tmp_path: Path) -> None:
         """The real CLI entry point applies decision answers AND completes
@@ -921,6 +1064,7 @@ class TestNoLLMCall:
             src_b=wiki_root / "feedback_l.md",
         )
         audit_id = _seed_audit_item(wiki_root, pid="no-llm-proposal")
+        rule_id = _seed_rule_proposal(wiki_root, source="no-llm-rule-source")
 
         write_decision_answer(
             raw_root, decision_id=qid, decision_type="question", verdict="Series B."
@@ -932,14 +1076,15 @@ class TestNoLLMCall:
             raw_root, decision_id=audit_id, decision_type="audit", verdict="approve"
         )
         write_decision_answer(
-            raw_root, decision_id="rule-1", decision_type="proposed-rule", verdict="accept"
+            raw_root, decision_id=rule_id, decision_type="proposed-rule", verdict="approve"
         )
 
-        # Must not raise -- proves the LLM entry point was never invoked.
+        # Must not raise -- proves the LLM entry point was never invoked,
+        # even on the real (not fail-closed) proposed-rule approve path.
         report = apply_decision_answers(wiki_root, raw_root)
 
-        assert report.applied == 3  # question + merge + audit
-        assert report.skipped == 1  # proposed-rule fails closed
+        assert report.applied == 4  # question + merge + audit + proposed-rule
+        assert report.skipped == 0
 
 
 # ---------------------------------------------------------------------------

@@ -96,7 +96,6 @@ import fnmatch
 import hashlib
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -126,7 +125,7 @@ from athenaeum.models import (
     parse_frontmatter,
 )
 from athenaeum.provenance import parse_source
-from athenaeum.store import FilesystemStore, Store
+from athenaeum.store import FilesystemStore, Store, append_line_durable
 
 log = logging.getLogger(__name__)
 
@@ -272,9 +271,58 @@ class MatchSpec(BaseModel):
         ):
             return False
         for field_name, predicate in self.fields.items():
-            if field_name not in record or not predicate.matches(record[field_name]):
+            found, value = resolve_field_path(record, field_name)
+            if not found or not predicate.matches(value):
                 return False
         return True
+
+
+def resolve_field_path(record: dict[str, Any], field_name: str) -> tuple[bool, Any]:
+    """Resolve a `match.fields` key against *record*, returning
+    `(found, value)`.
+
+    Issue athenaeum#974 AC1: a `match.fields` key may now reach a NESTED
+    frontmatter/JSON key one level (or more) below the record root, using a
+    dotted path (`"a.b"` -> ``record["a"]["b"]``). This codebase has NO
+    existing precedent for nested-key resolution (grepped for
+    dotted-path/nested-key helpers before writing this — none found), so the
+    syntax is a fresh choice, not a match to something already idiomatic
+    here. Dotted-path is the conventional external choice for this exact
+    problem (jq/dpath-style addressing) and — the deciding property — it
+    cannot collide with an ordinary top-level frontmatter key: those are
+    plain identifiers, and a literal `.` inside a YAML frontmatter key would
+    itself be unusual. That makes it the conservative, reversible pick this
+    issue's design-judgement note asks for when no repo precedent exists.
+
+    **Backward compatibility (non-negotiable, per issue athenaeum#974):** an
+    EXACT top-level key match always wins first, dots and all. Only when
+    *field_name* is not itself a literal top-level key AND contains at least
+    one `.` does this walk the dotted path into nested dicts. This means:
+
+    - every pre-existing rule's plain (non-dotted) `fields` key resolves
+      exactly as it always did — a single top-level ``record[field_name]``
+      lookup, unchanged;
+    - the vanishingly rare top-level key that happens to itself contain a
+      literal `.` still resolves as that exact top-level key first, so this
+      change cannot silently reinterpret an existing rule's meaning;
+    - a genuinely nested field (absent at top level) resolves via the
+      dotted path, e.g. `"metadata.log_group"` -> `record["metadata"]["log_group"]`.
+
+    Returns `(False, None)` if the path cannot be walked (a missing key at
+    any level, or a non-dict value in the middle of the path) — the caller
+    treats that exactly like "field absent from record" always has: no
+    match, never a crash.
+    """
+    if field_name in record:
+        return True, record[field_name]
+    if "." in field_name:
+        current: Any = record
+        for part in field_name.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return False, None
+            current = current[part]
+        return True, current
+    return False, None
 
 
 def record_key_fingerprint(record: dict[str, Any]) -> str:
@@ -1099,21 +1147,97 @@ def default_shape_rules_ledger_path(wiki_root: Path) -> Path:
 
 
 def _append_jsonl_line(path: Path, line: str) -> None:
-    """Same append-only-JSONL discipline as
-    `corrections._append_jsonl_line` / `provenance._append_jsonl_line`: a
-    single small `O_APPEND` write is atomic on local filesystems."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-    try:
-        os.write(fd, line.encode("utf-8"))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    """Append one line to *path* durably (``O_APPEND`` + fsync), via
+    :func:`athenaeum.store.append_line_durable` — the single shared
+    implementation issue athenaeum#980 (S5) collapsed this module's copy onto
+    (design note §2.4 / §6.2)."""
+    append_line_durable(path, line.encode("utf-8"))
 
 
 def append_shape_rules_ledger(wiki_root: Path, record: dict[str, Any]) -> None:
     path = default_shape_rules_ledger_path(wiki_root)
     _append_jsonl_line(path, json.dumps(record, sort_keys=True) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Per-record disposition rows (issue athenaeum#975, athenaeum#905 prerequisite)
+# ---------------------------------------------------------------------------
+#
+# `_shape_rules_applied.jsonl` above is a per-`(rule, mode)` AGGREGATE: it
+# answers "how often did this rule fire", not "which record got what
+# treatment". This ledger is the per-record complement -- one row per
+# candidate the shape-rules pass evaluates, including the ones no rule
+# matched at all, so athenaeum#905's shape-frequency detector has a real per-record
+# data source (athenaeum#923: "everything is dispositioned and the
+# disposition is audited"). Same `_`-prefixed, wiki-root, append-only-JSONL
+# discipline as the aggregate above -- every corpus walker in this repo
+# skips `_`-prefixed files, so this file can never become a claim or enter
+# the embedded index.
+
+SHAPE_RULE_DISPOSITIONS_FILENAME = "_shape_rule_dispositions.jsonl"
+
+
+def default_shape_rule_dispositions_path(wiki_root: Path) -> Path:
+    return wiki_root / SHAPE_RULE_DISPOSITIONS_FILENAME
+
+
+def append_shape_rule_disposition_row(wiki_root: Path, row: dict[str, Any]) -> None:
+    path = default_shape_rule_dispositions_path(wiki_root)
+    _append_jsonl_line(path, json.dumps(row, sort_keys=True) + "\n")
+
+
+#: Dispositions the shape-rules pass -- the deterministic, no-LLM layer,
+#: tier 0 on the ladder in `docs/field-corrections.md` §2 -- actually
+#: resolved a record with. Everything else (no rule matched at all, a rule
+#: that explicitly deferred via `fallthrough`/`observed-fallthrough`, or a
+#: soft failure that degrades to fallthrough -- `transform-error`,
+#: `preserve-unconfigured`, `preserve-failed`) is tier `None`: "not handled
+#: here", deferred to the reasoning ladder (tier >=1). This pass genuinely
+#: does not know which reasoning tier will handle a deferred record, so
+#: `None` is the honest encoding rather than a guessed number.
+_TIER_0_DISPOSITIONS: frozenset[str] = frozenset(
+    {
+        "emit",
+        "observed-emit",
+        "drop",
+        "observed-drop",
+        "retain",
+        "observed-retain",
+        "preserve",
+        "observed-preserve",
+        "rollup",
+        "observed-rollup",
+    }
+)
+
+
+def _disposition_tier(disposition: str) -> int | None:
+    """Map a shape-rules disposition to its reasoning-ladder tier -- see
+    :data:`_TIER_0_DISPOSITIONS`."""
+    return 0 if disposition in _TIER_0_DISPOSITIONS else None
+
+
+def _shape_rule_disposition_row(
+    *, raw: RawFile, record: dict[str, Any], rule_id: str | None, disposition: str
+) -> dict[str, Any]:
+    """Build one `_shape_rule_dispositions.jsonl` row.
+
+    `key_fingerprint` is the record's top-level KEY SET fingerprint
+    (:func:`record_key_fingerprint`) -- never raw values, per athenaeum#975 AC2.
+    `source`/`source_ref` come from `RawFile.source`/`RawFile.ref`, both
+    already non-sensitive (a raw source directory name and a
+    `source/filename` ref) -- no raw record VALUE ever lands in a row.
+    """
+    return {
+        "schema_version": 1,
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": raw.source,
+        "source_ref": raw.ref,
+        "key_fingerprint": record_key_fingerprint(record),
+        "tier": _disposition_tier(disposition),
+        "rule_id": rule_id,
+        "disposition": disposition,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1194,6 +1318,13 @@ def run_shape_rule_phase(
     rule matched but a value expression failed to resolve — degrades to
     fallthrough, the original raw file is left untouched).
 
+    Issue athenaeum#975: alongside that per-`(rule, mode)` aggregate, this also
+    appends one PER-RECORD disposition row (:func:`append_shape_rule_disposition_row`,
+    `wiki_root/_shape_rule_dispositions.jsonl`) for every candidate this phase
+    evaluates -- including the ones no rule matched (`rule_id: null`,
+    `disposition: "no-match"`) -- unless `dry_run` is set, mirroring the
+    aggregate's own dry-run behaviour.
+
     Returns a summary dict: `rules_loaded`, `rules_skipped_malformed`,
     `files_evaluated`, `files_matched`, `dispositions` (disposition ->
     count across the whole run).
@@ -1232,10 +1363,29 @@ def run_shape_rule_phase(
     # tautology and could never catch a disposition that forgot to tally.
     counts_seen: dict[tuple[str, str], int] = {}
 
-    def _tally(rule_tag: str, mode: str, disposition: str) -> None:
+    def _tally(
+        rule_tag: str,
+        mode: str,
+        disposition: str,
+        *,
+        raw: RawFile,
+        record: dict[str, Any],
+    ) -> None:
         counts = tallies.setdefault((rule_tag, mode), {})
         counts[disposition] = counts.get(disposition, 0) + 1
         summary["dispositions"][disposition] = summary["dispositions"].get(disposition, 0) + 1
+        # Issue athenaeum#975: every disposition this loop reaches funnels through
+        # here except the `matched_rule is None` early-continue (handled
+        # separately below) -- so a per-record row is appended in exactly one
+        # place, structurally, rather than at each of the dispositions' many
+        # call sites.
+        if not dry_run:
+            append_shape_rule_disposition_row(
+                wiki_root,
+                _shape_rule_disposition_row(
+                    raw=raw, record=record, rule_id=rule_tag, disposition=disposition
+                ),
+            )
 
     evaluated = 0
     for raw in candidates:
@@ -1251,6 +1401,16 @@ def run_shape_rule_phase(
             (r for r in rules if r.match.matches(raw=raw, record=record, fmt=fmt)), None
         )
         if matched_rule is None:
+            # Issue athenaeum#975: the interesting shapes for athenaeum#905's detector are
+            # precisely the ones no rule claims -- so this candidate still gets
+            # a disposition row, just with no rule/tier to attribute it to.
+            if not dry_run:
+                append_shape_rule_disposition_row(
+                    wiki_root,
+                    _shape_rule_disposition_row(
+                        raw=raw, record=record, rule_id=None, disposition="no-match"
+                    ),
+                )
             continue
         summary["files_matched"] += 1
         rule_tag = matched_rule.qualified_name
@@ -1261,7 +1421,7 @@ def run_shape_rule_phase(
 
         if matched_rule.disposition == "fallthrough":
             disposition = "fallthrough" if is_live else "observed-fallthrough"
-            _tally(rule_tag, matched_rule.mode, disposition)
+            _tally(rule_tag, matched_rule.mode, disposition, raw=raw, record=record)
             # Nothing written -- the file is left exactly as discovery
             # found it, for the ordinary tiered ladder to process normally.
             continue
@@ -1271,10 +1431,10 @@ def run_shape_rule_phase(
         # so it stays recoverable from history.
         if matched_rule.disposition == "drop":
             if not is_live:
-                _tally(rule_tag, matched_rule.mode, "observed-drop")
+                _tally(rule_tag, matched_rule.mode, "observed-drop", raw=raw, record=record)
                 continue
             drop_raw_file(knowledge_root, raw.path, rule_tag=rule_tag)
-            _tally(rule_tag, matched_rule.mode, "drop")
+            _tally(rule_tag, matched_rule.mode, "drop", raw=raw, record=record)
             log.info(
                 "shape-rules: %s dropped %s as information-free "
                 "(recoverable from git history)",
@@ -1288,10 +1448,10 @@ def run_shape_rule_phase(
         # deleted and NOT compiled. Discovery skips it from the next run on.
         if matched_rule.disposition == "retain":
             if not is_live:
-                _tally(rule_tag, matched_rule.mode, "observed-retain")
+                _tally(rule_tag, matched_rule.mode, "observed-retain", raw=raw, record=record)
                 continue
             mark_exempt(knowledge_root, [raw.ref])
-            _tally(rule_tag, matched_rule.mode, "retain")
+            _tally(rule_tag, matched_rule.mode, "retain", raw=raw, record=record)
             log.info(
                 "shape-rules: %s retained %s as a preserved source document "
                 "(compiled-exempt; file left in place)",
@@ -1314,7 +1474,7 @@ def run_shape_rule_phase(
         # move is the mechanism; the manifest is not involved.
         if matched_rule.disposition == "preserve":
             if not is_live:
-                _tally(rule_tag, matched_rule.mode, "observed-preserve")
+                _tally(rule_tag, matched_rule.mode, "observed-preserve", raw=raw, record=record)
                 continue
             preserved_dir = resolve_preserved_log_dir(config)
             if preserved_dir is None:
@@ -1326,7 +1486,7 @@ def run_shape_rule_phase(
                     rule_tag,
                     raw.ref,
                 )
-                _tally(rule_tag, matched_rule.mode, "preserve-unconfigured")
+                _tally(rule_tag, matched_rule.mode, "preserve-unconfigured", raw=raw, record=record)
                 continue
             # Build the correction BEFORE moving: a transform that cannot
             # resolve must leave the raw file exactly where it was, so the
@@ -1347,7 +1507,7 @@ def run_shape_rule_phase(
                         raw.ref,
                         exc,
                     )
-                    _tally(rule_tag, matched_rule.mode, "transform-error")
+                    _tally(rule_tag, matched_rule.mode, "transform-error", raw=raw, record=record)
                     continue
             dest = preserve_raw_file(
                 knowledge_root,
@@ -1357,7 +1517,7 @@ def run_shape_rule_phase(
                 rule_tag=rule_tag,
             )
             if dest is None:
-                _tally(rule_tag, matched_rule.mode, "preserve-failed")
+                _tally(rule_tag, matched_rule.mode, "preserve-failed", raw=raw, record=record)
                 continue
             if corr_record is not None and corr_spec is not None:
                 # Point the fact at the artifact WITHOUT disturbing its
@@ -1388,7 +1548,7 @@ def run_shape_rule_phase(
                     submitter=f"shape-rule:{rule_tag}",
                     records=[corr_record],
                 )
-            _tally(rule_tag, matched_rule.mode, "preserve")
+            _tally(rule_tag, matched_rule.mode, "preserve", raw=raw, record=record)
             log.info(
                 "shape-rules: %s preserved %s as a log artifact at %s%s",
                 rule_tag,
@@ -1416,7 +1576,7 @@ def run_shape_rule_phase(
                     raw.ref,
                     exc,
                 )
-                _tally(rule_tag, matched_rule.mode, "transform-error")
+                _tally(rule_tag, matched_rule.mode, "transform-error", raw=raw, record=record)
                 continue
             rollup_groups.setdefault(
                 (rule_tag, matched_rule.mode, _group_key_repr(group_key)), []
@@ -1425,6 +1585,8 @@ def run_shape_rule_phase(
                 rule_tag,
                 matched_rule.mode,
                 "rollup" if is_live else "observed-rollup",
+                raw=raw,
+                record=record,
             )
             continue
 
@@ -1442,11 +1604,11 @@ def run_shape_rule_phase(
                 raw.ref,
                 exc,
             )
-            _tally(rule_tag, matched_rule.mode, "transform-error")
+            _tally(rule_tag, matched_rule.mode, "transform-error", raw=raw, record=record)
             continue
 
         if matched_rule.mode != "live" or dry_run:
-            _tally(rule_tag, matched_rule.mode, "observed-emit")
+            _tally(rule_tag, matched_rule.mode, "observed-emit", raw=raw, record=record)
             continue
 
         batch_path = write_correction_batch(
@@ -1456,7 +1618,7 @@ def run_shape_rule_phase(
             records=[corr_record],
         )
         retire_compiled_raw_file(knowledge_root, raw.path, rule_tag=rule_tag)
-        _tally(rule_tag, matched_rule.mode, "emit")
+        _tally(rule_tag, matched_rule.mode, "emit", raw=raw, record=record)
         log.info(
             "shape-rules: %s compiled %s into correction batch %s",
             rule_tag,

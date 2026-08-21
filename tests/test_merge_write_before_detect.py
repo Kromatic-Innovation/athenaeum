@@ -150,7 +150,7 @@ def test_first_write_precedes_detection_and_c4_rewrites_flag(
     root = _seed_root(tmp_path, n_clusters=1)
     seen: dict[str, object] = {}
 
-    def _fake_detect(members, client, *, config=None, usage=None):
+    def _fake_detect(members, client, *, config=None, usage=None, wiki_root=None):
         # At detection time the page must already be on disk AND unflagged —
         # written by the pre-C4 first-write pass.
         pages = sorted((root / "wiki").glob("auto-*.md"))
@@ -188,7 +188,7 @@ def test_prior_flag_is_cleared_when_cluster_no_longer_conflicts(
     root = _seed_root(tmp_path, n_clusters=1)
 
     # Run 1: force detection → the page is written flagged.
-    def _detect_true(members, client, *, config=None, usage=None):
+    def _detect_true(members, client, *, config=None, usage=None, wiki_root=None):
         return ContradictionResult(
             detected=True,
             conflict_type="factual",
@@ -221,7 +221,7 @@ def test_dry_run_writes_nothing_even_when_detection_flags(
 ) -> None:
     root = _seed_root(tmp_path, n_clusters=1)
 
-    def _detect_true(members, client, *, config=None, usage=None):
+    def _detect_true(members, client, *, config=None, usage=None, wiki_root=None):
         return ContradictionResult(
             detected=True,
             conflict_type="factual",

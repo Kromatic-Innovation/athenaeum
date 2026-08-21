@@ -2016,11 +2016,19 @@ def merge_clusters_to_wiki(
                 cluster_threshold=merge_cluster_threshold,
             )
             if _suppress is not None:
+                # Issue athenaeum#1085: n_sources is recorded as its own structured
+                # field, UNCONDITIONALLY — not parsed out of `_suppress`, which
+                # only embeds the source count when the size-cap gate happens
+                # to be the one that fired (gate ordering is pinned by
+                # TestGateOrdering, so a cohesion/confidence/chain suppression
+                # previously recorded no size at all).
                 log.info(
                     "resolutions: SUPPRESSED degenerate merge proposal for "
-                    "cluster %s (%s); not written to _pending_merges.md",
+                    "cluster %s (%s); n_sources=%d; not written to "
+                    "_pending_merges.md",
                     entry.cluster_id,
                     _suppress,
+                    len(member_paths),
                 )
                 return
             # Issue athenaeum#433: type-compatibility precheck. A cluster spanning >1
@@ -2335,7 +2343,9 @@ def merge_clusters_to_wiki(
         # can now differ.
         if usage is not None and resolve_client is not None:
             usage.api_calls += 1
-        return propose_resolution(result, members, resolve_client, usage=usage)
+        return propose_resolution(
+            result, members, resolve_client, usage=usage, wiki_root=wiki_root
+        )
 
     # Issue athenaeum#462: FIRST WRITE — persist the deterministic C3 merge output to
     # disk BEFORE C4 detection runs. Until this change the page write loop sat
@@ -2535,7 +2545,7 @@ def merge_clusters_to_wiki(
             if usage is not None and client is not None:
                 usage.api_calls += 1
             result = detect_contradictions(
-                filtered, client, config=resolved_config, usage=usage
+                filtered, client, config=resolved_config, usage=usage, wiki_root=wiki_root
             )
             # Issue athenaeum#569 (H6): capture the detector's transient give-up BEFORE
             # any downgrade reassigns `result`, so a cluster whose detection was
@@ -2708,7 +2718,7 @@ def merge_clusters_to_wiki(
             if usage is not None and client is not None:
                 usage.api_calls += 1
             result = detect_contradictions(
-                pair, client, config=resolved_config, usage=usage
+                pair, client, config=resolved_config, usage=usage, wiki_root=wiki_root
             )
             if result.detected:
                 pairs_added_via_similarity += 1

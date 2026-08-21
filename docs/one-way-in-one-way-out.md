@@ -126,13 +126,14 @@ item 4 of §5's checklist taken up rather than worked around.
 
 `pii.read_person` / `read_people` (athenaeum#864, athenaeum#877) — and the
 `read_person` MCP tool and `athenaeum query person --uid ... [--include-contact]`
-CLI command — are **deprecated wrappers** (athenaeum#887), kept for backward
-compatibility and not the sanctioned entry point any more. They keep working
-identically: the Python functions emit a `DeprecationWarning`, the MCP tool logs
-a one-time notice, and the CLI command prints one to stderr, but no behaviour or
-output changed. `apollo-enrich`'s weekly job calls `read_people` today, which is
-precisely why they are deprecated rather than deleted — removal is athenaeum#888,
-gated on a real deprecation window and on known consumers having migrated.
+CLI command — were **deprecated wrappers** (athenaeum#887) over the same read,
+kept for backward compatibility while `apollo-enrich`'s weekly job still called
+`read_people` directly. They have since been **removed** (athenaeum#888), once
+`apollo-enrich` and every other known consumer migrated to the generalized
+`pii.read_entity` / `read_entities` path above (or `recall(with_pii=True)`).
+A caller still on the person-shaped names gets an `ImportError` /
+`AttributeError` / unknown-command error rather than a deprecation warning —
+there is no migration window left to rely on.
 
 ## 4. The invariant is not authorization
 
@@ -229,13 +230,11 @@ If you are writing a client against athenaeum:
 
    The person-shaped entry points — the `read_person` MCP tool, `athenaeum
    query person --uid ... [--include-contact]`, and `pii.read_person` /
-   `read_people` (athenaeum#864, athenaeum#877) — are **deprecated wrappers**
-   over that same read (athenaeum#887). They keep working identically, and each
-   surface now says so: a `DeprecationWarning` from the Python functions, a
-   one-time log line from the MCP tool, a stderr notice from the CLI command.
-   **A new integration should use the generic path**, which answers for every
-   entity class rather than one; an existing one has a deprecation window, not
-   a broken call (removal is athenaeum#888).
+   `read_people` (athenaeum#864, athenaeum#877) — were **deprecated wrappers**
+   over that same read (athenaeum#887) and have since been **removed**
+   (athenaeum#888), once every known consumer migrated to the generic path.
+   **Use the generic path** — it is now the only path, and answers for every
+   entity class rather than one.
 
    Whichever you use: do not resolve an excluded surface yourself, and do not
    treat a missing value as "no value" unless the response says so — the

@@ -901,6 +901,7 @@ def tier2_classify(
         owner=owner,
         stats=stats,
         stop_reason=first_stop_reason,
+        wiki_root=wiki_root,
     )
     first_truncated = stats.truncated > truncated_before
     first_degraded = stats.degraded > degraded_before
@@ -973,6 +974,7 @@ def tier2_classify(
             owner=owner,
             stats=retry_stats,
             stop_reason=reported_stop_reason(retry_response, _capabilities(config)),
+            wiki_root=wiki_root,
         )
         if not retry_stats.degraded and not retry_stats.truncated:
             # Recovered — clear the degrade recorded on the first attempt so
@@ -1047,6 +1049,8 @@ def parse_tier2_entities(
     owner: dict[str, Any] | None = None,
     stats: Tier2ParseStats | None = None,
     stop_reason: str | None = None,
+    *,
+    wiki_root: Path | None = None,
 ) -> list[ClassifiedEntity]:
     """Parse a Tier-2 classification response into entities.
 
@@ -1148,7 +1152,9 @@ def parse_tier2_entities(
     # import keeps pydantic off ``import tiers`` (the recall hot-path graph).
     from athenaeum.llm_schemas import observe_tier2_classify
 
-    observe_tier2_classify(items, call_site="tiers.parse_tier2_entities")
+    observe_tier2_classify(
+        items, call_site="tiers.parse_tier2_entities", wiki_root=wiki_root
+    )
 
     results: list[ClassifiedEntity] = []
     for item in items:
@@ -1271,6 +1277,7 @@ def tier2_reclassify_larger_budget(
         owner=owner,
         stats=retry_stats,
         stop_reason=reported_stop_reason(response, caps),
+        wiki_root=wiki_root,
     )
     return entities, retry_stats
 
@@ -1840,6 +1847,7 @@ def parse_merge_ops_response(
     existing_body: str,
     *,
     stop_reason: str | None = None,
+    wiki_root: Path | None = None,
 ) -> tuple[str | None, EscalationItem | None, bool]:
     """Parse a patch-mode merge response and apply it to ``existing_body``.
 
@@ -1931,7 +1939,9 @@ def parse_merge_ops_response(
             # keeps pydantic off ``import tiers`` (the recall hot-path graph).
             from athenaeum.llm_schemas import observe_tier3_merge_ops
 
-            observe_tier3_merge_ops(ops, call_site="tiers.parse_merge_ops_response")
+            observe_tier3_merge_ops(
+                ops, call_site="tiers.parse_merge_ops_response", wiki_root=wiki_root
+            )
             try:
                 return apply_merge_ops(existing_body, ops), None, False
             except MergeOpsError as exc:
@@ -1974,6 +1984,8 @@ def tier3_merge(
     client: LLMBackend,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
+    *,
+    wiki_root: Path | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
     """Use a capable LLM to merge observations into an existing entity page.
 
@@ -2010,6 +2022,7 @@ def tier3_merge(
         # so the "truncated -> fall back to full echo" branch never fires on a
         # spurious value — the fallback would itself be a no-op there.
         stop_reason=reported_stop_reason(response, _capabilities(config)),
+        wiki_root=wiki_root,
     )
     if not needs_fallback:
         return body, escalation
@@ -2247,6 +2260,7 @@ def tier3_derive_actions(
                     client,
                     usage=usage,
                     config=config,
+                    wiki_root=wiki_root,
                 )
                 if esc:
                     escalations.append(esc)
@@ -3414,7 +3428,13 @@ def reresolve_open_questions(
         # propose_resolution via the threaded ``usage`` (athenaeum#239).
         if usage is not None and client is not None:
             usage.api_calls += 1
-        proposal = propose_resolution(result, members, client, usage=usage)
+        # Issue athenaeum#980 AC4: pending_path is <wiki_root>/_pending_questions.md
+        # (module contract shared with athenaeum.answers), so its parent IS
+        # wiki_root — no new parameter needed to resolve the ledger behind
+        # the seam.
+        proposal = propose_resolution(
+            result, members, client, usage=usage, wiki_root=pending_path.parent
+        )
 
         action = getattr(proposal, "action", None)
         confidence = getattr(proposal, "confidence", 0.0)
