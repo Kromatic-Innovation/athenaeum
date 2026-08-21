@@ -4,11 +4,20 @@
 The anti-recurrence criterion of issue athenaeum#960: a check that reports the
 two-surface difference for ``do_not_email`` (wiki page frontmatter vs. the
 excluded-record surface) and, unlike ``bounce-divergence`` (issue
-athenaeum#853), **exits non-zero on ANY divergence** — the tolerated residual
-for this field is zero, not just "the surfaces were readable". That fixes the
-exact defect athenaeum#960's issue names in ``bounce-divergence``: a check
-whose exit code never reflects the number it reports is indistinguishable
-from no check at all.
+athenaeum#853), **exits non-zero on a real divergence** — the tolerated
+residual for this field is zero, not just "the surfaces were readable". That
+fixes the exact defect athenaeum#960's issue names in ``bounce-divergence``: a
+check whose exit code never reflects the number it reports is
+indistinguishable from no check at all.
+
+**Only one direction is a real divergence (issue athenaeum#1039).** The wiki
+page is the sole authoring surface (athenaeum#960's Out-of-scope forbids any
+backfill onto the excluded surface), so ``marked_on_wiki_not_excluded`` is
+the design's ONLY legal steady state, not a defect — see
+:func:`athenaeum.pii.do_not_email_state`'s precedence note. Only the excluded
+surface newly carrying the field (``marked_on_excluded_not_wiki``) is the
+divergence this check exists to catch. Before athenaeum#1039, this command
+exited non-zero on EITHER direction, alerting on every legal store state.
 
 Same reasoning as ``athenaeum bounce-divergence`` for why this is a CLI: an
 **operator** check run against a store — including a private store this
@@ -26,11 +35,12 @@ the existing ``athenaeum run`` / ``athenaeum ingest`` entries, and treat a
 non-zero exit as an alert (the residual is zero, so any exit above 0 is
 actionable, not merely informational).
 
-Exit codes: ``0`` — both surfaces were read and agree;
+Exit codes: ``0`` — both surfaces were read and either agree, or the wiki
+carries marks the excluded surface does not (the legal steady state);
 :data:`EXIT_SURFACE_UNREADABLE` (2) — at least one surface could not be
 read, so the difference is not a divergence measurement;
-:data:`EXIT_DIVERGED` (3) — both surfaces were read and they diverge. Code 1
-stays the generic error.
+:data:`EXIT_DIVERGED` (3) — both surfaces were read and the excluded surface
+newly carries a mark the wiki does not. Code 1 stays the generic error.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` — this
@@ -52,9 +62,10 @@ from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
 #: an agreement" (0) and from a genuine divergence (3).
 EXIT_SURFACE_UNREADABLE = 2
 
-#: Exit code when both surfaces were read and they diverge at all. The
-#: tolerated residual for `do_not_email` is zero (issue athenaeum#960), so —
-#: unlike `bounce-divergence` — this is a distinct non-zero code, not folded
+#: Exit code when both surfaces were read and the excluded surface newly
+#: carries a `do_not_email` mark the wiki does not (issue athenaeum#1039) —
+#: the only direction athenaeum#960's design treats as a real divergence.
+#: Unlike `bounce-divergence`, this is a distinct non-zero code, not folded
 #: into a bare "report was produced" 0.
 EXIT_DIVERGED = 3
 
@@ -82,7 +93,14 @@ def cmd_do_not_email_divergence(args: argparse.Namespace) -> int:
 
     if not report.complete:
         return EXIT_SURFACE_UNREADABLE
-    if report.diverged:
+    # Narrowed to the excluded-surface-newly-carrying-the-field direction
+    # (issue athenaeum#1039): `marked_on_wiki_not_excluded` is the design's
+    # only legal steady state (athenaeum#960 forbids backfill onto the
+    # excluded surface — see athenaeum.pii.do_not_email_state's precedence
+    # note), so it must not alert. This mirrors
+    # athenaeum.surface_divergence's registered `do_not_email` predicate,
+    # which had the same both-directions bug before athenaeum#1039.
+    if report.marked_on_excluded_not_wiki:
         return EXIT_DIVERGED
     return 0
 
