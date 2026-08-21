@@ -28,6 +28,7 @@ from athenaeum.store import (
     OPERATIONAL_SCOPES,
     PERSISTENCE_CLASSES,
     Lease,
+    LeaseHeldError,
     ObjectMeta,
     Record,
     Store,
@@ -46,27 +47,38 @@ class _Object:
 class InMemoryStore:
     """A ``dict``-backed :class:`~athenaeum.store.Store` fake — no filesystem at all.
 
-    Declares the same S1 capability profile as
-    :class:`~athenaeum.store.FilesystemStore` (``versioned=False``,
-    ``leases=False`` — both deferred to S3/S4) so the conformance suite
-    exercises identical behavior on both implementations. ``local_path_for``
-    is ``None`` (design note §6.2 D2: non-``None`` only on the filesystem
+    Declares the same capability profile as
+    :class:`~athenaeum.store.FilesystemStore` for everything but ``versioned``
+    (``False`` — no git tree to snapshot) so the conformance suite exercises
+    identical behavior on both implementations. ``local_path_for`` is
+    ``None`` (design note §6.2 D2: non-``None`` only on the filesystem
     adapter). Version tokens are a content hash rather than
     :class:`~athenaeum.store.FilesystemStore`'s ``mtime_ns:size`` — both are
     valid per D3 ("opaque; equality only"), and using a different scheme here
     is a deliberate cross-check that no test or caller accidentally parses a
     version token instead of comparing it.
+
+    ``lease`` (issue athenaeum#979, S4) is real here too, but — deliberately —
+    NOT implemented the same way as :class:`~athenaeum.store.FilesystemStore`'s
+    ``flock``-backed one. There is no kernel to release a mutex when a holder
+    dies, so ``ttl_seconds`` does genuine work: a lease name maps to
+    ``(token, expiry)`` in :attr:`_leases`, and it is available again once
+    ``time.monotonic()`` passes ``expiry`` — the design note's other-adapter
+    half of "mapping onto flock for the filesystem adapter and onto a lease
+    row / conditional put elsewhere" (§4.6). This is the non-filesystem lease
+    path ``tests/test_store_conformance.py``'s expiry test exercises.
     """
 
     def __init__(self) -> None:
         self._objects: dict[StoreKey, _Object] = {}
+        self._leases: dict[str, tuple[str, float]] = {}
         self.capabilities = StoreCapabilities(
             classes=PERSISTENCE_CLASSES,
             operational_scopes=OPERATIONAL_SCOPES,
             versioned=False,
             purgeable=True,
             compare_and_swap=True,
-            leases=False,
+            leases=True,
             append=True,
             bulk_list=True,
             bulk_read=True,
@@ -157,15 +169,61 @@ class InMemoryStore:
         return None
 
     def lease(self, name: str, ttl_seconds: float) -> AbstractContextManager[Lease]:
-        raise NotImplementedError(
-            "InMemoryStore.lease() is not implemented until S4 (athenaeum#979); "
-            "capabilities.leases is False"
-        )
+        return _InMemoryLease(self, name, ttl_seconds)
 
     def bootstrap(self) -> None:
         """No directory concept to create; matches
         :meth:`~athenaeum.store.FilesystemStore.bootstrap`'s non-destructive
         ``mkdir(exist_ok=True)`` by doing nothing to existing state."""
+
+
+class _InMemoryLease:
+    """The ``AbstractContextManager[Lease]`` :meth:`InMemoryStore.lease` returns.
+
+    Genuinely TTL-driven (unlike :class:`athenaeum.store.FileLease`, which
+    ignores ``ttl_seconds`` because the kernel already reclaims a dead
+    holder's ``flock`` — see that class's docstring): a name is unavailable
+    only until ``time.monotonic()`` passes the expiry this instance set on
+    acquire, so a holder that stops calling :meth:`heartbeat` (or crashes,
+    with nothing to release it) is naturally reclaimable once its TTL lapses
+    — the "lease row" half of design note §4.6, as opposed to the "flock"
+    half.
+    """
+
+    def __init__(self, store: InMemoryStore, name: str, ttl_seconds: float) -> None:
+        self._store = store
+        self._name = name
+        self._ttl = ttl_seconds
+        self._token: str | None = None
+
+    def __enter__(self) -> Lease:
+        now = time.monotonic()
+        held = self._store._leases.get(self._name)
+        if held is not None and held[1] > now:
+            raise LeaseHeldError(
+                self._name, {"expires_in_seconds": f"{held[1] - now:.3f}"}
+            )
+        token = f"{now:.9f}"
+        self._store._leases[self._name] = (token, now + self._ttl)
+        self._token = token
+        return Lease(name=self._name, token=token)
+
+    def heartbeat(self) -> None:
+        """Renew: push this lease's expiry another ``ttl_seconds`` out. No-op
+        if not currently held (mirrors ``FileLease.heartbeat``)."""
+        if self._token is None:
+            return
+        current = self._store._leases.get(self._name)
+        if current is not None and current[0] == self._token:
+            self._store._leases[self._name] = (self._token, time.monotonic() + self._ttl)
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self._token is None:
+            return
+        current = self._store._leases.get(self._name)
+        if current is not None and current[0] == self._token:
+            del self._store._leases[self._name]
+        self._token = None
 
 
 class NoRecoveryStore(InMemoryStore):
