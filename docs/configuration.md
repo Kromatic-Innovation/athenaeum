@@ -966,6 +966,49 @@ the ledger opts back in explicitly (see `tests/test_llm_schemas.py`'s
 wins over the env var per `resolve_cache_dir`'s precedence) and/or
 `monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1")`.
 
+### Per-contract strictness decision (M17 phase 2a, athenaeum#1035)
+
+Phase 1 above validates every in-scope contract against a uniform
+`extra="allow"` posture and never changes pipeline behavior. athenaeum#1035 (split
+from athenaeum#608) decides a per-contract posture for the two contracts with a
+measured, representative window — `tiers.tier2` and `tiers.tier3-merge` —
+recorded in code as `athenaeum.llm_schemas.STRICT_CONTRACTS`. The other four
+contracts (`query_topics`, `claim_kind`, `contradictions`, `resolutions`)
+remain phase 1 observe-only; the three C4-downstream ones are still starved of
+a representative sample and stay on athenaeum#608.
+
+Window measured: `~/.cache/athenaeum/_llm_schema_observations.jsonl`,
+2026-08-05T13:12Z to 2026-08-20T10:58Z, 3,634 records, 0 unparseable:
+
+| contract | records | mismatches | rate | mismatch classes |
+|---|---:|---:|---:|---|
+| `tiers.tier3-merge` | 2,961 | 4 | 0.135% | extra-keys 3 (`[].text2`, `[].append_section` x2), missing-required 1 (`0.op: Field required`) |
+| `tiers.tier2` | 150 | 0 | 0% | — |
+
+Decision, applying athenaeum#608's framework ("only missing-required mismatches
+justify rejection; extra keys are a different signal"):
+
+- **`tiers.tier2`** — 0% mismatch of any class at n=150: `Tier2Entity` tightens
+  from `extra="allow"` to `extra="forbid"`. Forbidding costs nothing observed
+  today and gives real protection against a silently-added field going
+  unnoticed. `name` stays the only required field.
+- **`tiers.tier3-merge`** — the two extra-key shapes observed (`[].text2`,
+  `[].append_section`) are real, repeated traffic, not sampling noise — the
+  framework's "different signal", not grounds for rejection. `MergeOp` stays
+  `extra="allow"`. The single missing-required hit (`0.op: Field required`)
+  confirms `op` stays required; that class is already enforced downstream —
+  `apply_merge_ops` raises `MergeOpsError` on a missing/unrecognized `op`
+  kind, and `parse_merge_ops_response` turns that into the guaranteed
+  no-worse-than-status-quo full-echo fallback.
+
+This is a schema-shape decision only: `observe()` for these two contracts
+still never raises to its caller and never gates the pipeline — the tightened
+`tiers.tier2` schema changes how a *future* mismatch is classified in the
+observation log, not whether today's response is accepted. No new
+`athenaeum.yaml` key or env var is introduced; the decision is a hardcoded,
+documented constant (`STRICT_CONTRACTS`), matching how `INSTRUMENTED_CONTRACTS`
+above is expressed.
+
 ## Contradiction detection and resolver
 
 Detection knobs live under the `contradiction:` yaml block; resolver behavior
