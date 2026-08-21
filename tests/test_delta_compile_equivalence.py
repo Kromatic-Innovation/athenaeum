@@ -428,6 +428,7 @@ def _break_bridge(root: Path) -> set[Path]:
     return {p}
 
 
+@pytest.mark.embedding
 def test_chain_transitive_repartition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
