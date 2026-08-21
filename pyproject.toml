@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "athenaeum"
-version = "0.19.17"
+version = "0.19.18"
 description = "Open source knowledge management pipeline — append-only intake, tiered compilation, configurable schemas"
 readme = "README.md"
 license = "Apache-2.0"
@@ -54,6 +54,13 @@ dev = [
     "pytest-cov>=5.0",
     "ruff==0.16.0",
     "fastmcp>=2.0.0,<4.0",
+    # athenaeum#1066: emits `::error file=...,line=...::` workflow commands for
+    # each failing test under `GITHUB_ACTIONS=true`, which GitHub turns into
+    # check-run annotations — readable via `gh api
+    # repos/{owner}/{repo}/check-runs/{id}/annotations` even from a lane that
+    # cannot reach Actions job logs. Purely additive: a no-op outside GitHub
+    # Actions (auto-detects the env var), so it changes no local test output.
+    "pytest-github-actions-annotate-failures>=0.2.0",
     # `build` + `hatchling` let tests/test_skill_packaging.py build the wheel
     # via `python -m build --no-isolation` and assert the bundled skills/
     # directory is present in the BUILT artifact (issue athenaeum#419) — the acceptance
