@@ -548,6 +548,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tripping the bound after it is quarantined out of the discovery set, so a
   chronically over-bound file is still never retried identically forever.
 
+### Removed
+
+- **`pii.read_person` / `pii.read_people`, the `read_person` MCP tool, and the
+  `athenaeum query person` CLI command (athenaeum#888).** Deprecated in
+  athenaeum#887 once the generalized `recall(with_pii=True)` path
+  (athenaeum#885/#886) became the sanctioned entry point; removed now that
+  every known consumer has migrated. Use `pii.read_entity` / `read_entities`
+  (or `recall(with_pii=True)` when searching rather than resolving a uid you
+  already hold) instead — both answer for any entity class, not only
+  persons. The `PersonRead = EntityRead` back-compat alias (added in
+  athenaeum#883) is removed alongside them, having no remaining referrers.
+  The `athenaeum query entity` / `read_entity` generalized surfaces this
+  replaces are unaffected, as is the unrelated `athenaeum query people`
+  command (filter/list, not a single-uid read).
+
 ## [0.19.0] - 2026-08-15
 
 _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never shipped to PyPI; the last published release was v0.18.1._
