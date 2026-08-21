@@ -31,6 +31,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   make a clean wiki look dirty, destroying the wiki gate's existing
   meaning. See `docs/sensitivity-value-routing.md` §5 for the updated
   disposition note.
+- **Narrowed the `do_not_email` surface-divergence predicate to the direction
+  the ratified design actually forbids (athenaeum#1039, holds athenaeum#1038).**
+  Both `athenaeum surface-divergence --field do_not_email` and the standalone
+  `athenaeum do-not-email-divergence` command exited non-zero (`EXIT_DIVERGED`)
+  on EITHER direction of disagreement between the wiki and excluded surfaces —
+  but athenaeum#960's Out-of-scope explicitly rejects "any backfill,
+  migration, or dual-write of `do_not_email` marks onto the excluded
+  surface", making the wiki page the sole authoring surface. That means
+  `marked_on_wiki_not_excluded` is the design's ONLY legal steady state, not
+  a divergence, and the check alerted on every legal store state (observed
+  live 2026-08-20: 4 wiki marks / 0 excluded records → `EXIT_DIVERGED`).
+  Both entry points now alert only on `marked_on_excluded_not_wiki` — the
+  excluded surface newly carrying the field, the direction
+  `athenaeum.pii.do_not_email_state`'s precedence note names as this guard's
+  actual job. The `bounced` field's predicate is unchanged; its
+  `marked_not_on_wiki` direction remains a real signal.
 
 - **Aligned code-side entity-type registry mirrors with `_schema/types.md`
   and gated the `corrections.py` write path (athenaeum#971, follow-up to
@@ -53,6 +69,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wrong bucket instead of preserving it for correct reclassification).
 ### Added
 
+- **`sensitivity.routing` config resolver (athenaeum#1022, slice 1/4 of
+  athenaeum#949's design note).** New `resolve_sensitivity_routing` in
+  `src/athenaeum/config.py`: resolves `{"enabled": bool, "classes":
+  {<name>: {"action": "route"|"off"}}}` from `sensitivity.routing.*` yaml,
+  `ATHENAEUM_SENSITIVITY_ROUTING_ENABLED` env, or a dark-by-default `false`
+  (`env > yaml > default`, mirroring `resolve_screening`'s
+  `ATHENAEUM_SCREEN_MEDICAL` precedent). A malformed `enabled` value or an
+  unknown per-class `action` raises the new `SensitivityRoutingConfigError`.
+  A separate axis from athenaeum#910's own `sensitivity.classes.*` — see
+  `docs/configuration.md` → "Sensitivity routing". **Behaviour-free**:
+  nothing reads this resolver yet; the routing/redaction mechanism, the
+  read path, and the librarian wiring are follow-on slices
+  (athenaeum#1023-athenaeum#1025).
 - **Dimension registry + kernel dimensions (athenaeum#714).** Root of the
   memory-model v6 dimension chain (child of epic athenaeum#709; athenaeum#715,
   athenaeum#716, athenaeum#719 all depend on this). New `src/athenaeum/dimensions.py`:

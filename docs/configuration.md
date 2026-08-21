@@ -326,7 +326,7 @@ athenaeum surface-divergence --field do_not_email --path ~/knowledge
 | Field | Registered by | Tolerated residual |
 |---|---|---|
 | `bounced` | issue athenaeum#853 | Wiki-surface entries with no pii mark are TOLERATED — the documented evidence-class asymmetry, [bounce-surface-convergence.md](bounce-surface-convergence.md). Pii marks with no wiki entry are NOT tolerated (zero). |
-| `do_not_email` | issue athenaeum#960 | Zero, in either direction — one operator-directed fact with one meaning. |
+| `do_not_email` | issue athenaeum#960 | The excluded surface newly carrying the field (`marked_on_excluded_not_wiki`) is NOT tolerated (zero). The wiki carrying a mark the excluded surface does not (`marked_on_wiki_not_excluded`) is the design's only legal steady state and is TOLERATED — the wiki page is the sole authoring surface; athenaeum#960's design forbids backfilling marks onto the excluded surface (narrowed by athenaeum#1039, which had alerted on this legal state). |
 
 Exit codes (shared with `bounce-divergence` / `do-not-email-divergence`):
 `0` clean (or `--report-only`, which reports and never fails on divergence —
@@ -1141,6 +1141,27 @@ build time, never a silent fallback:
 **Example `athenaeum.yaml`: unchanged.** The defaults need no config — a
 deployment with no `sensitivity:` block behaves exactly as it does today.
 The example at the end of this file is not amended for this section.
+
+## Sensitivity routing (athenaeum#949, slice 1/4 — config only)
+
+The routing config surface specified in
+[`docs/sensitivity-value-routing.md`](sensitivity-value-routing.md) §8 — a
+deliberately separate axis from the "Sensitivity classes" section above.
+That section defines *which classes exist*; this one will decide *whether a
+matched class gets intercepted at intake*, so a class can be defined without
+being routed. **This slice adds no behavior on its own** —
+`resolve_sensitivity_routing` exists in `config.py`, but nothing reads it
+yet. The routing/redaction mechanism, the read path, and the librarian
+wiring are follow-on slices (athenaeum#1023-athenaeum#1025).
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Routing switch | `ATHENAEUM_SENSITIVITY_ROUTING_ENABLED` | `sensitivity.routing.enabled` | `false` | Global on/off for the routing stage. `false` (default) is dark by design — byte-identical to pre-athenaeum#949 behavior. **Fails loudly** — a yaml value that isn't a boolean, or an env value that isn't `true`/`false` (case-insensitive), raises `SensitivityRoutingConfigError` rather than silently falling back. |
+| Per-class action | — | `sensitivity.routing.classes.<name>.action` | `route` when the class block is present but `action` is unset | Per-class override once routing is globally enabled: `route` or `off`. Defining a class under `sensitivity.routing.classes` and turning routing on is read as "protect it" unless the operator explicitly opts the class out. An unknown action raises `SensitivityRoutingConfigError`. |
+
+**Example `athenaeum.yaml`: unchanged.** The defaults need no config — a
+deployment with no `sensitivity.routing` block behaves exactly as it does
+today. The example at the end of this file is not amended for this section.
 
 ## Authority manifest (athenaeum#426)
 

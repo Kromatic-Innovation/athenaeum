@@ -2660,6 +2660,105 @@ def resolve_sensitivity_classes(config: dict[str, Any] | None) -> dict[str, dict
     return classes
 
 
+VALID_SENSITIVITY_ROUTING_ACTIONS = ("route", "off")
+
+
+class SensitivityRoutingConfigError(ValueError):
+    """Raised when the ``sensitivity.routing`` config block is invalid.
+
+    Mirrors :class:`athenaeum.screening.ScreeningConfigError` /
+    :class:`athenaeum.storage.StorageConfigError` /
+    :class:`athenaeum.sensitivity.SensitivityConfigError`: loud by design. A
+    malformed ``enabled`` flag or an unknown per-class ``action`` must never
+    silently fall back to a default — that could route (or fail to route) a
+    sensitivity class the operator did not intend.
+    """
+
+
+def resolve_sensitivity_routing(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Resolve the ``sensitivity.routing`` config surface (athenaeum#949 design note §8).
+
+    Slice 1/4 of athenaeum#949's design note (`docs/sensitivity-value-routing.md`).
+
+    Returns ``{"enabled": bool, "classes": {<name>: {"action": "route"|"off"}}}``.
+    A separate axis from :func:`resolve_sensitivity_classes` (athenaeum#910's
+    own ``sensitivity.classes.*`` — the *definition* of a class): this block
+    decides whether a matched class gets intercepted at intake, so a class
+    can be defined without being routed. This slice adds no behavior on its
+    own — nothing reads this resolver yet (issue athenaeum#1022; see
+    athenaeum#1023-athenaeum#1025 for the slices that do).
+
+    Precedence per the module convention (env > yaml > default, no seed in
+    ``_DEFAULTS`` so the code default stays reachable):
+    ``ATHENAEUM_SENSITIVITY_ROUTING_ENABLED`` env (``true``/``false``,
+    case-insensitive) > ``sensitivity.routing.enabled`` yaml > ``False``
+    (dark by default — the whole stage is a no-op, byte-identical to
+    pre-athenaeum#949 behavior, until an operator opts in).
+
+    Each entry under ``sensitivity.routing.classes.<name>`` may set
+    ``action`` to ``"route"`` or ``"off"``; when a class block is present but
+    ``action`` is unset, it defaults to ``"route"`` (defining a class and
+    turning routing on is read as "protect it" unless the operator
+    explicitly opts the class out).
+
+    Raises :class:`SensitivityRoutingConfigError` on a malformed ``enabled``
+    value (yaml value that isn't a bool, or an env value that isn't
+    ``true``/``false``) or an unknown per-class ``action`` — fail loud, no
+    silent fallback, matching :class:`athenaeum.screening.ScreeningConfigError`
+    / :class:`athenaeum.storage.StorageConfigError`'s existing posture.
+    """
+    enabled = False
+    classes: dict[str, dict[str, str]] = {}
+
+    if isinstance(config, dict):
+        sensitivity_cfg = config.get("sensitivity")
+        if isinstance(sensitivity_cfg, dict):
+            routing_cfg = sensitivity_cfg.get("routing")
+            if isinstance(routing_cfg, dict):
+                raw_enabled = routing_cfg.get("enabled")
+                if isinstance(raw_enabled, bool):
+                    enabled = raw_enabled
+                elif raw_enabled is not None:
+                    raise SensitivityRoutingConfigError(
+                        f"sensitivity.routing.enabled={raw_enabled!r} is "
+                        "invalid; expected a boolean."
+                    )
+
+                raw_classes = routing_cfg.get("classes")
+                if isinstance(raw_classes, dict):
+                    for name, definition in raw_classes.items():
+                        if not isinstance(name, str) or not name.strip():
+                            continue
+                        class_name = name.strip()
+                        action = "route"
+                        if isinstance(definition, dict):
+                            raw_action = definition.get("action")
+                            if isinstance(raw_action, str) and raw_action.strip():
+                                action = raw_action.strip().lower()
+                        if action not in VALID_SENSITIVITY_ROUTING_ACTIONS:
+                            raise SensitivityRoutingConfigError(
+                                f"sensitivity.routing.classes.{class_name}."
+                                f"action={action!r} is invalid; expected one "
+                                f"of {VALID_SENSITIVITY_ROUTING_ACTIONS}."
+                            )
+                        classes[class_name] = {"action": action}
+
+    env = os.environ.get("ATHENAEUM_SENSITIVITY_ROUTING_ENABLED")
+    if env is not None and env.strip():
+        env_value = env.strip().lower()
+        if env_value == "true":
+            enabled = True
+        elif env_value == "false":
+            enabled = False
+        else:
+            raise SensitivityRoutingConfigError(
+                f"ATHENAEUM_SENSITIVITY_ROUTING_ENABLED={env!r} is invalid; "
+                "expected 'true' or 'false'."
+            )
+
+    return {"enabled": enabled, "classes": classes}
+
+
 def resolve_excluded_read_mapping(config: dict[str, Any] | None) -> dict[str, str]:
     """Resolve ``storage.excluded_read_mapping`` — page ``type:`` → surface class (athenaeum#885).
 
