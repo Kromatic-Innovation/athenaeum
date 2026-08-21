@@ -646,7 +646,7 @@ class TestTier3Join:
 
 class TestEndToEndWithShapeRulePhase:
     def test_real_no_match_rows_feed_the_detector(self, tmp_path: Path) -> None:
-        # An unrelated live rule keeps `rules` non-empty (mirrors #975's own
+        # An unrelated live rule keeps `rules` non-empty (mirrors athenaeum#975's own
         # worked test) so the phase actually runs; it matches nothing here,
         # so every candidate falls through as "no-match" (tier: null).
         rules_dir = tmp_path / "rules"
