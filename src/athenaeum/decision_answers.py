@@ -43,13 +43,15 @@ ingest-answers`` tick (:mod:`athenaeum._cmd_pending`), not a second CLI
 command — that command already run-locks the pending-sidecar pass this
 belongs in.
 
-The ``proposed-rule`` decision type is REGISTERED (a conformant answer file
-schema-round-trips) but has no store: athenaeum#905 (open, blocked by
-athenaeum#901/athenaeum#903) owns designing the rule-proposal store, schema,
-and accept/reject semantics.
-Applying a ``proposed-rule`` answer here always fails closed — a structured,
-logged outcome, zero state mutation — rather than inventing that product
-decision in this slice.
+The ``proposed-rule`` decision type dispatches to the real store
+(:mod:`athenaeum.rule_proposals`, athenaeum#905 —
+:func:`~athenaeum.rule_proposals.approve_rule_proposal` /
+:func:`~athenaeum.rule_proposals.reject_rule_proposal`), wired in by
+athenaeum#921. Its ``verdict`` reuses the SAME ``approve``/``reject``
+vocabulary as ``merge`` (see :func:`_apply_merge_answer`); an unknown or
+already-resolved proposal id is caught and converted into a fail-soft
+skipped outcome, exactly like every other type — never a raised exception
+that would halt the batch.
 
 Layering: L4 domain/pipeline module, mirroring :mod:`athenaeum.decisions` —
 it aggregates OTHER L4 modules (:mod:`athenaeum.answers`,
@@ -122,9 +124,8 @@ class DecisionAnswerOutcome:
     applied: bool
     # ``None`` on success. Otherwise the underlying resolver's own error
     # code when available (``id_not_found``, ``already_answered``,
-    # ``already_resolved``, ``invalid_decision``, ...), or one of this
-    # module's own: ``malformed`` (schema-invalid answer file) and
-    # ``decision_type_unavailable`` (the athenaeum#905 proposed-rule placeholder).
+    # ``already_resolved``, ``invalid_decision``, ...), or this module's
+    # own ``malformed`` (schema-invalid answer file).
     error_code: str | None
     message: str
 
@@ -512,27 +513,88 @@ def _apply_audit_answer(wiki_root: Path, answer: DecisionAnswer) -> DecisionAnsw
     )
 
 
-def _apply_proposed_rule_answer(answer: DecisionAnswer) -> DecisionAnswerOutcome:
-    """Fail-closed placeholder — see module docstring and athenaeum#905.
+def _apply_proposed_rule_answer(wiki_root: Path, answer: DecisionAnswer) -> DecisionAnswerOutcome:
+    """Apply one ``proposed-rule`` decision answer against the real store
+    (:mod:`athenaeum.rule_proposals`, athenaeum#905) — tier 0, deterministic,
+    no LLM call: :func:`~athenaeum.rule_proposals.approve_rule_proposal`
+    writes an already-drafted, already-stored rule YAML to disk; it makes no
+    model call itself, so this dispatch branch stays as LLM-free as every
+    other one in this module.
 
-    athenaeum#905 has since landed the store (:mod:`athenaeum.rule_proposals`
-    — :func:`~athenaeum.rule_proposals.approve_rule_proposal` /
-    :func:`~athenaeum.rule_proposals.reject_rule_proposal`), but wiring THIS
-    decision-answer applier to it is athenaeum#921's scope, not athenaeum#905's — deliberately
-    not touched here. This call site still fails closed, zero state mutated,
-    until athenaeum#921 lands.
+    ``knowledge_root`` is DERIVED as ``wiki_root.parent`` rather than
+    threaded through as a new required parameter on
+    :func:`apply_decision_answers` (which would force every existing caller
+    to update). This mirrors an existing convention in this codebase —
+    ``_cmd_pending.cmd_ingest_answers`` sets ``wiki_root = target / "wiki"``
+    where ``target`` IS the knowledge root, and ``librarian.py`` derives
+    ``contacts_surface_root(wiki_root.parent, config)`` the same way — so
+    ``wiki_root.parent`` is already the established knowledge-root
+    derivation, not a new one invented for this call site.
+
+    ``answer.verdict`` reuses the SAME ``approve``/``reject`` vocabulary
+    (normalized the same way: stripped, lower-cased) as
+    :func:`_apply_merge_answer` — not a third spelling — which also matches
+    :mod:`athenaeum.rule_proposals`'s own function names
+    (:func:`~athenaeum.rule_proposals.approve_rule_proposal` /
+    :func:`~athenaeum.rule_proposals.reject_rule_proposal`). An invalid
+    verdict is a fail-soft skip with ``error_code="invalid_decision"``,
+    matching the merge applier exactly.
+
+    :func:`~athenaeum.rule_proposals.approve_rule_proposal` /
+    :func:`~athenaeum.rule_proposals.reject_rule_proposal` raise
+    ``ValueError`` for an unknown or already-resolved *proposal_id*; that is
+    caught here and converted into a fail-soft skipped outcome (never
+    propagated), matching :func:`_apply_audit_answer`'s
+    ``id_not_found``/``already_resolved`` split on the resolver's own
+    message text.
     """
+    from athenaeum.rule_proposals import approve_rule_proposal, reject_rule_proposal
+
+    decision = answer.verdict.strip().lower()
+    if decision not in ("approve", "reject"):
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code="invalid_decision",
+            message=f"verdict must be 'approve' or 'reject', got {answer.verdict!r}",
+        )
+
+    knowledge_root = wiki_root.parent
+    try:
+        if decision == "approve":
+            approve_rule_proposal(
+                knowledge_root,
+                wiki_root,
+                proposal_id=answer.decision_id,
+                note=answer.note,
+            )
+        else:
+            reject_rule_proposal(
+                wiki_root,
+                proposal_id=answer.decision_id,
+                note=answer.note,
+            )
+    except ValueError as exc:
+        msg = str(exc)
+        error_code = "already_resolved" if "already resolved" in msg else "id_not_found"
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code=error_code,
+            message=msg,
+        )
+
     return DecisionAnswerOutcome(
         path=answer.path,
         decision_id=answer.decision_id,
         decision_type=answer.decision_type,
-        applied=False,
-        error_code="decision_type_unavailable",
-        message=(
-            "proposed-rule decisions have a store now (athenaeum.rule_proposals, "
-            "athenaeum#905) but this applier is not wired to it yet (athenaeum#921) "
-            "— no state mutated"
-        ),
+        applied=True,
+        error_code=None,
+        message=f"rule proposal {'approved' if decision == 'approve' else 'rejected'}",
     )
 
 
@@ -555,7 +617,10 @@ def apply_decision_answers(
       immediately after this one in the same ``ingest-answers`` tick).
     - ``merge`` -> :func:`athenaeum.pending_merges.resolve_merge`.
     - ``audit`` -> :func:`athenaeum.calibration.record_audit_review`.
-    - ``proposed-rule`` -> fails closed, zero state mutation (athenaeum#905).
+    - ``proposed-rule`` -> :func:`athenaeum.rule_proposals.approve_rule_proposal`
+      / :func:`~athenaeum.rule_proposals.reject_rule_proposal` (athenaeum#905
+      store, wired by athenaeum#921). ``knowledge_root`` is derived as
+      ``wiki_root.parent`` — see :func:`_apply_proposed_rule_answer`.
 
     A file with no ``decision_id`` (a legacy answer, or anything else that
     happens to live in ``raw/answers/``) is silently left alone — not
@@ -628,7 +693,7 @@ def apply_decision_answers(
         elif answer.decision_type == "audit":
             outcome = _apply_audit_answer(wiki_root, answer)
         else:  # "proposed-rule" — the only other member of VALID_DECISION_TYPES
-            outcome = _apply_proposed_rule_answer(answer)
+            outcome = _apply_proposed_rule_answer(wiki_root, answer)
 
         report.outcomes.append(outcome)
         if outcome.applied:
