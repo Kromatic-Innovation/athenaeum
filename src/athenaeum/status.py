@@ -244,7 +244,9 @@ def status(knowledge_root: Path) -> StatusInfo:
 
         advisory = build_advisory(
             backlog=raw_pending,
-            ledger_records=_spend.read_ledger(_spend.resolve_ledger_path(config)),
+            ledger_records=_spend.read_ledger(
+                _spend.resolve_ledger_path(config, wiki_root=wiki_root)
+            ),
             warn_days=resolve_drain_warn_days(config),
             config=config,
         )

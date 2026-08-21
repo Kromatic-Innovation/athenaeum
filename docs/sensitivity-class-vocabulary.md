@@ -615,7 +615,14 @@ retroactively is a bulk edit, not a config change.
    is what an operator must not do, and this design adds no enforcement
    beyond the existing loud raise to catch it — a follow-on slice (§9, S5)
    is where a `storage.mapping` completeness check against the corpus could
-   be added if this proves to be a footgun in practice.
+   be added if this proves to be a footgun in practice. **Shipped in
+   athenaeum#993 (S5)**: `src/athenaeum/sensitivity_lint.py`'s completeness
+   check reports exactly this case — a class name a scanned corpus still
+   carries (via its own `sensitivity_class:` frontmatter marker) with no
+   live `storage.mapping` entry — at config-change/lint time, before an
+   operator ever hits the read-time fallthrough this point describes. It
+   does not change the fallthrough itself, and it is a lint an operator
+   chooses to run, not new enforcement inside the resolver.
 3. **A genuine bulk reclassification — "move every page tagged `hipaa`
    under the old rules to `hipaa-v2`" — is not a mechanism this design
    ships.** It is exactly the shape of work Lane C's field corrections
@@ -684,6 +691,15 @@ retroactively is a bulk edit, not a config change.
 > needs one, is a lint over the *resolved* `(read_policy, storage adapter)`
 > pair together — worth a follow-on slice (§9, S5), not worth pretending
 > this design already provides it by constraining one field.
+>
+> **Shipped in athenaeum#993 (S5), still not a floor.** The lint this decision
+> named now exists (`athenaeum.sensitivity_lint.lint_read_policy_adapter_pairs`):
+> it reports a class whose resolved `read_policy.access` is `confidential`/
+> `personal` but whose mapped adapter has `corpus_policy.embedded: True`.
+> It is advisory only — it reports, it does not raise, block a config load,
+> or alter resolution — so this decision's refusal to enforce a floor
+> **inside the resolver** stands exactly as written above; what changed is
+> only that the "worth a follow-on slice" lint is no longer hypothetical.
 
 > **Decision D5 — no retroactive reclassification tooling ships with this
 > design; migration is forward-only (§6), reusing field-corrections.md's
@@ -819,12 +835,26 @@ retroactively is a bulk edit, not a config change.
   rule (§2.4): "a key in code and not in that table is drift." Adds a
   `## Sensitivity classes (athenaeum#910)` section alongside the existing
   `## Intake screening (athenaeum#320)` one.
-- **S5 — `storage.mapping` completeness lint (optional, MoSCoW: could).**
-  A corpus-scan check that every class name any excluded record carries has
-  a live `storage.mapping` entry, catching the failure mode §6 point 2
-  describes before it becomes a `StorageConfigError` at read time. Also the
-  natural home for Decision D4's deferred `(read_policy, storage.mapping)`
-  floor lint, if a later review decides it is worth building.
+- **S5 (athenaeum#993, shipped) — `storage.mapping` completeness lint +
+  the deferred `(read_policy, adapter)` pair check (optional, MoSCoW:
+  could).** `src/athenaeum/sensitivity_lint.py`: a corpus-scan check that
+  every sensitivity class name any scanned content carries (via its own
+  `sensitivity_class:` frontmatter field — this lint's own scanning
+  convention, since no writer yet stamps a resolved classification onto
+  content) has a live `storage.mapping` entry naming a real adapter,
+  catching the failure mode §6 point 2 describes before it becomes a
+  `StorageConfigError` (or a silent fallthrough) at read time; plus
+  Decision D4's deferred `(read_policy, storage adapter)` pair check,
+  implemented as a separate, advisory, non-blocking finding kind. Both
+  checks are read-only, always caller-supplied config + corpus root (never
+  a hardcoded/live path), and driven entirely by committed synthetic
+  fixtures under `tests/fixtures/sensitivity_mapping/`
+  (`tests/test_sensitivity_lint.py`). CLI: `athenaeum storage lint-mapping`
+  (`src/athenaeum/_cmd_storage.py`) — standalone, not wired into any
+  existing CI gate by this slice. Neither `athenaeum.storage`'s nor
+  `athenaeum.sensitivity`'s resolvers changed: this slice only calls into
+  both, it does not modify either (§7 Decision D4 continues to stand as
+  written — this is an out-of-band lint, not a resolver-level floor).
 
 ---
 

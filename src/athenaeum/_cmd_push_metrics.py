@@ -64,6 +64,7 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
                 since=since,
                 cache_dir=args.cache_dir,
                 exclude_sessions=getattr(args, "exclude_session", None),
+                wiki_root=_resolve_wiki_root(args),
             )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)

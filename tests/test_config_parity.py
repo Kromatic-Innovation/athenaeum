@@ -470,7 +470,7 @@ class TestModelPlumbing:
         captured: dict[str, Any] = {}
 
         def fake_extract(
-            prompt: str, timeout: float = 3.0, config: Any = None
+            prompt: str, timeout: float = 3.0, config: Any = None, *, wiki_root: Any = None
         ) -> list[str]:
             captured["config"] = config
             return ["a-topic"]
@@ -500,7 +500,7 @@ class TestModelPlumbing:
         captured: dict[str, Any] = {}
 
         def fake_extract(
-            prompt: str, timeout: float = 3.0, config: Any = None
+            prompt: str, timeout: float = 3.0, config: Any = None, *, wiki_root: Any = None
         ) -> list[str]:
             captured["config"] = config
             return ["a-topic"]

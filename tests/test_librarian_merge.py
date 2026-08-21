@@ -983,6 +983,178 @@ class TestContradictionFixture:
         )
         assert not (wiki / "_pending_merges.md").exists()
 
+    # -- Issue athenaeum#1085: n_sources recorded unconditionally, regardless of
+    # -- which gate in _merge_proposal_suppression_reason fired ------------------
+
+    def test_size_cap_suppression_logs_n_sources(
+        self,
+        contradiction_merge_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The ``resolutions: SUPPRESSED`` log line (merge.py ~line 2020) must
+        carry n_sources even when the SIZE-CAP arm is what fired — this arm
+        already embeds the count in the reason string, so this is the
+        control case for the parametrization below."""
+        import logging
+
+        monkeypatch.setenv("ATHENAEUM_MAX_MERGE_SOURCES", "1")
+        caplog.set_level(logging.INFO, logger="athenaeum.merge")
+
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=self._detector_and_merge_clients(confidence=0.33),
+        )
+        suppressed = [
+            r for r in caplog.records if "resolutions: SUPPRESSED" in r.getMessage()
+        ]
+        assert suppressed
+        assert all("over-cluster" in r.getMessage() for r in suppressed)
+        assert all("n_sources=2" in r.getMessage() for r in suppressed)
+
+    def test_confidence_floor_suppression_logs_n_sources(
+        self,
+        contradiction_merge_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Same log line, but the CONFIDENCE-FLOOR arm fires instead — before
+        athenaeum#1085 this suppression recorded no size at all."""
+        import logging
+
+        monkeypatch.delenv("ATHENAEUM_MAX_MERGE_SOURCES", raising=False)
+        monkeypatch.setenv("ATHENAEUM_MIN_MERGE_CONFIDENCE", "0.5")
+        caplog.set_level(logging.INFO, logger="athenaeum.merge")
+
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=self._detector_and_merge_clients(confidence=0.33),
+        )
+        suppressed = [
+            r for r in caplog.records if "resolutions: SUPPRESSED" in r.getMessage()
+        ]
+        assert suppressed
+        assert all("low confidence" in r.getMessage() for r in suppressed)
+        assert all("n_sources=2" in r.getMessage() for r in suppressed)
+
+    def test_mean_cohesion_floor_suppression_logs_n_sources(
+        self,
+        contradiction_merge_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Same log line, but the MEAN-COHESION-FLOOR arm fires instead.
+        ``contradiction_merge_root``'s cluster row is written with
+        centroid_score=0.62 (>= the default 0.6 floor); overriding the floor
+        to 0.65 makes it the one that fires, without touching the size cap
+        (n=2 stays under the active default of 5, tightened from 25 by
+        athenaeum#421) or the complete-linkage arm
+        (min_pairwise defaults to 1.0 for this fixture's row)."""
+        import logging
+
+        monkeypatch.delenv("ATHENAEUM_MAX_MERGE_SOURCES", raising=False)
+        monkeypatch.delenv("ATHENAEUM_MIN_MERGE_CONFIDENCE", raising=False)
+        monkeypatch.setenv("ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY", "0.65")
+        caplog.set_level(logging.INFO, logger="athenaeum.merge")
+
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=self._detector_and_merge_clients(confidence=0.82),
+        )
+        suppressed = [
+            r for r in caplog.records if "resolutions: SUPPRESSED" in r.getMessage()
+        ]
+        assert suppressed
+        assert all("low cohesion" in r.getMessage() for r in suppressed)
+        assert all("n_sources=2" in r.getMessage() for r in suppressed)
+
+    def test_single_linkage_chain_suppression_logs_n_sources(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Same log line, but the COMPLETE-LINKAGE (chain) arm fires instead.
+        Unlike wiki_dedupe.py's equivalent arm, this one needs no
+        cluster-formation monkeypatch: merge.py's ``min_pairwise_score``
+        comes straight from the cluster JSONL row (``merge_cluster_row``),
+        so a hand-written row with a low ``min_pairwise_score`` reaches the
+        real ``_emit_escalation`` log call directly."""
+        import logging
+
+        knowledge_root = tmp_path / "knowledge"
+        scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+        _write_am_file(
+            scope,
+            "feedback_prior_session_debris_v1.md",
+            frontmatter_name="Prior session debris v1",
+            description="commit directly",
+            origin_session_id="s-111",
+            origin_turn=1,
+            sources=[
+                {
+                    "session": "s-111",
+                    "turn": 1,
+                    "date": "2026-04-10",
+                    "excerpt": "commit to develop, do not park",
+                }
+            ],
+            body="Commit prior-session debris directly to develop. Do not park on WIP.",
+        )
+        _write_am_file(
+            scope,
+            "feedback_prior_session_debris_v2.md",
+            frontmatter_name="Prior session debris v2",
+            description="park on WIP",
+            origin_session_id="s-222",
+            origin_turn=2,
+            sources=[
+                {
+                    "session": "s-222",
+                    "turn": 2,
+                    "date": "2026-04-11",
+                    "excerpt": "park on WIP, do not commit",
+                }
+            ],
+            body="Park prior-session debris on a WIP branch. Do not commit directly.",
+        )
+        _write_cluster_jsonl(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "code-0001",
+                    "member_paths": [
+                        "-Users-tristankromer-Code/feedback_prior_session_debris_v1.md",
+                        "-Users-tristankromer-Code/feedback_prior_session_debris_v2.md",
+                    ],
+                    "centroid_score": 0.62,
+                    # Below the default cluster_threshold (0.55, DEFAULT_CLUSTER_THRESHOLD)
+                    # -- a single-linkage chain, not a complete-linkage clique.
+                    "min_pairwise_score": 0.1,
+                    "rationale": "cosine >= 0.55; shares tokens: prior, session, debris",
+                },
+            ],
+        )
+        _write_config(knowledge_root)
+
+        monkeypatch.delenv("ATHENAEUM_MAX_MERGE_SOURCES", raising=False)
+        monkeypatch.delenv("ATHENAEUM_MIN_MERGE_CONFIDENCE", raising=False)
+        monkeypatch.delenv("ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY", raising=False)
+        caplog.set_level(logging.INFO, logger="athenaeum.merge")
+
+        merge_clusters_to_wiki(
+            knowledge_root,
+            client=self._detector_and_merge_clients(confidence=0.82),
+        )
+        wiki = knowledge_root / "wiki"
+        assert not (wiki / "_pending_merges.md").exists()
+        suppressed = [
+            r for r in caplog.records if "resolutions: SUPPRESSED" in r.getMessage()
+        ]
+        assert suppressed
+        assert all("single-linkage chain" in r.getMessage() for r in suppressed)
+        assert all("n_sources=2" in r.getMessage() for r in suppressed)
+
     def test_budget_exhausted_falls_back_to_escalate(
         self,
         contradiction_merge_root: Path,

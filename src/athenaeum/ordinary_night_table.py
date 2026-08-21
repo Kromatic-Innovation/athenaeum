@@ -337,7 +337,11 @@ def build_ordinary_night_table(
         knowledge_root, config=resolved_config, window_days=intake_window_days, now=now
     )
 
-    ledger = read_ledger(resolve_ledger_path(resolved_config, cache_dir=cache_dir))
+    ledger = read_ledger(
+        resolve_ledger_path(
+            resolved_config, cache_dir=cache_dir, wiki_root=knowledge_root / "wiki"
+        )
+    )
     calls_per_file = observed_calls_per_file(ledger)
     calls_source = "ledger" if calls_per_file is not None else "none (no librarian ledger history)"
 
