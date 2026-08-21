@@ -240,6 +240,24 @@ class TestFilenameEntityPrune:
         assert any("refusing to prune" in e for e in report.errors)
         assert (kr / "wiki" / "u-skill-md.md").exists()
 
+    def test_refuses_against_fake_declaring_no_recovery_capability(
+        self, tmp_path: Path
+    ) -> None:
+        """issue athenaeum#978 (S3, Tier A AC5): even with a REAL git repo
+        present, an injected store fake declaring neither ``versioned`` nor
+        ``purgeable`` (design note §4.4 R1) makes the gate refuse — proving
+        it is driven by the declared capability, not by probing
+        ``knowledge_root / ".git"`` directly."""
+        from tests.store_fakes import NoRecoveryStore
+
+        kr = _wiki(tmp_path)
+        report = build_filename_entity_report(kr / "wiki")
+        report = apply_filename_entity_prune(kr, report, store=NoRecoveryStore())
+        assert report.committed is False
+        assert any("refusing to prune" in e for e in report.errors)
+        assert (kr / "wiki" / "919f0485-skill-md.md").exists()
+        assert (kr / "wiki" / "c56ac256-project-registry-yaml.md").exists()
+
     def test_empty_report_is_noop(self, tmp_path: Path) -> None:
         kr = tmp_path / "knowledge"
         (kr / "wiki").mkdir(parents=True)

@@ -16,6 +16,7 @@ is what exercises it.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
@@ -163,3 +164,24 @@ class InMemoryStore:
         """No directory concept to create; matches
         :meth:`~athenaeum.store.FilesystemStore.bootstrap`'s non-destructive
         ``mkdir(exist_ok=True)`` by doing nothing to existing state."""
+
+
+class NoRecoveryStore(InMemoryStore):
+    """An :class:`InMemoryStore` declaring NEITHER ``versioned`` nor
+    ``purgeable`` (design note §4.4 R1; issue athenaeum#978, slice S3).
+
+    The fake R1's honest-refusal rule is written against: "a destructive
+    store operation MUST either (i) run against a surface whose adapter
+    declares ``versioned`` ... or (ii) refuse." A store with neither flag
+    set is the starkest case — there is no declared alternative at all — so
+    injecting this into a Tier-A/Tier-B call site's ``store=`` parameter
+    proves the call refuses rather than silently degrading to an
+    unrecoverable delete, without needing a real (non-)git-repo fixture.
+    Everything else is inherited unchanged from :class:`InMemoryStore`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.capabilities = dataclasses.replace(
+            self.capabilities, versioned=False, purgeable=False
+        )

@@ -21,6 +21,14 @@ import athenaeum.librarian as librarian_mod
 from athenaeum.librarian import RunContext, TokenUsage, _run_correction_phase, run
 
 
+def _git_init(root: Path) -> None:
+    subprocess.run(["git", "init", "-q", "-b", "test-branch"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=root, check=True)
+
+
 def _make_ctx(tmp_path: Path, config: dict | None = None) -> RunContext:
     ctx = RunContext(
         raw_root=tmp_path / "raw",
@@ -558,6 +566,13 @@ class TestBatchRetirement:
                 }
             }
         }
+        # issue athenaeum#978 (S3): retirement now refuses against a store
+        # that is not versioned rather than falling back to a silent
+        # unlink. Without a real git repo the batch would never be removed
+        # and would be reprocessed on every one of the 3 passes below,
+        # defeating exactly the "one ledger entry" assertion this test
+        # exists to prove.
+        _git_init(tmp_path)
 
         for _ in range(3):
             ctx = _make_ctx(tmp_path, config)
@@ -757,6 +772,10 @@ class TestSchemaAmendmentProposal:
                 }
             }
         }
+        # issue athenaeum#978 (S3): retirement now refuses against a store
+        # that is not versioned rather than falling back to a silent
+        # unlink, so this needs a real git repo to observe the batch retired.
+        _git_init(tmp_path)
         ctx = _make_ctx(tmp_path, config)
         _run_correction_phase(ctx)
 
