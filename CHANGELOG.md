@@ -30,6 +30,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wrong bucket instead of preserving it for correct reclassification).
 ### Added
 
+- **Per-contract LLM schema strictness for `tiers.tier2` and `tiers.tier3-merge`
+  (athenaeum#1035, M17 phase 2a, split from athenaeum#608).** Decided from the
+  measured observation window 2026-08-05T13:12Z-2026-08-20T10:58Z (3,634
+  records, 0 unparseable, recorded on athenaeum#608's 2026-08-20 comment):
+  `tiers.tier2` (150 obs, 0 mismatches) and `tiers.tier3-merge` (2,961 obs, 4
+  mismatches: extra-keys 3, missing-required 1) sit upstream of the C4
+  entity-phase bottleneck and have a representative sample. Applying
+  athenaeum#608's framework ("only missing-required mismatches justify
+  rejection; extra keys are a different signal"): `llm_schemas.Tier2Entity`
+  tightens from `extra="allow"` to `extra="forbid"` (0% mismatch of any class
+  observed — forbidding costs nothing today); `llm_schemas.MergeOp` stays
+  `extra="allow"` (its two observed extra-key shapes, `[].text2` and
+  `[].append_section`, are real repeated traffic, not grounds for rejection);
+  `op` stays required, matching the one missing-required hit in the window —
+  already enforced downstream via `apply_merge_ops`'s `MergeOpsError` ->
+  full-echo fallback. The decision is recorded in code as the new
+  `llm_schemas.STRICT_CONTRACTS` registry. The three C4-downstream contracts
+  (`contradictions`, `claim_kind`, `resolutions`) are explicitly untouched and
+  remain observe-only, decision deferred to athenaeum#608. See
+  `docs/configuration.md`'s "Per-contract strictness decision" section.
 - **Dimension registry + kernel dimensions (athenaeum#714).** Root of the
   memory-model v6 dimension chain (child of epic athenaeum#709; athenaeum#715,
   athenaeum#716, athenaeum#719 all depend on this). New `src/athenaeum/dimensions.py`:
