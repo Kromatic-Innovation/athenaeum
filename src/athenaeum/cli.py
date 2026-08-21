@@ -91,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_push_metrics import add_push_metrics_subparser
     from athenaeum._cmd_query import add_query_subparsers
     from athenaeum._cmd_questions import add_questions_subparser
+    from athenaeum._cmd_pii_restore import add_pii_restore_subparser
     from athenaeum._cmd_repair import add_repair_subparser
     from athenaeum._cmd_run import add_run_subparser
     from athenaeum._cmd_serve import add_serve_subparser
@@ -123,6 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_curate_subparsers(subparsers)  # dedupe, claims, auto-memory
     add_decay_subparser(subparsers)  # decay-sweep
     add_repair_subparser(subparsers)  # repair
+    add_pii_restore_subparser(subparsers)  # pii-restore (issue athenaeum#1037)
     add_questions_subparser(subparsers)  # questions
     add_merges_subparser(subparsers)  # merges
     add_decisions_subparser(subparsers)  # decisions
