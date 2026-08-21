@@ -366,6 +366,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   site's own scoped `git rm`-and-commit mechanics) to an explicit,
   monotonically-shrinking baseline.
 
+- **Lease is a declared store capability, backed by the same `flock` +
+  heartbeat + inode-race hardening `runlock` always had (athenaeum#979, S4 of
+  the whole-store adapter design lock, athenaeum#911).** `Store.lease()`
+  (S1's protocol member, previously inert) is now implemented for real:
+  `FilesystemStore.lease()` returns `FileLease`, a single non-blocking (or
+  `force=`) `flock` attempt built from the exact open/try-flock/inode-check/
+  metadata-write functions `athenaeum.runlock.RunLock` used to own directly —
+  moved, not duplicated, and generalized from `RunLock`'s hardcoded
+  `knowledge_root/.athenaeum.lock` to an arbitrary lockfile path.
+  `athenaeum.runlock.RunLock` now calls through `FileLease` for every
+  acquire/release/heartbeat, keeping its own `wait`/`force`/
+  `break_stale_after`/`warn_stale_after` policy, every existing exception
+  (`LockHeld`), and every log message unchanged — its entire existing test
+  suite (`tests/test_runlock.py`) passes unmodified against the relocated
+  primitive. `FilesystemStore.capabilities.leases` is `True`
+  unconditionally. `tests.store_fakes.InMemoryStore.lease()` is also real
+  now (`leases=True`), with genuinely TTL-driven expiry — the design note's
+  "onto flock for the filesystem adapter and onto a lease row ... elsewhere"
+  (§4.6) other half, since an in-memory fake has no kernel to reclaim a dead
+  holder's lock. `tests/test_store_conformance.py` gains shared
+  acquire/contention/release conformance tests plus a
+  `TestFakeAdapterLeaseExpiry` class proving the non-filesystem expiry path.
+
 - **v6 memory-model measurement pack: shadow-linkage count, backlog price
   sheet, ordinary-night steady-state table (athenaeum#713).** Three new
   `athenaeum measure` subcommands the comparator slice (child of athenaeum#709)
