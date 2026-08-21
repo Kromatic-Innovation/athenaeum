@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Shape rules: nested-key `fields` resolution + one-level source-subdir
+  discovery (athenaeum#974 — unblocks athenaeum#940).** The two code gaps the
+  intended `log_group: hestia-lanes-*` rule needed:
+  - `MatchSpec.fields` now resolves a dotted-path key (`"session.log_group"`)
+    into a nested frontmatter/JSON value, via new
+    `athenaeum.rules.resolve_field_path`. Backward compatible by
+    construction: an exact top-level key (dots and all) always wins first,
+    so every pre-existing rule's plain `fields` key keeps matching exactly
+    as before.
+  - `discover_raw_files` now also globs one level below each
+    `raw/<source>/` directory (`raw/<source>/<subdir>/`), so a source that
+    organises its own drops into subdirectories is discovered. A nested
+    file's `RawFile.source` is still the top-level source name. The
+    `raw/auto-memory/` tree (or any configured
+    `recall.extra_intake_roots` entry) is excluded from this descent — it
+    already has its own dedicated discovery path
+    (`discover_auto_memory_files`).
+  See `docs/shape-rules.md` §3.2/§3.3.
+
 - **Memory model v6: usage sensor for tier movement, never-ingest class
   list, ingestion gate (athenaeum#968 — reshaped athenaeum#430, blocks athenaeum#718).**
   Three additive pieces, all off/inert by default:
@@ -292,6 +311,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`quarantine.py` migrated onto the whole-store adapter seam (athenaeum#982,
+  S7 of the whole-store adapter design lock, athenaeum#911 — "the slice that
+  proves the write half").** `src/athenaeum/quarantine.py` now contains no
+  `pathlib` and no `shutil` call: the ledger append (`quarantine_file` /
+  `release_quarantine`) routes through `Store.append`, and the physical move
+  in both directions routes through `Store.move`. Every public function gains
+  an optional keyword-only `store=` parameter; when omitted, a private
+  `FilesystemStore` scoped to the caller's existing `wiki_root`/`raw_root`
+  is built per call, so no existing caller changes. `put` does not appear as
+  a `quarantine.py` call site (2026-08-21 re-scope: the design doc's own
+  §2.3 inventory names only `append` + `move` for this module; `put` was a
+  transcription error in the original filing). The pre-migration test suite
+  (`tests/test_quarantine.py`) passes with exactly one bounded edit: the
+  ordering-guarantee test's `monkeypatch.setattr("athenaeum.quarantine.shutil.move", ...)`
+  no longer resolves once `shutil` is not imported, so it is retargeted to
+  `athenaeum.store.FilesystemStore.move` — the store seam the ordering
+  guarantee now actually runs through — with every assertion in that test
+  otherwise untouched. A new `tests/test_quarantine_store_parity.py`
+  parametrizes the same logical scenarios over both `FilesystemStore` and
+  `tests.store_fakes.InMemoryStore`, verified by reading back through the
+  store rather than the filesystem — demonstrating the "no caller can tell"
+  property rather than asserting it.
+
 - **Coarse embedding fallback is now observable (athenaeum#1032).** The chromadb
   embedding path used to degrade silently three layers deep — no log line
   ever recorded that the hashing-trick fallback embedder produced a
@@ -365,6 +407,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sites this slice did not migrate (push/pull/rev-parse and each Tier
   site's own scoped `git rm`-and-commit mechanics) to an explicit,
   monotonically-shrinking baseline.
+
+- **Lease is a declared store capability, backed by the same `flock` +
+  heartbeat + inode-race hardening `runlock` always had (athenaeum#979, S4 of
+  the whole-store adapter design lock, athenaeum#911).** `Store.lease()`
+  (S1's protocol member, previously inert) is now implemented for real:
+  `FilesystemStore.lease()` returns `FileLease`, a single non-blocking (or
+  `force=`) `flock` attempt built from the exact open/try-flock/inode-check/
+  metadata-write functions `athenaeum.runlock.RunLock` used to own directly —
+  moved, not duplicated, and generalized from `RunLock`'s hardcoded
+  `knowledge_root/.athenaeum.lock` to an arbitrary lockfile path.
+  `athenaeum.runlock.RunLock` now calls through `FileLease` for every
+  acquire/release/heartbeat, keeping its own `wait`/`force`/
+  `break_stale_after`/`warn_stale_after` policy, every existing exception
+  (`LockHeld`), and every log message unchanged — its entire existing test
+  suite (`tests/test_runlock.py`) passes unmodified against the relocated
+  primitive. `FilesystemStore.capabilities.leases` is `True`
+  unconditionally. `tests.store_fakes.InMemoryStore.lease()` is also real
+  now (`leases=True`), with genuinely TTL-driven expiry — the design note's
+  "onto flock for the filesystem adapter and onto a lease row ... elsewhere"
+  (§4.6) other half, since an in-memory fake has no kernel to reclaim a dead
+  holder's lock. `tests/test_store_conformance.py` gains shared
+  acquire/contention/release conformance tests plus a
+  `TestFakeAdapterLeaseExpiry` class proving the non-filesystem expiry path.
 
 - **v6 memory-model measurement pack: shadow-linkage count, backlog price
   sheet, ordinary-night steady-state table (athenaeum#713).** Three new
@@ -547,6 +612,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (athenaeum#898) is unchanged and still backstops a file that keeps
   tripping the bound after it is quarantined out of the discovery set, so a
   chronically over-bound file is still never retried identically forever.
+
+### Removed
+
+- **`pii.read_person` / `pii.read_people`, the `read_person` MCP tool, and the
+  `athenaeum query person` CLI command (athenaeum#888).** Deprecated in
+  athenaeum#887 once the generalized `recall(with_pii=True)` path
+  (athenaeum#885/#886) became the sanctioned entry point; removed now that
+  every known consumer has migrated. Use `pii.read_entity` / `read_entities`
+  (or `recall(with_pii=True)` when searching rather than resolving a uid you
+  already hold) instead — both answer for any entity class, not only
+  persons. The `PersonRead = EntityRead` back-compat alias (added in
+  athenaeum#883) is removed alongside them, having no remaining referrers.
+  The `athenaeum query entity` / `read_entity` generalized surfaces this
+  replaces are unaffected, as is the unrelated `athenaeum query people`
+  command (filter/list, not a single-uid read).
 
 ## [0.19.0] - 2026-08-15
 

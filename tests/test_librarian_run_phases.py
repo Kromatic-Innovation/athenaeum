@@ -21,12 +21,14 @@ public ``run()`` entry point.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from athenaeum.decisions import list_pending_decisions
 from athenaeum.librarian import (
     DEFAULT_MAX_API_CALLS,
     DEFAULT_MAX_FILES,
@@ -38,9 +40,18 @@ from athenaeum.librarian import (
     _run_git_vcs_io,
     _run_intake_audit_phase,
     _run_preconditions,
+    _run_rule_proposal_phase,
     _run_wiki_dedup_phase,
 )
 from athenaeum.provider import ProviderConfigError
+from tests.conftest import FakeLLMClient, make_llm_response, make_llm_usage
+from tests.test_rule_proposals import (
+    _NOW,
+    _SMALL_CONFIG,
+    _draft_payload,
+    _fake_client,
+    _seed_deferred_rows,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -765,6 +776,162 @@ class TestRunIntakeAuditPhase:
         assert ctx.intake_audit_summary is not None
         assert ctx.intake_audit_summary["unclaimed_files"] == 0
         assert not (ctx.wiki_root / "_pending_questions.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# _run_rule_proposal_phase (issue athenaeum#1063 -- wires
+# athenaeum.rule_proposals.run_rule_proposal_detection into the nightly run,
+# closing the loop athenaeum#905 (detector) / athenaeum#921 (applier) opened)
+# ---------------------------------------------------------------------------
+
+
+def _rule_proposal_ctx(
+    tmp_path: Path, *, count: int, config: dict, threshold: int = 3
+) -> RunContext:
+    """A RunContext whose wiki/raw roots already carry *count* deferred
+    disposition rows for one shape (via ``_seed_deferred_rows``, which
+    hardcodes ``tmp_path/"wiki"`` and ``tmp_path/"raw"``) -- so the caller
+    only needs to choose the shape's row count and the phase's config."""
+    wiki_root = tmp_path / "wiki"
+    raw_root = tmp_path / "raw"
+    _seed_deferred_rows(tmp_path, source="s", count=count, tier=None)
+    ctx = _make_ctx(
+        tmp_path,
+        wiki_root=wiki_root,
+        raw_root=raw_root,
+        knowledge_root=tmp_path / "knowledge",
+        now=_NOW,
+    )
+    ctx.provider = "api"
+    ctx.config = config
+    return ctx
+
+
+def _rule_proposals_config(*, enabled: bool, threshold: int = 3) -> dict:
+    return {
+        "librarian": {
+            "rule_proposals": {
+                "enabled": enabled,
+                "threshold": threshold,
+                "window_days": 7,
+                "exemplar_count": 2,
+            }
+        }
+    }
+
+
+class TestRunRuleProposalPhase:
+    """Verification bar (athenaeum#1063): gate-off no-op, gate-on + threshold
+    met proposes and reaches ``list_pending_decisions``, threshold not met
+    is skipped even with the gate on, an expired deadline skips the phase,
+    and the drafting call's tokens land in the spend ledger."""
+
+    def test_noop_when_gate_off_by_default(self, tmp_path: Path) -> None:
+        # No `librarian.rule_proposals.enabled` key at all -- the documented
+        # default (config gate OFF).
+        ctx = _rule_proposal_ctx(tmp_path, count=3, config=_SMALL_CONFIG)
+        with patch("athenaeum.librarian.build_llm_client") as mock_build:
+            _run_rule_proposal_phase(ctx)
+        mock_build.assert_not_called()
+        assert ctx.rule_proposals_summary is None
+        assert ctx.usage.api_calls == 0
+
+    def test_noop_when_gate_explicitly_false(self, tmp_path: Path) -> None:
+        config = _rule_proposals_config(enabled=False)
+        ctx = _rule_proposal_ctx(tmp_path, count=3, config=config)
+        with patch("athenaeum.librarian.build_llm_client") as mock_build:
+            _run_rule_proposal_phase(ctx)
+        mock_build.assert_not_called()
+        assert ctx.rule_proposals_summary is None
+        assert ctx.usage.api_calls == 0
+
+    def test_runs_and_proposes_when_gate_on_and_threshold_met(
+        self, tmp_path: Path
+    ) -> None:
+        config = _rule_proposals_config(enabled=True, threshold=3)
+        ctx = _rule_proposal_ctx(tmp_path, count=3, config=config)
+        fake = _fake_client()
+        with patch("athenaeum.librarian.build_llm_client", return_value=fake):
+            _run_rule_proposal_phase(ctx)
+        assert ctx.rule_proposals_summary is not None
+        assert ctx.rule_proposals_summary["threshold_crossed"] == 1
+        assert ctx.rule_proposals_summary["proposed"] == 1
+        assert len(fake.calls) == 1  # exactly one drafting call
+
+    def test_proposed_rule_reaches_list_pending_decisions(self, tmp_path: Path) -> None:
+        """The JTBD athenaeum#1063 exists for: a `proposed-rule` decision must
+        become visible through `list_pending_decisions` via the SAME wiring
+        a real nightly run takes -- not merely via a direct call to
+        `run_rule_proposal_detection` (which athenaeum#905's own tests already
+        cover)."""
+        config = _rule_proposals_config(enabled=True, threshold=3)
+        ctx = _rule_proposal_ctx(tmp_path, count=3, config=config)
+        fake = _fake_client()
+        with patch("athenaeum.librarian.build_llm_client", return_value=fake):
+            _run_rule_proposal_phase(ctx)
+        decisions = list_pending_decisions(ctx.wiki_root)
+        assert any(d["type"] == "proposed-rule" for d in decisions)
+
+    def test_skipped_when_threshold_not_met_even_with_gate_on(
+        self, tmp_path: Path
+    ) -> None:
+        config = _rule_proposals_config(enabled=True, threshold=3)
+        # Only 2 deferred rows -- below the threshold of 3.
+        ctx = _rule_proposal_ctx(tmp_path, count=2, config=config)
+        fake = _fake_client()
+        with patch("athenaeum.librarian.build_llm_client", return_value=fake):
+            _run_rule_proposal_phase(ctx)
+        assert ctx.rule_proposals_summary is not None
+        assert ctx.rule_proposals_summary["threshold_crossed"] == 0
+        assert ctx.rule_proposals_summary["proposed"] == 0
+        assert fake.calls == []  # the model was never invoked
+        decisions = list_pending_decisions(ctx.wiki_root)
+        assert all(d["type"] != "proposed-rule" for d in decisions)
+
+    def test_deadline_already_expired_skips_phase(self, tmp_path: Path) -> None:
+        config = _rule_proposals_config(enabled=True, threshold=3)
+        ctx = _rule_proposal_ctx(tmp_path, count=3, config=config)
+        ctx.run_deadline = 0.0  # already elapsed
+        ctx.max_runtime = 60
+        with patch("athenaeum.librarian.build_llm_client") as mock_build:
+            _run_rule_proposal_phase(ctx)
+        mock_build.assert_not_called()
+        assert ctx.rule_proposals_summary == {"skipped_deadline_tripped": True}
+        assert ctx.usage.api_calls == 0
+
+    def test_deadline_tripped_flag_skips_phase(self, tmp_path: Path) -> None:
+        """``ctx.deadline_tripped`` (set by an earlier phase, e.g. the entity
+        tier loop) skips this phase even if ``ctx.run_deadline`` itself has
+        not technically elapsed yet -- mirrors the auto-memory block's own
+        guard at its call site in ``run()``."""
+        config = _rule_proposals_config(enabled=True, threshold=3)
+        ctx = _rule_proposal_ctx(tmp_path, count=3, config=config)
+        ctx.deadline_tripped = True
+        with patch("athenaeum.librarian.build_llm_client") as mock_build:
+            _run_rule_proposal_phase(ctx)
+        mock_build.assert_not_called()
+        assert ctx.rule_proposals_summary == {"skipped_deadline_tripped": True}
+
+    def test_spend_ledger_records_usage_for_the_drafting_call(
+        self, tmp_path: Path
+    ) -> None:
+        """Consistent with the tier-2/3 call sites (``tiers.py``'s
+        ``_record_usage``): the drafting call's tokens land in ``ctx.usage``
+        tagged ``knob="rule_proposals"``, and the knob's resolved
+        provider/model are recorded for the end-of-run per-knob-provider
+        spend split (issue athenaeum#841)."""
+        config = _rule_proposals_config(enabled=True, threshold=3)
+        ctx = _rule_proposal_ctx(tmp_path, count=3, config=config)
+        payload = json.dumps(_draft_payload())
+        usage_obj = make_llm_usage(input_tokens=111, output_tokens=22)
+        fake = FakeLLMClient(response=make_llm_response(payload, usage=usage_obj))
+        with patch("athenaeum.librarian.build_llm_client", return_value=fake):
+            _run_rule_proposal_phase(ctx)
+        assert ctx.usage.api_calls == 1
+        assert ctx.usage.per_knob["rule_proposals"]["input_tokens"] == 111
+        assert ctx.usage.per_knob["rule_proposals"]["output_tokens"] == 22
+        assert ctx.knob_providers["rule_proposals"] == "api"
+        assert ctx.knob_models["rule_proposals"]  # resolved to a concrete model id
 
 
 if __name__ == "__main__":
