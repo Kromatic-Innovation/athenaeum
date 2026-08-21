@@ -30,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wrong bucket instead of preserving it for correct reclassification).
 ### Added
 
+- **`sensitivity.routing` config resolver (athenaeum#1022, slice 1/4 of
+  athenaeum#949's design note).** New `resolve_sensitivity_routing` in
+  `src/athenaeum/config.py`: resolves `{"enabled": bool, "classes":
+  {<name>: {"action": "route"|"off"}}}` from `sensitivity.routing.*` yaml,
+  `ATHENAEUM_SENSITIVITY_ROUTING_ENABLED` env, or a dark-by-default `false`
+  (`env > yaml > default`, mirroring `resolve_screening`'s
+  `ATHENAEUM_SCREEN_MEDICAL` precedent). A malformed `enabled` value or an
+  unknown per-class `action` raises the new `SensitivityRoutingConfigError`.
+  A separate axis from athenaeum#910's own `sensitivity.classes.*` — see
+  `docs/configuration.md` → "Sensitivity routing". **Behaviour-free**:
+  nothing reads this resolver yet; the routing/redaction mechanism, the
+  read path, and the librarian wiring are follow-on slices
+  (athenaeum#1023-athenaeum#1025).
 - **Dimension registry + kernel dimensions (athenaeum#714).** Root of the
   memory-model v6 dimension chain (child of epic athenaeum#709; athenaeum#715,
   athenaeum#716, athenaeum#719 all depend on this). New `src/athenaeum/dimensions.py`:
