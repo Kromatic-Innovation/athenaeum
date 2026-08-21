@@ -587,6 +587,65 @@ class TestIdempotence:
 
 
 # ---------------------------------------------------------------------------
+# Deadline participation (issue athenaeum#1063): ``deadline_check`` is checked
+# at the top of EACH shape's iteration, mirroring
+# ``athenaeum.rules.run_shape_rule_phase``'s per-file check.
+# ---------------------------------------------------------------------------
+
+
+class TestDeadlineParticipation:
+    def test_deadline_already_expired_skips_every_shape(self, tmp_path: Path) -> None:
+        _seed_deferred_rows(tmp_path, source="s1", count=3, tier=None)
+        _seed_deferred_rows(tmp_path, source="s2", count=3, tier=None, start_index=100)
+        client = _fake_client()
+        summary = run_rule_proposal_detection(
+            wiki_root=tmp_path / "wiki",
+            raw_root=tmp_path / "raw",
+            config=_SMALL_CONFIG,
+            client=client,
+            now=_NOW,
+            deadline_check=lambda: True,
+        )
+        assert summary["skipped_deadline"] == 2  # both shapes, none visited
+        assert summary["threshold_crossed"] == 0
+        assert summary["proposed"] == 0
+        assert len(client.calls) == 0  # the model was never invoked
+        assert list_pending_rule_proposals(tmp_path / "wiki") == []
+
+    def test_deadline_tripping_mid_run_stops_remaining_shapes(
+        self, tmp_path: Path
+    ) -> None:
+        """The highest-frequency shape is visited first (deterministic
+        ordering) and still gets drafted; the deadline then trips before the
+        second, lower-frequency shape is even inspected."""
+        _seed_deferred_rows(tmp_path, source="s-frequent", count=5, tier=None)
+        _seed_deferred_rows(
+            tmp_path, source="s-rare", count=3, tier=None, start_index=100
+        )
+        client = _fake_client()
+        calls_before_second_shape = {"seen": 0}
+
+        def _deadline_check() -> bool:
+            # False for the first shape's own check, True from then on --
+            # trips AFTER the first (most-frequent) shape has already been
+            # drafted, BEFORE the second is even inspected.
+            calls_before_second_shape["seen"] += 1
+            return calls_before_second_shape["seen"] > 1
+
+        summary = run_rule_proposal_detection(
+            wiki_root=tmp_path / "wiki",
+            raw_root=tmp_path / "raw",
+            config=_SMALL_CONFIG,
+            client=client,
+            now=_NOW,
+            deadline_check=_deadline_check,
+        )
+        assert summary["proposed"] == 1
+        assert summary["skipped_deadline"] == 1  # the second shape, unvisited
+        assert len(client.calls) == 1
+
+
+# ---------------------------------------------------------------------------
 # No-readable-exemplar path
 # ---------------------------------------------------------------------------
 
