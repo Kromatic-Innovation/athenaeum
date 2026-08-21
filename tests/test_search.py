@@ -77,6 +77,17 @@ class TestFTS5Backend:
         # _index.md should be excluded
         assert count == 3
 
+    def test_build_index_skips_memory_md_in_wiki_root(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        """A ``MEMORY.md`` directly in the wiki root (not just under an extra
+        intake root — see ``TestFTS5ExtraRoots::test_memory_index_excluded``)
+        is also excluded, same skip-listed-name rule."""
+        (wiki_with_pages / "MEMORY.md").write_text("# MEMORY INDEX\n")
+        cache = tmp_path / "cache"
+        count = FTS5Backend().build_index(wiki_with_pages, cache)
+        assert count == 3  # unchanged: MEMORY.md never entered the index
+
     def test_build_index_creates_cache_dir(
         self, wiki_with_pages: Path, tmp_path: Path
     ) -> None:
@@ -1316,6 +1327,49 @@ class TestIncrementalHelpers:
         assert search_module._passes_globs("lean.md", None, ["acme*"]) is True
 
 
+class TestManifestStatsSchema:
+    """Unit coverage for ``_manifest_stats``' opaque-token schema stamp
+    (issue athenaeum#977) — direct coverage of the schema-mismatch and
+    malformed-row branches that a full ``build_index`` round trip only
+    reaches indirectly."""
+
+    def test_none_manifest_returns_empty(self) -> None:
+        assert search_module._manifest_stats(None) == {}
+
+    def test_schema_mismatch_returns_empty(self) -> None:
+        """A manifest whose top-level ``version`` isn't the current
+        opaque-token schema (whether absent, v1, or the old v2 shape) has no
+        usable prior stats — this is the "stamp mismatch forces one full
+        re-hash" mechanism."""
+        assert search_module._manifest_stats({"version": 1, "hashes": {}}) == {}
+        assert (
+            search_module._manifest_stats(
+                {"version": 2, "hashes": {}, "stats": {"a.md": [0, 0, ""]}}
+            )
+            == {}
+        )
+
+    def test_current_schema_missing_stats_key_returns_empty(self) -> None:
+        assert (
+            search_module._manifest_stats(
+                {"version": search_module._STORE_STATS_SCHEMA_VERSION, "hashes": {}}
+            )
+            == {}
+        )
+
+    def test_current_schema_malformed_row_is_skipped(self) -> None:
+        """A row that's missing an element never crashes the build — it is
+        just treated as having no usable prior stat for that one file."""
+        manifest = {
+            "version": search_module._STORE_STATS_SCHEMA_VERSION,
+            "hashes": {},
+            "stats": {"good.md": ["mtimehash:1", "2099-01-01"], "bad.md": ["only-one"]},
+        }
+        assert search_module._manifest_stats(manifest) == {
+            "good.md": ("mtimehash:1", "2099-01-01")
+        }
+
+
 # ---------------------------------------------------------------------------
 # Stat pre-filter (issue athenaeum#370) — skip re-reading files whose (mtime,size) match
 # ---------------------------------------------------------------------------
@@ -1346,17 +1400,21 @@ class TestStatPreFilter:
     def test_seed_writes_v2_manifest_with_stats(
         self, wiki_with_pages: Path, tmp_path: Path
     ) -> None:
+        """Issue athenaeum#977: the manifest's schema stamp is now 3 (the opaque
+        store-adapter version token replaces the raw ``(mtime_ns, size)``
+        pair — design note §6.2 D3)."""
         import json
 
         cache = tmp_path / "cache"
         FTS5Backend().build_index(wiki_with_pages, cache)
         m = json.loads((cache / "fts5-manifest.json").read_text())
-        assert m["version"] == 2
+        assert m["version"] == search_module._STORE_STATS_SCHEMA_VERSION
         assert set(m["stats"]) == set(m["hashes"])
-        # Each stat record is (mtime_ns, size, valid_until).
+        # Each stat record is (version, valid_until) — version is FilesystemStore's
+        # opaque "mtime_ns:size" token, compared for equality only (never parsed).
         rec = next(iter(m["stats"].values()))
-        assert len(rec) == 3
-        assert isinstance(rec[0], int) and isinstance(rec[1], int)
+        assert len(rec) == 2
+        assert isinstance(rec[0], str) and ":" in rec[0]
 
     def test_unchanged_rebuild_reads_no_bodies(
         self, wiki_with_pages: Path, tmp_path: Path, hash_spy: dict, delta_spy: dict
@@ -1432,11 +1490,11 @@ class TestStatPreFilter:
         self, wiki_with_pages: Path, tmp_path: Path, hash_spy: dict
     ) -> None:
         """A v1 manifest (hashes only, no stats) loads, forces one full re-hash,
-        and upgrades to v2 with stats on write."""
+        and upgrades to the current opaque-token schema on write (athenaeum#977)."""
         import json
 
         cache = tmp_path / "cache"
-        FTS5Backend().build_index(wiki_with_pages, cache)  # writes v2
+        FTS5Backend().build_index(wiki_with_pages, cache)  # writes the current schema
         mpath = cache / "fts5-manifest.json"
         m = json.loads(mpath.read_text())
         # Downgrade to a pre-athenaeum#370 v1 manifest: drop the stat map entirely.
@@ -1447,9 +1505,33 @@ class TestStatPreFilter:
         # No stats → the fast-path can't fire → every file is read+hashed once.
         assert hash_spy["n"] == 3
         assert count == 3
-        # The manifest is upgraded back to v2 with a full stat map.
+        # The manifest is upgraded back to the current schema with a full stat map.
         m2 = json.loads(mpath.read_text())
-        assert m2["version"] == 2
+        assert m2["version"] == search_module._STORE_STATS_SCHEMA_VERSION
+        assert set(m2["stats"]) == set(m2["hashes"])
+
+    def test_v2_manifest_backcompat_upgrades_to_current_schema(
+        self, wiki_with_pages: Path, tmp_path: Path, hash_spy: dict
+    ) -> None:
+        """Issue athenaeum#977: the OLD v2 manifest shape (raw ``(mtime_ns, size,
+        valid_until)`` stats, pre-opaque-token) is ALSO schema-incompatible —
+        not just v1 — and forces exactly one full re-hash, same as v1."""
+        import json
+
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        mpath = cache / "fts5-manifest.json"
+        m = json.loads(mpath.read_text())
+        # Downgrade to the pre-athenaeum#977 v2 shape: (mtime_ns, size, valid_until).
+        old_stats = {name: [0, 0, ""] for name in m["hashes"]}
+        mpath.write_text(json.dumps({"version": 2, "hashes": m["hashes"], "stats": old_stats}))
+
+        hash_spy["n"] = 0
+        count = FTS5Backend().build_index(wiki_with_pages, cache)
+        assert hash_spy["n"] == 3  # forced full re-hash exactly once
+        assert count == 3
+        m2 = json.loads(mpath.read_text())
+        assert m2["version"] == search_module._STORE_STATS_SCHEMA_VERSION
         assert set(m2["stats"]) == set(m2["hashes"])
 
     def test_valid_until_expiry_drops_page_without_reading(
@@ -1481,8 +1563,8 @@ class TestStatPreFilter:
         m = json.loads(mpath.read_text())
         past = (date.today() - timedelta(days=1)).isoformat()
         name = next(iter(m["stats"]))
-        mtime_ns, size, _vu = m["stats"][name]
-        m["stats"][name] = [mtime_ns, size, past]
+        version, _vu = m["stats"][name]
+        m["stats"][name] = [version, past]
         mpath.write_text(json.dumps(m))
 
         # Guard: the body must NOT be read on this build (stat still matches).
