@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum repair --bounce-fold`: CLI surface for athenaeum#850's
+  bounce-fold path (athenaeum#1006).** Exposes
+  `find_orphaned_bounce_marks`/`fold_orphaned_bounce_marks` as a new mode in
+  `repair`'s mutually-exclusive mode group, alongside `--tag-indent` /
+  `--value-quoting` / `--legacy-source-slugs` / `--backfill-sources`.
+  Dry-run by default; `--apply` writes. Reports `pairs_found` / `folded` /
+  `residual`, resolves the contacts surface from `--knowledge-root` (or an
+  explicit `--contacts-root` override), and follows the same exit-code
+  contract as the other repair modes (0 clean/applied, 1 error, 2 dry-run
+  found candidates). Deliberately **not** folded into `--all` — it writes to
+  the contacts surface (PII-adjacent) rather than reformatting wiki
+  frontmatter, a materially bigger blast radius than the existing `--all`
+  passes; see the module docstring in `src/athenaeum/_cmd_repair.py`.
 - **Publish the whole-store `Store` contract (athenaeum#983 — S8 of the
   whole-store adapter design lock, athenaeum#911).** `athenaeum.store`'s `Store`
   protocol, its data/error types (`StoreKey`, `ObjectMeta`, `Record`,
