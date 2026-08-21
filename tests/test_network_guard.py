@@ -69,6 +69,32 @@ def test_guard_allows_loopback() -> None:
         server.close()
 
 
+def test_guard_exception_type_is_not_satisfied_by_a_real_connection_error() -> None:
+    """``NetworkBlockedInDefaultSuite`` subclasses ``ConnectionError`` (an
+    ``OSError``) deliberately (issue athenaeum#1091) -- httpcore/httpx only
+    map ``OSError`` subclasses raised during connect into
+    ``httpx.ConnectError``, and a plain ``RuntimeError`` escaped that
+    mapping, which made a REAL blocked-connection caller (the anthropic SDK)
+    fall through to its long default-timeout retry path instead of failing
+    fast the way a genuine ``ConnectionRefusedError`` does (observed:
+    tests/test_live_delta_cadence.py went from ~7s to a 240s+ hang).
+
+    This test pins the OTHER half of that fix: the two exception types must
+    stay distinguishable by ``isinstance`` even though they share the
+    ``ConnectionError`` base, so ``pytest.raises(NetworkBlockedInDefaultSuite)``
+    in the tests above cannot be accidentally satisfied by an unrelated real
+    connection failure -- if the guard fixture were removed/broken, those
+    tests must still fail loudly rather than silently pass because SOME
+    ConnectionError-family exception happened to come out of a real (timed
+    out or refused) socket call.
+    """
+    real_error = ConnectionRefusedError("real OS-level refusal, not the guard")
+    assert isinstance(real_error, ConnectionError)  # same family...
+    assert not isinstance(real_error, NetworkBlockedInDefaultSuite)  # ...but distinguishable
+    assert issubclass(NetworkBlockedInDefaultSuite, ConnectionError)
+    assert issubclass(NetworkBlockedInDefaultSuite, OSError)
+
+
 def test_guard_allows_localhost_hostname() -> None:
     """The ``"localhost"`` literal (not just ``127.0.0.1``) is treated as
     local — ``connect_ex`` variant, since some callers use the non-raising
