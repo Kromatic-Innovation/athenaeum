@@ -62,8 +62,8 @@ audience check, then the athenaeum#532 ``recallable`` check, both BEFORE any
 excluded-surface lookup — either drop triggers ZERO excluded scans.
 Only once a page survives both does this module resolve its excluded record
 and assemble facts via the athenaeum#883 seam
-(:func:`athenaeum.pii.assemble_excluded_read`) — never ``read_entity``/
-``read_person``, never a fresh :class:`~athenaeum.models.EntityIndex` beyond
+(:func:`athenaeum.pii.assemble_excluded_read`) — never ``read_entity``,
+never a fresh :class:`~athenaeum.models.EntityIndex` beyond
 the one already needed to locate the page. The response SHAPE for that
 assembly follows the :class:`~athenaeum.pii.EntityRead` /
 :class:`~athenaeum.pii.RedactionMarker` precedent exactly: ``with_pii=True``
