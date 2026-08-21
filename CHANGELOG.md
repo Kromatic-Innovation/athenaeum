@@ -22,6 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the contacts surface (PII-adjacent) rather than reformatting wiki
   frontmatter, a materially bigger blast radius than the existing `--all`
   passes; see the module docstring in `src/athenaeum/_cmd_repair.py`.
+- **Merge-inflow restoration analysis: proposed `max_merge_sources` value
+  (athenaeum#1030 — athenaeum#787 prerequisite).** `docs/merge-inflow-
+  restoration.md`: characterizes what the athenaeum#784 baseline's suppression
+  counts do and do not support (no per-cluster `n_sources` distribution was
+  ever recorded — stated plainly rather than estimated), establishes that
+  raising `max_merge_sources` above 5 adds zero T2 safe-class auto-apply
+  exposure at any candidate value (`SAFE_CLASS_MAX_PAGES=3` is checked before
+  `memory_class` homogeneity in `reasoning_tiers.safe_class_violation`),
+  proposes **8** for operator ratification, states the athenaeum#715 comparator
+  re-run's orthogonal relationship (backlog vs. stream), and names the
+  minimal instrumentation that would make the distribution measurable going
+  forward. No default or runtime behavior changes — analysis only; the
+  live-config flip stays athenaeum#787's.
 
 - **Shape rules: nested-key `fields` resolution + one-level source-subdir
   discovery (athenaeum#974 — unblocks athenaeum#940).** The two code gaps the
