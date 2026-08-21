@@ -264,6 +264,8 @@ class NoCheapScanStore(InMemoryStore):
         self.capabilities = dataclasses.replace(
             self.capabilities, cheap_local_scan=False
         )
+
+
 class LatencyInjectingStore:
     """Wraps any :class:`~athenaeum.store.Store` implementation, counting
     ``iter_meta``/``read_many`` CALLS and optionally sleeping on each one.
