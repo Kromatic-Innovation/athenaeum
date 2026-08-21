@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from athenaeum.cli import main
 from athenaeum.config import load_config
 from athenaeum.librarian import reindex
@@ -1592,3 +1594,192 @@ class TestLintPiiCleanAfterRename:
             (root / "wiki" / "info-at-acme.md").read_text(encoding="utf-8")
         )
         assert name_field_holds_pii(deferred_meta) is True
+
+
+# ---------------------------------------------------------------------------
+# Sensitivity-registry migration (issue athenaeum#992, S3 of athenaeum#910's design note)
+# ---------------------------------------------------------------------------
+#
+# storage_migrate.py's detector call sites (the module-scope
+# `from athenaeum.pii import find_inline_emails, find_inline_phones` and the
+# function-local re-import inside `plan_name_email_rename`) now obtain
+# findings through `athenaeum.sensitivity.classify()` instead. The classes
+# below prove: (AC2) the module-scope import is gone and the sweep still
+# works; (AC4) the migrated path agrees with the pre-change
+# `find_inline_emails`/`find_inline_phones` result on representative fixture
+# shapes; (AC5) the athenaeum#500/#732 phone false-positive exclusions still hold;
+# (AC6) a purely test-defined recogniser travels the identical code path as
+# the shipped `email` recogniser; (AC7) with no `sensitivity:` config block,
+# the migrated sweep's output is unchanged.
+
+
+class TestNoDirectPiiDetectorImport:
+    def test_module_scope_import_does_not_name_find_inline_functions(self) -> None:
+        # AC2/AC8: storage_migrate no longer imports the detector functions by
+        # name at module scope, but athenaeum.pii still exports and works.
+        import athenaeum.storage_migrate as sm
+        from athenaeum.pii import find_inline_emails, find_inline_phones
+
+        assert not hasattr(sm, "find_inline_emails")
+        assert not hasattr(sm, "find_inline_phones")
+        assert find_inline_emails("reach a@b.com") == ["a@b.com"]
+        assert find_inline_phones("call 555-010-0100") == ["555-010-0100"]
+
+
+class TestSensitivityRegistryEquivalence:
+    """AC4: the migrated detector path agrees with the pre-change
+    ``athenaeum.pii.find_inline_emails``/``find_inline_phones`` result on
+    this module's existing fixture shapes — proven, not merely asserted.
+    """
+
+    EMAIL_FIXTURES: list[str] = [
+        "",
+        "no contact info here",
+        "reach jane@example.com for details",
+        "jane@example.com, then jane@example.com again",  # repeat -> dedup
+        "git@github.com is a clone url",  # service address (see below)
+        'source: "Streak import 2016 via founder@acme.example"',
+    ]
+
+    PHONE_FIXTURES: list[str] = [
+        "",
+        "call 555-010-0100 or (555) 010-0100",
+        "+1 555 010 0100 and +15550100100",
+        "555-010-0100, then 555-010-0100 again",  # repeat -> dedup
+        "logged (2026-07-29) in the CRM",  # athenaeum#500: parenthesized ISO date
+        "season 2019-2020 recap",  # athenaeum#500: year range
+        "QBO realm 1008563730 for this account",  # athenaeum#732: labeled record id
+        "GA4 stream 5139685489",  # athenaeum#732: labeled record id
+        "ISBN 9781234567897 first edition",  # athenaeum#732: bare ISBN-13
+        "issue list 256-257-280 filed",  # athenaeum#720: short unprefixed grouped run
+    ]
+
+    def test_email_detection_matches_pre_change_function_on_fixtures(self) -> None:
+        from athenaeum.pii import find_inline_emails
+        from athenaeum.storage_migrate import _classified_values
+
+        for text in self.EMAIL_FIXTURES:
+            assert _classified_values(text, "email", None) == find_inline_emails(text), text
+
+    def test_phone_detection_matches_pre_change_function_on_fixtures(self) -> None:
+        from athenaeum.pii import find_inline_phones
+        from athenaeum.storage_migrate import _classified_values
+
+        for text in self.PHONE_FIXTURES:
+            assert _classified_values(text, "phone", None) == find_inline_phones(text), text
+
+    def test_migratable_emails_still_excludes_service_addresses(self) -> None:
+        # _migratable_emails' is_service_address filter (issue athenaeum#507) is
+        # applied AFTER the registry lookup, unchanged.
+        from athenaeum.storage_migrate import _migratable_emails
+
+        assert _migratable_emails("git@github.com is the clone url", None) == []
+        assert _migratable_emails("reach jane@example.com", None) == ["jane@example.com"]
+
+
+class TestPhoneFalsePositiveSuppressionPreserved:
+    """AC5: the migrated storage_migrate sweep still excludes the athenaeum#500/#732
+    shapes. A regression here would silently re-open both closed issues.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "logged (2026-07-29) in the CRM",  # athenaeum#500: parenthesized ISO date
+            "First contact: 2026-07-29 per CRM",  # athenaeum#500: bare ISO date
+            "see (2019-2020) season stats",  # athenaeum#500: parenthesized year range
+            "page uid (52785095) in the index",  # athenaeum#500: parenthesized uid prefix
+            "QBO realm 1008563730 for this account",  # athenaeum#732: labeled record id
+            "GA4 stream 5139685489",  # athenaeum#732: labeled record id
+            "ISBN 9781234567897 first edition",  # athenaeum#732: bare ISBN-13
+        ],
+    )
+    def test_excluded_shape_produces_no_phone_match(self, text: str) -> None:
+        from athenaeum.storage_migrate import _classified_values
+
+        assert _classified_values(text, "phone", None) == []
+
+    def test_genuine_phone_beside_an_excluded_shape_still_matches(self) -> None:
+        from athenaeum.storage_migrate import _classified_values
+
+        assert _classified_values(
+            "met 2026-07-29, call (555) 010-0100", "phone", None
+        ) == ["(555) 010-0100"]
+
+
+class TestSensitivityRegistryEndToEnd:
+    """AC6: a purely test-defined recogniser, registered through the public
+    :func:`athenaeum.sensitivity.register_recognizer` and bound to a
+    test-defined class via config, travels a migrated call site's sweep
+    through the SAME generic helper (:func:`athenaeum.storage_migrate._classified_values`)
+    the shipped ``email`` recogniser uses — with no built-in-specific branch
+    anywhere in the traversed path (the helper is parameterized by recogniser
+    name; ``"email"``/``"phone"`` are not special-cased).
+    """
+
+    @pytest.fixture
+    def _isolate_registered_recognizers(self):
+        from athenaeum import sensitivity
+
+        snapshot = dict(sensitivity._REGISTERED_RECOGNIZERS)
+        try:
+            yield
+        finally:
+            sensitivity._REGISTERED_RECOGNIZERS.clear()
+            sensitivity._REGISTERED_RECOGNIZERS.update(snapshot)
+
+    def test_custom_recognizer_matches_travel_the_same_path_as_email(
+        self, _isolate_registered_recognizers
+    ) -> None:
+        from athenaeum.sensitivity import SensitivityMatch, register_recognizer
+        from athenaeum.storage_migrate import _classified_values
+
+        class _WidgetIdRecognizer:
+            name = "widget-id"
+
+            def detect(self, *, text, frontmatter=None):
+                return [
+                    SensitivityMatch(recognizer=self.name, value=tok)
+                    for tok in text.split()
+                    if tok.startswith("WID-")
+                ]
+
+        register_recognizer(_WidgetIdRecognizer())
+        config = {
+            "sensitivity": {
+                "classes": {
+                    "widget": {
+                        "recognizers": ["widget-id"],
+                        "read_policy": {"access": "internal"},
+                    }
+                }
+            }
+        }
+        text = "contact alice@example.com re WID-42 and WID-42 again"
+
+        custom = _classified_values(text, "widget-id", config)
+        email = _classified_values(text, "email", config)
+
+        assert custom == ["WID-42"]  # order-preserving dedup, same as email's
+        assert email == ["alice@example.com"]
+        assert type(custom) is type(email) is list
+
+
+class TestSensitivityRegistryDeploymentDefaultUnchanged:
+    """AC7: with no ``sensitivity:`` config block, the migrated sweep produces
+    the same findings it produced before this PR on the existing fixture
+    corpus — the full ``TestPlanPiiMigration``/``TestDetectorDrivenKeyCoverage``/
+    ``TestNestedFrontmatterCoverage`` suites above (unmodified by athenaeum#992 and
+    still green) are the corpus-wide proof; this test is the direct,
+    explicit one for the default (no ``sensitivity`` key) config shape.
+    """
+
+    def test_default_config_migration_matches_pre_change_shape(
+        self, tmp_path: Path
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path)
+        page = _write_entity_page(root / "wiki")
+        # EXCLUDED_CONFIG carries no `sensitivity:` key at all.
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+        assert plan.emails == ["jane@example.com"]
+        assert plan.phones == ["+1-555-0100"]

@@ -165,8 +165,159 @@ class TestLintPiiCLI:
 
         assert rc == EXIT_PII_FOUND
         payload = json.loads(capsys.readouterr().out)
-        assert payload[0]["emails"] == ["grace@example.com"]
-        assert payload[0]["path"].endswith("_queue.md")
+        assert payload["wiki"][0]["emails"] == ["grace@example.com"]
+        assert payload["wiki"][0]["path"].endswith("_queue.md")
+        # athenaeum#1049: raw/ is always present in the payload, empty when
+        # absent/clean — a consumer never has to guess whether the key exists.
+        assert payload["raw"] == []
+
+
+# ---------------------------------------------------------------------------
+# raw/ observability (issue athenaeum#1049)
+# ---------------------------------------------------------------------------
+#
+# `_cmd_storage_lint_pii` resolved its scan root as `knowledge_root / "wiki"`
+# only. `raw/` is a SIBLING of `wiki/`, not a descendant, and was never
+# scanned — `docs/sensitivity-value-routing.md` §5 confirms this premise
+# directly against the code. Once athenaeum#1025's standing filter ships, an
+# original value stays in `raw/` in the clear (append-only by contract) while
+# only a pointer reaches `wiki/`, so a clean `lint-pii` would read as "no
+# retained values anywhere" when every original is still sitting in `raw/`,
+# unmeasured. These tests pin the fix: `raw/` is scanned and reported as a
+# SEPARATE, non-gating surface — never summed into the wiki finding count,
+# never flipping the exit code — so wiki cleanliness and raw retention stay
+# distinguishable instead of collapsing into one number.
+
+
+def _wiki_and_raw(tmp_path: Path) -> Path:
+    root = tmp_path / "knowledge"
+    (root / "wiki").mkdir(parents=True)
+    (root / "raw").mkdir(parents=True)
+    return root
+
+
+class TestLintPiiRawTree:
+    def test_raw_finding_is_reported_but_does_not_fail_the_gate(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        # A clean wiki + a dirty raw/ must still exit 0 (issue athenaeum#1049):
+        # raw retention is today's normal, unavoidable state, not a regression
+        # this gate could ever clear -- gating on it would fail permanently.
+        root = _wiki_and_raw(tmp_path)
+        (root / "wiki" / "jane.md").write_text(
+            "---\nuid: '1'\nname: Jane\ntype: person\n---\nJane leads widgets.\n",
+            encoding="utf-8",
+        )
+        (root / "raw" / "intake-1.md").write_text(
+            "Reach Bob at bob.roberts@example.com or +1-555-0142.\n",
+            encoding="utf-8",
+        )
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "0 inline PII findings under" in out  # the wiki line
+        assert "2 inline PII finding(s) in 1 file(s) under" in out  # the raw line
+        assert "bob.roberts@example.com" in out
+        assert "not gated" in out
+
+    def test_raw_dirty_and_wiki_dirty_exit_code_reflects_wiki_only(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        # Both surfaces carrying findings still exits EXIT_PII_FOUND (from the
+        # wiki finding) -- never EXIT_PII_FOUND * 2 or some summed code, and
+        # the raw count is not added into the wiki finding count.
+        root = _wiki_and_raw(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "reach grace@example.com\n", encoding="utf-8"
+        )
+        (root / "raw" / "intake-1.md").write_text(
+            "carol@example.com and dave@example.com\n", encoding="utf-8"
+        )
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        assert rc == EXIT_PII_FOUND
+        out = capsys.readouterr().out
+        assert "1 inline PII finding(s) in 1 file(s) under" in out  # wiki count
+        assert "2 inline PII finding(s) in 1 file(s) under" in out  # raw count, distinct
+
+    def test_missing_raw_root_reports_clean_not_error(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        # _wiki() (not _wiki_and_raw()) never creates raw/ -- mirrors
+        # test_missing_wiki_root_is_empty's "missing means empty, never raises".
+        root = _wiki(tmp_path)
+        (root / "wiki" / "jane.md").write_text(
+            "---\nuid: '1'\nname: Jane\ntype: person\n---\nJane leads widgets.\n",
+            encoding="utf-8",
+        )
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "0 inline PII findings under" in out
+        assert str(root / "raw") in out
+
+    def test_clean_raw_tree_is_reported_as_zero(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        root = _wiki_and_raw(tmp_path)
+        (root / "wiki" / "jane.md").write_text(
+            "---\nuid: '1'\nname: Jane\ntype: person\n---\nJane leads widgets.\n",
+            encoding="utf-8",
+        )
+        (root / "raw" / "intake-1.md").write_text(
+            "Jane leads widgets, no contact data here.\n", encoding="utf-8"
+        )
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert f"0 inline PII findings under {root / 'raw'}" in out
+
+    def test_raw_finding_json_is_a_separate_key_never_summed(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        import json
+
+        root = _wiki_and_raw(tmp_path)
+        (root / "wiki" / "jane.md").write_text(
+            "---\nuid: '1'\nname: Jane\ntype: person\n---\nJane leads widgets.\n",
+            encoding="utf-8",
+        )
+        (root / "raw" / "intake-1.md").write_text(
+            "carol@example.com\n", encoding="utf-8"
+        )
+
+        rc = main(["storage", "lint-pii", "--path", str(root), "--json"])
+
+        assert rc == 0  # raw findings never flip the exit code
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["wiki"] == []
+        assert payload["raw"][0]["emails"] == ["carol@example.com"]
+        assert payload["raw"][0]["path"].endswith("intake-1.md")
+
+    def test_wiki_only_behavior_is_unchanged_by_raw_scanning(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        # Regression guard: adding the raw/ scan must not alter wiki/'s own
+        # finding count, adjudication, or exit code when raw/ does not exist
+        # at all (the pre-athenaeum#1049 shape every existing test in this file
+        # already exercises via `_wiki()`).
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_pending_merges_archive.md").write_text(
+            _QUEUE_FILE_FIXTURE, encoding="utf-8"
+        )
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        assert rc == EXIT_PII_FOUND
+        out = capsys.readouterr().out
+        assert "3 inline PII finding(s) in 1 file(s) under" in out
 
 
 # ---------------------------------------------------------------------------
@@ -454,10 +605,10 @@ class TestLintPiiAllowlistCLI:
 
         assert rc == EXIT_PII_FOUND
         payload = json.loads(capsys.readouterr().out)
-        assert len(payload) == 1
-        assert payload[0]["emails"] == ["real.person@example.com"]
-        assert payload[0]["allowlisted"] == ["noreply@example.com"]
-        assert payload[0]["adjudicated"] is False
+        assert len(payload["wiki"]) == 1
+        assert payload["wiki"][0]["emails"] == ["real.person@example.com"]
+        assert payload["wiki"][0]["allowlisted"] == ["noreply@example.com"]
+        assert payload["wiki"][0]["adjudicated"] is False
 
     def test_json_exits_zero_when_fully_adjudicated(
         self, tmp_path: Path, capsys
@@ -474,5 +625,5 @@ class TestLintPiiAllowlistCLI:
 
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
-        assert payload[0]["adjudicated"] is True
-        assert payload[0]["emails"] == []
+        assert payload["wiki"][0]["adjudicated"] is True
+        assert payload["wiki"][0]["emails"] == []

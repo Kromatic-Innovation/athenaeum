@@ -31,8 +31,9 @@ raw wiki files.
 Layering: L4 domain/pipeline module. Aggregates OTHER L4 modules
 (:mod:`athenaeum.answers`, :mod:`athenaeum.calibration`,
 :mod:`athenaeum.pending_merges`, :mod:`athenaeum.quarantine`,
-:mod:`athenaeum.retraction_cascade`) into one unified view and may import L3
-services (``models``) freely. Factoring rule:
+:mod:`athenaeum.retraction_cascade`, :mod:`athenaeum.rule_proposals`) into
+one unified view and may import L3 services (``models``) freely. Factoring
+rule:
 this module only READS and re-shapes the three underlying queues into a
 common item shape — it owns no queue's storage format or mutation path;
 resolving/writing back to a given queue stays the owning module's job (e.g.
@@ -51,6 +52,7 @@ from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
 from athenaeum.quarantine import list_pending_quarantine
 from athenaeum.retraction_cascade import read_retraction_reviews
+from athenaeum.rule_proposals import list_pending_rule_proposals
 
 # Keys the resolver appends to a pending-question block tail (issue athenaeum#126),
 # re-extracted verbatim when ``--with-proposal`` is requested. Kept in sync
@@ -381,6 +383,58 @@ def quarantine_to_decision(rec: dict) -> dict:
     }
 
 
+def proposed_rule_to_decision(rec: dict) -> dict:
+    """Convert a rule-proposal ledger record to a unified decision dict (issue athenaeum#905).
+
+    A ``type: "proposed-rule"`` item: the librarian drafted a candidate
+    shape rule from ``rec["count"]`` records of one ``(source,
+    key_fingerprint)`` shape that the deterministic shape-rules pass
+    deferred to the reasoning tiers (``tier is None`` in
+    ``_shape_rule_dispositions.jsonl`` -- see
+    :mod:`athenaeum.rule_proposals` for why this, not a literal tier 2/3,
+    is AC1's faithful reading). ``confidence`` is ``None`` -- there is no
+    similarity score behind a drafted rule, mirroring
+    :func:`quarantine_to_decision` / :func:`audit_to_decision`. Resolving
+    this item is :func:`athenaeum.rule_proposals.approve_rule_proposal`
+    (writes the rule into the rules directory in OBSERVE mode) or
+    :func:`athenaeum.rule_proposals.reject_rule_proposal` (permanently
+    suppresses this shape).
+    """
+    source = rec.get("source", "")
+    key_fingerprint = rec.get("key_fingerprint", "")
+    count = rec.get("count", 0)
+    window_days = rec.get("window_days")
+    impact = rec.get("projected_impact", "")
+    summary = (
+        f'The librarian drafted a candidate shape rule from {count} record(s) '
+        f'from "{source}" (shape {key_fingerprint}) deferred to the reasoning '
+        f'tiers over the last {window_days} day(s) -- approve to write it into '
+        f'the rules directory in OBSERVE mode, or reject to suppress this '
+        f'shape. Projected impact: {impact}'
+    )
+    return {
+        "type": "proposed-rule",
+        "id": rec.get("id"),
+        "created_at": rec.get("created_at"),
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "source": source,
+            "key_fingerprint": key_fingerprint,
+            "count": count,
+            "window_days": window_days,
+            "threshold": rec.get("threshold"),
+            "rule_name": rec.get("rule_name"),
+            "rule_yaml": rec.get("rule_yaml", ""),
+            "projected_impact": impact,
+            "rationale": rec.get("rationale", ""),
+            "exemplar_refs": rec.get("exemplar_refs", []),
+            "tier3_linked": rec.get("tier3_linked", False),
+            "tier3_note": rec.get("tier3_note", ""),
+        },
+    }
+
+
 def list_pending_merges_rich(merges_path: Path) -> list[dict]:
     """Unresolved merges as decidable dicts (title + gist + question)."""
     return [
@@ -416,12 +470,13 @@ def list_pending_decisions(
     the same fail-closed predicate ``recall`` applies. A question is withheld
     unless its ``source`` memory authorizes; a merge unless EVERY source page
     authorizes (checked over the FULL source set, before the athenaeum#431 render cap);
-    and ``retraction`` / ``audit`` / ``quarantine`` items — which reference pages
-    or raw-intake files by slug/proposal-id/ref rather than a readable
-    compiled-wiki source path — are withheld wholesale from a restricted
-    caller (adjudicating them is owner-only, mirroring the write-side guard
-    on ``review_audit_item``). Owner (``None``, the default) sees everything,
-    preserving existing behavior.
+    and ``retraction`` / ``audit`` / ``quarantine`` / ``proposed-rule`` items —
+    which reference pages, raw-intake files, or a shape's exemplar refs by
+    slug/proposal-id/ref rather than a readable compiled-wiki source path —
+    are withheld wholesale from a restricted caller (adjudicating them is
+    owner-only, mirroring the write-side guard on ``review_audit_item``).
+    Owner (``None``, the default) sees everything, preserving existing
+    behavior.
     """
     from athenaeum.models import all_sources_authorized, is_page_authorized_at
 
@@ -450,6 +505,11 @@ def list_pending_decisions(
         # release/leave-quarantined decision (AC 4/5).
         decisions += [
             quarantine_to_decision(rec) for rec in list_pending_quarantine(wiki_root)
+        ]
+        # Issue athenaeum#905: librarian-drafted rule proposals awaiting an
+        # operator's approve/reject decision.
+        decisions += [
+            proposed_rule_to_decision(rec) for rec in list_pending_rule_proposals(wiki_root)
         ]
     decisions.sort(key=lambda d: d["created_at"] or "")
     return decisions

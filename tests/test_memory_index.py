@@ -216,6 +216,26 @@ class TestApplyPruneIndex:
         # The index is left untouched — no git means no recoverable rewrite.
         assert (scope / "MEMORY.md").read_text(encoding="utf-8") == "- [Gone](gone.md)\n"
 
+    def test_refuses_against_fake_declaring_no_recovery_capability(
+        self, knowledge_with_dangling: Path
+    ) -> None:
+        """issue athenaeum#978 (S3, Tier A AC5): even with a REAL git repo
+        present (``knowledge_with_dangling`` is git-init'd), an injected
+        store fake declaring neither ``versioned`` nor ``purgeable`` (design
+        note §4.4 R1) makes the gate refuse — proving it is driven by the
+        declared capability, not by probing ``knowledge_root / ".git"``
+        directly."""
+        from tests.store_fakes import NoRecoveryStore
+
+        kr = knowledge_with_dangling
+        head_before = _git(kr, "rev-parse", "HEAD").stdout.strip()
+        report = apply_prune_index(
+            kr, build_dangling_report(_intake_roots(kr)), store=NoRecoveryStore()
+        )
+        assert report.committed is False
+        assert any("refusing to prune" in e for e in report.errors)
+        assert _git(kr, "rev-parse", "HEAD").stdout.strip() == head_before
+
     def test_empty_report_is_noop(self, knowledge_with_dangling: Path) -> None:
         kr = knowledge_with_dangling
         # Prune once to clean, then a second pass finds nothing dangling.

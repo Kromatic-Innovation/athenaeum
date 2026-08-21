@@ -25,7 +25,7 @@ Athenaeum already has two type axes on a wiki page. `memory_class` is a
 
 | Axis | Frontmatter key | Values | Defined in | Answers |
 |---|---|---|---|---|
-| Entity schema | `type:` | `person`, `company`, `project`, `concept`, `source`, + `FALLBACK_TYPES` (`auto-memory`, `tool`, `reference`, `principle`, `feedback`, `preference`, `user`) | `src/athenaeum/schemas.py` (`KNOWN_TYPES`) | "What kind of *entity* does this page describe?" |
+| Entity schema | `type:` | `person`, `company`, `project`, `concept`, `source`, + `FALLBACK_TYPES` (`auto-memory`, `tool`, `reference`, `principle`, `preference`, `incident`) | `src/athenaeum/schemas.py` (`KNOWN_TYPES`) | "What kind of *entity* does this page describe?" |
 | Intake type | `memory_type:` | `feedback`, `project`, `reference`, `user`, `recall` | `src/athenaeum/models.py` (`AutoMemoryFile.memory_type`) | "What intake channel / auto-memory shape produced this?" |
 | **Memory class (new)** | `memory_class:` | `fact`, `guideline`, `axiom`, `reference`, `entity`, `decision`, `procedure` | `src/athenaeum/schemas.py` (`MEMORY_CLASSES`) | "What EPISTEMIC kind of memory is this?" |
 

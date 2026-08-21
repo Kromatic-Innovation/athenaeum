@@ -1621,6 +1621,32 @@ def resolve_push_metrics_enabled(config: dict[str, Any] | None) -> bool:
     return True
 
 
+def resolve_ingestion_gate_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve whether the ingestion gate is enforced (issue athenaeum#968).
+
+    OFF by default — this is a new, additive gate (part 3 of athenaeum#968) that can
+    BLOCK ingestion when push-metrics precision instrumentation looks
+    unhealthy, so it must not change behavior for any existing operator
+    until they opt in (DoD: "lands dark behind a documented config key
+    defaulting to off"). Precedence: ``ATHENAEUM_INGESTION_GATE_ENABLED`` env
+    > ``librarian.ingestion_gate_enabled`` yaml > ``False``. Any env value
+    other than a falsey token (``0`` / ``false`` / ``no`` / ``off``,
+    case-insensitive) is truthy; a non-bool yaml value falls through to the
+    default. No seed in ``_DEFAULTS`` (issue athenaeum#231) — mirrors
+    :func:`resolve_push_metrics_enabled`'s shape, inverted default.
+    """
+    env = os.environ.get("ATHENAEUM_INGESTION_GATE_ENABLED")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false", "no", "off", "")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("ingestion_gate_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
 def resolve_spend_ledger_path(config: dict[str, Any] | None) -> Path | None:
     """Resolve an explicit spend-ledger path override (env > yaml > None) (athenaeum#378).
 
@@ -2000,6 +2026,80 @@ def resolve_screening(config: dict[str, Any] | None) -> dict[str, dict[str, str]
     return {"medical": {"action": action, "access": access}}
 
 
+def resolve_dimensions(config: dict[str, Any] | None) -> Any:
+    """Resolve the ``dimensions:`` config block into a validated registry (athenaeum#714).
+
+    Returns a :class:`athenaeum.dimensions.DimensionRegistry` — always
+    non-empty: the six kernel dimensions (recorded-time, observed-time,
+    valid-time, scope, subject, memory-class) are builtin and present
+    regardless of config. ``dimensions:`` in ``athenaeum.yaml`` is a list of
+    ADDITIONAL, deployment-declared dimensions (``engagement``, ``repo``,
+    ``maturity``, ...) layered on top; a fresh install with no ``dimensions:``
+    key gets the kernel-only registry, and ``athenaeum run`` behaves
+    unchanged either way (nothing in the librarian pipeline consults a
+    deployment dimension's ``applies_to`` unless one is declared).
+
+    No env var: ``dimensions:`` is a structural block (a list of typed
+    entries), not a scalar knob — there is no single value an env override
+    could sensibly replace. Raises
+    :class:`athenaeum.dimensions.DimensionRegistryError` on a malformed
+    entry (unknown ``kind``/``null_means``/``state``, non-kebab-case name,
+    duplicate name, an ``enum`` kind missing ``values``, or a name colliding
+    with a kernel dimension) — a mis-declared dimension is a real config
+    error, not something to silently drop, matching ``resolve_screening``'s
+    fail-loud posture for a structural (not scalar) knob.
+    """
+    from athenaeum.dimensions import DimensionRegistryError, build_registry
+
+    raw = config.get("dimensions") if isinstance(config, dict) else None
+    try:
+        return build_registry(raw)
+    except DimensionRegistryError:
+        raise
+
+
+def resolve_dimension_registry_epoch(config: dict[str, Any] | None) -> int:
+    """Resolve the dimension-registry epoch, for the verdict-ledger basis (athenaeum#714).
+
+    Bump ``librarian.dimensions_registry_epoch`` in ``athenaeum.yaml``
+    whenever a dimension's definition changes in a way that should
+    invalidate verdicts justified by the old definition (issue athenaeum#714 AC:
+    "Both must appear in the ledger basis of any verdict written after this
+    issue" — see :class:`athenaeum.verdicts.Basis`). Namespaced under
+    ``librarian.*`` alongside its athenaeum#712 sibling knobs
+    (``verdict_ledger_enabled``, ``verdict_epoch_batch_interval_days``), same
+    helper/coercion contract. Precedence:
+    ``ATHENAEUM_DIMENSION_REGISTRY_EPOCH`` env > yaml
+    ``librarian.dimensions_registry_epoch`` > ``1``. No seed in ``_DEFAULTS``
+    (issue athenaeum#231).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "dimensions_registry_epoch",
+        "ATHENAEUM_DIMENSION_REGISTRY_EPOCH",
+        1,
+    )
+
+
+def resolve_dimension_tree_epoch(config: dict[str, Any] | None) -> int:
+    """Resolve the scope-tree epoch, for the verdict-ledger basis (athenaeum#714).
+
+    Bump ``librarian.dimensions_tree_epoch`` in ``athenaeum.yaml`` on a
+    scope-tree reorg (renamed subtree) so athenaeum#712's targeted stale-marking
+    (:func:`athenaeum.verdicts.select_stale_for_tree_epoch_bump`) can
+    invalidate exactly the verdicts whose basis coordinates touch the
+    renamed subtree. Precedence: ``ATHENAEUM_DIMENSION_TREE_EPOCH`` env >
+    yaml ``librarian.dimensions_tree_epoch`` > ``1``. No seed in ``_DEFAULTS``
+    (issue athenaeum#231).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "dimensions_tree_epoch",
+        "ATHENAEUM_DIMENSION_TREE_EPOCH",
+        1,
+    )
+
+
 _DEFAULT_CONFIG_CONTENT = """\
 # Athenaeum sidecar configuration
 # See https://github.com/Kromatic-Innovation/athenaeum for docs.
@@ -2047,6 +2147,27 @@ search_backend: fts5
 #   medical:
 #     action: label_restrict   # label_restrict | off   (default: off)
 #     access: personal         # access level stamped when action=label_restrict
+
+# Dimension registry (issue athenaeum#714). Athenaeum ships the six KERNEL
+# dimensions (recorded-time, observed-time, valid-time, scope, subject,
+# memory-class) unconditionally — they need no config. `dimensions:` here
+# declares ADDITIONAL, deployment-specific axes on top; UNSET = kernel-only
+# (existing installs unchanged). See docs/configuration.md's "Dimension
+# registry" section for the full field reference.
+# dimensions:
+#   - name: engagement          # kebab-case, unique; must not collide with a
+#                                # kernel dimension name
+#     kind: identity             # interval | hierarchy | enum | identity
+#     null_means: unknown        # universal | unknown
+#     separates: true            # separator (may yield DISTINCT) vs sequencer
+#     applies_to:                # selector bounding which claims carry this
+#       memory_class: [entity]   # axis; {} / omitted = applies to every claim
+#     state: backfill            # backfill | enforced
+#     origin: operator           # builtin | operator | proposed:<id>
+#     since: 2026-08-01
+# librarian:
+#   dimensions_registry_epoch: 1  # bump on a dimension-definition change
+#   dimensions_tree_epoch: 1      # bump on a scope-tree reorg (renamed subtree)
 
 # Workspace owner identity (issue athenaeum#263). Designates the single canonical
 # person this knowledge base belongs to so the librarian keeps the owner a
@@ -2565,6 +2686,105 @@ def resolve_sensitivity_classes(config: dict[str, Any] | None) -> dict[str, dict
     return classes
 
 
+VALID_SENSITIVITY_ROUTING_ACTIONS = ("route", "off")
+
+
+class SensitivityRoutingConfigError(ValueError):
+    """Raised when the ``sensitivity.routing`` config block is invalid.
+
+    Mirrors :class:`athenaeum.screening.ScreeningConfigError` /
+    :class:`athenaeum.storage.StorageConfigError` /
+    :class:`athenaeum.sensitivity.SensitivityConfigError`: loud by design. A
+    malformed ``enabled`` flag or an unknown per-class ``action`` must never
+    silently fall back to a default — that could route (or fail to route) a
+    sensitivity class the operator did not intend.
+    """
+
+
+def resolve_sensitivity_routing(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Resolve the ``sensitivity.routing`` config surface (athenaeum#949 design note §8).
+
+    Slice 1/4 of athenaeum#949's design note (`docs/sensitivity-value-routing.md`).
+
+    Returns ``{"enabled": bool, "classes": {<name>: {"action": "route"|"off"}}}``.
+    A separate axis from :func:`resolve_sensitivity_classes` (athenaeum#910's
+    own ``sensitivity.classes.*`` — the *definition* of a class): this block
+    decides whether a matched class gets intercepted at intake, so a class
+    can be defined without being routed. This slice adds no behavior on its
+    own — nothing reads this resolver yet (issue athenaeum#1022; see
+    athenaeum#1023-athenaeum#1025 for the slices that do).
+
+    Precedence per the module convention (env > yaml > default, no seed in
+    ``_DEFAULTS`` so the code default stays reachable):
+    ``ATHENAEUM_SENSITIVITY_ROUTING_ENABLED`` env (``true``/``false``,
+    case-insensitive) > ``sensitivity.routing.enabled`` yaml > ``False``
+    (dark by default — the whole stage is a no-op, byte-identical to
+    pre-athenaeum#949 behavior, until an operator opts in).
+
+    Each entry under ``sensitivity.routing.classes.<name>`` may set
+    ``action`` to ``"route"`` or ``"off"``; when a class block is present but
+    ``action`` is unset, it defaults to ``"route"`` (defining a class and
+    turning routing on is read as "protect it" unless the operator
+    explicitly opts the class out).
+
+    Raises :class:`SensitivityRoutingConfigError` on a malformed ``enabled``
+    value (yaml value that isn't a bool, or an env value that isn't
+    ``true``/``false``) or an unknown per-class ``action`` — fail loud, no
+    silent fallback, matching :class:`athenaeum.screening.ScreeningConfigError`
+    / :class:`athenaeum.storage.StorageConfigError`'s existing posture.
+    """
+    enabled = False
+    classes: dict[str, dict[str, str]] = {}
+
+    if isinstance(config, dict):
+        sensitivity_cfg = config.get("sensitivity")
+        if isinstance(sensitivity_cfg, dict):
+            routing_cfg = sensitivity_cfg.get("routing")
+            if isinstance(routing_cfg, dict):
+                raw_enabled = routing_cfg.get("enabled")
+                if isinstance(raw_enabled, bool):
+                    enabled = raw_enabled
+                elif raw_enabled is not None:
+                    raise SensitivityRoutingConfigError(
+                        f"sensitivity.routing.enabled={raw_enabled!r} is "
+                        "invalid; expected a boolean."
+                    )
+
+                raw_classes = routing_cfg.get("classes")
+                if isinstance(raw_classes, dict):
+                    for name, definition in raw_classes.items():
+                        if not isinstance(name, str) or not name.strip():
+                            continue
+                        class_name = name.strip()
+                        action = "route"
+                        if isinstance(definition, dict):
+                            raw_action = definition.get("action")
+                            if isinstance(raw_action, str) and raw_action.strip():
+                                action = raw_action.strip().lower()
+                        if action not in VALID_SENSITIVITY_ROUTING_ACTIONS:
+                            raise SensitivityRoutingConfigError(
+                                f"sensitivity.routing.classes.{class_name}."
+                                f"action={action!r} is invalid; expected one "
+                                f"of {VALID_SENSITIVITY_ROUTING_ACTIONS}."
+                            )
+                        classes[class_name] = {"action": action}
+
+    env = os.environ.get("ATHENAEUM_SENSITIVITY_ROUTING_ENABLED")
+    if env is not None and env.strip():
+        env_value = env.strip().lower()
+        if env_value == "true":
+            enabled = True
+        elif env_value == "false":
+            enabled = False
+        else:
+            raise SensitivityRoutingConfigError(
+                f"ATHENAEUM_SENSITIVITY_ROUTING_ENABLED={env!r} is invalid; "
+                "expected 'true' or 'false'."
+            )
+
+    return {"enabled": enabled, "classes": classes}
+
+
 def resolve_excluded_read_mapping(config: dict[str, Any] | None) -> dict[str, str]:
     """Resolve ``storage.excluded_read_mapping`` — page ``type:`` → surface class (athenaeum#885).
 
@@ -2956,6 +3176,59 @@ def resolve_shape_rules_runtime_share(config: dict[str, Any] | None) -> float:
                 if resolved is not None:
                     return resolved
     return default
+
+
+def resolve_rule_proposals_threshold(config: dict[str, Any] | None) -> int:
+    """``librarian.rule_proposals.threshold`` (default 50).
+
+    Issue athenaeum#905 AC1/AC2: the record count -- grouped by ``(source,
+    key_fingerprint)``, restricted to rows the shape-rules pass deferred to
+    the reasoning ladder (``tier is None`` in
+    ``_shape_rule_dispositions.jsonl``; see :mod:`athenaeum.rule_proposals`)
+    -- that must be crossed within :func:`resolve_rule_proposals_window_days`
+    before the librarian drafts a candidate rule for that shape.
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_RULE_PROPOSALS_THRESHOLD",
+        "librarian",
+        "rule_proposals",
+        "threshold",
+        50,
+    )
+
+
+def resolve_rule_proposals_window_days(config: dict[str, Any] | None) -> int:
+    """``librarian.rule_proposals.window_days`` (default 30).
+
+    Issue athenaeum#905's "configurable window": the detector only counts
+    ``_shape_rule_dispositions.jsonl`` rows whose ``at`` timestamp falls
+    within this many days of "now".
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_RULE_PROPOSALS_WINDOW_DAYS",
+        "librarian",
+        "rule_proposals",
+        "window_days",
+        30,
+    )
+
+
+def resolve_rule_proposals_exemplar_count(config: dict[str, Any] | None) -> int:
+    """``librarian.rule_proposals.exemplar_count`` (default 5).
+
+    Issue athenaeum#905 AC2's "K exemplars" -- how many readable raw records
+    of a detected shape are embedded in the one drafting call.
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_RULE_PROPOSALS_EXEMPLAR_COUNT",
+        "librarian",
+        "rule_proposals",
+        "exemplar_count",
+        5,
+    )
 
 
 def resolve_verdict_ledger_enabled(config: dict[str, Any] | None) -> bool:

@@ -88,14 +88,20 @@ def _bounced_exceeds_allowance(report: bounce_divergence.DivergenceReport) -> bo
 def _do_not_email_exceeds_allowance(
     report: do_not_email_divergence.DoNotEmailDivergenceReport,
 ) -> bool:
-    """``do_not_email``'s declared allowance: zero, in either direction.
+    """``do_not_email``'s declared allowance: zero, but only in the
+    excluded-surface-newly-carrying-the-field direction (issue athenaeum#1039).
 
-    One operator-directed fact with one meaning — unlike ``bounced``, there
-    is no evidence-class asymmetry that would excuse either direction of
-    disagreement (see :func:`athenaeum.pii.do_not_email_state`'s own
-    docstring, which names this module as the guard for exactly this).
+    ``marked_on_wiki_not_excluded`` is TOLERATED — it is the design's ONLY
+    legal steady state, not a divergence to flag: athenaeum#960's
+    Out-of-scope explicitly rejects "any backfill, migration, or dual-write
+    of `do_not_email` marks onto the excluded surface", so the wiki carrying
+    a mark the excluded surface does not is expected, not a defect.
+    ``marked_on_excluded_not_wiki`` remains NOT tolerated (zero) — see
+    :func:`athenaeum.pii.do_not_email_state`'s precedence note, which names
+    "the excluded surface newly carrying the field" as the divergence this
+    guard's job is to flag.
     """
-    return report.diverged
+    return bool(report.marked_on_excluded_not_wiki)
 
 
 _REGISTRY: dict[str, FieldSpec] = {}
@@ -130,7 +136,12 @@ _register(
         name="do_not_email",
         wiki_key="do_not_email",
         join_key="uid",
-        allowance="zero divergence tolerated in either direction (one operator fact, one meaning).",
+        allowance=(
+            "marked_on_wiki_not_excluded is TOLERATED — the design's only "
+            "legal steady state (athenaeum#960 forbids backfill onto the "
+            "excluded surface); marked_on_excluded_not_wiki is NOT "
+            "tolerated (zero)."
+        ),
         compute=lambda wiki_root, contacts_root, as_of: (
             do_not_email_divergence.compute_do_not_email_divergence(wiki_root, contacts_root)
         ),

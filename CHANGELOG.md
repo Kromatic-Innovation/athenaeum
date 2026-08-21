@@ -7,6 +7,271 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Memory model v6: usage sensor for tier movement, never-ingest class
+  list, ingestion gate (athenaeum#968 — reshaped athenaeum#430, blocks athenaeum#718).**
+  Three additive pieces, all off/inert by default:
+  - **Usage sensor** — new `athenaeum.usage_report` extends the shipped
+    push-metrics instrumentation (athenaeum#711/#734/#795) into a per-claim
+    usage signal (pushed-count, referenced-count, last-referenced),
+    computed from the existing `_push_records.jsonl` /
+    `_push_references.jsonl` ledgers. ids-only (same redaction discipline
+    as `push_metrics`). New CLI: `athenaeum usage-report [--claim-id ID]
+    [--since ...] [--json]` (`src/athenaeum/_cmd_usage_report.py`).
+    `get_claim_usage`/`compute_usage_report` are the documented interface
+    athenaeum#718's tier-movement rules must consume instead of re-reading raw
+    ledgers.
+  - **Never-ingest class list** — the authority manifest (athenaeum#426) gains
+    an optional `never_ingest_classes:` key (`mirror-of-live-source`,
+    `pending-state-todo`); new `src/athenaeum/never_ingest.py` enforces it at
+    BOTH intake tiers, each at its own COMPILE choke point, never at
+    discovery: auto-memory (`_run_auto_memory_phase`, right after
+    `discover_auto_memory_files`, before clustering) and the entity tier
+    (`process_one`, right after each raw file's frontmatter is parsed, via
+    the shared `check_and_refuse` primitive). `discover_raw_files` itself is
+    untouched — its return value is read directly by
+    `backlog_price_sheet.py` / `ordinary_night_table.py` (athenaeum#713, held
+    pending an operator decision), so the entity-tier gate lives at compile
+    time, never at discovery, to keep that backlog count byte-identical. A
+    refused file (either tier) is excluded from that run's compilation,
+    ledgered ids-only (now including a `tier` field) to
+    `_never_ingest_refusals.jsonl`, and never deleted from disk. Empty/absent
+    manifest key is a complete no-op. See
+    `docs/authority-manifest.md#never-ingest-classes-athenaeum968`.
+  - **Ingestion gate** — new `src/athenaeum/ingestion_gate.py` +
+    `librarian.ingestion_gate_enabled` (default `false`): when enabled,
+    skips the whole auto-memory compilation phase for a run if push-metrics
+    precision instrumentation looks unhealthy (disabled, or zero
+    reference-determination records ever) — a liveness check, not a
+    quality bar. Nothing is deleted either way.
+  - **No deletion anywhere** in this issue's scope — movement is tier
+    metadata only, mechanically asserted by a static source scan in
+    `tests/test_never_ingest.py::TestNoDeletionStaticScan`.
+
+### Fixed
+
+- **`storage lint-pii` now scans `raw/`, reported as a separate,
+  non-gating surface (athenaeum#1049, filed from the athenaeum#949
+  close-out).** `_cmd_storage_lint_pii` resolved its scan root as
+  `knowledge_root / "wiki"` only; `raw/` is a SIBLING of `wiki/`, not a
+  descendant, and was never opened. Once athenaeum#1025's standing
+  sensitivity filter ships, a routed value's original bytes stay in
+  `raw/` in the clear (append-only by contract) while only a pointer
+  reaches `wiki/` — so a clean `lint-pii` would read as "no retained
+  values anywhere" while every original sat unmeasured in `raw/`, the
+  exact blind spot `docs/sensitivity-value-routing.md` §5 names as a
+  real, unresolved measurement gap. `lint-pii` now also scans `raw/`
+  with the same email/phone detectors and reports its count as a
+  DISTINCT surface — both in plain text (a second summary line) and in
+  `--json` (the top-level shape changes from a bare list to `{"wiki":
+  [...], "raw": [...]}`, no other known consumer of the prior shape).
+  Raw findings never flip the exit code: raw retention is today's
+  normal, unavoidable state (nothing in this change scrubs or
+  time-bounds it — athenaeum#437 owns existing residue, out of scope
+  here), so gating on it would fail every corpus permanently and would
+  make a clean wiki look dirty, destroying the wiki gate's existing
+  meaning. See `docs/sensitivity-value-routing.md` §5 for the updated
+  disposition note.
+- **Narrowed the `do_not_email` surface-divergence predicate to the direction
+  the ratified design actually forbids (athenaeum#1039, holds athenaeum#1038).**
+  Both `athenaeum surface-divergence --field do_not_email` and the standalone
+  `athenaeum do-not-email-divergence` command exited non-zero (`EXIT_DIVERGED`)
+  on EITHER direction of disagreement between the wiki and excluded surfaces —
+  but athenaeum#960's Out-of-scope explicitly rejects "any backfill,
+  migration, or dual-write of `do_not_email` marks onto the excluded
+  surface", making the wiki page the sole authoring surface. That means
+  `marked_on_wiki_not_excluded` is the design's ONLY legal steady state, not
+  a divergence, and the check alerted on every legal store state (observed
+  live 2026-08-20: 4 wiki marks / 0 excluded records → `EXIT_DIVERGED`).
+  Both entry points now alert only on `marked_on_excluded_not_wiki` — the
+  excluded surface newly carrying the field, the direction
+  `athenaeum.pii.do_not_email_state`'s precedence note names as this guard's
+  actual job. The `bounced` field's predicate is unchanged; its
+  `marked_not_on_wiki` direction remains a real signal.
+
+- **Aligned code-side entity-type registry mirrors with `_schema/types.md`
+  and gated the `corrections.py` write path (athenaeum#971, follow-up to
+  athenaeum#970).** `schemas.KNOWN_TYPES`/`FALLBACK_TYPES` now include `incident` (the
+  10th declared type per athenaeum#970's audit — previously every incident page
+  warned as "unknown") and no longer include `feedback`/`user` (folded away
+  by athenaeum#970); a page already on disk with one of those values keeps validating
+  without raising (athenaeum#93's non-raising design), it just now takes the
+  ordinary "unknown wiki type" path instead of the silent known-type path.
+  `corrections.py`'s tier-0 create branch (`WikiEntity(type=resolution.
+  entity_type, ...)`) previously had no `valid_types` gate at all, unlike the
+  classifier (`tiers.py`) and the other two deterministic create/upsert
+  paths (`intake.py`, `librarian.py`) — a correction batch could mint a page
+  under any string, including a athenaeum#970-folded type, with zero enforcement.
+  It now loads `_schema/types.md` (falling back to `KNOWN_TYPES`, same
+  pattern `librarian.py`/`entity_schema.py` use) and rejects-and-escalates
+  (`disposition="raised-tier"`) an unrecognized or folded `type`, matching
+  `intake.py`/`librarian.py`'s reject precedent rather than `tiers.py`'s
+  post-LLM coerce-to-`reference` (coercing here would misfile a fold into
+  the wrong bucket instead of preserving it for correct reclassification).
+### Added
+
+- **`storage.mapping` completeness lint + the deferred `(read_policy,
+  adapter)` pair check (athenaeum#993, S5 of athenaeum#910's design note).** New
+  `src/athenaeum/sensitivity_lint.py`: given a resolved config and a
+  caller-supplied corpus root, reports every sensitivity class name a
+  scanned corpus's content still carries (via its own `sensitivity_class:`
+  frontmatter field) that has no live `storage.mapping` entry, or whose
+  entry names an adapter absent from `storage.available_adapters()` — the
+  config-change-time catch for the read-time footgun the design note's §6
+  point 2 names. Also implements Decision D4's deferred pair check: a class
+  whose resolved `read_policy.access` is `confidential`/`personal` but whose
+  mapped adapter's `corpus_policy.embedded` is `True` is reported as a
+  separate, advisory finding kind that never blocks the gate on its own.
+  Both checks are read-only (never rewrites config or content) and driven by
+  committed synthetic fixtures under `tests/fixtures/sensitivity_mapping/`.
+  New CLI: `athenaeum storage lint-mapping --path <root> [--corpus <root>]
+  [--json]` (`src/athenaeum/_cmd_storage.py`), exiting non-zero only on a
+  completeness finding — standalone, not wired into any existing CI gate.
+  Neither `athenaeum.storage.resolve_adapter_for_class` nor
+  `athenaeum.sensitivity.available_classes` changed.
+- **Per-contract LLM schema strictness for `tiers.tier2` and `tiers.tier3-merge`
+  (athenaeum#1035, M17 phase 2a, split from athenaeum#608).** Decided from the
+  measured observation window 2026-08-05T13:12Z-2026-08-20T10:58Z (3,634
+  records, 0 unparseable, recorded on athenaeum#608's 2026-08-20 comment):
+  `tiers.tier2` (150 obs, 0 mismatches) and `tiers.tier3-merge` (2,961 obs, 4
+  mismatches: extra-keys 3, missing-required 1) sit upstream of the C4
+  entity-phase bottleneck and have a representative sample. Applying
+  athenaeum#608's framework ("only missing-required mismatches justify
+  rejection; extra keys are a different signal"): `llm_schemas.Tier2Entity`
+  tightens from `extra="allow"` to `extra="forbid"` (0% mismatch of any class
+  observed — forbidding costs nothing today); `llm_schemas.MergeOp` stays
+  `extra="allow"` (its two observed extra-key shapes, `[].text2` and
+  `[].append_section`, are real repeated traffic, not grounds for rejection);
+  `op` stays required, matching the one missing-required hit in the window —
+  already enforced downstream via `apply_merge_ops`'s `MergeOpsError` ->
+  full-echo fallback. The decision is recorded in code as the new
+  `llm_schemas.STRICT_CONTRACTS` registry. The three C4-downstream contracts
+  (`contradictions`, `claim_kind`, `resolutions`) are explicitly untouched and
+  remain observe-only, decision deferred to athenaeum#608. See
+  `docs/configuration.md`'s "Per-contract strictness decision" section.
+- **`sensitivity.routing` config resolver (athenaeum#1022, slice 1/4 of
+  athenaeum#949's design note).** New `resolve_sensitivity_routing` in
+  `src/athenaeum/config.py`: resolves `{"enabled": bool, "classes":
+  {<name>: {"action": "route"|"off"}}}` from `sensitivity.routing.*` yaml,
+  `ATHENAEUM_SENSITIVITY_ROUTING_ENABLED` env, or a dark-by-default `false`
+  (`env > yaml > default`, mirroring `resolve_screening`'s
+  `ATHENAEUM_SCREEN_MEDICAL` precedent). A malformed `enabled` value or an
+  unknown per-class `action` raises the new `SensitivityRoutingConfigError`.
+  A separate axis from athenaeum#910's own `sensitivity.classes.*` — see
+  `docs/configuration.md` → "Sensitivity routing". **Behaviour-free**:
+  nothing reads this resolver yet; the routing/redaction mechanism, the
+  read path, and the librarian wiring are follow-on slices
+  (athenaeum#1023-athenaeum#1025).
+- **Sensitivity routing/redaction mechanism (athenaeum#1023, slice 2/4 of
+  athenaeum#949's design note).** New `src/athenaeum/sensitivity_routing.py`:
+  `route_sensitive_values()` scans text via `sensitivity.classify()`
+  (athenaeum#910, unchanged) and routes each match whose class resolves to
+  the `route` action (slice 1's `resolve_sensitivity_routing`) to the
+  secret vault, substituting a resolvable pointer
+  (`[sensitive:<class>:<record_id> — value withheld; resolve via
+  athenaeum.sensitivity_routing.resolve_sensitive_record()]`) for the
+  matched span. `record_id` is a deterministic `uuid5` over the raw file's
+  reference, class, and span — never the matched value — so a re-scan
+  overwrites the same vault record rather than duplicating it (AC11), and
+  distinct/repeated values on one page get distinguishable pointers (AC2).
+  Deterministic `(span start, class name)` precedence resolves overlapping
+  or multiply-classified matches (AC7); a class's vault root resolves via
+  the existing `storage.mapping`/adapter layer when explicitly mapped to a
+  safe (not-in-corpus) surface, and falls back to the built-in `excluded`
+  adapter directly otherwise — never the storage layer's own "undeclared
+  maps to wiki" default. Raises the new `SensitivityRoutingError` (message
+  built from non-secret metadata only) rather than falling through
+  un-redacted for: a malformed `sensitivity.*` config; a match with no
+  character span; an unsafe (in-corpus) resolved vault target; or any vault
+  write failure. **Standalone in this slice** — not called from anywhere in
+  this repo. Reading a routed value back
+  (`resolve_sensitive_record`, athenaeum#1024) and wiring this into
+  `librarian.process_one` (athenaeum#1025) are follow-on slices. See
+  `docs/configuration.md` → "Sensitivity routing/redaction mechanism" and
+  the module's own docstring for the full disposition of every criterion.
+- **Dimension registry + kernel dimensions (athenaeum#714).** Root of the
+  memory-model v6 dimension chain (child of epic athenaeum#709; athenaeum#715,
+  athenaeum#716, athenaeum#719 all depend on this). New `src/athenaeum/dimensions.py`:
+  a typed registry parsed from `athenaeum.yaml`'s `dimensions:` block
+  (`resolve_dimensions` in `config.py`), four kind-comparators (`interval`
+  half-open `[from, until)`, `hierarchy` prefix-subsumption, `enum`
+  closed-vocabulary, `identity` ratified-only-disjoint) each returning
+  `equal | contains | overlaps | disjoint | unknown`, and the six built-in
+  kernel dimensions (`recorded-time`, `observed-time`, `valid-time`, `scope`,
+  `subject`, `memory-class`) — not deletable, always present. Per-dimension
+  `null_means` (`universal` | `unknown`) and `separates` (separator vs.
+  sequencer) semantics; `applies_to` selector bounding blast radius;
+  `backfill -> enforced` lifecycle wired to athenaeum#712's targeted
+  stale-marking (`maybe_flip_to_enforced`); corpus namespacing via
+  `cross_corpus_compare`. Write-side discipline: `WikiEntity` gains
+  `recorded_at` (stamped once at construction, never writer-supplied),
+  `provenance_scope` (PROVENANCE — named to avoid colliding with the
+  pre-existing, unrelated `AutoMemoryFile.origin_scope`), `claimed_scope`
+  (the ASSERTED `scope` coordinate — never auto-copied from
+  `provenance_scope`, with a regression test guarding it), and `subject`.
+  Intake temporal validation
+  (`validate_intake_temporal`, wired into both `intake.tier0_passthrough` and
+  `schemas.WikiBase`): hard-rejects `observed_at` later than `recorded_at` at
+  the intake boundary, where the anchor is genuinely stamped. On the
+  read/merge paths that share the `schemas.WikiBase` gate (`librarian.merge`,
+  `corrections`, `batch`) a page carrying no `recorded_at` of its own — the
+  shape of every page written before this change — is soft-flagged rather
+  than rejected, per this issue's "a claim missing a coordinate is not
+  rejected" AC. Deep back-dates soft-flag throughout.
+  Consumer for this PR: coordinate stamping at write time plus the new
+  `athenaeum dimensions show|compare` CLI (axis-by-axis coordinate display and
+  comparison) — the five-verdict comparator that will consume the full
+  algebra automatically is a separate, future child of epic athenaeum#709. Ships
+  kernel-only by default (`engagement`/`repo`/`maturity`/... are
+  deployment-declared examples in `docs/configuration.md`, not shipped
+  defaults); `memory-class` ships at `backfill` state (athenaeum#972 disposition).
+  See `docs/configuration.md`'s "Dimension registry" section.
+- **Generalized ENUMERATION primitive: `enumerate_entities` (MCP) /
+  `athenaeum enumerate` (CLI) (athenaeum#965).** Return every entity of a
+  declared type matching field predicates, ordered by a named field — with
+  NO query text, and never routed through `recall`'s relevance ranking. A
+  distinct code path from `recall`, not an argument on it: every one of
+  `recall`'s three backends either returns nothing or meaningless
+  neighbours for empty query text, so "enumerate everything of type X" was
+  structurally unanswerable through it even after athenaeum#964's `type`
+  filter. Field predicates support exact/substring/regex match (all
+  case-insensitive) over a named field or an ORDERED FALLBACK list of
+  fields (the generalized form of `athenaeum people --company`'s
+  `current_company`/`linkedin_company_at_connect` OR-shape), AND-combined
+  and repeatable. Results are sorted by a caller-named field (descending by
+  default, deterministic `uid`-ascending tiebreak) and paginated via a
+  `limit` (`0` = unlimited) plus an opaque continuation cursor. Every hit
+  carries `uid`/`type`/`name`, plus any additionally requested declared
+  fields; `google_contact_*` and `do_not_email` are usable as predicates
+  and output fields only behind `with_pii=True` (the same flag contract
+  `recall` already uses). Permitted type values and predicable field names
+  are derived from the deployment's declared entity-class schema (the
+  athenaeum#964 resolver) rather than hardcoded, and an unrecognized type
+  returns an empty result plus this deployment's known classes rather than
+  erroring. Reads the converged filterable-metadata store athenaeum#964
+  built (`FTS5Backend.candidates_by_type` — a plain indexed `WHERE type =
+  ?`, never FTS5 `MATCH`/ranking) to narrow the candidate set, then
+  re-reads fresh frontmatter per candidate for predicates, sorting, output
+  fields, and the same fail-closed audience scoping (athenaeum#538) every
+  other read tool applies. Does NOT deprecate or change `athenaeum people`
+  (that is athenaeum#966); `docs/recall-architecture.md` documents a
+  full capability-parity table against it. See
+  `src/athenaeum/enumeration.py` for the full contract.
+- **Decay-sweep ledger (athenaeum#969).** `athenaeum.decay_sweep.apply_sweep`
+  now writes one durable, machine-readable record per archived page —
+  which page, bucket + expiry, sweep timestamp, and the recovering commit
+  SHA — to `_decay_sweep_records.jsonl` under the cache dir (same discipline
+  as `_push_records.jsonl`: JSONL, `O_APPEND` + `fsync`, never inside the
+  wiki corpus), written BEFORE the archival `git rm` so a ledger-write
+  failure refuses the archival entirely rather than deleting without a
+  record. `docs/recall-architecture.md` and `docs/provenance-shape.md` §8.8
+  now name the expired-`daily` carve-out as the sole exemption from the
+  fail-closed expiry filter, state the swept-vs-cold distinction, and record
+  the `bucket:` → policy-pack `delete-after` mapping commitment for the
+  athenaeum#718 policy-pack work to consume — a documented mapping, not a
+  migration; no sweep/currency/bucket behavior changes.
+
 ### Changed
 
 - **Dropped the redundant `push: [develop]` trigger from `oss-readiness.yml`
@@ -35,17 +300,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in both directions routes through `Store.move`. Every public function gains
   an optional keyword-only `store=` parameter; when omitted, a private
   `FilesystemStore` scoped to the caller's existing `wiki_root`/`raw_root`
-  is built per call, so no existing caller changes and the pre-migration
-  test suite (`tests/test_quarantine.py`) passes unchanged against real
-  files (one exception: a white-box test that monkeypatched
-  `athenaeum.quarantine.shutil.move` directly can no longer intercept
-  anything now that `shutil` is not imported — reported, not edited, per the
-  issue's own guidance). A new `tests/test_quarantine_store_parity.py`
+  is built per call, so no existing caller changes. `put` does not appear as
+  a `quarantine.py` call site (2026-08-21 re-scope: the design doc's own
+  §2.3 inventory names only `append` + `move` for this module; `put` was a
+  transcription error in the original filing). The pre-migration test suite
+  (`tests/test_quarantine.py`) passes with exactly one bounded edit: the
+  ordering-guarantee test's `monkeypatch.setattr("athenaeum.quarantine.shutil.move", ...)`
+  no longer resolves once `shutil` is not imported, so it is retargeted to
+  `athenaeum.store.FilesystemStore.move` — the store seam the ordering
+  guarantee now actually runs through — with every assertion in that test
+  otherwise untouched. A new `tests/test_quarantine_store_parity.py`
   parametrizes the same logical scenarios over both `FilesystemStore` and
   `tests.store_fakes.InMemoryStore`, verified by reading back through the
   store rather than the filesystem — demonstrating the "no caller can tell"
   property rather than asserting it.
 
+- **Coarse embedding fallback is now observable (athenaeum#1032).** The chromadb
+  embedding path used to degrade silently three layers deep — no log line
+  ever recorded that the hashing-trick fallback embedder produced a
+  cluster's vectors, making the athenaeum#823/athenaeum#1005 over-cluster diagnosis
+  unfalsifiable from run artifacts. Observability only — no change to
+  clustering behaviour, thresholds, or the fallback's activation
+  conditions:
+  - `athenaeum.search._get_ef` now logs a one-time WARNING (naming the
+    exception class and message) when the chromadb embedding function
+    fails to initialize; `embed_texts` logs its own one-time WARNING when
+    it returns `None`, naming the fallback-hashing embedder as what will
+    produce vectors for callers that need them.
+  - `athenaeum.wiki_dedupe._resolve_wiki_embeddings` logs a one-time
+    WARNING when it engages `clusters._fallback_embeddings`.
+  - `clusters._resolve_embeddings`'s per-run fallback-count line is raised
+    `DEBUG` -> `WARNING` (was invisible at the deployed INFO level).
+  - `Cluster` gains an `embedder` field (`chromadb-default` /
+    `fallback-hashing` / `mixed` / `unknown`) carried through `to_row()`
+    into `raw/_librarian-clusters.jsonl`; the wiki-dedupe `SUPPRESSED` log
+    line now states the embedder that produced the suppressed cluster's
+    vectors. Pre-athenaeum#1032 JSONL rows without the field still
+    deserialize (default `unknown`).
 - **Whole-store adapter seam: `Store` protocol + `FilesystemStore` (athenaeum#976,
   S1 of the whole-store adapter design lock, athenaeum#911).** New
   `athenaeum/store.py` (L0/L1) defines `StoreKey`, `ObjectMeta`,
@@ -59,6 +350,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/store_fakes.InMemoryStore`, load-bearing for later slices S2/S7).
   **No existing caller is migrated onto the seam in this slice** — this is
   the seam and its tests only; callers migrate in S2/S3/S7.
+
+- **Recoverability is a declared store capability, not an ambient `.git`
+  check (athenaeum#978, S3 of the whole-store adapter design lock, athenaeum#911).**
+  `Store.snapshot()` (S1's protocol member, previously inert) is now
+  implemented for real: `FilesystemStore.snapshot()` carries the exact body
+  `librarian.git_snapshot` used to have (`git status --porcelain` / `git add
+  -A` / `git commit`, now against `self._knowledge_root` and returning the
+  new commit SHA rather than a bool) — moved, not duplicated;
+  `librarian.py` no longer defines `git_snapshot` at all. All four of its
+  call sites (design note §9.2 named two; the actual count is four —
+  `stop_on_deadline`, the pre-processing snapshot, the SIGTERM/SIGINT
+  handler, and the terminal per-run commit) now go through
+  `FilesystemStore(knowledge_root, {}).snapshot(...)`.
+  `FilesystemStore.capabilities.versioned` is `True` iff
+  `knowledge_root/.git` existed at construction time (design note §4.4 R1)
+  — the same precondition the old ad-hoc check expressed, now a declared
+  capability a caller can inject a fake for. The four Tier-A gates
+  (`retire.run_retire_pass`, `auto_memory_prune.apply_prune`,
+  `filename_entity_prune.apply_filename_entity_prune`,
+  `memory_index.apply_prune_index`) now refuse on
+  `not store.capabilities.versioned` instead of probing `.git` directly,
+  each taking an injectable `store:` keyword (default: a `FilesystemStore`
+  over the passed `knowledge_root`). Tier B's two silent `unlink`
+  fallbacks — `rules._retire_raw_file` (`retire_compiled_raw_file` /
+  `drop_raw_file`) and `corrections.retire_batch` — for a non-git
+  `knowledge_root` are REMOVED: both now refuse the same way Tier A does,
+  with no unlink-without-git escape hatch, including when a `git rm` itself
+  fails (previously also a silent-unlink fall-through). A new
+  `tests.store_fakes.NoRecoveryStore` fake (declaring neither `versioned`
+  nor `purgeable`) backs a refusal test at every Tier-A and Tier-B site,
+  each proving the gate is driven by the injected capability even against a
+  REAL git repo — not merely by the directory's absence.
+  `tests/test_no_git_shelling_outside_store.py` mechanically asserts
+  `git_snapshot` is not redefined or duplicated anywhere outside
+  `FilesystemStore`, and pins the remaining knowledge-store git-argv call
+  sites this slice did not migrate (push/pull/rev-parse and each Tier
+  site's own scoped `git rm`-and-commit mechanics) to an explicit,
+  monotonically-shrinking baseline.
 
 - **v6 memory-model measurement pack: shadow-linkage count, backlog price
   sheet, ordinary-night steady-state table (athenaeum#713).** Three new

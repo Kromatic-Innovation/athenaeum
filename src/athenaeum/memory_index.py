@@ -30,9 +30,11 @@ and calls in here inline) and does NOT touch any file other than a scope's
 ``MEMORY.md`` — a retired member's own deletion is the caller's job.
 
 **Layering:** L3 service. Module scope imports only :mod:`athenaeum.atomic_io`
-(L2) plus stdlib (``subprocess`` for the backfill's git commit). Never
-imports L4. Consumed inline by :mod:`athenaeum.retire` (L4, same commit as a
-retirement) and by the standalone ``athenaeum auto-memory prune-index`` CLI
+(L2), :mod:`athenaeum.store` (L0/L1, for the ``capabilities.versioned`` gate —
+issue athenaeum#978) plus stdlib (``subprocess`` for the backfill's git
+commit). Never imports L4. Consumed inline by :mod:`athenaeum.retire` (L4,
+same commit as a retirement) and by the standalone ``athenaeum auto-memory
+prune-index`` CLI
 backfill.
 """
 
@@ -46,6 +48,7 @@ from pathlib import Path
 from typing import Callable
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.store import FilesystemStore, Store
 
 log = logging.getLogger(__name__)
 
@@ -177,24 +180,35 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def apply_prune_index(knowledge_root: Path, report: DanglingReport) -> DanglingReport:
+def apply_prune_index(
+    knowledge_root: Path,
+    report: DanglingReport,
+    *,
+    store: Store | None = None,
+) -> DanglingReport:
     """Rewrite the dangling-carrying indexes and commit them in one labeled commit.
 
-    Mirrors the move-then-retire / auto-memory-prune safety contract: refuses to
-    act without a writable git repo (the rewrite must be recoverable), stages
-    and commits ONLY the rewritten index paths (a scoped pathspec, so unrelated
-    working-tree edits can never be swept into the "prune index pointers"
-    commit), and no-ops when there is nothing dangling. Mutates and returns
-    *report*.
+    Mirrors the move-then-retire / auto-memory-prune safety contract: refuses
+    to act against a store that is not versioned (design note §4.4 R1; issue
+    athenaeum#978 — the rewrite must be recoverable), stages and commits ONLY
+    the rewritten index paths (a scoped pathspec, so unrelated working-tree
+    edits can never be swept into the "prune index pointers" commit), and
+    no-ops when there is nothing dangling. Mutates and returns *report*.
+
+    *store* is the Tier-A recoverability gate, injectable so a test can
+    supply a fake declaring ``capabilities.versioned=False`` without a real
+    git repo. Defaults to a :class:`~athenaeum.store.FilesystemStore` over
+    *knowledge_root*.
     """
     if not report.scopes:
         log.info("prune-index: no dangling pointers — nothing to rewrite")
         return report
 
-    if not (knowledge_root / ".git").exists():
+    store = store if store is not None else FilesystemStore(knowledge_root, {})
+    if not store.capabilities.versioned:
         msg = (
-            f"no .git in {knowledge_root} — refusing to prune index (the "
-            "rewrite must be git-recoverable)"
+            f"store at {knowledge_root} is not versioned — refusing to "
+            "prune index (the rewrite must be git-recoverable)"
         )
         log.warning("prune-index: %s", msg)
         report.errors.append(msg)

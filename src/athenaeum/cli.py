@@ -77,8 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_curate import add_curate_subparsers
     from athenaeum._cmd_decay import add_decay_subparser
     from athenaeum._cmd_decisions import add_decisions_subparser
+    from athenaeum._cmd_dimensions import add_dimensions_subparser
     from athenaeum._cmd_do_not_email_divergence import add_do_not_email_divergence_subparser
     from athenaeum._cmd_drain import add_drain_subparser
+    from athenaeum._cmd_enumerate import add_enumerate_subparser
     from athenaeum._cmd_index import add_index_subparsers
     from athenaeum._cmd_lifecycle import add_lifecycle_subparsers
     from athenaeum._cmd_measure import add_measure_subparser
@@ -94,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_serve import add_serve_subparser
     from athenaeum._cmd_storage import add_storage_subparser
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
+    from athenaeum._cmd_usage_report import add_usage_report_subparser
     from athenaeum._cmd_verdicts import add_verdicts_subparser
 
     parser = argparse.ArgumentParser(
@@ -113,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_query_subparsers(
         subparsers
     )  # test-mcp, people, query-topics, stopwords, recall
+    add_enumerate_subparser(subparsers)  # enumerate (issue athenaeum#965)
     add_pending_subparsers(
         subparsers
     )  # ingest-answers, ingest-merges, reresolve-questions
@@ -133,9 +137,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_drain_subparser(subparsers)  # drain
     add_storage_subparser(subparsers)  # storage
     add_push_metrics_subparser(subparsers)  # push-metrics
+    add_usage_report_subparser(subparsers)  # usage-report (issue athenaeum#968)
     add_measure_subparser(subparsers)  # measure (shadow-linkage, backlog-price, ordinary-night)
     add_memory_class_subparser(subparsers)  # memory-class backfill
     add_verdicts_subparser(subparsers)  # verdicts (issue athenaeum#712)
+    add_dimensions_subparser(subparsers)  # dimensions show|compare (issue athenaeum#714)
     add_index_subparsers(
         subparsers
     )  # reindex/rebuild-index, compile, registry, ingest, session-end

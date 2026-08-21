@@ -451,6 +451,43 @@ increment the invariant would be a tautology and could never catch a
 disposition that forgot to tally. A violation is logged at ERROR with both
 figures.
 
+### 6.1 Per-record disposition rows (athenaeum#975)
+
+`_shape_rules_applied.jsonl` above is a per-`(rule, mode)` **aggregate**: it
+answers "how often did this rule fire", not "which record got what
+treatment". `wiki/_shape_rule_dispositions.jsonl` is the per-record
+complement — same `_`-prefixed, wiki-root, append-only-JSONL discipline
+(:func:`athenaeum.rules.append_shape_rule_disposition_row`,
+:func:`athenaeum.rules.default_shape_rule_dispositions_path`), so it can
+never become a claim or enter the embedded index. Every candidate the phase
+evaluates gets exactly one row, **including the ones no rule matched**
+(`rule_id: null`, `disposition: "no-match"`) — those are the shapes a
+frequency detector (athenaeum#905) actually needs to see:
+
+```json
+{"schema_version":1,"at":"2026-08-15T03:00:00Z","source":"delivery-monitor","source_ref":"delivery-monitor/20260815T030000Z-9f3ac1d2.jsonl","key_fingerprint":"a5149e5b057b68f7","tier":0,"rule_id":"example-contact-bounce@1","disposition":"emit"}
+```
+
+`key_fingerprint` is the same top-level-key-set fingerprint
+(`record_key_fingerprint`) the match spec uses — never a raw value.
+`source`/`source_ref` come from the raw file's own `source` (the raw source
+directory, what a frequency query groups by) and `ref` (`source/filename`),
+both already non-sensitive.
+
+**`tier`** encodes whether the shape-rules pass — the deterministic, no-LLM
+layer, tier 0 on the ladder in `field-corrections.md` §2 — actually disposed
+of the record:
+
+| `tier` | When |
+|---|---|
+| `0` | `emit` / `drop` / `retain` / `preserve` / `rollup`, and their `observed-*` forms — this pass resolved it. |
+| `null` | `no-match` (no rule matched at all), `fallthrough` / `observed-fallthrough`, or a soft failure (`transform-error`, `preserve-unconfigured`, `preserve-failed`) — deferred to the reasoning ladder (tier ≥1), which this pass cannot know in advance. `null` is deliberate: a guessed tier number would be a lie. |
+
+Rows are written unless `dry_run` is set, mirroring the aggregate ledger's
+own dry-run behaviour. **Forward-only:** this ledger starts accumulating
+from the run it first ships in — no backfill of historical intake is
+attempted.
+
 ---
 
 ## 7. Example rules — packaged, never engine defaults
@@ -495,8 +532,9 @@ for the full knob table (`max_records_per_run`, `runtime_share`).
 
 ## 9. Not decided here (later slices)
 
-- **Automatic rule generation** — a separate slice in this batch, not
-  addressed here, by athenaeum#901, or by athenaeum#903.
+- **Automatic rule generation** — see §10 below (issue athenaeum#905): the
+  librarian PROPOSES a rule for a human to approve; nothing here or in
+  athenaeum#901/athenaeum#903 auto-writes a rule.
 - **A configured preserved-log AREA, and moving a retained file into it** —
   athenaeum#837. `retain` (above) marks a file compiled-exempt *in place*;
   relocating it under an operator-configured preserved area, and carrying a
@@ -505,3 +543,86 @@ for the full knob table (`max_records_per_run`, `runtime_share`).
 - **Any change to the correction applier, allowlist, precedence, routing, or
   delta gate** — none; the engine's only interface to that machinery is
   writing a file in the format it already scans for.
+
+---
+
+## 10. Rule proposals — the librarian proposes, a human approves (athenaeum#905)
+
+`athenaeum.rule_proposals` closes the loop §6.1's per-record disposition
+ledger opened: it detects when the reasoning tiers keep re-deriving the same
+conclusion for one record shape, drafts a candidate rule from real
+exemplars, and puts it in front of an operator — never activating anything
+by itself.
+
+**The detector (AC1) counts rows whose `tier` is `null`** in
+`_shape_rule_dispositions.jsonl`, grouped by `(source, key_fingerprint)`,
+over a configurable window (`librarian.rule_proposals.window_days`, default
+30). This is a deliberate **respecification** of the issue text: AC1 as
+filed said "restricted to those handled at tier 2 or tier 3", written
+against an "intake ledger" that did not exist when the issue was drafted.
+The ledger the operator chose to build instead (§6.1, issue athenaeum#975) only
+ever knows `tier: 0` (the deterministic shape-rules pass resolved it) or
+`tier: null` (it did not — deferred to the reasoning ladder, tier >=1,
+which this pass cannot know in advance). `tier is null` — "the shape-rules
+pass could not handle this" — is the faithful reading of the issue's own
+Motivation ("the reasoning tiers stop re-deriving the same conclusion for
+the fiftieth instance of a shape"); no code anywhere encodes a literal tier
+2 or 3. "The reasoning tiers" here means the **intake** ladder
+(`docs/field-corrections.md` §2: tier0 structured -> tier1 programmatic ->
+tier2 classify -> tier3 merge -> tier4 human) — the ladder §6.1's ledger is
+built against — not the unrelated T1/T2 numbering in `reasoning_tiers.py`.
+
+**Crossing the threshold** (`librarian.rule_proposals.threshold`, default
+50) selects up to `librarian.rule_proposals.exemplar_count` (K, default 5)
+READABLE raw records for that shape — a deferred row's raw file may since
+have been compiled and retired, so unreadable rows are skipped, most-recent
+first; if zero exemplars are readable, no proposal is drafted this run (it
+is retried on a later run against fresh disposition rows). One drafting call
+is then made per shape, per AC2's "one language-model call over K exemplars
+plus their existing tier-3 outputs".
+
+**The tier-3-output join does not exist.** `_reasoning_tier_decisions.jsonl`
+(`reasoning_tiers.py`) is keyed by `proposal_id` — a MERGE proposal id — and
+carries no `source`/`source_ref` field a raw intake record could join
+against. `athenaeum.rule_proposals._tier3_outputs_for_exemplars` is the real
+join attempt, not a stub: it always returns `{}` against today's ledger
+schema, and the drafting call is told explicitly, in the prompt AND in the
+persisted proposal's `tier3_linked`/`tier3_note` fields, that tier-3 outputs
+were not linkable — it drafts from the exemplar records alone rather than
+inventing a linkage.
+
+**The draft (AC3)** is a JSON response (disposition + an optional
+`correction` block, matching every disposition except `rollup` — see the
+module docstring for why rollup is excluded from drafting) that code
+assembles into a full `ShapeRule` (the `match` block — `source` +
+`key_fingerprint` — is fixed by the detector, never left to the model) and
+re-validates via `ShapeRule.model_validate` before it is ever persisted. A
+draft that fails validation is skipped (logged), never stored. Every
+exemplar record embedded in the prompt is fenced via
+`athenaeum.prompt_safety.fence_untrusted` (AC7) — raw intake is untrusted
+input (`docs/field-corrections.md` §12a).
+
+**The proposal surfaces via `list_pending_decisions`** (AC4) as a
+`type: "proposed-rule"` item (`athenaeum.decisions.proposed_rule_to_decision`),
+owner-only (same withholding as `retraction`/`audit`/`quarantine` — see
+`athenaeum.decisions.list_pending_decisions`'s audience-scoping docstring).
+
+**Approve** (AC5, `athenaeum.rule_proposals.approve_rule_proposal`) writes
+the rule into `<knowledge_root>/rules/` with `mode` forced to `"observe"` —
+independent of, and re-validated after, whatever the drafting call
+produced — never in a live-writing state. **Reject** (AC6,
+`reject_rule_proposal`) records the rejection; because a proposal's id is
+derived from its shape alone (`proposal_item_id(source, key_fingerprint)`),
+a rejected shape is permanently suppressed — the next detection run skips it
+without spending another drafting call.
+
+**Persistence**: one ledger, `wiki/_rule_proposals.jsonl`, with `proposal` /
+`approve` / `reject` record kinds — same shape as `wiki/_quarantine.jsonl`
+(§ athenaeum#898).
+
+**Not wired into the nightly `athenaeum run` loop by this change.**
+`athenaeum.rule_proposals.run_rule_proposal_detection` is complete and
+independently callable/testable, mirroring `run_shape_rule_phase` /
+`run_intake_audit`'s shape, but adding its own `librarian.py` call site
+(`RunContext`, deadline/spend-ledger integration) is left to a follow-up —
+see the module's own docstring "Wiring note".
