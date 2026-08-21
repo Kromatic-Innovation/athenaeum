@@ -30,3 +30,4 @@ tilde-rooted-path **
 # fails the gate.
 plus-alias-email tests/test_pii_off_corpus.py
 plus-alias-email tests/test_storage_migrate_pii.py
+bare-issue-ref tests/fixtures/street_address_fixtures.py

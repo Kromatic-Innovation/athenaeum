@@ -15,9 +15,28 @@
   unknown-recognizer validation (§3.2 Decision D6), the shipped
   :data:`_BUILTIN_CLASSES` ``pii`` class (§5), and :func:`classify`, the
   registry entry point.
+- **S2 (athenaeum#991)** — the third built-in recogniser: ``street-address``
+  (:class:`_StreetAddressRecognizer`), registered through the identical
+  public :func:`register_recognizer` call the ``email``/``phone`` built-ins
+  use, and bound to the shipped ``pii`` class by default (:data:`_BUILTIN_CLASSES`
+  now reads ``["email", "phone", "street-address"]``). **Fixture-bounded, not
+  general-purpose address detection**: keyword + regex over a committed
+  positive/negative fixture set (``tests/fixtures/street_address_fixtures.py``),
+  matching a US-style ``<number> <street-name> <street-type>`` line, with or
+  without a unit designator, with or without a trailing city/state/ZIP —
+  never non-US formats, PO-box-only lines, or bare postal codes (see the
+  recogniser's own docstring for the full in-scope/non-goal list).
 
-No production module imports this one yet — no caller is migrated onto
-:func:`classify` in this slice (that is slice S3, per §9 of the design note).
+No production module imports this one yet as of S1a/S1b — no caller was
+migrated onto :func:`classify` in those two slices (that was slice S3,
+athenaeum#992, **shipped since**: :mod:`athenaeum.storage_migrate`,
+:mod:`athenaeum.bounce_contract` and :mod:`athenaeum.outbound_pii` all call
+:func:`classify` today). Because S3 landed before this slice (S2), binding
+``street-address`` into the ``pii`` class here **does** change what those
+three already-migrated sweeps report for text that matches the new
+recogniser — see :class:`_StreetAddressRecognizer`'s docstring and this
+issue's own PR description for the disclosure issue athenaeum#991's "Edges"
+section calls for in exactly this ordering.
 
 **The span decision (design note §3.2's open question, resolved here).** The
 note simultaneously specifies ``SensitivityMatch.span: tuple[int, int] | None``
@@ -57,6 +76,7 @@ caller, never loaded from disk by this module.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -134,7 +154,7 @@ class SensitivityRecognizer(Protocol):
 #: §3.2 "no ``if built_in`` branch anywhere in this contract") the built-ins
 #: register through the exact same public :func:`register_recognizer` call a
 #: deployment's own recogniser would use, rather than bypassing it.
-_BUILTIN_RECOGNIZER_NAMES: frozenset[str] = frozenset({"email", "phone"})
+_BUILTIN_RECOGNIZER_NAMES: frozenset[str] = frozenset({"email", "phone", "street-address"})
 
 #: In-process registry (the code extension point). Populated by
 #: :func:`register_recognizer` — both for the two built-ins (at the bottom of
@@ -251,6 +271,173 @@ class _PhoneRecognizer:
         return matches
 
 
+#: US Postal Service street-type suffixes this recogniser matches (design
+#: note §9 S2 / issue athenaeum#991's minimum in-scope list). Deliberately a
+#: small, common subset — full name and the usual abbreviation, both
+#: case-sensitive Title Case — not the complete USPS Publication 28 suffix
+#: table: this slice is fixture-bounded, not a claim of exhaustive coverage.
+#: Longer alternatives are listed first only for readability; correctness
+#: does not depend on ordering because each alternative is anchored with a
+#: trailing ``(?![A-Za-z])`` (see ``_STREET_ADDRESS_RE``), which makes the
+#: regex engine's own alternation backtracking pick the exact-word match
+#: regardless of list order (``St`` cannot falsely consume the first two
+#: letters of ``Street`` and stop there).
+_STREET_TYPES: tuple[str, ...] = (
+    "Street", "St",
+    "Avenue", "Ave",
+    "Boulevard", "Blvd",
+    "Drive", "Dr",
+    "Lane", "Ln",
+    "Road", "Rd",
+    "Court", "Ct",
+    "Place", "Pl",
+    "Way",
+    "Terrace", "Ter",
+    "Circle", "Cir",
+    "Parkway", "Pkwy",
+    "Square", "Sq",
+    "Trail", "Trl",
+    "Highway", "Hwy",
+)
+
+#: Unit designators for the optional "with a unit designator" in-scope form
+#: (issue athenaeum#991). A bare ``#`` (no keyword) is also accepted — see
+#: ``_STREET_ADDRESS_RE``'s ``unit_no`` group.
+_UNIT_TYPES: tuple[str, ...] = (
+    "Apartment", "Apt",
+    "Suite", "Ste",
+    "Unit",
+)
+
+#: The 50 US states' USPS two-letter abbreviations plus DC — the "postal
+#: component" half of the optional trailing city/state/ZIP form. Deliberately
+#: the closed USPS vocabulary, not a bare ``[A-Z]{2}`` wildcard: an
+#: unconstrained two-letter-plus-digits pattern would be a much wider net
+#: than this fixture-bounded slice is scoped to (issue athenaeum#991's "in-scope
+#: forms... at minimum" list, read narrowly).
+_US_STATE_ABBREVIATIONS: tuple[str, ...] = (
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+    "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+    "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+    "DC",
+)
+
+#: A single Title Case word, optionally carrying an internal apostrophe or
+#: hyphen (``O'Malley``, ``Mid-Town``) — the repeated unit both the street
+#: name and the city name below are built from.
+_TITLE_WORD = r"[A-Z][a-z]*(?:['\-][A-Za-z]+)?"
+
+#: US-style street-address line: ``<number> <street-name> <street-type>``,
+#: with an optional unit designator and an optional trailing
+#: ``City, ST 12345`` component (issue athenaeum#991's in-scope forms). Every
+#: piece before the street type is REQUIRED — there is no shape in this
+#: pattern that can match without a recognised street-type keyword actually
+#: present, which is what keeps this recogniser off the false-positive
+#: shapes its own fixture file's negative half enumerates (a numbered list
+#: item, a version/build string, a date-like run, a labeled record id — none
+#: of those contain one of ``_STREET_TYPES``' words immediately after a
+#: number-led capitalised phrase).
+_STREET_ADDRESS_RE = re.compile(
+    r"(?<!\d)(?P<number>\d{1,6})(?!\d)"
+    r"\s+(?P<name>" + _TITLE_WORD + r"(?:\s+" + _TITLE_WORD + r"){0,3})"
+    r"\s+(?P<type>(?:"
+    + "|".join(sorted(_STREET_TYPES, key=len, reverse=True))
+    + r"))(?![A-Za-z])\.?"
+    r"(?:[,\s]+(?P<unit_kw>(?:"
+    + "|".join(sorted(_UNIT_TYPES, key=len, reverse=True))
+    + r"))(?![A-Za-z])\.?\s*#?\s*(?P<unit_no>[A-Za-z0-9-]+)"
+    r"|[,\s]+#\s*(?P<hash_unit_no>[A-Za-z0-9-]+))?"
+    r"(?:,\s*(?P<city>" + _TITLE_WORD + r"(?:\s+" + _TITLE_WORD + r"){0,2})"
+    r",\s*(?P<state>(?:" + "|".join(_US_STATE_ABBREVIATIONS) + r"))"
+    r"\s+(?P<zip>\d{5}(?:-\d{4})?))?"
+)
+
+
+class _StreetAddressRecognizer:
+    """Built-in ``street-address`` recogniser (issue athenaeum#991, design note §9 S2).
+
+    **Fixture-bounded, not general-purpose address detection** — the same
+    posture the design note's Motivation states explicitly: this ships a
+    committed fixture set (``tests/fixtures/street_address_fixtures.py``)
+    with stated precision/recall on that set, not a claim of catching every
+    real-world address. Detection stays keyword + regex, matching
+    :mod:`athenaeum.screening` and the ``email``/``phone`` recognisers'
+    posture, never ML/NER.
+
+    **In-scope forms** (issue athenaeum#991's stated minimum):
+
+    - A US-style ``<number> <street-name> <street-type>`` line with a common
+      street-type suffix (``_STREET_TYPES`` — a deliberately small subset of
+      USPS Publication 28's suffix table, not the whole table).
+    - ...with a unit designator (``Apt``/``Apartment``/``Suite``/``Ste``/
+      ``Unit``, or a bare ``#``) — e.g. ``123 Maple Street, Apt 4B``.
+    - ...without a unit designator — e.g. ``123 Maple Street``.
+    - ...with a trailing ``City, ST 12345`` (or ``ST 12345-6789``) component,
+      ``ST`` drawn from the closed USPS two-letter state list
+      (``_US_STATE_ABBREVIATIONS``) — e.g. ``123 Maple Street, Springfield,
+      IL 62704``.
+    - ...without one — e.g. ``123 Maple Street``.
+
+    **Stated non-goals** (issue athenaeum#991's stated minimum — each has a
+    negative fixture asserting no match in
+    ``tests/fixtures/street_address_fixtures.py``):
+
+    - **Non-US address formats.** ``_STREET_TYPES`` is an English/USPS
+      vocabulary only (no ``Rue``, ``Straße``, ``Weg``, …), so a non-US
+      street line simply never supplies a matching ``type`` group.
+    - **PO-box-only lines** (``PO Box 4521``). ``PO``/``Box`` are not
+      street-type words, so no match — with or without a trailing
+      city/state/ZIP, since that component is only ever appended AFTER a
+      required ``number + name + type`` match, never matched on its own.
+    - **Bare postal codes with no street line** (a standalone ZIP, or a ZIP
+      mentioned in prose with no preceding street line). Same reason: the
+      trailing ``city, ST zip`` group cannot match without the required
+      street-type core matching first.
+
+    **Additional false-positive shapes the recogniser must not fire on**
+    (issue athenaeum#991's explicit list, each with a negative fixture): a
+    numbered list item followed by prose, a version or build string, a
+    date-like run, and a labeled record id. None of these pair a
+    number-led, Title-Case capitalised phrase with an immediately following
+    ``_STREET_TYPES`` word, so the required core never matches — including
+    the harder case of a street-type-shaped English word (``Circle``,
+    ``Court``, ``Way``, …) appearing in ordinary prose after a number, which
+    the required-name-word-before-type structure (the type can never BE the
+    recogniser's only captured word) keeps from firing.
+
+    **Scans ``text`` only** — ``frontmatter`` is accepted for protocol
+    conformance but not consulted (this recogniser reports no
+    ``field``-carrying matches), matching the ``email``/``phone`` built-ins'
+    posture.
+
+    **Interaction with already-migrated callers (issue athenaeum#991's own
+    "Edges" note).** athenaeum#992 (S3) already migrated
+    :mod:`athenaeum.storage_migrate`, :mod:`athenaeum.bounce_contract` and
+    :mod:`athenaeum.outbound_pii` onto :func:`classify` before this
+    recogniser existed. Because this recogniser is bound into the ``pii``
+    class by default (:data:`_BUILTIN_CLASSES`), those three already-shipped
+    sweeps begin reporting street-address matches as of this change —
+    issue athenaeum#991's own "Edges" section names this exact ordering and
+    asks the PR that lands second to say so; this docstring, and the implementing
+    PR's description, are that disclosure.
+    """
+
+    name = "street-address"
+
+    def detect(
+        self, *, text: str, frontmatter: Mapping[str, Any] | None
+    ) -> list[SensitivityMatch]:
+        source = text or ""
+        return [
+            SensitivityMatch(
+                recognizer=self.name, value=m.group(0), span=(m.start(), m.end())
+            )
+            for m in _STREET_ADDRESS_RE.finditer(source)
+        ]
+
+
 # ---------------------------------------------------------------------------
 # Built-in registration — the identical public call a deployment's own
 # recogniser would make (design note §3.2). Runs at import time; this is the
@@ -259,6 +446,7 @@ class _PhoneRecognizer:
 
 register_recognizer(_EmailRecognizer())
 register_recognizer(_PhoneRecognizer())
+register_recognizer(_StreetAddressRecognizer())
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +507,7 @@ class SensitivityClass:
 #: note §3.1's "config wins" rule for classes has no partial-merge case).
 _BUILTIN_CLASSES: dict[str, dict[str, Any]] = {
     "pii": {
-        "recognizers": ["email", "phone"],
+        "recognizers": ["email", "phone", "street-address"],
         "read_policy": {"access": "personal"},
     },
 }
