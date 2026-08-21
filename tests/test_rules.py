@@ -37,6 +37,7 @@ from athenaeum.rules import (
     build_correction_record,
     load_rules,
     record_key_fingerprint,
+    resolve_field_path,
     resolve_value_expr,
     run_shape_rule_phase,
 )
@@ -313,6 +314,157 @@ class TestMatchSpec:
         assert not spec.matches(
             raw=raw_wrong_source, record={"status": "bounced"}, fmt="jsonl"
         )
+
+    # -- issue athenaeum#974 AC1: nested frontmatter key resolution --------------
+
+    def test_nested_field_one_level_below_record_root_matches(
+        self, tmp_path: Path
+    ) -> None:
+        """The AC1 case named literally in the issue: a ``log_group`` value
+        one level below the record root."""
+        spec = MatchSpec.model_validate(
+            {"fields": {"session.log_group": {"glob": "hestia-lanes-*"}}}
+        )
+        raw = self._raw(tmp_path, "hestia", "a.md")
+        record = {"uid": "x", "session": {"log_group": "hestia-lanes-974"}}
+        assert spec.matches(raw=raw, record=record, fmt="md")
+        other = {"uid": "x", "session": {"log_group": "other-group"}}
+        assert not spec.matches(raw=raw, record=other, fmt="md")
+
+    def test_nested_field_missing_intermediate_key_no_match(
+        self, tmp_path: Path
+    ) -> None:
+        spec = MatchSpec.model_validate(
+            {"fields": {"session.log_group": {"exact": "hestia-lanes-974"}}}
+        )
+        raw = self._raw(tmp_path, "hestia", "a.md")
+        assert not spec.matches(raw=raw, record={"uid": "x"}, fmt="md")
+
+    def test_nested_field_non_dict_intermediate_no_match(
+        self, tmp_path: Path
+    ) -> None:
+        spec = MatchSpec.model_validate(
+            {"fields": {"session.log_group": {"exact": "hestia-lanes-974"}}}
+        )
+        raw = self._raw(tmp_path, "hestia", "a.md")
+        # "session" resolves to a scalar, not a dict -- the path cannot walk
+        # further, so this is "absent", never a crash.
+        assert not spec.matches(raw=raw, record={"session": "not-a-dict"}, fmt="md")
+
+    def test_exact_top_level_key_wins_over_dotted_interpretation(
+        self, tmp_path: Path
+    ) -> None:
+        """Backward compatibility (issue athenaeum#974, non-negotiable): a
+        literal top-level key that happens to contain a dot resolves as
+        THAT key first -- this change must never reinterpret an existing
+        rule's exact-key lookup as a nested path."""
+        spec = MatchSpec.model_validate({"fields": {"a.b": {"exact": "literal"}}})
+        raw = self._raw(tmp_path, "s", "a.md")
+        record = {"a.b": "literal", "a": {"b": "nested-would-be-wrong"}}
+        assert spec.matches(raw=raw, record=record, fmt="md")
+
+    def test_every_existing_top_level_fields_rule_keeps_matching(
+        self, tmp_path: Path
+    ) -> None:
+        """Every pre-athenaeum#974 top-level `fields` predicate keeps matching
+        exactly as before -- same record, same predicate, same result."""
+        spec = MatchSpec.model_validate({"fields": {"status": {"exact": "bounced"}}})
+        raw = self._raw(tmp_path, "s", "a.jsonl")
+        assert spec.matches(raw=raw, record={"status": "bounced"}, fmt="jsonl")
+        assert not spec.matches(raw=raw, record={"status": "delivered"}, fmt="jsonl")
+        assert not spec.matches(raw=raw, record={}, fmt="jsonl")
+
+
+class TestResolveFieldPath:
+    """Unit coverage for :func:`resolve_field_path` directly (issue
+    athenaeum#974 AC1), independent of the ``MatchSpec.matches`` wiring above."""
+
+    def test_top_level_key_found(self) -> None:
+        assert resolve_field_path({"a": 1}, "a") == (True, 1)
+
+    def test_top_level_key_absent(self) -> None:
+        assert resolve_field_path({}, "a") == (False, None)
+
+    def test_dotted_path_two_levels(self) -> None:
+        record = {"session": {"log_group": "hestia-lanes-974"}}
+        assert resolve_field_path(record, "session.log_group") == (
+            True,
+            "hestia-lanes-974",
+        )
+
+    def test_dotted_path_three_levels(self) -> None:
+        record = {"a": {"b": {"c": "deep"}}}
+        assert resolve_field_path(record, "a.b.c") == (True, "deep")
+
+    def test_dotted_path_missing_leaf(self) -> None:
+        record = {"session": {"other": "x"}}
+        assert resolve_field_path(record, "session.log_group") == (False, None)
+
+    def test_dotted_path_non_dict_intermediate(self) -> None:
+        record = {"session": "scalar"}
+        assert resolve_field_path(record, "session.log_group") == (False, None)
+
+    def test_exact_key_with_literal_dot_takes_priority(self) -> None:
+        record = {"a.b": "literal", "a": {"b": "nested"}}
+        assert resolve_field_path(record, "a.b") == (True, "literal")
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#974 AC3: the intended `log_group: hestia-lanes-*` rule,
+# demonstrated end-to-end against a fixture record shaped like a real
+# hestia-lane raw file living in a nested source subdirectory -- proving
+# BOTH gaps (AC1 nested-field resolution, AC2 nested-subdir discovery)
+# together make the rule athenaeum#940 wants expressible.
+# ---------------------------------------------------------------------------
+
+
+class TestIntendedHestiaLanesRuleExpressible:
+    def test_log_group_glob_rule_matches_nested_lane_fixture(
+        self, tmp_path: Path
+    ) -> None:
+        # A fixture record shaped like a real hestia-lane raw file: the
+        # `log_group` frontmatter key lives one level below the record root,
+        # and the file itself lives one level below its source directory
+        # (`raw/hestia/hestia-lanes-974/...`) -- exactly the two gaps the
+        # issue names.
+        raw_root = tmp_path / "raw"
+        lane_file = raw_root / "hestia" / "hestia-lanes-974" / (
+            "20260821T000000Z-aaaaaaaa.md"
+        )
+        lane_file.parent.mkdir(parents=True, exist_ok=True)
+        lane_file.write_text(
+            "---\nuid: lane-974\nsession:\n  log_group: hestia-lanes-974\n---\n"
+            "lane body\n",
+            encoding="utf-8",
+        )
+        # A non-matching sibling under a DIFFERENT log group -- proves the
+        # glob is discriminating, not a rubber stamp.
+        other_file = raw_root / "hestia" / "other-group" / (
+            "20260821T000100Z-bbbbbbbb.md"
+        )
+        other_file.parent.mkdir(parents=True, exist_ok=True)
+        other_file.write_text(
+            "---\nuid: other\nsession:\n  log_group: other-group\n---\nbody\n",
+            encoding="utf-8",
+        )
+
+        candidates = discover_raw_files(raw_root)
+        assert len(candidates) == 2  # AC2: both nested files are discovered
+
+        rule_spec = MatchSpec.model_validate(
+            {
+                "source": "hestia",
+                "fields": {"session.log_group": {"glob": "hestia-lanes-*"}},
+            }
+        )
+
+        matched_refs = []
+        for raw in candidates:
+            record, fmt = _record_and_format(raw)
+            if rule_spec.matches(raw=raw, record=record, fmt=fmt):
+                matched_refs.append(raw.ref)
+
+        assert matched_refs == ["hestia/20260821T000000Z-aaaaaaaa.md"]
 
 
 # ---------------------------------------------------------------------------
