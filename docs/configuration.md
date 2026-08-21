@@ -1296,6 +1296,173 @@ thread through the SAME lock the CLI command already holds.
 is the sanctioned read path (mirrors `athenaeum merges`) — hand-parsing
 `wiki/_verdicts/*.jsonl` directly is not supported.
 
+## Dimension registry (athenaeum#714)
+
+Root of the memory-model v6 dimension chain (child of epic athenaeum#709;
+athenaeum#715/athenaeum#716/athenaeum#719 depend on this). A **dimension** is a
+declared, typed axis a claim takes a coordinate on. Two claims' coordinates on
+one axis compare to exactly one of `equal | contains | overlaps | disjoint |
+unknown` (`src/athenaeum/dimensions.py`). Athenaeum ships **six kernel
+dimensions unconditionally** — built in, not deletable, need no config:
+
+| Dimension | Kind | `null_means` | `separates` | Bound to |
+|---|---|---|---|---|
+| `recorded-time` | `interval` | `unknown` | `false` (precedence-only) | New `recorded_at` frontmatter key; system transaction time, stamped once at first `WikiEntity` construction — never writer-supplied. |
+| `observed-time` | `interval` | `unknown` | `false` (sequencer) | Existing `observed_at` (athenaeum#424). |
+| `valid-time` | `interval` | `universal` | `true` | Existing `valid_from` / `valid_until` (athenaeum#308). |
+| `scope` | `hierarchy` | `universal` | `true` | New `claimed_scope` frontmatter key — see "Ambiguity resolved" below for why not the existing `scope:` key. |
+| `subject` | `identity` | `unknown` | `true` | New `subject` frontmatter key. |
+| `memory-class` | `enum` | `unknown` | `true` | Existing `memory_class` (athenaeum#424/athenaeum#996). Ships at `state: backfill`, not `enforced` — see the athenaeum#972 disposition comment on athenaeum#714. |
+
+**Comparators.** `interval` is **half-open `[from, until)`** — abutting
+windows ("2020–2022" then "2022–") compare `disjoint`, not a zero-width
+`overlaps` (a known failure mode of the collapsed/inclusive algebra used
+elsewhere in this repo; the on-disk `valid_until` field stays INCLUSIVE and
+unchanged for every other reader — the half-open conversion happens only at
+the dimension-registry coordinate boundary, `dimensions.parsed_coordinate`).
+`hierarchy` is prefix-subsumption (`kromatic` `contains` `kromatic/platform`;
+siblings `disjoint`). `enum` is closed-vocabulary same/different. `identity`
+returns `disjoint` **only when the caller passes `ratified=True`** (distinct
+uids each backed by human confirmation, independent provenance, or a prior
+ledgered verdict) — there is no confidence/threshold parameter; an unratified
+mismatch is `unknown`, never a false separation.
+
+**Null semantics are per-dimension.** `null_means: universal` — an absent
+coordinate asserts "applies across this whole axis"; the comparator treats it
+as containing any value. `null_means: unknown` — absence means "not
+captured"; the comparator returns `unknown`. Two claims BOTH null on a
+dimension are never separable by it (`unknown`) regardless of `null_means`. A
+claim may write the literal `*` to explicitly assert universal, independent
+of the dimension's configured `null_means`.
+
+**`separates` vs. sequencer.** Separators (`valid-time`, `scope`, `subject`,
+`memory-class`) partition territory — a `disjoint` relation there means the
+two claims cannot conflict. Sequencers (`recorded-time`, `observed-time`)
+order beliefs about ONE territory and never separate, even on `disjoint` —
+they feed supersession ordering instead (`dimensions.can_separate`).
+
+**`applies_to` bounds blast radius.** A selector (e.g.
+`{memory_class: [entity]}`) determining which claims carry the axis at all —
+a dimension outside its `applies_to` on either side of a comparison is simply
+not consulted (`unknown`), so a CRM-only axis never touches dev-rig pages.
+
+**Lifecycle: `backfill -> enforced`.** In `backfill`, a dimension is
+consulted only for pairs where BOTH sides already carry a coordinate.
+`dimensions.maybe_flip_to_enforced` flips a dimension to `enforced` once
+coverage crosses `coverage_threshold`, wired to athenaeum#712's targeted
+stale-marking (`verdicts.select_stale_for_dimension_change` +
+`verdicts.mark_pairs_stale`) so affected ledger entries are marked stale in
+the same transition. Retiring a dimension re-nulls its coordinates
+(`dimensions.retire_dimension_coordinate`) rather than deleting them —
+coordinates are additive metadata.
+
+**Corpus namespacing.** `org:maturity` and `personal:maturity` are different
+axes unless a ratified mapping declares a translation
+(`dimensions.cross_corpus_compare`); an unmapped or kind-mismatched pair
+degrades to `unknown`, never a false `disjoint`/`equal` from colliding
+vocabularies that happen to share a name or value set.
+
+**Write-side discipline (the highest-risk item this issue names).** Origin
+scope is PROVENANCE (`WikiEntity.provenance_scope` — where/what context wrote
+the claim, free the way `source`/`source_type` are; named `provenance_scope`,
+not `origin_scope`, to avoid colliding with `AutoMemoryFile.origin_scope`, an
+unrelated pre-existing field — see "Ambiguity resolved" below). Claimed scope
+is an ASSERTED coordinate (`WikiEntity.claimed_scope` — where the claim
+APPLIES). They are never the same field and provenance is never auto-copied
+into the coordinate — guarded by a regression test
+(`tests/test_dimensions.py::TestProvenanceScopeNeverPopulatesClaimedScope`). A
+claim missing a coordinate is not rejected; it lands per the dimension's null
+semantics.
+
+**Ambiguity resolved (dispatch aperture, reversible).** The `scope` dimension
+reads/writes a NEW `claimed_scope` frontmatter key rather than the existing
+`scope:` key (`schemas.WikiBase.scope`, athenaeum#434). `scope:` is already
+read as an incompatible nested `{org, locale}` shape by two live consumers
+(`athenaeum.scoped_claims`, athenaeum#329, and `athenaeum.contradictions`'
+scope-block advisory line) — stacking a third, string-shaped reader onto the
+same key would compound an existing collision rather than "match existing
+frontmatter conventions." `claimed_scope` is zero-collision, additive, and
+trivially reversible: retargeting the reader/writer to a different key is a
+one-line change (`dimensions.coordinate_value` / `parsed_coordinate`,
+`models.WikiEntity`'s field), with no data migration since coordinates are
+additive metadata.
+
+The provenance field went through the same check for a different reason: an
+early draft named it `origin_scope`, which collides with a real, heavily-used
+PRE-EXISTING field — `AutoMemoryFile.origin_scope` (issue athenaeum#167, the
+raw-intake scope-directory identifier consumed across `merge.py`,
+`cross_scope.py`, `clusters.py`, `resolutions.py`, `tiers.py`, and more) —
+that `resolutions.py` documents as "NEVER stored in frontmatter." Storing a
+NEW frontmatter key with that exact identifier would have directly
+contradicted that documented invariant for anyone grepping the name, even
+though the two fields live on different dataclasses and never share data at
+runtime. Renamed to `provenance_scope` before this landed — verified
+zero-collision the same way as `claimed_scope`/`subject`/`recorded_at`.
+
+**Intake temporal validation** (`dimensions.validate_intake_temporal`, wired
+into `schemas.WikiBase`'s model validator — the same choke point every
+intake path already validates frontmatter through): hard-rejects
+`observed_at` later than `recorded_at` ("cannot have observed the future");
+soft-flags (`UserWarning`) an `observed_at` more than
+`DEEP_BACKDATE_THRESHOLD_DAYS` (730, i.e. 2 years) before `recorded_at` for
+review — the value is kept (fail-open, matching every other temporal parser
+in this repo).
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Deployment dimensions | — | `dimensions` | _(unset = kernel-only)_ | A list of ADDITIONAL, deployment-declared dimension entries (see field reference below). No env var — this is a structural block, not a scalar knob. See [`resolve_dimensions`](../src/athenaeum/config.py). |
+| Registry epoch | `ATHENAEUM_DIMENSION_REGISTRY_EPOCH` | `librarian.dimensions_registry_epoch` | `1` | Bump on a dimension-definition change that should invalidate verdicts justified by the old definition — feeds `verdicts.Basis.registry_epoch`. |
+| Tree epoch | `ATHENAEUM_DIMENSION_TREE_EPOCH` | `librarian.dimensions_tree_epoch` | `1` | Bump on a scope-tree reorg (renamed subtree) — feeds `verdicts.Basis.tree_epoch` and athenaeum#712's `select_stale_for_tree_epoch_bump`. |
+
+**`dimensions:` entry field reference** (each entry validated by
+`dimensions.parse_dimension_entry`; a malformed entry raises
+`DimensionRegistryError` naming the field):
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string | yes | kebab-case, unique, must not collide with a kernel dimension name. |
+| `kind` | string | yes | one of `interval \| hierarchy \| enum \| identity`. |
+| `null_means` | string | no (default `unknown`) | `universal \| unknown`. |
+| `values` | list of strings | required when `kind: enum` | closed vocabulary. |
+| `separates` | bool | no (default `true`) | separator vs. sequencer. |
+| `applies_to` | mapping | no (default `{}` = applies everywhere) | `{frontmatter_key: value_or_list}`, conjunctive. |
+| `state` | string | no (default `enforced`) | `backfill \| enforced`. |
+| `origin` | string | no (default `operator`) | `builtin \| operator \| proposed:<id>`. |
+| `since` | ISO date | no | when the dimension was declared. |
+| `coverage_threshold` | number | no (default `1.0`) | consulted only while `state: backfill`. |
+
+```yaml
+dimensions:
+  - name: engagement          # kebab-case, unique
+    kind: identity            # interval | hierarchy | enum | identity
+    null_means: unknown       # universal | unknown
+    separates: true           # separator vs sequencer
+    applies_to:                # selector bounding which claims carry this axis
+      memory_class: [entity]
+    state: backfill            # backfill | enforced
+    origin: operator           # builtin | operator | proposed:<id>
+    since: 2026-08-01
+librarian:
+  dimensions_registry_epoch: 1
+  dimensions_tree_epoch: 1
+```
+
+**Behavior with no `dimensions:` key set.** `athenaeum run` completes
+unchanged — the kernel-only registry participates in nothing the librarian
+pipeline runs today beyond `WikiEntity` construction stamping `recorded_at`
+(a new, additive frontmatter key on newly-written pages) and the intake
+temporal check above (fail-open; a no-op unless `observed_at` is genuinely
+set to a future date or a deep back-date). `engagement`, `repo`, `maturity`,
+`environment` and similar are deployment-declared EXAMPLES, never shipped
+defaults — time is universal, engagements are a CRM's business.
+
+**How to inspect it.** `athenaeum dimensions show <page.md>` prints one
+page's coordinates across every registered dimension; `athenaeum dimensions
+compare <page-a.md> <page-b.md>` prints the axis-by-axis relation for a pair.
+Both accept `--json`. This is the registry's consumer for this issue — the
+five-verdict comparator that will consume the full algebra automatically is
+a separate, future child of epic athenaeum#709.
+
 ## Recall and search
 
 | Knob | CLI flag | Env var | YAML key | Default | What it does |

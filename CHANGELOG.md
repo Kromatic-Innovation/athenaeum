@@ -30,6 +30,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wrong bucket instead of preserving it for correct reclassification).
 ### Added
 
+- **Dimension registry + kernel dimensions (athenaeum#714).** Root of the
+  memory-model v6 dimension chain (child of epic athenaeum#709; athenaeum#715,
+  athenaeum#716, athenaeum#719 all depend on this). New `src/athenaeum/dimensions.py`:
+  a typed registry parsed from `athenaeum.yaml`'s `dimensions:` block
+  (`resolve_dimensions` in `config.py`), four kind-comparators (`interval`
+  half-open `[from, until)`, `hierarchy` prefix-subsumption, `enum`
+  closed-vocabulary, `identity` ratified-only-disjoint) each returning
+  `equal | contains | overlaps | disjoint | unknown`, and the six built-in
+  kernel dimensions (`recorded-time`, `observed-time`, `valid-time`, `scope`,
+  `subject`, `memory-class`) — not deletable, always present. Per-dimension
+  `null_means` (`universal` | `unknown`) and `separates` (separator vs.
+  sequencer) semantics; `applies_to` selector bounding blast radius;
+  `backfill -> enforced` lifecycle wired to athenaeum#712's targeted
+  stale-marking (`maybe_flip_to_enforced`); corpus namespacing via
+  `cross_corpus_compare`. Write-side discipline: `WikiEntity` gains
+  `recorded_at` (stamped once at construction, never writer-supplied),
+  `provenance_scope` (PROVENANCE — named to avoid colliding with the
+  pre-existing, unrelated `AutoMemoryFile.origin_scope`), `claimed_scope`
+  (the ASSERTED `scope` coordinate — never auto-copied from
+  `provenance_scope`, with a regression test guarding it), and `subject`.
+  Intake temporal validation
+  (`validate_intake_temporal`, wired into both `intake.tier0_passthrough` and
+  `schemas.WikiBase`): hard-rejects `observed_at` later than `recorded_at` at
+  the intake boundary, where the anchor is genuinely stamped. On the
+  read/merge paths that share the `schemas.WikiBase` gate (`librarian.merge`,
+  `corrections`, `batch`) a page carrying no `recorded_at` of its own — the
+  shape of every page written before this change — is soft-flagged rather
+  than rejected, per this issue's "a claim missing a coordinate is not
+  rejected" AC. Deep back-dates soft-flag throughout.
+  Consumer for this PR: coordinate stamping at write time plus the new
+  `athenaeum dimensions show|compare` CLI (axis-by-axis coordinate display and
+  comparison) — the five-verdict comparator that will consume the full
+  algebra automatically is a separate, future child of epic athenaeum#709. Ships
+  kernel-only by default (`engagement`/`repo`/`maturity`/... are
+  deployment-declared examples in `docs/configuration.md`, not shipped
+  defaults); `memory-class` ships at `backfill` state (athenaeum#972 disposition).
+  See `docs/configuration.md`'s "Dimension registry" section.
 - **Generalized ENUMERATION primitive: `enumerate_entities` (MCP) /
   `athenaeum enumerate` (CLI) (athenaeum#965).** Return every entity of a
   declared type matching field predicates, ordered by a named field — with

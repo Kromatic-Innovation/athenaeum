@@ -60,6 +60,7 @@ from athenaeum.config import (
     resolve_raw_file_max_bytes,
 )
 from athenaeum.corrections import parse_batch_envelope
+from athenaeum.dimensions import stamp_recorded_time, validate_intake_temporal
 from athenaeum.ephemeral import classify_ephemeral
 from athenaeum.models import (
     AutoMemoryFile,
@@ -536,6 +537,23 @@ def tier0_passthrough(
     # uid/type/name contract is enforced. Raises pydantic.ValidationError
     # on failure; caller treats that as a real bug, not a fall-through.
     validate_wiki_meta(meta)
+
+    # Issue athenaeum#714 intake AC: "intake rejects observed_at later than
+    # recorded_at". THIS is the intake boundary the AC names, so the anchor
+    # is supplied explicitly here rather than left to the schema validator.
+    # ``schemas.WikiBase``'s model validator runs on every ``validate_wiki_meta``
+    # caller — including read/merge paths over pages already on disk
+    # (``librarian.merge``, ``corrections``, ``batch``) — so it can only soft-flag
+    # a page that carries no ``recorded_at`` of its own; rejecting there would
+    # break existing data on the very paths that could repair it. A NEW page
+    # entering the corpus is anchored to now, exactly as
+    # ``WikiEntity.__post_init__`` would stamp it, so the hard reject lands here
+    # where it belongs. ``meta`` is NOT mutated: tier 0 is a byte-for-byte
+    # passthrough and must not gain a frontmatter key it was not given.
+    validate_intake_temporal(
+        observed_at=meta.get("observed_at"),
+        recorded_at=entity.recorded_at or stamp_recorded_time(),
+    )
 
     if dry_run:
         return entity
