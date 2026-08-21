@@ -454,7 +454,7 @@ ingest — deterministically, with **no LLM call, ever**. Dispatch per
 | `question` | `athenaeum.answers.resolve_by_id` | flips the checkbox; the legacy `ingest_answers` pass immediately after completes the write-back + archival |
 | `merge` | `athenaeum.pending_merges.resolve_merge` | the full approve/reject apply (wiki write, wikilink rewrite, source deletes, provenance) |
 | `audit` | `athenaeum.calibration.record_audit_review` | appends the review record to the calibration ledger |
-| `proposed-rule` | — | **fails closed**: a structured, logged `decision_type_unavailable` outcome, zero state mutation. A rule-proposal store exists now (`athenaeum.rule_proposals`, issue athenaeum#905 — `approve_rule_proposal`/`reject_rule_proposal`), but wiring THIS applier to it is athenaeum#921's scope, not #905's. The type was registered here (the answer-file schema round-trips) so both #905 and #921 have a slot to land in without touching this table's dispatch shape. |
+| `proposed-rule` | — | **fails closed**: a structured, logged `decision_type_unavailable` outcome, zero state mutation. A rule-proposal store exists now (`athenaeum.rule_proposals`, issue athenaeum#905 — `approve_rule_proposal`/`reject_rule_proposal`), but wiring THIS applier to it is athenaeum#921's scope, not athenaeum#905's. The type was registered here (the answer-file schema round-trips) so both athenaeum#905 and athenaeum#921 have a slot to land in without touching this table's dispatch shape. |
 
 **Fail-soft, idempotent, no bookkeeping needed**: an unknown decision id, an
 already-resolved decision id, an invalid verdict, or a schema-malformed

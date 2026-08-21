@@ -518,9 +518,9 @@ def _apply_proposed_rule_answer(answer: DecisionAnswer) -> DecisionAnswerOutcome
     athenaeum#905 has since landed the store (:mod:`athenaeum.rule_proposals`
     — :func:`~athenaeum.rule_proposals.approve_rule_proposal` /
     :func:`~athenaeum.rule_proposals.reject_rule_proposal`), but wiring THIS
-    decision-answer applier to it is athenaeum#921's scope, not #905's — deliberately
+    decision-answer applier to it is athenaeum#921's scope, not athenaeum#905's — deliberately
     not touched here. This call site still fails closed, zero state mutated,
-    until #921 lands.
+    until athenaeum#921 lands.
     """
     return DecisionAnswerOutcome(
         path=answer.path,
