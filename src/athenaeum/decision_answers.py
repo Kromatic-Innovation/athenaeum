@@ -513,7 +513,15 @@ def _apply_audit_answer(wiki_root: Path, answer: DecisionAnswer) -> DecisionAnsw
 
 
 def _apply_proposed_rule_answer(answer: DecisionAnswer) -> DecisionAnswerOutcome:
-    """Fail-closed placeholder — see module docstring and athenaeum#905."""
+    """Fail-closed placeholder — see module docstring and athenaeum#905.
+
+    athenaeum#905 has since landed the store (:mod:`athenaeum.rule_proposals`
+    — :func:`~athenaeum.rule_proposals.approve_rule_proposal` /
+    :func:`~athenaeum.rule_proposals.reject_rule_proposal`), but wiring THIS
+    decision-answer applier to it is athenaeum#921's scope, not athenaeum#905's — deliberately
+    not touched here. This call site still fails closed, zero state mutated,
+    until athenaeum#921 lands.
+    """
     return DecisionAnswerOutcome(
         path=answer.path,
         decision_id=answer.decision_id,
@@ -521,8 +529,9 @@ def _apply_proposed_rule_answer(answer: DecisionAnswer) -> DecisionAnswerOutcome
         applied=False,
         error_code="decision_type_unavailable",
         message=(
-            "proposed-rule decisions have no store yet (athenaeum#905, blocked by "
-            "athenaeum#901/athenaeum#903) — no state mutated"
+            "proposed-rule decisions have a store now (athenaeum.rule_proposals, "
+            "athenaeum#905) but this applier is not wired to it yet (athenaeum#921) "
+            "— no state mutated"
         ),
     )
 
