@@ -92,7 +92,7 @@ from typing import Any, Callable
 from athenaeum import detection_state, spend, zero_yield
 from athenaeum._retry import TransientAPIError
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.authority import load_authority_manifest
+from athenaeum.authority import AuthorityManifest, load_authority_manifest
 from athenaeum.bounce_contract import check_tier0_bounce_conformance
 from athenaeum.clusters import (
     cluster_auto_memory_files,
@@ -172,7 +172,11 @@ from athenaeum.models import (
     parse_frontmatter,
     render_frontmatter,
 )
-from athenaeum.never_ingest import filter_never_ingest
+from athenaeum.never_ingest import (
+    NEVER_INGEST_TIER_ENTITY,
+    check_and_refuse,
+    filter_never_ingest,
+)
 from athenaeum.pii import (
     ExcludedRecordIndex,
     HardBounceFact,
@@ -1049,6 +1053,7 @@ def process_one(
     calls_before_file: int = 0,
     started_at_file: float | None = None,
     write_client: LLMBackend | None = None,
+    never_ingest_manifest: AuthorityManifest | None = None,
 ) -> ProcessingResult:
     """Process a single raw file through all tiers.
 
@@ -1083,6 +1088,17 @@ def process_one(
     ``started_at_file`` is ``time.monotonic()``, both snapshotted by the
     caller at the moment THIS file started, so the deltas measured here are
     this file's own spend, not the phase's running total.
+
+    ``never_ingest_manifest`` (issue athenaeum#968) is the authority manifest
+    loaded ONCE for the whole ``ctx.raw_files`` loop, same threading shape as
+    ``excluded_index`` above. Checked HERE, at the per-file COMPILE choke
+    point, deliberately never at discovery -- :func:`athenaeum.intake.
+    discover_raw_files`'s return value must stay byte-identical for
+    ``backlog_price_sheet.py`` / ``ordinary_night_table.py`` (issue athenaeum#713,
+    held pending an operator decision), which call it directly for their own
+    backlog counts. ``None`` (every pre-athenaeum#968 caller, and any caller that
+    does not thread a manifest) disables the check entirely -- matching an
+    empty/absent ``never_ingest_classes`` manifest key exactly.
     """
     effective_write_client = write_client if write_client is not None else client
     result = ProcessingResult(raw_file=raw)
@@ -1095,8 +1111,31 @@ def process_one(
     # below touches raw._content. Tier 0 already honors raw `access:` verbatim;
     # this pins the same guarantee onto the Tier-2/3 LLM path for the unstructured
     # medical notes that never reach Tier 0. Empty when the raw carries none.
-    raw_meta, _ = parse_frontmatter(raw.content)
+    raw_meta, raw_body = parse_frontmatter(raw.content)
     sticky_access = parse_access(raw_meta)
+
+    # Issue athenaeum#968: the never-ingest class gate, entity tier. A no-op
+    # unless a manifest was threaded in AND it declares at least one
+    # never_ingest_classes entry -- dark by default, identical contract to
+    # the auto-memory gate. A refused file is excluded from compilation this
+    # run and ledgered ids-only to ``_never_ingest_refusals.jsonl``; it is
+    # NEVER deleted from disk (see ``athenaeum.never_ingest``'s module
+    # docstring) and is simply re-evaluated (and, if still matching,
+    # re-refused) idempotently the next run.
+    if never_ingest_manifest is not None and never_ingest_manifest.never_ingest_classes:
+        ni_refusal = check_and_refuse(
+            raw_meta,
+            raw_body,
+            manifest=never_ingest_manifest,
+            origin_scope=raw.source,
+            filename=raw.path.name,
+            tier=NEVER_INGEST_TIER_ENTITY,
+            cache_dir=_resolve_cache_dir(None),
+            dry_run=dry_run,
+        )
+        if ni_refusal is not None:
+            result.skipped.append(f"never-ingest:{ni_refusal.class_slug}")
+            return result
 
     # --- Tier 0: passthrough for pre-structured raw-intake ---
     # When upstream producers already emit valid wiki-schema frontmatter,
@@ -4123,6 +4162,20 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     excluded_index = ExcludedRecordIndex(
                         contacts_surface_root(ctx.wiki_root.parent, ctx.config)
                     )
+                    # Issue athenaeum#968: the never-ingest class gate, entity tier.
+                    # Loaded ONCE per run (mirrors excluded_index above) and
+                    # threaded down through process_one, which checks it at the
+                    # COMPILE choke point for each raw file -- never at discovery.
+                    # ctx.raw_files (this loop's own iterand, set by
+                    # discover_raw_files above) is deliberately left untouched:
+                    # backlog_price_sheet.py / ordinary_night_table.py (issue
+                    # athenaeum#713, held pending an operator decision) both call
+                    # discover_raw_files directly for their own backlog counts, and
+                    # must keep seeing the exact same set/count this gate does not
+                    # exist for them.
+                    never_ingest_manifest = load_authority_manifest(
+                        resolve_authority_manifest_path(ctx.knowledge_root, ctx.config)
+                    )
                     for i, raw in enumerate(ctx.raw_files):
                         # Issue athenaeum#526 (H10): heartbeat at every per-file boundary
                         # so a long healthy entity phase keeps the lock's
@@ -4279,6 +4332,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 # falls back to *client* (``classify``)
                                 # unchanged.
                                 write_client=write_client,
+                                never_ingest_manifest=never_ingest_manifest,
                             )
                         except RawFileTooLargeError as exc:
                             # Issue athenaeum#898: the per-file BYTE bound (checked by

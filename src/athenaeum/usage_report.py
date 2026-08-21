@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-claim usage report: pushed / referenced / last-referenced (issue athenaeum#968).
 
-Part 1 of #968 (memory-model v6's reshaped #430): the "usage sensor for tier
+Part 1 of athenaeum#968 (memory-model v6's reshaped athenaeum#430): the "usage sensor for tier
 movement" memory-model §6.5 names. Extends the shipped push-metrics
 instrumentation (:mod:`athenaeum.push_metrics`, issues athenaeum#711/#734/#795) — which
 already durably records every push and every session-end reference
@@ -10,7 +10,7 @@ has been pushed, how many times it was actually referenced afterward, and
 when it was last referenced. This module computes and reports that signal.
 It does NOT decide what to do with it — no policy, no tier-movement rule,
 nothing that writes to a wiki page. That consumer is issue athenaeum#718; see "The
-interface #718 consumes" below.
+interface athenaeum#718 consumes" below.
 
 **Redaction discipline** (issue athenaeum#968 AC1): every field on
 :class:`ClaimUsage` is an id, a count, or a timestamp — never claim content,
@@ -20,7 +20,7 @@ frontmatter ``uid``, or a raw-intake filename, which is timestamp+hash, never
 name-derived), so this module reads those same ids straight through without
 adding any redaction logic of its own.
 
-**The interface #718 consumes** (issue athenaeum#968 AC3): #718's tier-movement
+**The interface athenaeum#718 consumes** (issue athenaeum#968 AC3): athenaeum#718's tier-movement
 rules MUST call :func:`get_claim_usage` (single-claim) or
 :func:`compute_usage_report` (bulk) — never re-read
 ``_push_records.jsonl``/``_push_references.jsonl`` directly. This is the one

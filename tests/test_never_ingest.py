@@ -11,10 +11,13 @@ Covers:
   deleted from disk; refusals are ledgered (unless dry_run).
 - The refusal ledger round-trips.
 - Wiring: `_run_auto_memory_phase` consults the manifest and excludes a
-  refused file before clustering.
+  refused file before clustering; ``process_one`` does the same for the
+  entity tier, at the per-file COMPILE choke point, WITHOUT changing
+  ``discover_raw_files``'s own return value (the athenaeum#713 backlog-count
+  guard).
 - The hard "no deletion anywhere" constraint (issue athenaeum#968 AC4): a
-  static source scan asserting none of the three new #968 modules call a
-  filesystem-deletion primitive.
+  static source scan asserting none of the three new athenaeum#968 modules call
+  a filesystem-deletion primitive.
 """
 
 from __future__ import annotations
@@ -22,12 +25,14 @@ from __future__ import annotations
 import ast
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
-from athenaeum.authority import AuthorityManifest, AuthoritySource
+from athenaeum.authority import AuthorityManifest, AuthoritySource, parse_authority_manifest
 from athenaeum.never_ingest import (
     NeverIngestRefusal,
+    check_and_refuse,
     classify_never_ingest,
     filter_never_ingest,
     read_refusals,
@@ -128,8 +133,16 @@ class TestRefusalLedgerRoundtrip:
         assert len(rows) == 1
         assert rows[0]["class"] == "mirror-of-live-source"
         assert rows[0]["origin_scope"] == "-Users-alice-Code-projectx"
+        assert rows[0]["tier"] == "auto-memory"  # default tier
         # ids-only: no content field anywhere in the row.
-        assert set(rows[0]) == {"ts", "class", "detail", "origin_scope", "file_ref_hash"}
+        assert set(rows[0]) == {
+            "ts",
+            "class",
+            "detail",
+            "origin_scope",
+            "file_ref_hash",
+            "tier",
+        }
 
     def test_missing_ledger_reads_empty(self, tmp_path: Path) -> None:
         assert read_refusals(tmp_path / "cache") == []
@@ -359,3 +372,281 @@ class TestNoDeletionStaticScan:
             f"{modname}.py calls a deletion primitive ({offenders}) -- "
             "issue athenaeum#968 forbids deletion anywhere in this issue's scope"
         )
+
+
+class TestCheckAndRefuse:
+    """The shared classify+ledger primitive both intake tiers call."""
+
+    def test_match_builds_and_ledgers(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        meta = {"name": "x", "topics": ["webfont-embedding"]}
+        refusal = check_and_refuse(
+            meta,
+            "body",
+            manifest=_manifest(),
+            origin_scope="graph-writer",
+            filename="20260801T000000Z-abcd1234.md",
+            tier="entity",
+            cache_dir=cache_dir,
+        )
+        assert refusal is not None
+        assert refusal.tier == "entity"
+        assert refusal.class_slug == "mirror-of-live-source"
+        assert read_refusals(cache_dir) == [refusal.to_dict()]
+
+    def test_no_match_returns_none_and_ledgers_nothing(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        refusal = check_and_refuse(
+            {"name": "x"},
+            "ordinary body",
+            manifest=_manifest(),
+            origin_scope="graph-writer",
+            filename="f.md",
+            tier="entity",
+            cache_dir=cache_dir,
+        )
+        assert refusal is None
+        assert read_refusals(cache_dir) == []
+
+    def test_dry_run_returns_match_but_does_not_ledger(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        meta = {"name": "x", "topics": ["webfont-embedding"]}
+        refusal = check_and_refuse(
+            meta,
+            "body",
+            manifest=_manifest(),
+            origin_scope="graph-writer",
+            filename="f.md",
+            tier="entity",
+            cache_dir=cache_dir,
+            dry_run=True,
+        )
+        assert refusal is not None
+        assert read_refusals(cache_dir) == []
+
+
+ENTITY_SOURCE_DIR = "graph-writer"
+
+_ENTITY_MANIFEST_YAML = """\
+version: 1
+sources:
+  - slug: css-typeface-source
+    location: assets/styles/cover.css
+    kind: config
+    topics:
+      - webfont-embedding
+never_ingest_classes:
+  - mirror-of-live-source
+"""
+
+
+def _raw_from_content(raw_dir: Path, content: str, *, filename: str = "note.md"):
+    from athenaeum.models import RawFile
+
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    path = raw_dir / filename
+    path.write_text(content, encoding="utf-8")
+    return RawFile(path=path, source=ENTITY_SOURCE_DIR, timestamp="", uuid8="")
+
+
+class TestEntityTierWiring:
+    """Issue athenaeum#968: `process_one` enforces the never-ingest gate at the
+    per-file COMPILE choke point (never at discovery), per the coordinator's
+    review -- `discover_raw_files`'s own return value must stay
+    byte-identical so athenaeum#713's backlog-count instruments
+    (`backlog_price_sheet.py` / `ordinary_night_table.py`) never silently
+    move.
+    """
+
+    _MATCHING_CONTENT = (
+        "---\nname: Montserrat cover font\ntopics:\n  - webfont-embedding\n"
+        "---\nThe cover uses Montserrat, set in assets/styles/cover.css.\n"
+    )
+
+    def test_refused_file_never_reaches_the_llm_tiers(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import process_one
+        from athenaeum.models import EntityIndex
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        raw = _raw_from_content(tmp_path / "raw" / ENTITY_SOURCE_DIR, self._MATCHING_CONTENT)
+        manifest = parse_authority_manifest(_ENTITY_MANIFEST_YAML)
+
+        client = MagicMock()
+        client.messages.create.side_effect = AssertionError(
+            "never-ingest refusal must short-circuit before any LLM tier runs"
+        )
+        result = process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            client,
+            valid_types=["person", "company"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+            never_ingest_manifest=manifest,
+        )
+        client.messages.create.assert_not_called()
+        assert not result.created
+        assert not result.updated
+        assert not result.escalated
+        assert result.skipped == ["never-ingest:mirror-of-live-source"]
+
+    def test_refused_file_never_deleted_and_no_wiki_page_written(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.librarian import process_one
+        from athenaeum.models import EntityIndex
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        raw = _raw_from_content(tmp_path / "raw" / ENTITY_SOURCE_DIR, self._MATCHING_CONTENT)
+        original_text = raw.path.read_text(encoding="utf-8")
+        manifest = parse_authority_manifest(_ENTITY_MANIFEST_YAML)
+
+        process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            None,
+            valid_types=["person", "company"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+            never_ingest_manifest=manifest,
+        )
+
+        assert raw.path.exists()
+        assert raw.path.read_text(encoding="utf-8") == original_text
+        assert list(wiki.glob("*.md")) == []
+
+    def test_refusal_ledgered_with_entity_tier(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import process_one
+        from athenaeum.models import EntityIndex
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        raw = _raw_from_content(tmp_path / "raw" / ENTITY_SOURCE_DIR, self._MATCHING_CONTENT)
+        manifest = parse_authority_manifest(_ENTITY_MANIFEST_YAML)
+
+        process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            None,
+            valid_types=["person", "company"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+            never_ingest_manifest=manifest,
+        )
+        # process_one resolves the cache dir itself (mirrors the auto-memory
+        # gate's own ATHENAEUM_CACHE_DIR-driven resolution) -- read it back
+        # the same way rather than threading cache_dir through process_one.
+        from athenaeum.config import resolve_cache_dir
+
+        rows = read_refusals(resolve_cache_dir(None))
+        assert len(rows) == 1
+        assert rows[0]["tier"] == "entity"
+        assert rows[0]["class"] == "mirror-of-live-source"
+
+    def test_no_manifest_threaded_is_a_complete_noop(self, tmp_path: Path) -> None:
+        """``never_ingest_manifest=None`` (the default -- every pre-athenaeum#968
+        caller) must behave byte-identically to before this issue: the
+        matching content reaches Tier 1 normally instead of being refused.
+        ``dry_run=True`` keeps this test LLM-free (returns after Tier 1)
+        without changing what's under test -- whether the never-ingest gate
+        fired.
+        """
+        from athenaeum.librarian import process_one
+        from athenaeum.models import EntityIndex
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        raw = _raw_from_content(tmp_path / "raw" / ENTITY_SOURCE_DIR, self._MATCHING_CONTENT)
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            None,
+            valid_types=["person", "company"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+            dry_run=True,
+        )
+        assert "never-ingest:mirror-of-live-source" not in result.skipped
+
+
+class TestDiscoverRawFilesUnaffectedByNeverIngest:
+    """The athenaeum#713 regression guard the coordinator asked for explicitly:
+    `discover_raw_files`'s return (set AND count) must be byte-identical
+    regardless of never-ingest classification -- the gate lives at the
+    per-file COMPILE choke point (`process_one`), never at discovery, so
+    `backlog_price_sheet.py` / `ordinary_night_table.py` (both call
+    `discover_raw_files` directly for their own backlog counts, athenaeum#713,
+    held pending an operator decision) never silently see a different
+    number.
+    """
+
+    def test_discovery_set_unchanged_with_and_without_never_ingest_classes(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.intake import discover_raw_files
+
+        raw_root = tmp_path / "raw"
+        matching = (
+            "---\nname: Montserrat cover font\ntopics:\n  - webfont-embedding\n"
+            "---\nThe cover uses Montserrat, set in assets/styles/cover.css.\n"
+        )
+        non_matching = "---\nname: Ordinary note\n---\nNothing special here.\n"
+        _raw_from_content(raw_root / ENTITY_SOURCE_DIR, matching, filename="a.md")
+        _raw_from_content(raw_root / ENTITY_SOURCE_DIR, non_matching, filename="b.md")
+
+        # discover_raw_files takes no manifest argument at all -- it cannot
+        # be influenced by never_ingest_classes even in principle. This test
+        # pins that contract: the returned ref set is identical regardless
+        # of what a caller does with never-ingest classification downstream.
+        refs_before = sorted(r.ref for r in discover_raw_files(raw_root))
+        refs_after = sorted(r.ref for r in discover_raw_files(raw_root))
+        assert refs_before == refs_after == [
+            f"{ENTITY_SOURCE_DIR}/a.md",
+            f"{ENTITY_SOURCE_DIR}/b.md",
+        ]
+
+    def test_process_one_refusal_does_not_touch_discovery_output(
+        self, tmp_path: Path
+    ) -> None:
+        """End-to-end: even after `process_one` has refused a file (via a
+        manifest a CALLER threaded in), a FRESH `discover_raw_files` call
+        still returns that same file -- refusal is a per-run compile
+        decision, not a discovery-time exclusion.
+        """
+        from athenaeum.intake import discover_raw_files
+        from athenaeum.librarian import process_one
+        from athenaeum.models import EntityIndex
+
+        raw_root = tmp_path / "raw"
+        matching = (
+            "---\nname: Montserrat cover font\ntopics:\n  - webfont-embedding\n"
+            "---\nThe cover uses Montserrat, set in assets/styles/cover.css.\n"
+        )
+        _raw_from_content(raw_root / ENTITY_SOURCE_DIR, matching, filename="a.md")
+
+        refs_before = sorted(r.ref for r in discover_raw_files(raw_root))
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        raw = discover_raw_files(raw_root)[0]
+        manifest = parse_authority_manifest(_ENTITY_MANIFEST_YAML)
+        process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            None,
+            valid_types=["person", "company"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+            never_ingest_manifest=manifest,
+        )
+
+        refs_after = sorted(r.ref for r in discover_raw_files(raw_root))
+        assert refs_before == refs_after == [f"{ENTITY_SOURCE_DIR}/a.md"]

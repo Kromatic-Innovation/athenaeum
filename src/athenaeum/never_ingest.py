@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Never-ingest class list: write-refusal classes enforced at intake (issue athenaeum#968).
 
-Part 2 of #968 (memory-model v6's reshaped #430): the write-refusal classes
+Part 2 of athenaeum#968 (memory-model v6's reshaped athenaeum#430): the write-refusal classes
 memory-model §6.2.4 calls the "refused tier", as CONFIGURATION the intake
 path consults, extending :mod:`athenaeum.authority`'s existing manifest
 mechanism (:data:`athenaeum.authority.NEVER_INGEST_CLASS_SLUGS`) rather than
@@ -101,6 +101,20 @@ log = logging.getLogger(__name__)
 #: :data:`athenaeum.push_metrics.PUSH_RECORDS_FILENAME` — so a refusal
 #: record can never itself become a claim or enter the embedded index.
 REFUSALS_FILENAME = "_never_ingest_refusals.jsonl"
+
+#: Which intake pipeline produced a refusal (issue athenaeum#968). Both tiers
+#: are enforced at their own COMPILE choke point, never at discovery:
+#: ``auto-memory`` in ``librarian._run_auto_memory_phase`` (right after
+#: ``discover_auto_memory_files``, via :func:`filter_never_ingest`);
+#: ``entity`` in ``librarian.process_one`` (per raw file, right after its
+#: frontmatter is parsed, via :func:`check_and_refuse` directly) —
+#: deliberately NOT inside :func:`athenaeum.intake.discover_raw_files`
+#: itself, whose return value ``backlog_price_sheet.py`` /
+#: ``ordinary_night_table.py`` (issue athenaeum#713, held pending an operator
+#: decision) read directly for their own backlog counts and must see
+#: unchanged.
+NEVER_INGEST_TIER_AUTO_MEMORY = "auto-memory"
+NEVER_INGEST_TIER_ENTITY = "entity"
 
 #: Closed, fixed phrase list for the ``pending-state-todo`` class. Every
 #: phrase is lower-case; matching is a case-insensitive substring test over
@@ -250,13 +264,21 @@ def _hash_ref(origin_scope: str, filename: str) -> str:
 
 @dataclass(frozen=True)
 class NeverIngestRefusal:
-    """One refused intake file, as it will appear in the refusal ledger."""
+    """One refused intake file, as it will appear in the refusal ledger.
+
+    ``tier`` (issue athenaeum#968) is one of :data:`NEVER_INGEST_TIER_AUTO_MEMORY`
+    / :data:`NEVER_INGEST_TIER_ENTITY` — which intake pipeline produced this
+    refusal. Defaults to the auto-memory tier (the original, pre-entity-tier
+    shape of this dataclass) so existing callers/fixtures that don't pass it
+    keep working unchanged.
+    """
 
     ts: str
     class_slug: str
     detail: str
     origin_scope: str
     file_ref_hash: str
+    tier: str = NEVER_INGEST_TIER_AUTO_MEMORY
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -265,6 +287,7 @@ class NeverIngestRefusal:
             "detail": self.detail,
             "origin_scope": self.origin_scope,
             "file_ref_hash": self.file_ref_hash,
+            "tier": self.tier,
         }
 
 
@@ -313,7 +336,60 @@ def read_refusals(cache_dir: Path | None = None) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Filter — the intake choke point callers actually consult.
+# check_and_refuse — the ONE classify+ledger primitive both tiers share.
+# ---------------------------------------------------------------------------
+
+
+def check_and_refuse(
+    meta: dict[str, Any] | None,
+    body: str,
+    *,
+    manifest: AuthorityManifest,
+    origin_scope: str,
+    filename: str,
+    tier: str,
+    cache_dir: Path | None = None,
+    dry_run: bool = False,
+) -> NeverIngestRefusal | None:
+    """Classify one (meta, body) pair and, on a match, build + ledger the
+    refusal in one call. Returns ``None`` when nothing matches (or no
+    classes are enabled) — the common, cheap case, and the caller's signal
+    to proceed with this file normally.
+
+    The SINGLE shared primitive both intake tiers call (issue athenaeum#968):
+    :func:`filter_never_ingest` (auto-memory, pre-clustering) and
+    ``athenaeum.librarian.process_one`` (entity tier, per-file at the
+    compile choke point — never at discovery, see :data:`NEVER_INGEST_TIER_ENTITY`'s
+    docstring for why). One code path means the classify → build → log →
+    ledger sequence cannot drift between the two tiers.
+    """
+    match = classify_never_ingest(meta, body, manifest=manifest)
+    if match is None:
+        return None
+    refusal = NeverIngestRefusal(
+        ts=_now_iso(),
+        class_slug=match.class_slug,
+        detail=match.detail,
+        origin_scope=origin_scope,
+        file_ref_hash=_hash_ref(origin_scope, filename),
+        tier=tier,
+    )
+    log.info(
+        "never-ingest: refusing %s/%s (tier=%s, class=%s, %s) -- excluded "
+        "from this run's compilation, left on disk",
+        origin_scope,
+        filename,
+        tier,
+        match.class_slug,
+        match.detail,
+    )
+    if not dry_run:
+        record_refusal(refusal, cache_dir=cache_dir)
+    return refusal
+
+
+# ---------------------------------------------------------------------------
+# Filter — the auto-memory intake choke point.
 # ---------------------------------------------------------------------------
 
 
@@ -335,11 +411,12 @@ def filter_never_ingest(
     Re-reads each candidate file's frontmatter independently (never mutates
     or relies on ``discover_auto_memory_files``'s own return shape, which
     carries only a handful of fields, not the full body) — mirrors
-    :mod:`athenaeum.intake_audit`'s own "independent walk" shape. A file that
-    matches an enabled class is excluded from ``kept``, appended to
-    ``refused``, and (unless *dry_run*) ledgered via :func:`record_refusal` —
-    it is NEVER deleted from disk (see the module docstring's "No deletion,
-    ever").
+    :mod:`athenaeum.intake_audit`'s own "independent walk" shape. Each
+    candidate is classified via the shared :func:`check_and_refuse`
+    primitive (tier=:data:`NEVER_INGEST_TIER_AUTO_MEMORY`); a match is
+    excluded from ``kept``, appended to ``refused``, and (unless *dry_run*)
+    ledgered — it is NEVER deleted from disk (see the module docstring's
+    "No deletion, ever").
 
     A file that cannot be re-read (permission error, vanished mid-run,
     non-UTF-8) fails OPEN — kept, never refused on an I/O error alone.
@@ -356,36 +433,31 @@ def filter_never_ingest(
             kept.append(am)
             continue
         meta, body = parse_frontmatter(text)
-        match = classify_never_ingest(meta, body, manifest=manifest)
-        if match is None:
-            kept.append(am)
-            continue
-        refusal = NeverIngestRefusal(
-            ts=_now_iso(),
-            class_slug=match.class_slug,
-            detail=match.detail,
+        refusal = check_and_refuse(
+            meta,
+            body,
+            manifest=manifest,
             origin_scope=am.origin_scope,
-            file_ref_hash=_hash_ref(am.origin_scope, am.path.name),
+            filename=am.path.name,
+            tier=NEVER_INGEST_TIER_AUTO_MEMORY,
+            cache_dir=cache_dir,
+            dry_run=dry_run,
         )
-        refused.append(refusal)
-        log.info(
-            "never-ingest: refusing %s (scope=%s, class=%s, %s) -- excluded "
-            "from this run's compilation, left on disk",
-            am.path,
-            am.origin_scope,
-            match.class_slug,
-            match.detail,
-        )
-        if not dry_run:
-            record_refusal(refusal, cache_dir=cache_dir)
+        if refusal is None:
+            kept.append(am)
+        else:
+            refused.append(refusal)
     return kept, refused
 
 
 __all__ = [
     "REFUSALS_FILENAME",
+    "NEVER_INGEST_TIER_AUTO_MEMORY",
+    "NEVER_INGEST_TIER_ENTITY",
     "NeverIngestMatch",
     "NeverIngestRefusal",
     "classify_never_ingest",
+    "check_and_refuse",
     "refusals_path",
     "record_refusal",
     "read_refusals",
