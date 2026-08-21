@@ -912,9 +912,9 @@ class TestForwardOnlyAppend:
 
 
 # ---------------------------------------------------------------------------
-# athenaeum#975 AC5: #905's shape-frequency-by-key-fingerprint-and-source
+# athenaeum#975 AC5: athenaeum#905's shape-frequency-by-key-fingerprint-and-source
 # detector question is answerable from the rows alone. This is the point of
-# the issue -- written as a small, readable reduction #905's lane can lift
+# the issue -- written as a small, readable reduction athenaeum#905's lane can lift
 # directly.
 # ---------------------------------------------------------------------------
 
@@ -946,7 +946,7 @@ class TestShapeFrequencyQuery:
 
         rows = _disposition_rows(tmp_path)
 
-        # #905's worked query: shape frequency by (source, key_fingerprint),
+        # athenaeum#905's worked query: shape frequency by (source, key_fingerprint),
         # restricted to rows the deterministic (tier 0) layer did NOT
         # handle -- exactly the shapes the reasoning ladder still has to
         # cover, which is what makes them interesting to a detector looking
