@@ -3152,6 +3152,59 @@ def resolve_shape_rules_runtime_share(config: dict[str, Any] | None) -> float:
     return default
 
 
+def resolve_rule_proposals_threshold(config: dict[str, Any] | None) -> int:
+    """``librarian.rule_proposals.threshold`` (default 50).
+
+    Issue athenaeum#905 AC1/AC2: the record count -- grouped by ``(source,
+    key_fingerprint)``, restricted to rows the shape-rules pass deferred to
+    the reasoning ladder (``tier is None`` in
+    ``_shape_rule_dispositions.jsonl``; see :mod:`athenaeum.rule_proposals`)
+    -- that must be crossed within :func:`resolve_rule_proposals_window_days`
+    before the librarian drafts a candidate rule for that shape.
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_RULE_PROPOSALS_THRESHOLD",
+        "librarian",
+        "rule_proposals",
+        "threshold",
+        50,
+    )
+
+
+def resolve_rule_proposals_window_days(config: dict[str, Any] | None) -> int:
+    """``librarian.rule_proposals.window_days`` (default 30).
+
+    Issue athenaeum#905's "configurable window": the detector only counts
+    ``_shape_rule_dispositions.jsonl`` rows whose ``at`` timestamp falls
+    within this many days of "now".
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_RULE_PROPOSALS_WINDOW_DAYS",
+        "librarian",
+        "rule_proposals",
+        "window_days",
+        30,
+    )
+
+
+def resolve_rule_proposals_exemplar_count(config: dict[str, Any] | None) -> int:
+    """``librarian.rule_proposals.exemplar_count`` (default 5).
+
+    Issue athenaeum#905 AC2's "K exemplars" -- how many readable raw records
+    of a detected shape are embedded in the one drafting call.
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_RULE_PROPOSALS_EXEMPLAR_COUNT",
+        "librarian",
+        "rule_proposals",
+        "exemplar_count",
+        5,
+    )
+
+
 def resolve_verdict_ledger_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve the verdict-ledger opt-in (issue athenaeum#712). DEFAULT OFF.
 
