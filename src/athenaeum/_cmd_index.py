@@ -249,6 +249,19 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
         "recompile (always --incremental's budgeted, resumable path).",
     )
     ingest_parser.add_argument(
+        "--evaluate-only",
+        action="store_true",
+        help="Lock-free public trigger-evaluation mode (issue athenaeum#1001): "
+        "evaluate the configured reasoning-tier triggers against LIVE state "
+        "and print the verdict, then exit — NEVER takes .athenaeum.lock and "
+        "NEVER compiles, even when a trigger fired (unlike --if-triggered, "
+        "which compiles on a fire). Reads the exact same reasoning-trigger "
+        "stamp --if-triggered completion writes. Exit codes: 2 = a trigger "
+        "fired, 0 = none fired, 1 = an error occurred evaluating (mirrors "
+        "this repo's dry-run-found-something ternary, e.g. `athenaeum "
+        "decay`/`athenaeum repair`). Cannot be combined with --if-triggered.",
+    )
+    ingest_parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -553,6 +566,11 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     SAME command, not a second entry point — see :func:`_evaluate_ingest_trigger`.
     When given and no configured trigger fired, this function returns BEFORE
     the lock-acquire block below: no lock, no ``ingest()`` call, no mutation.
+
+    ``--evaluate-only`` (issue athenaeum#1001) is a further, SEPARATE mode:
+    evaluate and report the verdict but NEVER compile, even on a fire — see
+    :func:`_cmd_ingest_evaluate_only`, dispatched immediately below before
+    any of the ``--if-triggered``/``--full`` validation.
     """
     import json
 
@@ -566,6 +584,15 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     )
     raw_root = knowledge_root / "raw"
     wiki_root = knowledge_root / "wiki"
+
+    # Issue athenaeum#1001: --evaluate-only is a SEPARATE lock-free public
+    # mode, not a variant of --if-triggered's fire-then-compile behaviour —
+    # it returns here, before the --incremental/--full validation below, the
+    # lock-acquire block, and any call to ingest(). See
+    # :func:`_cmd_ingest_evaluate_only`.
+    if getattr(args, "evaluate_only", False):
+        return _cmd_ingest_evaluate_only(args, knowledge_root, raw_root)
+
     # Default incremental: neither flag → None → True; --full → False.
     incremental = True if args.incremental is None else args.incremental
 
@@ -699,6 +726,77 @@ def _evaluate_ingest_trigger(
         on_demand=False,
         config=config,
     )
+
+
+def _cmd_ingest_evaluate_only(
+    args: argparse.Namespace, knowledge_root: Path, raw_root: Path
+) -> int:
+    """``ingest --evaluate-only`` (issue athenaeum#1001): lock-free public mode.
+
+    Evaluates the SAME triggers, gathered the SAME way, against the SAME
+    reasoning-trigger stamp path as ``--if-triggered``:
+    :func:`_evaluate_ingest_trigger` is the single shared call site both this
+    function and :func:`cmd_ingest`'s ``--if-triggered`` branch use, so the
+    stamp path can never drift between the two modes. Unlike
+    ``--if-triggered``, this NEVER acquires the run lock and NEVER calls
+    :func:`athenaeum.librarian.ingest` — not even when a trigger fires. This
+    is the surface a deployed evaluator (for example a launchd/cron unit on
+    a schedule this repo does not own) should poll to decide whether to
+    invoke ``athenaeum ingest --if-triggered`` next, instead of importing
+    this module's private stamp symbols
+    (:data:`athenaeum.librarian.REASONING_TRIGGER_STAMP_NAME`,
+    :func:`athenaeum.librarian._load_timestamp_stamp`) directly.
+
+    Exit codes mirror this repo's established dry-run-found-something
+    ternary (``athenaeum decay``, ``athenaeum repair`` — see
+    :func:`athenaeum._cmd_decay.cmd_decay`'s docstring): ``0`` - no trigger
+    fired (nothing to do), ``1`` - an error occurred evaluating triggers,
+    ``2`` - a trigger fired (a "found something" signal: the caller should
+    now run ``ingest --if-triggered`` to actually compile).
+    """
+    import json
+
+    from athenaeum.config import load_config
+
+    if getattr(args, "if_triggered", False):
+        print(
+            "error: --evaluate-only cannot be combined with --if-triggered — "
+            "--evaluate-only never compiles even when a trigger fires; run "
+            "--if-triggered alone for the fire-then-compile behavior, or "
+            "--evaluate-only alone to just see the verdict (issue athenaeum#1001).",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        cfg = load_config(knowledge_root)
+        decision = _evaluate_ingest_trigger(raw_root, cfg, args.cache_dir)
+    except Exception as exc:  # noqa: BLE001 — surface a clean JSON error line
+        print(
+            json.dumps(
+                {
+                    "command": "ingest",
+                    "mode": "evaluate-only",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "exit_code": 1,
+                }
+            )
+        )
+        return 1
+
+    exit_code = 2 if decision.fired else 0
+    print(
+        json.dumps(
+            {
+                "command": "ingest",
+                "mode": "evaluate-only",
+                "fired": decision.fired,
+                "trigger": decision.reason,
+                "exit_code": exit_code,
+            }
+        )
+    )
+    return exit_code
 
 
 def _record_ingest_trigger_completion(cache_dir: Path | None) -> None:

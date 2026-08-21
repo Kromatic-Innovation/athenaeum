@@ -17,7 +17,8 @@ recall hook, the clusterer, the delta compiler, and the cross-scope sweep
 all call into this module) — resist adding capability-specific branches;
 callers adapt to the three backends' shared ``SearchBackend`` Protocol.
 
-**Layering:** L3 service. Imports only L1 (:mod:`athenaeum.models`) and L2
+**Layering:** L3 service. Imports only L1 (:mod:`athenaeum.models`,
+:mod:`athenaeum.store` — issue athenaeum#977, the whole-store adapter seam) and L2
 (:mod:`athenaeum.authority`, :mod:`athenaeum.pii`) at module scope; never
 imports L4 (the domain/pipeline modules — :mod:`athenaeum.tiers`,
 :mod:`athenaeum.librarian`, etc.). ``chromadb`` (the ``vector`` backend's
@@ -61,7 +62,7 @@ import re
 import shutil
 import sqlite3
 import time
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import date
 from fnmatch import fnmatch
 from pathlib import Path
@@ -82,6 +83,7 @@ from athenaeum.models import (
 )
 from athenaeum.pii import is_pii_flagged
 from athenaeum.storage import is_embedded
+from athenaeum.store import FilesystemStore, ObjectMeta, StoreKey
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -447,6 +449,16 @@ _VECTOR_MANIFEST = "vector-manifest.json"
 # first build after this ships does one full re-hash and stamps it.
 _MANIFEST_REHASH_KEY = "last_full_rehash_at"
 
+# Issue athenaeum#977 (S2 of the whole-store adapter design, athenaeum#911): the manifest's
+# top-level ``version`` schema stamp for the opaque-version-token ``stats``
+# shape (design note §6.2 D3). A manifest whose ``version`` is not this value
+# — including every pre-athenaeum#977 manifest (v1 hashes-only, or the old v2
+# ``[mtime_ns, size, valid_until]`` shape) — is schema-incompatible: it is
+# treated exactly like a v1 manifest (no usable stats), forcing ONE full
+# re-hash on the next build (the same mechanism issue athenaeum#373's periodic
+# backstop already models), after which the write path stamps this version.
+_STORE_STATS_SCHEMA_VERSION = 3
+
 
 def _now() -> float:
     """Return the current epoch seconds.
@@ -553,6 +565,45 @@ def _is_recall_inactive(meta: dict[str, Any] | None, as_of: date | None = None) 
     return valid_until_expired(meta, as_of)
 
 
+def _scan_surface(
+    store: FilesystemStore,
+    surface: str,
+    *,
+    keep: Callable[[str], bool],
+    prior_versions: Mapping[str, str] | None = None,
+) -> tuple[dict[str, ObjectMeta], Mapping[StoreKey, bytes]]:
+    """List *surface* once and batch-read only the changed/added subset.
+
+    Issue athenaeum#977 (S2), design note §3.5 P1/P3: :meth:`Store.iter_meta`
+    replaces the former per-page ``path.stat()`` with ONE listing call
+    regardless of corpus size ``N``, and :meth:`Store.read_many` replaces the
+    former per-page ``path.read_bytes()`` with ONE batched read of exactly
+    the ``c`` keys whose version differs from *prior_versions* (or has none)
+    — never ``N`` individual reads. *keep* is applied INSIDE the listing
+    loop, before a key can enter the read set, so a filtered-out object
+    (wrong extension, an operational subdirectory, a skip-listed name) is
+    never fetched — matching the pre-athenaeum#977 walk, which filtered before
+    ever calling ``stat``/``read`` on a page.
+
+    Returns ``(current, contents)``: *current* is ``{relative_key:
+    ObjectMeta}`` for every KEPT object; *contents* is ``read_many``'s result
+    for the changed/added subset (``{}`` — no ``read_many`` call at all — when
+    nothing changed, the common no-op-rebuild case).
+    """
+    current: dict[str, ObjectMeta] = {}
+    to_read: list[StoreKey] = []
+    versions = prior_versions or {}
+    for meta in store.iter_meta(surface):
+        rel = meta.key.key
+        if not keep(rel):
+            continue
+        current[rel] = meta
+        if versions.get(rel) != meta.version:
+            to_read.append(meta.key)
+    contents = store.read_many(to_read) if to_read else {}
+    return current, contents
+
+
 def _scan_indexed_records(
     wiki_root: Path,
     extra_roots: Iterable[Path] | None,
@@ -560,17 +611,37 @@ def _scan_indexed_records(
     include_globs: Iterable[str] | None = None,
     exclude_globs: Iterable[str] | None = None,
     as_of: date | None = None,
-    prior: dict[str, tuple[int, int, str, str]] | None = None,
+    prior: dict[str, tuple[str, str, str]] | None = None,
     config: dict[str, Any] | None = None,
-) -> Iterator[tuple[str, Path, str, str, dict[str, Any], tuple[int, int, str]]]:
+) -> Iterator[tuple[str, Path, str, str, dict[str, Any], tuple[str, str]]]:
     """Yield ``(indexed_name, path, hash, text, meta, statrec)`` per active page.
+
+    Issue athenaeum#977 (S2 of the whole-store adapter design, athenaeum#911): this scan
+    is built on the ``Store`` bulk primitives (design note §6.2) via
+    :func:`_scan_surface` instead of a per-page ``path.stat()`` +
+    ``path.read_bytes()`` walk. One :class:`~athenaeum.store.FilesystemStore`
+    is constructed per call, scoped to *wiki_root* (surface ``"wiki"``, flat —
+    a listed key nested under an operational subdirectory such as
+    ``_quarantine`` is excluded exactly like the old non-recursive
+    ``os.listdir`` walk) plus one synthetic surface per *extra_roots* entry
+    (recursive, ``.md``-only, name-prefixed — unchanged from the pre-existing
+    convention). No caller-visible signature change: this remains an internal
+    helper over filesystem ``Path``s, matching S1's "no callers migrated"
+    scoping — the store is an implementation detail of THIS scan, not exposed
+    outward. (``_scan_all_entries`` / ``_iter_wiki_entries`` /
+    ``_iter_extra_root_entries`` above are left untouched: they also serve
+    ``athenaeum.recurring_claims`` and direct test callers that want a plain
+    ``Path`` enumeration rather than the store abstraction, so the "which
+    files count" rule is necessarily re-expressed here rather than shared.)
 
     ``content_hash`` is the sha256 of the whole file (frontmatter + body).
     ``text`` is the full decoded file (callers truncate as needed for the
-    index document). ``statrec`` is ``(mtime_ns, size, valid_until_iso)`` for
-    the manifest's stat pre-filter. Inactive memories are filtered here so they
-    are absent from both index and manifest — the incremental differ then treats
-    an active→inactive flip as a deletion. Unreadable files are skipped.
+    index document). ``statrec`` is ``(version, valid_until_iso)`` — *version*
+    is the store adapter's opaque token (design note §6.2 D3; ``mtime_ns:size``
+    for ``FilesystemStore`` — compared for equality only, never parsed).
+    Inactive memories are filtered here so they are absent from both index
+    and manifest — the incremental differ then treats an active→inactive
+    flip as a deletion. Unreadable/vanished files are skipped.
 
     Issue athenaeum#427: a page carrying a truthy ``pii:`` frontmatter flag (see
     :func:`athenaeum.pii.is_pii_flagged`) is ALSO filtered out here, same as
@@ -586,47 +657,70 @@ def _scan_indexed_records(
     build is always full), so the manifest a normal live rebuild diffs against is
     never contaminated by a historical view.
 
-    ``prior`` (issue athenaeum#370) enables the stat pre-filter: a map ``indexed_name ->
-    (mtime_ns, size, valid_until_iso, hash)`` from the last manifest. When a
-    file's ``(mtime_ns, size)`` matches its prior entry, its body is NOT read or
-    re-hashed — the stored hash is reused (rsync-style heuristic). The page was
-    active last build (only active pages are in the manifest) and its content is
-    unchanged, so it stays active EXCEPT if its ``valid_until`` has since expired
-    relative to ``as_of`` — that time-varying bound is re-checked from the stored
-    date without a read, preserving the athenaeum#308 date-expiry semantics. Stat-matched
-    rows yield placeholder ``text=""``/``meta={}``: callers only consume those
-    for the add/change delta, whose members always fail the stat match and are
-    freshly read. ``prior`` MUST be ``None`` for a full (re)build — a full build
-    inserts every scanned record, so the placeholders would corrupt it. Callers
-    pass ``prior`` only on the incremental-apply path.
+    ``prior`` (issue athenaeum#370, opaque-token schema per athenaeum#977) enables the
+    stat pre-filter: a map ``indexed_name -> (version, valid_until_iso, hash)``
+    from the last manifest. When a file's CURRENT store version matches its
+    prior entry, its body is NOT read or re-hashed — the stored hash is
+    reused (rsync-style heuristic). The page was active last build (only
+    active pages are in the manifest) and its content is unchanged, so it
+    stays active EXCEPT if its ``valid_until`` has since expired relative to
+    ``as_of`` — that time-varying bound is re-checked from the stored date
+    without a read, preserving the athenaeum#308 date-expiry semantics.
+    Version-matched rows yield placeholder ``text=""``/``meta={}``: callers
+    only consume those for the add/change delta, whose members always fail
+    the version match and are freshly read (via one batched ``read_many``
+    call per surface — design note P3 — never one read per file). ``prior``
+    MUST be ``None``/empty for a full (re)build — a full build inserts every
+    scanned record, so the placeholders would corrupt it. Callers pass
+    ``prior`` only on the incremental-apply path.
     """
     include = list(include_globs) if include_globs else None
     exclude = list(exclude_globs) if exclude_globs else None
-    for indexed_name, path in _scan_all_entries(wiki_root, extra_roots):
-        if not _passes_globs(indexed_name, include, exclude):
+    prior_map = prior or {}
+
+    roots: dict[str, Path] = {"wiki": wiki_root}
+    extra_surfaces: list[tuple[str, str]] = []  # (surface_name, indexed-name prefix)
+    for i, root in enumerate(extra_roots or ()):
+        if not root.is_dir():
             continue
-        try:
-            st = path.stat()
-        except OSError:
-            continue
-        mtime_ns, size = st.st_mtime_ns, st.st_size
-        prior_rec = prior.get(indexed_name) if prior else None
-        if prior_rec is not None and prior_rec[0] == mtime_ns and prior_rec[1] == size:
-            # Stat fast-path: content unchanged since the last active build.
+        surface = f"extra{i}"
+        roots[surface] = root
+        extra_surfaces.append((surface, root.name))
+    store = FilesystemStore(knowledge_root=wiki_root, roots=roots)
+
+    def _local_path_for(key: StoreKey) -> Path:
+        fn = store.capabilities.local_path_for
+        assert fn is not None  # FilesystemStore always declares this escape hatch
+        return fn(key)
+
+    def _decode(
+        indexed_name: str,
+        key: StoreKey,
+        meta_obj: ObjectMeta,
+        contents: Mapping[StoreKey, bytes],
+    ) -> tuple[str, Path, str, str, dict[str, Any], tuple[str, str]] | None:
+        prior_rec = prior_map.get(indexed_name)
+        if prior_rec is not None and prior_rec[0] == meta_obj.version:
+            # Version fast-path: content unchanged since the last active build.
             # Re-check ONLY the time-varying upper bound (superseded_by /
-            # deprecated are content-based and cannot change without a stat
+            # deprecated are content-based and cannot change without a version
             # change). ``valid_until`` may have crossed ``as_of`` (default
             # today) with no content edit — drop the page then so it becomes a
             # manifest ``removed`` and leaves the index (issue athenaeum#308).
-            stored_vu = prior_rec[2]
+            stored_vu = prior_rec[1]
             if stored_vu and valid_until_expired({"valid_until": stored_vu}, as_of):
-                continue
-            yield indexed_name, path, prior_rec[3], "", {}, (mtime_ns, size, stored_vu)
-            continue
-        try:
-            data = path.read_bytes()
-        except OSError:
-            continue
+                return None
+            return (
+                indexed_name,
+                _local_path_for(key),
+                prior_rec[2],
+                "",
+                {},
+                (meta_obj.version, stored_vu),
+            )
+        data = contents.get(key)
+        if data is None:  # pragma: no cover - defensive: vanished between list and read
+            return None
         content_hash = hashlib.sha256(data).hexdigest()
         text = data.decode("utf-8", errors="replace")
         meta, _ = parse_frontmatter(text)
@@ -637,11 +731,11 @@ def _scan_indexed_records(
         # ``bucket: daily`` page stays indexed for currency ranking instead
         # of being hard-dropped — see that function's docstring.
         if _is_recall_inactive(meta, as_of):
-            continue
+            return None
         # Issue athenaeum#427: a ``pii: true``-flagged page never enters the index or
         # the manifest (belt-and-suspenders — see the docstring above).
         if is_pii_flagged(meta):
-            continue
+            return None
         # Issue athenaeum#532 (H4): honor the storage-adapter corpus policy at index
         # build. A page whose entity class routes to a surface with
         # ``embedded: false`` never enters the FTS5 / vector store — the
@@ -655,9 +749,55 @@ def _scan_indexed_records(
         if config is not None:
             page_type = str(meta.get("type") or "")
             if not is_embedded(page_type, config):
-                continue
+                return None
         vu = validity_bound_str(meta, "valid_until")
-        yield indexed_name, path, content_hash, text, meta, (mtime_ns, size, vu)
+        return indexed_name, _local_path_for(key), content_hash, text, meta, (meta_obj.version, vu)
+
+    # -- wiki: flat surface, .md only, no underscore/skip-listed names ------
+    def _wiki_keep(rel: str) -> bool:
+        if "/" in rel or not rel.endswith(".md") or rel.startswith("_"):
+            return False
+        if rel in _INTAKE_SKIP_NAMES:
+            return False
+        return _passes_globs(rel, include, exclude)
+
+    wiki_prior_versions = {
+        name: rec[0] for name, rec in prior_map.items() if "/" not in name
+    }
+    wiki_current, wiki_contents = _scan_surface(
+        store, "wiki", keep=_wiki_keep, prior_versions=wiki_prior_versions
+    )
+    for rel in sorted(wiki_current):
+        record = _decode(rel, wiki_current[rel].key, wiki_current[rel], wiki_contents)
+        if record is not None:
+            yield record
+
+    # -- extra roots: recursive, .md only, name-prefixed --------------------
+    for surface, root_name in extra_surfaces:
+        name_prefix = root_name + "/"
+
+        def _extra_keep(rel: str, _root_name: str = root_name) -> bool:
+            if not rel.endswith(".md"):
+                return False
+            if Path(rel).name in _INTAKE_SKIP_NAMES:
+                return False
+            return _passes_globs(f"{_root_name}/{rel}", include, exclude)
+
+        surface_prior_versions = {
+            name[len(name_prefix) :]: rec[0]
+            for name, rec in prior_map.items()
+            if name.startswith(name_prefix)
+        }
+        extra_current, extra_contents = _scan_surface(
+            store, surface, keep=_extra_keep, prior_versions=surface_prior_versions
+        )
+        for rel in sorted(extra_current):
+            indexed_name = f"{root_name}/{rel}"
+            record = _decode(
+                indexed_name, extra_current[rel].key, extra_current[rel], extra_contents
+            )
+            if record is not None:
+                yield record
 
 
 def _compute_delta(
@@ -703,25 +843,35 @@ def _manifest_hashes(manifest: dict[str, Any] | None) -> dict[str, str]:
     return {}
 
 
-def _manifest_stats(manifest: dict[str, Any] | None) -> dict[str, tuple[int, int, str]]:
-    """Extract the ``{indexed_name: (mtime_ns, size, valid_until)}`` stat map.
+def _manifest_stats(manifest: dict[str, Any] | None) -> dict[str, tuple[str, str]]:
+    """Extract the ``{indexed_name: (version, valid_until)}`` stat map.
 
-    Issue athenaeum#370's stat pre-filter. Absent (a v1 manifest predating stats) or
-    malformed => ``{}``, which forces a one-time full hash of every file and the
-    manifest upgrades to v2 on the next write. Each stored entry is a
-    ``[mtime_ns, size, valid_until]`` list (JSON has no tuples); rows that do not
-    parse are skipped (fail to a re-hash), never crashing the build.
+    Issue athenaeum#370's stat pre-filter, re-keyed on the opaque store-adapter
+    version token by issue athenaeum#977 (design note §6.2 D3: ``version`` is
+    compared for equality only, never parsed — for ``FilesystemStore`` today
+    it happens to be ``mtime_ns:size``, but callers must not assume that
+    shape). ``manifest["version"]`` is this schema's stamp
+    (``_STORE_STATS_SCHEMA_VERSION``): a manifest that does not carry it —
+    every pre-athenaeum#977 manifest, whether v1 (hashes-only) or the old v2
+    ``[mtime_ns, size, valid_until]`` shape — is schema-incompatible and
+    returns ``{}`` here exactly like a v1 manifest always has, which forces a
+    one-time full re-hash of every file (the same forced-rehash backstop
+    issue athenaeum#373 already models) and the manifest upgrades to the current
+    schema on the next write. Each stored entry is a ``[version,
+    valid_until]`` list (JSON has no tuples); rows that do not parse are
+    skipped individually (fail to a re-hash for that one file), never
+    crashing the build.
     """
-    if not manifest:
+    if not manifest or manifest.get("version") != _STORE_STATS_SCHEMA_VERSION:
         return {}
     stats = manifest.get("stats")
     if not isinstance(stats, dict):
         return {}
-    out: dict[str, tuple[int, int, str]] = {}
+    out: dict[str, tuple[str, str]] = {}
     for name, rec in stats.items():
         try:
-            mtime_ns, size, vu = rec[0], rec[1], rec[2]
-            out[str(name)] = (int(mtime_ns), int(size), str(vu or ""))
+            version, vu = rec[0], rec[1]
+            out[str(name)] = (str(version), str(vu or ""))
         except (TypeError, ValueError, IndexError):
             continue
     return out
@@ -744,21 +894,24 @@ def _manifest_last_full_rehash(manifest: dict[str, Any] | None) -> float | None:
 
 def _scan_prior(
     manifest: dict[str, Any] | None,
-) -> dict[str, tuple[int, int, str, str]]:
+) -> dict[str, tuple[str, str, str]]:
     """Join a manifest's hashes + stats into the scan's ``prior`` map (athenaeum#370).
 
-    Returns ``{indexed_name: (mtime_ns, size, valid_until, hash)}`` for names
-    that have BOTH a hash and a stat entry. A name missing either (e.g. every
-    name in a v1 manifest, which has no ``stats``) is omitted, so it is read and
-    re-hashed exactly once — after which the v2 write records its stat.
+    Returns ``{indexed_name: (version, valid_until, hash)}`` for names that
+    have BOTH a hash and a stat entry — unchanged from athenaeum#370's join, just
+    keyed on the opaque store-adapter version token (athenaeum#977) instead of a raw
+    ``(mtime_ns, size)`` pair. A name missing either (e.g. every name in a
+    schema-incompatible manifest, which ``_manifest_stats`` reports as having
+    no ``stats``) is omitted, so it is read and re-hashed exactly once — after
+    which the write records its stat in the current schema.
     """
     hashes = _manifest_hashes(manifest)
     stats = _manifest_stats(manifest)
-    out: dict[str, tuple[int, int, str, str]] = {}
-    for name, (mtime_ns, size, vu) in stats.items():
+    out: dict[str, tuple[str, str, str]] = {}
+    for name, (version, vu) in stats.items():
         h = hashes.get(name)
         if h is not None:
-            out[name] = (mtime_ns, size, vu, h)
+            out[name] = (version, vu, h)
     return out
 
 
@@ -766,26 +919,28 @@ def _write_manifest(
     path: Path,
     hashes: dict[str, str],
     extra: dict[str, Any] | None = None,
-    stats: dict[str, tuple[int, int, str]] | None = None,
+    stats: dict[str, tuple[str, str]] | None = None,
     last_full_rehash_at: float | None = None,
 ) -> None:
     """Atomically write the manifest sidecar (temp file + rename).
 
-    ``stats`` (issue athenaeum#370) persists the per-file ``(mtime_ns, size,
-    valid_until)`` alongside the hash so the next build's stat pre-filter can
-    skip re-reading unchanged files. Bumped to ``version: 2`` when stats are
-    written; a reader that only knows ``hashes`` is unaffected (still present).
+    ``stats`` (issue athenaeum#370, opaque-token schema per athenaeum#977) persists the
+    per-file ``(version, valid_until)`` alongside the hash so the next
+    build's stat pre-filter can skip re-reading unchanged files. Bumped to
+    ``version: _STORE_STATS_SCHEMA_VERSION`` when stats are written; a reader
+    that only knows ``hashes`` is unaffected (still present).
 
     ``last_full_rehash_at`` (issue athenaeum#373) records the epoch seconds of the most
-    recent build that re-hashed every file (a full rebuild or a stale-triggered
-    incremental re-hash). The stale-detection backstop reads it to decide when
-    to force the next full re-hash; a fresh incremental build PRESERVES the prior
-    value by passing it back unchanged. ``None`` omits the key.
+    recent build that re-hashed every file (a full rebuild, a stale-triggered
+    incremental re-hash, or a schema-stamp mismatch — athenaeum#977). The
+    stale-detection backstop reads it to decide when to force the next full
+    re-hash; a fresh incremental build PRESERVES the prior value by passing it
+    back unchanged. ``None`` omits the key.
     """
-    version = 2 if stats is not None else 1
+    version = _STORE_STATS_SCHEMA_VERSION if stats is not None else 1
     payload: dict[str, Any] = {"version": version, "hashes": hashes}
     if stats is not None:
-        payload["stats"] = {k: [v[0], v[1], v[2]] for k, v in stats.items()}
+        payload["stats"] = {k: [v[0], v[1]] for k, v in stats.items()}
     if last_full_rehash_at is not None:
         payload[_MANIFEST_REHASH_KEY] = last_full_rehash_at
     if extra:
@@ -949,10 +1104,23 @@ class FTS5Backend:
         # age, force one this build (``prior=None`` => every file re-read and
         # re-hashed) while STILL applying the change delta incrementally. A fresh
         # manifest preserves its stored timestamp; a full rebuild always stamps.
+        #
+        # Issue athenaeum#977: a manifest whose ``version`` predates the opaque-token
+        # schema (``_STORE_STATS_SCHEMA_VERSION``) is folded into the SAME
+        # staleness check — ``_manifest_stats``/``_scan_prior`` would already
+        # report no usable prior stats for it, but treating it as ``stale``
+        # explicitly also stamps a fresh ``last_full_rehash_at`` for the forced
+        # re-hash this build performs, instead of silently preserving a
+        # timestamp from before the schema changed.
         now = _now()
         last_rehash = _manifest_last_full_rehash(stored)
-        stale = last_rehash is None or (now - last_rehash) > (
-            full_rehash_max_age_days * 86400.0
+        schema_mismatch = (
+            stored is not None and stored.get("version") != _STORE_STATS_SCHEMA_VERSION
+        )
+        stale = (
+            last_rehash is None
+            or schema_mismatch
+            or (now - last_rehash) > (full_rehash_max_age_days * 86400.0)
         )
         rehash_at = now if (not do_incremental or stale) else last_rehash
 
@@ -1388,7 +1556,7 @@ class VectorBackend:
     def _add_records(
         self,
         collection: Any,
-        records: list[tuple[str, Path, str, str, dict[str, Any], tuple[int, int, str]]],
+        records: list[tuple[str, Path, str, str, dict[str, Any], tuple[str, str]]],
     ) -> None:
         """Embed and add a batch of scanned records to the collection."""
         ids: list[str] = []
@@ -1492,10 +1660,18 @@ class VectorBackend:
         # On the incremental path, force a full re-hash of every file when the
         # manifest has not recorded one within the max age — the change delta is
         # still applied incrementally (no rmtree / full re-embed).
+        #
+        # Issue athenaeum#977: also stale when the manifest predates the opaque-token
+        # schema — see the identical comment in ``FTS5Backend.build_index``.
         now = _now()
         last_rehash = _manifest_last_full_rehash(stored)
-        stale = last_rehash is None or (now - last_rehash) > (
-            full_rehash_max_age_days * 86400.0
+        schema_mismatch = (
+            stored is not None and stored.get("version") != _STORE_STATS_SCHEMA_VERSION
+        )
+        stale = (
+            last_rehash is None
+            or schema_mismatch
+            or (now - last_rehash) > (full_rehash_max_age_days * 86400.0)
         )
 
         # Issue athenaeum#370: stat pre-filter the scan on the incremental path only —
@@ -1504,10 +1680,10 @@ class VectorBackend:
         # build (athenaeum#373) also passes ``prior=None`` to force a re-hash of all.
         prior = _scan_prior(stored) if (do_incremental and not stale) else None
 
-        def _scan(with_prior: dict[str, tuple[int, int, str, str]] | None) -> tuple[
-            list[tuple[str, Path, str, str, dict[str, Any], tuple[int, int, str]]],
+        def _scan(with_prior: dict[str, tuple[str, str, str]] | None) -> tuple[
+            list[tuple[str, Path, str, str, dict[str, Any], tuple[str, str]]],
             dict[str, str],
-            dict[str, tuple[int, int, str]],
+            dict[str, tuple[str, str]],
         ]:
             recs = list(
                 _scan_indexed_records(

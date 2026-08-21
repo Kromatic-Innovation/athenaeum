@@ -27,6 +27,7 @@ import logging
 import re
 import subprocess
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -34,6 +35,7 @@ from typing import Any, Callable
 import anthropic as anthropic_mod
 import pytest
 
+import athenaeum.models as models_mod
 from athenaeum.batch import (
     BATCH_POLL_INTERVAL_SECONDS,
     BatchExecutionError,
@@ -323,6 +325,24 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
+def _freeze_recorded_at(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue athenaeum#1064: pin ``WikiEntity.__post_init__``'s ``recorded_at``
+    stamp to one fixed instant for the duration of the test.
+
+    The batch/sync equivalence tests run TWO full ``run()`` passes and
+    assert their wiki output is byte-identical. Each pass stamps every new
+    entity's ``recorded_at`` from the real wall clock independently, so a
+    test whose two passes straddle a wall-clock second boundary fails on
+    nothing but that one-second skew even though the equivalence the test
+    exists to prove holds. Freezing the shared clock (rather than excluding
+    ``recorded_at`` from ``_wiki_snapshot``) keeps the comparison a strict
+    equality — see the issue for why the exclusion was rejected as a real
+    weakening of what the test proves.
+    """
+    fixed = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(models_mod, "_recorded_time_now", lambda: fixed)
+
+
 def _wiki_snapshot(root: Path) -> dict[str, str]:
     return {
         p.name: p.read_text(encoding="utf-8")
@@ -555,6 +575,7 @@ class TestBatchSyncEquivalence:
         root_sync = _seed_root(tmp_path, "sync", contents, with_acme=True)
         root_batch = _seed_root(tmp_path, "batch", contents, with_acme=True)
         _clean_env(monkeypatch)
+        _freeze_recorded_at(monkeypatch)
         caplog.set_level(logging.INFO, logger="athenaeum")
 
         sync_client = _FakeClient(_scripted_responder)
@@ -615,6 +636,7 @@ class TestBatchSyncEquivalence:
         root_sync = _seed_root(tmp_path, "sync", contents, with_acme=True)
         root_batch = _seed_root(tmp_path, "batch", contents, with_acme=True)
         _clean_env(monkeypatch)
+        _freeze_recorded_at(monkeypatch)
 
         sync_client = _FakeClient(_scripted_responder)
         monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: sync_client)
