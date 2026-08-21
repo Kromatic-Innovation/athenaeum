@@ -434,8 +434,9 @@ resolved_at: 2026-08-14T20:00:00Z
 - **`decision_type`** is REQUIRED — because the id spaces above can
   collide, an id alone cannot tell the applier which store to look in.
 - **`verdict`** is the per-type decision token: for `question` the answer
-  body (as today); for `merge`, `approve` or `reject`; for `audit`, the
-  human verdict compared against the tier's original verdict.
+  body (as today); for `merge` and `proposed-rule`, `approve` or `reject`;
+  for `audit`, the human verdict compared against the tier's original
+  verdict.
 
 A record with **no `decision_id`** is a legacy `pending_question_answer`
 provenance file (the pre-athenaeum#908 output of `ingest_answers` — an audit
@@ -454,7 +455,7 @@ ingest — deterministically, with **no LLM call, ever**. Dispatch per
 | `question` | `athenaeum.answers.resolve_by_id` | flips the checkbox; the legacy `ingest_answers` pass immediately after completes the write-back + archival |
 | `merge` | `athenaeum.pending_merges.resolve_merge` | the full approve/reject apply (wiki write, wikilink rewrite, source deletes, provenance) |
 | `audit` | `athenaeum.calibration.record_audit_review` | appends the review record to the calibration ledger |
-| `proposed-rule` | — | **fails closed**: a structured, logged `decision_type_unavailable` outcome, zero state mutation. A rule-proposal store exists now (`athenaeum.rule_proposals`, issue athenaeum#905 — `approve_rule_proposal`/`reject_rule_proposal`), but wiring THIS applier to it is athenaeum#921's scope, not athenaeum#905's. The type was registered here (the answer-file schema round-trips) so both athenaeum#905 and athenaeum#921 have a slot to land in without touching this table's dispatch shape. |
+| `proposed-rule` | `athenaeum.rule_proposals.approve_rule_proposal` / `reject_rule_proposal` | `verdict: approve` writes the stored, already-drafted rule YAML into `<knowledge_root>/rules/` in **observe mode** and appends an `approve` record; `verdict: reject` appends a `reject` record, permanently suppressing that shape (issue athenaeum#905). `knowledge_root` is derived as `wiki_root.parent`. An unknown or already-resolved proposal id is caught and skipped, same fail-soft contract as every other type (issue athenaeum#921). |
 
 **Fail-soft, idempotent, no bookkeeping needed**: an unknown decision id, an
 already-resolved decision id, an invalid verdict, or a schema-malformed
