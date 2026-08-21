@@ -2016,11 +2016,19 @@ def merge_clusters_to_wiki(
                 cluster_threshold=merge_cluster_threshold,
             )
             if _suppress is not None:
+                # Issue athenaeum#1085: n_sources is recorded as its own structured
+                # field, UNCONDITIONALLY — not parsed out of `_suppress`, which
+                # only embeds the source count when the size-cap gate happens
+                # to be the one that fired (gate ordering is pinned by
+                # TestGateOrdering, so a cohesion/confidence/chain suppression
+                # previously recorded no size at all).
                 log.info(
                     "resolutions: SUPPRESSED degenerate merge proposal for "
-                    "cluster %s (%s); not written to _pending_merges.md",
+                    "cluster %s (%s); n_sources=%d; not written to "
+                    "_pending_merges.md",
                     entry.cluster_id,
                     _suppress,
+                    len(member_paths),
                 )
                 return
             # Issue athenaeum#433: type-compatibility precheck. A cluster spanning >1
