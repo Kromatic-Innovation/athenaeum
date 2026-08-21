@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the `drop` / `retain` / `rollup` dispositions, compiled-exempt
-retirement and the denominator invariant (issue athenaeum#903).
+retirement, the denominator invariant (issue athenaeum#903), and the
+per-record disposition ledger (issue athenaeum#975).
 
-Organized to map onto the issue's 6 acceptance criteria — each test class
+Organized to map onto each issue's acceptance criteria — each test class
 below is annotated with the AC it proves. The engine half (`emit`,
 `fallthrough`, matching, transform, observe mode) is athenaeum#901 and stays in
-``tests/test_rules.py``; this file covers only what athenaeum#903 adds.
+``tests/test_rules.py``; this file covers what athenaeum#903 and athenaeum#975 add.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -28,6 +30,8 @@ from athenaeum.intake import discover_raw_files
 from athenaeum.rules import (
     TERMINAL_DISPOSITIONS,
     ShapeRule,
+    default_shape_rule_dispositions_path,
+    record_key_fingerprint,
     run_shape_rule_phase,
 )
 
@@ -106,6 +110,52 @@ def _rollup_rule(**overrides) -> dict:
     return d
 
 
+_BASE_CORRECTION = {
+    "target": {"type": "person", "handle": {"email": "$email"}},
+    "op": "set",
+    "field": "bounced",
+    "value": "$status_date",
+    "source": "script:test-rule",
+    "observed_at": "$observed_at",
+}
+
+
+def _emit_rule(**overrides) -> dict:
+    d = {
+        "version": 1,
+        "name": "contact-bounce",
+        "mode": "live",
+        "match": {"source": "delivery-monitor", "format": "jsonl"},
+        "disposition": "emit",
+        "correction": dict(_BASE_CORRECTION),
+    }
+    d.update(overrides)
+    return d
+
+
+def _fallthrough_rule(**overrides) -> dict:
+    d = {
+        "version": 1,
+        "name": "unrecognized-export",
+        "mode": "live",
+        "match": {"source": "misc-export", "format": "jsonl"},
+        "disposition": "fallthrough",
+    }
+    d.update(overrides)
+    return d
+
+
+def _record(**overrides) -> dict:
+    d = {
+        "status": "bounced",
+        "email": "alex@example.org",
+        "status_date": "2026-08-06",
+        "observed_at": "2026-08-06T14:01:55Z",
+    }
+    d.update(overrides)
+    return d
+
+
 def _run(tmp_path: Path, **kwargs):
     return run_shape_rule_phase(
         raw_root=tmp_path / "raw",
@@ -120,6 +170,17 @@ def _ledger_lines(tmp_path: Path) -> list[dict]:
     from athenaeum.rules import default_shape_rules_ledger_path
 
     path = default_shape_rules_ledger_path(tmp_path / "wiki")
+    if not path.is_file():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _disposition_rows(tmp_path: Path) -> list[dict]:
+    path = default_shape_rule_dispositions_path(tmp_path / "wiki")
     if not path.is_file():
         return []
     return [
@@ -587,3 +648,320 @@ class TestDenominatorInvariant:
         )
         _run(tmp_path)
         assert _ledger_lines(tmp_path)[0]["rule"] == "daily-journal@1"
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#975 AC1: every intake record processed by the shape-rules pass
+# appends one per-record disposition row to `_shape_rule_dispositions.jsonl`
+# -- source_ref, key_fingerprint, tier, rule_id (or none), disposition, at.
+# ---------------------------------------------------------------------------
+
+
+class TestPerRecordDispositionRows:
+    _ROW_FIELDS = {
+        "schema_version",
+        "at",
+        "source",
+        "source_ref",
+        "key_fingerprint",
+        "tier",
+        "rule_id",
+        "disposition",
+    }
+
+    def test_emit_appends_a_tier_0_row_with_the_exact_field_set(
+        self, tmp_path: Path
+    ) -> None:
+        _write_rule(tmp_path / "rules", "r1.yaml", _emit_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "delivery-monitor",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            _record(),
+        )
+        _run(tmp_path)
+
+        rows = _disposition_rows(tmp_path)
+        assert len(rows) == 1
+        row = rows[0]
+        assert set(row.keys()) == self._ROW_FIELDS
+        assert row["disposition"] == "emit"
+        assert row["tier"] == 0
+        assert row["rule_id"] == "contact-bounce@1"
+        assert row["source"] == "delivery-monitor"
+        assert row["source_ref"] == "delivery-monitor/20260806T140211Z-9f3ac1d2.jsonl"
+        assert row["key_fingerprint"] == record_key_fingerprint(_record())
+        assert row["schema_version"] == 1
+
+    def test_observed_emit_appends_a_tier_0_row(self, tmp_path: Path) -> None:
+        _write_rule(tmp_path / "rules", "r1.yaml", _emit_rule(mode="observe"))
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "delivery-monitor",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            _record(),
+        )
+        _run(tmp_path)
+
+        rows = _disposition_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["disposition"] == "observed-emit"
+        assert rows[0]["tier"] == 0
+        assert rows[0]["rule_id"] == "contact-bounce@1"
+
+    def test_fallthrough_appends_a_deferred_row(self, tmp_path: Path) -> None:
+        _write_rule(tmp_path / "rules", "r1.yaml", _fallthrough_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "misc-export",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            {"a": 1},
+        )
+        _run(tmp_path)
+
+        rows = _disposition_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["disposition"] == "fallthrough"
+        assert rows[0]["tier"] is None
+        assert rows[0]["rule_id"] == "unrecognized-export@1"
+
+    def test_drop_appends_a_tier_0_row(self, tmp_path: Path) -> None:
+        _git_init(tmp_path)
+        _write_rule(tmp_path / "rules", "r1.yaml", _drop_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "contact-sync",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            {"kind": "skip_no_change"},
+        )
+        _run(tmp_path)
+
+        rows = _disposition_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["disposition"] == "drop"
+        assert rows[0]["tier"] == 0
+        assert rows[0]["rule_id"] == "skip-noop@1"
+
+    def test_retain_appends_a_tier_0_row(self, tmp_path: Path) -> None:
+        _write_rule(tmp_path / "rules", "r1.yaml", _retain_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw", "journal", "20260806T140211Z-9f3ac1d2.jsonl", {"e": 1}
+        )
+        _run(tmp_path)
+
+        rows = _disposition_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["disposition"] == "retain"
+        assert rows[0]["tier"] == 0
+
+    def test_rollup_appends_one_tier_0_row_per_member(self, tmp_path: Path) -> None:
+        _write_rule(tmp_path / "rules", "r1.yaml", _rollup_rule())
+        for i in (0, 1):
+            _write_raw_jsonl(
+                tmp_path / "raw",
+                "events",
+                f"20260806T1402{i:02d}Z-9f3ac1d{i}.jsonl",
+                {"person_uid": "p1", "ts": "2026-08-01T00:00:00Z"},
+            )
+        _run(tmp_path)
+
+        rows = _disposition_rows(tmp_path)
+        assert len(rows) == 2
+        assert all(row["disposition"] == "rollup" for row in rows)
+        assert all(row["tier"] == 0 for row in rows)
+
+    def test_no_match_appends_a_deferred_row_with_no_rule(
+        self, tmp_path: Path
+    ) -> None:
+        # A rule is loaded (so the phase actually runs), but it matches a
+        # different source -- this record matches no rule at all.
+        _write_rule(tmp_path / "rules", "r1.yaml", _emit_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "unrelated-source",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            {"whatever": "shape"},
+        )
+        _run(tmp_path)
+
+        rows = _disposition_rows(tmp_path)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["disposition"] == "no-match"
+        assert row["rule_id"] is None
+        assert row["tier"] is None
+        assert row["source"] == "unrelated-source"
+        assert set(row.keys()) == self._ROW_FIELDS
+
+    def test_dry_run_writes_no_rows(self, tmp_path: Path) -> None:
+        _write_rule(tmp_path / "rules", "r1.yaml", _emit_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "delivery-monitor",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            _record(),
+        )
+        _run(tmp_path, dry_run=True)
+
+        assert _disposition_rows(tmp_path) == []
+        # The aggregate ledger is dry-run-suppressed too -- unaffected by
+        # this change (AC3's "additive" guarantee, just verified for the
+        # dry-run path specifically).
+        assert _ledger_lines(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#975 AC2: fingerprints, never raw values -- no raw sensitive value
+# or name-derived string appears anywhere in a disposition row.
+# ---------------------------------------------------------------------------
+
+
+class TestNoRawValuesInDispositionRows:
+    def test_sentinel_value_never_appears_in_the_ledger_bytes(
+        self, tmp_path: Path
+    ) -> None:
+        _write_rule(tmp_path / "rules", "r1.yaml", _emit_rule())
+        sentinel = "personal@example.com"
+        record = _record(email=sentinel)
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "delivery-monitor",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            record,
+        )
+        _run(tmp_path)
+
+        path = default_shape_rule_dispositions_path(tmp_path / "wiki")
+        raw_bytes = path.read_bytes()
+        assert sentinel.encode("utf-8") not in raw_bytes
+
+        expected_fingerprint = record_key_fingerprint(record)
+        rows = _disposition_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["key_fingerprint"] == expected_fingerprint
+        assert expected_fingerprint.encode("utf-8") in raw_bytes
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#975 AC3: the existing per-rule aggregate keeps its current shape
+# and consumers -- an additive change only.
+# ---------------------------------------------------------------------------
+
+
+class TestAggregateShapeUnchanged:
+    def test_aggregate_field_set_is_unchanged(self, tmp_path: Path) -> None:
+        _write_rule(tmp_path / "rules", "r1.yaml", _emit_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "delivery-monitor",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            _record(),
+        )
+        _run(tmp_path)
+
+        lines = _ledger_lines(tmp_path)
+        assert len(lines) == 1
+        assert set(lines[0].keys()) == {
+            "schema_version",
+            "run_at",
+            "rule",
+            "mode",
+            "records_seen",
+            "records_total",
+            "dispositions",
+        }
+        assert lines[0]["dispositions"] == {"emit": 1}
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#975 AC4: forward-only -- running the phase twice appends new
+# disposition rows and never rewrites/truncates earlier ones.
+# ---------------------------------------------------------------------------
+
+
+class TestForwardOnlyAppend:
+    def test_running_twice_appends_without_touching_earlier_rows(
+        self, tmp_path: Path
+    ) -> None:
+        # A real git repo so `emit`'s retirement actually removes the first
+        # raw file -- otherwise it would still be present (unretired) on the
+        # second run and get re-disposed, defeating the point of this test.
+        _git_init(tmp_path)
+        _write_rule(tmp_path / "rules", "r1.yaml", _emit_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "delivery-monitor",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            _record(),
+        )
+        _run(tmp_path)
+        first_rows = _disposition_rows(tmp_path)
+        assert len(first_rows) == 1
+
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "delivery-monitor",
+            "20260807T140211Z-9f3ac1d3.jsonl",
+            _record(),
+        )
+        _run(tmp_path)
+        second_rows = _disposition_rows(tmp_path)
+
+        assert len(second_rows) == 2
+        assert second_rows[0] == first_rows[0]
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#975 AC5: #905's shape-frequency-by-key-fingerprint-and-source
+# detector question is answerable from the rows alone. This is the point of
+# the issue -- written as a small, readable reduction #905's lane can lift
+# directly.
+# ---------------------------------------------------------------------------
+
+
+class TestShapeFrequencyQuery:
+    def test_unmatched_shape_frequency_by_source_and_fingerprint(
+        self, tmp_path: Path
+    ) -> None:
+        # An unrelated rule keeps `rules` non-empty so the phase actually
+        # runs, but it matches nothing in "orphan-export" -- every record
+        # from that source falls through as "no-match" (tier: null).
+        _write_rule(tmp_path / "rules", "r1.yaml", _emit_rule())
+
+        widget_shape = {"widget_id": "placeholder", "status": "new"}
+        for i in range(3):
+            _write_raw_jsonl(
+                tmp_path / "raw",
+                "orphan-export",
+                f"20260806T1402{i:02d}Z-9f3ac1d{i}.jsonl",
+                {"widget_id": f"w{i}", "status": "new"},
+            )
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "orphan-export",
+            "20260806T140299Z-9f3ac1d9.jsonl",
+            {"totally_different_shape": True},
+        )
+        _run(tmp_path)
+
+        rows = _disposition_rows(tmp_path)
+
+        # #905's worked query: shape frequency by (source, key_fingerprint),
+        # restricted to rows the deterministic (tier 0) layer did NOT
+        # handle -- exactly the shapes the reasoning ladder still has to
+        # cover, which is what makes them interesting to a detector looking
+        # for shapes the deterministic layer keeps failing on.
+        shape_frequency: Counter[tuple[str, str]] = Counter(
+            (row["source"], row["key_fingerprint"])
+            for row in rows
+            if row["tier"] is None
+        )
+
+        widget_key = ("orphan-export", record_key_fingerprint(widget_shape))
+        other_key = (
+            "orphan-export",
+            record_key_fingerprint({"totally_different_shape": True}),
+        )
+        assert shape_frequency[widget_key] == 3
+        assert shape_frequency[other_key] == 1
+        assert sum(shape_frequency.values()) == 4
