@@ -25,7 +25,7 @@ Athenaeum already has two type axes on a wiki page. `memory_class` is a
 
 | Axis | Frontmatter key | Values | Defined in | Answers |
 |---|---|---|---|---|
-| Entity schema | `type:` | `person`, `company`, `project`, `concept`, `source`, + `FALLBACK_TYPES` (`auto-memory`, `tool`, `reference`, `principle`, `feedback`, `preference`, `user`) | `src/athenaeum/schemas.py` (`KNOWN_TYPES`) | "What kind of *entity* does this page describe?" |
+| Entity schema | `type:` | `person`, `company`, `project`, `concept`, `source`, + `FALLBACK_TYPES` (`auto-memory`, `tool`, `reference`, `principle`, `preference`, `incident`) | `src/athenaeum/schemas.py` (`KNOWN_TYPES`) | "What kind of *entity* does this page describe?" |
 | Intake type | `memory_type:` | `feedback`, `project`, `reference`, `user`, `recall` | `src/athenaeum/models.py` (`AutoMemoryFile.memory_type`) | "What intake channel / auto-memory shape produced this?" |
 | **Memory class (new)** | `memory_class:` | `fact`, `guideline`, `axiom`, `reference`, `entity`, `decision`, `procedure` | `src/athenaeum/schemas.py` (`MEMORY_CLASSES`) | "What EPISTEMIC kind of memory is this?" |
 
@@ -57,6 +57,58 @@ them.
   `athenaeum._lint.lint_untyped_memory_class` are the predicates a
   lint/report pass calls to surface these pages as "untyped" rather than
   letting them disappear silently.
+
+## 2a. Assignment — rule map, backfill, and where this axis sits in its lifecycle (athenaeum#996)
+
+**Lifecycle position: BACKFILL, not enforced.** `memory_class` is currently a
+*populated-but-optional* dimension. Absence is tolerated by validation (see
+"Validation behavior" above), nothing refuses a page for lacking it, and no
+writer is required to set it. The sequence this axis moves through is:
+
+1. **Writable** (shipped, athenaeum#996) — `models.WikiEntity` carries `memory_class`
+   and `render()` emits it, so newly created pages land classed. Before this
+   the field existed only on the READ model (`schemas.WikiBase`), so corpus
+   coverage could not be anything but zero.
+2. **Backfilled** (this stage) — `athenaeum memory-class backfill` assigns the
+   field to existing pages that lack it. Running it against the live store is
+   an operator act, tracked separately.
+3. **Enforced** (NOT scheduled) — a future decision could make the field
+   required at write time or make `_lint.lint_untyped_memory_class` fail a
+   gate. Nothing does that today; do not write code that assumes the field is
+   present.
+
+### The deterministic `type:` → `memory_class:` rule map
+
+Source of truth: `schemas.TYPE_TO_MEMORY_CLASS` / `schemas.memory_class_for_type`.
+Adopted on athenaeum#972 after a live-corpus scan; it decides ~97% of pages at zero
+LLM calls.
+
+| `type:` | `memory_class:` |
+|---|---|
+| `person`, `company`, `concept`, `tool`, `project`, `source`, `user` | `entity` |
+| `reference` | `reference` |
+| `principle` | `guideline` |
+| `auto-memory`, `preference`, `feedback`, `incident`, `issue` | *(no rule — classifier residual)* |
+| anything else | *(no rule — reported as `unmapped-type`, never guessed)* |
+
+The residual types are intake/lifecycle markers rather than entity kinds, so
+they split across `fact`/`decision`/`procedure`/`guideline` on CONTENT. The
+backfill command's opt-in `--classifier` mode handles them in batched calls
+(~20 pages each, routed through the `classify` model knob); pages carrying
+`retired: true` are excluded by default.
+
+**No machine may mint `axiom`.** The rule map has no `axiom` target, and the
+classifier's output is filtered against `schemas.MACHINE_ASSIGNABLE_MEMORY_CLASSES`
+(= `MEMORY_CLASSES` minus `axiom`) in code, not merely discouraged in the
+prompt. Axiom status requires the human-approved promotion record §6 defers to
+athenaeum#434.
+
+Two further guarantees the backfill holds, both because a taxonomy pass must be
+re-runnable without an operator auditing 20k+ files: an existing non-empty
+`memory_class` is never overwritten, and a page with no YAML frontmatter block
+is skipped and counted — never given a synthetic one. The write is a textual
+insertion of one line into the existing frontmatter block rather than a
+parse/re-render round trip, so a second run is a byte-level no-op.
 
 ## 3. Merge-vs-cite semantics (documented here; enforcement shipped in athenaeum#433)
 

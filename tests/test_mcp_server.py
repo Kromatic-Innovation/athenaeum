@@ -162,6 +162,65 @@ class TestRecall:
 
 
 # ---------------------------------------------------------------------------
+# Recall type filter (issue athenaeum#964)
+# ---------------------------------------------------------------------------
+
+
+class TestRecallTypeFilter:
+    def test_no_filter_is_byte_identical(self, wiki_dir: Path) -> None:
+        before = recall_search(wiki_dir, "Acme fintech")
+        after = recall_search(wiki_dir, "Acme fintech", type_filter=None)
+        assert before == after
+
+    def test_matching_type_filters_in(self, wiki_dir: Path) -> None:
+        result = recall_search(wiki_dir, "Acme fintech", type_filter="company")
+        assert "Acme Corp" in result
+
+    def test_non_matching_type_filters_out(self, wiki_dir: Path) -> None:
+        result = recall_search(wiki_dir, "Acme fintech", type_filter="person")
+        assert "Acme Corp" not in result
+
+    def test_unrecognized_type_names_known_classes_not_silent(
+        self, wiki_dir: Path
+    ) -> None:
+        result = recall_search(wiki_dir, "Acme fintech", type_filter="no-such-class")
+        assert "No wiki pages matched" in result
+        assert "not a recognized entity class" in result
+        # The deployment's real classes (company/feedback, from the wiki_dir
+        # fixture) are named so a typo is diagnosable from the response alone.
+        assert "company" in result
+
+    def test_unrecognized_type_is_not_an_error(self, wiki_dir: Path) -> None:
+        # Must return a string result, never raise.
+        result = recall_search(wiki_dir, "Acme fintech", type_filter="bogus")
+        assert isinstance(result, str)
+
+    def test_hit_includes_uid_and_type(self, wiki_dir: Path) -> None:
+        result = recall_search(wiki_dir, "Acme fintech")
+        assert "**Uid:** a1b2c3d4" in result
+        assert "**Type:** company" in result
+
+    def test_hit_includes_outbound_links_when_present(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "a.md").write_text(
+            "---\nuid: u1\ntype: person\nname: Alice\n---\n\n"
+            "Alice knows [[bob-page]] and cites [[carol-page|Carol]].\n"
+        )
+        result = recall_search(wiki, "Alice")
+        assert "**Links:** bob-page, carol-page" in result
+
+    def test_hit_omits_links_line_when_none(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "a.md").write_text(
+            "---\nuid: u1\ntype: person\nname: Alice\n---\n\nNo links here.\n"
+        )
+        result = recall_search(wiki, "Alice")
+        assert "**Links:**" not in result
+
+
+# ---------------------------------------------------------------------------
 # Recall provenance/context header (issue athenaeum#325)
 # ---------------------------------------------------------------------------
 
@@ -310,7 +369,9 @@ class TestRecallHeaderRendering:
 
     def test_bare_page_matches_pre_325_shape(self, tmp_path: Path) -> None:
         # A page with none of source/updated/valid/status renders the original
-        # Tags-then-blank-then-snippet shape (no blank metadata line inserted).
+        # Tags-then-blank-then-snippet shape (no blank metadata line inserted)
+        # -- with the issue athenaeum#964 Uid/Type lines (always rendered, unlike
+        # the omit-at-default athenaeum#325 header) directly after Tags.
         wiki = self._wiki(tmp_path)
         (wiki / "terse.md").write_text(
             "---\n"
@@ -320,7 +381,7 @@ class TestRecallHeaderRendering:
             "A terse page about migrations.\n"
         )
         result = recall_search(wiki, "migrations terse")
-        assert "**Tags:** plain\n\n" in result
+        assert "**Tags:** plain\n**Uid:** —\n**Type:** —\n\n" in result
 
     def test_withheld_contested_page_leaks_no_status(self, tmp_path: Path) -> None:
         # Safety lock (athenaeum#325 raison d'etre): a restricted caller must not see a
@@ -605,6 +666,170 @@ class TestCreateServer:
                 monkeypatch.setitem(sys.modules, "fastmcp", saved)
             else:
                 monkeypatch.delitem(sys.modules, "fastmcp", raising=False)
+
+
+# ---------------------------------------------------------------------------
+# entity_schema tool + config-derived recall schema (issue athenaeum#964)
+# ---------------------------------------------------------------------------
+
+
+class TestEntitySchemaToolAndConfigDerivedSchema:
+    def _build(self, tmp_path: Path, *, caller_audience: set[str] | None = None):
+        pytest.importorskip("fastmcp")
+        from athenaeum.mcp_server import create_server
+
+        raw = tmp_path / "raw"
+        wiki = tmp_path / "wiki"
+        raw.mkdir()
+        wiki.mkdir()
+        return create_server(
+            raw_root=raw, wiki_root=wiki, caller_audience=caller_audience
+        ), wiki
+
+    def _get_fn(self, server, name: str):
+        import asyncio
+
+        async def _run():
+            tool = await server.get_tool(name)
+            return tool.fn
+
+        return asyncio.run(_run())
+
+    def test_registers_entity_schema_tool(self, tmp_path: Path) -> None:
+        import asyncio
+
+        server, _wiki = self._build(tmp_path)
+
+        async def _run() -> set[str]:
+            return {t.name for t in await server.list_tools()}
+
+        names = asyncio.run(_run())
+        assert "entity_schema" in names
+
+    def test_recall_schema_names_a_declared_type_absent_from_source(
+        self, tmp_path: Path
+    ) -> None:
+        # Issue athenaeum#964: the recall tool schema is COMPUTED from this
+        # deployment's own types.md, not a literal enum in the source.
+        raw = tmp_path / "raw"
+        wiki = tmp_path / "wiki"
+        raw.mkdir()
+        wiki.mkdir()
+        (wiki / "_schema").mkdir()
+        (wiki / "_schema" / "types.md").write_text(
+            "| Type |\n|---|\n| zzz-deployment-only-type |\n"
+        )
+        pytest.importorskip("fastmcp")
+        from athenaeum.mcp_server import create_server
+
+        server = create_server(raw_root=raw, wiki_root=wiki)
+        recall_fn = self._get_fn(server, "recall")
+        assert "zzz-deployment-only-type" in recall_fn.__doc__
+
+    def test_missing_types_md_does_not_prevent_registration(
+        self, tmp_path: Path
+    ) -> None:
+        # No `_schema/` directory at all -- must degrade gracefully, never
+        # hard-fail server construction.
+        server, _wiki = self._build(tmp_path)
+        recall_fn = self._get_fn(server, "recall")
+        assert recall_fn is not None
+
+    def test_empty_types_md_does_not_prevent_registration(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        wiki = tmp_path / "wiki"
+        raw.mkdir()
+        wiki.mkdir()
+        (wiki / "_schema").mkdir()
+        (wiki / "_schema" / "types.md").write_text("")
+        pytest.importorskip("fastmcp")
+        from athenaeum.mcp_server import create_server
+
+        server = create_server(raw_root=raw, wiki_root=wiki)
+        recall_fn = self._get_fn(server, "recall")
+        assert recall_fn is not None
+
+    def test_entity_schema_tool_reports_declared_observed_and_queryable(
+        self, tmp_path: Path
+    ) -> None:
+        raw = tmp_path / "raw"
+        wiki = tmp_path / "wiki"
+        raw.mkdir()
+        wiki.mkdir()
+        (wiki / "_schema").mkdir()
+        (wiki / "_schema" / "types.md").write_text("| Type |\n|---|\n| person |\n")
+        (wiki / "a.md").write_text(
+            "---\nuid: u1\ntype: auto-memory\nname: Memory\n---\n\nBody.\n"
+        )
+        pytest.importorskip("fastmcp")
+        from athenaeum.mcp_server import create_server
+
+        server = create_server(raw_root=raw, wiki_root=wiki)
+        schema_fn = self._get_fn(server, "entity_schema")
+        result = schema_fn()
+
+        assert result["queryable_fields"] == ["type"]
+        by_name = {c["name"]: c for c in result["classes"]}
+        assert by_name["person"]["declared"] is True
+        assert by_name["person"]["observed"] is False
+        assert by_name["auto-memory"]["declared"] is False
+        assert by_name["auto-memory"]["observed"] is True
+        assert by_name["auto-memory"]["count"] == 1
+
+    def test_observed_undeclared_type_is_schema_visible_and_recall_accepts_it(
+        self, tmp_path: Path
+    ) -> None:
+        # Issue athenaeum#964 AC amendment 3 end-to-end: a corpus type absent
+        # from types.md is BOTH (a) listed by entity_schema as
+        # observed-undeclared and (b) directly usable as a recall(type=...)
+        # value -- the schema-authority decision rule is the live corpus,
+        # not the declared registry alone.
+        raw = tmp_path / "raw"
+        wiki = tmp_path / "wiki"
+        raw.mkdir()
+        wiki.mkdir()
+        (wiki / "_schema").mkdir()
+        (wiki / "_schema" / "types.md").write_text("| Type |\n|---|\n| person |\n")
+        (wiki / "a.md").write_text(
+            "---\nuid: u1\ntype: auto-memory\nname: Auto Memory Page\n---\n\n"
+            "Some auto-memory content about widgets.\n"
+        )
+        pytest.importorskip("fastmcp")
+        from athenaeum.mcp_server import create_server, recall_search
+
+        server = create_server(raw_root=raw, wiki_root=wiki)
+        schema_fn = self._get_fn(server, "entity_schema")
+        schema_result = schema_fn()
+        by_name = {c["name"]: c for c in schema_result["classes"]}
+        assert by_name["auto-memory"]["declared"] is False
+        assert by_name["auto-memory"]["observed"] is True
+
+        recall_result = recall_search(wiki, "widgets", type_filter="auto-memory")
+        assert "Auto Memory Page" in recall_result
+
+    def test_entity_schema_tool_respects_caller_audience(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        wiki = tmp_path / "wiki"
+        raw.mkdir()
+        wiki.mkdir()
+        (wiki / "a.md").write_text(
+            "---\nuid: u1\ntype: person\nname: Alice\naudience: [finance]\n---\n\n"
+            "Body.\n"
+        )
+        pytest.importorskip("fastmcp")
+        from athenaeum.mcp_server import create_server
+
+        server = create_server(
+            raw_root=raw, wiki_root=wiki, caller_audience={"ops"}
+        )
+        schema_fn = self._get_fn(server, "entity_schema")
+        result = schema_fn()
+        by_name = {c["name"]: c for c in result["classes"]}
+        assert by_name["person"]["count"] == 0
+
+    def test_instructions_mention_entity_schema(self, tmp_path: Path) -> None:
+        server, _wiki = self._build(tmp_path)
+        assert "entity_schema" in (server.instructions or "")
 
 
 # ---------------------------------------------------------------------------
@@ -960,7 +1185,7 @@ class TestCLIServe:
 
 
 class TestAllMcpToolWrappers:
-    """Invoke all 14 registered MCP tool wrappers through ``tool.fn()``."""
+    """Invoke all 16 registered MCP tool wrappers through ``tool.fn()``."""
 
     # One valid-args invocation per registered tool. Read tools take no args;
     # the write tools are called with a nonexistent id so a single call
@@ -986,6 +1211,8 @@ class TestAllMcpToolWrappers:
         "resolve_merge": lambda fn: fn("no-such-id", "reject"),
         "read_person": lambda fn: fn("no-such-uid"),
         "read_entity": lambda fn: fn("no-such-uid", "person"),
+        "entity_schema": lambda fn: fn(),
+        "enumerate_entities": lambda fn: fn("no-such-type"),
     }
     _EXPECTED_TYPE = {
         "recall": str,
@@ -1002,6 +1229,8 @@ class TestAllMcpToolWrappers:
         "calibration_summary": dict,
         "read_person": str,
         "read_entity": str,
+        "entity_schema": dict,
+        "enumerate_entities": dict,
     }
 
     def _server(self, tmp_path: Path, *, cache_dir: Path | None = None):
@@ -1042,7 +1271,12 @@ class TestAllMcpToolWrappers:
             f"registered-only={registered - set(self._INVOKE)}, "
             f"map-only={set(self._INVOKE) - registered}"
         )
-        assert len(registered) == 14
+        # Issue athenaeum#964: +1 for `entity_schema`, the ONE new schema-query tool
+        # that issue adds. Issue athenaeum#965 adds one more: `enumerate_entities`,
+        # the generalized ENUMERATION primitive (a distinct code path from
+        # `recall` — no query text, never routed through ranking). Bumping
+        # this number is exactly the tripwire this test exists for.
+        assert len(registered) == 16
 
     @pytest.mark.parametrize("name", sorted(_INVOKE))
     def test_wrapper_marshals_args_and_returns_declared_type(

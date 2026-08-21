@@ -380,6 +380,134 @@ class TestApplyMerge:
 
 
 # ---------------------------------------------------------------------------
+# TestVerdictLedgerWiring — issue athenaeum#712 Wiring AC.
+#
+# The verdict ledger is "consumed within this same issue by writing verdicts
+# for the decisions the current pipeline already makes": a merge
+# approve/reject applied here (the SAME apply_decision_answers path
+# `athenaeum ingest-answers` drives) records a verdict when
+# `librarian.verdict_ledger_enabled` is on AND the caller passes its
+# already-acquired lock — and does neither when the flag is off (byte-
+# identical to before athenaeum#712) or no lock is supplied (every
+# pre-athenaeum#712 caller).
+# ---------------------------------------------------------------------------
+
+
+class TestVerdictLedgerWiring:
+    def test_flag_off_writes_no_verdict(self, wiki_root: Path, raw_root: Path) -> None:
+        from athenaeum.runlock import RunLock
+        from athenaeum.verdicts import ledger_exists
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="flag-off-topic",
+            src_a=wiki_root / "feedback_off_a.md",
+            src_b=wiki_root / "feedback_off_b.md",
+        )
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="approve"
+        )
+
+        lock = RunLock(wiki_root.parent)
+        with lock:
+            report = apply_decision_answers(
+                wiki_root,
+                raw_root,
+                config={"librarian": {"verdict_ledger_enabled": False}},
+                lock=lock,
+            )
+        assert report.applied == 1
+        assert ledger_exists(wiki_root) is False
+
+    def test_flag_on_with_lock_records_duplicate_verdict_on_approve(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        from athenaeum.runlock import RunLock
+        from athenaeum.verdicts import list_by_verdict
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="flag-on-topic",
+            src_a=wiki_root / "feedback_on_a.md",
+            src_b=wiki_root / "feedback_on_b.md",
+        )
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="approve"
+        )
+
+        lock = RunLock(wiki_root.parent)
+        with lock:
+            report = apply_decision_answers(
+                wiki_root,
+                raw_root,
+                config={"librarian": {"verdict_ledger_enabled": True}},
+                lock=lock,
+            )
+        assert report.applied == 1
+        entries = list_by_verdict(wiki_root)
+        assert len(entries) == 1
+        assert entries[0]["verdict"] == "duplicate"
+
+    def test_flag_on_with_lock_records_distinct_verdict_on_reject(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        from athenaeum.runlock import RunLock
+        from athenaeum.verdicts import list_by_verdict
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="flag-on-reject-topic",
+            src_a=wiki_root / "feedback_rej_a.md",
+            src_b=wiki_root / "feedback_rej_b.md",
+        )
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="reject"
+        )
+
+        lock = RunLock(wiki_root.parent)
+        with lock:
+            report = apply_decision_answers(
+                wiki_root,
+                raw_root,
+                config={"librarian": {"verdict_ledger_enabled": True}},
+                lock=lock,
+            )
+        assert report.applied == 1
+        entries = list_by_verdict(wiki_root)
+        assert len(entries) == 1
+        assert entries[0]["verdict"] == "distinct"
+
+    def test_flag_on_without_lock_writes_no_verdict(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """No lock supplied (every pre-athenaeum#712 caller) -> no ledger write,
+        even with the flag on — see apply_decision_answers's `lock` docstring."""
+        from athenaeum.verdicts import ledger_exists
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="no-lock-topic",
+            src_a=wiki_root / "feedback_nl_a.md",
+            src_b=wiki_root / "feedback_nl_b.md",
+        )
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="approve"
+        )
+
+        report = apply_decision_answers(
+            wiki_root,
+            raw_root,
+            config={"librarian": {"verdict_ledger_enabled": True}},
+        )
+        assert report.applied == 1
+        assert ledger_exists(wiki_root) is False
+
+
+# ---------------------------------------------------------------------------
 # TestFoldRecoverability — issue athenaeum#947 AC4.
 #
 # Drives the REAL deferred (MCP-shaped) path end to end: write a

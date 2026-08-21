@@ -41,10 +41,12 @@ file texts (:class:`PiiMigrationPlan`); it never writes. The thin CLI
 mirroring the read / transform / write split ``authority.py`` /
 ``_cmd_authority.py`` use for ``authority convert``.
 
-Detection reuses :mod:`athenaeum.pii` verbatim (``find_inline_emails`` /
-``find_inline_phones`` / ``DURABLE_IDENTIFIER_FIELDS``) — the athenaeum#455 outbound-lint
-scanner's single source of truth for the patterns — rather than defining a
-second detector.
+Detection is obtained through :func:`athenaeum.sensitivity.classify` (issue
+athenaeum#992) — the ``email``/``phone`` shipped recognisers, which iterate the same
+compiled patterns :mod:`athenaeum.pii` defines, rather than importing
+:func:`athenaeum.pii.find_inline_emails`/:func:`~athenaeum.pii.find_inline_phones`
+by name. :data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS` is still consumed
+directly, since that is identity/field policy, not detection.
 
 Layering: L4 domain/pipeline module. May import L3 services (``models``,
 ``pii``, ``storage``) freely. Factoring rule: this module is a PURE
@@ -66,12 +68,42 @@ from athenaeum.pii import (
     DURABLE_IDENTIFIER_FIELDS,
     PII_ENTITY_CLASS,
     PII_FLAG,
-    find_inline_emails,
-    find_inline_phones,
     is_service_address,
     name_field_holds_pii,
 )
+from athenaeum.sensitivity import classify
 from athenaeum.storage import surface_root_for_class
+
+
+def _classified_values(
+    text: str, recognizer_name: str, config: dict[str, Any] | None
+) -> list[str]:
+    """Values a single named recogniser matched in *text*, in order, deduped.
+
+    The migrated replacement for a direct ``athenaeum.pii.find_inline_emails``/
+    ``find_inline_phones`` call (issue athenaeum#992): routes through
+    :func:`athenaeum.sensitivity.classify` instead of importing a detector
+    function by name, so a deployment's own ``sensitivity:`` config (not just
+    the two shipped recognisers) is honoured here. *recognizer_name* is not
+    special-cased — ``"email"``/``"phone"`` reach this function through the
+    exact same filter a custom recogniser name would, which is what lets a
+    test-defined recogniser prove it travels the identical path (see
+    ``TestSensitivityRegistryEndToEnd`` in ``tests/test_storage_migrate_pii.py``).
+
+    Dedup is order-preserving, matching the contract
+    :func:`~athenaeum.pii.find_inline_emails`/:func:`~athenaeum.pii.find_inline_phones`
+    already had — :func:`athenaeum.sensitivity.classify` itself reports one
+    match per occurrence (no dedup, per its built-ins' span contract), so this
+    wrapper is what keeps this module's caller-visible behaviour unchanged.
+    """
+    seen: list[str] = []
+    for classified in classify(text=text or "", config=config):
+        if classified.match.recognizer != recognizer_name:
+            continue
+        value = classified.match.value
+        if value not in seen:
+            seen.append(value)
+    return seen
 
 # The migrated contact record is routed through the same ``PII_ENTITY_CLASS``
 # (``"pii"``) the rest of the module uses, so an operator's existing
@@ -139,19 +171,22 @@ def _redact_inline_tokens(body: str, tokens: list[str]) -> str:
     return new_body
 
 
-def _migratable_emails(text: str) -> list[str]:
+def _migratable_emails(text: str, config: dict[str, Any] | None) -> list[str]:
     """Email-shaped tokens in *text* that are genuine contact data.
 
     Filters out service identifiers (``git@github.com``, Google Calendar group
     addresses, …) via :func:`~athenaeum.pii.is_service_address` (issue athenaeum#507): a
     naïve sweep that migrated those would damage the page (a broken clone URL /
     calendar ref) while archiving no real PII. Order and dedup follow
-    :func:`~athenaeum.pii.find_inline_emails`.
+    :func:`_classified_values`, which mirrors :func:`~athenaeum.pii.find_inline_emails`'s
+    contract exactly.
     """
-    return [e for e in find_inline_emails(text) if not is_service_address(e)]
+    return [e for e in _classified_values(text, "email", config) if not is_service_address(e)]
 
 
-def _migrate_str_value(value: str) -> tuple[str | None, list[str], list[str]]:
+def _migrate_str_value(
+    value: str, config: dict[str, Any] | None
+) -> tuple[str | None, list[str], list[str]]:
     """Extract contact tokens from one frontmatter string value.
 
     Returns ``(new_value, emails, phones)``:
@@ -171,8 +206,8 @@ def _migrate_str_value(value: str) -> tuple[str | None, list[str], list[str]]:
         in place with :data:`INLINE_REDACTION_MARKER`, keeping the non-PII
         context so the field stays meaningful.
     """
-    emails = _migratable_emails(value)
-    phones = find_inline_phones(value)
+    emails = _migratable_emails(value, config)
+    phones = _classified_values(value, "phone", config)
     if not (emails or phones):
         return value, [], []
     redacted = _redact_inline_tokens(value, emails + phones)
@@ -186,6 +221,7 @@ def _migrate_str_value(value: str) -> tuple[str | None, list[str], list[str]]:
 
 def _migrate_value(
     value: Any,
+    config: dict[str, Any] | None,
 ) -> tuple[Any, list[str], list[str]]:
     """Recursively migrate one frontmatter value of arbitrary nesting depth.
 
@@ -209,7 +245,7 @@ def _migrate_value(
     a durable identifier nested inside a structure is preserved verbatim.
     """
     if isinstance(value, str):
-        return _migrate_str_value(value)
+        return _migrate_str_value(value, config)
 
     emails: list[str] = []
     phones: list[str] = []
@@ -217,7 +253,7 @@ def _migrate_value(
     if isinstance(value, list):
         new_list: list[Any] = []
         for item in value:
-            new_item, em, ph = _migrate_value(item)
+            new_item, em, ph = _migrate_value(item, config)
             emails += em
             phones += ph
             if new_item is not None:
@@ -230,7 +266,7 @@ def _migrate_value(
             if key in DURABLE_IDENTIFIER_FIELDS:
                 new_dict[key] = item
                 continue
-            new_item, em, ph = _migrate_value(item)
+            new_item, em, ph = _migrate_value(item, config)
             emails += em
             phones += ph
             if new_item is not None:
@@ -242,6 +278,7 @@ def _migrate_value(
 
 def _migrate_frontmatter(
     meta: dict[str, Any],
+    config: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     """Rewrite frontmatter, extracting contact data from every non-durable field.
 
@@ -268,7 +305,7 @@ def _migrate_frontmatter(
         if key in DURABLE_IDENTIFIER_FIELDS:
             new_meta[key] = value
             continue
-        new_value, em, ph = _migrate_value(value)
+        new_value, em, ph = _migrate_value(value, config)
         emails += em
         phones += ph
         if new_value is not None:
@@ -335,11 +372,11 @@ def plan_pii_migration(
     # Detector-driven frontmatter scan (athenaeum#502): pull contact tokens from EVERY
     # non-durable field, preserving durable identifiers and the name-is-an-email
     # carve-out. Then the body inline tokens.
-    new_meta, fm_emails, fm_phones = _migrate_frontmatter(meta)
+    new_meta, fm_emails, fm_phones = _migrate_frontmatter(meta, config)
     # Body: same service-identifier exclusion as the frontmatter path (athenaeum#507) —
     # a `git@github.com` in prose is left byte-identical, not redacted.
-    inline_emails = _migratable_emails(body)
-    inline_phones = find_inline_phones(body)
+    inline_emails = _migratable_emails(body, config)
+    inline_phones = _classified_values(body, "phone", config)
 
     emails = _dedupe_preserving_order(fm_emails + inline_emails)
     phones = _dedupe_preserving_order(fm_phones + inline_phones)
@@ -505,7 +542,7 @@ def plan_name_email_rename(
     """
     from athenaeum.models import slugify
     from athenaeum.pending_merges import _add_aliases_to_frontmatter
-    from athenaeum.pii import NAME_FIELDS, derive_display_name_from_email, find_inline_emails
+    from athenaeum.pii import NAME_FIELDS, derive_display_name_from_email
 
     text = page_path.read_text(encoding="utf-8")
     meta, body = parse_frontmatter(text)
@@ -519,7 +556,7 @@ def plan_name_email_rename(
         if raw is None:
             continue
         candidate = str(raw)
-        hits = find_inline_emails(candidate)
+        hits = _classified_values(candidate, "email", config)
         if hits:
             email = hits[0]
             name_field = field

@@ -390,6 +390,144 @@ def record_spend(
         return False
 
 
+def record_spend_per_knob_provider(
+    usage: "TokenUsage",
+    knob_providers: dict[str, str],
+    knob_models: dict[str, str],
+    *,
+    run_type: str,
+    default_provider: str,
+    session_id: str | None = None,
+    files_processed: int | None = None,
+    config: dict[str, Any] | None = None,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> bool:
+    """Split *usage* into one ledger row PER DISTINCT PROVIDER actually used
+    this run (issue athenaeum#841 AC2), instead of :func:`record_spend`'s
+    single ``provider=`` assumption.
+
+    :func:`record_spend` assumes one provider served the whole run.
+    Issue athenaeum#841 threads a per-knob client through the librarian
+    pipeline, so a single run can now genuinely mix providers (e.g.
+    ``classify`` on ``claude-cli`` while ``write`` stays on ``api``) — no
+    single ``provider=`` on one ledger row is fully correct any more, and
+    ``athenaeum spend --by-knob``'s ``{subscription, api, unknown}`` split
+    (derived from each ROW's ``provider`` field) would misattribute every
+    knob in a mixed run to whichever provider happened to be passed.
+
+    Groups ``usage.per_knob``'s token buckets by each knob's ACTUAL resolved
+    provider (*knob_providers*, keyed by knob — see
+    :func:`athenaeum.librarian._arm_run_deadline`) and writes one
+    :func:`record_spend` row per distinct provider, each carrying only that
+    provider's own token/knob/model attribution (*knob_models* — each
+    knob resolves to exactly one model for the whole run) and the correct
+    ``billing_mode``. A knob with tokens but no entry in *knob_providers* (or
+    *knob_models*) falls back to *default_provider* (unmodeled) — defensive,
+    should not happen for a caller that resolves every knob it tags.
+
+    A run whose knobs all resolve to ONE provider (the common case: no
+    ``llm.providers.<knob>`` override, or every override agrees with the
+    global default) writes exactly the SAME single row :func:`record_spend`
+    would have written — byte-identical ledger output for the default
+    config (mirrors this epic's AC6 elsewhere).
+
+    ``api_calls`` and *files_processed* are NOT split per provider — the
+    accumulator tracks ``api_calls`` as one run-level counter, not
+    knob-attributed, so precise per-provider call counts aren't derivable.
+    Both ride on the row for *default_provider* only, so summing them across
+    a run's ledger rows still equals the true run-level figure exactly once,
+    never double-counted or dropped. Untagged tokens (``usage.input_tokens``
+    etc. minus the per-knob-tagged subset — e.g. a call site that forgot a
+    ``knob=`` tag) also ride on the *default_provider* row, so no token
+    silently vanishes from the ledger.
+    """
+    if usage.api_calls == 0 and usage.total_tokens == 0:
+        return False
+
+    providers_used = {
+        knob_providers.get(knob, default_provider) for knob in usage.per_knob
+    }
+    # Always include the default provider's row — it carries api_calls,
+    # files_processed, and any untagged remainder even when every tagged
+    # knob happens to resolve elsewhere.
+    providers_used.add(default_provider)
+    if len(providers_used) <= 1:
+        return record_spend(
+            usage,
+            run_type=run_type,
+            provider=default_provider,
+            session_id=session_id,
+            files_processed=files_processed,
+            config=config,
+            cache_dir=cache_dir,
+            ledger_path=ledger_path,
+        )
+
+    from athenaeum.models import TokenUsage as _TokenUsage
+
+    _KEYS = (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    )
+    tagged_totals = {k: 0 for k in _KEYS}
+    for bucket in usage.per_knob.values():
+        for k in _KEYS:
+            tagged_totals[k] += int(bucket.get(k, 0) or 0)
+
+    wrote_any = False
+    for provider in sorted(providers_used):
+        sub = _TokenUsage()
+        sub.subscription_covered = provider == "claude-cli"
+        for knob, bucket in usage.per_knob.items():
+            if knob_providers.get(knob, default_provider) != provider:
+                continue
+            # ``add_tokens`` (not ``add``) — ``api_calls`` is set explicitly
+            # below from *usage*'s own counter, not incremented once per
+            # knob tagged into this row.
+            sub.add_tokens(
+                int(bucket.get("input_tokens", 0) or 0),
+                int(bucket.get("output_tokens", 0) or 0),
+                int(bucket.get("cache_creation_input_tokens", 0) or 0),
+                int(bucket.get("cache_read_input_tokens", 0) or 0),
+                model=knob_models.get(knob),
+                knob=knob,
+            )
+        if provider == default_provider:
+            sub.api_calls = usage.api_calls
+            # Untagged remainder (a call site that never tagged a knob) —
+            # attributed to the default provider so the sum across rows
+            # still equals the run's true totals.
+            sub.add_tokens(
+                max(usage.input_tokens - tagged_totals["input_tokens"], 0),
+                max(usage.output_tokens - tagged_totals["output_tokens"], 0),
+                max(
+                    usage.cache_creation_input_tokens
+                    - tagged_totals["cache_creation_input_tokens"],
+                    0,
+                ),
+                max(
+                    usage.cache_read_input_tokens
+                    - tagged_totals["cache_read_input_tokens"],
+                    0,
+                ),
+            )
+        wrote = record_spend(
+            sub,
+            run_type=run_type,
+            provider=provider,
+            session_id=session_id,
+            files_processed=files_processed if provider == default_provider else None,
+            config=config,
+            cache_dir=cache_dir,
+            ledger_path=ledger_path,
+        )
+        wrote_any = wrote_any or wrote
+    return wrote_any
+
+
 # ---------------------------------------------------------------------------
 # Reading + summarising (the `athenaeum spend` command + the ceilings)
 # ---------------------------------------------------------------------------

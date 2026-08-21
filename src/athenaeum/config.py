@@ -1425,40 +1425,59 @@ def resolve_raw_file_max_bytes(config: dict[str, Any] | None) -> int:
 
 
 def resolve_raw_file_max_api_calls(config: dict[str, Any] | None) -> int:
-    """Resolve the per-raw-file LLM-call bound (issue athenaeum#898).
+    """Resolve the per-raw-file LLM-call bound (issue athenaeum#898, recalibrated athenaeum#994).
 
     Precedence: ``ATHENAEUM_RAW_FILE_MAX_API_CALLS`` env >
-    ``librarian.raw_file_max_api_calls`` yaml > ``8``. Checked by the entity
-    phase runner (:mod:`athenaeum.librarian`) after each raw file's
-    ``process_one`` call completes — the number of LLM calls THAT ONE FILE
-    consumed (``usage.api_calls`` before vs. after) is compared against this
-    bound. An ordinary file costs roughly 1-3 calls (tier-2 classify plus one
-    tier-3 action or two); ``8`` leaves generous headroom above that while
-    still catching a file whose action set loops. See
-    :func:`_resolve_positive_int_knob` for the coercion contract.
+    ``librarian.raw_file_max_api_calls`` yaml > ``60``. Checked
+    INCREMENTALLY by :func:`athenaeum.tiers.tier3_derive_actions`, after each
+    entity action a raw file drives, against the running count of LLM calls
+    THAT ONE FILE has consumed so far (``usage.api_calls`` before the file
+    started vs. now) — see :class:`~athenaeum.models.RawFileOverBudgetError`'s
+    docstring for why the check moved from "once, after the whole file" to
+    "after every action".
+
+    The original ``8`` default assumed an ordinary file costs roughly 1-3
+    calls (tier-2 classify plus one tier-3 action or two). Measured reality
+    on the live deployment (2026-08-15/16 nightly logs, api provider) put an
+    ordinary file at **20-46 calls** — un-batched ``tier3_write`` spends one
+    call per entity action, and a file with several entities easily clears a
+    dozen — so ``8`` sat 3-6x below the median file and rejected normal
+    input rather than catching loopers. ``60`` covers the measured
+    distribution with headroom while still catching a file whose action set
+    genuinely loops. See :func:`_resolve_positive_int_knob` for the coercion
+    contract.
     """
     return _resolve_positive_int_knob(
-        config, "raw_file_max_api_calls", "ATHENAEUM_RAW_FILE_MAX_API_CALLS", 8
+        config, "raw_file_max_api_calls", "ATHENAEUM_RAW_FILE_MAX_API_CALLS", 60
     )
 
 
 def resolve_raw_file_max_runtime_seconds(config: dict[str, Any] | None) -> int:
-    """Resolve the per-raw-file wall-clock bound in seconds (issue athenaeum#898).
+    """Resolve the per-raw-file wall-clock bound, in seconds.
+
+    Issue athenaeum#898, recalibrated athenaeum#994.
 
     Precedence: ``ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS`` env >
-    ``librarian.raw_file_max_runtime_seconds`` yaml > ``120``. Checked
-    alongside :func:`resolve_raw_file_max_api_calls` — the wall-clock spent
-    inside ONE file's ``process_one`` call, compared against this bound.
-    ``120`` seconds is generous for a single file's tier-2/tier-3 round
-    trip(s) under normal conditions while still catching a file that hangs
-    or loops. See :func:`_resolve_positive_int_knob` for the coercion
-    contract.
+    ``librarian.raw_file_max_runtime_seconds`` yaml > ``900``. Checked
+    alongside :func:`resolve_raw_file_max_api_calls`, incrementally, after
+    each entity action — the wall-clock spent inside ONE file's processing
+    so far, compared against this bound.
+
+    The original ``120`` default assumed a single file's tier-2/tier-3
+    round trip(s) stayed well under it. Measured reality on the live
+    deployment (2026-08-15/16 nightly logs, api provider) put an ordinary
+    file at **300-690 seconds** — in line with the same un-batched
+    per-action call pattern that drove the call-count recalibration above —
+    so ``120`` rejected normal input long before it caught anything
+    pathological. ``900`` covers the measured distribution with headroom
+    while still catching a file that genuinely hangs or loops. See
+    :func:`_resolve_positive_int_knob` for the coercion contract.
     """
     return _resolve_positive_int_knob(
         config,
         "raw_file_max_runtime_seconds",
         "ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS",
-        120,
+        900,
     )
 
 
@@ -2511,6 +2530,41 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
     return adapters
 
 
+def resolve_sensitivity_classes(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Resolve the ``sensitivity.classes`` class-definition blocks (athenaeum#910, S1b).
+
+    Returns the raw (still-unvalidated) per-class mapping dicts keyed by class
+    name; :func:`athenaeum.sensitivity.available_classes` validates each,
+    resolves ``inherits`` chains, and builds the
+    :class:`~athenaeum.sensitivity.SensitivityClass` objects. Returns an EMPTY
+    dict when unset — the shipped built-in ``pii`` class (defined in
+    :data:`athenaeum.sensitivity._BUILTIN_CLASSES`, not here — this dict's
+    own source-of-truth rule, §2.4 of ``docs/sensitivity-class-vocabulary.md``)
+    is still resolved by ``available_classes`` regardless, so this resolver is
+    NOT seeded in ``_DEFAULTS``: seeding it here would make the code default
+    unreachable, the exact athenaeum#187 regression that rule exists to
+    prevent. Non-string keys and non-mapping values are dropped defensively
+    (a malformed entry is surfaced loudly later, at build time, with the
+    class name in the message — same posture as :func:`resolve_storage_adapters`).
+    """
+    if not isinstance(config, dict):
+        return {}
+    sensitivity_cfg = config.get("sensitivity") or {}
+    if not isinstance(sensitivity_cfg, dict):
+        return {}
+    raw = sensitivity_cfg.get("classes")
+    if not isinstance(raw, dict):
+        return {}
+    classes: dict[str, dict[str, Any]] = {}
+    for name, definition in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(definition, dict):
+            continue
+        classes[name.strip()] = definition
+    return classes
+
+
 def resolve_excluded_read_mapping(config: dict[str, Any] | None) -> dict[str, str]:
     """Resolve ``storage.excluded_read_mapping`` — page ``type:`` → surface class (athenaeum#885).
 
@@ -2902,3 +2956,52 @@ def resolve_shape_rules_runtime_share(config: dict[str, Any] | None) -> float:
                 if resolved is not None:
                     return resolved
     return default
+
+
+def resolve_verdict_ledger_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the verdict-ledger opt-in (issue athenaeum#712). DEFAULT OFF.
+
+    Gates the ENTIRE verdict-ledger subsystem (:mod:`athenaeum.verdicts`):
+    with this off, ``athenaeum run`` never touches ``wiki/_verdicts/`` (no
+    new file, no new run-summary phase, no exit-code change — byte-identical
+    to before athenaeum#712), and a merge approve/reject via ``athenaeum
+    ingest-answers`` never writes a verdict entry. Mirrors
+    :func:`resolve_reasoning_tier_auditing_enabled`'s shape exactly: env
+    ``ATHENAEUM_VERDICT_LEDGER_ENABLED`` (``1``/``true``/``yes``/``on``,
+    case-insensitive) > yaml ``librarian.verdict_ledger_enabled`` > default
+    ``False``. No seed in ``_DEFAULTS`` (issue athenaeum#231). Default OFF is
+    deliberate — the comparator that would populate the ledger with real
+    verdicts does not exist yet (a separate, future child of athenaeum#709);
+    turning this on before then only exercises the store/schema/epoch
+    machinery via the merge approve/reject decisions the pipeline already
+    makes. Non-bool yaml values and unrecognized env strings fall through to
+    off.
+    """
+    env = os.environ.get("ATHENAEUM_VERDICT_LEDGER_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("verdict_ledger_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
+def resolve_verdict_epoch_batch_interval_days(config: dict[str, Any] | None) -> int:
+    """Resolve the comparator-epoch batching interval in days (issue athenaeum#712).
+
+    "Epoch bumps are batched (default monthly) and the batching interval is
+    a documented config key" — this is that key. Precedence:
+    ``ATHENAEUM_VERDICT_EPOCH_BATCH_INTERVAL_DAYS`` env > yaml
+    ``librarian.verdict_epoch_batch_interval_days`` > ``30``. See
+    :func:`_resolve_positive_int_knob` for the coercion contract (``bool`` /
+    non-int / ``<= 0`` values fall through to the default).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "verdict_epoch_batch_interval_days",
+        "ATHENAEUM_VERDICT_EPOCH_BATCH_INTERVAL_DAYS",
+        30,
+    )

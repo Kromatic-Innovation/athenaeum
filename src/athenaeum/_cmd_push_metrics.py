@@ -59,11 +59,15 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
 
             since = parse_since(args.since)
 
-        baseline = push_metrics.compute_baseline(
-            since=since,
-            cache_dir=args.cache_dir,
-            exclude_sessions=getattr(args, "exclude_session", None),
-        )
+        try:
+            baseline = push_metrics.compute_baseline(
+                since=since,
+                cache_dir=args.cache_dir,
+                exclude_sessions=getattr(args, "exclude_session", None),
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         docs_path = args.docs_path.expanduser().resolve()
         dry_run = getattr(args, "dry_run", False)
 
@@ -109,21 +113,31 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
 
     # sub == "coverage-audit"
     wiki_root = _resolve_wiki_root(args)
-    worksheet = push_metrics.build_coverage_worksheet(
-        n=args.n,
-        wiki_root=wiki_root,
-        cache_dir=args.cache_dir,
-        seed=getattr(args, "seed", None),
-    )
+    try:
+        worksheet = push_metrics.build_coverage_worksheet(
+            n=args.n,
+            wiki_root=wiki_root,
+            cache_dir=args.cache_dir,
+            seed=getattr(args, "seed", None),
+            exclude_sessions=getattr(args, "exclude_session", None),
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     output_path = args.output.expanduser().resolve()
     push_metrics.write_coverage_worksheet(worksheet, output_path=output_path)
 
     if args.json:
         sys.stdout.write(json.dumps(worksheet) + "\n")
     else:
+        excluded_sessions_str = (
+            ",".join(worksheet["excluded_sessions"]) if worksheet["excluded_sessions"] else "none"
+        )
         print(
             f"sampled {worksheet['sampled_session_count']} session(s) -> "
             f"{output_path}\n"
+            f"excluded_sessions: {excluded_sessions_str}\n"
+            f"excluded_push_records: {worksheet['excluded_push_records']}\n"
             "Mark each candidate's reviewer_verdict, then compute the "
             "coverage-floor miss rate from the completed worksheet."
         )
@@ -202,7 +216,10 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         "test suite and leaked fixture pushes into the ledger, issue "
         "athenaeum#791) from the precision/session counts. Repeatable. "
         "Excluded sessions and their record counts are always reported, "
-        "never silently dropped.",
+        "never silently dropped. Accepts the full session id or an "
+        "unambiguous prefix of exactly one known session id (issue "
+        "athenaeum#987); a value matching zero or multiple known session "
+        "ids is a hard error (exit 1), never a silent zero-effect success.",
     )
 
     coverage_p = p_sub.add_parser(
@@ -228,4 +245,18 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         type=Path,
         default=Path("coverage-audit-worksheet.json"),
         help="Worksheet output file (default: ./coverage-audit-worksheet.json).",
+    )
+    coverage_p.add_argument(
+        "--exclude-session",
+        action="append",
+        default=None,
+        metavar="SESSION_ID",
+        help="Exclude a KNOWN-synthetic session id (same semantics as "
+        "`baseline --exclude-session`, issue athenaeum#791) from being "
+        "sampled and from other sessions' candidate lists. Repeatable. "
+        "Excluded sessions and their record counts are always reported, "
+        "never silently dropped. Accepts the full session id or an "
+        "unambiguous prefix of exactly one known session id (issue "
+        "athenaeum#987); a value matching zero or multiple known session "
+        "ids is a hard error (exit 1), never a silent zero-effect success.",
     )

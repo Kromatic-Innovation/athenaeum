@@ -1254,6 +1254,127 @@ class TestRebuildIndex:
 
 
 # ---------------------------------------------------------------------------
+# process_one — per-knob client routing (issue athenaeum#841)
+#
+# ``process_one`` threads TWO clients: ``client`` (Tier 2 / the ``classify``
+# knob) and ``write_client`` (Tier 3 / the ``write`` knob). Proves each tier
+# reaches ONLY the client for its own knob — a regression that collapses
+# them back onto one shared client either starves one fake of its expected
+# call or exhausts the other's side_effect early.
+# ---------------------------------------------------------------------------
+
+
+class TestProcessOnePerKnobClientRouting:
+    @staticmethod
+    def _raw_file(tmp_path: Path) -> RawFile:
+        raw_path = tmp_path / "raw" / "note.md"
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_text(
+            "Talked with Priya Shah about the new onboarding flow.\n",
+            encoding="utf-8",
+        )
+        return RawFile(
+            path=raw_path, source="claude-session", timestamp="", uuid8="deadbeef"
+        )
+
+    @staticmethod
+    def _resp(text: str) -> MagicMock:
+        r = MagicMock()
+        r.content = [MagicMock(text=text)]
+        return r
+
+    def test_tier2_uses_classify_client_tier3_uses_write_client(
+        self, tmp_path: Path
+    ) -> None:
+        import json
+
+        from athenaeum.librarian import process_one
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        raw = self._raw_file(tmp_path)
+
+        classify_client = MagicMock()
+        classify_client.messages.create.return_value = self._resp(
+            json.dumps(
+                [
+                    {
+                        "name": "Priya Shah onboarding note",
+                        "entity_type": "reference",
+                        "tags": [],
+                        "access": "internal",
+                        "observations": "Discussed the new onboarding flow.",
+                    }
+                ]
+            )
+        )
+        write_client = MagicMock()
+        write_client.messages.create.return_value = self._resp(
+            "# Priya Shah onboarding note\n\nDiscussed the new onboarding flow.\n"
+        )
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki_root),
+            wiki_root,
+            classify_client,
+            valid_types=["reference", "person"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+            write_client=write_client,
+        )
+        assert result.created, "expected a wiki page to be created"
+
+        classify_client.messages.create.assert_called_once()
+        write_client.messages.create.assert_called_once()
+        assert classify_client is not write_client
+
+    def test_no_write_client_falls_back_to_client_ac6(self, tmp_path: Path) -> None:
+        """AC6: every pre-athenaeum#841 caller only ever passed ``client=`` —
+        omitting ``write_client`` must still serve BOTH tiers off the ONE
+        client, byte-identical to before."""
+        import json
+
+        from athenaeum.librarian import process_one
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        raw = self._raw_file(tmp_path)
+
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            self._resp(
+                json.dumps(
+                    [
+                        {
+                            "name": "Priya Shah onboarding note",
+                            "entity_type": "reference",
+                            "tags": [],
+                            "access": "internal",
+                            "observations": "Discussed the new onboarding flow.",
+                        }
+                    ]
+                )
+            ),
+            self._resp(
+                "# Priya Shah onboarding note\n\nDiscussed the new onboarding flow.\n"
+            ),
+        ]
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki_root),
+            wiki_root,
+            client,
+            valid_types=["reference", "person"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+        )
+        assert result.created
+        assert client.messages.create.call_count == 2
+
+
+# ---------------------------------------------------------------------------
 # run() integration — mocked LLM, real filesystem + git
 # ---------------------------------------------------------------------------
 

@@ -40,8 +40,8 @@ Every default figure on this page is verified against the code under
 See [exit-codes.md](exit-codes.md) for the full `athenaeum run` exit-code table (`0` / `1` / `75` / `124`).
 | Stuck-file threshold | — | `ATHENAEUM_STUCK_FILE_THRESHOLD` | `librarian.stuck_file_threshold` | `3` | Consecutive-run failure count after which a raw file is treated as **stuck** (athenaeum#663). `tier3_write` is all-or-nothing per raw file (a partial write cannot leave the wiki half-merged), so one reliably-failing LLM call — e.g. an entity page large enough to time out every night — otherwise discards the file's other successful merges and the file is retried WHOLE every run, forever, silently. A file that fails on the **same content** this many runs running is instead SKIPPED (it stops consuming an LLM call each night) and surfaced as machine-detectable run state: `out_run_stats["stuck_files"]` (ref, consecutive failures, failing `kind:name` action, last error) plus a greppable `librarian-stuck-file` WARNING and a `stuck=N` field on the run-summary line. State lives in `wiki/_stuck_files.json` (keyed by ref + content hash, so editing the file resets its count); a run that finally succeeds on the file clears its entry. Must be `>= 1` (below that would quarantine a file on its first transient failure); non-numeric / non-positive / bool values fall back to the default. |
 | Raw-file byte bound | — | `ATHENAEUM_RAW_FILE_MAX_BYTES` | `librarian.raw_file_max_bytes` | `5242880` (5 MiB) | Per-raw-file byte bound (athenaeum#898). Enforced by `RawFile.content` — a raw intake file over this is refused BEFORE it is read into memory or handed to the classifier (`RawFileTooLargeError`, checked via `stat()`, so an oversized file costs one syscall to reject, not a full read). Motivated by a measured 9.7MB dry-run artifact that accounted for 93% of timed entity-phase LLM calls for roughly three months. Counts toward the quarantine threshold below (bound `"bytes"`). `bool` / non-int / `<= 0` values fall through to the default. |
-| Raw-file LLM-call bound | — | `ATHENAEUM_RAW_FILE_MAX_API_CALLS` | `librarian.raw_file_max_api_calls` | `8` | Per-raw-file LLM-call bound (athenaeum#898). Checked by the entity phase runner after each file's `process_one` call completes: the number of LLM calls THAT FILE consumed (`usage.api_calls` before vs. after), compared against this bound. An ordinary file costs roughly 1-3 calls; `8` leaves headroom while still catching a file whose action set loops. An over-bound file's result is not applied — the raw file is left on disk (not deleted, not counted) so it can accumulate a consecutive-violation count. Counts toward the quarantine threshold below (bound `"llm_calls"`). `bool` / non-int / `<= 0` values fall through to the default. |
-| Raw-file wall-clock bound | — | `ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS` | `librarian.raw_file_max_runtime_seconds` | `120` | Per-raw-file wall-clock bound in **seconds** (athenaeum#898). Checked alongside the LLM-call bound above — the wall-clock spent inside one file's `process_one` call. Counts toward the quarantine threshold below (bound `"wall_clock"`). `bool` / non-int / `<= 0` values fall through to the default. |
+| Raw-file LLM-call bound | — | `ATHENAEUM_RAW_FILE_MAX_API_CALLS` | `librarian.raw_file_max_api_calls` | `60` | Per-raw-file LLM-call bound (athenaeum#898, recalibrated athenaeum#994). Checked INCREMENTALLY by `tier3_derive_actions`, after each entity action a raw file drives, against the running LLM-call count THAT FILE has consumed so far. Measured reality (2026-08-15/16 nightly logs) put an ordinary file at 20-46 calls — un-batched `tier3_write` spends one call per entity action — so the old `8` default (assuming ~1-3 calls) rejected normal input; `60` covers the measured distribution with headroom. An over-bound file's completed actions (everything that finished BEFORE the bound tripped) ARE written — durable partial progress, not discarded — and only the unstarted remainder is dropped; the raw file itself is left on disk (not deleted, not counted as processed) so it can accumulate a consecutive-violation count. Counts toward the quarantine threshold below (bound `"llm_calls"`). `bool` / non-int / `<= 0` values fall through to the default. |
+| Raw-file wall-clock bound | — | `ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS` | `librarian.raw_file_max_runtime_seconds` | `900` | Per-raw-file wall-clock bound in **seconds** (athenaeum#898, recalibrated athenaeum#994). Checked alongside the LLM-call bound above, incrementally, after each entity action — the wall-clock spent inside one file's processing so far. Measured reality put an ordinary file at 300-690s; the old `120` default rejected normal input, `900` covers the measured distribution with headroom. Same partial-progress-on-trip behavior as the LLM-call bound. Counts toward the quarantine threshold below (bound `"wall_clock"`). `bool` / non-int / `<= 0` values fall through to the default. |
 | Quarantine threshold | — | `ATHENAEUM_QUARANTINE_THRESHOLD` | `librarian.quarantine_threshold` | `2` | Consecutive-run count after which a raw file that keeps exceeding ANY of the three bounds above is **quarantined** (athenaeum#898) — physically moved from `raw/<source>/` to `wiki/_quarantine/<source>/`, so it drops out of `discover_raw_files`'s discovery set, plus an audit-ledger record (`wiki/_quarantine.jsonl`) and a `type: "quarantine"` entry in `athenaeum decisions` / `list_pending_decisions`. Mirrors the stuck-file ledger's shape (`wiki/_quarantine_candidates.json`, keyed by ref + content hash, so editing the file resets its count) but is tracked as a SEPARATE ledger — a bound violation is a measured resource fact, not a processing exception, and its disposition (physical removal) is heavier than the stuck-file skip-in-place. Reversible only via an operator decision (`athenaeum.quarantine.release_quarantine`) — there is no automatic un-quarantine. Must be `>= 1`; non-numeric / non-positive / bool values fall back to the default. |
 | Junk-match stopwords | — | — | `librarian.junk_match_stopwords` | *(extends the built-in default)* | Extra entity names to treat as **junk** so a Tier-1 match on them never issues a Tier-3 merge LLM call (athenaeum#662). Tier-1 matches any indexed page name ≥ 3 chars, and the index accumulates junk pages (`here`, `get`, `main`, `reach`, `lane a`, …) — each became a ~16-23KB merge call, roughly **half** of the ~15-18 Tier-3 calls per file. A conservative built-in default (the measured junk plus common English function words) is always applied; entries here are **added** to it, case-insensitively on the whole name. Tune per corpus as the junk set changes. |
 | Junk-match allowlist | — | — | `librarian.junk_match_allowlist` | `[]` | Entity names that must **never** be treated as junk (athenaeum#662) — the escape hatch for a real entity whose name collides with a default/stopword junk word (e.g. a company literally named "Reach"). Wins over both the built-in default and `junk_match_stopwords`, case-insensitively. |
@@ -306,6 +306,53 @@ Configuring `backlog_files` / `backlog_bytes` / `interval_hours` is what
 makes reasoning respond to actual load instead of a fixed clock. `athenaeum
 ingest` **without** `--if-triggered` is unaffected by any of this — it is the
 pre-existing on-demand poke (issue athenaeum#349) and always compiles.
+
+## Surface-divergence guard (athenaeum#963)
+
+`athenaeum surface-divergence --field <name>` is the generalized, **failing**
+guard for the class of defect athenaeum#853/#960/#963 name: two surfaces
+(wiki frontmatter and the contacts/excluded surface) record the same fact
+under independent write paths with no invariant binding them, so a
+divergence is invisible unless something actually checks and can fail. It
+supersedes `bounce-divergence` / `do-not-email-divergence` as the entry
+point an unattended caller should use (those two commands still exist,
+unchanged, for backward compatibility and interactive use).
+
+```
+athenaeum surface-divergence --field bounced --path ~/knowledge
+athenaeum surface-divergence --field do_not_email --path ~/knowledge
+```
+
+| Field | Registered by | Tolerated residual |
+|---|---|---|
+| `bounced` | issue athenaeum#853 | Wiki-surface entries with no pii mark are TOLERATED — the documented evidence-class asymmetry, [bounce-surface-convergence.md](bounce-surface-convergence.md). Pii marks with no wiki entry are NOT tolerated (zero). |
+| `do_not_email` | issue athenaeum#960 | Zero, in either direction — one operator-directed fact with one meaning. |
+
+Exit codes (shared with `bounce-divergence` / `do-not-email-divergence`):
+`0` clean (or `--report-only`, which reports and never fails on divergence —
+interactive-inspection only, never for an unattended caller); `2` a surface
+could not be read (the difference is not a divergence measurement); `3` a
+registered field diverged beyond its declared allowance. An unregistered
+`--field` value is rejected by argument parsing rather than guessed at.
+
+**Where this runs unattended:**
+
+- **CI, against fixture stores, on every push/PR** — `tests/test_surface_divergence.py`
+  builds both fields' failing/passing/unreadable cases as synthetic
+  fixtures and runs through this repo's normal `pytest` step in `ci.yml`,
+  so a regression in the checker itself fails the build. GitHub Actions has
+  no access to a live store, so this is deliberately the fixture-only half
+  (2026-08-20 AC amendment on athenaeum#963).
+- **The live store, on an operator's own schedule** — there is no shipped
+  nightly cron wrapper in this repo (see "Reasoning-tier triggers" below);
+  an operator's external cron/launchd (or a cross-repo nightly sweep, e.g.
+  Hestia's, which is out of scope for this repository) should invoke both
+  lines above alongside the existing `athenaeum run` / `athenaeum ingest`
+  entries and treat a non-zero, non-report-only exit as an alert. This
+  in-repo command and its documented exit-code contract are the
+  registration artifact athenaeum#963 asks for; whether an operator's own
+  external wrapper has actually added these two lines is state on that
+  operator's host, outside anything this repository's tests can observe.
 
 ## Models
 
@@ -599,45 +646,55 @@ llm:
     topic: claude-cli     # recall query-topic extraction only
 ```
 
-**Which knobs are ACTUALLY routed today (scaffolding, athenaeum#786):**
+**What is actually wired today (issue athenaeum#841 — all six knobs are wired):**
 
-- **Routed (fully honored):** `topic` (`athenaeum.query_topics`, the recall
-  sidecar) and `resolve` **only via** the `athenaeum ingest-answers` /
-  `athenaeum reresolve-questions` CLI commands. Both resolve their own
-  provider independently and construct their own client — a per-knob
-  override is fully honored, including in the spend ledger (`athenaeum spend
-  --by-knob` shows the provider split, since each of these commands writes
-  its own ledger row tagged with the provider that actually served it).
-- **Accepted but NOT yet routed (warned, not silent):** `classify`, `write`,
-  `resolve` (within an `athenaeum run` librarian run — distinct from the
-  `resolve` knob's CLI-command path above, which IS routed), `reasoning_t1`,
-  and `reasoning_t2`. The librarian's (`athenaeum run`) entity/merge pipeline
-  serves all five through ONE client built from the **global** provider. A
-  `llm.providers.<knob>` override for one of these five is accepted (no
-  error) but currently has **no effect** on which client serves a librarian
-  run — threading per-knob clients through that pipeline is tracked in
-  athenaeum#841. This is not silent: at startup, `_run_preconditions` logs a
-  WARNING naming the knob, the override's source, and that it has no effect
-  yet (issue athenaeum#786, mirroring the `reasoning_tiers`
-  inert-model-knob-warning pattern from athenaeum#780) — a config with no per-knob
-  override anywhere logs nothing. The batch-mode startup guard (below) still
-  validates a `classify`/`write` override correctly regardless (loudly
-  rejecting an incompatible one before the run starts, since batch mode +
-  `claude-cli` is invalid no matter which client construction catches up
-  later).
+Every one of `classify` / `write` / `resolve` / `topic` / `reasoning_t1` /
+`reasoning_t2` genuinely routes to the provider it resolves to:
+
+- `topic` (`athenaeum.query_topics`, the recall sidecar) and `resolve` via
+  the `athenaeum ingest-answers` / `athenaeum reresolve-questions` CLI
+  commands each resolve their own provider independently and construct
+  their own client (issue athenaeum#786) — unchanged by athenaeum#841.
+- `classify`, `write`, `resolve` (within an `athenaeum run` librarian run —
+  distinct from the `resolve` knob's CLI-command path above, wired
+  separately), `reasoning_t1`, and `reasoning_t2` are now each threaded
+  through the librarian's (`athenaeum run`) entity/merge pipeline as their
+  OWN client (issue athenaeum#841): `classify` serves `tiers.classify`
+  (page classification), the C4 contradiction detector, and `claim_kind`
+  stamping; `write` serves `tiers.tier3_create`/`tier3_merge` (including the
+  Batch API's tier-3 batch and its same-page-merge/truncation-retry
+  fallbacks); `resolve` serves the C4 resolver (`resolutions.
+  propose_resolution`); `reasoning_t1`/`reasoning_t2` serve the merge-phase
+  reasoning-tier screen. Clients are constructed per DISTINCT resolved
+  provider, not per call or per knob — several knobs sharing one provider
+  (the common case: no per-knob overrides) share exactly ONE client, same as
+  before athenaeum#841. The athenaeum#786 "accepted but inert" startup warning is
+  gone — every override above now has an effect, so there is nothing left
+  to warn about.
+- In the spend ledger, `athenaeum spend --by-knob` shows the real provider
+  split for a librarian run too: when a run's knobs resolve to more than one
+  provider, the run writes one ledger row PER distinct provider (each
+  carrying only that provider's own token/knob/model attribution and correct
+  `billing_mode`) instead of one row assuming a single provider for the
+  whole run.
 - **Known limitation — knob granularity, not functional-area granularity.**
   The `classify` knob is shared by `tiers.classify` (the librarian's page
   classifier), `contradictions.detect_system` (the C4 contradiction
   detector), and `claim_kind` — routing "the contradiction detector on a
   different provider than the page classifier" is **not** reachable through
   `llm.providers.classify` today; it needs the `classify` knob split into
-  separate knobs first, which is a deliberate, separate refactor.
+  separate knobs first, which is a deliberate, separate refactor (unchanged
+  by athenaeum#841 — recorded, not solved, exactly as athenaeum#786 originally
+  documented it).
 
 Batch mode (`ATHENAEUM_BATCH_MODE` / `librarian.batch_mode`) is served by the
 `classify` and `write` knobs only (`batch.py`'s two `execute_batch` call
-sites). The startup guard checks BOTH knobs' resolved providers — batch mode
-+ `claude-cli` on either one is a loud startup error, matching the
+sites), now via each knob's own client. The startup guard still checks BOTH
+knobs' resolved providers before either client is built — batch mode +
+`claude-cli` on either one is a loud startup error, matching the
 `claude-cli` provider's existing "Batch mode is API-only" constraint above.
+In practice the two rarely differ in a batch run: the guard requires BOTH to
+resolve to `api` before a batch run can even start.
 
 ## Spend ledger and ceiling (athenaeum#378)
 
@@ -1012,6 +1069,79 @@ intake per the configured action and access.
 |---|---|---|---|---|
 | Medical screening | `ATHENAEUM_SCREEN_MEDICAL` | `screening.medical.action` | `off` | Action for medical intake: `off` (default, no screening) or an enabled action per `docs/screening.md`. **Fails loudly** — a mis-set value raises `ScreeningConfigError` rather than serving with a silently inert classifier. This is one of the two deliberate exceptions to the WARN-and-fall-back malformed-env policy (athenaeum#528). |
 
+## Sensitivity classes (athenaeum#910)
+
+The open, deployment-configurable sensitivity-class vocabulary specified in
+[`docs/sensitivity-class-vocabulary.md`](sensitivity-class-vocabulary.md).
+Athenaeum ships exactly one class today (`pii`); a deployment can define its
+own (`hipaa`, a `classified`/`secret`/`top-secret` gradation, …) without
+patching this repository. This section documents the **class-vocabulary**
+half only — *which classes exist, what detects them, and what read policy
+each carries*. The recogniser code-registration contract
+(`register_recognizer` / `available_recognizers`) is a Python extension
+point, not a YAML knob, and is documented in `sensitivity.py`'s module
+docstring rather than here; the class-to-storage-surface mapping is the
+**pre-existing, unchanged** `storage.mapping`/`storage.adapters` knobs
+documented elsewhere in this file (they are not repeated here — see
+`docs/storage-adapter-contract.md`).
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Class definitions | — | `sensitivity.classes.<name>` | `{}` (operator entries) — the built-in `pii` class is always resolved regardless, see below | Defines a sensitivity class: `recognizers` (a list of recogniser names bound to it — code-registered, never config-defined) and `read_policy` (`access` + `audience`, below). No env override — a dict has no single scalar encoding (`resolve_storage_mapping`'s precedent). |
+| Bound recognisers | — | `sensitivity.classes.<name>.recognizers` | `[]` when omitted | The recogniser names (e.g. `email`, `phone`, or a deployment's own code-registered one) whose matches count toward this class. **Not inherited** — only `read_policy` inherits (see below). An empty list — explicit `[]` or the key simply omitted — is honoured literally: the class is never auto-detected, reachable only by explicit operator/agent tagging. Naming a recogniser `available_recognizers()` doesn't know about raises `SensitivityConfigError` at build time. |
+| Read policy | — | `sensitivity.classes.<name>.read_policy.access` | none (must resolve, directly or via `inherits`) | One of the four existing `access:` levels (`open` / `internal` / `confidential` / `personal` — the same vocabulary athenaeum#312 already ships, not a new one). An out-of-vocabulary value raises `SensitivityConfigError` rather than defaulting; so does a class whose `access` never resolves at all (no value set anywhere in its `inherits` chain). |
+| Read policy audience | — | `sensitivity.classes.<name>.read_policy.audience` | `[]` when omitted | The same opaque role-list mechanism `athenaeum serve --audience` already documents (`docs/security-posture.md` §2.1). **Unvalidated** — any role name is accepted; there is no known-role vocabulary to check against. |
+| Inheritance | — | `sensitivity.classes.<name>.inherits` | unset (no parent) | Names another class in the resolved config (built-in or operator-defined) whose `read_policy` this class defaults from. See "Inheritance semantics" below. |
+
+**Built-in `pii` class, unless overridden.** With no `sensitivity:` config at
+all, `pii` resolves to `recognizers: [email, phone]` and
+`read_policy: {access: personal}` — byte-identical to today's hardcoded
+`PII_ENTITY_CLASS` behaviour. The shipped default lives in
+`sensitivity._BUILTIN_CLASSES` (a module constant), **not** in this module's
+`_DEFAULTS` — the same "shipped default lives beside the owning domain
+module, not seeded into config's defaults dict" pattern
+`excluded_read_mapping` already uses, so the code default stays reachable
+(issue athenaeum#187's regression is exactly what seeding here would risk). An
+operator `sensitivity.classes.pii` entry **overrides the built-in wholesale**
+— recognisers and read_policy alike, not merged field-by-field: an override
+that omits `recognizers:` gets an *empty* list, not the built-in's two.
+
+**Inheritance semantics (`inherits: <parent-class-name>`).** Field-default-
+fill only, resolved parent-first through a chain (not required to be one
+level): an unset field on the child's `read_policy` takes the parent's
+already-resolved value; an explicitly set child field always wins, in either
+direction. There is **no monotonic-restriction floor** — a child may resolve
+*looser* than its parent (e.g. `access: open` inheriting from a `personal`
+parent) if an operator genuinely configures that; nothing in this design or
+`storage.mapping` enforces a ceiling (a lint over the resolved
+`(read_policy, storage adapter)` pair is a possible future slice, not
+shipped here).
+
+**Partition invariant.** A recogniser name may be bound to **at most one**
+class's `recognizers:` list across the whole resolved config (built-ins plus
+operator classes together) — including the built-in `pii` class's own
+`email`/`phone`. Binding the same recogniser name to two classes raises
+`SensitivityConfigError` naming both classes and the recogniser. This makes
+every detected match's destination class unambiguous by construction — see
+`docs/sensitivity-class-vocabulary.md` §7 Decision D6 for the deliberate
+escape hatch (two *different* recogniser names wrapping the same detection
+function, each bound to a different class) and how `sensitivity.classify()`
+surfaces its consequence.
+
+**Cycle / dangling-parent errors.** Both raise `SensitivityConfigError` at
+build time, never a silent fallback:
+
+- **`inherits` cycle** — a class's `inherits` chain loops back on itself
+  (`a inherits b inherits a`, or a longer chain), including a class naming
+  itself (`a inherits a`). The error names every class in the cycle.
+- **Dangling parent** — `inherits` names a class absent from the resolved
+  config (not a built-in, not another operator entry). The error names the
+  missing parent.
+
+**Example `athenaeum.yaml`: unchanged.** The defaults need no config — a
+deployment with no `sensitivity:` block behaves exactly as it does today.
+The example at the end of this file is not amended for this section.
+
 ## Authority manifest (athenaeum#426)
 
 | Knob | Env var | YAML key | Default | What it does |
@@ -1098,6 +1228,73 @@ one record per decision: `tier`, `decision`, `reason`, `reason_code`,
 (`reasoning_tiers._build_log_record_fields`). Read it back with
 `reasoning_tiers.read_reasoning_tier_decisions()`, optionally filtered by
 `proposal_id` or `tier`.
+
+## Verdict ledger (athenaeum#712) — off by default
+
+An append-only record of pairwise comparison verdicts
+(`duplicate | contradiction | specialization | distinct | underdetermined`),
+each carrying the exact set of facts — the **basis** — it was justified by
+(content hashes, coordinates, epochs, authority), so a change to any one of
+those facts can invalidate exactly the verdicts that depended on it. Ships
+in `src/athenaeum/verdicts.py`, ahead of the five-verdict comparator that
+will populate it (a separate, future child of the memory-model v6 epic,
+athenaeum#709) — the comparator's invalidation story depends on the basis
+being right from entry one.
+
+**Wiring decision (athenaeum#712 AC).** The comparator does not exist yet, so
+this ships dark behind one flag defaulting off. With the flag on, two real
+integration points fire — this is not a schema nothing writes to:
+
+- `athenaeum ingest-answers` — a merge **approve**/**reject** decision
+  (`athenaeum.decision_answers._apply_merge_answer`) records a
+  `duplicate`/`distinct` verdict for the resolved pair, using the same
+  sources the pending-merge proposal already named. This is "consumed
+  within this issue by writing verdicts for the decisions the current
+  pipeline already makes."
+- `athenaeum run`'s finalize phase materializes the ledger directory and
+  epoch registry (if absent) and advances the per-branch duty-cycle
+  counters one night — so a live run genuinely produces a well-formed,
+  queryable ledger even before the comparator exists to populate it with
+  real content.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Verdict ledger | `ATHENAEUM_VERDICT_LEDGER_ENABLED` | `librarian.verdict_ledger_enabled` | `false` (**off**) | Gates the whole subsystem: the `ingest-answers` merge-decision recorder, the `run` finalize advisor, and materializing `wiki/_verdicts/` at all. See [`resolve_verdict_ledger_enabled`](../src/athenaeum/config.py). |
+| Epoch batch interval | `ATHENAEUM_VERDICT_EPOCH_BATCH_INTERVAL_DAYS` | `librarian.verdict_epoch_batch_interval_days` | `30` | Comparator-epoch bumps are batched on this interval (days) — passed to `verdicts.open_epoch`'s `batch_interval_days`. |
+
+```yaml
+librarian:
+  verdict_ledger_enabled: true
+  verdict_epoch_batch_interval_days: 30
+```
+
+**With the flag off:** `athenaeum run` is byte-identical to before athenaeum#712
+— no file appears under `wiki/_verdicts/`, no new run-summary phase, no
+exit-code change. `athenaeum ingest-answers` resolves merges exactly as
+before; nothing records a verdict.
+
+**Store layout**, under `wiki/_verdicts/`:
+
+- `<YYYY-MM>.jsonl` — one **live** monthly partition, keyed by the month a
+  pair's currently-live verdict was decided. Append-only, `O_APPEND` +
+  fsync, same durability discipline as `_merge_provenance.jsonl`.
+- `_verdicts_history.jsonl` — verdicts superseded by a newer decision for
+  the same pair, moved out by `verdicts.compact()`. Invalidation waves scan
+  the live partitions only.
+- `_verdicts_epochs.json` — the per-branch comparator-epoch registry:
+  current version, whether a re-comparison wave is open, and the
+  nights-in-wave / nights-total duty-cycle counters (target <=25%,
+  reporting only — enforcing the target is out of scope).
+
+**Single-appender.** Every mutating `verdicts.py` function reuses
+`athenaeum.runlock.RunLock` rather than a second lock — it takes a required
+`lock:` argument and requires it already acquired (raises `LockNotHeld`
+otherwise); it never acquires the lock itself. Both integration points above
+thread through the SAME lock the CLI command already holds.
+
+**How to inspect it.** `athenaeum verdicts {count,list-by-verdict,show-one-pair,show-stale}`
+is the sanctioned read path (mirrors `athenaeum merges`) — hand-parsing
+`wiki/_verdicts/*.jsonl` directly is not supported.
 
 ## Recall and search
 
@@ -1224,8 +1421,8 @@ librarian:
   entity_runtime_share: 0.6     # entity phase's share of max_runtime; rest reserved for C4 (athenaeum#440)
   stuck_file_threshold: 3       # consecutive-failure count before a raw file is skipped as stuck (athenaeum#663)
   raw_file_max_bytes: 5242880          # per-raw-file byte bound; 5 MiB (athenaeum#898)
-  raw_file_max_api_calls: 8            # per-raw-file LLM-call bound (athenaeum#898)
-  raw_file_max_runtime_seconds: 120    # per-raw-file wall-clock bound in seconds (athenaeum#898)
+  raw_file_max_api_calls: 60           # per-raw-file LLM-call bound (athenaeum#898, recalibrated athenaeum#994)
+  raw_file_max_runtime_seconds: 900    # per-raw-file wall-clock bound in seconds (athenaeum#898, recalibrated athenaeum#994)
   quarantine_threshold: 2              # consecutive bound-violations before quarantine (athenaeum#898)
   junk_match_stopwords: []      # extra entity names filtered before a tier-3 merge call (athenaeum#662)
   junk_match_allowlist: []      # entity names to never treat as junk — escape hatch (athenaeum#662)
@@ -1248,6 +1445,8 @@ librarian:
   decisions_max_sources_per_merge: 20       # decisions-view per-merge source fan-out cap (athenaeum#431)
   audit_sample_rate_t2_approvals: 0.075     # share of T2 approvals sampled for human audit (athenaeum#438)
   audit_sample_rate_t1_rejects: 0.075       # share of T1 rejects sampled for human audit (athenaeum#438)
+  verdict_ledger_enabled: false              # off by default; verdict ledger + basis (athenaeum#712)
+  verdict_epoch_batch_interval_days: 30      # comparator-epoch bump batching interval (athenaeum#712)
   delta:
     enabled: true               # delta-scoped incremental compile on client=None path (athenaeum#370)
     max_affected_clusters: 8    # > this many clusters touched => full compile (athenaeum#370)

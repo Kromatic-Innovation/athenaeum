@@ -160,6 +160,119 @@ def test_baseline_exclude_session_flag(tmp_path: Path) -> None:
     assert payload["excluded_push_records"] == 1
 
 
+def test_baseline_exclude_session_accepts_unambiguous_prefix(tmp_path: Path) -> None:
+    """athenaeum#987 AC1: a session-id prefix that resolves to exactly one
+    known session is accepted, same effect as the full id.
+    """
+    cache_dir = tmp_path / "cache"
+    clean = push_metrics.build_push_record(
+        session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+    )
+    push_metrics.record_push(clean, cache_dir=cache_dir)
+    push_metrics.record_reference_result(
+        push_metrics.ReferenceResult(
+            session_id="clean", ts="2026-01-01T00:00:00Z", pushed_ids=["u1"], referenced_ids=["u1"]
+        ),
+        cache_dir=cache_dir,
+    )
+    synth = push_metrics.build_push_record(
+        session_id="d5774338-7d8b-4152-a252-248d156f95ef",
+        query="q",
+        backend="fts5",
+        hits=[("test-page.md", None, "b")],
+    )
+    push_metrics.record_push(synth, cache_dir=cache_dir)
+    push_metrics.record_reference_result(
+        push_metrics.ReferenceResult(
+            session_id="d5774338-7d8b-4152-a252-248d156f95ef",
+            ts="2026-01-01T00:00:00Z",
+            pushed_ids=["test-page.md"],
+            referenced_ids=[],
+        ),
+        cache_dir=cache_dir,
+    )
+
+    rc, out = _run(
+        [
+            "push-metrics",
+            "baseline",
+            "--cache-dir",
+            str(cache_dir),
+            "--docs-path",
+            str(tmp_path / "docs.md"),
+            "--exclude-session",
+            "d5774338-7d8b",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["sessions"] == 1
+    assert payload["excluded_sessions"] == ["d5774338-7d8b-4152-a252-248d156f95ef"]
+    assert payload["excluded_push_records"] == 1
+
+
+def test_baseline_exclude_session_no_match_is_a_loud_failure(tmp_path: Path) -> None:
+    """athenaeum#987: the exact incident this issue fixes — a supplied value
+    matching no known session id must exit non-zero, never silently succeed
+    with a zero-effect exclusion.
+    """
+    cache_dir = tmp_path / "cache"
+    _seed_valid_ledger(cache_dir)
+    rc, out, err = _run_capture_stderr(
+        [
+            "push-metrics",
+            "baseline",
+            "--cache-dir",
+            str(cache_dir),
+            "--docs-path",
+            str(tmp_path / "docs.md"),
+            "--exclude-session",
+            "no-such-session",
+            "--json",
+        ]
+    )
+    assert rc != 0
+    assert "no-such-session" in err
+    assert out == ""
+
+
+def test_baseline_exclude_session_ambiguous_prefix_is_a_loud_failure(tmp_path: Path) -> None:
+    """athenaeum#987: a prefix matching more than one known session must
+    also be a hard error, never a guess at which one was meant.
+    """
+    cache_dir = tmp_path / "cache"
+    for sid in ("synth-a", "synth-b"):
+        push_metrics.record_push(
+            push_metrics.build_push_record(
+                session_id=sid, query="q", backend="fts5", hits=[("f.md", {"uid": sid}, "b")]
+            ),
+            cache_dir=cache_dir,
+        )
+        push_metrics.record_reference_result(
+            push_metrics.ReferenceResult(
+                session_id=sid, ts="2026-01-01T00:00:00Z", pushed_ids=[sid], referenced_ids=[sid]
+            ),
+            cache_dir=cache_dir,
+        )
+    rc, out, err = _run_capture_stderr(
+        [
+            "push-metrics",
+            "baseline",
+            "--cache-dir",
+            str(cache_dir),
+            "--docs-path",
+            str(tmp_path / "docs.md"),
+            "--exclude-session",
+            "synth-",
+            "--json",
+        ]
+    )
+    assert rc != 0
+    assert "ambiguous" in err
+    assert out == ""
+
+
 def test_baseline_without_exclude_session_reports_honest_zero(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     _seed_valid_ledger(cache_dir)
@@ -340,6 +453,155 @@ def test_coverage_audit_json_stdout(tmp_path: Path) -> None:
     assert rc == 0
     payload = json.loads(out)
     assert payload["sampled_session_count"] == 1
+
+
+def test_coverage_audit_exclude_session_flag(tmp_path: Path) -> None:
+    """athenaeum#986 AC2: ``--exclude-session`` on coverage-audit at the CLI
+    layer — same semantics as ``baseline --exclude-session``: the excluded
+    session is dropped from the sample and reported, never silently ignored.
+    """
+    cache_dir = tmp_path / "cache"
+    clean = push_metrics.build_push_record(
+        session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+    )
+    push_metrics.record_push(clean, cache_dir=cache_dir)
+    synth = push_metrics.build_push_record(
+        session_id="synth", query="q", backend="fts5", hits=[("test-page.md", None, "b")]
+    )
+    push_metrics.record_push(synth, cache_dir=cache_dir)
+
+    rc, out = _run(
+        [
+            "push-metrics",
+            "coverage-audit",
+            "--cache-dir",
+            str(cache_dir),
+            "--n",
+            "5",
+            "--seed",
+            "1",
+            "--output",
+            str(tmp_path / "ws.json"),
+            "--exclude-session",
+            "synth",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["sampled_session_count"] == 1
+    assert payload["sessions"][0]["session_id"] == "clean"
+    assert payload["excluded_sessions"] == ["synth"]
+    assert payload["excluded_push_records"] == 1
+
+
+def test_coverage_audit_exclude_session_accepts_unambiguous_prefix(tmp_path: Path) -> None:
+    """athenaeum#987 AC3: the prefix behavior applies uniformly to
+    coverage-audit, not just baseline.
+    """
+    cache_dir = tmp_path / "cache"
+    clean = push_metrics.build_push_record(
+        session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+    )
+    push_metrics.record_push(clean, cache_dir=cache_dir)
+    synth = push_metrics.build_push_record(
+        session_id="d5774338-7d8b-4152-a252-248d156f95ef",
+        query="q",
+        backend="fts5",
+        hits=[("test-page.md", None, "b")],
+    )
+    push_metrics.record_push(synth, cache_dir=cache_dir)
+
+    rc, out = _run(
+        [
+            "push-metrics",
+            "coverage-audit",
+            "--cache-dir",
+            str(cache_dir),
+            "--n",
+            "5",
+            "--seed",
+            "1",
+            "--output",
+            str(tmp_path / "ws.json"),
+            "--exclude-session",
+            "d5774338-7d8b",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["sampled_session_count"] == 1
+    assert payload["sessions"][0]["session_id"] == "clean"
+    assert payload["excluded_sessions"] == ["d5774338-7d8b-4152-a252-248d156f95ef"]
+    assert payload["excluded_push_records"] == 1
+
+
+def test_coverage_audit_exclude_session_no_match_is_a_loud_failure(tmp_path: Path) -> None:
+    """athenaeum#987: same loud-failure behavior on coverage-audit as on
+    baseline — a value matching no known session id is a hard error.
+    """
+    cache_dir = tmp_path / "cache"
+    push_metrics.record_push(
+        push_metrics.build_push_record(
+            session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+        ),
+        cache_dir=cache_dir,
+    )
+    rc, out, err = _run_capture_stderr(
+        [
+            "push-metrics",
+            "coverage-audit",
+            "--cache-dir",
+            str(cache_dir),
+            "--n",
+            "5",
+            "--seed",
+            "1",
+            "--output",
+            str(tmp_path / "ws.json"),
+            "--exclude-session",
+            "no-such-session",
+            "--json",
+        ]
+    )
+    assert rc != 0
+    assert "no-such-session" in err
+    assert out == ""
+
+
+def test_coverage_audit_exclude_session_ambiguous_prefix_is_a_loud_failure(tmp_path: Path) -> None:
+    """athenaeum#987: an ambiguous prefix is a hard error on coverage-audit
+    too, never a silent pick of one candidate session.
+    """
+    cache_dir = tmp_path / "cache"
+    for sid in ("synth-a", "synth-b"):
+        push_metrics.record_push(
+            push_metrics.build_push_record(
+                session_id=sid, query="q", backend="fts5", hits=[("f.md", {"uid": sid}, "b")]
+            ),
+            cache_dir=cache_dir,
+        )
+    rc, out, err = _run_capture_stderr(
+        [
+            "push-metrics",
+            "coverage-audit",
+            "--cache-dir",
+            str(cache_dir),
+            "--n",
+            "5",
+            "--seed",
+            "1",
+            "--output",
+            str(tmp_path / "ws.json"),
+            "--exclude-session",
+            "synth-",
+            "--json",
+        ]
+    )
+    assert rc != 0
+    assert "ambiguous" in err
+    assert out == ""
 
 
 def test_no_subcommand_prints_usage(tmp_path: Path) -> None:

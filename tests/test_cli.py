@@ -527,6 +527,75 @@ class TestRecall:
         lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
         assert len(lines) <= 1
 
+    def test_type_filter_narrows_results(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Issue athenaeum#964: `--type` on the shell-accessible `recall` command,
+        # exercising the same backend.query(type_filter=...) path as the MCP
+        # tool.
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "alice.md").write_text(
+            "---\nuid: u1\ntype: person\nname: Alice\n---\n\n"
+            "Alice practices lean startup.\n"
+        )
+        (wiki / "acme.md").write_text(
+            "---\nuid: u2\ntype: company\nname: Acme Corp\n---\n\n"
+            "Acme Corp practices lean startup.\n"
+        )
+        rc = main(
+            [
+                "recall",
+                "lean startup",
+                "--path",
+                str(knowledge),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--backend",
+                "keyword",
+                "--type",
+                "company",
+            ]
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "acme.md" in out
+        assert "alice.md" not in out
+
+    def test_unrecognized_type_filter_names_known_classes(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "acme.md").write_text(
+            "---\nuid: u2\ntype: company\nname: Acme Corp\n---\n\n"
+            "Acme Corp practices lean startup.\n"
+        )
+        rc = main(
+            [
+                "recall",
+                "lean startup",
+                "--path",
+                str(knowledge),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--backend",
+                "keyword",
+                "--type",
+                "no-such-class",
+            ]
+        )
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "not a recognized entity class" in err
+        assert "company" in err
+
     def test_missing_wiki_returns_error(
         self,
         tmp_path: Path,
@@ -1388,3 +1457,50 @@ class TestEverySubparserHasFuncDefault:
             if not has_func
         ]
         assert missing, "guard failed to detect a stripped func binding"
+
+
+class TestEverySubparserHelpRenders:
+    """Guard athenaeum#1004: an unescaped literal ``%`` in a ``help=`` string
+    makes argparse's ``_expand_help`` crash at *render* time (``%(...)s``
+    interpolation runs the whole help string through ``% params``), not at
+    parser-build time — so only actually calling ``--help`` catches it. This
+    walks every registered subparser, top-level and nested, and calls
+    ``format_help()`` on each, so the whole class of unescaped-``%`` help
+    crashes fails CI, not the operator's terminal.
+    """
+
+    @staticmethod
+    def _all_parsers(parser: argparse.ArgumentParser, prefix: list[str]):
+        yield prefix, parser
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, subparser in action.choices.items():
+                    yield from TestEverySubparserHelpRenders._all_parsers(
+                        subparser, [*prefix, name]
+                    )
+
+    def test_format_help_does_not_crash_for_any_subparser(self) -> None:
+        parser = build_parser()
+        failures: list[tuple[str, str]] = []
+        for path, sub in self._all_parsers(parser, prefix=[]):
+            try:
+                sub.format_help()
+            except Exception as exc:  # noqa: BLE001 - failure detail matters
+                failures.append((" ".join(path) or "athenaeum", repr(exc)))
+        assert not failures, (
+            "these subcommand paths crash rendering --help (likely an "
+            f"unescaped literal % in a help= string — use %%): {failures}"
+        )
+
+    def test_memory_class_backfill_help_exits_zero(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Regression test for the reported crash: ``athenaeum memory-class
+        backfill --help`` used to raise ``TypeError: %o format: an integer
+        is required, not dict`` from the ``~97%`` in ``--classifier``'s help.
+        """
+        with pytest.raises(SystemExit) as excinfo:
+            main(["memory-class", "backfill", "--help"])
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        assert "97%" in out

@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """MCP memory server — read/write gate for an Athenaeum knowledge base.
 
-Registers 13 tools (issue athenaeum#538 — the count was previously under-reported as 2;
-issue athenaeum#864 added ``read_person``; issue athenaeum#886 added ``read_entity``):
+Registers 16 tools (issue athenaeum#538 — the count was previously under-reported as 2;
+issue athenaeum#864 added ``read_person``; issue athenaeum#886 added ``read_entity``;
+issue athenaeum#964 added ``entity_schema``, the ONE new schema-query tool — see that
+issue's "no proliferating typed interfaces" ratified position; issue athenaeum#965 added
+``enumerate_entities``, the generalized ENUMERATION primitive — a distinct code
+path from ``recall``, not an argument on it, because it takes no query text and
+never routes through relevance ranking):
 
   Reads:  recall, list_pending_questions, list_pending_merges,
           list_pending_decisions, list_axiom_audit, scan_retraction_cascade,
-          calibration_summary, read_entity, read_person
+          calibration_summary, read_entity, read_person, entity_schema,
+          enumerate_entities
   Writes: remember, resolve_question, resolve_merge, review_audit_item
 
 Excluded/withheld fields (a person's contact data, and whatever else the
@@ -46,12 +52,16 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from athenaeum.config import resolve_cache_dir
+from athenaeum.entity_schema import QUERYABLE_FIELDS, resolve_entity_classes
+from athenaeum.enumeration import DEFAULT_LIMIT as _ENUMERATE_DEFAULT_LIMIT
+from athenaeum.enumeration import enumerate_entities as _enumerate_entities
+from athenaeum.enumeration import predicate_from_dict as _predicate_from_dict
 from athenaeum.killswitch import is_disabled
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
@@ -62,6 +72,7 @@ from athenaeum.models import (
     parse_bucket,
     parse_frontmatter,
     render_frontmatter,
+    resolve_page_type,
     valid_until_expired,
     validity_bound_str,
 )
@@ -191,6 +202,7 @@ def recall_search(
     with_pii: bool = False,
     usage_classes: Collection[str] | None = None,
     history: bool = False,
+    type_filter: str | Sequence[str] | None = None,
 ) -> str:
     """Search the knowledge wiki for pages relevant to *query*.
 
@@ -255,6 +267,15 @@ def recall_search(
             in the backend's own relevance order, unchanged. Deliberately the
             most conservative opt-in mechanism (an explicit flag, not query-
             text inference) — see ``_recall_via_backend``'s docstring.
+        type_filter: Issue athenaeum#964 — narrow the search to one or more entity
+            classes (a page's ``type:``). ``None`` (default) searches every
+            class, byte-identical to pre-athenaeum#964 behavior. An opaque,
+            operator-defined string — NEVER validated against
+            ``wiki/_schema/types.md`` here; see the ``entity_schema`` MCP
+            tool / :mod:`athenaeum.entity_schema` for the declared/observed
+            registry. A value this deployment has never seen returns an
+            empty match together with the classes it DOES have, never a
+            silent "no results" and never an error.
 
     Returns a formatted string of matching wiki pages with relevance scores
     and content snippets.
@@ -269,7 +290,7 @@ def recall_search(
     # similarity search. `resolve_handle_query` is a complete no-op \u2014 no
     # lookup of any kind \u2014 when the query is not handle-shaped, so an ordinary
     # query's output below is untouched by this branch existing.
-    from athenaeum import identity_resolution
+    from athenaeum import identity_resolution, pii
 
     handle_resolution = identity_resolution.resolve_handle_query(
         wiki_root.parent,
@@ -281,7 +302,16 @@ def recall_search(
         usage_classes=usage_classes,
     )
     if handle_resolution is not None:
-        return json.dumps(handle_resolution.to_dict(), indent=2, sort_keys=True)
+        # Issue athenaeum#1002: `contact_values[].source` can carry a raw
+        # frontmatter/record value (including a bare YAML date) straight
+        # through from `ContactClassification.source` — coerce it the same
+        # way every other JSON-emitting read surface does.
+        return json.dumps(
+            handle_resolution.to_dict(),
+            indent=2,
+            sort_keys=True,
+            default=pii.json_date_default,
+        )
 
     if not tokenize_keyword_query(query):
         return "Query too short \u2014 provide at least one keyword (2+ characters)."
@@ -298,6 +328,7 @@ def recall_search(
         with_pii=with_pii,
         usage_classes=usage_classes,
         history=history,
+        type_filter=type_filter,
     )
 
 
@@ -487,7 +518,11 @@ def entity_read(
         return json.dumps(
             {"ok": False, "error": f"{not_found_label} not found: uid={uid!r}"}, indent=2
         )
-    return json.dumps(result.to_dict(), indent=2)
+    # Issue athenaeum#1002: `result.to_dict()["frontmatter"]` is the page's
+    # RAW parsed frontmatter, which can carry a `datetime.date`/`datetime`
+    # value straight from a bare YAML date — coerce it to ISO-8601 rather
+    # than letting `json.dumps` raise on it.
+    return json.dumps(result.to_dict(), indent=2, default=pii.json_date_default)
 
 
 def _resolve_hit_path(
@@ -544,6 +579,33 @@ def _date_part(value: object) -> str:
         return ""
     match = _ISO_DATE_RE.search(str(value))
     return match.group(0) if match else ""
+
+
+# Same wikilink grammar as ``inference_blocks._WIKILINK_RE`` /
+# ``resolutions._WIKILINK_RE`` (Obsidian-style ``[[slug]]`` / ``[[slug|alias]]``).
+# Kept as a separate, local pattern object rather than importing a private
+# name from another module — matches those modules' own stated rationale for
+# not sharing the compiled regex object across modules.
+_WIKILINK_RE = re.compile(r"\[\[([^\[\]|\n]+?)(?:\|[^\[\]\n]*)?\]\]")
+
+
+def _extract_outbound_links(body: str) -> list[str]:
+    """Return the wikilink targets in a page body, order-preserved, deduped.
+
+    Issue athenaeum#964: the outbound half of "return related records so an agent
+    can continue digging" — the cheap, deterministic half the issue scopes in
+    (inbound backlinks need a new index and are out of scope). Slug only (the
+    ``|alias`` half of ``[[slug|alias]]`` is display text, not a target).
+    """
+    slugs: list[str] = []
+    seen: set[str] = set()
+    for m in _WIKILINK_RE.finditer(body):
+        raw = m.group(1).strip()
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        slugs.append(raw)
+    return slugs
 
 
 def _recall_metadata_lines(fm: dict[str, object]) -> list[str]:
@@ -746,7 +808,10 @@ def _excluded_block_for_hit(
         usage_classes=usage_classes,
     )
     validity = pii.assemble_excluded_validity(record_meta, fields)
-    do_not_email = pii.do_not_email_state(record_meta)
+    # Reads BOTH surfaces (issue athenaeum#960): `fm` is this hit's own
+    # already-resolved page frontmatter, the same value `assemble_excluded_read`
+    # above was given — no extra read needed.
+    do_not_email = pii.do_not_email_state(record_meta, fm)
 
     lines: list[str] = []
     for field_name, values in fields.items():
@@ -819,8 +884,18 @@ def _render_facts_block(facts: Mapping[str, object]) -> str:
     ADDITIVE by design: the ``**field:**`` lines are unchanged, so every
     existing reader of this block keeps working, and a machine consumer gets a
     real interface next to them rather than instead of them.
+
+    ``default=pii.json_date_default`` (issue athenaeum#1002), not a bare
+    ``str``: a ``classification["source"]`` value can carry a raw frontmatter
+    date, and this is the same coercion point ``read_entity``/``read_person``
+    use, so recall's ``with_pii`` block cannot render a date differently than
+    the typed read does.
     """
-    payload = json.dumps(facts, ensure_ascii=False, sort_keys=True, default=str)
+    from athenaeum import pii
+
+    payload = json.dumps(
+        facts, ensure_ascii=False, sort_keys=True, default=pii.json_date_default
+    )
     return f"```json athenaeum-excluded-facts\n{payload}\n```\n"
 
 
@@ -837,6 +912,7 @@ def _recall_via_backend(
     with_pii: bool = False,
     usage_classes: Collection[str] | None = None,
     history: bool = False,
+    type_filter: str | Sequence[str] | None = None,
 ) -> str:
     """Delegate recall to a registered search backend, then format results.
 
@@ -868,7 +944,7 @@ def _recall_via_backend(
     returns hits in the backend's own relevance order, exactly as before this
     issue existed.
     """
-    from athenaeum.search import DegradedIndexError, get_backend
+    from athenaeum.search import DegradedIndexError, get_backend, normalize_type_filter
 
     try:
         backend = get_backend(backend_name)
@@ -884,6 +960,7 @@ def _recall_via_backend(
             n=top_k,
             wiki_root=wiki_root,
             caller_audience=caller_audience,
+            type_filter=type_filter,
         )
     except NotImplementedError as exc:
         return str(exc)
@@ -895,8 +972,29 @@ def _recall_via_backend(
             "Rebuild it with `athenaeum reindex` and retry."
         )
 
+    # Issue athenaeum#964: an unrecognized ``type_filter`` value is NOT an error and
+    # never reads as a plain "nothing matched" — it names the classes this
+    # deployment actually has, computed against the SAME declared/observed
+    # registry the schema-query tool reports (never against
+    # ``wiki/_schema/types.md`` alone — an observed-only class must count as
+    # recognized too).
+    unrecognized_note = ""
+    normalized_types = normalize_type_filter(type_filter)
+    if normalized_types is not None:
+        known_names = {
+            c.name for c in resolve_entity_classes(wiki_root, caller_audience=caller_audience)
+        }
+        unrecognized = [t for t in normalized_types if t not in known_names]
+        if unrecognized:
+            classes_str = ", ".join(sorted(known_names)) if known_names else "(none)"
+            unrecognized_note = (
+                f"\n\nNote: type filter value(s) {', '.join(unrecognized)} are not "
+                f"a recognized entity class on this deployment. Known classes: "
+                f"{classes_str}."
+            )
+
     if not hits:
-        return f"No wiki pages matched query: {query!r}"
+        return f"No wiki pages matched query: {query!r}{unrecognized_note}"
 
     # Issue athenaeum#904 (AC4/AC5): currency-aware reorder, skipped entirely in
     # history mode. Reorders only — never changes which hits are present or
@@ -1001,17 +1099,36 @@ def _recall_via_backend(
         # surfaces a Status line pointing at the pending-question queue.
         meta_lines = _recall_metadata_lines(fm)
         meta_block = "".join(f"{line}\n" for line in meta_lines)
+        # Issue athenaeum#964: uid + type on EVERY hit — without a uid an agent can
+        # only reach `read_entity` by string-parsing the `<uid>-<slug>.md`
+        # filename (exactly the storage-layout parsing
+        # `docs/one-way-in-one-way-out.md` exists to prevent). Always
+        # rendered (never omit-at-default like the athenaeum#325 header above), since
+        # "go dig further" is the whole point of the field.
+        uid = str(fm.get("uid") or "—")
+        page_type = resolve_page_type(fm) or "—"
+        # Outbound `[[wikilink]]` targets (issue athenaeum#964) — the cheap,
+        # deterministic half of "return related records" the issue scopes in
+        # (inbound backlinks need a new index and are explicitly out of
+        # scope). Omitted entirely when the page has none, so the hit renders
+        # unchanged in that case (no empty "**Links:**" line).
+        links_line = ""
+        outbound = _extract_outbound_links(body) if body else []
+        if outbound:
+            links_line = f"**Links:** {', '.join(outbound)}\n"
         blocks.append(
             f"{display_name} (score: {score:.1f})\n"
             f"**Path:** {display_prefix}\n"
             f"**Tags:** {tags}\n"
-            f"{meta_block}{excluded_block}\n"
+            f"**Uid:** {uid}\n"
+            f"**Type:** {page_type}\n"
+            f"{meta_block}{links_line}{excluded_block}\n"
             f"{snip}\n"
         )
         _pushed_hits.append((filename, fm, snip))
 
     if not blocks:
-        return f"No wiki pages matched query: {query!r}"
+        return f"No wiki pages matched query: {query!r}{unrecognized_note}"
 
     parts: list[str] = [f"Found {len(blocks)} matching pages:\n"]
     for rank, block in enumerate(blocks, 1):
@@ -1041,7 +1158,7 @@ def _recall_via_backend(
     except Exception:  # recall must never fail over telemetry
         log.debug("push-metrics: push-record instrumentation failed", exc_info=True)
 
-    return "\n".join(parts)
+    return "\n".join(parts) + unrecognized_note
 
 
 def remember_write(
@@ -1365,12 +1482,36 @@ def create_server(
             "Install it with: pip install athenaeum[mcp]"
         ) from exc
 
+    # Issue athenaeum#964: the entity-class registry is resolved ONCE here, at server
+    # construction — never per-call — and backs BOTH the ``recall`` tool's
+    # config-derived ``type`` parameter description AND the ``entity_schema``
+    # tool below, so the two never drift against each other. A ``types.md``
+    # edit takes effect on the NEXT server start (documented, not a
+    # limitation — see docs/recall-architecture.md; nothing here precludes
+    # wiring `notifications/tools/list_changed` later for a live refresh).
+    _entity_classes = resolve_entity_classes(wiki_root, caller_audience=caller_audience)
+    _entity_class_names = [c.name for c in _entity_classes]
+    _entity_classes_str = ", ".join(_entity_class_names) if _entity_class_names else "(none yet)"
+    # Issue athenaeum#965: same "computed once" rule as `_entity_classes` above —
+    # `enumerate_entities` reuses this set for its unrecognized-type check
+    # rather than re-scanning the wiki on every call.
+    _enumerate_known_classes = frozenset(_entity_class_names)
+    _enumerate_cache_dir = cache_dir or resolve_cache_dir(None)
+
     mcp = FastMCP(
         "athenaeum",
         instructions=(
             "Knowledge memory server powered by Athenaeum. "
             "Use `remember` to save information to raw intake for later compilation. "
-            "Use `recall` to search the compiled wiki for relevant knowledge. "
+            "Use `recall` to search the compiled wiki for relevant knowledge — narrow "
+            "by entity class with `recall(type=...)` when you know what kind of thing "
+            "you're looking for (a person, a company, a principle, ...). Call "
+            "`entity_schema` first to discover what kinds of things this deployment "
+            "holds and which fields you can query on (issue athenaeum#964). "
+            "Need every entity of a type matching criteria — not a ranked search "
+            "over a phrase? Use `enumerate_entities(entity_type=..., predicates=...)` "
+            "instead of `recall`: it takes no query text and never ranks (issue "
+            "athenaeum#965) — the generalized primitive behind `athenaeum people`. "
             "Use `list_pending_questions` / `resolve_question` to triage "
             "detector-flagged contradictions, and "
             "`list_pending_merges` / `resolve_merge` to triage resolver-proposed "
@@ -1387,11 +1528,36 @@ def create_server(
         ),
     )
 
-    @mcp.tool()
     def recall(
-        query: str, top_k: int = 5, with_pii: bool = False, history: bool = False
+        query: str,
+        top_k: int = 5,
+        with_pii: bool = False,
+        history: bool = False,
+        type: str | None = None,
     ) -> str:
-        """Search the knowledge wiki for pages relevant to a query.
+        return recall_search(
+            wiki_root,
+            query,
+            top_k,
+            search_backend=search_backend,
+            cache_dir=cache_dir,
+            extra_roots=extra_roots,
+            caller_audience=caller_audience,
+            config=config,
+            with_pii=with_pii,
+            history=history,
+            type_filter=type,
+        )
+
+    # Issue athenaeum#964: the docstring — and therefore the ``type`` parameter's
+    # description FastMCP puts in the generated tool schema — is built HERE,
+    # from ``_entity_classes_str`` above, rather than written as a literal.
+    # Assigned to ``__doc__`` (not inline in the ``def``) so it can be
+    # computed from this deployment's resolved registry, and the function is
+    # registered via an explicit ``mcp.tool()(recall)`` call (not the
+    # ``@mcp.tool()`` decorator syntax every other tool below uses) so the
+    # registration happens AFTER the dynamic docstring is attached.
+    recall.__doc__ = f"""Search the knowledge wiki for pages relevant to a query.
 
         Dispatches to the configured search backend:
 
@@ -1420,7 +1586,7 @@ def create_server(
                 off-corpus for any other entity class (issue athenaeum#885). This is
                 the sanctioned way to read excluded data for a hit you found
                 here; do not open an excluded surface directly
-                (``docs/one-way-in-one-way-out.md`` §3). Default ``False``, and
+                (``docs/one-way-in-one-way-out.md`` section 3). Default ``False``, and
                 free when unset: no excluded surface is scanned at all.
 
                 It cannot widen what you can see. Excluded values are never
@@ -1435,22 +1601,175 @@ def create_server(
                 By default an expired ``daily``-bucket page ranks below a
                 current one; ``history=True`` disables that reorder for this
                 call and returns results in plain relevance order.
+            type: Narrow the search to one entity class (a page's ``type:``) —
+                issue athenaeum#964. Omitting this (the default, ``None``) searches
+                EVERY class, exactly as before this parameter existed. This
+                deployment's entity classes: {_entity_classes_str}. Call the
+                `entity_schema` tool for each class's live page count and
+                whether it is declared / observed / both. A value that is
+                NOT one of the classes above still runs — it returns no
+                matches together with this same class list in the response,
+                never a silent "nothing matched" and never an error, so a
+                typo is always diagnosable from the response alone.
 
         Returns:
             Matching wiki pages with relevance scores and content snippets.
         """
-        return recall_search(
-            wiki_root,
-            query,
-            top_k,
-            search_backend=search_backend,
-            cache_dir=cache_dir,
-            extra_roots=extra_roots,
-            caller_audience=caller_audience,
-            config=config,
-            with_pii=with_pii,
-            history=history,
-        )
+    mcp.tool()(recall)
+
+    @mcp.tool()
+    def entity_schema() -> dict:
+        """Report the entity classes this deployment declares and/or observes.
+
+        Issue athenaeum#964: the ONE schema-query tool this issue adds (the
+        operator's ratified direction was "the only other endpoint or MCP
+        tooling we should be adding is schema queries" — no per-kind API).
+        Call this BEFORE narrowing a `recall` query with `type=...` when you
+        don't already know this deployment's entity classes.
+
+        Computed once at server construction from the SAME resolver that
+        derives `recall`'s `type` parameter description, so the two can never
+        disagree. A `wiki/_schema/types.md` edit takes effect on the next
+        server start (this issue does not implement hot reload — see
+        docs/recall-architecture.md).
+
+        Returns:
+            A dict with:
+
+            - `classes`: one entry per entity class — `name`, `count` (live
+              pages this caller may read), `declared` (present in
+              `wiki/_schema/types.md`), `observed` (at least one live page
+              carries this class), `fields` (the union of frontmatter KEYS
+              its pages carry — keys only, values are never reported, and
+              any key routed to an excluded surface, e.g. inline contact
+              fields, is omitted entirely rather than listed).
+            - `queryable_fields`: the fields `recall`'s filter arguments
+              actually implement today — exactly `["type"]`. Never advertises
+              a field no filter implements.
+        """
+        return {
+            "classes": [
+                {
+                    "name": c.name,
+                    "count": c.count,
+                    "declared": c.declared,
+                    "observed": c.observed,
+                    "fields": list(c.fields),
+                }
+                for c in _entity_classes
+            ],
+            "queryable_fields": list(QUERYABLE_FIELDS),
+        }
+
+    def enumerate_entities(
+        entity_type: str,
+        predicates: list[dict] | None = None,
+        sort_key: str = "name",
+        descending: bool = True,
+        limit: int = _ENUMERATE_DEFAULT_LIMIT,
+        cursor: str | None = None,
+        fields: list[str] | None = None,
+        with_pii: bool = False,
+    ) -> dict:
+        try:
+            parsed_predicates = [_predicate_from_dict(p) for p in (predicates or [])]
+            result = _enumerate_entities(
+                wiki_root,
+                _enumerate_cache_dir,
+                entity_type=entity_type,
+                predicates=parsed_predicates,
+                sort_key=sort_key,
+                descending=descending,
+                limit=limit,
+                cursor=cursor,
+                fields=fields or [],
+                with_pii=with_pii,
+                caller_audience=caller_audience,
+                extra_roots=extra_roots,
+                config=config,
+                known_classes=_enumerate_known_classes,
+            )
+        except ValueError as exc:
+            return {
+                "hits": [],
+                "next_cursor": None,
+                "known_classes": [],
+                "error": str(exc),
+            }
+        return {
+            "hits": list(result.hits),
+            "next_cursor": result.next_cursor,
+            "known_classes": list(result.known_classes),
+        }
+
+    # Issue athenaeum#965: same reason `recall`'s docstring is built above rather
+    # than written as a literal — this deployment's entity-class list is
+    # interpolated from `_entity_classes_str`, computed once at server
+    # construction. Assigned to `__doc__` (not an inline docstring literal,
+    # which an f-string never becomes — CPython only auto-populates
+    # `__doc__` from a plain string constant) and registered via an explicit
+    # `mcp.tool()(...)` call so registration happens AFTER the dynamic
+    # docstring is attached.
+    enumerate_entities.__doc__ = f"""Enumerate every entity of a declared type
+        matching field predicates.
+
+        Issue athenaeum#965: the generalized ENUMERATION primitive — a DISTINCT
+        code path from `recall`, not an argument on it. `recall` narrows a
+        RELEVANCE-RANKED search: it always needs query text to rank against, so
+        it structurally cannot answer "give me every entity of type X whose
+        field Y matches, ordered by field Z" — there is no X to rank. This
+        tool takes no query text at all and never routes through
+        BM25/vector ranking; it reads a plain type-indexed candidate set and
+        applies your predicates directly. Call `entity_schema` first to
+        discover this deployment's entity classes and their fields — this
+        deployment's classes today: {_entity_classes_str}.
+
+        Does NOT deprecate or change `athenaeum people` — see
+        docs/recall-architecture.md's capability-parity table for the
+        generalized expression that reproduces each of its surfaces.
+
+        Args:
+            entity_type: The declared entity class to enumerate (a page's
+                `type:`). Required. An unrecognized value does not error —
+                the response's `known_classes` names what this deployment
+                DOES have, exactly like `recall`'s `type` filter.
+            predicates: Field predicates, AND-combined. Each is
+                `{{"fields": "name" | ["name", "fallback_name", ...],
+                "kind": "eq" | "ne" | "substring" | "regex", "value": "..."}}`.
+                `fields` as a list is an ORDERED FALLBACK set, OR-combined —
+                the generalized form of `athenaeum people --company`'s
+                `current_company` / `linkedin_company_at_connect` shape.
+                `eq`/`substring`/`regex` all compare case-insensitively;
+                `ne` is `eq` negated (e.g. `do_not_email != true`).
+                Default: no predicates (every page of `entity_type`).
+            sort_key: Frontmatter field to sort by. Default `"name"`.
+            descending: Sort direction. Default `True`. Ties are always
+                broken by `uid` ascending, regardless of direction — the
+                documented deterministic tiebreak.
+            limit: Max rows to return. `0` = unlimited (matching
+                `athenaeum people --limit 0`). Default {_ENUMERATE_DEFAULT_LIMIT}.
+            cursor: An opaque continuation token from a prior call's
+                `next_cursor`. Must be reused with the IDENTICAL
+                `entity_type`/`sort_key`/`descending` it was minted under.
+            fields: Additional declared field names to include per hit,
+                beyond the always-present `uid`/`type`/`name`. A field
+                absent from a page is included as `null`, never silently
+                omitted, so every hit has the same shape.
+            with_pii: Required to reference `do_not_email` or
+                `google_contact_*` as a predicate field OR a requested
+                output field — the SAME flag contract `recall(with_pii=...)`
+                already uses. Default `False`.
+
+        Returns:
+            A dict with `hits` (each carrying `uid`, `type`, `name`, plus
+            any requested `fields`), `next_cursor` (a token for the next
+            page, or `null` when there is none), `known_classes` (populated
+            only when `entity_type` was not recognized), and — only on a
+            caller-input error such as a PII-gated field used without
+            `with_pii=True`, or a cursor minted under a different query
+            shape — an `error` string with `hits`/`next_cursor` empty.
+        """
+    mcp.tool()(enumerate_entities)
 
     @mcp.tool()
     def remember(

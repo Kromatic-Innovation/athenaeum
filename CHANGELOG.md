@@ -5,6 +5,314 @@ All notable changes to Athenaeum are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Aligned code-side entity-type registry mirrors with `_schema/types.md`
+  and gated the `corrections.py` write path (athenaeum#971, follow-up to
+  athenaeum#970).** `schemas.KNOWN_TYPES`/`FALLBACK_TYPES` now include `incident` (the
+  10th declared type per athenaeum#970's audit — previously every incident page
+  warned as "unknown") and no longer include `feedback`/`user` (folded away
+  by athenaeum#970); a page already on disk with one of those values keeps validating
+  without raising (athenaeum#93's non-raising design), it just now takes the
+  ordinary "unknown wiki type" path instead of the silent known-type path.
+  `corrections.py`'s tier-0 create branch (`WikiEntity(type=resolution.
+  entity_type, ...)`) previously had no `valid_types` gate at all, unlike the
+  classifier (`tiers.py`) and the other two deterministic create/upsert
+  paths (`intake.py`, `librarian.py`) — a correction batch could mint a page
+  under any string, including a athenaeum#970-folded type, with zero enforcement.
+  It now loads `_schema/types.md` (falling back to `KNOWN_TYPES`, same
+  pattern `librarian.py`/`entity_schema.py` use) and rejects-and-escalates
+  (`disposition="raised-tier"`) an unrecognized or folded `type`, matching
+  `intake.py`/`librarian.py`'s reject precedent rather than `tiers.py`'s
+  post-LLM coerce-to-`reference` (coercing here would misfile a fold into
+  the wrong bucket instead of preserving it for correct reclassification).
+### Added
+
+- **Generalized ENUMERATION primitive: `enumerate_entities` (MCP) /
+  `athenaeum enumerate` (CLI) (athenaeum#965).** Return every entity of a
+  declared type matching field predicates, ordered by a named field — with
+  NO query text, and never routed through `recall`'s relevance ranking. A
+  distinct code path from `recall`, not an argument on it: every one of
+  `recall`'s three backends either returns nothing or meaningless
+  neighbours for empty query text, so "enumerate everything of type X" was
+  structurally unanswerable through it even after athenaeum#964's `type`
+  filter. Field predicates support exact/substring/regex match (all
+  case-insensitive) over a named field or an ORDERED FALLBACK list of
+  fields (the generalized form of `athenaeum people --company`'s
+  `current_company`/`linkedin_company_at_connect` OR-shape), AND-combined
+  and repeatable. Results are sorted by a caller-named field (descending by
+  default, deterministic `uid`-ascending tiebreak) and paginated via a
+  `limit` (`0` = unlimited) plus an opaque continuation cursor. Every hit
+  carries `uid`/`type`/`name`, plus any additionally requested declared
+  fields; `google_contact_*` and `do_not_email` are usable as predicates
+  and output fields only behind `with_pii=True` (the same flag contract
+  `recall` already uses). Permitted type values and predicable field names
+  are derived from the deployment's declared entity-class schema (the
+  athenaeum#964 resolver) rather than hardcoded, and an unrecognized type
+  returns an empty result plus this deployment's known classes rather than
+  erroring. Reads the converged filterable-metadata store athenaeum#964
+  built (`FTS5Backend.candidates_by_type` — a plain indexed `WHERE type =
+  ?`, never FTS5 `MATCH`/ranking) to narrow the candidate set, then
+  re-reads fresh frontmatter per candidate for predicates, sorting, output
+  fields, and the same fail-closed audience scoping (athenaeum#538) every
+  other read tool applies. Does NOT deprecate or change `athenaeum people`
+  (that is athenaeum#966); `docs/recall-architecture.md` documents a
+  full capability-parity table against it. See
+  `src/athenaeum/enumeration.py` for the full contract.
+- **Decay-sweep ledger (athenaeum#969).** `athenaeum.decay_sweep.apply_sweep`
+  now writes one durable, machine-readable record per archived page —
+  which page, bucket + expiry, sweep timestamp, and the recovering commit
+  SHA — to `_decay_sweep_records.jsonl` under the cache dir (same discipline
+  as `_push_records.jsonl`: JSONL, `O_APPEND` + `fsync`, never inside the
+  wiki corpus), written BEFORE the archival `git rm` so a ledger-write
+  failure refuses the archival entirely rather than deleting without a
+  record. `docs/recall-architecture.md` and `docs/provenance-shape.md` §8.8
+  now name the expired-`daily` carve-out as the sole exemption from the
+  fail-closed expiry filter, state the swept-vs-cold distinction, and record
+  the `bucket:` → policy-pack `delete-after` mapping commitment for the
+  athenaeum#718 policy-pack work to consume — a documented mapping, not a
+  migration; no sweep/currency/bucket behavior changes.
+
+### Changed
+
+- **Dropped the redundant `push: [develop]` trigger from `oss-readiness.yml`
+  (athenaeum#816).** The workflow now runs on `pull_request: branches:
+  [develop]` only. Develop's strict required-status-checks ruleset
+  (`develop-ci-required`) already guarantees a merge commit's tree is
+  identical to the tree its PR run tested, so the post-merge `push` run only
+  ever reproduced the same result — pure noise on every merge. `OSS
+  Readiness` is not in develop's required-check set and
+  `promote-main.yml`'s promotion gate never queries it (re-confirmed live:
+  `gh api repos/Kromatic-Innovation/athenaeum/rules/branches/develop` lists
+  only `CI Required`), so this is safe in isolation. `ci.yml` intentionally
+  keeps its own `push: [develop]` trigger — it is the only run that stamps
+  `CI Required` check-runs onto develop's tip SHA, which
+  `promote-main.yml`'s develop -> main gate resolves by SHA. That will be
+  revisited once athenaeum#1031 lands. The `concurrency` block (keyed on
+  `${{ github.workflow }}-${{ github.ref }}`) is unchanged.
+
+### Added
+
+- **Coarse embedding fallback is now observable (athenaeum#1032).** The chromadb
+  embedding path used to degrade silently three layers deep — no log line
+  ever recorded that the hashing-trick fallback embedder produced a
+  cluster's vectors, making the athenaeum#823/athenaeum#1005 over-cluster diagnosis
+  unfalsifiable from run artifacts. Observability only — no change to
+  clustering behaviour, thresholds, or the fallback's activation
+  conditions:
+  - `athenaeum.search._get_ef` now logs a one-time WARNING (naming the
+    exception class and message) when the chromadb embedding function
+    fails to initialize; `embed_texts` logs its own one-time WARNING when
+    it returns `None`, naming the fallback-hashing embedder as what will
+    produce vectors for callers that need them.
+  - `athenaeum.wiki_dedupe._resolve_wiki_embeddings` logs a one-time
+    WARNING when it engages `clusters._fallback_embeddings`.
+  - `clusters._resolve_embeddings`'s per-run fallback-count line is raised
+    `DEBUG` -> `WARNING` (was invisible at the deployed INFO level).
+  - `Cluster` gains an `embedder` field (`chromadb-default` /
+    `fallback-hashing` / `mixed` / `unknown`) carried through `to_row()`
+    into `raw/_librarian-clusters.jsonl`; the wiki-dedupe `SUPPRESSED` log
+    line now states the embedder that produced the suppressed cluster's
+    vectors. Pre-athenaeum#1032 JSONL rows without the field still
+    deserialize (default `unknown`).
+- **Whole-store adapter seam: `Store` protocol + `FilesystemStore` (athenaeum#976,
+  S1 of the whole-store adapter design lock, athenaeum#911).** New
+  `athenaeum/store.py` (L0/L1) defines `StoreKey`, `ObjectMeta`,
+  `StoreCapabilities`, and the `Store` protocol per
+  `docs/whole-store-adapter-design.md` §6.2, plus `FilesystemStore` — the
+  protocol implemented over `atomic_io` + `pathlib`. `resolve_store_for_class()`
+  is now available alongside the existing `surface_root_for_class()` in
+  `athenaeum.storage`, extending the seam rather than forking it (design note
+  §6.1 D5). A conformance suite (`tests/test_store_conformance.py`) exercises
+  both `FilesystemStore` and a reusable in-memory fake
+  (`tests/store_fakes.InMemoryStore`, load-bearing for later slices S2/S7).
+  **No existing caller is migrated onto the seam in this slice** — this is
+  the seam and its tests only; callers migrate in S2/S3/S7.
+
+- **v6 memory-model measurement pack: shadow-linkage count, backlog price
+  sheet, ordinary-night steady-state table (athenaeum#713).** Three new
+  `athenaeum measure` subcommands the comparator slice (child of athenaeum#709)
+  is gated on, all read-only against the live store (no wiki write, no
+  `_pending_merges.md` mutation, no reindex) and all committing their dated
+  snapshot into `docs/memory-model-measurements.md`:
+  - `athenaeum measure shadow-linkage` — runs the existing complete-linkage
+    formation (`athenaeum.clusters`, athenaeum#681) over the live wiki-page
+    population in shadow mode: embeddings only, zero LLM calls (asserted by
+    test), no writes. Reports cluster count, size distribution, and the
+    count of pairs that would reach the comparator's content-comparison
+    stage — for both the current complete-linkage path and the pre-athenaeum#681
+    single-linkage path, side by side.
+  - `athenaeum measure backlog-price` — prices draining the raw-intake
+    backlog: re-counts the backlog (`athenaeum.intake.discover_raw_files`,
+    never a copied literal), reads measured calls/file and tokens/file from
+    the spend ledger (`athenaeum.drain_advisor`, extended with the new
+    `observed_calls_per_file`), derives wall-clock/file from the operator's
+    `librarian-run-summary` log lines (new `athenaeum.run_summary_log`
+    parser — the spend ledger itself has no elapsed-time field), and prices
+    via the existing per-MTok rate table
+    (`athenaeum.drain_advisor.estimate_drain_cost_usd`). Includes a
+    decision-inflow-rate sensitivity table (5-50 decisions/100 compiled
+    files) showing days-to-terminal-disposition against a configurable
+    human daily decision budget (default 20/day) and flagging a 6-month
+    horizon breach. The "with write-refusal/retention-pack pre-filter"
+    column is reported `n/a` unless an operator supplies
+    `--prefilter-excluded-fraction` — that classifier does not exist yet in
+    this codebase, so its saving is never fabricated.
+  - `athenaeum measure ordinary-night` — builds the ordinary-night
+    steady-state table: measured files/day of intake, calls/file,
+    wall-clock/file, against the ACTUAL configured nightly call budget
+    (`librarian.max_api_calls`, default 800) and wall-clock window
+    (`librarian.max_runtime`, default 3600s) — plus the comparator regime's
+    amortized load as explicit, operator-supplied assumptions (the
+    comparator/TTL/invalidation-wave/audit-sampling subsystems don't exist
+    yet). States a `closes` / `does-not-close` / `indeterminate` verdict
+    up front; when it does not close, lists the three documented options
+    the design lock names WITHOUT auto-selecting one — that remains an
+    explicit operator decision.
+
+  Every figure a real corpus run would need is produced by a named,
+  reproducible command (`athenaeum measure ...`), never a hand-typed table
+  or an ad-hoc session calculation. Where this implementation ran without
+  access to the operator's live `~/knowledge` store, no figure was
+  estimated or fabricated — the instrument ships; the measurement run is
+  handed back to the operator.
+
+- **Verdict ledger with justification basis (athenaeum#712).** New
+  `src/athenaeum/verdicts.py` — an append-only, per-month-partitioned ledger
+  of pairwise comparison verdicts (`duplicate | contradiction |
+  specialization | distinct | underdetermined`), each carrying the exact
+  `basis` of facts (content hashes, coordinates, epochs, authority) it was
+  justified by, so a change to any one fact invalidates exactly the
+  verdicts that depended on it — a truth-maintenance move that ships ahead
+  of the five-verdict comparator that will populate it (a separate, future
+  child of the memory-model v6 epic, athenaeum#709). Content hashing covers
+  claim content only (system-authored coordinates/breadcrumbs/predicate
+  annotations/tier flags are excluded, so the verdict system never
+  triggers its own re-comparison waves). Six targeted, per-basis-element
+  stale-marking rules, each independently testable. Single-appender via
+  the existing `athenaeum.runlock.RunLock` (no second lock). A per-branch
+  comparator-epoch registry enforces no-overlapping-wave and computes the
+  nights-in-wave/nights duty cycle. New CLI surface: `athenaeum verdicts
+  {count,list-by-verdict,show-one-pair,show-stale}`. Ships dark behind
+  `librarian.verdict_ledger_enabled` (default `false`) — with it on, a
+  merge approve/reject via `athenaeum ingest-answers` records a verdict for
+  the decision the pipeline already made, and `athenaeum run`'s finalize
+  phase materializes the ledger and advances the duty-cycle counters. See
+  `docs/configuration.md`'s "Verdict ledger" section. `run()`'s new `lock`
+  parameter is covered end to end (not just at the finalize-phase boundary)
+  by `tests/test_verdicts_run_wiring.py::TestRunEndToEndLockThreading`,
+  which drives the real top-level `run(..., lock=lock)` against an
+  empty-corpus scratch tree and asserts a well-formed ledger with the flag
+  on and no `wiki/_verdicts/` at all with it off.
+
+- **Per-knob provider routing threaded through the librarian pipeline
+  (athenaeum#841, finishing the athenaeum#786 scaffolding).** `llm.providers.<knob>` /
+  `ATHENAEUM_<KNOB>_LLM_PROVIDER` overrides for `classify`, `write`,
+  `resolve`, `reasoning_t1`, and `reasoning_t2` used to be accepted but
+  silently inert on an `athenaeum run` librarian run — the entity/merge
+  pipeline built ONE shared client from the global provider for all five,
+  and a startup warning was the only signal an override had no effect. Each
+  of the five now gets its OWN client, constructed once per DISTINCT
+  resolved provider via a shared `LLMClientCache` (several knobs sharing one
+  provider still construct exactly one client — no behavior change for the
+  common no-override case, which resolves byte-identically to before). The
+  ineffective-override warning is removed; a bad per-knob provider id now
+  fails the run loudly at the same startup preflight gate as the global
+  provider, instead of surfacing later as a raw traceback. `athenaeum spend
+  --by-knob` now shows the real provider split for a mixed-provider
+  librarian run too: when a run's knobs resolve to more than one provider,
+  the run writes one spend-ledger row PER distinct provider (each carrying
+  only that provider's own token/knob/model attribution and correct
+  `billing_mode`) via the new `spend.record_spend_per_knob_provider`,
+  instead of one row assuming a single provider for the whole run. See
+  `docs/configuration.md`'s "Per-knob provider routing" section for the
+  updated "what is actually wired" summary.
+
+- **`athenaeum surface-divergence --field <name>` — the bounce-divergence
+  check generalized into a per-field guard that runs unattended and fails
+  (athenaeum#963).** `bounce-divergence` (athenaeum#853) never failed on a
+  divergence — `report.complete` was the only thing its exit code reflected
+  — and nothing ran it automatically; `do-not-email-divergence`
+  (athenaeum#960) fixed that for its own one field but copied the whole
+  module to do it. `surface-divergence` is one command, registry-driven
+  (`athenaeum.surface_divergence.FieldSpec`): adding a field is registering
+  a descriptor (wiki key, join key, declared allowance), not copying a
+  module. `bounced` and `do_not_email` are both registered; `bounced`'s
+  report numbers and JSON keys are unchanged from `bounce-divergence`'s.
+  Exits non-zero (`3`) when a registered field diverges beyond its declared
+  allowance — `bounced` tolerates a wiki-surface entry with no pii mark
+  (the documented evidence-class asymmetry,
+  `docs/bounce-surface-convergence.md`) but not a pii mark with no wiki
+  entry; `do_not_email` tolerates neither direction. `2` on an unreadable
+  surface, distinct from a genuine divergence. `--report-only` preserves
+  the pre-athenaeum#963 exit-0-unless-unreadable contract for interactive
+  inspection. Reachable from the installed console-script entry point, not
+  only `PYTHONPATH=src python -m athenaeum.cli` — the exact gap athenaeum#963
+  reports for `bounce-divergence` (`tests/test_surface_divergence.py::TestInstalledCli`
+  builds a wheel and installs it fresh to prove it). Wired into `pytest`
+  (and therefore `ci.yml`) against fixture stores; the two prior commands
+  (`bounce-divergence`, `do-not-email-divergence`) are unchanged and still
+  shipped. See `docs/configuration.md` → "Surface-divergence guard
+  (athenaeum#963)" for the operator-invocation contract this registers for
+  an unattended nightly pass against the live store.
+
+### Documentation
+
+- **Design note: standing sensitive-value filter at raw-sweep intake
+  (athenaeum#949).** New `docs/sensitivity-value-routing.md` answers the
+  issue's AC1–AC13 — placement and pointer contract (AC1/AC2), the uid
+  problem and the proposed record-keyed read-path disposition (AC3), the
+  raw-tree observability gap stated as open rather than solved (AC4),
+  disposition of the existing `screen_intake` stage (AC5), per-write-path
+  redaction mechanics (AC6), precedence and fail-closed behavior (AC7/AC10),
+  usage-classification default (AC9), idempotency (AC11), the correlation
+  trade (AC12), the migration story relative to athenaeum#437 (AC13), and
+  the relationship to `pii.RedactionMarker` left as an explicit open
+  question (AC8). Cites a working spike (branch
+  `prototype/949-sensitivity-routing-spike`, not merged and not part of
+  this change) as verification evidence for specific mechanical claims —
+  the note's decisions are proposals for review, not settled by the spike
+  having been built. Implementation is explicitly deferred to the
+  follow-on slices the note's §10 lists — athenaeum#1022 (config resolver),
+  athenaeum#1023 (routing/redaction mechanism), athenaeum#1024
+  (record-keyed read path), athenaeum#1025 (wire into the librarian raw
+  sweep) — filed as separate issues against this note (AC14's filing half;
+  review of the note itself is routed separately). Docs-only; no code
+  changed.
+
+### Fixed
+
+- **The librarian's per-raw-file LLM-call/wall-clock bounds rejected
+  ordinary files instead of catching loopers, and an over-bound file's
+  completed work was discarded wholesale (athenaeum#994).**
+  `resolve_raw_file_max_api_calls` (default `8`) and
+  `resolve_raw_file_max_runtime_seconds` (default `120`, seconds) assumed an
+  ordinary raw file cost roughly 1-3 LLM calls and well under two minutes.
+  Measured reality on the live deployment (2026-08-15/16 nightly logs, api
+  provider) put an ordinary file at 20-46 calls and 300-690 seconds —
+  un-batched `tier3_write` spends one call per entity action — so both
+  bounds sat 3-6x below the median file and rejected normal input rather
+  than catching genuine loopers; two consecutive nights spent over 3,000s
+  and 240+ calls each on `created=0 updated=0 files=0`, redoing the same
+  files at full cost both nights. Defaults are recalibrated to `60` calls
+  and `900` seconds, covering the measured distribution with headroom.
+  Enforcement also moved from post-hoc (checked once, after a whole file's
+  actions had all already run and paid for) to pre-emptive/incremental:
+  `tier3_derive_actions` now checks both bounds after EACH entity action, so
+  a file whose Nth action pushes it over the bound never starts action N+1.
+  The action(s) that completed before the trip now land as durable partial
+  progress — written to disk before the over-budget error propagates,
+  via the new `RawFileOverBudgetError.new_entities` /
+  `pending_updates` / `updated_uids` / `escalations` payload and
+  `librarian._apply_tier3_results` — instead of the entire file's spent
+  work being discarded every time, which is what caused the same file to be
+  redone in full on consecutive nights. The existing quarantine ledger
+  (athenaeum#898) is unchanged and still backstops a file that keeps
+  tripping the bound after it is quarantined out of the discovery set, so a
+  chronically over-bound file is still never retried identically forever.
+
 ## [0.19.0] - 2026-08-15
 
 _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never shipped to PyPI; the last published release was v0.18.1._

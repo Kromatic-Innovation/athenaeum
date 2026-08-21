@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -464,6 +465,33 @@ def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
                 meta[_k] = str(_v)
     body = text[m.end() :]
     return meta, body
+
+
+def resolve_page_type(meta: dict[str, object] | None) -> str:
+    """Return a page's entity class (``type:``), with a documented precedence.
+
+    Issue athenaeum#964: ``type`` appears both top-level (``type: person``, the
+    documented shape) and — on some pages — nested under ``metadata:``
+    (``metadata: {type: person}``). Precedence: a non-empty top-level
+    ``type`` wins; a non-empty ``metadata.type`` is used only when the
+    top-level key is absent/empty; otherwise ``""``. This is the ONE place
+    that precedence is decided — the type-filter code path in
+    :mod:`athenaeum.search` and the entity-class resolver in
+    :mod:`athenaeum.entity_schema` both call this rather than reading
+    ``meta.get("type")`` directly, so a page authored either way is found by
+    the same filter value.
+    """
+    if not meta:
+        return ""
+    top = meta.get("type")
+    if isinstance(top, str) and top.strip():
+        return top.strip()
+    nested = meta.get("metadata")
+    if isinstance(nested, dict):
+        inner = nested.get("type")
+        if isinstance(inner, str) and inner.strip():
+            return inner.strip()
+    return ""
 
 
 def parse_refines(meta: dict[str, object] | None) -> list[str]:
@@ -1073,6 +1101,24 @@ def all_sources_authorized(
     )
 
 
+def delimited_index_string(values: Iterable[str]) -> str:
+    """Serialize a set/list of tokens as a ``|``-delimited, anchored string.
+
+    Issue athenaeum#964 (AC amendment 2): the ONE shared list-valued-field encoding
+    every search backend materializes through, factored out of
+    :func:`audience_index_string` (its original, sole caller) rather than each
+    caller inventing its own delimiter convention. Anchored on both ends so a
+    substring/``LIKE`` test can never cross a token boundary (``|ops|`` never
+    matches ``|opsadmin|``) — the same property :func:`audience_index_string`
+    already relied on. Empty input returns ``"|"`` (the empty-sentinel shape),
+    not ``""``, so a caller can always safely wrap a probe token in ``|...|``.
+    """
+    parts = sorted({v for v in values if v})
+    if not parts:
+        return "|"
+    return "|" + "|".join(parts) + "|"
+
+
 def audience_index_string(meta: dict[str, object] | None) -> str:
     """Serialize a page's effective audience for storage in the search index.
 
@@ -1089,13 +1135,8 @@ def audience_index_string(meta: dict[str, object] | None) -> str:
     metadata so Layer B can filter INSIDE each backend query.
     """
     roles, public = effective_audience(meta)
-    parts: list[str] = []
-    if public:
-        parts.append(AUDIENCE_PUBLIC_TOKEN)
-    parts.extend(sorted(roles))
-    if not parts:
-        return "|"
-    return "|" + "|".join(parts) + "|"
+    parts: list[str] = [AUDIENCE_PUBLIC_TOKEN] if public else []
+    return delimited_index_string(parts + sorted(roles))
 
 
 def audience_string_authorized(
@@ -1155,27 +1196,65 @@ class RawFileTooLargeError(Exception):
 
 
 class RawFileOverBudgetError(Exception):
-    """Raised by :func:`athenaeum.librarian.process_one` when a raw file's
-    LLM-call count or wall-clock spend crosses its per-file bound
-    (issue athenaeum#898).
+    """Raised by :func:`athenaeum.tiers.tier3_derive_actions` when a raw
+    file's LLM-call count or wall-clock spend crosses its per-file bound
+    (issue athenaeum#898, revised athenaeum#994).
 
-    Raised AFTER this file's LLM calls complete (:func:`athenaeum.tiers.tier3_derive_actions`
-    returns) but BEFORE any of this file's disk writes start — no wiki page
-    is created, no existing page is updated, no escalation is written. This
-    is what makes "the over-bound result is discarded" true rather than
-    aspirational: checking the bound only AFTER ``process_one`` returned (the
-    pre-athenaeum#898-review shape) was too late — ``tier3_write``'s update flush and
-    ``process_one``'s own create-write loop had both already landed on disk
-    by then, so "discarding" only skipped the run's create/update bookkeeping
-    and the raw-file unlink, never the writes themselves; the raw file was
-    then reprocessed next run against a wiki that already contained its
-    output. ``bound`` is ``"llm_calls"`` or ``"wall_clock"``.
+    Checked INCREMENTALLY, after each entity action in the file's action
+    list completes — not once, post-hoc, after the whole file's actions have
+    all run. This is what makes the bound pre-emptive rather than post-hoc:
+    a file whose Nth action pushes it over the bound never starts action
+    N+1, so the file's *remaining* LLM spend is the one thing actually
+    prevented (the pre-athenaeum#994 shape checked once at the end, so a file
+    already destined to trip the bound still paid for every one of its
+    actions before the check ever ran).
+
+    ``new_entities`` / ``pending_updates`` / ``updated_uids`` / ``escalations``
+    (athenaeum#994) carry every action that completed BEFORE the bound
+    tripped, in exactly the shape :func:`athenaeum.tiers.tier3_derive_actions`
+    itself returns them on a clean run. The catching caller
+    (:func:`athenaeum.librarian.process_one`) writes these to disk — durable
+    partial progress — before propagating the error, rather than discarding
+    them. This supersedes the athenaeum#898-era contract (preserved verbatim
+    in git history) under which NOTHING from an over-bound file was ever
+    written; that all-or-nothing shape is what caused the same file to be
+    redone in full, at full LLM cost, on consecutive nights (the athenaeum#994
+    diagnosis). The un-started remainder of the file's actions is still
+    discarded — only actions that had ALREADY completed land — and the raw
+    file itself is left on disk exactly as before, so the entity loop's
+    existing quarantine/backoff ledger (unchanged by athenaeum#994) still
+    accumulates a consecutive-violation count and eventually quarantines a
+    file that keeps tripping the bound, rather than reprocessing its
+    unstarted remainder identically forever. ``bound`` is ``"llm_calls"`` or
+    ``"wall_clock"``.
     """
 
-    def __init__(self, ref: str, *, bound: str, detail: str) -> None:
+    def __init__(
+        self,
+        ref: str,
+        *,
+        bound: str,
+        detail: str,
+        new_entities: list[WikiEntity] | None = None,
+        pending_updates: list[tuple[Path, str]] | None = None,
+        updated_uids: list[str] | None = None,
+        escalations: list[EscalationItem] | None = None,
+    ) -> None:
         self.ref = ref
         self.bound = bound
         self.detail = detail
+        # Issue athenaeum#994: partial durable progress — everything derived
+        # (LLM calls already made) before the bound tripped, not yet
+        # written by tier3_derive_actions itself (it never writes) but
+        # ready for the caller to write verbatim.
+        self.new_entities: list[WikiEntity] = new_entities if new_entities is not None else []
+        self.pending_updates: list[tuple[Path, str]] = (
+            pending_updates if pending_updates is not None else []
+        )
+        self.updated_uids: list[str] = updated_uids if updated_uids is not None else []
+        self.escalations: list[EscalationItem] = (
+            escalations if escalations is not None else []
+        )
         super().__init__(f"{ref}: over its {bound} bound — {detail}")
 
 
@@ -1378,6 +1457,36 @@ class WikiEntity:
     model: str | None = None
     on_behalf_of: str | None = None
     asserter: dict[str, object] | None = None
+    # Issue athenaeum#996: the memory-taxonomy axis (athenaeum#424) reaches the WRITE
+    # model. It existed only on the read/validation model (``schemas.WikiBase``)
+    # until now, so no code path could emit it and coverage could only ever be
+    # zero — a backfill without this field would decay at the new-page rate.
+    # Left ``None`` by a caller it is DERIVED from ``type`` in ``__post_init__``
+    # via the adopted rule map, so every newly created page lands classed
+    # without any call site having to know the taxonomy. An explicit value
+    # always wins; an unmapped ``type`` stays ``None`` and renders no key.
+    memory_class: str | None = None
+
+    def __post_init__(self) -> None:
+        # Lazy import: only this one call needs the vocabulary, and
+        # ``memory_class`` is a leaf module (see its docstring for why the
+        # constants do not live in ``schemas``).
+        from athenaeum.memory_class import MEMORY_CLASSES, memory_class_for_type
+
+        if self.memory_class is None or self.memory_class == "":
+            self.memory_class = memory_class_for_type(self.type)
+            return
+        if self.memory_class not in MEMORY_CLASSES:
+            # Warn-and-keep, matching how ``schemas.WikiBase`` treats an
+            # unrecognized value (and the athenaeum#93 ``KNOWN_TYPES`` precedent it
+            # cites): round-trip fidelity beats silently dropping a value the
+            # operator deliberately wrote. The read path warns about it too.
+            warnings.warn(
+                f"unknown memory_class {self.memory_class!r} "
+                f"(recognized: {sorted(MEMORY_CLASSES)})",
+                UserWarning,
+                stacklevel=2,
+            )
 
     @property
     def filename(self) -> str:
@@ -1390,6 +1499,11 @@ class WikiEntity:
             "type": self.type,
             "name": self.name,
         }
+        # Issue athenaeum#996: emitted immediately after ``type`` — the two type
+        # axes read together (docs/memory-taxonomy.md §2). Absent when the
+        # rule map does not decide, never defaulted to a class.
+        if self.memory_class:
+            meta["memory_class"] = self.memory_class
         if self.aliases:
             meta["aliases"] = self.aliases
         meta["access"] = self.access

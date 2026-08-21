@@ -18,7 +18,7 @@ Design:
 - ``validate_wiki_meta`` dispatches a frontmatter dict to the right model
   by ``type``. Unknown types fall through to ``WikiBase`` rather than
   raising — the live wiki has 13+ types (tool, reference, principle,
-  auto-memory, feedback, preference, user, …) and Lane A is not retyping
+  auto-memory, incident, preference, …) and Lane A is not retyping
   them.
 
 Out of scope here (Lane B / athenaeum#90, Lane G / athenaeum#91):
@@ -88,23 +88,21 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+# The ``memory_class`` vocabulary + rule map live in the leaf module
+# :mod:`athenaeum.memory_class` (issue athenaeum#996) so the WRITE model
+# (``models.WikiEntity``) can share them without closing an import cycle
+# through config/pii/storage. Re-exported here because ``MEMORY_CLASSES`` has
+# been importable from this module since athenaeum#424 and consumers
+# (merge_type_gate, reasoning_tiers, axiom_governance, _lint) import it that
+# way — moving it must not break them.
+from athenaeum.memory_class import (  # noqa: F401 — re-exported, see above
+    MACHINE_ASSIGNABLE_MEMORY_CLASSES,
+    MEMORY_CLASSES,
+    TYPE_TO_MEMORY_CLASS,
+    memory_class_for_type,
+)
 from athenaeum.pii import CONTACT_FRONTMATTER_FIELDS, is_pii_flagged
 from athenaeum.provenance import validate_field_sources, validate_source_value
-
-#: The 7 recognized ``memory_class:`` values (issue athenaeum#424). Deliberately does
-#: NOT include ``open-question`` / ``hypothesis`` — the settled taxonomy
-#: defers those rather than over-minting classes up front.
-MEMORY_CLASSES: frozenset[str] = frozenset(
-    {
-        "fact",
-        "guideline",
-        "axiom",
-        "reference",
-        "entity",
-        "decision",
-        "procedure",
-    }
-)
 
 
 class WikiBase(BaseModel):
@@ -309,15 +307,25 @@ _BY_TYPE: dict[str, type[WikiBase]] = {
 # :class:`WikiBase` for validation; the allowlist exists so unknown
 # types (typos, drift) emit a warning instead of being silently
 # accepted. See issue athenaeum#93.
+#
+# Issue athenaeum#971 (follow-up to the ``_schema/types.md`` reconciliation in
+# athenaeum#970): ``incident`` added — the 10th declared type per athenaeum#970's audit, absent
+# here meant every incident page warned as "unknown". ``user`` and
+# ``feedback`` REMOVED — athenaeum#970 folds them (``user`` -> ``preference``); they
+# stay non-raising (fall through to the ordinary "unknown wiki type"
+# :class:`UserWarning` below, same as any other out-of-registry value, never
+# an exception — a page in the wild with ``type: user`` keeps validating) but
+# no longer count as a currently-valid type for a NEW write, which is what
+# lets :func:`athenaeum.corrections.process_correction_record` gate a create
+# against the fold (see that module's ``valid_types`` check).
 FALLBACK_TYPES: frozenset[str] = frozenset(
     {
         "auto-memory",
         "tool",
         "reference",
         "principle",
-        "feedback",
         "preference",
-        "user",
+        "incident",
     }
 )
 

@@ -159,7 +159,32 @@ The wiki itself never grows an in-tree "archived" marker page for this —
 `athenaeum decay-sweep` (`athenaeum.decay_sweep`) periodically `git rm`s an
 expired `bucket: daily` page from the live tree (never `weekly`/`durable`/
 unbucketed), leaving it recoverable from git history. Dry-run by default,
-same shape as `athenaeum auto-memory prune`.
+same shape as `athenaeum auto-memory prune`. Every archived page also gets a
+durable sweep-ledger record (`_decay_sweep_records.jsonl`, cache dir, never
+the wiki corpus) — which page, why, when, and the recovering commit SHA —
+and the sweep refuses to archive at all if that ledger write fails (issue
+athenaeum#969).
+
+**The expired-`daily` exemption is the SOLE exemption from the fail-closed
+expiry filter (issue athenaeum#969).** `_is_recall_inactive`'s divergence
+from `is_inactive_memory`, above, is scoped to exactly one condition —
+`bucket: daily` AND expired — and nothing else. Every other case the §8.3
+"currently-valid-by-default" filter governs (`docs/provenance-shape.md`
+§8.3) — a superseded/deprecated page, an expired `weekly`/`durable`/
+unbucketed page — stays hard-excluded exactly as before. There is no second
+carve-out anywhere in the recall path; a future one needs its own issue and
+its own review of this invariant, not a quiet extension of this one.
+
+**Swept ≠ cold.** Do not conflate this section's sweep with the memory
+model's planned cold tier (`embedded: false`, the storage-adapter
+`corpus_policy` bit — `docs/whole-store-adapter-design.md` §8 "Surface 1").
+A COLD page stays on disk in the live wiki tree: it is excluded from the
+FTS5/vector index, but it remains reachable through `KeywordBackend`'s
+full-corpus scan (`cheap_local_scan` — a deep-recall path that does not
+depend on the index). A SWEPT page has been `git rm`'d out of the live tree
+entirely (above): it has no recall path at all, indexed or not — the only
+way back is `git show`/`git log` against the recovering commit the sweep
+ledger records, never a `recall()` call of any kind.
 
 ## Handle-shaped queries — exact reverse lookup, not similarity search (athenaeum#907)
 
@@ -191,6 +216,254 @@ decision is the caller's own policy, applied over the facts this module
 returns. Access control (who may set `with_pii`, or call `recall` at all) is
 a separate, deferred question (athenaeum#864); this module implements
 neither.
+
+## Type filter, config-derived tool schema, and entity-class discovery (athenaeum#964)
+
+`recall` (the MCP tool and the `athenaeum recall` CLI) accepts an optional
+**`type`** filter that narrows the search to one or more entity classes (a
+page's `type:`). It is the alternative to a per-kind API (a `people`
+endpoint, a `companies` endpoint, ...) — one generalizable argument instead
+of a proliferating set of typed interfaces, matching the ratified
+`athenaeum-one-ladder-no-typed-interfaces` position already applied to the
+resolve/read half of the interface (athenaeum#883/#885/#886).
+
+**Contract:**
+
+- Omitting `type` (the default, `None`) searches every class — byte-identical
+  to the pre-athenaeum#964 behavior.
+- The value is an **opaque, operator-defined string** — it is NEVER validated
+  against `wiki/_schema/types.md`. A corpus can carry a class that isn't
+  declared there at all (`auto-memory` is exactly such a class on the live
+  corpus, per the issue's own evidence), and a filter on it still works.
+- An unrecognized value does NOT error and does NOT read as a silent "nothing
+  matched": the response names the deployment's actual entity classes
+  alongside the empty result, so a typo is always diagnosable from the
+  response itself.
+- The predicate is pushed **INSIDE** every backend's query — before
+  ranking/top-k is selected, never post-filtered on the result list — the
+  same rule athenaeum#312's `caller_audience` predicate already follows. A backend
+  that only post-filtered would silently return too few (or wrongly-ranked)
+  results once a filtered class fell outside the unfiltered top-k.
+
+**Per-backend implementation:**
+
+| Backend | Storage | Predicate |
+|---|---|---|
+| `keyword` | none (scans frontmatter live) | checked before scoring, so a non-matching page never enters the candidate list |
+| `fts5` | a `type UNINDEXED` column (same shape as the existing `audience` column) | `AND type IN (...)` in the `WHERE` clause, before `ORDER BY rank LIMIT` |
+| `vector` | a `type` key in chromadb metadata | a native `where=` clause, composed with the existing `filename` exclusion via `$and` so a call passing both honors both |
+
+**Frontmatter precedence.** `type` appears both top-level (`type: person`,
+the documented shape) and, on some pages, nested under `metadata:`
+(`metadata: {type: person}`). `athenaeum.models.resolve_page_type` is the
+ONE place this precedence is decided — top-level wins, `metadata.type` is
+the fallback — and every `type`-column/metadata writer (FTS5's `_row_for`,
+the vector backend's `_add_records`) and the entity-class resolver all call
+it, so a page authored either way is found identically by every backend.
+
+**Index rebuild.** Because the athenaeum#370 stat pre-filter skips re-reading an
+unchanged file's frontmatter, adding a filterable field to the metadata
+contract does not "just work" on the next ordinary incremental build — an
+untouched page would silently keep serving its old (type-less) metadata
+forever. Both indexed backends carry a metadata-schema version stamp checked
+before every incremental build: FTS5 reuses its existing
+`_SCHEMA_VERSION`/`PRAGMA user_version` mechanism (bumped 2 → 3); the vector
+backend gained an equivalent `metadata_schema_version` manifest key (new at
+2). A mismatch — including a pre-athenaeum#964 manifest carrying no such key at
+all — forces a FULL rebuild rather than being incrementally reused, so every
+page picks up the new column/key exactly once. The operator's own ratified
+direction for this migration: *"I genuinely don't care if we have to
+rebuild ... plan for the long term and generalized use case"* — a full
+rebuild is CPU-only (the embedding model runs locally, no API spend) and is
+the sanctioned migration path, not a fallback.
+
+**Full-rebuild wall time — PENDING host-side measurement.** The issue asks
+for a measured (not predicted) full-rebuild wall time on the live corpus
+(22,797 wiki pages at the time the issue was filed) on the vector backend.
+This PR was built in a sandboxed lane with no access to the operator's real
+`~/knowledge` corpus and no network egress to chromadb's embedding-model
+download endpoint, so that measurement could not be produced here — a
+fabricated number would be worse than an honest gap. Run once, post-merge,
+against the live corpus:
+
+```
+time athenaeum reindex --full --backend vector
+```
+
+and replace this paragraph with the observed wall time.
+
+**Related-record identity.** Each recall hit now always renders `**Uid:**`
+and `**Type:**` (unlike the omit-at-default athenaeum#325 header — "go dig
+further" is the point, so these are never hidden), plus a `**Links:**` line
+listing the page's outbound `[[wikilink]]` targets when it has any (omitted
+entirely when it has none). This closes the identity gap the issue's own
+evidence named: previously the only way to reach `read_entity` from a hit was
+to string-parse the `<uid>-<slug>.md` filename. Inbound backlinks are
+explicitly OUT of scope — serving them needs a new index this issue does not
+build; see the issue's own "Out of scope" section.
+
+**Entity-class discovery — the `entity_schema` MCP tool.** The ONE new MCP
+tool this issue adds (deliberately the only addition — "the only other
+endpoint or MCP tooling we should be adding is schema queries," per the
+operator's ratified direction). Call it before narrowing with `type=...` when
+the deployment's classes aren't already known. It reports, per class:
+
+- `count` — live pages this caller may read (fail-closed audience-scoped,
+  same predicate as `recall` itself).
+- `declared` — present in `wiki/_schema/types.md`.
+- `observed` — at least one live page carries this class.
+- `fields` — the union of frontmatter KEYS its pages carry. Keys only, never
+  values, and any key routed to an excluded surface (e.g. inline `emails`)
+  is omitted entirely rather than listed — the tool can never become a
+  "which PII fields exist" oracle.
+
+`declared` and `observed` are reported independently rather than reconciled:
+the two CAN legitimately drift (an operator adds a class to the corpus before
+updating `types.md`, or the reverse), and this tool's job is to make that
+drift visible at the protocol level, not to paper over it — reconciling
+`types.md` itself is a separate, out-of-scope corpus-repair job.
+
+`queryable_fields` reports exactly the fields `recall`'s filter arguments
+implement today — `["type"]`. It must never advertise a field no filter
+actually honors.
+
+**Config-derived tool schema, computed once.** `recall`'s `type` parameter
+description — and `entity_schema`'s whole answer — are computed from the SAME
+resolver (`athenaeum.entity_schema.resolve_entity_classes`) at
+`create_server()` time, from THIS deployment's own `wiki/_schema/types.md`
+and corpus, not from a hardcoded literal in source. A deployment with no (or
+an empty) `types.md` degrades to the observed classes / the collapsed
+fallback set (`athenaeum.schemas.KNOWN_TYPES` — see below) rather than
+failing to register the tool at all.
+
+This is computed **once**, at server construction — not per call. A
+`types.md` edit takes effect on the **next server start**. This is a
+deliberate choice, not a limitation: the installed protocol
+(`mcp` at `2025-11-25`) supports `notifications/tools/list_changed` for live
+schema invalidation, and nothing in this implementation precludes wiring that
+up later — it is simply out of scope for this issue.
+
+**One fallback source of truth.** Two independently-drifted "fallback entity
+types" lists used to exist — `athenaeum.librarian.FALLBACK_TYPES` (a list,
+used when `types.md` is missing at compile time) and
+`athenaeum.schemas.FALLBACK_TYPES` (a frozenset, used to build
+`KNOWN_TYPES` for the athenaeum#93 unknown-type warning). They are collapsed to
+one: `athenaeum.schemas.KNOWN_TYPES`, which the entity-class resolver AND
+`librarian.py`'s compile-time fallback both now read directly. `librarian.py`
+no longer defines its own copy.
+
+## Generalized ENUMERATION primitive (athenaeum#965)
+
+`recall` narrows a **relevance-ranked** search — it always needs query text
+to rank against. Even with athenaeum#964's `type` filter, it structurally
+cannot answer "give me every entity of type X whose field Y matches,
+ordered by field Z": there is no X to rank. `enumerate_entities` (the MCP
+tool) / `athenaeum enumerate` (the CLI) is that different primitive —
+**why a separate primitive, not an argument on `recall`**: every one of
+`recall`'s three backends (`keyword`, `fts5`, `vector`) either returns
+nothing or returns meaningless neighbours for empty/no query text (see the
+"Type filter..." section above and issue athenaeum#965's own evidence) —
+enumeration is not a missing argument, it is a code path that must never
+touch query-text ranking at all. It takes a declared entity type, zero or
+more field predicates, a sort key, and a limit — and no query string.
+
+**Contract:**
+
+- `entity_type` is **required** — there is no "enumerate everything" mode.
+  An unrecognized value does not error: the response's `known_classes`
+  names what this deployment DOES declare/observe (the exact same "escalate
+  rather than reject" rule `recall`'s `type` filter already follows),
+  computed from the SAME resolver (`athenaeum.entity_schema.resolve_entity_classes`,
+  issue athenaeum#964) — never a second, independently-drifting list.
+- Zero or more `predicates`, AND-combined. Each names one field — or an
+  **ordered fallback list of fields**, OR-combined (the generalized form of
+  `athenaeum people --company`'s `current_company` /
+  `linkedin_company_at_connect` shape) — and a match kind: `eq` (exact),
+  `substring`, or `regex`, all case-insensitive. `ne` is `eq` negated (e.g.
+  `do_not_email != true`), not a fourth independent kind.
+- A caller-named `sort_key` (any frontmatter field), descending by default.
+  Ties — including an entire class sharing one sort value — are always
+  broken by `uid` ascending, regardless of sort direction. Values that parse
+  as numeric sort numerically; everything else (including a missing value)
+  sorts as its lowercased string form.
+- `limit` with a sane default (50, matching `athenaeum people`'s own
+  default), `0` = unlimited (matching that same command's `--limit 0`).
+  Pagination is an opaque continuation `cursor` from a prior call's
+  `next_cursor`; a cursor is only valid for the exact
+  `(entity_type, sort_key, descending)` triple it was minted under.
+- Every hit carries `uid`, `type`, `name`. A caller may request additional
+  declared `fields` per hit; a field absent on a given page is included as
+  `null`, never silently omitted, so every hit has the same shape.
+- `google_contact_*` and `do_not_email` are usable as predicates AND as
+  requested output fields, gated behind `with_pii=True` — the SAME flag
+  contract `recall(with_pii=...)` already uses. Referencing either without
+  the flag raises (CLI: nonzero exit + message; MCP: an `error` key in the
+  response) rather than silently omitting the field.
+- Fail-closed audience scoping (issue athenaeum#538), identical to every other
+  read tool: a restricted `caller_audience` never enumerates a page it may
+  not read.
+
+**Backend.** Enumeration reads the converged filterable-metadata store
+athenaeum#964 built: `FTS5Backend.candidates_by_type` runs a plain indexed
+`WHERE type = ?` against the SQLite `wiki` table's `type UNINDEXED` column —
+the SAME column `recall`'s `type_filter` predicate already applies — never
+FTS5 `MATCH`/BM25 ranking. That table has only seven columns (`filename`,
+`name`, `tags`, `aliases`, `description`, `audience`, `type`); it does not,
+and per the issue's "no new index structures" constraint must not, carry
+arbitrary frontmatter fields like `current_company` or `do_not_email`. So
+the type column narrows the **candidate set** to pages of the requested
+type — bounded, not a corpus-wide scan — and `athenaeum.enumeration` reads
+each candidate's frontmatter fresh from disk for predicate evaluation, the
+sort key, output field selection, and the fail-closed audience re-check.
+This is the same "trust the index for narrowing, re-read fresh frontmatter
+for content and authorization" pattern every other read layer in this
+codebase already uses (`recall`'s own Layer C, `cmd_recall`,
+`entity_schema`'s field-key scan) — not a second, independently-drifting
+full-corpus scanner duplicating the `keyword` backend's traversal (the
+issue's original Plan step 2, superseded by the 2026-08-20 AC amendment that
+named this backend explicitly).
+
+**Pagination cursor.** An opaque, base64-encoded JSON payload:
+`{entity_type, sort_key, descending, sort_tuple, uid}` — the exact sort
+position of the last-returned hit. Stable because ordering is always fully
+determined by `(sort_tuple, uid)`: primary sort ascending/descending by the
+caller-named field, secondary always `uid` ascending (a stable double sort —
+sort by `uid` first, then by the primary key with a stable algorithm,
+so ties retain their `uid`-ascending relative order regardless of
+direction). Resuming re-derives the full candidate/predicate/sort
+computation and skips forward to the position after the cursor's
+`(sort_tuple, uid)` — a best-effort continuation over a live corpus (not a
+frozen snapshot): a stale cursor (its row no longer matches, or was
+deleted) resumes from the start rather than raising. A cursor presented
+against a different `(entity_type, sort_key, descending)` than it was
+minted under raises/errors rather than silently returning nonsense.
+
+**PII-gated fields — scoping note.** `google_contact_*` and `do_not_email`
+are read from the SAME on-page frontmatter as every other field — this is
+NOT `recall(with_pii=True)`'s excluded-surface RECORD JOIN (which resolves
+values from an off-corpus contact store for one hit at a time via
+`pii.assemble_excluded_read`). Enumeration's job is discovery — which
+`uid`s match — not the deep per-entity contact read; a caller that needs
+the full excluded-surface record for an enumerated hit still follows up
+with `recall(with_pii=True)` or `read_entity` by the returned `uid`. What
+`with_pii=True` adds here is narrower and cheaper: it is the access GATE on
+these two specific field names (as predicate or output), matching the flag
+CONTRACT `recall` uses, not its join mechanism.
+
+**Capability parity with `athenaeum people`.** This issue does not
+deprecate or change `athenaeum people` (that is athenaeum#966). Per surface:
+
+| `athenaeum people` surface | Generalized `enumerate` expression | Notes |
+|---|---|---|
+| `--company SUBSTR` (repeatable, AND; matches `current_company` OR `linkedin_company_at_connect`) | `--where current_company,linkedin_company_at_connect:substring:SUBSTR` (repeatable) | Reproduced exactly — the ordered-fallback-field predicate generalizes this shape by construction. |
+| `--tag VALUE` (repeatable, AND; exact match) | `--where tags:eq:VALUE` (repeatable) | Reproduced — `tags` is a list field; `eq` matches if any list element equals `VALUE`. |
+| `--tier VALUE` (sugar for `--tag tier:VALUE`) | `--where tags:eq:tier:VALUE` | Reproduced, minus the shorthand — the caller spells out `tier:VALUE` itself; no special-cased flag. |
+| `--title-regex PATTERN` (repeatable, AND) | `--where current_title,linkedin_position_at_connect:regex:PATTERN` (repeatable) | Reproduced exactly. |
+| `--company-regex PATTERN` (repeatable, AND) | `--where current_company,linkedin_company_at_connect:regex:PATTERN` (repeatable) | Reproduced exactly. |
+| Default order: `warm_score` desc | `--sort warm_score` (descending is `enumerate`'s own default) | Reproduced exactly, with ZERO special-casing — `warm_score` is itself a plain stored frontmatter field (`cmd_people` reads it with a bare `meta.get("warm_score")`); `enumerate`'s generic sort mechanism handles it identically to any other field. This is the intended generalization, not a coincidence. |
+| `--top-touch N` (switches order to `meeting_count_24mo*3 + sent_count_24mo`, top N) | **Dropped.** | A genuinely COMPUTED composite with no single backing frontmatter field — the exact shape AC amendment 3 names as out of scope ("computed orderings ... are out of scope here"). A caller wanting this still uses `athenaeum people --top-touch`. |
+| `--limit N` (`0` = unlimited) | `--limit N` (`0` = unlimited) | Reproduced exactly, same semantics. |
+| `--format table\|tsv` | **Dropped.** `enumerate` prints one JSON document. | Presentation-layer concern outside a generalized primitive's scope; JSON is the strictly more general shape a caller can render as either table or TSV itself. |
 
 ## Load-bearing invariants
 
