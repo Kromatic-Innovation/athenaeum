@@ -326,7 +326,7 @@ athenaeum surface-divergence --field do_not_email --path ~/knowledge
 | Field | Registered by | Tolerated residual |
 |---|---|---|
 | `bounced` | issue athenaeum#853 | Wiki-surface entries with no pii mark are TOLERATED — the documented evidence-class asymmetry, [bounce-surface-convergence.md](bounce-surface-convergence.md). Pii marks with no wiki entry are NOT tolerated (zero). |
-| `do_not_email` | issue athenaeum#960 | Zero, in either direction — one operator-directed fact with one meaning. |
+| `do_not_email` | issue athenaeum#960 | The excluded surface newly carrying the field (`marked_on_excluded_not_wiki`) is NOT tolerated (zero). The wiki carrying a mark the excluded surface does not (`marked_on_wiki_not_excluded`) is the design's only legal steady state and is TOLERATED — the wiki page is the sole authoring surface; athenaeum#960's design forbids backfilling marks onto the excluded surface (narrowed by athenaeum#1039, which had alerted on this legal state). |
 
 Exit codes (shared with `bounce-divergence` / `do-not-email-divergence`):
 `0` clean (or `--report-only`, which reports and never fails on divergence —
