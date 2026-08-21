@@ -18,7 +18,6 @@ from athenaeum.config import load_config
 from athenaeum.librarian import reindex
 from athenaeum.pii_restore import MARKER
 from athenaeum.search import query_fts5_index
-
 from tests.test_pii_restore_tool import _build_fixture_repo
 
 
