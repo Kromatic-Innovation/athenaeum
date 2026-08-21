@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Anchored PII-restore repair tooling: rename-following + retro-filename
+  history lookup (athenaeum#1037, repairs the tool athenaeum#691's 2026-08-20 operator
+  lane found blind to 673/844 markers).** New `athenaeum pii-restore` CLI
+  (`src/athenaeum/_cmd_pii_restore.py`) over a new library module
+  (`src/athenaeum/pii_restore.py`), implementing the two methods
+  athenaeum#691 demonstrated instead of the preserved script's whole-file `difflib`
+  alignment (which fragments a marker's opcode the moment a librarian
+  reshape or a rename touches the page):
+  - **Anchored restore with rename-following** — recovers each marker's
+    pre-image by matching a small line-local anchor against the page's own
+    `git log --follow` history, so a page renamed since the migration is
+    still found under its old path(s).
+  - **Retro-filename class** — resolves a corrupted
+    `retros/<timestamp>--<issue-list>.md` citation by timestamp-key lookup
+    into `raw/retros/`'s own git-add history, independent of any per-page
+    diff and reachable even after the raw file has rotated out of the
+    working tree.
+  - Dry-run is the default; `--apply` is explicit. Dry-run reports per-class
+    counts split by method, and every residue reason is named (never a
+    silent skip) — `kept:real-pii`, `no-pre-image:page-created-after-
+    migration` (the reshaped/propagated-corruption class), `no-pre-
+    image:context-not-found`, `retro-filename:not-found-in-history`.
+  - **PII safety pins are in the write path, not only in tests:** every
+    restoration routes through one choke point (`_classify_or_refuse`) that
+    fails closed on an unrecognized token — the person-contact email/phone
+    axes are never restored regardless of flags; a hand-built plan that
+    tries to bypass classification under a forged class label is still
+    refused, because the token is re-classified at write time. The tool
+    refuses to write under an `excluded/` path component. The
+    migrated-address population (`athenaeum.pii.iter_contact_records`) is
+    counted before and after every apply and the apply raises
+    (`PiiRestoreSafetyError`) if it moved.
+  - `--apply --reindex` rebuilds the search index (matching `storage
+    migrate-pii`'s own `--reindex` convention) so restored text is
+    reachable via `recall`; without `--reindex` the command prints the same
+    "still carries the pre-restore text" instruction `migrate-pii` does.
+  - Fixture-only test coverage (`tests/test_pii_restore_tool.py`,
+    `tests/test_cmd_pii_restore.py`): a synthetic corpus with its own
+    throwaway git history covering a renamed page, a reshaped
+    (propagated-corruption) page, and a retro-filename case, plus the
+    email/phone safety-pin and over-restore-refusal cases. No test touches
+    a live store — the live-store run stays athenaeum#691's `~operator` job.
 - **`athenaeum repair --bounce-fold`: CLI surface for athenaeum#850's
   bounce-fold path (athenaeum#1006).** Exposes
   `find_orphaned_bounce_marks`/`fold_orphaned_bounce_marks` as a new mode in
