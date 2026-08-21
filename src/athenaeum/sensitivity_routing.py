@@ -395,23 +395,35 @@ def route_sensitive_values(
             "closed rather than leaving the value unredacted"
         )
 
+    # The unresolvable check above raised on any None span, so every
+    # remaining match's span is guaranteed non-None here — but that's a
+    # runtime invariant across a list, which mypy cannot infer from the
+    # aggregate `if unresolvable: raise`. Narrow explicitly, once, so the
+    # rest of the function works with plain (start, end) tuples instead of
+    # re-reading the Optional `m.match.span` at each use site.
+    resolved: list[tuple[int, int, ClassifiedMatch]] = []
+    for m in routable:
+        span = m.match.span
+        assert span is not None, (
+            "unresolvable (None-span) matches were raised above"
+        )
+        resolved.append((span[0], span[1], m))
+
     # AC7: deterministic precedence for overlapping / multiply-classified spans.
-    ordered = sorted(routable, key=lambda m: (m.match.span[0], m.sensitivity_class))
-    kept: list[ClassifiedMatch] = []
+    ordered = sorted(resolved, key=lambda t: (t[0], t[2].sensitivity_class))
+    kept: list[tuple[int, int, ClassifiedMatch]] = []
     last_end = -1
-    for m in ordered:
-        start, end = m.match.span
+    for start, end, m in ordered:
         if start < last_end:
             continue
-        kept.append(m)
+        kept.append((start, end, m))
         last_end = end
 
     # Write every vault record BEFORE mutating any text, so a failure partway
     # through never leaves some values pointered and others still embedded
     # in a half-redacted string (AC10/AC11).
     pointers: dict[tuple[int, int], str] = {}
-    for m in kept:
-        start, end = m.match.span
+    for start, end, m in kept:
         value = text[start:end]
         try:
             pointer = _route_one(
@@ -439,8 +451,7 @@ def route_sensitive_values(
         pointers[(start, end)] = pointer
 
     redacted = text
-    for m in sorted(kept, key=lambda m: m.match.span[0], reverse=True):
-        start, end = m.match.span
+    for start, end, _m in sorted(kept, key=lambda t: t[0], reverse=True):
         redacted = redacted[:start] + pointers[(start, end)] + redacted[end:]
     return redacted
 
