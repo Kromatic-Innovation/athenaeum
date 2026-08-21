@@ -14,21 +14,49 @@ classes (email, phone) in already-composed text. It does NOT own egress
 stays parked on athenaeum#428 and is deliberately NOT attempted here: no policy
 judgment, no network, no live-store access, no LLM call.
 
-**Layering:** L3 service. Imports nothing but :mod:`athenaeum.pii` (a sibling
-L3 module) at module scope — reuses its compiled ``_EMAIL_RE`` / ``_PHONE_RE``
-patterns (and its digit-count floor) rather than a second, driftable copy, so
-the detection patterns change in exactly one place. Consumed by
+**Layering:** L3 service. Imports :mod:`athenaeum.sensitivity` (a sibling L3
+module) at module scope for :func:`~athenaeum.sensitivity.classify` — detection
+is obtained through the registry rather than importing
+:mod:`athenaeum.pii`'s private compiled patterns directly (issue athenaeum#992;
+see "Migrated onto the sensitivity registry" below). Consumed by
 :mod:`athenaeum.provider` (redacting a CLI error envelope before it reaches a
 log line) and the ``athenaeum outbound-lint`` CLI.
 
 Relationship to :mod:`athenaeum.pii` (the athenaeum#427 corpus-hygiene slice): that
 module lints *entity pages that stay in the corpus* for inline contact data.
 This module lints *outbound-destined text about to leave the system*. They are
-different surfaces with different lifecycles, so they are separate modules — but
-they share ONE definition of "what an email/phone looks like": this module
-reuses :mod:`athenaeum.pii`'s compiled ``_EMAIL_RE`` / ``_PHONE_RE`` patterns
-(and its digit-count floor) rather than defining a second, driftable copy. If
-the detection patterns ever need to change, they change in one place.
+different surfaces with different lifecycles, so they are separate modules —
+but detection shares ONE definition of "what an email/phone looks like":
+:mod:`athenaeum.sensitivity`'s built-in ``email``/``phone`` recognisers, which
+themselves iterate :mod:`athenaeum.pii`'s compiled ``_EMAIL_RE`` / ``_PHONE_RE``
+patterns. If the detection patterns ever need to change, they change in one
+place.
+
+**Migrated onto the sensitivity registry (issue athenaeum#992).** This module used
+to import :mod:`athenaeum.pii`'s private ``_EMAIL_RE`` / ``_PHONE_RE`` /
+``_has_enough_digits`` / ``_is_excluded_phone_shape`` directly — never
+:func:`~athenaeum.pii.find_inline_emails`/:func:`~athenaeum.pii.find_inline_phones`
+(``docs/sensitivity-class-vocabulary.md`` §2.1/§9 previously claimed
+otherwise; that claim is corrected in this PR). Migration was viable because
+:mod:`athenaeum.sensitivity`'s built-in recognisers populate
+``SensitivityMatch.span`` (the design note's S1a span decision), which
+redaction requires. :func:`scan_outbound_text` now calls
+:func:`athenaeum.sensitivity.classify` with ``config=None`` (this module has
+no config surface of its own — every call site is unconditional) and applies
+the SAME two policies it always applied on top of raw detection: (1) a phone
+match whose span overlaps an email match is dropped
+(``test_email_containing_digits_is_not_double_counted_as_phone``), and (2)
+the allowlist filter. One deliberate, enumerated behavioural
+difference: the built-in ``phone`` recogniser additionally suppresses a
+digit run the surrounding prose already types as a labeled record id
+(:func:`athenaeum.pii._has_labeled_identifier_prefix`, issue athenaeum#732) — a
+suppression :func:`scan_outbound_text` did not previously apply. No existing
+fixture exercises a labeled-identifier-prefixed phone-shaped token in outbound
+text, so ``redact_outbound_text``'s output is byte-identical to pre-change on
+the full existing fixture corpus (see ``TestOutboundPiiUnchangedOnFixtures``
+in ``tests/test_outbound_pii.py``); the difference is a strict convergence
+with the corpus-lint's already-shipped athenaeum#732 fix, not a new suppression
+invented for this module.
 
 Allowlist / fail-safe (the "isn't already known to the recipient" qualifier in
 athenaeum#428): a caller that can establish an address is already known to the recipient
@@ -51,18 +79,10 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-# Single source of truth for the detection patterns: reuse athenaeum#427's compiled
-# regexes and digit floor rather than defining a second copy that could drift.
-# These are module-private in athenaeum.pii, but sharing one definition of
-# "what an email/phone looks like" across the two lints is the explicit intent
-# (see the module docstring), and importing them here creates no cycle —
-# athenaeum.pii does not import this module.
-from athenaeum.pii import (
-    _EMAIL_RE,
-    _PHONE_RE,
-    _has_enough_digits,
-    _is_excluded_phone_shape,
-)
+# Single source of truth for detection: the sensitivity registry's shipped
+# `email`/`phone` recognisers (issue athenaeum#992). Importing sensitivity here
+# creates no cycle — it does not import this module.
+from athenaeum.sensitivity import classify
 
 #: The two PII classes this lint recognizes (the two athenaeum#428 names). Exposed as
 #: constants so callers/tests match on a symbol rather than a bare string.
@@ -191,9 +211,15 @@ def scan_outbound_text(text: str, *, allowlist: Allowlist | object = None) -> li
 
     Detects emails first, then phone numbers that do NOT overlap an email match
     (so ``5551234567`` inside ``jo.5551234567@x.com`` is reported once, as the
-    email, not twice). Phone candidates below the digit floor are dropped, so
-    ordinary digit runs (years, issue numbers, counts) do not false-positive,
-    and email detection requires a dotted TLD so ``@handle`` mentions and
+    email, not twice). Detection is obtained through
+    :func:`athenaeum.sensitivity.classify` (issue athenaeum#992) — the shipped
+    ``email``/``phone`` recognisers, which already apply the digit-count floor
+    and the provably-not-a-phone exclusion (ISO dates, year ranges, bare id
+    fragments — issue athenaeum#683) that this module always relied on, plus one
+    additional suppression this module did not previously have (a
+    labeled-identifier-prefixed digit run, issue athenaeum#732 — see this
+    module's docstring for why that is a deliberate, harmless convergence).
+    Email detection requires a dotted TLD so ``@handle`` mentions and
     ``@decorator`` names do not false-positive.
 
     Findings naming an address in *allowlist* (already known to the recipient)
@@ -204,33 +230,32 @@ def scan_outbound_text(text: str, *, allowlist: Allowlist | object = None) -> li
     source = text or ""
     line_starts = _line_starts(source)
 
+    classified = classify(text=source, config=None)
+
     findings: list[PiiFinding] = []
     email_spans: list[tuple[int, int]] = []
 
-    for m in _EMAIL_RE.finditer(source):
-        start, end = m.start(), m.end()
+    for cm in classified:
+        if cm.match.recognizer != PII_KIND_EMAIL:
+            continue
+        assert cm.match.span is not None  # built-in recognisers always set span
+        start, end = cm.match.span
         email_spans.append((start, end))
         line, column = _locate(start, line_starts)
         findings.append(
-            PiiFinding(PII_KIND_EMAIL, m.group(0), start, end, line, column)
+            PiiFinding(PII_KIND_EMAIL, cm.match.value, start, end, line, column)
         )
 
-    for m in _PHONE_RE.finditer(source):
-        token = m.group(1)
-        if not _has_enough_digits(token):
+    for cm in classified:
+        if cm.match.recognizer != PII_KIND_PHONE:
             continue
-        # Drop shapes that are provably not a phone (ISO dates, year ranges,
-        # bare id fragments) — robust to a leading '+'/'(' the regex folds into
-        # its group. Shared with athenaeum.pii.find_inline_phones (issue athenaeum#683)
-        # so the egress lint no longer over-flags a parenthesized date/uid.
-        if _is_excluded_phone_shape(token):
-            continue
-        start, end = m.start(1), m.end(1)
+        assert cm.match.span is not None  # built-in recognisers always set span
+        start, end = cm.match.span
         if any(start < e and s < end for s, e in email_spans):
             continue  # digits living inside an email match; already reported
         line, column = _locate(start, line_starts)
         findings.append(
-            PiiFinding(PII_KIND_PHONE, token, start, end, line, column)
+            PiiFinding(PII_KIND_PHONE, cm.match.value, start, end, line, column)
         )
 
     findings.sort(key=lambda f: f.start)
