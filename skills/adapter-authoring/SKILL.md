@@ -18,6 +18,32 @@ This skill file ships inside the published `athenaeum` package (under `skills/`)
 the contract doc and example live in the repository and the source distribution
 (links above), so it stays self-contained however it was installed.
 
+**Not the same thing as a store adapter.** This skill is about a **source**
+adapter — turning external data into `raw/` intake files, per
+`docs/adapter-contract.md` above. If instead you are implementing a whole
+**physical storage backend** (e.g. so athenaeum can persist its knowledge
+root somewhere other than a local filesystem — an object store, a database),
+that is the `Store` protocol, and it has its own contract and its own
+runnable conformance harness:
+
+- [`docs/store-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/store-contract.md)
+  — the published `Store` contract (issue athenaeum#983).
+- `athenaeum.store_conformance.StoreConformanceTests` — subclass it, override
+  its `store` fixture with your own `Store` implementation, and run pytest;
+  see `docs/store-contract.md`'s "Running the conformance harness against
+  your own implementation" section for the exact shape, and
+  `tests/test_store_conformance_harness.py` in the athenaeum repo for a
+  complete worked example.
+
+The two adapters never collide (same non-overlap `docs/storage-adapter-contract.md`
+draws between the storage-adapter layer and this skill's intake adapters): an
+intake adapter turns an external source into `raw/` files and stops at
+"how data *enters* the pipeline"; a `Store` implementation governs how the
+already-compiled wiki is physically read and written. If you're feeding a new
+external source in, keep reading this skill. If you want athenaeum's
+knowledge root to live on a different physical backend, go to
+`docs/store-contract.md` instead.
+
 ## The one rule
 
 A source **only appends raw files** to the intake tree. A separate compiler —
@@ -108,3 +134,4 @@ comes from this structure, not from trusting the source.
 - [`examples/adapters/minimal_adapter.py`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/examples/adapters/minimal_adapter.py) — synthetic, runnable Lane-A adapter.
 - [`docs/provenance-shape.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/provenance-shape.md) — provenance grammar and the MCP `remember` API.
 - [`docs/integrations/claude-code.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/integrations/claude-code.md) — a complete Lane-B (auto-memory) adapter.
+- [`docs/store-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/store-contract.md) — the sibling `Store` (physical storage backend) contract and its runnable third-party conformance harness, `athenaeum.store_conformance.StoreConformanceTests` — for writing a storage adapter instead of a source adapter.
