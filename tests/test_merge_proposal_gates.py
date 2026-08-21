@@ -400,6 +400,176 @@ class TestGateOrdering:
         assert reason is not None
 
 
+def _write_wiki_dedupe_page(wiki_root, filename: str, *, body: str) -> None:
+    wiki_root.mkdir(parents=True, exist_ok=True)
+    text = f"---\nname: {filename[:-3]}\ntype: concept\n---\n{body}\n"
+    (wiki_root / filename).write_text(text, encoding="utf-8")
+
+
+def _n_identical_vectors_embed(texts: list[str]) -> list[list[float]]:
+    """Every candidate embeds to the same unit vector -> mean/min pairwise 1.0,
+    isolating the size-cap arm (see test_wiki_dedupe.py's ``_identical_embed``,
+    same convention)."""
+    return [[1.0, 0.0] for _ in texts]
+
+
+def _two_vector_embed_at_cosine(cosine: float):
+    """Two unit 2D vectors whose pairwise cosine similarity is exactly *cosine*."""
+    import math
+
+    def _embed(texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0], [cosine, math.sqrt(max(0.0, 1.0 - cosine**2))]]
+
+    return _embed
+
+
+class TestWikiDedupeSuppressionLogsNSources:
+    """Issue athenaeum#1085: the ``wiki-page dedup: SUPPRESSED`` log line
+    (``wiki_dedupe.py`` ~line 482) must carry ``n_sources`` unconditionally —
+    regardless of which gate in ``_merge_proposal_suppression_reason`` fired.
+    Exercised through the REAL call path (:func:`propose_wiki_page_merges`),
+    not the pure gate function in isolation, since the field is emitted by
+    the log call, not the gate return value.
+    """
+
+    def test_size_cap_arm_logs_n_sources(
+        self, tmp_path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        for i in range(6):
+            _write_wiki_dedupe_page(
+                wiki_root, f"dup-{i}.md", body=f"Cohesive duplicate page {i}."
+            )
+        knowledge_root = wiki_root.parent
+
+        caplog.set_level(logging.INFO, logger="athenaeum.wiki_dedupe")
+        proposals = propose_wiki_page_merges(
+            knowledge_root,
+            config={},  # defaults: max_merge_sources=5
+            threshold=0.8,
+            embedding_provider=_n_identical_vectors_embed,
+        )
+        assert proposals == []
+        suppressed = [r for r in caplog.records if "SUPPRESSED" in r.getMessage()]
+        assert suppressed
+        assert all("over-cluster" in r.getMessage() for r in suppressed)
+        assert all("n_sources=6" in r.getMessage() for r in suppressed)
+
+    def test_mean_cohesion_floor_arm_logs_n_sources(
+        self, tmp_path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        _write_wiki_dedupe_page(wiki_root, "a.md", body="Page A content.")
+        _write_wiki_dedupe_page(wiki_root, "b.md", body="Page B content.")
+        knowledge_root = wiki_root.parent
+
+        # threshold=0.5 forms the pair into one clique (cosine 0.55 >= 0.5,
+        # so complete-linkage is satisfied and the chain arm cannot fire);
+        # the default min_merge_mean_similarity floor (0.6) then suppresses.
+        caplog.set_level(logging.INFO, logger="athenaeum.wiki_dedupe")
+        proposals = propose_wiki_page_merges(
+            knowledge_root,
+            config={},
+            threshold=0.5,
+            embedding_provider=_two_vector_embed_at_cosine(0.55),
+        )
+        assert proposals == []
+        suppressed = [r for r in caplog.records if "SUPPRESSED" in r.getMessage()]
+        assert suppressed
+        assert all("low cohesion" in r.getMessage() for r in suppressed)
+        assert all("n_sources=2" in r.getMessage() for r in suppressed)
+
+    def test_confidence_floor_arm_logs_n_sources(
+        self, tmp_path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        _write_wiki_dedupe_page(wiki_root, "a.md", body="Page A content.")
+        _write_wiki_dedupe_page(wiki_root, "b.md", body="Page B content.")
+        knowledge_root = wiki_root.parent
+
+        # cosine 0.7 clears both threshold=0.65 (complete-linkage) and the
+        # default mean-similarity floor (0.6) -- only the opt-in confidence
+        # floor (overridden to 0.9 here) suppresses.
+        caplog.set_level(logging.INFO, logger="athenaeum.wiki_dedupe")
+        proposals = propose_wiki_page_merges(
+            knowledge_root,
+            config={"librarian": {"min_merge_confidence": 0.9}},
+            threshold=0.65,
+            embedding_provider=_two_vector_embed_at_cosine(0.7),
+        )
+        assert proposals == []
+        suppressed = [r for r in caplog.records if "SUPPRESSED" in r.getMessage()]
+        assert suppressed
+        assert all("low confidence" in r.getMessage() for r in suppressed)
+        assert all("n_sources=2" in r.getMessage() for r in suppressed)
+
+    def test_single_linkage_chain_arm_logs_n_sources(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The complete-linkage backstop arm cannot be reached via REAL cluster
+        formation: issue athenaeum#681 made formation itself complete-linkage, so a
+        freshly-formed cluster's ``min_pairwise_score`` is always >= the
+        threshold used to form it (see the athenaeum#681 comment at
+        ``wiki_dedupe.py`` ~line 440). This test injects a synthetic
+        chain-shaped :class:`~athenaeum.clusters.Cluster` — the shape a
+        pre-athenaeum#681 legacy cluster row could still carry — by monkeypatching
+        ``find_wiki_page_clusters`` (the module-level seam ``propose_wiki_page_merges``
+        calls through), so the arm's log behavior is still pinned even though
+        production code can no longer produce its input naturally.
+        """
+        import logging
+
+        from athenaeum import wiki_dedupe
+        from athenaeum.clusters import EMBEDDER_CHROMADB_DEFAULT, Cluster
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        _write_wiki_dedupe_page(wiki_root, "a.md", body="Page A content.")
+        _write_wiki_dedupe_page(wiki_root, "b.md", body="Page B content.")
+        knowledge_root = wiki_root.parent
+
+        def _fake_find_wiki_page_clusters(
+            wiki_root, *, threshold, embedding_provider=None, config=None
+        ):
+            return [
+                Cluster(
+                    cluster_id="chain-0001",
+                    member_paths=["a.md", "b.md"],
+                    centroid_score=0.9,
+                    min_pairwise_score=0.1,
+                    rationale="synthetic single-linkage chain (pre-athenaeum#681 shape)",
+                    embedder=EMBEDDER_CHROMADB_DEFAULT,
+                )
+            ]
+
+        monkeypatch.setattr(
+            wiki_dedupe, "find_wiki_page_clusters", _fake_find_wiki_page_clusters
+        )
+        caplog.set_level(logging.INFO, logger="athenaeum.wiki_dedupe")
+
+        proposals = wiki_dedupe.propose_wiki_page_merges(
+            knowledge_root,
+            config={},
+            threshold=0.55,
+        )
+        assert proposals == []
+        suppressed = [r for r in caplog.records if "SUPPRESSED" in r.getMessage()]
+        assert suppressed
+        assert all("single-linkage chain" in r.getMessage() for r in suppressed)
+        assert all("n_sources=2" in r.getMessage() for r in suppressed)
+
+
 class TestClassifyMergeWriteKind:
     """Issue athenaeum#421 — slug-collision precheck classification."""
 
