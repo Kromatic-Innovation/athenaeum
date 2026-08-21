@@ -96,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_serve import add_serve_subparser
     from athenaeum._cmd_storage import add_storage_subparser
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
+    from athenaeum._cmd_usage_report import add_usage_report_subparser
     from athenaeum._cmd_verdicts import add_verdicts_subparser
 
     parser = argparse.ArgumentParser(
@@ -136,6 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_drain_subparser(subparsers)  # drain
     add_storage_subparser(subparsers)  # storage
     add_push_metrics_subparser(subparsers)  # push-metrics
+    add_usage_report_subparser(subparsers)  # usage-report (issue athenaeum#968)
     add_measure_subparser(subparsers)  # measure (shadow-linkage, backlog-price, ordinary-night)
     add_memory_class_subparser(subparsers)  # memory-class backfill
     add_verdicts_subparser(subparsers)  # verdicts (issue athenaeum#712)

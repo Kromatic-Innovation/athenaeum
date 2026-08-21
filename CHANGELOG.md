@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Memory model v6: usage sensor for tier movement, never-ingest class
+  list, ingestion gate (athenaeum#968 — reshaped athenaeum#430, blocks athenaeum#718).**
+  Three additive pieces, all off/inert by default:
+  - **Usage sensor** — new `athenaeum.usage_report` extends the shipped
+    push-metrics instrumentation (athenaeum#711/#734/#795) into a per-claim
+    usage signal (pushed-count, referenced-count, last-referenced),
+    computed from the existing `_push_records.jsonl` /
+    `_push_references.jsonl` ledgers. ids-only (same redaction discipline
+    as `push_metrics`). New CLI: `athenaeum usage-report [--claim-id ID]
+    [--since ...] [--json]` (`src/athenaeum/_cmd_usage_report.py`).
+    `get_claim_usage`/`compute_usage_report` are the documented interface
+    athenaeum#718's tier-movement rules must consume instead of re-reading raw
+    ledgers.
+  - **Never-ingest class list** — the authority manifest (athenaeum#426) gains
+    an optional `never_ingest_classes:` key (`mirror-of-live-source`,
+    `pending-state-todo`); new `src/athenaeum/never_ingest.py` enforces it
+    at auto-memory intake (`_run_auto_memory_phase`, right after
+    `discover_auto_memory_files`, before clustering). A refused file is
+    excluded from that run's compilation, ledgered ids-only to
+    `_never_ingest_refusals.jsonl`, and never deleted from disk. Empty/absent
+    manifest key is a complete no-op. See
+    `docs/authority-manifest.md#never-ingest-classes-athenaeum968`.
+  - **Ingestion gate** — new `src/athenaeum/ingestion_gate.py` +
+    `librarian.ingestion_gate_enabled` (default `false`): when enabled,
+    skips the whole auto-memory compilation phase for a run if push-metrics
+    precision instrumentation looks unhealthy (disabled, or zero
+    reference-determination records ever) — a liveness check, not a
+    quality bar. Nothing is deleted either way.
+  - **No deletion anywhere** in this issue's scope — movement is tier
+    metadata only, mechanically asserted by a static source scan in
+    `tests/test_never_ingest.py::TestNoDeletionStaticScan`.
+
 ### Fixed
 
 - **`storage lint-pii` now scans `raw/`, reported as a separate,

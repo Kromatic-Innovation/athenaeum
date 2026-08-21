@@ -58,6 +58,9 @@ sources:
     topics:                           # slugs/topics this source OWNS
       - lean-development-workflow
       - clean-commit-discipline
+never_ingest_classes:                 # optional (issue athenaeum#968); see below
+  - mirror-of-live-source
+  - pending-state-todo
 ```
 
 `version` must be the literal integer `1` (a schema-evolution seam — a future
@@ -142,6 +145,58 @@ stdout without writing); `--apply` writes it. This command never walks the
 corpus — running the converter against the whole live corpus is operator task
 athenaeum#437, out of scope here.
 
+## Never-ingest classes (athenaeum#968)
+
+An optional `never_ingest_classes:` list — write-refusal classes the
+**auto-memory intake path** consults, extending this same manifest mechanism
+rather than adding a second config surface. Empty or absent by default: a
+manifest written before athenaeum#968, or one that never mentions the key,
+enforces nothing new (`AuthorityManifest.never_ingest_classes == ()`).
+
+Two class slugs are recognised (a closed vocabulary —
+`athenaeum.authority.NEVER_INGEST_CLASS_SLUGS`; naming anything else raises
+`AuthorityManifestError` at parse time, same "loud on malformed" contract as
+every other field):
+
+- **`mirror-of-live-source`** — the claim names a value whose system of
+  record is a repo/config/doc already declared under `sources:` above.
+  Detected by reusing `find_duplicate_source(meta, manifest)` UNCHANGED —
+  the exact deterministic topic/tag/name lookup `authority lint` already
+  uses for post-hoc wiki-page duplicates, now consulted at intake instead.
+- **`pending-state-todo`** — the claim asserts the CURRENT presence/absence
+  of something in an external artifact ("X needs updating", "has Y landed
+  yet"). Detected by an explicit `pending_state: true` frontmatter flag, or
+  a small closed phrase list (`athenaeum.never_ingest._PENDING_STATE_PHRASES`
+  — e.g. "has it been added", "still needs", "todo:").
+
+Both classes are seed evidence from athenaeum#968's own filing comment: a
+2026-08-07 operator evidence log of three witnessed live wiki pages that
+should never have been ingested as durable claims in the first place.
+
+**Enforcement point:** `athenaeum.never_ingest.filter_never_ingest`, called
+from `athenaeum.librarian._run_auto_memory_phase` immediately after
+`discover_auto_memory_files` and before clustering. A refused file is
+excluded from that run's compilation but is **never deleted** — it stays on
+disk and is re-evaluated (and, if the class still matches, re-excluded)
+idempotently on every later run, the same non-destructive shape
+`athenaeum.ephemeral`'s own intake drop already uses.
+
+**Visibility — never a silent drop.** Every refusal is appended, ids-only
+(a class slug, a closed-vocabulary detail token, the origin scope, and a
+content-free hash of the file's identity — never the filename itself, which
+for an auto-memory file can carry a free-text slug), to
+`<cache_dir>/_never_ingest_refusals.jsonl`. This is the OTHER rung of the
+"one-ladder rule": raw intake `athenaeum.intake_audit` cannot even
+RECOGNISE escalates to a human via the pending-question queue; raw intake
+that IS recognised but matches a DECLARED refusal class needs no human
+escalation (the class was already declared) but is still ledgered, never
+silently dropped.
+
+Entity-tier raw intake (`athenaeum.intake.discover_raw_files`,
+`raw/<source>/...`) is **not yet gated** by this mechanism — a deliberate
+scope boundary of athenaeum#968, not a silent gap. Only the auto-memory
+pipeline (`raw/auto-memory/<scope>/...`) is currently enforced.
+
 ## Out of scope here
 
 - Reasoning-tier consultation of the manifest (T1/T2, athenaeum#423/#432).
@@ -149,3 +204,5 @@ athenaeum#437, out of scope here.
 - Syncing skill files across teammates via athenaeum (explicitly deferred;
   see `docs/storage-adapter-contract.md`'s note on the deferred skill-file-sync
   surface).
+- Gating entity-tier raw intake (`raw/<source>/...`) by
+  `never_ingest_classes` — only auto-memory intake is enforced (athenaeum#968).

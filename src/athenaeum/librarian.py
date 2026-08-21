@@ -92,6 +92,7 @@ from typing import Any, Callable
 from athenaeum import detection_state, spend, zero_yield
 from athenaeum._retry import TransientAPIError
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.authority import load_authority_manifest
 from athenaeum.bounce_contract import check_tier0_bounce_conformance
 from athenaeum.clusters import (
     cluster_auto_memory_files,
@@ -107,6 +108,7 @@ from athenaeum.config import (
 from athenaeum.config import (
     load_config,
     preflight_model_rates,
+    resolve_authority_manifest_path,
     resolve_corrections_max_escalations_per_run,
     resolve_corrections_runtime_share,
     resolve_delta_enabled,
@@ -137,6 +139,7 @@ from athenaeum.delta import (
     compute_affected_clusters,
     splice_cluster_report,
 )
+from athenaeum.ingestion_gate import check_ingestion_gate
 from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE re-exported for back-compat
     _AUTO_MEMORY_SKIP_NAMES,
     AUTO_MEMORY_FILE_RE,
@@ -169,6 +172,7 @@ from athenaeum.models import (
     parse_frontmatter,
     render_frontmatter,
 )
+from athenaeum.never_ingest import filter_never_ingest
 from athenaeum.pii import (
     ExcludedRecordIndex,
     HardBounceFact,
@@ -2807,6 +2811,18 @@ class RunContext:
     # discovery path claimed this run, and how many pending decisions were
     # raised (vs. already open/resolved) for them.
     intake_audit_summary: dict[str, Any] | None = None
+    # Issue athenaeum#968: run-summary counts from the never-ingest gate applied
+    # in ``_run_auto_memory_phase`` (``None`` until that phase runs) -- how
+    # many auto-memory candidates were excluded this run because they
+    # matched a manifest-declared ``never_ingest_classes`` entry. Empty/zero
+    # when the manifest declares no classes (the dark-by-default case).
+    never_ingest_summary: dict[str, Any] | None = None
+    # Issue athenaeum#968: the ingestion gate's verdict for this run (``None``
+    # until ``_run_auto_memory_phase`` runs). ``blocked=True`` means
+    # auto-memory compilation was skipped this run because push-metrics
+    # precision instrumentation looked unhealthy while the gate was enabled
+    # (see ``athenaeum.ingestion_gate``).
+    ingestion_gate_status: dict[str, Any] | None = None
     # Issue athenaeum#440: absolute monotonic instant after which the entity phase stops
     # CLAIMING new files, reserving the remainder of ``run_deadline`` for the
     # phases downstream of it (auto-memory C2/C3 and the C4 contradiction
@@ -4700,6 +4716,21 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     early return check (cluster_only never reaches merged_entries use) and
     reads it isn't needed there — retire below is the only consumer.
     """
+    # Issue athenaeum#968 part 3: the ingestion gate. Checked BEFORE discovery --
+    # when enabled (off by default) and push-metrics precision instrumentation
+    # looks unhealthy, auto-memory compilation is skipped entirely this run so
+    # intake cannot silently keep degrading push quality with no visibility.
+    # Nothing on disk is touched either way; a blocked run simply re-checks
+    # (and, if still unhealthy, re-skips) next time.
+    gate_status = check_ingestion_gate(config=ctx.config, cache_dir=_resolve_cache_dir(None))
+    ctx.ingestion_gate_status = gate_status.to_dict()
+    if gate_status.blocked:
+        log.warning(
+            "ingestion gate: auto-memory phase SKIPPED this run -- %s",
+            gate_status.reason,
+        )
+        return None
+
     # C1 + C2: auto-memory discovery followed by the C2 cluster pass.
     # Clustering must run BEFORE any tier routing so that downstream C3
     # merge has a fresh grouping to consume. Scope identity is preserved
@@ -4708,6 +4739,38 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     auto_memory_files = discover_auto_memory_files(ctx.knowledge_root, config=ctx.config)
     if not auto_memory_files:
         return None
+
+    # Issue athenaeum#968 part 2: the never-ingest class gate. A no-op (returns
+    # every file unchanged) unless the authority manifest declares at least
+    # one ``never_ingest_classes`` entry -- dark by default. A refused file
+    # is excluded from THIS run's compilation and ledgered
+    # (``_never_ingest_refusals.jsonl``); it is never deleted from disk (see
+    # ``athenaeum.never_ingest``'s module docstring).
+    manifest = load_authority_manifest(
+        resolve_authority_manifest_path(ctx.knowledge_root, ctx.config)
+    )
+    auto_memory_files, never_ingest_refusals = filter_never_ingest(
+        auto_memory_files,
+        manifest,
+        cache_dir=_resolve_cache_dir(None),
+        dry_run=ctx.dry_run,
+    )
+    ctx.never_ingest_summary = {
+        "refused": len(never_ingest_refusals),
+        "by_class": {
+            slug: sum(1 for r in never_ingest_refusals if r.class_slug == slug)
+            for slug in sorted({r.class_slug for r in never_ingest_refusals})
+        },
+    }
+    if never_ingest_refusals:
+        log.info(
+            "never-ingest: refused %d auto-memory file(s) this run: %s",
+            len(never_ingest_refusals),
+            ctx.never_ingest_summary["by_class"],
+        )
+    if not auto_memory_files:
+        return None
+
     by_scope: dict[str, int] = {}
     for am in auto_memory_files:
         by_scope[am.origin_scope] = by_scope.get(am.origin_scope, 0) + 1

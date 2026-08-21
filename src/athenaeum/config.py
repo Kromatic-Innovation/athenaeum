@@ -1621,6 +1621,32 @@ def resolve_push_metrics_enabled(config: dict[str, Any] | None) -> bool:
     return True
 
 
+def resolve_ingestion_gate_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve whether the ingestion gate is enforced (issue athenaeum#968).
+
+    OFF by default — this is a new, additive gate (part 3 of #968) that can
+    BLOCK ingestion when push-metrics precision instrumentation looks
+    unhealthy, so it must not change behavior for any existing operator
+    until they opt in (DoD: "lands dark behind a documented config key
+    defaulting to off"). Precedence: ``ATHENAEUM_INGESTION_GATE_ENABLED`` env
+    > ``librarian.ingestion_gate_enabled`` yaml > ``False``. Any env value
+    other than a falsey token (``0`` / ``false`` / ``no`` / ``off``,
+    case-insensitive) is truthy; a non-bool yaml value falls through to the
+    default. No seed in ``_DEFAULTS`` (issue athenaeum#231) — mirrors
+    :func:`resolve_push_metrics_enabled`'s shape, inverted default.
+    """
+    env = os.environ.get("ATHENAEUM_INGESTION_GATE_ENABLED")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false", "no", "off", "")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("ingestion_gate_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
 def resolve_spend_ledger_path(config: dict[str, Any] | None) -> Path | None:
     """Resolve an explicit spend-ledger path override (env > yaml > None) (athenaeum#378).
 
