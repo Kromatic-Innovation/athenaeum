@@ -3231,6 +3231,39 @@ def resolve_rule_proposals_exemplar_count(config: dict[str, Any] | None) -> int:
     )
 
 
+def resolve_rule_proposals_enabled(config: dict[str, Any] | None) -> bool:
+    """``librarian.rule_proposals.enabled`` (default False). DEFAULT OFF.
+
+    Issue athenaeum#1063: gates the wiring of
+    :func:`athenaeum.rule_proposals.run_rule_proposal_detection` into the
+    nightly ``athenaeum run`` loop (``librarian._run_rule_proposal_phase``).
+    With this off (the default), the phase returns immediately -- zero LLM
+    calls, no client constructed, no disposition-ledger read.
+
+    Mirrors :func:`resolve_verdict_ledger_enabled`'s shape: env
+    ``ATHENAEUM_RULE_PROPOSALS_ENABLED`` (``1``/``true``/``yes``/``on``,
+    case-insensitive) > yaml ``librarian.rule_proposals.enabled`` > default
+    ``False``. Default OFF is deliberate: this wiring adds a NEW unattended
+    language-model call to the nightly run -- real recurring spend an
+    operator must opt into rather than discover behind a detector issue (see
+    athenaeum#1063's own text). Set ``librarian.rule_proposals.enabled: true``
+    (or the env var) to turn it on. Non-bool yaml values and unrecognized env
+    strings fall through to off.
+    """
+    env = os.environ.get("ATHENAEUM_RULE_PROPOSALS_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            rp_cfg = librarian_cfg.get("rule_proposals")
+            if isinstance(rp_cfg, dict):
+                raw = rp_cfg.get("enabled")
+                if isinstance(raw, bool):
+                    return raw
+    return False
+
+
 def resolve_verdict_ledger_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve the verdict-ledger opt-in (issue athenaeum#712). DEFAULT OFF.
 

@@ -100,30 +100,36 @@ Five pieces, in the order the issue settles them:
    predicate a consumer (recall, lint) calls to tell present-but-
    non-deliverable apart from absent.
 
-6. **One-call person read** (:func:`read_person`, issue athenaeum#864) — the single
-   sanctioned entry point for reading a person's wiki page together with
-   their contact data. It is the concrete realization of the egress half of
-   the two-path invariant (``docs/one-way-in-one-way-out.md`` §3) for the
-   contact-data surface: it resolves :func:`contacts_surface_root` itself, so
-   a caller supplies only a ``uid`` and a boolean, never a path. With
-   inclusion off (the default), each withheld contact field is reported as a
-   :class:`RedactionMarker` naming the field and that a value exists — never
-   the value — so a caller can tell "redacted" from "absent" instead of both
-   collapsing to the same missing key. Reachable from the MCP server
-   (``read_person`` tool) and ``athenaeum query person``.
+6. **One-call entity read** (:func:`read_entity`, issue athenaeum#883/#886) — the
+   single sanctioned entry point for reading any entity's wiki page together
+   with its excluded/contact data by uid. It is the concrete realization of
+   the egress half of the two-path invariant
+   (``docs/one-way-in-one-way-out.md`` §3) for the excluded-data surface: it
+   resolves the surface root itself, so a caller supplies only a ``uid`` and a
+   boolean, never a path. With inclusion off (the default), each withheld
+   field is reported as a :class:`RedactionMarker` naming the field and that a
+   value exists — never the value — so a caller can tell "redacted" from
+   "absent" instead of both collapsing to the same missing key. Reachable
+   from the MCP server (``read_entity`` tool) and ``athenaeum query entity``.
 
-   :func:`read_people` is the BATCH form of the same read (issue athenaeum#877),
-   and the one to reach for whenever more than one uid is resolved in a
-   single process. ``read_person`` rebuilds two O(corpus) indexes per call —
-   the wiki :class:`~athenaeum.models.EntityIndex` and a full
-   :func:`iter_contact_records` scan — which is fine for the occasional
+   :func:`read_entities` is the BATCH form of the same read (issue
+   athenaeum#877), and the one to reach for whenever more than one uid is
+   resolved in a single process. ``read_entity`` rebuilds two O(corpus)
+   indexes per call — the wiki :class:`~athenaeum.models.EntityIndex` and a
+   full :func:`iter_contact_records` scan — which is fine for the occasional
    single lookup and quadratic-in-practice for a loop: ~28s per uid against
    the live 16,928-page store, or ~37 hours for the 4,696-person population
-   ``apollo-enrich``'s weekly job resolves. ``read_people`` builds each index
-   exactly once per batch (:func:`build_contact_record_uid_index` is the
-   contacts half) and returns identical values, so the fix is a cost change
-   and not a semantic one. Both entry points share one assembly body
+   ``apollo-enrich``'s weekly job resolves. ``read_entities`` builds each
+   index exactly once per batch (:func:`build_contact_record_uid_index` is
+   the contacts half) and returns identical values, so the fix is a cost
+   change and not a semantic one. Both entry points share one assembly body
    (``_person_read_from_indexes``) so they cannot drift.
+
+   The original person-shaped entry points (``read_person``/``read_people``,
+   issue athenaeum#864/#877) were deprecated in athenaeum#887 and removed in
+   athenaeum#888 once every known consumer had migrated to the generic form
+   above; ``PersonRead`` (a back-compat alias of :class:`EntityRead`) was
+   removed in the same change, having no remaining referrers.
 
 7. **Facts, not verdicts** (issue athenaeum#851) — athenaeum returns what it
    knows and how it knows it; the consumer decides what to do about it.
@@ -164,7 +170,6 @@ import json
 import logging
 import os
 import re
-import warnings
 from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
@@ -3092,17 +3097,18 @@ def fold_orphaned_bounce_marks(
 
 
 # ---------------------------------------------------------------------------
-# 6. One-call person read (issue athenaeum#864)
+# 6. One-call entity read (issue athenaeum#883/#886)
 # ---------------------------------------------------------------------------
 #
 # The egress-half realization of the two-path invariant
-# (``docs/one-way-in-one-way-out.md`` §3) for the contact-data surface:
-# :func:`read_person` is the ONE sanctioned way to read a person's page
-# together with their contact data. It resolves :func:`contacts_surface_root`
-# itself — a caller supplies a ``uid`` and a boolean, never a path — and, with
-# inclusion off, reports each withheld field as a :class:`RedactionMarker`
-# rather than silently omitting it, so "redacted" and "absent" never collapse
-# to the same shape.
+# (``docs/one-way-in-one-way-out.md`` §3) for the excluded-data surface:
+# :func:`read_entity` is the ONE sanctioned way to read an entity's page
+# together with its excluded data. It resolves the surface root itself — a
+# caller supplies a ``uid`` and a boolean, never a path — and, with inclusion
+# off, reports each withheld field as a :class:`RedactionMarker` rather than
+# silently omitting it, so "redacted" and "absent" never collapse to the same
+# shape. (The person-shaped ``read_person`` predecessor was removed in
+# athenaeum#888.)
 
 #: The union of :data:`CONTACT_FRONTMATTER_FIELDS` and
 #: :data:`CONTACT_IDENTIFIER_FIELDS`, in that stable order — every frontmatter
@@ -3119,7 +3125,7 @@ def fold_orphaned_bounce_marks(
 #: a caller's ``contact["emails"]`` with an equal value) — ``dict.fromkeys``
 #: dedupes while preserving first-seen order, which is what keeps this the
 #: single ``("emails", "phones", "former_emails", "alt_emails")`` iteration
-#: order :func:`read_person` relies on.
+#: order :func:`read_entity` relies on.
 CONTACT_DATA_FIELDS: tuple[str, ...] = tuple(
     dict.fromkeys(CONTACT_FRONTMATTER_FIELDS + CONTACT_IDENTIFIER_FIELDS)
 )
@@ -3231,8 +3237,8 @@ def resolve_contact_record_for_uid(contacts_root: Path, uid: str) -> Path | None
     """Find the existing contact record whose frontmatter ``uid`` equals *uid*.
 
     The ``uid``-keyed sibling of :func:`resolve_contact_record` (which
-    resolves by ADDRESS instead) — this is how :func:`read_person` finds a
-    person's contact record without the caller ever constructing the surface
+    resolves by ADDRESS instead) — this is how :func:`read_entity` finds an
+    entity's contact record without the caller ever constructing the surface
     path itself (issue athenaeum#864). Mirrors :func:`resolve_contact_record`'s
     discipline exactly:
 
@@ -3282,7 +3288,7 @@ def build_contact_record_uid_index(contacts_root: Path) -> dict[str, Path]:
     therefore paid that scan N times — 4,696 uids against the live corpus
     projected to ~37 hours. This builds the whole ``uid -> record`` mapping
     in a single pass, so the scan is paid O(1) times for any number of
-    lookups. :func:`read_people` is the caller that exists to use it.
+    lookups. :func:`read_entities` is the caller that exists to use it.
 
     Resolution discipline is IDENTICAL to
     :func:`resolve_contact_record_for_uid`, so a batch read never resolves a
@@ -3331,7 +3337,7 @@ def build_contact_record_uid_index(contacts_root: Path) -> dict[str, Path]:
 
 @dataclass(frozen=True)
 class RedactionMarker:
-    """One withheld contact field on a :class:`PersonRead` (issue athenaeum#864).
+    """One withheld contact field on an :class:`EntityRead` (issue athenaeum#864).
 
     Names the field and that a value EXISTS, without the value itself — the
     property that lets a caller distinguish "this person has an email on
@@ -3358,9 +3364,8 @@ def json_date_default(obj: object) -> str:
     """``default=`` callback for ``json.dumps``: coerce dates to ISO-8601 (issue athenaeum#1002).
 
     The ONE coercion point for every JSON-emitting read surface built over the
-    sanctioned excluded-field read path — ``read_entity``, ``read_person``
-    (:meth:`EntityRead.to_dict` carries ``frontmatter`` unconverted, and
-    ``read_person`` is a thin wrapper over ``read_entity``) and
+    sanctioned excluded-field read path — ``read_entity``
+    (:meth:`EntityRead.to_dict` carries ``frontmatter`` unconverted) and
     ``recall(with_pii=True)`` (:mod:`athenaeum.mcp_server`'s excluded-facts
     render and handle-resolution join, both of which can carry a
     :class:`ContactClassification`'s ``source`` straight from record
@@ -3386,10 +3391,10 @@ def json_date_default(obj: object) -> str:
 class EntityRead:
     """Result of :func:`read_entity` — an entity's page plus excluded-data view.
 
-    Renamed field-for-field from ``PersonRead`` (issue athenaeum#883), which
-    remains as an alias. Nothing about the shape changed: the rename is what
-    makes the person read and the generic read the SAME type by construction
-    rather than two types kept in parity by test.
+    Renamed field-for-field from ``PersonRead`` (issue athenaeum#883). A
+    ``PersonRead = EntityRead`` back-compat alias existed from athenaeum#883
+    through athenaeum#887's deprecation window; it was removed in athenaeum#888
+    alongside ``read_person``/``read_people``, its only remaining referrers.
 
     The ``contact`` / ``contact_included`` / ``contact_record_path`` field
     names stay as-is on the generic type. Renaming them would change the JSON
@@ -3488,14 +3493,6 @@ class EntityRead:
             },
             "do_not_email": self.do_not_email.to_dict(),
         }
-
-
-#: The name this type carried before issue athenaeum#883 generalized the read past
-#: persons. Kept as a true ALIAS, not a subclass or a parallel dataclass, so
-#: ``read_person`` and ``read_entity`` return the identical type and parity
-#: between them is by construction rather than by test. Every existing
-#: annotation, ``isinstance`` check and import of ``PersonRead`` keeps working.
-PersonRead = EntityRead
 
 
 def assemble_excluded_read(
@@ -3676,131 +3673,6 @@ def _entity_read_from_indexes(
     )
 
 
-#: The message both deprecated person-shaped entry points carry (issue
-#: athenaeum#887). One constant, not two strings, so the two functions cannot
-#: drift in what they tell a caller to migrate to.
-_READ_PERSON_DEPRECATION = (
-    "pii.{name} is deprecated (athenaeum#887) and will be removed in a future "
-    "release (athenaeum#888). Use recall(with_pii=True) to resolve excluded "
-    "fields for a hit you found by searching, or pii.{replacement} "
-    "(surface_class='pii') to read by uid — both work for any entity class, "
-    "not only persons. Behaviour is unchanged for now: this warning is the "
-    "only difference."
-)
-
-
-def read_person(
-    knowledge_root: Path,
-    config: dict[str, Any] | None,
-    uid: str,
-    *,
-    include_contact: bool = False,
-    usage_classes: Collection[str] | None = None,
-) -> PersonRead | None:
-    """Read one person's wiki page, with contact data gated by *include_contact*.
-
-    .. deprecated:: athenaeum#887
-       Use :func:`read_entity` (or ``recall(with_pii=True)``) instead — both
-       answer for any entity class rather than only persons. This function
-       keeps working IDENTICALLY and is not removed here; removal is
-       athenaeum#888, gated on a real deprecation window and on known consumers
-       having migrated. Everything the rest of this docstring says about
-       behaviour is still accurate.
-
-    The ONE sanctioned entry point for reading a person's contact data (issue
-    athenaeum#864, ``docs/one-way-in-one-way-out.md`` §3) — the sole caller-facing
-    function that both resolves a person's wiki page AND their contact
-    record. A caller supplies only a ``uid`` and a boolean; this function
-    resolves the contact surface via :func:`contacts_surface_root` and the
-    record within it via :func:`resolve_contact_record_for_uid` itself. That
-    is the load-bearing property: the caller never constructs the surface
-    path.
-
-    Steps:
-
-    1. Resolve the wiki page for *uid* via
-       :class:`athenaeum.models.EntityIndex`. Returns ``None`` when there is
-       no such page — the caller surfaces "person not found"; this is the
-       ONLY ``None`` case.
-    2. Parse the page into ``frontmatter`` + ``body``.
-    3. Resolve the contact surface and the matching record
-       (:func:`resolve_contact_record_for_uid`). A person whose contact
-       record does not exist (or does not resolve) is not an error: the page
-       is still returned, with an empty ``contact`` and no redaction markers.
-    4. Read the record's frontmatter via :func:`read_bounce_record` (the
-       existing generic "read a contact record's frontmatter, or ``{}``"
-       helper — reused here, not duplicated).
-    5. For each field in :data:`CONTACT_DATA_FIELDS` carrying a non-empty
-       value on the record: with *include_contact* True, the values land in
-       ``contact[field]`` and their classifications in
-       ``classifications[field]``, co-indexed; with it False, a
-       :class:`RedactionMarker` is appended instead — never both, and never
-       neither for a field that genuinely has a value.
-    6. With *usage_classes* given, values whose class is not in it are
-       dropped from ``contact`` (issue athenaeum#866).
-
-    Args:
-        knowledge_root: Root of the knowledge base (parent of ``wiki/``).
-        config: Resolved ``athenaeum.yaml`` config, passed straight to
-            :func:`contacts_surface_root` so the contact surface resolves
-            exactly as it does for every other consumer of that function.
-        uid: The person's durable identifier.
-        include_contact: Contact-data inclusion flag (issue athenaeum#864). Default
-            ``False`` — excluded. Who may set this flag is deliberately out
-            of scope for this function (deferred, see
-            ``docs/one-way-in-one-way-out.md`` §4); a caller that needs to
-            gate it applies that check BEFORE calling this function (see
-            ``athenaeum.mcp_server.person_read`` for the MCP-surface
-            instance of that gate).
-        usage_classes: Restrict returned contact values to these usage
-            classes (issue athenaeum#866) — e.g.
-            ``usage_classes=OUTREACH_ELIGIBLE_CLASSES`` for a caller that must
-            not receive a provider-sourced address by accident. ``None`` (the
-            default) returns every value, each carrying its classification, so
-            an existing caller's results are unchanged. Only meaningful with
-            *include_contact* True; a redacted read exposes no values to
-            filter. Pass an explicitly empty collection to receive no contact
-            values at all — that is a caller asking for nothing, not a request
-            for everything, so it is honoured literally rather than treated as
-            ``None``.
-
-    Returns:
-        A :class:`PersonRead`, or ``None`` when *uid* does not resolve to a
-        wiki page.
-
-    Cost:
-        This function builds BOTH indexes it needs — the wiki
-        :class:`~athenaeum.models.EntityIndex` and the contacts-surface
-        ``uid -> record`` mapping — from scratch on every call, because a
-        single read has nothing to amortize them against. Both are
-        O(corpus): together they measured ~28s per call against the live
-        16,928-page store (issue athenaeum#877). **Resolving more than one uid in
-        one process: call :func:`read_people` instead**, which builds each
-        index exactly once for the whole batch and returns identical
-        ``PersonRead`` values.
-
-    Since issue athenaeum#883 this is a thin wrapper over :func:`read_entity` with
-    the surface class fixed to :data:`PII_ENTITY_CLASS` and ``include_contact``
-    mapped to ``include_excluded``. Its signature, defaults, return value and
-    JSON shape are unchanged, and ``PersonRead`` is now an alias of
-    :class:`EntityRead` — so the person read and the generic read are the same
-    type by construction, not two types held in parity by test.
-    """
-    warnings.warn(
-        _READ_PERSON_DEPRECATION.format(name="read_person", replacement="read_entity"),
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return read_entity(
-        knowledge_root,
-        config,
-        uid,
-        surface_class=PII_ENTITY_CLASS,
-        include_excluded=include_contact,
-        usage_classes=usage_classes,
-    )
-
-
 def read_entity(
     knowledge_root: Path,
     config: dict[str, Any] | None,
@@ -3812,17 +3684,18 @@ def read_entity(
 ) -> EntityRead | None:
     """Read one entity's wiki page, with excluded data gated by *include_excluded*.
 
-    The entity-class-generic form of :func:`read_person` (issue athenaeum#883), and
-    the primitive that function is now a wrapper over. It resolves an entity of
-    ANY wiki ``type:`` through :class:`~athenaeum.models.EntityIndex` (which
-    has always indexed every type by uid, not just persons) and joins it to the
-    excluded record for *surface_class* — so the read that was person-shaped by
-    accident of how it was built now works for any class the operator has
-    routed to an excluded surface.
+    The entity-class-generic form of the person-shaped read that preceded it
+    (issue athenaeum#883; the ``read_person`` wrapper itself was removed in
+    athenaeum#888 once every known consumer had migrated). It resolves an
+    entity of ANY wiki ``type:`` through :class:`~athenaeum.models.EntityIndex`
+    (which has always indexed every type by uid, not just persons) and joins
+    it to the excluded record for *surface_class* — so the read that was
+    person-shaped by accident of how it was built now works for any class the
+    operator has routed to an excluded surface.
 
-    Semantics are :func:`read_person`'s, unchanged, with two generalizations:
-    the surface is *surface_class*'s rather than always ``pii``'s, and which
-    frontmatter fields count as data comes from
+    Semantics are the former person-shaped read's, unchanged, with two
+    generalizations: the surface is *surface_class*'s rather than always
+    ``pii``'s, and which frontmatter fields count as data comes from
     :func:`resolve_excluded_fields`'s per-class policy rather than the fixed
     :data:`CONTACT_DATA_FIELDS` allowlist. The four inclusion/record cells, the
     :class:`RedactionMarker` per withheld non-empty field, and the co-indexed
@@ -3845,7 +3718,7 @@ def read_entity(
             remains the deferred athenaeum#864 question — this function neither
             widens nor narrows it.
         usage_classes: Restrict returned values to these usage classes
-            (issue athenaeum#866), exactly as :func:`read_person`.
+            (issue athenaeum#866), exactly as the former person-shaped read.
 
     Returns:
         An :class:`EntityRead`, or ``None`` when *uid* resolves to no wiki
@@ -3853,9 +3726,9 @@ def read_entity(
         NOT one: the page is returned with empty data and no markers.
 
     Cost:
-        Builds both O(corpus) indexes per call, as :func:`read_person` always
-        has (~28s against the live 16,928-page store, of which 25.2s is
-        ``EntityIndex``). **Resolving more than one uid: use
+        Builds both O(corpus) indexes per call, as the former person-shaped
+        read always has (~28s against the live 16,928-page store, of which
+        25.2s is ``EntityIndex``). **Resolving more than one uid: use
         :func:`read_entities`.** A caller that already HAS the page and its
         frontmatter — ``recall`` — should call
         :func:`assemble_excluded_read` directly and build no index at all.
@@ -4135,8 +4008,8 @@ def read_entities(
 ) -> Iterator[tuple[str, EntityRead | None]]:
     """Read MANY entities, paying each O(corpus) scan once (issues athenaeum#877/#883).
 
-    The batch counterpart to :func:`read_entity`, and the primitive
-    :func:`read_people` is now a wrapper over. Every yielded
+    The batch counterpart to :func:`read_entity` (the primitive the removed
+    ``read_people`` wrapper was built over — see athenaeum#888). Every yielded
     :class:`EntityRead` is exactly what :func:`read_entity` would have returned
     for that uid — the batch differs ONLY in what it costs.
 
@@ -4186,119 +4059,6 @@ def read_entities(
                 config=config,
             ),
         )
-
-
-def read_people(
-    knowledge_root: Path,
-    config: dict[str, Any] | None,
-    uids: Iterable[str],
-    *,
-    include_contact: bool = False,
-    usage_classes: Collection[str] | None = None,
-) -> Iterator[tuple[str, PersonRead | None]]:
-    """Read MANY persons, paying each O(corpus) scan once (issue athenaeum#877).
-
-    .. deprecated:: athenaeum#887
-       Use :func:`read_entities` (or ``recall(with_pii=True)``) instead — the
-       same batch read, for any entity class. This function keeps working
-       IDENTICALLY, including its laziness and its positional calling
-       convention, and is not removed here; removal is athenaeum#888. Everything
-       the rest of this docstring says about behaviour is still accurate.
-
-    The batch counterpart to :func:`read_person`, and the entry point a caller
-    resolving more than one uid in a single process should use. It is the same
-    read — every yielded :class:`PersonRead` is exactly what
-    :func:`read_person` would have returned for that uid, including the
-    redaction/classification semantics and the ``None`` for a uid with no wiki
-    page — differing ONLY in what it costs.
-
-    What it fixes: :func:`read_person` rebuilds two O(corpus) indexes per call
-    (the wiki :class:`~athenaeum.models.EntityIndex`, and a full
-    :func:`iter_contact_records` scan), so N uids cost N full passes over the
-    store. Measured against the live 16,928-page corpus that is ~28s per uid;
-    the 4,696-person population ``apollo-enrich``'s weekly warm-tier job
-    resolves projected to ~37 hours. Here both indexes are built ONCE for the
-    whole batch, so per-uid work is a dict lookup plus reading that person's
-    own two files — the fixed cost is paid once no matter how many uids follow.
-
-    Both halves matter, and fixing only one would not have moved the number:
-    the contacts scan is the half issue athenaeum#877 names, but the
-    ``EntityIndex`` rebuild is the larger share (a bare frontmatter pass over
-    the wiki alone measured 25.2s of the 28.1s).
-
-    Yields:
-        ``(uid, PersonRead | None)`` pairs, in the order *uids* supplies them
-        — ``None`` for a uid that resolves to no wiki page, exactly as
-        :func:`read_person` returns ``None`` for one. Pairs (not a bare
-        sequence of reads) so a caller always knows WHICH uid a result or a
-        ``None`` belongs to; input order (not a dict) so duplicate uids are
-        neither collapsed nor reordered. A caller wanting the mapping can
-        ``dict(read_people(...))``.
-
-    The stream is LAZY on purpose: a :class:`PersonRead` carries the person's
-    full page body, so materializing thousands at once would hold much of the
-    corpus in memory at peak. Consuming this iterator one pair at a time keeps
-    the footprint flat. Two consequences worth knowing: nothing is read — not
-    even the indexes — until the first pair is pulled, and the indexes are
-    built on the FIRST UID rather than at call time, so an empty batch costs
-    nothing rather than one full pass to read zero people.
-
-    The two-path invariant is preserved unchanged
-    (``docs/one-way-in-one-way-out.md`` §3): the caller supplies uids and
-    flags, and THIS function resolves :func:`contacts_surface_root` and the
-    records within it. A caller still never constructs a surface path — which
-    is the property that made a batch entry point the right fix here rather
-    than exporting the index for callers to scan themselves.
-
-    Args:
-        knowledge_root: Root of the knowledge base (parent of ``wiki/``).
-        config: Resolved ``athenaeum.yaml`` config, passed to
-            :func:`contacts_surface_root` exactly as :func:`read_person`
-            passes it.
-        uids: The uids to read, in the order results are wanted. Consumed
-            lazily; an empty iterable yields nothing and reads nothing.
-        include_contact: Contact-data inclusion flag, applied to every uid in
-            the batch — same meaning and same ``False`` default as
-            :func:`read_person`. A batch mixing inclusion states is two calls,
-            deliberately: one flag per call keeps the "who may set this"
-            question (``docs/one-way-in-one-way-out.md`` §4) answerable at one
-            place per call rather than per element.
-        usage_classes: Restrict returned contact values to these usage classes
-            (issue athenaeum#866), same meaning as :func:`read_person`.
-            Normalized once for the whole batch.
-
-    Since issue athenaeum#883 this is a thin wrapper over :func:`read_entities` with
-    the surface class fixed to :data:`PII_ENTITY_CLASS`. Its signature,
-    defaults, laziness, yielded pairs and JSON shape are unchanged — in
-    particular the POSITIONAL calling convention
-    ``read_people(knowledge_root, config, uids, include_contact=True)`` is
-    load-bearing (it is ``apollo-enrich``'s exact call shape, the only external
-    consumer) and neither becomes keyword-only nor reorders.
-
-    Note this is deliberately NOT a generator function (issue athenaeum#887): it
-    warns and then RETURNS :func:`read_entities`' generator, rather than
-    ``yield from``-ing it. A ``warnings.warn`` inside a generator body does not
-    run until the generator is first advanced, so a caller that constructed the
-    iterator and passed it elsewhere — or never consumed it — would get the
-    warning at a confusing point or not at all. Returning the inner generator
-    warns at CALL time while preserving laziness exactly: nothing is read, not
-    even the indexes, until the first pair is pulled.
-    """
-    warnings.warn(
-        _READ_PERSON_DEPRECATION.format(
-            name="read_people", replacement="read_entities"
-        ),
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return read_entities(
-        knowledge_root,
-        config,
-        uids,
-        surface_class=PII_ENTITY_CLASS,
-        include_excluded=include_contact,
-        usage_classes=usage_classes,
-    )
 
 
 __all__ = [
@@ -4371,11 +4131,8 @@ __all__ = [
     "build_contact_record_uid_index",
     "RedactionMarker",
     "EntityRead",
-    "PersonRead",
     "read_entity",
     "read_entities",
-    "read_person",
-    "read_people",
     "CONTACT_CLASSIFICATION_FIELD",
     "USAGE_CLASS_OBSERVED",
     "USAGE_CLASS_PROVIDER",

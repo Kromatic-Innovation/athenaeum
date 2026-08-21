@@ -1185,17 +1185,17 @@ class TestCLIServe:
 
 
 class TestAllMcpToolWrappers:
-    """Invoke all 16 registered MCP tool wrappers through ``tool.fn()``."""
+    """Invoke all 15 registered MCP tool wrappers through ``tool.fn()``."""
 
     # One valid-args invocation per registered tool. Read tools take no args;
     # the write tools are called with a nonexistent id so a single call
     # exercises BOTH the wrapper's argument marshalling and its error-to-string
     # path without a seeded queue. ``remember`` is the one write tool with a
-    # trivial success, so it gets real content. ``read_person`` (issue athenaeum#864)
-    # is called with an unknown uid against an empty wiki — a JSON-string
-    # not-found message, exercising marshalling without a seeded person page.
-    # ``read_entity`` (issue athenaeum#886) is the generic form of the same read
-    # and is invoked the same way, with its required entity class supplied.
+    # trivial success, so it gets real content. ``read_entity`` (issue
+    # athenaeum#886) is called with an unknown uid against an empty wiki — a
+    # JSON-string not-found message, exercising marshalling without a seeded
+    # entity page. (The person-shaped ``read_person`` tool, issue athenaeum#864,
+    # was invoked the same way here before its removal in athenaeum#888.)
     _INVOKE = {
         "recall": lambda fn: fn("anything at all"),
         "remember": lambda fn: fn("a note worth remembering", source="test-session"),
@@ -1209,7 +1209,6 @@ class TestAllMcpToolWrappers:
         "calibration_summary": lambda fn: fn(),
         "review_audit_item": lambda fn: fn("no-such-id", "confirm"),
         "resolve_merge": lambda fn: fn("no-such-id", "reject"),
-        "read_person": lambda fn: fn("no-such-uid"),
         "read_entity": lambda fn: fn("no-such-uid", "person"),
         "entity_schema": lambda fn: fn(),
         "enumerate_entities": lambda fn: fn("no-such-type"),
@@ -1227,7 +1226,6 @@ class TestAllMcpToolWrappers:
         "review_audit_item": dict,
         "scan_retraction_cascade": dict,
         "calibration_summary": dict,
-        "read_person": str,
         "read_entity": str,
         "entity_schema": dict,
         "enumerate_entities": dict,
@@ -1274,9 +1272,11 @@ class TestAllMcpToolWrappers:
         # Issue athenaeum#964: +1 for `entity_schema`, the ONE new schema-query tool
         # that issue adds. Issue athenaeum#965 adds one more: `enumerate_entities`,
         # the generalized ENUMERATION primitive (a distinct code path from
-        # `recall` — no query text, never routed through ranking). Bumping
-        # this number is exactly the tripwire this test exists for.
-        assert len(registered) == 16
+        # `recall` — no query text, never routed through ranking). Issue
+        # athenaeum#888 removes one: the person-shaped `read_person` tool, once
+        # every known consumer had migrated to `read_entity`. Bumping this
+        # number is exactly the tripwire this test exists for.
+        assert len(registered) == 15
 
     @pytest.mark.parametrize("name", sorted(_INVOKE))
     def test_wrapper_marshals_args_and_returns_declared_type(
