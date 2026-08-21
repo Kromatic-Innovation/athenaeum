@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
 import textwrap
@@ -13,6 +15,21 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
+
+# Issue athenaeum#1091 — must be set BEFORE chromadb is ever imported by any
+# test module (conftest.py is imported first, at collection time, ahead of
+# every test module chromadb might reach). chromadb's ``Settings`` is a
+# pydantic ``BaseSettings`` that reads ``ANONYMIZED_TELEMETRY`` from the
+# environment; leaving it default-True would make posthog telemetry a SECOND
+# outbound-network source for the default suite, independent of the ONNX
+# model download that ``_offline_embedding_function`` below neutralizes. (In
+# the installed chromadb version the default ``Posthog`` telemetry client's
+# ``capture()`` is already a no-op, so this is belt-and-suspenders — but the
+# no-op-ness is an implementation detail of chromadb's vendored client, not
+# a documented contract, so setting the flag explicitly rather than relying
+# on it.) ``os.environ.setdefault`` (not ``monkeypatch``, unavailable at
+# import time) so a human's real ``ANONYMIZED_TELEMETRY`` env override wins.
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 
 # Issue athenaeum#554 (L11) — re-export RecordingClient so the record/replay eval
 # double is importable from a single, discoverable location alongside the
@@ -172,6 +189,171 @@ def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
     monkeypatch.setenv("GIT_COMMITTER_NAME", "Test Runner")
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
+
+
+def _default_selection(request: pytest.FixtureRequest) -> bool:
+    """True unless the test is marked ``eval``, ``live``, or ``embedding``
+    (issue athenaeum#1091).
+
+    Both fixtures below only engage for the default (non-eval/live/embedding)
+    pytest selection — an ``eval``/``live`` test opted into the real network,
+    and an ``embedding``-marked test (e.g.
+    ``test_chain_transitive_repartition``) specifically needs the REAL
+    MiniLM model's cosine values, not the offline lexical stand-in, and
+    needs real network egress to fetch it (see ``evals.yml``'s
+    ``embedding-suite`` job) — the offline embedding stand-in / network
+    guard would just break both.
+    """
+    node = request.node
+    return not (
+        node.get_closest_marker("eval")
+        or node.get_closest_marker("live")
+        or node.get_closest_marker("embedding")
+    )
+
+
+@pytest.fixture(autouse=True)
+def _offline_embedding_function(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Route chromadb's default embedding function through a deterministic,
+    offline stand-in for the whole default (non-eval/live/embedding) suite
+    (athenaeum#1091).
+
+    ``VectorBackend``'s default-model path passes ``embedding_function=None``
+    through to chromadb (``src/athenaeum/search.py:_embedding_function``), and
+    the read-side calls (``query()``, and ``_get_ef``/``embed_texts`` when
+    they construct a real ``DefaultEmbeddingFunction``) don't pass an
+    embedding function at all. In every one of those cases chromadb's own
+    fall-through (``CollectionCommon._embed``, and ``get_collection``'s
+    ``embedding_function: ... = DefaultEmbeddingFunction()`` default
+    parameter) resolves to ``chromadb.utils.embedding_functions
+    .DefaultEmbeddingFunction``, whose ``__call__`` lazily constructs a real
+    ``ONNXMiniLM_L6_V2`` and calls it — that construction+call is the thing
+    that downloads the ONNX model over HTTP on first use.
+
+    So the one seam that intercepts EVERY default-model code path — build,
+    incremental add, string-query embed — without touching any
+    ``src/athenaeum`` production code, is ``ONNXMiniLM_L6_V2`` itself:
+    ``DefaultEmbeddingFunction.__call__`` re-imports it (``from
+    chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import
+    ONNXMiniLM_L6_V2``) fresh on every call, so patching the class attribute
+    on its module is picked up immediately. Swapping
+    ``VectorBackend._embedding_function`` instead would NOT have worked: that
+    method already returns ``None`` for the default model in production, and
+    ``query()``/``embed_texts()`` never call it at all.
+
+    Never touches ``SentenceTransformerEmbeddingFunction`` (the non-default
+    ``embedding_model`` branch) — no default-selection test exercises a real
+    non-default model (``test_embedding_model_swap_forces_full_rebuild``
+    stubs ``_embedding_function`` itself), so that branch is left alone.
+    """
+    if not _default_selection(request):
+        return
+    try:
+        import chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 as onnx_module
+    except ImportError:
+        return  # chromadb (or its optional [vector] extra) isn't installed here
+
+    from tests.offline_embeddings import OfflineONNXMiniLMStub
+
+    monkeypatch.setattr(onnx_module, "ONNXMiniLM_L6_V2", OfflineONNXMiniLMStub)
+
+
+class NetworkBlockedInDefaultSuite(RuntimeError):
+    """Raised when the default (non-eval/live) pytest selection attempts an
+    outbound connection to a non-local address (issue athenaeum#1091).
+
+    Naming the destination in the message is deliberate — this is meant to
+    be immediately diagnosable from a CI failure, not just "test hung/failed
+    for some reason."
+    """
+
+
+def _is_local_address(address: object) -> bool:
+    """True for loopback/AF_UNIX destinations; False for anything routable.
+
+    ``address`` is whatever ``socket.socket.connect``/``connect_ex`` or
+    ``socket.create_connection`` received: a ``(host, port)`` tuple for
+    AF_INET/AF_INET6, a path string for AF_UNIX, or (rarely) something else.
+    Non-tuple addresses (AF_UNIX, or a shape we don't recognize) are treated
+    as local — this guard's job is blocking outbound network egress, not
+    policing IPC.
+    """
+    if isinstance(address, str):
+        return True  # AF_UNIX path
+    try:
+        host = address[0]
+    except (TypeError, IndexError, KeyError):
+        return True
+    if host in ("localhost",):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False  # a hostname that isn't a loopback literal — treat as remote
+
+
+@pytest.fixture(autouse=True)
+def _block_non_local_network(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin the ``pyproject.toml`` invariant: the default pytest selection
+    performs no outbound network request (issue athenaeum#1091).
+
+    Patches ``socket.socket.connect``/``connect_ex`` (covers raw sockets and
+    most HTTP client libraries, including httpx's sync transport when it
+    connects directly) and ``socket.create_connection`` (httpx/httpcore's
+    usual path) to reject any non-local destination with a named,
+    immediately-diagnosable error instead of hanging or silently succeeding
+    against a real network. AF_UNIX and loopback (``127.0.0.0/8``, ``::1``,
+    ``localhost``) are allowed. Disabled for tests marked ``eval``, ``live``,
+    or ``embedding`` — all three opted into the real network (see
+    ``_default_selection`` above).
+
+    See ``tests/test_network_guard.py`` for the test that proves this
+    fixture actually blocks (and that it allows loopback) — required so the
+    pin itself is covered, not just asserted in a docstring.
+    """
+    if not _default_selection(request):
+        return
+
+    orig_connect = socket.socket.connect
+    orig_connect_ex = socket.socket.connect_ex
+    orig_create_connection = socket.create_connection
+
+    def guarded_connect(self: socket.socket, address: Any, *a: Any, **kw: Any) -> Any:
+        if not _is_local_address(address):
+            raise NetworkBlockedInDefaultSuite(
+                f"blocked outbound socket.connect to {address!r}: the default "
+                "pytest selection must stay offline (athenaeum#1091) — mark "
+                "the test `eval` or `live` if it legitimately needs the network"
+            )
+        return orig_connect(self, address, *a, **kw)
+
+    def guarded_connect_ex(
+        self: socket.socket, address: Any, *a: Any, **kw: Any
+    ) -> Any:
+        if not _is_local_address(address):
+            raise NetworkBlockedInDefaultSuite(
+                f"blocked outbound socket.connect_ex to {address!r}: the default "
+                "pytest selection must stay offline (athenaeum#1091) — mark "
+                "the test `eval` or `live` if it legitimately needs the network"
+            )
+        return orig_connect_ex(self, address, *a, **kw)
+
+    def guarded_create_connection(address: Any, *a: Any, **kw: Any) -> Any:
+        if not _is_local_address(address):
+            raise NetworkBlockedInDefaultSuite(
+                f"blocked outbound socket.create_connection to {address!r}: the "
+                "default pytest selection must stay offline (athenaeum#1091) — "
+                "mark the test `eval` or `live` if it legitimately needs the network"
+            )
+        return orig_create_connection(address, *a, **kw)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
+    monkeypatch.setattr(socket, "create_connection", guarded_create_connection)
 
 
 def pytest_configure(config: pytest.Config) -> None:
