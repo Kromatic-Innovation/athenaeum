@@ -163,22 +163,32 @@ is its own self-contained YAML file, not a config-table entry.
 | Records per run | `ATHENAEUM_SHAPE_RULES_MAX_RECORDS_PER_RUN` | `librarian.shape_rules.max_records_per_run` | `50000` | Run-level cap on candidate raw files the engine evaluates against rules, mirroring `librarian.corrections.max_records_per_run`. Files beyond the cap are untouched and retried next run. |
 | Phase runtime share | `ATHENAEUM_SHAPE_RULES_RUNTIME_SHARE` | `librarian.shape_rules.runtime_share` | `0.05` | Fraction of `librarian.max_runtime` this phase may spend, mirroring `librarian.corrections.runtime_share`'s mechanism exactly (own budget — an overrun in one deterministic phase never starves the other). Checked at FILE boundaries only (never mid-file). |
 
-### Rule proposals (`librarian.rule_proposals.*`, athenaeum#905)
+### Rule proposals (`librarian.rule_proposals.*`, athenaeum#905 / athenaeum#1063)
 
 The librarian's rule-proposal detector/drafter (`athenaeum.rule_proposals`,
 see [`shape-rules.md` §10](shape-rules.md)) — counts records the shape-rule
 engine above deferred to the reasoning tiers, drafts a candidate rule from
 exemplars once a shape crosses threshold, and puts it on the
-`list_pending_decisions` surface for a human to approve or reject. Not wired
-into the nightly `athenaeum run` loop by athenaeum#905 (see that section's "Not
-wired" note) — these knobs govern `run_rule_proposal_detection` whenever/
-however it is invoked.
+`list_pending_decisions` surface for a human to approve or reject. Wired
+into the nightly `athenaeum run` loop (issue athenaeum#1063,
+`librarian._run_rule_proposal_phase`) — **OFF by default.** Set
+`librarian.rule_proposals.enabled: true` (or the env var below) to turn it
+on; left off, the phase never builds a client, never reads the disposition
+ledger, and makes zero LLM calls.
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
-| Threshold | `ATHENAEUM_RULE_PROPOSALS_THRESHOLD` | `librarian.rule_proposals.threshold` | `50` | Deferred-record count (per `(source, key_fingerprint)` shape, within the window below) that must be crossed before a shape is drafted. |
+| Enabled | `ATHENAEUM_RULE_PROPOSALS_ENABLED` | `librarian.rule_proposals.enabled` | `false` | **Master gate.** With this off, `_run_rule_proposal_phase` returns immediately every run — no new spend, no behavior change. This wiring adds a NEW unattended model-drafting call to the nightly run, so it defaults off until an operator opts in. |
+| Threshold | `ATHENAEUM_RULE_PROPOSALS_THRESHOLD` | `librarian.rule_proposals.threshold` | `50` | Deferred-record count (per `(source, key_fingerprint)` shape, within the window below) that must be crossed before a shape is drafted. Also doubles as the phase's cadence control — see the note below. |
 | Window | `ATHENAEUM_RULE_PROPOSALS_WINDOW_DAYS` | `librarian.rule_proposals.window_days` | `30` | Only disposition rows whose `at` timestamp falls within this many days of "now" count toward the threshold. |
 | Exemplar count (K) | `ATHENAEUM_RULE_PROPOSALS_EXEMPLAR_COUNT` | `librarian.rule_proposals.exemplar_count` | `5` | How many readable raw records of a detected shape are embedded in the one drafting call. |
+
+Cadence note: once enabled, there is no separate once-per-period stamp —
+the `threshold` above IS the cadence control, together with the detector's
+own per-shape idempotency (a shape already carrying a pending or rejected
+proposal is never re-drafted). `run_shape_rule_phase` has no once-per-period
+guard beyond its own runtime share either, so there is nothing further to
+mirror.
 
 The drafting call's model/`max_tokens`/`thinking` route through the standard
 `resolve_model`/`resolve_max_tokens`/`resolve_thinking` knobs under knob name
@@ -334,6 +344,42 @@ Configuring `backlog_files` / `backlog_bytes` / `interval_hours` is what
 makes reasoning respond to actual load instead of a fixed clock. `athenaeum
 ingest` **without** `--if-triggered` is unaffected by any of this — it is the
 pre-existing on-demand poke (issue athenaeum#349) and always compiles.
+
+### Lock-free public evaluation (`--evaluate-only`, athenaeum#1001)
+
+`athenaeum ingest --evaluate-only` runs ONLY the trigger evaluation above —
+prints a one-line JSON verdict and returns — and, unlike `--if-triggered`,
+**never compiles even when a trigger fires** and never takes
+`.athenaeum.lock` (no lock is even considered):
+
+```
+athenaeum ingest --evaluate-only
+```
+
+```json
+{"command": "ingest", "mode": "evaluate-only", "fired": true, "trigger": "backlog-files", "exit_code": 2}
+```
+
+Exit codes mirror this repo's existing dry-run-found-something ternary
+(`athenaeum decay`, `athenaeum repair`): `0` — no trigger fired, `1` — an
+error occurred evaluating, `2` — a trigger fired (`trigger` names which
+one, same reasons as the table above). Cannot be combined with
+`--if-triggered`.
+
+This is the public surface a deployed evaluator (for example a
+launchd/cron unit polling on a schedule this repo does not own, such as
+`com.kromatic.athenaeum-reasoning-triggers`) should poll to decide whether
+to invoke `athenaeum ingest --if-triggered` next — instead of importing
+this module's private stamp symbols
+(`athenaeum.librarian.REASONING_TRIGGER_STAMP_NAME`,
+`athenaeum.librarian._load_timestamp_stamp`) directly, which breaks
+silently on any internal rename of those symbols. Both modes read the
+SAME reasoning-trigger stamp through the SAME shared internal helper, so
+the two can never drift out of sync — see
+`tests/test_ingest_reindex.py::TestIngestEvaluateOnlyCLI` for the tests
+proving the lock-free guarantee, the shared stamp path, and that the
+public mode's answer survives a simulated rename of those private symbols
+(issue athenaeum#1001's ACs).
 
 ## Surface-divergence guard (athenaeum#963)
 

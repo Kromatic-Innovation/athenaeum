@@ -2,9 +2,10 @@
 """``recall(with_pii=True)`` — excluded fields for any entity class (athenaeum#885).
 
 The caller-facing generalization of athenaeum#883's primitives, at the Python
-``recall_search`` / ``_recall_via_backend`` layer only. The MCP tool argument,
-the ``read_person`` tool and ``athenaeum query person`` are athenaeum#886's scope
-and are untouched here.
+``recall_search`` / ``_recall_via_backend`` layer only. The MCP tool argument
+and ``athenaeum query entity`` (and the now-removed, athenaeum#888,
+person-shaped ``read_person`` tool / ``athenaeum query person``) are
+athenaeum#886's scope and are untouched here.
 
 Structure mirrors the issue's acceptance criteria:
 
@@ -150,7 +151,6 @@ class TestJoinReusesTheAssemblySeam:
 
         monkeypatch.setattr(pii, "read_entity", _explode)
         monkeypatch.setattr(pii, "read_entities", _explode)
-        monkeypatch.setattr(pii, "read_person", _explode)
 
         result = recall_search(
             corpus / "wiki", "widget", config=EXCLUDED_CONFIG, with_pii=True
@@ -369,7 +369,7 @@ class TestLayerOrdering:
     def test_authorized_restricted_caller_still_receives_the_join(
         self, tmp_path: Path
     ) -> None:
-        """The rule is person_read's: survive the audience check, get values."""
+        """The rule is entity_read's: survive the audience check, get values."""
         knowledge = tmp_path / "knowledge"
         _write_page(
             knowledge / "wiki", "alex", name="Alex Widget", extra="access: open\n"

@@ -668,9 +668,30 @@ without spending another drafting call.
 `approve` / `reject` record kinds — same shape as `wiki/_quarantine.jsonl`
 (§ athenaeum#898).
 
-**Not wired into the nightly `athenaeum run` loop by this change.**
-`athenaeum.rule_proposals.run_rule_proposal_detection` is complete and
-independently callable/testable, mirroring `run_shape_rule_phase` /
-`run_intake_audit`'s shape, but adding its own `librarian.py` call site
-(`RunContext`, deadline/spend-ledger integration) is left to a follow-up —
-see the module's own docstring "Wiring note".
+**Wired into the nightly `athenaeum run` loop (issue athenaeum#1063), OFF by
+default.** `athenaeum.rule_proposals.run_rule_proposal_detection` is now
+called from `librarian.py`'s `_run_rule_proposal_phase`, run immediately
+before the finalize phase (after the auto-memory block, so this run's own
+newly-deferred disposition rows are already visible to the detector). The
+call site is config-gated OFF by default —
+**set `librarian.rule_proposals.enabled: true` in `athenaeum.yaml` (or the
+env var `ATHENAEUM_RULE_PROPOSALS_ENABLED=1`) to turn it on.** Left off, the
+phase is a complete no-op: no client is built, the disposition ledger is
+never read, and no LLM call — hence no new spend — is ever made. Default OFF
+is deliberate: this wiring adds a NEW unattended language-model call to the
+nightly run, real recurring spend an operator must opt into rather than
+discover behind a detector issue.
+
+Once enabled, cadence is governed entirely by the detector's own
+`librarian.rule_proposals.threshold` (default 50) plus its built-in
+per-shape idempotency (a shape already carrying a pending or rejected
+proposal is never re-drafted) — there is no separate once-per-period stamp,
+mirroring `run_shape_rule_phase`, which has no such guard beyond its own
+runtime share. The phase participates in the run's wall-clock deadline
+(`ctx.run_deadline`, issue athenaeum#396) directly — skipped entirely if
+already expired, and re-checked before each shape's drafting call — and
+each drafting call's tokens are recorded into the run's spend ledger tagged
+`knob="rule_proposals"`, the same accounting the tier-2/3 call sites use
+(see `librarian._run_rule_proposal_phase`'s docstring for the full
+rationale, including why it does NOT carve out its own runtime share the
+way `_run_shape_rule_phase` does).

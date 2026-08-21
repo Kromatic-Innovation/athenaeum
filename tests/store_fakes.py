@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ from athenaeum.store import (
     Lease,
     ObjectMeta,
     Record,
+    Store,
     StoreCapabilities,
     StoreConflictError,
     StoreKey,
@@ -185,3 +187,77 @@ class NoRecoveryStore(InMemoryStore):
         self.capabilities = dataclasses.replace(
             self.capabilities, versioned=False, purgeable=False
         )
+
+
+class LatencyInjectingStore:
+    """Wraps any :class:`~athenaeum.store.Store` implementation, counting
+    ``iter_meta``/``read_many`` CALLS and optionally sleeping on each one.
+
+    This is the fake design note §3.5 P5 asks for: "The guard is an
+    operation-count assertion against a latency-injecting fake adapter."
+    Counting calls (not objects/entries) is what makes the S2 (athenaeum#977) op-count
+    guard meaningful — a per-page ``stat()``/``read()`` walk costs nothing
+    extra on a local filesystem test, so a naive test could pass even with an
+    O(N) round-trip design. Injecting a real, non-zero ``latency_seconds`` per
+    call and asserting wall-clock time proves the bound holds even when each
+    call has a genuine cost: ``iter_meta_calls`` stays 1 and
+    ``read_many_calls`` stays at most 1 (batching every changed key)
+    regardless of corpus size ``N`` — see
+    ``tests/benchmarks/test_index_build_opcount.py``.
+
+    Every other :class:`~athenaeum.store.Store` method delegates unchanged to
+    *inner* — this fake only instruments the two bulk primitives the design
+    note's P1/P3 constraints are about.
+    """
+
+    def __init__(self, inner: Store, *, latency_seconds: float = 0.0) -> None:
+        self._inner = inner
+        self.latency_seconds = latency_seconds
+        self.iter_meta_calls = 0
+        self.read_many_calls = 0
+        self.capabilities = inner.capabilities
+
+    def _sleep(self) -> None:
+        if self.latency_seconds:
+            time.sleep(self.latency_seconds)
+
+    # -- instrumented bulk primitives (design note P1/P3) ------------------
+
+    def iter_meta(self, surface: str, prefix: str = "") -> Iterator[ObjectMeta]:
+        self.iter_meta_calls += 1
+        self._sleep()
+        yield from self._inner.iter_meta(surface, prefix)
+
+    def read_many(self, keys: Sequence[StoreKey]) -> Mapping[StoreKey, bytes]:
+        self.read_many_calls += 1
+        self._sleep()
+        return self._inner.read_many(keys)
+
+    # -- everything else: unmodified passthrough ---------------------------
+
+    def read(self, key: StoreKey) -> bytes:
+        return self._inner.read(key)
+
+    def iter_records(self, surface: str, prefix: str = "") -> Iterator[Record]:
+        return self._inner.iter_records(surface, prefix)
+
+    def put(self, key: StoreKey, data: bytes, *, expect: str | None = None) -> str:
+        return self._inner.put(key, data, expect=expect)
+
+    def append(self, key: StoreKey, line: bytes) -> None:
+        self._inner.append(key, line)
+
+    def delete(self, key: StoreKey, *, expect: str | None = None) -> bool:
+        return self._inner.delete(key, expect=expect)
+
+    def move(self, src: StoreKey, dst: StoreKey) -> None:
+        self._inner.move(src, dst)
+
+    def snapshot(self, label: str) -> str | None:
+        return self._inner.snapshot(label)
+
+    def lease(self, name: str, ttl_seconds: float) -> AbstractContextManager[Lease]:
+        return self._inner.lease(name, ttl_seconds)
+
+    def bootstrap(self) -> None:
+        self._inner.bootstrap()

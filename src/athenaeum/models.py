@@ -1421,6 +1421,22 @@ class AutoMemoryFile:
         return out
 
 
+def _recorded_time_now() -> datetime:
+    """Return the current instant for ``WikiEntity.recorded_at`` stamping.
+
+    Issue athenaeum#1064: isolated to this one seam (rather than inlining
+    ``datetime.now(timezone.utc)`` at the call site below) so a test that
+    constructs entities across two passes needing the SAME ``recorded_at``
+    (e.g. the batch/sync equivalence tests in ``test_batch_mode.py``) can
+    freeze it via ``monkeypatch.setattr(models, "_recorded_time_now", ...)``
+    instead of racing the real wall clock across a second boundary. Mirrors
+    :func:`athenaeum.dimensions.stamp_recorded_time`'s injectable-``now``
+    contract without importing it — see the cycle note in
+    ``WikiEntity.__post_init__`` below for why that import is not taken.
+    """
+    return datetime.now(timezone.utc)
+
+
 @dataclass
 class WikiEntity:
     """An entity page in wiki/ using the full entity template format."""
@@ -1537,7 +1553,7 @@ class WikiEntity:
         # ``tests/test_import_graph_acyclic.py``'s whole-graph SCC guard,
         # which counts function-local imports too, not just top-level ones).
         if not self.recorded_at:
-            self.recorded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self.recorded_at = _recorded_time_now().isoformat(timespec="seconds")
 
     @property
     def filename(self) -> str:
