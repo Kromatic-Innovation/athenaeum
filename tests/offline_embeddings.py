@@ -96,7 +96,7 @@ def _apply_tie_break_salt(vec: list[float], text: str, *, dim: int) -> None:
 
 
 def embed_one(text: str, *, dim: int = DIM) -> list[float]:
-    """Hashing-trick bag-of-tokens embedding, L2-normalized to unit length."""
+    """Hashing-trick bag-of-words embedding, unit-normalized (L2)."""
     vec = [0.0] * dim
     tokens = tokenize(text)
     if not tokens:
