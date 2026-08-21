@@ -24,10 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     ledgers.
   - **Never-ingest class list** — the authority manifest (athenaeum#426) gains
     an optional `never_ingest_classes:` key (`mirror-of-live-source`,
-    `pending-state-todo`); new `src/athenaeum/never_ingest.py` enforces it
-    at auto-memory intake (`_run_auto_memory_phase`, right after
-    `discover_auto_memory_files`, before clustering). A refused file is
-    excluded from that run's compilation, ledgered ids-only to
+    `pending-state-todo`); new `src/athenaeum/never_ingest.py` enforces it at
+    BOTH intake tiers, each at its own COMPILE choke point, never at
+    discovery: auto-memory (`_run_auto_memory_phase`, right after
+    `discover_auto_memory_files`, before clustering) and the entity tier
+    (`process_one`, right after each raw file's frontmatter is parsed, via
+    the shared `check_and_refuse` primitive). `discover_raw_files` itself is
+    untouched — its return value is read directly by
+    `backlog_price_sheet.py` / `ordinary_night_table.py` (athenaeum#713, held
+    pending an operator decision), so the entity-tier gate lives at compile
+    time, never at discovery, to keep that backlog count byte-identical. A
+    refused file (either tier) is excluded from that run's compilation,
+    ledgered ids-only (now including a `tier` field) to
     `_never_ingest_refusals.jsonl`, and never deleted from disk. Empty/absent
     manifest key is a complete no-op. See
     `docs/authority-manifest.md#never-ingest-classes-athenaeum968`.

@@ -1322,23 +1322,31 @@ every other class but unsafe here.
 ### Never-ingest classes (athenaeum#968)
 
 The authority manifest also carries an optional `never_ingest_classes:` list
-— write-refusal classes the auto-memory intake path consults, extending the
-manifest mechanism above rather than adding a second config surface. Empty
-or absent by default (a manifest written before athenaeum#968, or one that never
-mentions the key, enforces nothing new). Two classes are recognised:
+— write-refusal classes BOTH intake paths (auto-memory and entity tier)
+consult, extending the manifest mechanism above rather than adding a second
+config surface. Empty or absent by default (a manifest written before
+athenaeum#968, or one that never mentions the key, enforces nothing new). Two
+classes are recognised:
 
 - `mirror-of-live-source` — reuses the manifest's own topic-index lookup
-  (the same one `authority lint` uses) to refuse an auto-memory intake file
-  whose `topics`/`tags`/`name` names a topic a `sources:` entry already
-  owns.
+  (the same one `authority lint` uses) to refuse an intake file whose
+  `topics`/`tags`/`name` names a topic a `sources:` entry already owns.
 - `pending-state-todo` — refuses an intake file that asserts the current
   presence/absence of something in an external artifact (an explicit
   `pending_state: true` flag, or a phrase like "has it been added" / "still
   needs" / "todo:").
 
-Enforced at `_run_auto_memory_phase` (`src/athenaeum/librarian.py`), right
-after `discover_auto_memory_files` and before clustering — a refused file is
-excluded from that run's compilation and appended, ids-only, to
+Enforced at each tier's own COMPILE choke point, never at discovery:
+auto-memory in `_run_auto_memory_phase` (`src/athenaeum/librarian.py`), right
+after `discover_auto_memory_files` and before clustering; entity tier in
+`process_one`, right after each raw file's frontmatter is parsed and before
+Tier 0 passthrough. Deliberately never inside
+`athenaeum.intake.discover_raw_files` itself — that function's return value
+is read directly, unmodified, by `backlog_price_sheet.py` /
+`ordinary_night_table.py` (issue athenaeum#713's backlog-count instruments, held
+pending an operator decision), so gating at discovery would silently move
+those numbers. A refused file (either tier) is excluded from that run's
+compilation and appended, ids-only, to
 `<cache_dir>/_never_ingest_refusals.jsonl` (never deleted from disk; it is
 re-evaluated on the next run). See `athenaeum.never_ingest` and
 [`docs/authority-manifest.md`](authority-manifest.md#never-ingest-classes-athenaeum968)

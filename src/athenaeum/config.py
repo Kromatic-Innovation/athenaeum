@@ -1624,7 +1624,7 @@ def resolve_push_metrics_enabled(config: dict[str, Any] | None) -> bool:
 def resolve_ingestion_gate_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve whether the ingestion gate is enforced (issue athenaeum#968).
 
-    OFF by default — this is a new, additive gate (part 3 of #968) that can
+    OFF by default — this is a new, additive gate (part 3 of athenaeum#968) that can
     BLOCK ingestion when push-metrics precision instrumentation looks
     unhealthy, so it must not change behavior for any existing operator
     until they opt in (DoD: "lands dark behind a documented config key

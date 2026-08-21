@@ -173,29 +173,47 @@ Both classes are seed evidence from athenaeum#968's own filing comment: a
 2026-08-07 operator evidence log of three witnessed live wiki pages that
 should never have been ingested as durable claims in the first place.
 
-**Enforcement point:** `athenaeum.never_ingest.filter_never_ingest`, called
-from `athenaeum.librarian._run_auto_memory_phase` immediately after
-`discover_auto_memory_files` and before clustering. A refused file is
-excluded from that run's compilation but is **never deleted** — it stays on
-disk and is re-evaluated (and, if the class still matches, re-excluded)
-idempotently on every later run, the same non-destructive shape
-`athenaeum.ephemeral`'s own intake drop already uses.
+**Enforcement points — both intake tiers, each at its own COMPILE choke
+point, never at discovery:**
 
-**Visibility — never a silent drop.** Every refusal is appended, ids-only
-(a class slug, a closed-vocabulary detail token, the origin scope, and a
-content-free hash of the file's identity — never the filename itself, which
-for an auto-memory file can carry a free-text slug), to
+- **Auto-memory** (`raw/auto-memory/<scope>/...`) —
+  `athenaeum.never_ingest.filter_never_ingest`, called from
+  `athenaeum.librarian._run_auto_memory_phase` immediately after
+  `discover_auto_memory_files` and before clustering. A refused file is
+  excluded from that run's `auto_memory_files` list.
+- **Entity tier** (`raw/<source>/...`) — `athenaeum.librarian.process_one`
+  checks the SAME classifier, via the shared
+  `athenaeum.never_ingest.check_and_refuse` primitive, at the very start of
+  processing each raw file (right after its frontmatter is parsed, before
+  Tier 0 passthrough). Deliberately **not** inside
+  `athenaeum.intake.discover_raw_files` itself: that function's return value
+  is read directly by `backlog_price_sheet.py` and `ordinary_night_table.py`
+  (issue athenaeum#713's measurement instruments, held pending an operator
+  decision) for their own backlog counts, and moving what `discover_raw_files`
+  returns would silently move those numbers. `discover_raw_files` takes no
+  manifest argument and is entirely unmodified by athenaeum#968 — a refused
+  entity-tier file is still discovered and still counted in the backlog, it
+  is simply not compiled into a wiki page this run (mirrors `result.skipped`,
+  the same disposition bucket a Tier 1 old-format skip already uses).
+
+In both cases a refused file is excluded from **that run's compilation**
+only — it is **never deleted**. It stays on disk and is re-evaluated (and, if
+the class still matches, re-excluded) idempotently on every later run, the
+same non-destructive shape `athenaeum.ephemeral`'s own intake drop already
+uses.
+
+**Visibility — never a silent drop.** Every refusal, from either tier, is
+appended via the same `athenaeum.never_ingest.check_and_refuse` call,
+ids-only (a class slug, a closed-vocabulary detail token, an origin
+scope/source, a content-free hash of the file's identity — never the
+filename itself, which for an auto-memory file can carry a free-text slug —
+and a `tier` field: `auto-memory` or `entity`), to
 `<cache_dir>/_never_ingest_refusals.jsonl`. This is the OTHER rung of the
 "one-ladder rule": raw intake `athenaeum.intake_audit` cannot even
 RECOGNISE escalates to a human via the pending-question queue; raw intake
 that IS recognised but matches a DECLARED refusal class needs no human
 escalation (the class was already declared) but is still ledgered, never
 silently dropped.
-
-Entity-tier raw intake (`athenaeum.intake.discover_raw_files`,
-`raw/<source>/...`) is **not yet gated** by this mechanism — a deliberate
-scope boundary of athenaeum#968, not a silent gap. Only the auto-memory
-pipeline (`raw/auto-memory/<scope>/...`) is currently enforced.
 
 ## Out of scope here
 
@@ -204,5 +222,3 @@ pipeline (`raw/auto-memory/<scope>/...`) is currently enforced.
 - Syncing skill files across teammates via athenaeum (explicitly deferred;
   see `docs/storage-adapter-contract.md`'s note on the deferred skill-file-sync
   surface).
-- Gating entity-tier raw intake (`raw/<source>/...`) by
-  `never_ingest_classes` — only auto-memory intake is enforced (athenaeum#968).

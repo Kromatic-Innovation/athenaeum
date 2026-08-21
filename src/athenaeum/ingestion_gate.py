@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Ingestion gate: intake gated on push-metrics precision staying healthy (issue athenaeum#968).
 
-Part 3 of #968 (memory-model v6's reshaped #430): the "measured-precision
+Part 3 of athenaeum#968 (memory-model v6's reshaped athenaeum#430): the "measured-precision
 hook" memory-model §6.5 names — "so intake cannot silently degrade push
 quality." The push-precision instrument (:mod:`athenaeum.push_metrics`,
 issue athenaeum#711) is itself an optional, config-gated measurement; if an
