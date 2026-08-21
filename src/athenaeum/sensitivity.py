@@ -154,7 +154,9 @@ class SensitivityRecognizer(Protocol):
 #: §3.2 "no ``if built_in`` branch anywhere in this contract") the built-ins
 #: register through the exact same public :func:`register_recognizer` call a
 #: deployment's own recogniser would use, rather than bypassing it.
-_BUILTIN_RECOGNIZER_NAMES: frozenset[str] = frozenset({"email", "phone", "street-address"})
+_BUILTIN_RECOGNIZER_NAMES: frozenset[str] = frozenset(
+    {"email", "phone", "street-address"}
+)
 
 #: In-process registry (the code extension point). Populated by
 #: :func:`register_recognizer` — both for the two built-ins (at the bottom of
@@ -163,7 +165,9 @@ _BUILTIN_RECOGNIZER_NAMES: frozenset[str] = frozenset({"email", "phone", "street
 _REGISTERED_RECOGNIZERS: dict[str, SensitivityRecognizer] = {}
 
 
-def register_recognizer(recognizer: SensitivityRecognizer, *, replace: bool = False) -> None:
+def register_recognizer(
+    recognizer: SensitivityRecognizer, *, replace: bool = False
+) -> None:
     """Register a recogniser in-process (the code extension point).
 
     Mirrors :func:`athenaeum.storage.register_adapter`'s documented shape
@@ -189,7 +193,9 @@ def register_recognizer(recognizer: SensitivityRecognizer, *, replace: bool = Fa
     _REGISTERED_RECOGNIZERS[name] = recognizer
 
 
-def available_recognizers(config: dict[str, Any] | None) -> dict[str, SensitivityRecognizer]:
+def available_recognizers(
+    config: dict[str, Any] | None
+) -> dict[str, SensitivityRecognizer]:
     """Return every recogniser available to this config, keyed by name.
 
     Built-ins union code-:func:`register_recognizer` entries. Unlike a future
@@ -283,29 +289,45 @@ class _PhoneRecognizer:
 #: regardless of list order (``St`` cannot falsely consume the first two
 #: letters of ``Street`` and stop there).
 _STREET_TYPES: tuple[str, ...] = (
-    "Street", "St",
-    "Avenue", "Ave",
-    "Boulevard", "Blvd",
-    "Drive", "Dr",
-    "Lane", "Ln",
-    "Road", "Rd",
-    "Court", "Ct",
-    "Place", "Pl",
+    "Street",
+    "St",
+    "Avenue",
+    "Ave",
+    "Boulevard",
+    "Blvd",
+    "Drive",
+    "Dr",
+    "Lane",
+    "Ln",
+    "Road",
+    "Rd",
+    "Court",
+    "Ct",
+    "Place",
+    "Pl",
     "Way",
-    "Terrace", "Ter",
-    "Circle", "Cir",
-    "Parkway", "Pkwy",
-    "Square", "Sq",
-    "Trail", "Trl",
-    "Highway", "Hwy",
+    "Terrace",
+    "Ter",
+    "Circle",
+    "Cir",
+    "Parkway",
+    "Pkwy",
+    "Square",
+    "Sq",
+    "Trail",
+    "Trl",
+    "Highway",
+    "Hwy",
 )
 
 #: Unit designators for the optional "with a unit designator" in-scope form
 #: (issue athenaeum#991). A bare ``#`` (no keyword) is also accepted — see
 #: ``_STREET_ADDRESS_RE``'s ``unit_no`` group.
 _UNIT_TYPES: tuple[str, ...] = (
-    "Apartment", "Apt",
-    "Suite", "Ste",
+    "Apartment",
+    "Apt",
+    "Suite",
+    "Ste",
     "Unit",
 )
 
@@ -316,11 +338,56 @@ _UNIT_TYPES: tuple[str, ...] = (
 #: than this fixture-bounded slice is scoped to (issue athenaeum#991's "in-scope
 #: forms... at minimum" list, read narrowly).
 _US_STATE_ABBREVIATIONS: tuple[str, ...] = (
-    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
-    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
-    "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
-    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
-    "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+    "AL",
+    "AK",
+    "AZ",
+    "AR",
+    "CA",
+    "CO",
+    "CT",
+    "DE",
+    "FL",
+    "GA",
+    "HI",
+    "ID",
+    "IL",
+    "IN",
+    "IA",
+    "KS",
+    "KY",
+    "LA",
+    "ME",
+    "MD",
+    "MA",
+    "MI",
+    "MN",
+    "MS",
+    "MO",
+    "MT",
+    "NE",
+    "NV",
+    "NH",
+    "NJ",
+    "NM",
+    "NY",
+    "NC",
+    "ND",
+    "OH",
+    "OK",
+    "OR",
+    "PA",
+    "RI",
+    "SC",
+    "SD",
+    "TN",
+    "TX",
+    "UT",
+    "VT",
+    "VA",
+    "WA",
+    "WV",
+    "WI",
+    "WY",
     "DC",
 )
 
@@ -342,8 +409,12 @@ _TITLE_WORD = r"[A-Z][a-z]*(?:['\-][A-Za-z]+)?"
 _STREET_ADDRESS_RE = re.compile(
     r"(?<!\d)(?P<number>\d{1,6})(?!\d)"
     r"\s+(?P<name>" + _TITLE_WORD + r"(?:\s+" + _TITLE_WORD + r"){0,3})"
-    r"\s+(?P<type>(?:" + "|".join(sorted(_STREET_TYPES, key=len, reverse=True)) + r"))(?![A-Za-z])\.?"
-    r"(?:[,\s]+(?P<unit_kw>(?:" + "|".join(sorted(_UNIT_TYPES, key=len, reverse=True)) + r"))(?![A-Za-z])\.?\s*#?\s*(?P<unit_no>[A-Za-z0-9-]+)"
+    r"\s+(?P<type>(?:"
+    + "|".join(sorted(_STREET_TYPES, key=len, reverse=True))
+    + r"))(?![A-Za-z])\.?"
+    r"(?:[,\s]+(?P<unit_kw>(?:"
+    + "|".join(sorted(_UNIT_TYPES, key=len, reverse=True))
+    + r"))(?![A-Za-z])\.?\s*#?\s*(?P<unit_no>[A-Za-z0-9-]+)"
     r"|[,\s]+#\s*(?P<hash_unit_no>[A-Za-z0-9-]+))?"
     r"(?:,\s*(?P<city>" + _TITLE_WORD + r"(?:\s+" + _TITLE_WORD + r"){0,2})"
     r",\s*(?P<state>(?:" + "|".join(_US_STATE_ABBREVIATIONS) + r"))"
