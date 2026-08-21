@@ -3,9 +3,20 @@
 
 A single subcommand with a mutually-exclusive repair-mode group
 (``--tag-indent`` / ``--value-quoting`` / ``--legacy-source-slugs`` /
-``--backfill-sources`` / ``--all``), kept in its own module because it is
-sizable on its own (multiple report shapes, exit-code contract shared with
-``auto-memory prune``).
+``--backfill-sources`` / ``--bounce-fold`` / ``--all``), kept in its own
+module because it is sizable on its own (multiple report shapes, exit-code
+contract shared with ``auto-memory prune``).
+
+``--bounce-fold`` (issue athenaeum#1006) exposes
+:func:`athenaeum.pii.find_orphaned_bounce_marks` /
+:func:`athenaeum.pii.fold_orphaned_bounce_marks` (issue athenaeum#850) on the
+CLI. It is deliberately NOT part of ``--all``: the other ``--all`` passes
+(tag-indent, value-quoting) rewrite wiki frontmatter formatting in place;
+bounce-fold writes to the contacts surface (PII-adjacent, via
+:func:`athenaeum.pii.mark_bounced`) and mints a cross-record link
+(``folded_into``) between two different files. That is a materially bigger
+blast radius than a formatting sweep, so it stays an explicit, separately-run
+mode rather than something a blanket ``--all`` picks up implicitly.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` — this
@@ -65,6 +76,14 @@ def add_repair_subparser(subparsers: argparse._SubParsersAction) -> None:
         "user-stated / agent-observed upgrades, else confirm inferred.",
     )
     repair_mode.add_argument(
+        "--bounce-fold",
+        action="store_true",
+        help="Fold slug-keyed bounce marks stranded by the pre-athenaeum#850 "
+        "resolve path onto the person record that already lists the same "
+        "address (issue athenaeum#1006 / athenaeum#850). Not included in --all "
+        "— see module docstring.",
+    )
+    repair_mode.add_argument(
         "--all",
         action="store_true",
         help="Run all repair passes in sequence (tag-indent then value-quoting).",
@@ -84,14 +103,24 @@ def add_repair_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--knowledge-root",
         type=Path,
         default=None,
-        help="Knowledge root for --backfill-sources (default: ~/knowledge); "
-        "auto-memory is read from <root>/raw/auto-memory.",
+        help="Knowledge root for --backfill-sources / --bounce-fold "
+        "(default: ~/knowledge); auto-memory is read from "
+        "<root>/raw/auto-memory, and the contacts surface is resolved from "
+        "it via the configured storage mapping unless --contacts-root "
+        "overrides that.",
     )
     repair_parser.add_argument(
         "--projects-root",
         type=Path,
         default=None,
         help="Transcript root for --backfill-sources " "(default: ~/.claude/projects).",
+    )
+    repair_parser.add_argument(
+        "--contacts-root",
+        type=Path,
+        default=None,
+        help="--bounce-fold: override the contacts surface root (defaults to "
+        "the configured `pii` entity-class surface under --knowledge-root).",
     )
     repair_parser.add_argument(
         "--limit",
@@ -124,6 +153,11 @@ def cmd_repair(args: argparse.Namespace) -> int:
     # the wiki, so it branches BEFORE the wiki_root resolution below.
     if getattr(args, "backfill_sources", False):
         return _cmd_repair_backfill_sources(args)
+
+    # Bounce-fold (issue athenaeum#1006 / athenaeum#850) reads the contacts surface, not
+    # the wiki, so it branches BEFORE the wiki_root resolution below too.
+    if getattr(args, "bounce_fold", False):
+        return _cmd_repair_bounce_fold(args)
 
     wiki_root = (args.wiki_root or Path("~/knowledge/wiki")).expanduser().resolve()
     if not wiki_root.is_dir():
@@ -258,6 +292,69 @@ def _cmd_repair_backfill_sources(args: argparse.Namespace) -> int:
         if report.errors:
             return 1
         if not args.apply and total_changed > 0:
+            return 2
+        return 0
+    finally:
+        if lock is not None and not isinstance(lock, int):
+            lock.release()
+
+
+def _cmd_repair_bounce_fold(args: argparse.Namespace) -> int:
+    """Run the athenaeum#850 bounce-fold pass over the contacts surface (issue athenaeum#1006).
+
+    Exit codes (same contract as the other repair modes — see
+    :func:`cmd_repair`):
+        0 — clean run (zero orphaned pairs found, OR ``--apply`` succeeded
+            with no errors).
+        1 — errors encountered (read/write failures while folding).
+        2 — dry-run found orphaned pairs that WOULD be folded (CI gate
+            signal).
+    """
+    from athenaeum.config import load_config
+    from athenaeum.pii import contacts_surface_root, fold_orphaned_bounce_marks
+
+    knowledge_root = (args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    cfg = load_config(knowledge_root)
+    contacts_root = (
+        args.contacts_root.expanduser().resolve()
+        if args.contacts_root
+        else contacts_surface_root(knowledge_root, cfg)
+    )
+    if not contacts_root.is_dir():
+        print(f"Contacts root not found: {contacts_root}", file=sys.stderr)
+        return 1
+
+    # --apply mutates the contacts surface and can race a concurrent `run`,
+    # so it takes the run lock (issue athenaeum#309), same as the other
+    # write-capable repair modes. A dry-run reads only — no lock.
+    lock: RunLock | int | None = None
+    if args.apply:
+        lock = _acquire_or_exit(knowledge_root, args, cfg)
+        if isinstance(lock, int):
+            return lock
+    try:
+        mode = "APPLY" if args.apply else "DRY RUN"
+        try:
+            report = fold_orphaned_bounce_marks(contacts_root, dry_run=not args.apply)
+        except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
+            print(f"ERR bounce-fold ({type(exc).__name__}): {exc}", file=sys.stderr)
+            return 1
+
+        pairs_found = report.count
+        folded = pairs_found if args.apply else 0
+        residual = pairs_found - folded
+
+        print(f"=== repair bounce-fold ({mode}) ===")
+        print(f"  pairs_found: {pairs_found}")
+        print(f"  folded:      {folded}")
+        print(f"  residual:    {residual}")
+        if report.folded and not args.apply:
+            for pair in report.folded[:20]:
+                print(f"    {pair.bounce_record.name} -> {pair.person_record.name}")
+            if len(report.folded) > 20:
+                print(f"    ... and {len(report.folded) - 20} more")
+
+        if not args.apply and pairs_found > 0:
             return 2
         return 0
     finally:
