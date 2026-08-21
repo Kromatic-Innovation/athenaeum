@@ -27,6 +27,12 @@ Two sub-commands:
   value by contract, so folding its count into the gate would make the
   command permanently fail with no fix in scope — see athenaeum#1049 and
   ``docs/sensitivity-value-routing.md`` §5.
+- ``lint-mapping`` — the ``storage.mapping`` completeness lint + the deferred
+  `(read_policy, adapter)` pair check (issue athenaeum#993, S5 of
+  ``docs/sensitivity-class-vocabulary.md`` §9). A thin CLI wrapper over
+  :mod:`athenaeum.sensitivity_lint`, which holds all the check logic; exits
+  non-zero only on a completeness finding (a D4 policy-mismatch finding is
+  advisory and never fails the gate on its own).
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` — this
@@ -52,6 +58,10 @@ from athenaeum.pii import (
     load_pii_allowlist,
     scan_corpus_pii,
 )
+from athenaeum.sensitivity_lint import (
+    SensitivityMappingLintResult,
+    lint_sensitivity_storage_mapping,
+)
 from athenaeum.storage_migrate import (
     NameEmailRenameReport,
     PiiMigrationPlan,
@@ -68,6 +78,15 @@ from athenaeum.storage_migrate import (
 #: rather than imported to keep the two lint CLIs decoupled (same rationale the
 #: detectors themselves are shared but the CLIs are not).
 EXIT_PII_FOUND = 2
+
+#: Exit code when ``lint-mapping`` finds a completeness gap (a sensitivity
+#: class the scanned corpus carries with no live ``storage.mapping`` entry,
+#: or one mapped to a nonexistent adapter). Same value/rationale as
+#: :data:`EXIT_PII_FOUND` — kept as its own named constant (not imported)
+#: since the two lint CLIs are deliberately decoupled. A D4 policy-mismatch
+#: finding never triggers this exit code on its own — see
+#: :attr:`athenaeum.sensitivity_lint.SensitivityMappingLintResult.is_clean`.
+EXIT_MAPPING_ISSUES = 2
 
 #: How often bulk apply/scan emits a progress line to stderr. A silent
 #: 11.5k-page run is indistinguishable from a hung one (issue athenaeum#495), so
@@ -248,6 +267,40 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
 
+    lint_mapping_p = s_sub.add_parser(
+        "lint-mapping",
+        help=(
+            "storage.mapping completeness lint + the deferred (read_policy, "
+            "adapter) pair check (issue athenaeum#993): every sensitivity class "
+            "the scanned corpus carries must have a live storage.mapping "
+            "entry naming a real adapter; exit non-zero on a gap. Advisory-"
+            "only D4 policy-mismatch findings are also reported but never "
+            "fail the gate on their own."
+        ),
+    )
+    lint_mapping_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge root (default: ~/knowledge); also the default corpus root.",
+    )
+    lint_mapping_p.add_argument(
+        "--corpus",
+        type=Path,
+        default=None,
+        help=(
+            "Corpus root to scan for sensitivity_class: frontmatter "
+            "(default: the --path knowledge root). Always caller-supplied — "
+            "this lint never falls back to a hardcoded or environment-"
+            "derived path (issue athenaeum#993's own AC)."
+        ),
+    )
+    lint_mapping_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON findings instead of plain text.",
+    )
+
 
 def cmd_storage(args: argparse.Namespace) -> int:
     sub = getattr(args, "storage_target", None)
@@ -255,7 +308,12 @@ def cmd_storage(args: argparse.Namespace) -> int:
         return _cmd_storage_migrate_pii(args)
     if sub == "lint-pii":
         return _cmd_storage_lint_pii(args)
-    print("usage: athenaeum storage {migrate-pii,lint-pii} [...]", file=sys.stderr)
+    if sub == "lint-mapping":
+        return _cmd_storage_lint_mapping(args)
+    print(
+        "usage: athenaeum storage {migrate-pii,lint-pii,lint-mapping} [...]",
+        file=sys.stderr,
+    )
     return 2
 
 
@@ -731,3 +789,70 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
         )
 
     return wiki_rc
+
+
+def _cmd_storage_lint_mapping(args: argparse.Namespace) -> int:
+    """CLI wrapper for the athenaeum#993 lint (S5 of the sensitivity-class design note).
+
+    All check logic lives in :mod:`athenaeum.sensitivity_lint` — this
+    function only resolves inputs, calls
+    :func:`~athenaeum.sensitivity_lint.lint_sensitivity_storage_mapping`, and
+    prints/exits, mirroring :func:`_cmd_storage_lint_pii`'s shape.
+
+    Exit code reflects ONLY the completeness findings
+    (:data:`EXIT_MAPPING_ISSUES` when any exist, ``0`` otherwise) — a D4
+    policy-mismatch finding is always reported but never changes the exit
+    code, per :attr:`~athenaeum.sensitivity_lint.SensitivityMappingLintResult.is_clean`.
+    """
+    knowledge_root = _resolve_knowledge_root(args)
+    corpus_root = getattr(args, "corpus", None) or knowledge_root
+    config = load_config(knowledge_root)
+
+    result: SensitivityMappingLintResult = lint_sensitivity_storage_mapping(
+        config, corpus_root
+    )
+
+    if args.json:
+        import json
+
+        payload = {
+            "completeness": [
+                {
+                    "kind": f.kind,
+                    "class_name": f.class_name,
+                    "detail": f.detail,
+                    "paths": [str(p) for p in f.paths],
+                }
+                for f in result.completeness
+            ],
+            "policy": [
+                {
+                    "kind": f.kind,
+                    "class_name": f.class_name,
+                    "detail": f.detail,
+                }
+                for f in result.policy
+            ],
+        }
+        sys.stdout.write(json.dumps(payload) + "\n")
+        return 0 if result.is_clean else EXIT_MAPPING_ISSUES
+
+    if result.is_clean:
+        print(f"0 storage.mapping completeness finding(s) under {corpus_root}")
+    else:
+        print(
+            f"{len(result.completeness)} storage.mapping completeness "
+            f"finding(s) under {corpus_root}:"
+        )
+        for f in result.completeness:
+            print(f"  [{f.kind}] {f.detail}")
+
+    if result.policy:
+        print(
+            f"{len(result.policy)} advisory (read_policy, adapter) pair "
+            "mismatch finding(s) — does not fail this gate:"
+        )
+        for f in result.policy:
+            print(f"  [{f.kind}] {f.detail}")
+
+    return 0 if result.is_clean else EXIT_MAPPING_ISSUES
