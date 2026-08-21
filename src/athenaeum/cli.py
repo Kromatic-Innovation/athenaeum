@@ -88,10 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_merges import add_merges_subparser
     from athenaeum._cmd_outbound import add_outbound_subparser
     from athenaeum._cmd_pending import add_pending_subparsers
+    from athenaeum._cmd_pii_restore import add_pii_restore_subparser
     from athenaeum._cmd_push_metrics import add_push_metrics_subparser
     from athenaeum._cmd_query import add_query_subparsers
     from athenaeum._cmd_questions import add_questions_subparser
-    from athenaeum._cmd_pii_restore import add_pii_restore_subparser
     from athenaeum._cmd_repair import add_repair_subparser
     from athenaeum._cmd_run import add_run_subparser
     from athenaeum._cmd_serve import add_serve_subparser
