@@ -68,6 +68,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     metadata only, mechanically asserted by a static source scan in
     `tests/test_never_ingest.py::TestNoDeletionStaticScan`.
 
+### Deprecated
+
+- **`athenaeum people` — deprecated in favour of the generalized `athenaeum
+  enumerate` primitive (athenaeum#966).** Now that athenaeum#964 (narrow by
+  declared `type`) and athenaeum#965 (enumerate by declared type + field
+  predicates) have shipped, every question `people` answers is answerable
+  through `athenaeum enumerate --type person --where ...` — see
+  `docs/recall-architecture.md`'s capability-parity table (landed with
+  athenaeum#965) for the exact per-flag mapping, including the two rows
+  generalization deliberately drops: `--top-touch`'s computed composite sort
+  and `--format table|tsv` rendering, both presentation/scoring concerns
+  outside the generalized primitive's contract, not gaps in it. `people`
+  prints a one-line migration notice to **stderr** on every call — never to
+  stdout, which is a table or TSV a script may parse, and a notice there
+  would be a breaking output change dressed up as a deprecation.
+
+  **This changes zero behaviour** — the command keeps working identically;
+  flags, filtering, ordering and output format are byte-identical before and
+  after, asserted by regression test on a synthetic fixture corpus, alongside
+  parity tests proving each reproducible row's `enumerate` expression returns
+  the same set of pages as the `people` invocation it replaces.
+
+  Actual removal is a separate, later issue, gated on a real deprecation
+  window and on known consumers having migrated — **not** on this one
+  closing, and with no removal date set. Per the version-bump policy this
+  issue is a **patch** (a notice, no behaviour change); the removal will be a
+  breaking change and must bump **minor** at minimum, with a `### Removed`
+  entry — the same shape athenaeum#887 (deprecation) / athenaeum#888
+  (removal) already established for `athenaeum query person`.
+
 ### Fixed
 
 - **`storage lint-pii` now scans `raw/`, reported as a separate,
