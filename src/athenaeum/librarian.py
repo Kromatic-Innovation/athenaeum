@@ -118,6 +118,7 @@ from athenaeum.config import (
     resolve_full_compile_every_days,
     resolve_heartbeat_interval,
     resolve_live_delta_enabled,
+    resolve_model,
     resolve_model_rates,
     resolve_pull_before_run,
     resolve_push_after_run,
@@ -126,6 +127,7 @@ from athenaeum.config import (
     resolve_raw_file_max_api_calls,
     resolve_raw_file_max_runtime_seconds,
     resolve_retire,
+    resolve_rule_proposals_enabled,
     resolve_shape_rules_runtime_share,
 )
 from athenaeum.config import resolve_cache_dir as _resolve_cache_dir_config
@@ -188,12 +190,14 @@ from athenaeum.provider import (
     LLMBackend,
     LLMClientCache,
     ProviderConfigError,
+    build_llm_client,
     capabilities_for_knob,
     preflight_provider,
     resolve_provider,
 )
 from athenaeum.quarantine import quarantine_file as _quarantine_file
 from athenaeum.registry import collect_handles
+from athenaeum.rule_proposals import DEFAULT_RULE_PROPOSALS_MODEL, run_rule_proposal_detection
 from athenaeum.rules import run_shape_rule_phase
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
@@ -2850,6 +2854,11 @@ class RunContext:
     # discovery path claimed this run, and how many pending decisions were
     # raised (vs. already open/resolved) for them.
     intake_audit_summary: dict[str, Any] | None = None
+    # Issue athenaeum#1063: run-summary counts from
+    # ``_run_rule_proposal_phase`` (``None`` until that phase runs, including
+    # when the config gate is off -- a disabled phase never touches this
+    # field, distinguishing "didn't run" from "ran and saw nothing").
+    rule_proposals_summary: dict[str, Any] | None = None
     # Issue athenaeum#968: run-summary counts from the never-ingest gate applied
     # in ``_run_auto_memory_phase`` (``None`` until that phase runs) -- how
     # many auto-memory candidates were excluded this run because they
@@ -3574,6 +3583,118 @@ def _run_intake_audit_phase(ctx: RunContext) -> None:
             summary["raised_groups"],
             summary["raised_files"],
             summary["already_open_groups"],
+        )
+
+
+def _run_rule_proposal_phase(ctx: RunContext) -> None:
+    """Rule-proposal detector wiring (issue athenaeum#1063), closing the
+    athenaeum#905 (detector) / athenaeum#921 (applier) loop — see
+    `athenaeum.rule_proposals`'s module docstring, "Wiring note".
+
+    **Config-gated OFF by default**
+    (:func:`~athenaeum.config.resolve_rule_proposals_enabled`,
+    ``librarian.rule_proposals.enabled``, mirroring
+    :func:`_run_shape_rule_phase`'s config-gate pattern). Unlike that
+    deterministic, LLM-free phase, this one makes a REAL unattended
+    model-drafting call, so it needs its own opt-in rather than running
+    unconditionally: this wiring adds new recurring spend to the nightly
+    run that an operator must consciously turn on. Off (the default), this
+    function returns immediately — no client built, no disposition-ledger
+    read, ``ctx.rule_proposals_summary`` stays ``None``.
+
+    Called from `run()` immediately before the finalize phase — AFTER the
+    auto-memory block (C1-C4 + retire + athenaeum#188 reresolve), and NOT
+    reached at all by a `merge_only`/`cluster_only` run (both return before
+    this call site, same as finalize) — rather than alongside
+    shape-rules/corrections/intake-audit earlier in the run: this phase
+    reads `_shape_rule_dispositions.jsonl`, the SAME ledger
+    `_run_shape_rule_phase` writes to earlier in this run, and running last
+    means THIS run's own newly-deferred rows are already visible to the
+    detector's window/threshold count — the same "make this run's own
+    writes visible to a later phase in this SAME run" rationale
+    `_run_shape_rule_phase`'s docstring gives for its own ordering. Also
+    skipped whenever ``ctx.deadline_tripped`` (mirrors the auto-memory
+    block's own guard just above its call site) — a run that already blew
+    its wall-clock budget must not open a brand-new LLM knob afterward.
+
+    **Deadline participation** deliberately does NOT mirror
+    `_run_shape_rule_phase`'s carved-out runtime SHARE. That share exists
+    because shape-rules runs FIRST and must be protected from a later,
+    possibly-overrunning phase starving it. This phase runs LAST, after the
+    entity-tier and auto-memory phases have already spent whatever
+    ``ctx.run_deadline`` allowed — carving out a FRESH share at this point
+    would extend the run's total wall-clock time past ``max_runtime``,
+    exactly what ``run_deadline`` (issue athenaeum#396) exists to bound.
+    Instead this phase participates directly in the run's own
+    ``ctx.run_deadline``: skipped entirely if already expired, and
+    re-checked per-shape via ``deadline_check`` (mirrors
+    `_run_shape_rule_phase`'s per-file check — see
+    `run_rule_proposal_detection`'s docstring) so a run that trips the
+    deadline partway through several qualifying shapes stops cleanly
+    instead of overrunning.
+
+    **Cadence**: no separate once-per-period stamp. The detector's own
+    ``threshold`` (``librarian.rule_proposals.threshold``, default 50
+    disposition rows within ``window_days``) IS the cadence control — a
+    shape that has not crossed it yet costs zero LLM calls this run, and
+    `run_rule_proposal_detection`'s own idempotency (a shape already
+    carrying a pending or rejected proposal is skipped before any drafting
+    call) prevents ever re-spending on a shape already handled.
+    `_run_shape_rule_phase` has no once-per-period guard beyond its runtime
+    share either, so there is nothing further to mirror here.
+
+    **Spend-ledger accounting**: the drafting call's tokens are recorded
+    into ``ctx.usage`` tagged ``knob="rule_proposals"`` — the exact
+    mechanism the tier-2/3 call sites use (`athenaeum.tiers._record_usage`),
+    NOT `_run_shape_rule_phase`'s pattern (that phase makes zero LLM calls
+    and asserts so). The knob's resolved provider/model are recorded into
+    ``ctx.knob_providers``/``ctx.knob_models`` (mirroring the five
+    `_LIBRARIAN_ROUTED_KNOBS`, issue athenaeum#841) so
+    ``spend.record_spend_per_knob_provider`` attributes this call's spend
+    to its own knob/provider/model rather than falling back to the
+    unmodeled default.
+    """
+    if not resolve_rule_proposals_enabled(ctx.config):
+        return
+    if ctx.deadline_tripped or ctx.deadline_exceeded():
+        ctx.rule_proposals_summary = {"skipped_deadline_tripped": True}
+        return
+
+    _provider = resolve_provider(ctx.config, knob="rule_proposals", default=ctx.provider)
+    ctx.knob_providers["rule_proposals"] = _provider
+    ctx.knob_models["rule_proposals"] = resolve_model(
+        "rule_proposals",
+        "ATHENAEUM_RULE_PROPOSALS_MODEL",
+        DEFAULT_RULE_PROPOSALS_MODEL,
+        ctx.config,
+    )
+    client = build_llm_client(
+        ctx.config, knob="rule_proposals", api_key=ctx.api_key, max_retries=3
+    )
+
+    summary = run_rule_proposal_detection(
+        wiki_root=ctx.wiki_root,
+        raw_root=ctx.raw_root,
+        config=ctx.config,
+        client=client,
+        now=ctx.now,
+        dry_run=ctx.dry_run,
+        deadline_check=ctx.deadline_exceeded,
+        usage=ctx.usage,
+    )
+    ctx.rule_proposals_summary = summary
+    if summary["proposed"] or summary["threshold_crossed"]:
+        log.info(
+            "rule-proposals: %d shape(s) crossed threshold, %d proposal(s) drafted "
+            "this run (%d pending/suppressed, %d no-exemplar, %d invalid, %d "
+            "no-client, %d deadline-deferred)",
+            summary["threshold_crossed"],
+            summary["proposed"],
+            summary["skipped_pending"] + summary["skipped_suppressed"],
+            summary["skipped_no_exemplars"],
+            summary["skipped_draft_invalid"],
+            summary["skipped_no_client"],
+            summary["skipped_deadline"],
         )
 
 
@@ -5727,6 +5848,15 @@ def run(
         )
         ctx.emit_run_summary()  # issue athenaeum#464
         return 0
+
+    # Phase: rule-proposal detector wiring (issue athenaeum#1063) — config-gated
+    # OFF by default, so a no-op for every run until an operator opts in. Runs
+    # here (after auto-memory, immediately before finalize; NOT reached by
+    # merge_only or cluster_only, which both already returned above) rather
+    # than alongside the deterministic shape-rules/corrections/intake-audit
+    # phases earlier in the run — see `_run_rule_proposal_phase`'s docstring
+    # for the full ordering + deadline rationale.
+    _run_rule_proposal_phase(ctx)
 
     # Phase: finalize (spend summary + ledger, post-run push, page-size
     # guardrail, pending-merge revalidation advisor, summary emit, drain

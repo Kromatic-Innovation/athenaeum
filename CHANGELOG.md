@@ -292,6 +292,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`quarantine.py` migrated onto the whole-store adapter seam (athenaeum#982,
+  S7 of the whole-store adapter design lock, athenaeum#911 — "the slice that
+  proves the write half").** `src/athenaeum/quarantine.py` now contains no
+  `pathlib` and no `shutil` call: the ledger append (`quarantine_file` /
+  `release_quarantine`) routes through `Store.append`, and the physical move
+  in both directions routes through `Store.move`. Every public function gains
+  an optional keyword-only `store=` parameter; when omitted, a private
+  `FilesystemStore` scoped to the caller's existing `wiki_root`/`raw_root`
+  is built per call, so no existing caller changes. `put` does not appear as
+  a `quarantine.py` call site (2026-08-21 re-scope: the design doc's own
+  §2.3 inventory names only `append` + `move` for this module; `put` was a
+  transcription error in the original filing). The pre-migration test suite
+  (`tests/test_quarantine.py`) passes with exactly one bounded edit: the
+  ordering-guarantee test's `monkeypatch.setattr("athenaeum.quarantine.shutil.move", ...)`
+  no longer resolves once `shutil` is not imported, so it is retargeted to
+  `athenaeum.store.FilesystemStore.move` — the store seam the ordering
+  guarantee now actually runs through — with every assertion in that test
+  otherwise untouched. A new `tests/test_quarantine_store_parity.py`
+  parametrizes the same logical scenarios over both `FilesystemStore` and
+  `tests.store_fakes.InMemoryStore`, verified by reading back through the
+  store rather than the filesystem — demonstrating the "no caller can tell"
+  property rather than asserting it.
+
 - **Coarse embedding fallback is now observable (athenaeum#1032).** The chromadb
   embedding path used to degrade silently three layers deep — no log line
   ever recorded that the hashing-trick fallback embedder produced a
