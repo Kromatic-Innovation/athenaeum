@@ -1152,7 +1152,7 @@ matched class gets intercepted at intake*, so a class can be defined without
 being routed. **This slice adds no behavior on its own** —
 `resolve_sensitivity_routing` exists in `config.py`, but nothing reads it
 yet. The routing/redaction mechanism, the read path, and the librarian
-wiring are follow-on slices (athenaeum#1023-#1025).
+wiring are follow-on slices (athenaeum#1023-athenaeum#1025).
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|

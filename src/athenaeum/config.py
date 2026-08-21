@@ -2686,7 +2686,7 @@ def resolve_sensitivity_routing(config: dict[str, Any] | None) -> dict[str, Any]
     decides whether a matched class gets intercepted at intake, so a class
     can be defined without being routed. This slice adds no behavior on its
     own — nothing reads this resolver yet (issue athenaeum#1022; see
-    athenaeum#1023-#1025 for the slices that do).
+    athenaeum#1023-athenaeum#1025 for the slices that do).
 
     Precedence per the module convention (env > yaml > default, no seed in
     ``_DEFAULTS`` so the code default stays reachable):

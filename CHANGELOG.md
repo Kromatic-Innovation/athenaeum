@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/configuration.md` → "Sensitivity routing". **Behaviour-free**:
   nothing reads this resolver yet; the routing/redaction mechanism, the
   read path, and the librarian wiring are follow-on slices
-  (athenaeum#1023-#1025).
+  (athenaeum#1023-athenaeum#1025).
 - **Dimension registry + kernel dimensions (athenaeum#714).** Root of the
   memory-model v6 dimension chain (child of epic athenaeum#709; athenaeum#715,
   athenaeum#716, athenaeum#719 all depend on this). New `src/athenaeum/dimensions.py`:
