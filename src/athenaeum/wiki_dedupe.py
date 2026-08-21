@@ -479,12 +479,20 @@ def propose_wiki_page_merges(
             # cluster's vectors — the over-cluster diagnosis this gate guards
             # against needs to know whether a coarse hashing-trick fallback
             # (rather than real MiniLM similarity) drove the suppression.
+            # Issue athenaeum#1085: n_sources is recorded as its own structured field,
+            # UNCONDITIONALLY — not parsed out of `suppression`, which only
+            # embeds the source count when the size-cap gate happens to be
+            # the one that fired (gate ordering is pinned by
+            # TestGateOrdering, so a cohesion/confidence/chain suppression
+            # previously recorded no size at all).
             log.info(
                 "wiki-page dedup: SUPPRESSED degenerate merge proposal for "
-                "cluster %s (%s); embedder=%s; not written to _pending_merges.md",
+                "cluster %s (%s); embedder=%s; n_sources=%d; not written to "
+                "_pending_merges.md",
                 cluster.cluster_id,
                 suppression,
                 cluster.embedder,
+                len(sources),
             )
             continue
 
