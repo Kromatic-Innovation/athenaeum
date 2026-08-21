@@ -41,28 +41,47 @@ complete no-op (see :func:`filter_never_ingest`'s first line), so this
 mechanism ships dark by default (issue athenaeum#968 DoD: "no half-wired state at
 merge").
 
-**Enforcement point:** :func:`filter_never_ingest` is called from
-:mod:`athenaeum.librarian`'s ``_run_auto_memory_phase``, immediately after
-:func:`athenaeum.intake.discover_auto_memory_files` and before clustering —
-the auto-memory raw-intake pipeline (``raw/auto-memory/<scope>/...``) is the
-choke point closest to the evidence log's examples (three memory-model
-pages, all originally written via this pipeline). :func:`athenaeum.intake.
-discover_auto_memory_files` and :func:`discover_raw_files` themselves are
-UNTOUCHED — this module does its own independent re-read of each candidate
-file's frontmatter, mirroring :mod:`athenaeum.intake_audit`'s own
-"independent walk, discovery functions stay pure" shape, rather than baking
-a ledger-writing side effect into a function documented as a pure L2
-discovery primitive. Raw-intake entity-tier files
-(:func:`athenaeum.intake.discover_raw_files`) are NOT yet gated — a
-deliberate, documented scope boundary (see the module's own tests and the
-issue athenaeum#968 PR description), not a silent gap.
+**Enforcement points** (both intake tiers) sit at each tier's own COMPILE
+choke point, never inside a discovery function:
 
-**No deletion, ever** (issue athenaeum#968 AC4, a hard constraint): a refused file
-is excluded from the returned "kept" list — meaning it is simply not offered
-to clustering/compilation this run — but it is NEVER removed from disk. It
-is re-evaluated (and, if the class still matches, re-excluded) idempotently
-on every subsequent run, exactly like :func:`athenaeum.ephemeral.
-classify_ephemeral`'s own drop already works. This module contains no
+- **Auto-memory** — :func:`filter_never_ingest` is called from
+  :mod:`athenaeum.librarian`'s ``_run_auto_memory_phase``, immediately after
+  :func:`athenaeum.intake.discover_auto_memory_files` and before
+  clustering — the auto-memory raw-intake pipeline
+  (``raw/auto-memory/<scope>/...``) is the choke point closest to the
+  evidence log's examples (three memory-model pages, all originally written
+  via this pipeline).
+- **Entity tier** — :mod:`athenaeum.librarian`'s ``process_one`` calls
+  :func:`check_and_refuse` directly, right after each raw file's
+  frontmatter is parsed and before Tier 0 passthrough — a manifest is
+  loaded once per run and threaded into ``process_one`` exactly like that
+  function's existing ``excluded_index`` parameter.
+
+Both choke points sit AFTER discovery, never inside it, for two reasons:
+:func:`athenaeum.intake.discover_auto_memory_files` and
+:func:`athenaeum.intake.discover_raw_files` are documented as pure L2
+discovery primitives (this module does its own independent re-read of each
+candidate file's frontmatter instead, mirroring
+:mod:`athenaeum.intake_audit`'s own "independent walk, discovery functions
+stay pure" shape); and, for the entity tier specifically,
+:func:`athenaeum.intake.discover_raw_files`'s return value is read
+DIRECTLY by ``backlog_price_sheet.py`` / ``ordinary_night_table.py`` (issue
+athenaeum#713's backlog-count instruments, held pending an operator decision) —
+filtering inside discovery would silently move those numbers, so
+``discover_raw_files`` stays byte-for-byte UNTOUCHED and a refused
+entity-tier file is still discovered and still counted in the backlog; it
+is simply not compiled into a wiki page this run (see
+``tests/test_never_ingest.py::TestDiscoverRawFilesUnaffectedByNeverIngest``
+for the regression guard on this).
+
+**No deletion, ever** (issue athenaeum#968 AC4, a hard constraint): a refused
+file is simply not offered to compilation this run — excluded from
+:func:`filter_never_ingest`'s returned "kept" list (auto-memory) or
+short-circuited out of ``process_one`` into ``result.skipped`` (entity
+tier) — but it is NEVER removed from disk, either way. It is re-evaluated
+(and, if the class still matches, re-excluded) idempotently on every
+subsequent run, exactly like :func:`athenaeum.ephemeral.classify_ephemeral`'s
+own drop already works. This module contains no
 ``unlink``/``remove``/``rmtree`` call anywhere — asserted by
 ``tests/test_never_ingest.py``'s static scan.
 
