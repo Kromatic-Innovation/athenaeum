@@ -272,9 +272,58 @@ class MatchSpec(BaseModel):
         ):
             return False
         for field_name, predicate in self.fields.items():
-            if field_name not in record or not predicate.matches(record[field_name]):
+            found, value = resolve_field_path(record, field_name)
+            if not found or not predicate.matches(value):
                 return False
         return True
+
+
+def resolve_field_path(record: dict[str, Any], field_name: str) -> tuple[bool, Any]:
+    """Resolve a `match.fields` key against *record*, returning
+    `(found, value)`.
+
+    Issue athenaeum#974 AC1: a `match.fields` key may now reach a NESTED
+    frontmatter/JSON key one level (or more) below the record root, using a
+    dotted path (`"a.b"` -> ``record["a"]["b"]``). This codebase has NO
+    existing precedent for nested-key resolution (grepped for
+    dotted-path/nested-key helpers before writing this — none found), so the
+    syntax is a fresh choice, not a match to something already idiomatic
+    here. Dotted-path is the conventional external choice for this exact
+    problem (jq/dpath-style addressing) and — the deciding property — it
+    cannot collide with an ordinary top-level frontmatter key: those are
+    plain identifiers, and a literal `.` inside a YAML frontmatter key would
+    itself be unusual. That makes it the conservative, reversible pick this
+    issue's design-judgement note asks for when no repo precedent exists.
+
+    **Backward compatibility (non-negotiable, per issue athenaeum#974):** an
+    EXACT top-level key match always wins first, dots and all. Only when
+    *field_name* is not itself a literal top-level key AND contains at least
+    one `.` does this walk the dotted path into nested dicts. This means:
+
+    - every pre-existing rule's plain (non-dotted) `fields` key resolves
+      exactly as it always did — a single top-level ``record[field_name]``
+      lookup, unchanged;
+    - the vanishingly rare top-level key that happens to itself contain a
+      literal `.` still resolves as that exact top-level key first, so this
+      change cannot silently reinterpret an existing rule's meaning;
+    - a genuinely nested field (absent at top level) resolves via the
+      dotted path, e.g. `"metadata.log_group"` -> `record["metadata"]["log_group"]`.
+
+    Returns `(False, None)` if the path cannot be walked (a missing key at
+    any level, or a non-dict value in the middle of the path) — the caller
+    treats that exactly like "field absent from record" always has: no
+    match, never a crash.
+    """
+    if field_name in record:
+        return True, record[field_name]
+    if "." in field_name:
+        current: Any = record
+        for part in field_name.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return False, None
+            current = current[part]
+        return True, current
+    return False, None
 
 
 def record_key_fingerprint(record: dict[str, Any]) -> str:

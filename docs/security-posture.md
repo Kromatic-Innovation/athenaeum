@@ -65,7 +65,7 @@ The decided model (this is the "write it down" outcome athenaeum#538 asked for):
 
 | Tool group | Tools | Restricted (`caller_audience != None`) behavior |
 |---|---|---|
-| Scoped reads | `recall`, `list_pending_questions`, `list_pending_merges`, `list_pending_decisions`, `read_entity`, `read_person` | Fail-closed by the SAME predicate `recall` uses (`is_page_authorized`): an item is withheld unless the caller is authorized for **every** source page behind it. A restricted caller can never obtain page content `recall` would refuse. `read_entity` and `read_person` additionally never return an excluded value for a page they withhold — the authorization check runs before any excluded data is assembled, and it is the SAME check on both paths, so the generic tool cannot be used to obtain what the person-shaped one refuses (issues athenaeum#864, athenaeum#886). `recall`'s `with_pii` join likewise runs strictly AFTER that predicate, so it can never be used to probe whether a record exists behind a page the caller may not read (issue athenaeum#885). |
+| Scoped reads | `recall`, `list_pending_questions`, `list_pending_merges`, `list_pending_decisions`, `read_entity` | Fail-closed by the SAME predicate `recall` uses (`is_page_authorized`): an item is withheld unless the caller is authorized for **every** source page behind it. A restricted caller can never obtain page content `recall` would refuse. `read_entity` additionally never returns an excluded value for a page it withholds — the authorization check runs before any excluded data is assembled (issues athenaeum#864, athenaeum#886). `recall`'s `with_pii` join likewise runs strictly AFTER that predicate, so it can never be used to probe whether a record exists behind a page the caller may not read (issue athenaeum#885). (The person-shaped `read_person` tool applied the identical check before its removal in athenaeum#888.) |
 | Owner-only writes | `resolve_question`, `resolve_merge`, `review_audit_item` | **Fail closed** — adjudicating the operator's contradiction/merge/calibration queue is an owner action. `list_pending_decisions` likewise withholds the `retraction`/`audit` calibration items (no readable source-page path to authorize against). |
 | Intentionally open | `remember` | **Not** audience-scoped. Intake is write-only and compiles through the read-time screening path (athenaeum#320); a restricted secondary agent contributing raw memories is the intended use. It cannot read anything back it isn't authorized for. |
 | Metadata reads | `list_axiom_audit`, `scan_retraction_cascade`, `calibration_summary` | Not page-content bearing (governance history, provenance flags, tier counts). Left unscoped; revisit if any starts echoing page bodies. |
@@ -162,12 +162,14 @@ read interface returns every value with its classification attached, and
 accepts a `usage_classes` filter so a caller that must not see
 provider-sourced addresses cannot receive one by accident. **Every surface
 carries that filter**, which is what keeps the rule from being escapable by
-choosing a different entry point: `pii.read_entity` / `read_entities` and
-`pii.read_person` / `read_people`; the `read_entity` and `read_person` MCP
-tools (both take `usage_classes`); `recall`'s `with_pii` join (which threads
-`usage_classes` to the same assembly); and, on the shell, `athenaeum query
-entity --usage-class`, `athenaeum query person --usage-class` and `athenaeum
-recall --with-pii --usage-class`. A generic tool that had dropped the filter
+choosing a different entry point: `pii.read_entity` / `read_entities`; the
+`read_entity` MCP tool (takes `usage_classes`); `recall`'s `with_pii` join
+(which threads `usage_classes` to the same assembly); and, on the shell,
+`athenaeum query entity --usage-class` and `athenaeum recall --with-pii
+--usage-class`. (The person-shaped `pii.read_person` / `read_people`, the
+`read_person` MCP tool, and `athenaeum query person --usage-class` carried
+the identical filter before their removal in athenaeum#888.) A generic tool
+that had dropped the filter
 would not have been a smaller version of the same tool — it would have been a
 way around this section. `pii.is_outreach_eligible` is the
 single predicate a consumer calls. A consumer-side check is still wanted as

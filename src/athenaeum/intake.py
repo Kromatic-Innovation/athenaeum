@@ -42,6 +42,7 @@ no reserved subtree and no separate discovery function").
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections.abc import Iterable
 from datetime import date
@@ -320,6 +321,67 @@ def _is_claimed_correction_batch(fpath: Path) -> bool:
     return parse_batch_envelope(first_line) is not None
 
 
+def _discover_raw_files_in_dir(
+    scan_dir: Path,
+    *,
+    source: str,
+    exempt_refs: Iterable[str] | None,
+    raw_file_max_bytes: int | None,
+) -> list[RawFile]:
+    """Glob `*.md`/`*.jsonl` directly inside *scan_dir* and return the
+    resulting :class:`RawFile` list, tagged with *source* (the OWNING
+    `raw/<source>/` directory name — never *scan_dir* itself, so a nested
+    subdirectory's files still carry the same `source` a top-level file in
+    the same source would, and `match.source`/non-intake exclusion continue
+    to key off that one name regardless of how deep a file actually sits).
+
+    Shared by :func:`discover_raw_files` for both the source directory
+    itself and (issue athenaeum#974) each of its direct subdirectories — the
+    candidate-filtering logic (`.gitkeep`, compiled-exempt, claimed
+    correction batch, filename parse) must stay IDENTICAL at both depths, so
+    it lives here once rather than being duplicated per call site.
+    """
+    files: list[RawFile] = []
+    candidates = sorted({*scan_dir.glob("*.md"), *scan_dir.glob("*.jsonl")})
+    for fpath in candidates:
+        if fpath.name == ".gitkeep":
+            continue
+        # Issue athenaeum#903 (`retain`): compiled-exempt — a preserved source
+        # document. Still on disk, never offered to the tiers again. The key
+        # is ``RawFile.ref`` (``source/filename``), the same identifier the
+        # audit ledger uses.
+        if exempt_refs and f"{source}/{fpath.name}" in exempt_refs:
+            continue
+        if fpath.suffix.lower() == ".jsonl" and _is_claimed_correction_batch(fpath):
+            # Claimed by the correction phase (§3.1) -- not ordinary
+            # intake, and NOT a second discovery walk: the correction
+            # phase reads this exact file directly by path/shape, it is
+            # simply not appended to the list this function returns.
+            continue
+        m = RAW_FILE_RE.match(fpath.name)
+        if m:
+            files.append(
+                RawFile(
+                    path=fpath,
+                    source=source,
+                    timestamp=m.group(1),
+                    uuid8=m.group(2),
+                    max_content_bytes=raw_file_max_bytes,
+                )
+            )
+        else:
+            files.append(
+                RawFile(
+                    path=fpath,
+                    source=source,
+                    timestamp="",
+                    uuid8="",
+                    max_content_bytes=raw_file_max_bytes,
+                )
+            )
+    return files
+
+
 def discover_raw_files(
     raw_root: Path, config: dict[str, Any] | None = None
 ) -> list[RawFile]:
@@ -351,6 +413,34 @@ def discover_raw_files(
     default), so a first read of ``.content`` anywhere downstream enforces
     the per-file byte bound uniformly — this is the ONE place that resolves
     it, not a per-call-site knob.
+
+    Issue athenaeum#974: after globbing *directly* inside `raw/<source>/`,
+    also glob inside each of its direct subdirectories — ONE level below the
+    source directory, never deeper (the issue's own wording: "records one
+    level below a source directory"). This lets a source that organises its
+    own drops into subfolders (e.g. `raw/hestia/<lane>/`) still be
+    discovered, without turning discovery into an unbounded recursive walk.
+    A nested file's `RawFile.source` is still the TOP-LEVEL source directory
+    name — not `<source>/<subdir>` — so `match.source` and
+    `non_intake_sources` keep meaning exactly what they meant before this
+    issue: "which `raw/<source>/` tree", not "which exact directory".
+
+    The one exception: a source directory that is itself a configured
+    ``recall.extra_intake_roots`` entry (default ``raw/auto-memory``) is
+    NEVER descended into for this new subdir walk. That tree already has
+    its OWN dedicated discovery function
+    (:func:`discover_auto_memory_files`) and its own frontmatter schema
+    (``name``/``type``/... rather than the entity schema's ``uid``/``name``)
+    — every one of its real records lives one level below
+    `raw/auto-memory/` (`raw/auto-memory/<scope>/<file>.md`), so this
+    function's new subdir descent would otherwise start silently
+    double-discovering every auto-memory file as if it were an ordinary
+    entity raw file, feeding it through the WRONG schema and the WRONG
+    tier ladder. Its own top-level (non-subdir) scan is untouched — it
+    already finds nothing there today, since auto-memory never places a
+    file directly at its root — so this guard changes nothing about
+    pre-athenaeum#974 behaviour, it only stops this issue's new code from
+    reaching into a tree a sibling function already owns.
     """
     files: list[RawFile] = []
     if not raw_root.exists():
@@ -365,6 +455,15 @@ def discover_raw_files(
     # the entity loop, the drain backlog count and `status` alike, without
     # touching a single caller. Fails open to an empty set.
     exempt_refs = load_exempt(raw_root.parent)
+    # Issue athenaeum#974: resolved once, same `raw_root.parent`-as-knowledge-root
+    # convention `load_exempt` above already uses in this function -- the
+    # trees this function's new subdir descent must never enter (see
+    # docstring). Fails open to an empty set (a half-initialized knowledge
+    # base with no configured extras, or none of the extras existing on
+    # disk yet, excludes nothing new).
+    extra_intake_roots = {
+        p.resolve() for p in resolve_extra_intake_roots(raw_root.parent, config)
+    }
 
     for source_dir in sorted(raw_root.iterdir()):
         if not source_dir.is_dir():
@@ -384,47 +483,46 @@ def discover_raw_files(
         # before any tier classification can re-escalate them.
         if source == "answers":
             continue
-        candidates = sorted(
-            {*source_dir.glob("*.md"), *source_dir.glob("*.jsonl")}
+        files.extend(
+            _discover_raw_files_in_dir(
+                source_dir,
+                source=source,
+                exempt_refs=exempt_refs,
+                raw_file_max_bytes=raw_file_max_bytes,
+            )
         )
-        for fpath in candidates:
-            if fpath.name == ".gitkeep":
+        # Issue athenaeum#974: a source directory that is itself a dedicated
+        # extra-intake-root (default: `raw/auto-memory`) already has its OWN
+        # nested-subdirectory discovery function -- see the docstring's
+        # "one exception" paragraph. Never descend into it here.
+        if source_dir.resolve() in extra_intake_roots:
+            continue
+        # Issue athenaeum#974: one level below the source directory -- direct
+        # subdirectories only, never a recursive walk. Each subdirectory is
+        # scanned with the SAME candidate-filtering rules as the source
+        # directory itself (`.gitkeep`, compiled-exempt, claimed correction
+        # batch, filename parse), via the shared helper above.
+        #
+        # `os.scandir` rather than `Path.iterdir()` + `Path.is_dir()`: a
+        # source directory ordinarily holds mostly ORDINARY FILES (the
+        # existing top-level raw files), and `DirEntry.is_dir()` reads the
+        # directory-type bit the OS already returned from `readdir` instead
+        # of issuing a fresh `stat()` per entry -- so this loop costs
+        # (in the common case) zero extra syscalls beyond the directory read
+        # itself, rather than one wasted `stat()` per ordinary file just to
+        # learn "not a directory".
+        for entry in sorted(os.scandir(source_dir), key=lambda e: e.name):
+            if not entry.is_dir():
                 continue
-            # Issue athenaeum#903 (`retain`): compiled-exempt — a preserved source
-            # document. Still on disk, never offered to the tiers again. The key
-            # is ``RawFile.ref`` (``source/filename``), the same identifier the
-            # audit ledger uses.
-            if exempt_refs and f"{source}/{fpath.name}" in exempt_refs:
-                continue
-            if fpath.suffix.lower() == ".jsonl" and _is_claimed_correction_batch(
-                fpath
-            ):
-                # Claimed by the correction phase (§3.1) -- not ordinary
-                # intake, and NOT a second discovery walk: the correction
-                # phase reads this exact file directly by path/shape, it is
-                # simply not appended to the list this function returns.
-                continue
-            m = RAW_FILE_RE.match(fpath.name)
-            if m:
-                files.append(
-                    RawFile(
-                        path=fpath,
-                        source=source,
-                        timestamp=m.group(1),
-                        uuid8=m.group(2),
-                        max_content_bytes=raw_file_max_bytes,
-                    )
+            subdir = Path(entry.path)
+            files.extend(
+                _discover_raw_files_in_dir(
+                    subdir,
+                    source=source,
+                    exempt_refs=exempt_refs,
+                    raw_file_max_bytes=raw_file_max_bytes,
                 )
-            else:
-                files.append(
-                    RawFile(
-                        path=fpath,
-                        source=source,
-                        timestamp="",
-                        uuid8="",
-                        max_content_bytes=raw_file_max_bytes,
-                    )
-                )
+            )
     return files
 
 

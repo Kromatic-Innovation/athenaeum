@@ -63,15 +63,22 @@ proposal's id is derived from its SHAPE, not from the event
 (:func:`proposal_item_id`) — permanently suppresses that shape from being
 proposed again (AC6).
 
-**Wiring note (deliberate scope boundary).** `athenaeum.rules.run_shape_rule_
-phase` and `athenaeum.intake_audit.run_intake_audit` are both called from
-`librarian.py`'s nightly run loop. `run_rule_proposal_detection` here is NOT
-wired into that loop by this change — the issue's own plan lists "add the
-detector / drafting call / decision type+mapper / approve+reject / tests",
-not "wire into the nightly run", and doing so touches `librarian.py`'s
-`RunContext`/deadline/spend-ledger machinery, a materially larger and
-differently-risked surface. The phase function is complete and independently
-callable/testable; wiring it into the nightly run is left to a follow-up.
+**Wiring note (issue athenaeum#1063 — supersedes the prior deferral).**
+`run_rule_proposal_detection` is now called from `librarian.py`'s nightly
+run loop via `librarian._run_rule_proposal_phase`, mirroring how
+`athenaeum.rules.run_shape_rule_phase` and
+`athenaeum.intake_audit.run_intake_audit` are wired in: config-gated
+(`librarian.rule_proposals.enabled`, default **False** — an operator must
+opt in before this phase makes its first LLM call), participating in the
+run's wall-clock deadline via the `deadline_check` parameter above (checked
+per-shape, mirroring `run_shape_rule_phase`'s per-file check), and
+accounting its one-call-per-shape spend via the `usage` parameter above
+(`athenaeum.tiers._record_usage`, `knob="rule_proposals"` — the same
+mechanism the tier-2/3 call sites use). Cadence is governed by the
+detector's own `threshold` (default 50 disposition rows) plus its built-in
+per-shape idempotency (a pending or rejected shape is never re-drafted) —
+no separate once-per-period stamp; see `_run_rule_proposal_phase`'s
+docstring for why that is sufficient.
 
 Persistence mirrors :mod:`athenaeum.quarantine` (the closest precedent: a
 JSONL ledger with distinct EVENT kinds, an unresolved-items query, and a
@@ -97,7 +104,7 @@ import logging
 import os
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -113,10 +120,11 @@ from athenaeum.config import (
     resolve_rule_proposals_threshold,
     resolve_rule_proposals_window_days,
 )
-from athenaeum.models import parse_frontmatter
+from athenaeum.models import TokenUsage, parse_frontmatter
 from athenaeum.prompt_safety import data_only_clause, fence_untrusted
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
 from athenaeum.rules import ShapeRule, default_shape_rule_dispositions_path
+from athenaeum.tiers import _record_usage
 
 log = logging.getLogger(__name__)
 
@@ -611,10 +619,18 @@ def _draft_rule_proposal(
     tier3_outputs: dict[str, str],
     name: str,
     config: dict[str, Any] | None,
+    usage: TokenUsage | None = None,
 ) -> dict[str, Any] | None:
     """One LLM call -> a validated candidate rule + projected-impact line,
     or ``None`` if the response is unparseable or schema-invalid (logged,
-    never raised)."""
+    never raised).
+
+    *usage* (issue athenaeum#1063), when given, records this call's tokens via
+    :func:`athenaeum.tiers._record_usage` tagged ``knob="rule_proposals"`` --
+    the same accounting the tier-2/3 call sites (``tiers.py``) use, so
+    ``spend.record_spend_per_knob_provider`` attributes this call's spend
+    correctly instead of it vanishing from the run's ledger.
+    """
     params = build_rule_proposal_request_params(
         source=source,
         key_fingerprint=key_fingerprint,
@@ -626,6 +642,7 @@ def _draft_rule_proposal(
         lambda: client.messages.create(**params),
         description=f"rule_proposal {source}:{key_fingerprint}",
     )
+    _record_usage(response, usage, model=params["model"], knob="rule_proposals")
     payload = _parse_rule_proposal_response(response_text(response))
     if payload is None:
         log.warning(
@@ -678,15 +695,27 @@ def run_rule_proposal_detection(
     now: datetime | None = None,
     ledger_path: Path | None = None,
     dry_run: bool = False,
+    deadline_check: Callable[[], bool] | None = None,
+    usage: TokenUsage | None = None,
 ) -> dict[str, Any]:
     """Detect + draft (issue athenaeum#905 AC1/AC2). The callable entry point
-    a future librarian-run wiring would invoke -- see the module docstring's
-    "Wiring note" for why this change does not add that call site itself.
+    wired into the nightly librarian run by ``librarian._run_rule_proposal_phase``
+    (issue athenaeum#1063) -- see the module docstring's "Wiring note".
 
     Idempotent per shape: a shape already carrying a pending (unresolved)
     proposal is not re-proposed, and a shape carrying a `reject` is
     permanently suppressed (AC6) -- both checked before any drafting call is
     made, so a repeat run never spends an LLM call on either case.
+
+    *deadline_check* (issue athenaeum#1063), when given, is checked at the top
+    of EACH shape's iteration -- the same "check at the boundary before the
+    next unit of work, never mid-call" contract
+    :func:`athenaeum.rules.run_shape_rule_phase` uses at file boundaries.
+    Shapes are visited most-frequent-first (see the sort below), so a run
+    that trips the deadline mid-way still drafted the highest-value shapes
+    first. *usage*, when given, is threaded to :func:`_draft_rule_proposal`
+    so each drafting call's tokens are recorded exactly like the tier-2/3
+    call sites in ``tiers.py``.
     """
     summary: dict[str, Any] = {
         "shapes_seen": 0,
@@ -697,6 +726,7 @@ def run_rule_proposal_detection(
         "skipped_no_exemplars": 0,
         "skipped_draft_invalid": 0,
         "skipped_no_client": 0,
+        "skipped_deadline": 0,
     }
     wiki_root = Path(wiki_root)
     raw_root = Path(raw_root)
@@ -721,11 +751,18 @@ def run_rule_proposal_detection(
 
     # Deterministic order: most-frequent shape first, then (source,
     # key_fingerprint) as a tiebreak -- so a run bounded by an external
-    # deadline (a future librarian wiring's own concern, not this
-    # function's) would drain the highest-value shapes first.
-    for (source, key_fingerprint), rows in sorted(
-        grouped.items(), key=lambda kv: (-len(kv[1]), kv[0])
-    ):
+    # deadline (issue athenaeum#1063's librarian wiring) drains the
+    # highest-value shapes first.
+    ordered_shapes = sorted(grouped.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    for _idx, ((source, key_fingerprint), rows) in enumerate(ordered_shapes):
+        if deadline_check is not None and deadline_check():
+            # Mirrors `athenaeum.rules.run_shape_rule_phase`'s file-boundary
+            # deadline check: stop BEFORE starting the next shape's work,
+            # never mid-drafting-call. Every shape not yet visited this run
+            # is retried next run against the same (still-accumulating)
+            # disposition rows -- nothing here is lost, only deferred.
+            summary["skipped_deadline"] += len(ordered_shapes) - _idx
+            break
         if len(rows) < threshold:
             continue
         summary["threshold_crossed"] += 1
@@ -766,6 +803,7 @@ def run_rule_proposal_detection(
             tier3_outputs=tier3_outputs,
             name=name,
             config=config,
+            usage=usage,
         )
         if draft is None:
             summary["skipped_draft_invalid"] += 1

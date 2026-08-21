@@ -3,7 +3,7 @@
 
 athenaeum#883 made the primitives class-generic and athenaeum#885 wired `recall`;
 after those, a caller reaching athenaeum over MCP or the shell could still only
-ask the person-shaped question. These tests pin the two caller-facing surfaces:
+ask the person-shaped question. These tests pin the caller-facing surfaces:
 
 - ``TestMcpRecallToolFlag`` — the `@mcp.tool() recall` tool takes `with_pii`
   and threads it; default behaviour for every existing caller is unchanged.
@@ -11,18 +11,17 @@ ask the person-shaped question. These tests pin the two caller-facing surfaces:
   entity class, `include_excluded` AND `usage_classes` (dropping the last is
   not a smaller version of the same tool — it removes a filter
   `docs/security-posture.md` §2.3 depends on), and its fail-closed audience
-  check is the same one `person_read` applies.
-- ``TestMcpReadPersonWrapperParity`` — the retained `read_person` tool's
-  output is identical to the generic tool's across all four
-  inclusion/record cells AND for a `usage_classes`-filtered case.
-- ``TestCliEntityCommand`` / ``TestCliPersonWrapperParity`` — the same for the
-  shell: `athenaeum query entity` prints the same JSON object shape, and
-  `athenaeum query person` prints BYTE-IDENTICAL stdout to before, including
-  a `--usage-class`-filtered case.
+  check.
+- ``TestCliEntityCommand`` — the same for the shell: `athenaeum query entity`
+  prints the same JSON object shape.
 - ``TestCliRecallWithPii`` — `athenaeum recall --with-pii`. `cmd_recall` is a
   SECOND implementation of the layer ordering (it builds its own backend and
   its own authorization/recallable drops), so its layer ordering is asserted
   HERE against that code path — athenaeum#885's tests do not cover it.
+
+The person-shaped `read_person` MCP tool and `athenaeum query person` CLI
+command this module once pinned parity against were removed in athenaeum#888;
+their coverage is `entity_read`/`cmd_entity`'s alone now.
 """
 
 from __future__ import annotations
@@ -34,8 +33,8 @@ from pathlib import Path
 import pytest
 
 from athenaeum import pii
-from athenaeum._cmd_query import cmd_entity, cmd_person, cmd_recall
-from athenaeum.mcp_server import entity_read, person_read
+from athenaeum._cmd_query import cmd_entity, cmd_recall
+from athenaeum.mcp_server import entity_read
 
 EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
 
@@ -213,7 +212,7 @@ class TestMcpReadEntityTool:
     def test_fail_closed_audience_check_applies_on_the_generic_path(
         self, corpus: Path
     ) -> None:
-        """A restricted caller never receives a value, whichever tool it calls."""
+        """A restricted caller never receives a value from the tool."""
         generic = entity_read(
             corpus,
             "alex",
@@ -222,17 +221,8 @@ class TestMcpReadEntityTool:
             caller_audience=RESTRICTED,
             config=EXCLUDED_CONFIG,
         )
-        person = person_read(
-            corpus,
-            "alex",
-            include_contact_data=True,
-            caller_audience=RESTRICTED,
-            config=EXCLUDED_CONFIG,
-        )
 
         assert "alex@example.org" not in generic
-        assert "alex@example.org" not in person
-        assert json.loads(generic) == json.loads(person)
 
     def test_authorized_restricted_caller_receives_the_value(
         self, tmp_path: Path
@@ -263,55 +253,6 @@ class TestMcpReadEntityTool:
         assert payload["contact"] == {"emails": ["alex@example.org"]}
 
 
-class TestMcpReadPersonWrapperParity:
-    """The retained tool's output is identical to the generic tool's."""
-
-    @pytest.mark.parametrize("include", [True, False])
-    @pytest.mark.parametrize("with_record", [True, False])
-    def test_identical_output_across_the_four_cells(
-        self, tmp_path: Path, include: bool, with_record: bool
-    ) -> None:
-        knowledge = tmp_path / "knowledge"
-        _write_config(knowledge)
-        _write_page(knowledge / "wiki", "alex", name="Alex Widget")
-        if with_record:
-            _write_record(
-                pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG),
-                "alex-contact.md",
-                uid="alex",
-                fields="emails:\n  - alex@example.org\n",
-            )
-        server = _server(knowledge)
-        person_tool = _tool(server, "read_person")
-        entity_tool = _tool(server, "read_entity")
-
-        assert person_tool.fn("alex", include) == entity_tool.fn("alex", "person", include)
-
-    def test_identical_output_for_a_usage_class_filtered_case(
-        self, corpus: Path
-    ) -> None:
-        server = _server(corpus)
-        person_tool = _tool(server, "read_person")
-        entity_tool = _tool(server, "read_entity")
-
-        assert person_tool.fn("alex", True, ["observed"]) == entity_tool.fn(
-            "alex", "person", True, ["observed"]
-        )
-
-    def test_read_person_tool_keeps_its_exact_argument_names(
-        self, corpus: Path
-    ) -> None:
-        """Its name and ALL THREE arguments are unchanged (athenaeum#886 AC)."""
-        tool = _tool(_server(corpus), "read_person")
-
-        assert tool.name == "read_person"
-        assert set(tool.parameters["properties"]) == {
-            "uid",
-            "include_contact_data",
-            "usage_classes",
-        }
-
-
 class TestDateTypedFrontmatterCoercion:
     """A bare YAML date/datetime must not crash JSON serialization (athenaeum#1002).
 
@@ -321,10 +262,10 @@ class TestDateTypedFrontmatterCoercion:
     the reported ``9660b25b`` crashed every read tool with ``Object of type
     date is not JSON serializable``. These pin the fix at the ONE shared
     coercion point (:func:`athenaeum.pii.json_date_default`), exercised
-    across ``read_entity``, ``read_person`` and both of ``recall``'s
+    across ``read_entity`` and both of ``recall``'s
     ``with_pii=True`` JSON-emitting branches (the ordinary similarity-search
     facts block AND the handle-shaped exact-lookup document) — so a fix
-    landed on only one of the three would leave this failing on the others.
+    landed on only one of these would leave this failing on the others.
     """
 
     def test_read_entity_round_trips_a_bare_date_and_a_datetime(
@@ -371,22 +312,6 @@ class TestDateTypedFrontmatterCoercion:
 
         assert payload["frontmatter"]["dob"] == "1990-01-01"
         assert payload["contact"] == {"emails": ["alex@example.org"]}
-
-    def test_read_person_wrapper_round_trips_the_same_page(
-        self, tmp_path: Path
-    ) -> None:
-        """``read_person`` delegates to ``read_entity`` — same fix, same result."""
-        knowledge = tmp_path / "knowledge"
-        _write_config(knowledge)
-        _write_page(
-            knowledge / "wiki", "alex", name="Alex Widget", extra="dob: 1990-01-01\n"
-        )
-
-        payload = json.loads(
-            person_read(knowledge, "alex", config=EXCLUDED_CONFIG)
-        )
-
-        assert payload["frontmatter"]["dob"] == "1990-01-01"
 
     def test_mcp_read_entity_tool_round_trips_a_dated_page(self, tmp_path: Path) -> None:
         knowledge = tmp_path / "knowledge"
@@ -456,15 +381,6 @@ class TestDateTypedFrontmatterCoercion:
         assert payload["contact_values"][0]["source"] == "2026-03-01T10:30:00"
 
 
-def _person_args(knowledge: Path, uid: str, **kwargs: object) -> argparse.Namespace:
-    return argparse.Namespace(
-        path=knowledge,
-        uid=uid,
-        include_contact=kwargs.get("include_contact", False),
-        usage_class=kwargs.get("usage_class", []),
-    )
-
-
 def _entity_args(knowledge: Path, uid: str, **kwargs: object) -> argparse.Namespace:
     return argparse.Namespace(
         path=knowledge,
@@ -521,47 +437,6 @@ class TestCliEntityCommand:
 
         assert rc == 1
         assert "no entity found" in capsys.readouterr().err
-
-
-class TestCliPersonWrapperParity:
-    """`query person` prints BYTE-IDENTICAL stdout to the generic command."""
-
-    @pytest.mark.parametrize("include", [True, False])
-    def test_byte_identical_stdout(
-        self, corpus: Path, capsys: pytest.CaptureFixture[str], include: bool
-    ) -> None:
-        assert cmd_person(_person_args(corpus, "alex", include_contact=include)) == 0
-        person_out = capsys.readouterr().out
-        assert cmd_entity(_entity_args(corpus, "alex", include_excluded=include)) == 0
-        entity_out = capsys.readouterr().out
-
-        assert person_out == entity_out
-
-    def test_byte_identical_stdout_for_a_usage_class_filtered_case(
-        self, corpus: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        cmd_person(
-            _person_args(
-                corpus, "alex", include_contact=True, usage_class=["observed"]
-            )
-        )
-        person_out = capsys.readouterr().out
-        cmd_entity(
-            _entity_args(
-                corpus, "alex", include_excluded=True, usage_class=["observed"]
-            )
-        )
-        entity_out = capsys.readouterr().out
-
-        assert person_out == entity_out
-
-    def test_unknown_uid_keeps_its_exact_person_wording_and_exit_code(
-        self, corpus: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        rc = cmd_person(_person_args(corpus, "nobody"))
-
-        assert rc == 1
-        assert "no person found" in capsys.readouterr().err
 
 
 def _subcommand_flags(name: str) -> set[str]:
@@ -776,12 +651,15 @@ class TestCmdPeopleIsUntouched:
 
         assert not flags & {"--include-excluded", "--include-contact", "--with-pii"}
 
-    def test_the_commands_that_DO_gain_flags_are_exactly_the_intended_three(
+    def test_the_commands_that_DO_gain_flags_are_exactly_the_intended_two(
         self,
     ) -> None:
-        """The complement of the assertion above — what did change, and only that."""
+        """The complement of the assertion above — what did change, and only that.
+
+        A third command, ``person``, also gained excluded-field flags at the
+        same time as ``entity`` — it was removed in athenaeum#888 once every
+        known consumer had migrated to ``entity``, so only two remain here.
+        """
         assert "--with-pii" in _subcommand_flags("recall")
         assert "--usage-class" in _subcommand_flags("recall")
         assert {"--include-excluded", "--class"} <= _subcommand_flags("entity")
-        # The retained person command keeps its own flag, unrenamed.
-        assert "--include-contact" in _subcommand_flags("person")

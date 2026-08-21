@@ -127,7 +127,7 @@ marker for the whole page).
 **AC3's constraint, restated precisely, because it is the fact that forces
 this section's decision.** The existing excluded-surface read machinery —
 `with_pii=True` in `recall`, `mcp_server._excluded_block_for_hit`,
-`read_entity`/`read_person` — resolves through
+`read_entity` — resolves through
 `pii.ExcludedRecordIndex.by_uid(uid)`. It is uid-keyed by construction. A
 hit with no `uid` has nothing to join on and the excluded block is simply
 absent. §7.1's own routing model is uid+field keyed for the identical
