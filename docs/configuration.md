@@ -335,6 +335,42 @@ makes reasoning respond to actual load instead of a fixed clock. `athenaeum
 ingest` **without** `--if-triggered` is unaffected by any of this — it is the
 pre-existing on-demand poke (issue athenaeum#349) and always compiles.
 
+### Lock-free public evaluation (`--evaluate-only`, athenaeum#1001)
+
+`athenaeum ingest --evaluate-only` runs ONLY the trigger evaluation above —
+prints a one-line JSON verdict and returns — and, unlike `--if-triggered`,
+**never compiles even when a trigger fires** and never takes
+`.athenaeum.lock` (no lock is even considered):
+
+```
+athenaeum ingest --evaluate-only
+```
+
+```json
+{"command": "ingest", "mode": "evaluate-only", "fired": true, "trigger": "backlog-files", "exit_code": 2}
+```
+
+Exit codes mirror this repo's existing dry-run-found-something ternary
+(`athenaeum decay`, `athenaeum repair`): `0` — no trigger fired, `1` — an
+error occurred evaluating, `2` — a trigger fired (`trigger` names which
+one, same reasons as the table above). Cannot be combined with
+`--if-triggered`.
+
+This is the public surface a deployed evaluator (for example a
+launchd/cron unit polling on a schedule this repo does not own, such as
+`com.kromatic.athenaeum-reasoning-triggers`) should poll to decide whether
+to invoke `athenaeum ingest --if-triggered` next — instead of importing
+this module's private stamp symbols
+(`athenaeum.librarian.REASONING_TRIGGER_STAMP_NAME`,
+`athenaeum.librarian._load_timestamp_stamp`) directly, which breaks
+silently on any internal rename of those symbols. Both modes read the
+SAME reasoning-trigger stamp through the SAME shared internal helper, so
+the two can never drift out of sync — see
+`tests/test_ingest_reindex.py::TestIngestEvaluateOnlyCLI` for the tests
+proving the lock-free guarantee, the shared stamp path, and that the
+public mode's answer survives a simulated rename of those private symbols
+(issue athenaeum#1001's ACs).
+
 ## Surface-divergence guard (athenaeum#963)
 
 `athenaeum surface-divergence --field <name>` is the generalized, **failing**
