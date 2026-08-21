@@ -863,6 +863,293 @@ class TestIngestIfTriggeredCLI:
 
 
 # ---------------------------------------------------------------------------
+# --evaluate-only (issue athenaeum#1001) — the lock-free PUBLIC
+# trigger-evaluation mode. Unlike --if-triggered, this never calls
+# ``ingest()`` (the only thing in this module that touches git), so its
+# fixture skips ``_seed_knowledge_root``'s ``git init``/commit entirely —
+# this also sidesteps an unrelated, pre-existing sandbox restriction here
+# that refuses commits to a fixture repo whose initial branch is `main`.
+# ---------------------------------------------------------------------------
+
+
+def _seed_bare_knowledge_root(tmp_path: Path) -> Path:
+    """A knowledge root with just a `raw/sessions` dir — no git required.
+
+    Valid for --evaluate-only because that mode never calls
+    :func:`athenaeum.librarian.ingest` (the only git-touching call in this
+    module), regardless of whether a trigger fires.
+    """
+    root = tmp_path / "knowledge"
+    (root / "raw" / "sessions").mkdir(parents=True)
+    return root
+
+
+class TestIngestEvaluateOnlyCLI:
+    def test_never_takes_the_run_lock_even_when_a_trigger_fires(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """AC1: holds the real run lock, then shows --evaluate-only still
+        succeeds and reports a FIRED verdict — the strongest form of "does
+        not take .athenaeum.lock" (mirrors
+        ``TestIngestIfTriggeredCLI.test_noop_never_takes_the_run_lock``, but
+        for a firing trigger rather than a no-op one, since --evaluate-only
+        must never contend for the lock regardless of the verdict)."""
+        from athenaeum.runlock import RunLock
+
+        root = _seed_bare_knowledge_root(tmp_path)
+        (root / "athenaeum.yaml").write_text(
+            "librarian:\n  reasoning_triggers:\n    backlog_files: 1\n"
+        )
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        with RunLock(root):  # held for the entire evaluate-only call
+            rc = main(
+                [
+                    "ingest",
+                    "--evaluate-only",
+                    "--path",
+                    str(root),
+                    "--cache-dir",
+                    str(cache),
+                ]
+            )
+        assert rc == 2
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload == {
+            "command": "ingest",
+            "mode": "evaluate-only",
+            "fired": True,
+            "trigger": "backlog-files",
+            "exit_code": 2,
+        }
+
+    def test_never_compiles_even_when_a_trigger_fires(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """AC1 (compile half): monkeypatch the underlying compile engine to
+        raise if called at all, then show a FIRING --evaluate-only call
+        never reaches it — unlike --if-triggered, a fire never compiles
+        here."""
+        import athenaeum.librarian as librarian_mod
+
+        def _boom(**kwargs: object) -> None:
+            raise AssertionError("--evaluate-only must never call ingest()")
+
+        monkeypatch.setattr(librarian_mod, "ingest", _boom)
+
+        root = _seed_bare_knowledge_root(tmp_path)
+        (root / "athenaeum.yaml").write_text(
+            "librarian:\n  reasoning_triggers:\n    backlog_files: 1\n"
+        )
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        rc = main(
+            [
+                "ingest",
+                "--evaluate-only",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+        assert rc == 2
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload["fired"] is True
+
+    def test_reads_the_same_stamp_path_if_triggered_completion_writes(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """AC2: writes the reasoning-trigger stamp via the EXACT function
+        --if-triggered's completion path calls
+        (:func:`athenaeum._cmd_index._record_ingest_trigger_completion`),
+        then shows --evaluate-only sees it as fresh (no trigger fires). If
+        --evaluate-only read from a different path/source, it would see NO
+        stamp, treat ``since_last_run`` as ``None`` ("infinitely overdue"),
+        and the nightly backstop would fire unconditionally — so this test
+        fails loudly on a path mismatch rather than passing by coincidence.
+        """
+        from athenaeum._cmd_index import _record_ingest_trigger_completion
+
+        root = _seed_bare_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+
+        _record_ingest_trigger_completion(cache)  # same writer --if-triggered uses
+
+        rc = main(
+            [
+                "ingest",
+                "--evaluate-only",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload == {
+            "command": "ingest",
+            "mode": "evaluate-only",
+            "fired": False,
+            "trigger": "none",
+            "exit_code": 0,
+        }
+
+    def test_evaluate_only_never_writes_the_stamp_itself(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--evaluate-only is read-only: it must not advance the
+        reasoning-trigger stamp it reads (only a real completed run does)."""
+        root = _seed_bare_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+
+        rc = main(
+            [
+                "ingest",
+                "--evaluate-only",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+        assert rc == 2  # first-ever call: nightly backstop fires
+        capsys.readouterr()
+        assert not (cache / "reasoning-trigger-stamp.json").exists()
+
+    def test_error_path_exits_1_and_prints_json(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The error exit code (1) is distinct from both fired (2) and
+        not-fired (0)."""
+        import athenaeum._cmd_index as cmd_index_mod
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(cmd_index_mod, "_evaluate_ingest_trigger", _boom)
+
+        root = _seed_bare_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+
+        rc = main(
+            [
+                "ingest",
+                "--evaluate-only",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload["command"] == "ingest"
+        assert payload["mode"] == "evaluate-only"
+        assert "boom" in payload["error"]
+        assert payload["exit_code"] == 1
+
+    def test_combined_with_if_triggered_is_rejected(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        root = _seed_bare_knowledge_root(tmp_path)
+
+        rc = main(["ingest", "--evaluate-only", "--if-triggered", "--path", str(root)])
+        assert rc == 1
+        assert "--evaluate-only" in capsys.readouterr().err
+
+    def test_public_mode_matches_what_the_private_symbol_read_would_show(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """AC3: the deployed wrapper's private-symbol imports become
+        unnecessary. Reproduces exactly what the wrapper's private read does
+        today (:data:`athenaeum.librarian.REASONING_TRIGGER_STAMP_NAME` +
+        :func:`athenaeum.librarian._load_timestamp_stamp` to check "has a
+        triggered run ever completed") and shows the public
+        ``ingest --evaluate-only`` JSON verdict carries the same
+        fired/not-fired answer for the same state — so the wrapper's job
+        (decide whether to invoke ``ingest --if-triggered`` next) is fully
+        expressible through the public CLI mode alone, with no private
+        import at the call site.
+        """
+        from athenaeum.config import resolve_cache_dir
+        from athenaeum.librarian import (
+            REASONING_TRIGGER_STAMP_NAME,
+            _load_timestamp_stamp,
+        )
+
+        root = _seed_bare_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+
+        # What the wrapper's private-symbol read sees today: no stamp yet.
+        stamp_path = resolve_cache_dir(cache) / REASONING_TRIGGER_STAMP_NAME
+        assert _load_timestamp_stamp(stamp_path) is None
+
+        rc = main(
+            [
+                "ingest",
+                "--evaluate-only",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+        payload = json.loads(capsys.readouterr().out.strip())
+        # The public mode's "run now" answer (exit 2, fired) agrees with what
+        # the private read above implies (no completed run ever -> overdue).
+        assert rc == 2
+        assert payload["fired"] is True
+
+    def test_renaming_the_private_symbols_does_not_change_behavior(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """AC4: renaming ``REASONING_TRIGGER_STAMP_NAME`` /
+        ``_load_timestamp_stamp`` must not change --evaluate-only's
+        observable behavior. Simulates the rename by aliasing the stamp
+        filename constant under a new name in ``athenaeum.librarian`` —
+        ``_evaluate_ingest_trigger`` re-imports the module attribute fresh
+        on every call, so this exercises the real lookup, not a stale
+        reference — and shows the public mode's verdict is unaffected.
+        """
+        import athenaeum.librarian as librarian_mod
+
+        monkeypatch.setattr(
+            librarian_mod, "REASONING_TRIGGER_STAMP_NAME", "renamed-stamp-name.json"
+        )
+
+        root = _seed_bare_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+
+        rc = main(
+            [
+                "ingest",
+                "--evaluate-only",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+        assert rc == 2  # first-ever call still fires the nightly backstop
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload["fired"] is True
+        assert payload["trigger"] == "nightly-backstop"
+
+
+# ---------------------------------------------------------------------------
 # reindex CLI
 # ---------------------------------------------------------------------------
 

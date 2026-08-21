@@ -852,7 +852,7 @@ def _read_surface_record(surface_root: Path, uid: str) -> tuple[Path, dict[str, 
     """Resolve *uid*'s record on the sensitivity-routed surface (issue athenaeum#872).
 
     Reached through :func:`athenaeum.pii.resolve_contact_record_for_uid` — the
-    SAME uid-keyed resolution :func:`athenaeum.pii.read_person` uses — rather
+    SAME uid-keyed resolution :func:`athenaeum.pii.read_entity` uses — rather
     than a bespoke ``{uid}.json`` path this router alone understood. That is
     what makes a value this function's caller writes visible to
     ``classify_contact_value``/``iter_contact_records``/``is_bounced`` by
