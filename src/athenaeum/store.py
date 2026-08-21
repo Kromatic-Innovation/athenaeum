@@ -19,8 +19,9 @@ slice** — S2 (athenaeum#977), S3 (athenaeum#978), S4 (athenaeum#979) and S7
 (athenaeum#982) do that. ``snapshot`` is implemented for real as of S3
 (athenaeum#978) — see :meth:`FilesystemStore.snapshot`. ``lease`` is
 implemented for real as of S4 (athenaeum#979) — see :meth:`FilesystemStore.lease`
-and :class:`FileLease`. One protocol member remains deliberately inert here:
-the R3 persistence-class enforcement §5.2 defines (S5, athenaeum#980).
+and :class:`FileLease`. The R3 persistence-class enforcement §5.2 defines is
+implemented as of S5 (athenaeum#980) — see :class:`ArtifactDeclaration` and
+:data:`ARTIFACT_REGISTRY`.
 
 **The lease primitive and its relationship to** :mod:`athenaeum.runlock`
 **(issue athenaeum#979, S4).** The flock + heartbeat + inode-race hardening that
@@ -107,6 +108,35 @@ except ImportError:  # pragma: no cover - non-POSIX (Windows)
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter
+
+# ---------------------------------------------------------------------------
+# Shared durable-append primitive (design note §4.6 / §6.2, §2.4; issue
+# athenaeum#980, slice S5)
+# ---------------------------------------------------------------------------
+
+
+def append_line_durable(path: Path, line: bytes) -> None:
+    """``O_APPEND`` + ``fsync``: append *line* to *path*, creating the parent
+    directory and the file itself if needed.
+
+    THE single implementation of the primitive design note §2.4 found
+    duplicated across "12 modules, no shared implementation" — a plain
+    ``O_APPEND`` write of one small record is atomic on local filesystems, so
+    a crash can at worst leave a torn TRAILING line (every reader in this
+    codebase already tolerates that), never corrupt an already-written
+    record. :meth:`FilesystemStore.append` is one caller; every per-module
+    ``_append_line``/``_append_jsonl_line``/``_append_ledger_line`` helper
+    this slice migrated (issue athenaeum#980 AC3) is another — collapsing
+    what used to be 12+ independent copies of this exact body onto one.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+    try:
+        os.write(fd, line)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -500,14 +530,456 @@ class FileLease:
                 pass
 
 
-#: The four R3 persistence classes (design note §5.2). Declarative in S1 —
-#: nothing here enforces that an artifact declares exactly one; that
-#: enforcement is S5 (athenaeum#980).
+#: The four R3 persistence classes (design note §5.2).
 PERSISTENCE_CLASSES = frozenset({"source", "derived", "operational", "config"})
 
-#: The two R3 operational scopes (design note §5.2), declarative for the same
-#: reason as :data:`PERSISTENCE_CLASSES`.
+#: The two R3 operational scopes (design note §5.2).
 OPERATIONAL_SCOPES = frozenset({"store-durable", "machine-local"})
+
+
+@dataclass(frozen=True)
+class ArtifactDeclaration:
+    """One store artifact's R3 persistence-class declaration (design note
+    §5.2, issue athenaeum#980, slice S5).
+
+    ``__post_init__`` is the enforcement S1 left inert (this module's
+    docstring: "the R3 persistence-class enforcement §5.2 defines (S5,
+    athenaeum#980)"): every declaration names exactly one
+    :data:`PERSISTENCE_CLASSES` member (a required ``str`` field, so "more
+    than one" is not representable), and an ``operational`` declaration
+    additionally names exactly one :data:`OPERATIONAL_SCOPES` member — never
+    zero, never both, and never a scope on a non-``operational`` artifact.
+
+    Not itself part of the :class:`Store` protocol — a catalogue the
+    conformance/enumeration test (``tests/test_artifact_registry.py``) reads,
+    not something a caller constructs at runtime.
+    """
+
+    #: Short, stable identifier — the artifact's filename/constant where one
+    #: exists, otherwise a descriptive slug (design note citation in
+    #: ``source_ref`` disambiguates).
+    name: str
+    persistence_class: str
+    operational_scope: str | None
+    #: Human-readable root the artifact resolves under today: ``"wiki root"``,
+    #: ``"raw root"``, ``"cache dir"``, ``"knowledge root"``, or
+    #: ``"excluded surface root"``.
+    location: str
+    #: ``module.py:CONSTANT_NAME`` (or ``module.py:<literal>`` where no named
+    #: constant exists) plus the design note table/paragraph this row
+    #: transcribes.
+    source_ref: str
+
+    def __post_init__(self) -> None:
+        if self.persistence_class not in PERSISTENCE_CLASSES:
+            raise ValueError(
+                f"artifact {self.name!r}: persistence_class "
+                f"{self.persistence_class!r} not in {sorted(PERSISTENCE_CLASSES)}"
+            )
+        if self.persistence_class == "operational":
+            if self.operational_scope not in OPERATIONAL_SCOPES:
+                raise ValueError(
+                    f"artifact {self.name!r}: class 'operational' requires "
+                    f"operational_scope in {sorted(OPERATIONAL_SCOPES)}, got "
+                    f"{self.operational_scope!r}"
+                )
+        elif self.operational_scope is not None:
+            raise ValueError(
+                f"artifact {self.name!r}: class {self.persistence_class!r} must not "
+                f"declare an operational_scope (got {self.operational_scope!r})"
+            )
+
+
+#: Every store artifact design note §5.1/§5.2/§2.3.1 names, declaring its R3
+#: class (issue athenaeum#980, slice S5). This is the enumeration
+#: ``tests/test_artifact_registry.py`` walks for AC1/AC2/AC6.
+#:
+#: ``source`` and ``derived`` membership is §5.1's confirmed boundary (raw +
+#: wiki authoritative, indexes derived) plus the concrete cache-dir index
+#: artifacts §5.2 names as the ``derived`` example. ``operational`` membership
+#: is §5.2's table, one row per artifact rather than per table row so each
+#: has its own declaration. ``config`` membership is the R3 box's own list
+#: (§5.2: "operator-authored declarations (``rules/``, ``templates/``, the
+#: authority manifest, ``athenaeum.yaml``)") — the narrower, authoritative
+#: definition, not §2.3.1's wider sweep-finding paragraph that also names
+#: ``registry.json``, ``compiled-exempt.json`` and the preserved-log
+#: directory; those three are classified individually below against what
+#: they actually are (see each entry's ``source_ref`` for the reasoning).
+ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
+    # -- source (design note §5.1) ---------------------------------------
+    ArtifactDeclaration(
+        name="raw-intake",
+        persistence_class="source",
+        operational_scope=None,
+        location="raw root",
+        source_ref="intake.py (design note §5.1: 'raw ... authoritative')",
+    ),
+    ArtifactDeclaration(
+        name="compiled-wiki-pages",
+        persistence_class="source",
+        operational_scope=None,
+        location="wiki root",
+        source_ref="librarian.py (design note §5.1: 'wiki authoritative')",
+    ),
+    ArtifactDeclaration(
+        name="preserved-log-area",
+        persistence_class="source",
+        operational_scope=None,
+        location="knowledge root (operator-configured subdirectory)",
+        source_ref=(
+            "rules.py:987-1023 preserved_log_source_pointer/move-into-preserved-area "
+            "(design note §2.3.1 names the directory; classified 'source' here, not "
+            "'config', because the directory HOLDS preserved raw log content — a "
+            "retained source document, design note §5.1 — not an operator-authored "
+            "behavioural declaration)"
+        ),
+    ),
+    # -- derived (design note §5.1, §5.2 cache-dir 'yes' row) ------------
+    ArtifactDeclaration(
+        name="fts5-index-db",
+        persistence_class="derived",
+        operational_scope=None,
+        location="cache dir",
+        source_ref="search.py:269 _DB_NAME (design note §5.1/§5.2 cache-dir 'yes' row)",
+    ),
+    ArtifactDeclaration(
+        name="vector-collection",
+        persistence_class="derived",
+        operational_scope=None,
+        location="cache dir",
+        source_ref="search.py:1335 _VECTOR_COLLECTION (design note §5.1)",
+    ),
+    ArtifactDeclaration(
+        name="fts5-manifest",
+        persistence_class="derived",
+        operational_scope=None,
+        location="cache dir",
+        source_ref="search.py:436 _FTS5_MANIFEST (design note §5.2 cache-dir 'yes' row)",
+    ),
+    ArtifactDeclaration(
+        name="vector-manifest",
+        persistence_class="derived",
+        operational_scope=None,
+        location="cache dir",
+        source_ref="search.py:437 _VECTOR_MANIFEST (design note §5.2 cache-dir 'yes' row)",
+    ),
+    ArtifactDeclaration(
+        name="vector-generation-stamp",
+        persistence_class="derived",
+        operational_scope=None,
+        location="cache dir",
+        source_ref="search.py:1342 _VECTOR_GENERATION (design note §5.1)",
+    ),
+    ArtifactDeclaration(
+        name="ingest-manifest",
+        persistence_class="derived",
+        operational_scope=None,
+        location="cache dir",
+        source_ref=(
+            "librarian.py:5878 INGEST_MANIFEST_NAME (design note §5.2 cache-dir "
+            "'yes' row: 'ingest ... manifests ... yes — from a full rebuild')"
+        ),
+    ),
+    ArtifactDeclaration(
+        name="auto-memory-manifest",
+        persistence_class="derived",
+        operational_scope=None,
+        location="cache dir",
+        source_ref="librarian.py:6076 AUTO_MEMORY_MANIFEST_NAME (design note §5.2 "
+        "cache-dir 'yes' row)",
+    ),
+    # -- operational / store-durable (design note §5.2 table) -----------
+    ArtifactDeclaration(
+        name="pending-questions",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref="answers.py '_pending_questions.md' (design note §5.2 table row 1)",
+    ),
+    ArtifactDeclaration(
+        name="pending-questions-archive",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref="answers.py:24 '_pending_questions_archive.md' (design note §5.2 "
+        "table row 1, '+ archives')",
+    ),
+    ArtifactDeclaration(
+        name="pending-merges",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref="pending_merges.py '_pending_merges.md' (design note §5.2 table row 1)",
+    ),
+    ArtifactDeclaration(
+        name="pending-merges-archive",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref="pending_merges.py:63 '_pending_merges_archive.md' (design note §5.2 "
+        "table row 1, '+ archives')",
+    ),
+    ArtifactDeclaration(
+        name="quarantine-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref="quarantine.py:81 QUARANTINE_LEDGER_FILENAME (design note §5.2 table row 2)",
+    ),
+    ArtifactDeclaration(
+        name="merge-provenance-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref="provenance.py:427 MERGE_PROVENANCE_FILENAME (design note §5.2 table row 3)",
+    ),
+    ArtifactDeclaration(
+        name="pending-retractions-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref="retraction_cascade.py:64 RETRACTION_REVIEW_FILENAME (design note "
+        "§5.2 table row 4)",
+    ),
+    ArtifactDeclaration(
+        name="calibration-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref="calibration.py:61 CALIBRATION_LEDGER_FILENAME (design note §5.2 table row 5)",
+    ),
+    ArtifactDeclaration(
+        name="reasoning-tier-decisions-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref="reasoning_tiers.py:368 REASONING_TIER_LOG_FILENAME (design note "
+        "§5.2 table row 5)",
+    ),
+    ArtifactDeclaration(
+        name="axiom-governance-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref="axiom_governance.py:92 AXIOM_LEDGER_FILENAME (design note §5.2 table row 5)",
+    ),
+    ArtifactDeclaration(
+        name="corrections-applied-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref="corrections.py:1843 CORRECTIONS_LEDGER_FILENAME (design note §5.2 table row 5)",
+    ),
+    ArtifactDeclaration(
+        name="shape-rules-applied-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref="rules.py:1143 SHAPE_RULES_LEDGER_FILENAME (design note §5.2 table row 5)",
+    ),
+    ArtifactDeclaration(
+        name="shape-rule-dispositions-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref="rules.py:1183 SHAPE_RULE_DISPOSITIONS_FILENAME (design note §5.2 table row 5)",
+    ),
+    ArtifactDeclaration(
+        name="rule-proposals-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref=(
+            "rule_proposals.py:140 RULE_PROPOSALS_LEDGER_FILENAME (sibling of the "
+            "design note §5.2 table row 5 ledgers, same house-style duplicated "
+            "appender §2.4 counts; not itself named in the table's prose but "
+            "identical in shape and location)"
+        ),
+    ),
+    ArtifactDeclaration(
+        name="resolved-contradictions-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="raw root",
+        source_ref="fingerprint.py:61 RESOLVED_CONTRADICTIONS_RELPATH (design note "
+        "§5.2 table row 6)",
+    ),
+    ArtifactDeclaration(
+        name="observations-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="excluded surface root",
+        source_ref="pii.py:1306 OBSERVATION_LOG_FILENAME (design note §5.2 table row 7)",
+    ),
+    ArtifactDeclaration(
+        name="observation-supersessions-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="excluded surface root",
+        source_ref="pii.py:1312 SUPERSESSION_LOG_FILENAME (design note §5.2 table row 7)",
+    ),
+    ArtifactDeclaration(
+        name="llm-schema-observations-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="cache dir (relocation mechanism added, not yet wired — see source_ref)",
+        source_ref=(
+            "llm_schemas.py:134 OBSERVATIONS_FILENAME (design note §5.2 table row 8 "
+            "'observations.jsonl'). Issue athenaeum#980 AC4: "
+            "llm_schemas.durable_observations_path() implements the behind-the-seam "
+            "location with a legacy-store fallback, but is NOT wired to any of "
+            "record_observation's five scattered validation call sites in this slice "
+            "(see that function's docstring) — physical relocation is a follow-up"
+        ),
+    ),
+    ArtifactDeclaration(
+        name="spend-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="cache dir (relocation mechanism added, not yet wired — see source_ref)",
+        source_ref=(
+            "spend.py:129 LEDGER_FILENAME (design note §5.2 table row 8 'spend.jsonl'). "
+            "Issue athenaeum#980 AC4: spend.durable_ledger_path() implements the "
+            "behind-the-seam location with a legacy-store fallback, and "
+            "resolve_ledger_path()/record_spend()/record_spend_per_knob_provider() all "
+            "accept an opt-in wiki_root= to use it — but no caller passes it in this "
+            "slice (wiring every write AND every read call site together, so reports "
+            "never go blind mid-migration, is a follow-up; see PR body)"
+        ),
+    ),
+    ArtifactDeclaration(
+        name="push-records-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="cache dir (relocation mechanism added, not yet wired — see source_ref)",
+        source_ref=(
+            "push_metrics.py:80 PUSH_RECORDS_FILENAME (design note §5.2 table row 8 "
+            "'_push_records.jsonl'). Issue athenaeum#980 AC4: "
+            "push_metrics.durable_push_records_path() implements the behind-the-seam "
+            "location with a legacy-store fallback, and record_push() accepts an "
+            "opt-in wiki_root= to use it — but no caller passes it in this slice "
+            "(same read/write coordination follow-up as the spend ledger)"
+        ),
+    ),
+    ArtifactDeclaration(
+        name="push-references-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="cache dir",
+        source_ref=(
+            "push_metrics.py:82 REFERENCE_RECORDS_FILENAME '_push_references.jsonl' — "
+            "sibling of push-records-ledger (same module, same durable/not-reconstructible "
+            "shape) but not itself named in design note §5.2's table, so classified "
+            "without relocation, same reasoning as never-ingest-refusals-ledger below"
+        ),
+    ),
+    ArtifactDeclaration(
+        name="never-ingest-refusals-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="cache dir",
+        source_ref=(
+            "never_ingest.py:122 REFUSALS_FILENAME — same durable, not-reconstructible "
+            "shape as design note §5.2 table row 8 (and one of the duplicated §2.4 "
+            "appenders AC3 collapses), but NOT named in §5.2's table, so its physical "
+            "location is left as-is per 'do not invent a classification the note does "
+            "not state'; only classification is declared here, not relocated"
+        ),
+    ),
+    ArtifactDeclaration(
+        name="decay-sweep-records-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="cache dir",
+        source_ref=(
+            "decay_sweep.py:100 SWEEP_LEDGER_FILENAME — same reasoning as "
+            "never-ingest-refusals-ledger above: durable and not reconstructible, one "
+            "of the §2.4 duplicated appenders, but outside §5.2's named table rows, so "
+            "classified without relocation"
+        ),
+    ),
+    ArtifactDeclaration(
+        name="corrections-entity-registry",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="knowledge root",
+        source_ref=(
+            "corrections.py load_registry() 'registry.json' — named in design note "
+            "§2.3.1's wider sweep paragraph as 'operator-authored', but its own module "
+            "documents it as a machine-maintained entity-handle map built from applied "
+            "corrections, not an operator declaration; classified 'operational' against "
+            "R3's own box definition (§5.2) rather than 'config'"
+        ),
+    ),
+    ArtifactDeclaration(
+        name="compiled-exempt-manifest",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="knowledge root",
+        source_ref=(
+            "compiled_exempt.py:55 COMPILED_EXEMPT_FILENAME 'compiled-exempt.json' — "
+            "named in design note §2.3.1's wider sweep paragraph, but its own module "
+            "docstring calls it 'a durable decision' recording per-file retain "
+            "dispositions, not an operator-authored behavioural declaration; classified "
+            "'operational' against R3's own box definition (§5.2) rather than 'config'"
+        ),
+    ),
+    # -- operational / machine-local (design note §5.2 table row 9) -----
+    ArtifactDeclaration(
+        name="detection-incomplete-state",
+        persistence_class="operational",
+        operational_scope="machine-local",
+        location="cache dir",
+        source_ref="detection_state.py:57 _STORE_NAME 'detection_incomplete.json' "
+        "(design note §5.2 table row 9)",
+    ),
+    ArtifactDeclaration(
+        name="zero-yield-state",
+        persistence_class="operational",
+        operational_scope="machine-local",
+        location="cache dir",
+        source_ref="zero_yield.py:57 STATE_NAME 'zero_yield_state.json' (design note "
+        "§5.2 table row 9)",
+    ),
+    ArtifactDeclaration(
+        name="killswitch-state",
+        persistence_class="operational",
+        operational_scope="machine-local",
+        location="cache dir",
+        source_ref="killswitch.py:100 state_path() 'disabled' (design note §5.2 table row 9)",
+    ),
+    # -- config (design note §5.2 R3 box) --------------------------------
+    ArtifactDeclaration(
+        name="shape-rules",
+        persistence_class="config",
+        operational_scope=None,
+        location="knowledge root",
+        source_ref="rules.py:740 'rules/*.yaml' (design note §5.2 R3 box, issue athenaeum#980 AC5)",
+    ),
+    ArtifactDeclaration(
+        name="entity-templates",
+        persistence_class="config",
+        operational_scope=None,
+        location="knowledge root",
+        source_ref="init.py 'templates/' (design note §5.2 R3 box, issue athenaeum#980 AC5)",
+    ),
+    ArtifactDeclaration(
+        name="authority-manifest",
+        persistence_class="config",
+        operational_scope=None,
+        location="knowledge root",
+        source_ref="authority.py:257,260 'authority-manifest.yaml' (design note §5.2 "
+        "R3 box, issue athenaeum#980 AC5)",
+    ),
+    ArtifactDeclaration(
+        name="athenaeum-config",
+        persistence_class="config",
+        operational_scope=None,
+        location="knowledge root",
+        source_ref="config.py:185 'athenaeum.yaml' (design note §5.2 R3 box, issue "
+        "athenaeum#980 AC5)",
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -745,16 +1217,10 @@ class FilesystemStore:
         return new_version
 
     def append(self, key: StoreKey, line: bytes) -> None:
-        """``O_APPEND`` + ``fsync`` (design note §4.6 / §6.2): the primitive the
-        12 duplicated per-module ledger writers §2.4 counts collapse onto."""
-        path = self._path_for(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
-        try:
-            os.write(fd, line)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        """``O_APPEND`` + ``fsync`` (design note §4.6 / §6.2) via
+        :func:`append_line_durable` — the primitive the 12 duplicated
+        per-module ledger writers §2.4 counts collapse onto."""
+        append_line_durable(self._path_for(key), line)
 
     def delete(self, key: StoreKey, *, expect: str | None = None) -> bool:
         """``expect=None`` deletes unconditionally (``False`` if already absent,

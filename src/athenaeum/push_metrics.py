@@ -67,6 +67,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.config import resolve_cache_dir
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 
@@ -122,25 +123,32 @@ def _now_iso() -> str:
 
 
 def _append_line(path: Path, line: str) -> None:
-    """Append one line to *path* durably (``O_APPEND`` + fsync).
-
-    Mirrors :func:`athenaeum.spend._append_line` exactly: a single small
-    ``O_APPEND`` write is atomic on local filesystems, so a crash can at worst
-    leave a torn TRAILING line (skipped by readers), never corrupt an
-    already-written record.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-    try:
-        os.write(fd, line.encode("utf-8"))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    """Append one line to *path* durably (``O_APPEND`` + fsync), via
+    :func:`athenaeum.store.append_line_durable` — the single shared
+    implementation issue athenaeum#980 (S5) collapsed this module's copy onto
+    (design note §2.4 / §6.2)."""
+    append_line_durable(path, line.encode("utf-8"))
 
 
 def push_records_path(cache_dir: Path | None = None) -> Path:
     """Resolve the push-records ledger path: ``<cache_dir>/_push_records.jsonl``."""
     return resolve_cache_dir(cache_dir) / PUSH_RECORDS_FILENAME
+
+
+def durable_push_records_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
+    """The R3 ``operational``/``store-durable`` location (design note §5.2
+    table row 8; issue athenaeum#980 AC4): ``<wiki_root>/_push_records.jsonl``.
+
+    Same legacy-fallback contract as :func:`athenaeum.spend.durable_ledger_path`:
+    an existing installation's populated ``<cache_dir>/_push_records.jsonl``
+    keeps resolving there until migrated; a fresh or already-migrated store
+    resolves to the new, behind-the-seam location.
+    """
+    new_path = Path(wiki_root) / PUSH_RECORDS_FILENAME
+    legacy_path = push_records_path(cache_dir)
+    if new_path.exists() or not legacy_path.exists():
+        return new_path
+    return legacy_path
 
 
 def reference_records_path(cache_dir: Path | None = None) -> Path:
@@ -303,6 +311,7 @@ def record_push(
     record: PushRecord,
     *,
     cache_dir: Path | None = None,
+    wiki_root: Path | None = None,
     config: dict[str, Any] | None = None,
 ) -> bool:
     """Append one push record to the durable ledger. Best-effort.
@@ -313,6 +322,10 @@ def record_push(
     swallowed and logged at warning level — a ledger write must NEVER break
     or slow the live recall path, but a silent failure here would produce the
     same "reads as zero forever" hazard athenaeum#568 fixed for the spend ledger.
+
+    *wiki_root*, when supplied, resolves the ledger behind the seam (issue
+    athenaeum#980 AC4) via :func:`durable_push_records_path`; omitted,
+    resolution is unchanged from before that issue.
     """
     try:
         from athenaeum.config import resolve_push_metrics_enabled
@@ -321,7 +334,11 @@ def record_push(
             return False
         if not record.session_id or not record.items:
             return False
-        path = push_records_path(cache_dir)
+        path = (
+            durable_push_records_path(wiki_root, cache_dir=cache_dir)
+            if wiki_root is not None
+            else push_records_path(cache_dir)
+        )
         _append_line(path, json.dumps(record.to_dict(), separators=(",", ":")) + "\n")
         return True
     except Exception as exc:  # noqa: BLE001 — must never break recall

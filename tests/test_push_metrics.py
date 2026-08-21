@@ -1059,3 +1059,49 @@ class TestEstimateTokens:
 
     def test_never_negative(self) -> None:
         assert push_metrics.estimate_tokens("abc") == 0
+
+
+# ---------------------------------------------------------------------------
+# durable_push_records_path — issue athenaeum#980 AC4: the R3
+# operational/store-durable relocation seam. NOT wired to the live
+# mcp_server.py caller in this slice (see athenaeum.store.ARTIFACT_REGISTRY's
+# "push-records-ledger" entry) — these tests cover the resolver capability.
+# ---------------------------------------------------------------------------
+
+
+class TestDurablePushRecordsPath:
+    def test_fresh_store_resolves_to_wiki_root(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        resolved = push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir)
+        assert resolved == wiki_root / push_metrics.PUSH_RECORDS_FILENAME
+
+    def test_legacy_store_falls_back_to_cache_dir(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        legacy = cache_dir / push_metrics.PUSH_RECORDS_FILENAME
+        legacy.write_text('{"session_id":"s"}\n', encoding="utf-8")
+        resolved = push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir)
+        assert resolved == legacy
+
+    def test_record_push_without_wiki_root_is_unchanged(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        record = push_metrics.build_push_record(
+            session_id="s1", query="q", backend="fts5", hits=[("p.md", {}, "snip")]
+        )
+        assert push_metrics.record_push(record, cache_dir=cache_dir) is True
+        assert (cache_dir / push_metrics.PUSH_RECORDS_FILENAME).exists()
+
+    def test_record_push_with_wiki_root_writes_behind_the_seam(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        record = push_metrics.build_push_record(
+            session_id="s1", query="q", backend="fts5", hits=[("p.md", {}, "snip")]
+        )
+        assert push_metrics.record_push(record, cache_dir=cache_dir, wiki_root=wiki_root) is True
+        assert (wiki_root / push_metrics.PUSH_RECORDS_FILENAME).exists()
+        assert not (cache_dir / push_metrics.PUSH_RECORDS_FILENAME).exists()

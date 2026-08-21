@@ -485,6 +485,28 @@ def observations_path(cache_dir: Path | None = None) -> Path:
     return resolve_cache_dir(cache_dir) / OBSERVATIONS_FILENAME
 
 
+def durable_observations_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
+    """The R3 ``operational``/``store-durable`` location (design note §5.2
+    table row 8 'observations.jsonl'; issue athenaeum#980 AC4):
+    ``<wiki_root>/_llm_schema_observations.jsonl``.
+
+    Same legacy-fallback contract as
+    :func:`athenaeum.spend.durable_ledger_path`. NOT wired to
+    :func:`record_observation`/:func:`observe`/:func:`observe_parse_failure`
+    in this slice — this module's two public entry points are called from
+    five scattered validation call sites (``claim_kind``, ``query_topics``,
+    ``contradictions``, ``resolutions``, ``tiers``), none of which currently
+    carries a ``wiki_root`` this deep into response parsing, and threading it
+    through all five is real, separate scope. This function exists so the
+    capability is ready and tested for that follow-up.
+    """
+    new_path = Path(wiki_root) / OBSERVATIONS_FILENAME
+    legacy_path = observations_path(cache_dir)
+    if new_path.exists() or not legacy_path.exists():
+        return new_path
+    return legacy_path
+
+
 def record_observation(
     *,
     contract: str,
