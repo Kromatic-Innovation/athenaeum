@@ -81,7 +81,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -90,6 +89,7 @@ from typing import Any
 
 from athenaeum.config import resolve_cache_dir
 from athenaeum.models import parse_bucket, parse_frontmatter, valid_until_expired
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 
@@ -236,22 +236,17 @@ def _now_iso() -> str:
 
 
 def _append_ledger_line(path: Path, line: str) -> None:
-    """Append one line durably (``O_APPEND`` + ``fsync``).
+    """Append one line durably (``O_APPEND`` + ``fsync``), via
+    :func:`athenaeum.store.append_line_durable` — the single shared
+    implementation issue athenaeum#980 (S5) collapsed this module's copy onto
+    (design note §2.4 / §6.2).
 
-    Mirrors :func:`athenaeum.push_metrics._append_line` byte-for-byte, with
-    one deliberate difference in the CALLER's contract, not this function's
-    body: this function still raises on failure, and :func:`write_sweep_ledger`
-    (unlike :func:`athenaeum.push_metrics.record_push`) does NOT catch and
-    swallow that exception — see :func:`write_sweep_ledger`'s docstring for
+    One difference stays in the CALLER's contract, not this function's body:
+    :func:`write_sweep_ledger` (unlike :func:`athenaeum.push_metrics.record_push`)
+    does NOT catch and swallow a write failure here — see that docstring for
     why a ledger write on this path must be allowed to fail loudly.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-    try:
-        os.write(fd, line.encode("utf-8"))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    append_line_durable(path, line.encode("utf-8"))
 
 
 def write_sweep_ledger(

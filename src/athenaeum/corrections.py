@@ -77,7 +77,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import subprocess
 import uuid
 from collections.abc import Callable
@@ -114,7 +113,7 @@ from athenaeum.provenance import parse_source
 from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.storage import surface_root_for_class
-from athenaeum.store import FilesystemStore, Store
+from athenaeum.store import FilesystemStore, Store, append_line_durable
 
 log = logging.getLogger(__name__)
 
@@ -852,7 +851,7 @@ def _read_surface_record(surface_root: Path, uid: str) -> tuple[Path, dict[str, 
     """Resolve *uid*'s record on the sensitivity-routed surface (issue athenaeum#872).
 
     Reached through :func:`athenaeum.pii.resolve_contact_record_for_uid` — the
-    SAME uid-keyed resolution :func:`athenaeum.pii.read_person` uses — rather
+    SAME uid-keyed resolution :func:`athenaeum.pii.read_entity` uses — rather
     than a bespoke ``{uid}.json`` path this router alone understood. That is
     what makes a value this function's caller writes visible to
     ``classify_contact_value``/``iter_contact_records``/``is_bounced`` by
@@ -1848,16 +1847,11 @@ def default_corrections_ledger_path(wiki_root: Path) -> Path:
 
 
 def _append_jsonl_line(path: Path, line: str) -> None:
-    """Same append-only-JSONL discipline as
-    ``provenance._append_jsonl_line`` / ``spend._append_line``: a single
-    small ``O_APPEND`` write is atomic on local filesystems."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-    try:
-        os.write(fd, line.encode("utf-8"))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    """Append one line to *path* durably (``O_APPEND`` + fsync), via
+    :func:`athenaeum.store.append_line_durable` — the single shared
+    implementation issue athenaeum#980 (S5) collapsed this module's copy onto
+    (design note §2.4 / §6.2)."""
+    append_line_durable(path, line.encode("utf-8"))
 
 
 def build_ledger_record(outcome: BatchOutcome) -> dict[str, Any]:

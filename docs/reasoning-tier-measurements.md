@@ -8,6 +8,11 @@ Figures here are **measured**, never estimated. Every section records the exact
 commands that produced it so a later agent with no session memory can reproduce a
 comparable number.
 
+See [`merge-inflow-restoration.md`](merge-inflow-restoration.md) (athenaeum#1030) for
+the follow-on analysis of the `max_merge_sources` suppression this doc
+measures below — what the recorded suppression counts do and do not support,
+and a proposed cap value for athenaeum#787's operator ratification.
+
 ---
 
 ## Baseline 0 — pre-enable, 2026-08-19
@@ -277,6 +282,52 @@ grep -hE "wiki-page dedup" ~/Library/Logs/pre-dawn-sweep.out.log \
   | grep -v SUPPRESSED | awk '{print substr($1,1,10)}' | sort | uniq -c
 grep -hE "wiki-page dedup: SUPPRESSED" ~/Library/Logs/pre-dawn-sweep.out.log \
   | awk '{print substr($1,1,10)}' | sort | uniq -c
+
+# issue athenaeum#1085: over-cluster size distribution, bucketed by n_sources per
+# night, across BOTH suppression call sites ("wiki-page dedup: SUPPRESSED" in
+# wiki_dedupe.py AND "resolutions: SUPPRESSED" in merge.py -- the line-count-
+# only command above covers only the former, and neither command above
+# retains the message text, so n_sources was discarded even where the
+# size-gate reason string happened to carry it). n_sources is now a
+# structured field on every SUPPRESSED line unconditionally, regardless of
+# which gate fired (size cap, single-linkage chain, mean-cohesion floor, or
+# confidence floor) -- see athenaeum#1085 -- so this recovers the distribution
+# merge-inflow-restoration.md §2 documents as unmeasurable under the two
+# commands above.
+grep -hE "wiki-page dedup: SUPPRESSED|resolutions: SUPPRESSED" ~/Library/Logs/pre-dawn-sweep.out.log \
+  | awk '{
+      date = substr($1, 1, 10);
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^n_sources=[0-9]+;?$/) {
+          n = $i; gsub(/[^0-9]/, "", n);
+          print date, n;
+        }
+      }
+    }' | sort | uniq -c
+
+# same, split per call site -- answers merge-inflow-restoration.md §2
+# consequence 3 specifically: the resolver-path (merge.py) slice was never
+# counted by any command above it.
+grep -hE "wiki-page dedup: SUPPRESSED" ~/Library/Logs/pre-dawn-sweep.out.log \
+  | awk '{
+      date = substr($1, 1, 10);
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^n_sources=[0-9]+;?$/) {
+          n = $i; gsub(/[^0-9]/, "", n);
+          print date, n;
+        }
+      }
+    }' | sort | uniq -c
+grep -hE "resolutions: SUPPRESSED" ~/Library/Logs/pre-dawn-sweep.out.log \
+  | awk '{
+      date = substr($1, 1, 10);
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^n_sources=[0-9]+;?$/) {
+          n = $i; gsub(/[^0-9]/, "", n);
+          print date, n;
+        }
+      }
+    }' | sort | uniq -c
 ```
 
 ### Carried forward to the enable-and-measure pass

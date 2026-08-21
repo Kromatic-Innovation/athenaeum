@@ -37,6 +37,9 @@ Manifest format + location (design choice, documented here):
           topics:                        # slugs/topics this source OWNS
             - lean-development-workflow
             - clean-commit-discipline
+      never_ingest_classes:              # optional (issue athenaeum#968); empty/absent
+        - mirror-of-live-source          # by default -- no new intake refusal
+        - pending-state-todo             # until an operator opts a class in
 
   ``version`` must be the literal integer ``1`` (schema-evolution seam — a
   future incompatible schema bumps it and the loader can dispatch on it).
@@ -44,6 +47,9 @@ Manifest format + location (design choice, documented here):
   (non-empty — where the live source lives), and ``topics`` (non-empty list
   of non-empty strings). ``kind`` is optional free text (not validated
   against a closed vocabulary — operators name their own source kinds).
+  ``never_ingest_classes`` is an optional list of write-refusal class slugs
+  (issue athenaeum#968); see :data:`NEVER_INGEST_CLASS_SLUGS` and
+  :mod:`athenaeum.never_ingest` for the enforcement mechanism.
 
 A malformed manifest (missing ``version``, wrong version, non-list
 ``sources``, a source missing a required field, a duplicate ``slug``, or
@@ -81,6 +87,32 @@ SUPPORTED_MANIFEST_VERSION = 1
 #: construction rather than by a second ad hoc check at each call site.
 POINTER_STUB_FLAG = "pointer_stub"
 
+#: Never-ingest class slugs (issue athenaeum#968) -- a CLOSED vocabulary an
+#: operator's ``never_ingest_classes:`` manifest entry must draw from. Naming
+#: anything else is a malformed manifest (loud, same discipline as every
+#: other defect this module rejects) -- see :func:`parse_authority_manifest`.
+#:
+#: - ``mirror-of-live-source``: the claim names a value whose system of
+#:   record is a repo/config/doc already declared as a ``sources:`` entry
+#:   here -- refuse it at intake exactly like :func:`find_duplicate_source`
+#:   already flags it post-hoc for a compiled wiki page. Detected by
+#:   :func:`athenaeum.never_ingest.classify_never_ingest`, which reuses THIS
+#:   module's own topic-index lookup (:func:`find_duplicate_source`), never a
+#:   second matcher.
+#: - ``pending-state-todo``: the claim asserts the current presence/absence
+#:   of something in an external artifact ("X needs updating", "has Y landed
+#:   yet") -- a TODO belongs in the tracker of the artifact's own repo, not
+#:   in memory. Detected by a small closed phrase list, also in
+#:   :mod:`athenaeum.never_ingest`.
+#:
+#: Both classes are seed evidence from athenaeum#968's own filing comment (the
+#: 2026-08-07 operator evidence log of three witnessed live pages).
+CLASS_MIRROR_OF_LIVE_SOURCE = "mirror-of-live-source"
+CLASS_PENDING_STATE_TODO = "pending-state-todo"
+NEVER_INGEST_CLASS_SLUGS: frozenset[str] = frozenset(
+    {CLASS_MIRROR_OF_LIVE_SOURCE, CLASS_PENDING_STATE_TODO}
+)
+
 
 class AuthorityManifestError(ValueError):
     """Raised when the authority manifest is missing required structure.
@@ -108,10 +140,20 @@ class AuthoritySource:
 
 @dataclass(frozen=True)
 class AuthorityManifest:
-    """A loaded, validated authority manifest."""
+    """A loaded, validated authority manifest.
+
+    ``never_ingest_classes`` (issue athenaeum#968) is the write-refusal class
+    list the intake path consults -- empty by default (a manifest that omits
+    the key, or every pre-athenaeum#968 manifest on disk, enforces nothing new;
+    the gate is dark until an operator explicitly opts a class in). Each
+    entry is one of :data:`NEVER_INGEST_CLASS_SLUGS`; see
+    :mod:`athenaeum.never_ingest` for the detectors and the intake choke
+    point that consults this field.
+    """
 
     version: int
     sources: tuple[AuthoritySource, ...]
+    never_ingest_classes: tuple[str, ...] = ()
 
     def topic_index(self) -> dict[str, AuthoritySource]:
         """Return a ``{normalized_topic: source}`` lookup map.
@@ -241,7 +283,55 @@ def parse_authority_manifest(text: str) -> AuthorityManifest:
             )
         )
 
-    return AuthorityManifest(version=version, sources=tuple(sources))
+    never_ingest_classes = _parse_never_ingest_classes(raw.get("never_ingest_classes"))
+
+    return AuthorityManifest(
+        version=version,
+        sources=tuple(sources),
+        never_ingest_classes=never_ingest_classes,
+    )
+
+
+def _parse_never_ingest_classes(raw_classes: Any) -> tuple[str, ...]:
+    """Validate + normalize the optional ``never_ingest_classes:`` key.
+
+    Absent/``None`` -> ``()`` (issue athenaeum#968's "dark by default": a
+    manifest that never mentions this key enforces nothing new). Present but
+    not a list, an entry that is not a non-empty string, an entry outside
+    :data:`NEVER_INGEST_CLASS_SLUGS`, or a duplicate entry all raise
+    :class:`AuthorityManifestError` -- same "loud on malformed" contract as
+    every other field this loader validates.
+    """
+    if raw_classes is None:
+        return ()
+    if not isinstance(raw_classes, list):
+        raise AuthorityManifestError(
+            "authority manifest: 'never_ingest_classes' must be a list "
+            f"(got {type(raw_classes).__name__})"
+        )
+    classes: list[str] = []
+    seen: set[str] = set()
+    for idx, entry in enumerate(raw_classes):
+        if not isinstance(entry, str) or not entry.strip():
+            raise AuthorityManifestError(
+                f"authority manifest: never_ingest_classes[{idx}] must be a "
+                "non-empty string"
+            )
+        slug = entry.strip()
+        if slug not in NEVER_INGEST_CLASS_SLUGS:
+            raise AuthorityManifestError(
+                f"authority manifest: never_ingest_classes[{idx}] "
+                f"{slug!r} is not a recognised class (expected one of "
+                f"{sorted(NEVER_INGEST_CLASS_SLUGS)})"
+            )
+        if slug in seen:
+            raise AuthorityManifestError(
+                f"authority manifest: duplicate never_ingest_classes entry "
+                f"{slug!r}"
+            )
+        seen.add(slug)
+        classes.append(slug)
+    return tuple(classes)
 
 
 def load_authority_manifest(path: Path) -> AuthorityManifest:
@@ -488,6 +578,9 @@ def convert_page_to_pointer_stub(
 __all__ = [
     "SUPPORTED_MANIFEST_VERSION",
     "POINTER_STUB_FLAG",
+    "CLASS_MIRROR_OF_LIVE_SOURCE",
+    "CLASS_PENDING_STATE_TODO",
+    "NEVER_INGEST_CLASS_SLUGS",
     "AuthorityManifestError",
     "AuthoritySource",
     "AuthorityManifest",

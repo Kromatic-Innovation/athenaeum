@@ -40,13 +40,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
+
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 
@@ -474,20 +475,11 @@ def build_merge_provenance_record(
 
 
 def _append_jsonl_line(path: Path, line: str) -> None:
-    """Append one line to *path* durably (``O_APPEND`` + fsync).
-
-    Same discipline as :func:`athenaeum.spend._append_line`: a single small
-    ``O_APPEND`` write is atomic on local filesystems, so a crash can at
-    worst leave a torn TRAILING line (which the reader skips), never
-    corrupt an already-written record.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-    try:
-        os.write(fd, line.encode("utf-8"))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    """Append one line to *path* durably (``O_APPEND`` + fsync), via
+    :func:`athenaeum.store.append_line_durable` — the single shared
+    implementation issue athenaeum#980 (S5) collapsed this module's copy onto
+    (design note §2.4 / §6.2)."""
+    append_line_durable(path, line.encode("utf-8"))
 
 
 def record_merge_provenance(

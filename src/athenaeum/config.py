@@ -1621,6 +1621,32 @@ def resolve_push_metrics_enabled(config: dict[str, Any] | None) -> bool:
     return True
 
 
+def resolve_ingestion_gate_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve whether the ingestion gate is enforced (issue athenaeum#968).
+
+    OFF by default — this is a new, additive gate (part 3 of athenaeum#968) that can
+    BLOCK ingestion when push-metrics precision instrumentation looks
+    unhealthy, so it must not change behavior for any existing operator
+    until they opt in (DoD: "lands dark behind a documented config key
+    defaulting to off"). Precedence: ``ATHENAEUM_INGESTION_GATE_ENABLED`` env
+    > ``librarian.ingestion_gate_enabled`` yaml > ``False``. Any env value
+    other than a falsey token (``0`` / ``false`` / ``no`` / ``off``,
+    case-insensitive) is truthy; a non-bool yaml value falls through to the
+    default. No seed in ``_DEFAULTS`` (issue athenaeum#231) — mirrors
+    :func:`resolve_push_metrics_enabled`'s shape, inverted default.
+    """
+    env = os.environ.get("ATHENAEUM_INGESTION_GATE_ENABLED")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false", "no", "off", "")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("ingestion_gate_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
 def resolve_spend_ledger_path(config: dict[str, Any] | None) -> Path | None:
     """Resolve an explicit spend-ledger path override (env > yaml > None) (athenaeum#378).
 
@@ -3150,6 +3176,92 @@ def resolve_shape_rules_runtime_share(config: dict[str, Any] | None) -> float:
                 if resolved is not None:
                     return resolved
     return default
+
+
+def resolve_rule_proposals_threshold(config: dict[str, Any] | None) -> int:
+    """``librarian.rule_proposals.threshold`` (default 50).
+
+    Issue athenaeum#905 AC1/AC2: the record count -- grouped by ``(source,
+    key_fingerprint)``, restricted to rows the shape-rules pass deferred to
+    the reasoning ladder (``tier is None`` in
+    ``_shape_rule_dispositions.jsonl``; see :mod:`athenaeum.rule_proposals`)
+    -- that must be crossed within :func:`resolve_rule_proposals_window_days`
+    before the librarian drafts a candidate rule for that shape.
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_RULE_PROPOSALS_THRESHOLD",
+        "librarian",
+        "rule_proposals",
+        "threshold",
+        50,
+    )
+
+
+def resolve_rule_proposals_window_days(config: dict[str, Any] | None) -> int:
+    """``librarian.rule_proposals.window_days`` (default 30).
+
+    Issue athenaeum#905's "configurable window": the detector only counts
+    ``_shape_rule_dispositions.jsonl`` rows whose ``at`` timestamp falls
+    within this many days of "now".
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_RULE_PROPOSALS_WINDOW_DAYS",
+        "librarian",
+        "rule_proposals",
+        "window_days",
+        30,
+    )
+
+
+def resolve_rule_proposals_exemplar_count(config: dict[str, Any] | None) -> int:
+    """``librarian.rule_proposals.exemplar_count`` (default 5).
+
+    Issue athenaeum#905 AC2's "K exemplars" -- how many readable raw records
+    of a detected shape are embedded in the one drafting call.
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_RULE_PROPOSALS_EXEMPLAR_COUNT",
+        "librarian",
+        "rule_proposals",
+        "exemplar_count",
+        5,
+    )
+
+
+def resolve_rule_proposals_enabled(config: dict[str, Any] | None) -> bool:
+    """``librarian.rule_proposals.enabled`` (default False). DEFAULT OFF.
+
+    Issue athenaeum#1063: gates the wiring of
+    :func:`athenaeum.rule_proposals.run_rule_proposal_detection` into the
+    nightly ``athenaeum run`` loop (``librarian._run_rule_proposal_phase``).
+    With this off (the default), the phase returns immediately -- zero LLM
+    calls, no client constructed, no disposition-ledger read.
+
+    Mirrors :func:`resolve_verdict_ledger_enabled`'s shape: env
+    ``ATHENAEUM_RULE_PROPOSALS_ENABLED`` (``1``/``true``/``yes``/``on``,
+    case-insensitive) > yaml ``librarian.rule_proposals.enabled`` > default
+    ``False``. Default OFF is deliberate: this wiring adds a NEW unattended
+    language-model call to the nightly run -- real recurring spend an
+    operator must opt into rather than discover behind a detector issue (see
+    athenaeum#1063's own text). Set ``librarian.rule_proposals.enabled: true``
+    (or the env var) to turn it on. Non-bool yaml values and unrecognized env
+    strings fall through to off.
+    """
+    env = os.environ.get("ATHENAEUM_RULE_PROPOSALS_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            rp_cfg = librarian_cfg.get("rule_proposals")
+            if isinstance(rp_cfg, dict):
+                raw = rp_cfg.get("enabled")
+                if isinstance(raw, bool):
+                    return raw
+    return False
 
 
 def resolve_verdict_ledger_enabled(config: dict[str, Any] | None) -> bool:

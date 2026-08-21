@@ -86,6 +86,11 @@ KNOWN_GIT_ARGV_MODULES: dict[str, int] = {
     "librarian": 3,  # git_push, git_pull, _capture_head's rev-parse — NOT snapshot
     "memory_index": 1,
     "pending_merges": 2,
+    "pii_restore": 1,  # athenaeum#1037: reads the knowledge store's OWN history
+    # (git log --follow / git show) to locate a marker's pre-image and to
+    # resolve a retro filename by timestamp key — read-only history lookups,
+    # not a snapshot/commit, so there is no FilesystemStore primitive this
+    # maps onto.
     "retire": 1,
     "rules": 1,
     "status": 1,

@@ -133,6 +133,8 @@ def classify_claim_kind(
     client: "LLMBackend | None",
     config: dict[str, Any] | None = None,
     usage: TokenUsage | None = None,
+    *,
+    wiki_root: Path | None = None,
 ) -> str:
     """Classify a memory snippet into one of :data:`CLAIM_KINDS`, or ``""``.
 
@@ -225,6 +227,7 @@ def classify_claim_kind(
             contract="claim_kind",
             call_site="claim_kind.classify_claim_kind",
             detail="malformed-classify-response",
+            wiki_root=wiki_root,
         )
         return ""
 
@@ -239,6 +242,7 @@ def classify_claim_kind(
             contract="claim_kind",
             call_site="claim_kind.classify_claim_kind",
             detail="no-json-object",
+            wiki_root=wiki_root,
         )
         return ""
     # Observe-only schema validation (athenaeum#570, M17 phase 1): log any delta from the
@@ -247,7 +251,9 @@ def classify_claim_kind(
     # import graph until first use.
     from athenaeum.llm_schemas import observe_claim_kind
 
-    observe_claim_kind(payload, call_site="claim_kind.classify_claim_kind")
+    observe_claim_kind(
+        payload, call_site="claim_kind.classify_claim_kind", wiki_root=wiki_root
+    )
     value = payload.get("claim_kind")
     if isinstance(value, str) and value in CLAIM_KINDS:
         return value
@@ -260,6 +266,8 @@ def stamp_claim_kind(
     client: "LLMBackend | None",
     config: dict[str, Any] | None = None,
     usage: TokenUsage | None = None,
+    *,
+    wiki_root: Path | None = None,
 ) -> str:
     """Classify + stamp ``claim_kind:`` into a raw file's frontmatter, once.
 
@@ -284,7 +292,9 @@ def stamp_claim_kind(
     if existing:
         return existing
 
-    kind = classify_claim_kind(content, client, config=config, usage=usage)
+    kind = classify_claim_kind(
+        content, client, config=config, usage=usage, wiki_root=wiki_root
+    )
     if not kind:
         return ""
 

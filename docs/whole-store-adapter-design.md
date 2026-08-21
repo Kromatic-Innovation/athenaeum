@@ -590,7 +590,7 @@ reconstructible from raw + wiki**:
 | `_quarantine.jsonl` (`quarantine.py:59-75`) | wiki root | no |
 | `_merge_provenance.jsonl` (`provenance.py:427-431`) | wiki root | no |
 | `_pending_retractions.jsonl` (`retraction_cascade.py:26-28`) | wiki root | no |
-| `_calibration.jsonl`, `_reasoning_tier_decisions.jsonl`, `_axiom_governance.jsonl`, `_corrections_applied.jsonl`, `_shape_rules_applied.jsonl` | wiki root | no |
+| `_calibration.jsonl`, `_reasoning_tier_decisions.jsonl`, `_axiom_governance.jsonl`, `_corrections_applied.jsonl`, `_shape_rules_applied.jsonl`, `_shape_rule_dispositions.jsonl` | wiki root | no |
 | `_resolved_contradictions.jsonl` (`fingerprint.py:61`) | `raw/` | no |
 | `_observations.jsonl` / `_observation_supersessions.jsonl` (`pii.py:1309-1314`) | excluded surface root | no |
 | `observations.jsonl`, `spend.jsonl`, `_push_records.jsonl` (`llm_schemas.py:391-394`, `config.py:1449`, `push_metrics.py:132`) | **cache dir** | no |
@@ -782,13 +782,30 @@ ledgers currently sitting in the cache dir — `spend.jsonl`,
 and not reconstructible, so they belong inside the store, and today they are
 in the one directory a user would feel safe deleting.
 
-**Layering.** `athenaeum/store.py` is **L1**, and it inherits `storage.py`'s
-documented exception verbatim: it may reach up to L2 `config` for adapter and
-mapping resolution, *because "which surface a class maps to" is explicitly a
-config-owned decision* (`storage.py:50-57`). `resolve_store_for_class()`
-therefore lives in `store.py` beside that exception, not in `storage.py` —
-which keeps `storage.py` as the class → surface router (D5) and gives the
-physical layer its own module.
+**Layering.** `athenaeum/store.py` is **L0/L1**, and it does **not** inherit
+`storage.py`'s upward reach to L2 `config` — an earlier draft of this section
+said it did. **What shipped (S1, issue athenaeum#976) is the reverse of that
+claim:** `resolve_store_for_class()` lives in **`storage.py`**, which imports
+`athenaeum.store` one-directionally to build a `FilesystemStore`.
+`athenaeum.store` itself imports only `athenaeum.atomic_io` (L0) and
+`athenaeum.models` (L1) — it has **no** import of `athenaeum.storage`, not
+even a function-local/deferred one.
+
+**Why the original split could not ship.** Defining `resolve_store_for_class`
+in `store.py` and having it reach up to `storage.py` for adapter/mapping
+resolution would create a real edge back INTO `store.py` from `storage.py`
+(which independently needs `FilesystemStore` to implement its own side of the
+wrapper) — a two-module strongly-connected component.
+`tests/test_import_graph_acyclic.py`'s zero-tolerance SCC guard (baseline
+pinned to `[]` since issue athenaeum#640) counts function-local/deferred
+imports as graph edges too, so not even a call-time-deferred import would
+have escaped it; the proposed layering could not have shipped as written.
+Putting `resolve_store_for_class` on the `storage.py` side of the edge keeps
+the dependency one-directional while still satisfying D5 ("the existing seam
+is extended, never forked" — it sits beside `surface_root_for_class` in the
+same module, doing the equivalent resolution for the store). See
+`docs/store-contract.md`'s "Where this sits" section for the full published
+account; issue athenaeum#1087 corrected this section to match it.
 
 `FilesystemStore` is implementable without weakening `atomic_io.py`'s L0 rule
 (*"may import only stdlib"*, `atomic_io.py:17`): the dependency runs the

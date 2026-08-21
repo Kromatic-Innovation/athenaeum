@@ -8,12 +8,10 @@ are issues athenaeum#885/#886). Structure mirrors the issue's acceptance criteri
   SURFACE class; ``contacts_surface_root`` still resolves identically.
 - ``TestFieldPolicy`` — the three-step resolution order, the
   denylist-complement default for an unknown class, and the config override.
-- ``TestReadEntityParity`` — the parity matrix: a ``read_person`` result
-  equals ``read_entity(..., surface_class="pii")`` across all four
-  inclusion/record cells and for both ``usage_classes=None`` and a filtered
-  set. ``PersonRead`` is an alias of ``EntityRead``, so this is parity by
-  construction; the test pins it anyway because the WRAPPERS could still
-  drift in what they pass.
+- ``TestReadEntitiesBatch`` — ``read_entities`` batch-read behaviour (laziness
+  on an empty uid list). Formerly also pinned ``read_person``/``read_people``
+  parity with ``read_entity``/``read_entities``, removed in athenaeum#888
+  along with those symbols.
 - ``TestNonPersonSurfaceClass`` — a non-person entity class reads back its
   fields through the denylist-complement default.
 - ``TestAssemblyFunctionIsEntityIndexFree`` — the athenaeum#885 seam: the public
@@ -24,8 +22,8 @@ are issues athenaeum#885/#886). Structure mirrors the issue's acceptance criteri
 - ``TestLibrarianThreadsOneIndex`` — the index is built ONCE above
   ``process_one`` and threaded down, not rebuilt per raw file.
 
-Fixtures follow the ``EXCLUDED_CONFIG`` + tmp-path corpus-builder idiom from
-``tests/test_person_read.py``.
+Fixtures follow the ``EXCLUDED_CONFIG`` + tmp-path corpus-builder idiom used
+throughout this suite's excluded-read tests.
 """
 
 from __future__ import annotations
@@ -40,9 +38,7 @@ from athenaeum.models import RawFile
 from athenaeum.pii import (
     CONTACT_DATA_FIELDS,
     EXCLUDED_RECORD_BOOKKEEPING_FIELDS,
-    EntityRead,
     ExcludedRecordIndex,
-    PersonRead,
     RedactionMarker,
     assemble_excluded_read,
     contacts_surface_root,
@@ -50,19 +46,8 @@ from athenaeum.pii import (
     mark_bounced,
     read_entities,
     read_entity,
-    read_people,
-    read_person,
     resolve_excluded_fields,
 )
-
-# Issue athenaeum#887: this module exercises the DEPRECATED person-shaped entry
-# points on purpose — they are the behaviour/parity tests that must keep
-# passing unchanged until athenaeum#888 actually removes them, which is exactly
-# what "deprecated, not changed" means. The specific warning is filtered here
-# so the suite stays readable; it is NOT filtered globally, and that it fires
-# at all (with the right message, at the caller's line, at CALL time for the
-# lazy batch form) is asserted directly in tests/test_read_person_deprecation.py.
-pytestmark = pytest.mark.filterwarnings("ignore:pii.read_p:DeprecationWarning")
 
 EXCLUDED_CONFIG = {"storage": {"mapping": {"pii": "excluded"}}}
 
@@ -255,74 +240,15 @@ class TestFieldPolicy:
         assert resolve_excluded_fields("vendor", None, None) == ()
 
 
-class TestReadEntityParity:
-    """``read_person`` == ``read_entity(..., surface_class="pii")``, all cells."""
+class TestReadEntitiesBatch:
+    """``read_entities`` batch-read behaviour not already covered by the
+    single-uid tests above.
 
-    @pytest.mark.parametrize("with_record", [True, False])
-    @pytest.mark.parametrize("include", [True, False])
-    @pytest.mark.parametrize("usage_classes", [None, ("observed",)])
-    def test_parity_across_four_cells_and_both_class_filters(
-        self,
-        tmp_path: Path,
-        with_record: bool,
-        include: bool,
-        usage_classes: tuple[str, ...] | None,
-    ) -> None:
-        knowledge = _person_corpus(tmp_path, with_record=with_record)
-
-        person = read_person(
-            knowledge,
-            EXCLUDED_CONFIG,
-            "alex",
-            include_contact=include,
-            usage_classes=usage_classes,
-        )
-        entity = read_entity(
-            knowledge,
-            EXCLUDED_CONFIG,
-            "alex",
-            surface_class="pii",
-            include_excluded=include,
-            usage_classes=usage_classes,
-        )
-
-        assert person == entity
-        assert person is not None
-        assert person.to_dict() == entity.to_dict()
-
-    def test_person_read_is_an_alias_of_entity_read(self) -> None:
-        """Parity by construction: one type, not two kept in step by test."""
-        assert PersonRead is EntityRead
-
-    def test_unknown_uid_is_none_on_both(self, tmp_path: Path) -> None:
-        knowledge = _person_corpus(tmp_path)
-
-        assert read_person(knowledge, EXCLUDED_CONFIG, "nobody") is None
-        assert read_entity(knowledge, EXCLUDED_CONFIG, "nobody", surface_class="pii") is None
-
-    def test_read_people_batch_parity_and_positional_call_shape(
-        self, tmp_path: Path
-    ) -> None:
-        """apollo-enrich's exact positional call shape must keep working."""
-        knowledge = _person_corpus(tmp_path)
-
-        # Positional (knowledge_root, config, uids) + keyword include_contact —
-        # apollo_enrich_warm_tier.py:372's shape verbatim.
-        batch = dict(read_people(knowledge, EXCLUDED_CONFIG, ["alex"], include_contact=True))
-        generic = dict(
-            read_entities(
-                knowledge,
-                EXCLUDED_CONFIG,
-                ["alex"],
-                surface_class="pii",
-                include_excluded=True,
-            )
-        )
-
-        assert batch == generic
-        assert batch["alex"] == read_person(
-            knowledge, EXCLUDED_CONFIG, "alex", include_contact=True
-        )
+    Formerly also pinned ``read_person``/``read_people`` parity with
+    ``read_entity``/``read_entities`` and the ``PersonRead is EntityRead``
+    alias — removed in athenaeum#888 along with those symbols, which no
+    longer exist to compare against.
+    """
 
     def test_batch_reads_nothing_for_an_empty_uid_list(self, tmp_path: Path) -> None:
         """Laziness is preserved: an empty batch costs no scan at all."""
