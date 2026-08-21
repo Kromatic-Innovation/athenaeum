@@ -755,3 +755,28 @@ class TestDurableObservationsPath:
         legacy.write_text('{"v":1}\n', encoding="utf-8")
         resolved = llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
         assert resolved == legacy
+
+    def test_no_split_brain_on_a_fresh_store(self, tmp_path: Path) -> None:
+        """The production WRITE path (record_observation, as observe()/
+        observe_parse_failure() call it) and the production READ path
+        (read_observations) must agree on where a fresh store's ledger
+        lives — issue athenaeum#980 AC4."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+
+        llm_schemas.record_observation(
+            contract="split-brain-probe",
+            call_site="test",
+            outcome="ok",
+            cache_dir=cache_dir,
+            wiki_root=wiki_root,
+        )
+
+        rows = llm_schemas.read_observations(cache_dir, wiki_root=wiki_root)
+        assert any(r.get("contract") == "split-brain-probe" for r in rows)
+
+        # A read that forgets wiki_root= must not silently see the same
+        # records via the old cache-dir default.
+        stale = llm_schemas.read_observations(cache_dir)
+        assert stale == []

@@ -44,6 +44,7 @@ each call site, is "stay import-light."
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
 
@@ -87,6 +88,8 @@ def extract_topics(
     prompt: str,
     timeout: float = 3.0,
     config: dict[str, object] | None = None,
+    *,
+    wiki_root: Path | None = None,
 ) -> list[str]:
     """Extract substantive search topics from a user prompt.
 
@@ -100,6 +103,9 @@ def extract_topics(
         config: Optional resolved athenaeum.yaml dict (issue athenaeum#232) — routes
             ``models.topic`` to the call. ``None`` keeps env > code-default
             resolution.
+        wiki_root: When supplied, the spend ledger below resolves behind the
+            seam (issue athenaeum#980 AC4); omitted, resolution is unchanged
+            from before that issue.
     """
     if not prompt or len(prompt.strip()) < 4:
         return []
@@ -220,6 +226,7 @@ def extract_topics(
                 # returns "" for absent).
                 session_id=push_metrics.resolve_session_id() or None,
                 config=config,
+                wiki_root=wiki_root,
             )
         except Exception:
             # Issue athenaeum#540 (L19): the swallow is correct (a ledger hiccup must not
@@ -270,7 +277,7 @@ def extract_topics(
     # hot-path's import graph. The existing normalization below is untouched.
     from athenaeum.llm_schemas import observe_query_topics
 
-    observe_query_topics(items, call_site="query_topics.extract_topics")
+    observe_query_topics(items, call_site="query_topics.extract_topics", wiki_root=wiki_root)
 
     if not isinstance(items, list):
         return []

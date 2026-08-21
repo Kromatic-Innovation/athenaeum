@@ -17,6 +17,15 @@ import json
 import sys
 from pathlib import Path
 
+from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
+
+
+def _resolve_wiki_root(args: argparse.Namespace) -> Path:
+    knowledge_root = (
+        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    )
+    return knowledge_root / "wiki"
+
 
 def cmd_usage_report(args: argparse.Namespace) -> int:
     """``athenaeum usage-report [--claim-id ID] [--since ...] [--json]``."""
@@ -28,7 +37,9 @@ def cmd_usage_report(args: argparse.Namespace) -> int:
 
         since = parse_since(args.since)
 
-    report = usage_report.compute_usage_report(cache_dir=args.cache_dir, since=since)
+    report = usage_report.compute_usage_report(
+        cache_dir=args.cache_dir, since=since, wiki_root=_resolve_wiki_root(args)
+    )
 
     claim_id = getattr(args, "claim_id", None)
     if claim_id:
@@ -78,6 +89,14 @@ def add_usage_report_subparser(subparsers: argparse._SubParsersAction) -> None:
         "(issue athenaeum#968).",
     )
     p.set_defaults(func=cmd_usage_report)
+    p.add_argument(
+        "--path",
+        "--knowledge-root",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory whose wiki/ AC4-relocated push-records "
+        "ledger this report reads (default: ~/knowledge). Issue athenaeum#980.",
+    )
     p.add_argument(
         "--cache-dir",
         type=Path,

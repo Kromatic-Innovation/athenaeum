@@ -490,15 +490,9 @@ def durable_observations_path(wiki_root: Path, *, cache_dir: Path | None = None)
     table row 8 'observations.jsonl'; issue athenaeum#980 AC4):
     ``<wiki_root>/_llm_schema_observations.jsonl``.
 
-    Same legacy-fallback contract as
-    :func:`athenaeum.spend.durable_ledger_path`. NOT wired to
-    :func:`record_observation`/:func:`observe`/:func:`observe_parse_failure`
-    in this slice — this module's two public entry points are called from
-    five scattered validation call sites (``claim_kind``, ``query_topics``,
-    ``contradictions``, ``resolutions``, ``tiers``), none of which currently
-    carries a ``wiki_root`` this deep into response parsing, and threading it
-    through all five is real, separate scope. This function exists so the
-    capability is ready and tested for that follow-up.
+    Same legacy-fallback contract as :func:`athenaeum.spend.durable_ledger_path`:
+    an existing installation's populated cache-dir ledger keeps resolving
+    there until migrated; a fresh or already-migrated store resolves here.
     """
     new_path = Path(wiki_root) / OBSERVATIONS_FILENAME
     legacy_path = observations_path(cache_dir)
@@ -516,6 +510,7 @@ def record_observation(
     errors: list[str] | None = None,
     extra_keys: list[str] | None = None,
     cache_dir: Path | None = None,
+    wiki_root: Path | None = None,
 ) -> None:
     """Append ONE observation record to the durable ledger. Best-effort.
 
@@ -523,6 +518,10 @@ def record_observation(
     2 was missing) or ``"mismatch"`` (carrying its ``classes``). Never raises: a
     telemetry write must not degrade the pipeline. Enabled by default; set
     ``ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED=0`` to disable.
+
+    *wiki_root*, when supplied, resolves the ledger behind the seam (issue
+    athenaeum#980 AC4) via :func:`durable_observations_path`; omitted,
+    resolution is unchanged from before that issue.
     """
     try:
         if os.environ.get("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1").strip().lower() in (
@@ -544,7 +543,11 @@ def record_observation(
             "errors": errors or [],
             "extra_keys": extra_keys or [],
         }
-        path = observations_path(cache_dir)
+        path = (
+            durable_observations_path(wiki_root, cache_dir=cache_dir)
+            if wiki_root is not None
+            else observations_path(cache_dir)
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -557,9 +560,20 @@ def record_observation(
         )
 
 
-def read_observations(cache_dir: Path | None = None) -> list[dict[str, Any]]:
-    """Read every observation record from the ledger (``[]`` when absent)."""
-    path = observations_path(cache_dir)
+def read_observations(
+    cache_dir: Path | None = None, *, wiki_root: Path | None = None
+) -> list[dict[str, Any]]:
+    """Read every observation record from the ledger (``[]`` when absent).
+
+    *wiki_root*, when supplied, resolves via :func:`durable_observations_path`
+    — the SAME resolution :func:`record_observation` uses, so a read against
+    a given store always finds exactly what the matching write produced.
+    """
+    path = (
+        durable_observations_path(wiki_root, cache_dir=cache_dir)
+        if wiki_root is not None
+        else observations_path(cache_dir)
+    )
     if not path.exists():
         return []
     rows: list[dict[str, Any]] = []
@@ -628,6 +642,7 @@ def observe(
     contract: str,
     call_site: str,
     cache_dir: Path | None = None,
+    wiki_root: Path | None = None,
 ) -> None:
     """Validate ``payload`` against ``model`` for OBSERVATION ONLY.
 
@@ -646,6 +661,8 @@ def observe(
         contract: the contract name (aggregate mismatch counts by this).
         call_site: a stable label identifying the parse site.
         cache_dir: override the ledger location (tests / non-default deploys).
+        wiki_root: resolve the ledger behind the seam (issue athenaeum#980 AC4);
+            omitted, resolution is unchanged from before that issue.
     """
     try:
         errors: list[str] = []
@@ -681,6 +698,7 @@ def observe(
             errors=errors,
             extra_keys=extra_keys,
             cache_dir=cache_dir,
+            wiki_root=wiki_root,
         )
     except Exception:  # pragma: no cover - defensive: observation must never throw
         # A failure to *observe* must not degrade the pipeline in any way — the
@@ -700,6 +718,7 @@ def observe_parse_failure(
     call_site: str,
     detail: str | None = None,
     cache_dir: Path | None = None,
+    wiki_root: Path | None = None,
 ) -> None:
     """Count a TOTAL parse failure as a ``parse-fail`` mismatch (athenaeum#724 defect 1).
 
@@ -708,6 +727,8 @@ def observe_parse_failure(
     parse failure is the most extreme missing-required case (athenaeum#608), and
     exactly the class the pre-athenaeum#724 instrument could not see. Emits the
     same WARNING marker and records a mismatch to the ledger. Never raises.
+
+    *wiki_root* (issue athenaeum#980 AC4): forwarded to :func:`record_observation`.
     """
     try:
         log.warning(
@@ -725,6 +746,7 @@ def observe_parse_failure(
             classes=[MISMATCH_PARSE_FAIL],
             errors=[detail] if detail else [],
             cache_dir=cache_dir,
+            wiki_root=wiki_root,
         )
     except Exception:  # pragma: no cover - defensive: observation must never throw
         log.debug(
@@ -735,25 +757,65 @@ def observe_parse_failure(
         )
 
 
-def observe_query_topics(payload: Any, *, call_site: str) -> None:
-    observe(QueryTopicsResponse, payload, contract="query_topics", call_site=call_site)
+def observe_query_topics(
+    payload: Any, *, call_site: str, wiki_root: Path | None = None
+) -> None:
+    observe(
+        QueryTopicsResponse,
+        payload,
+        contract="query_topics",
+        call_site=call_site,
+        wiki_root=wiki_root,
+    )
 
 
-def observe_claim_kind(payload: Any, *, call_site: str) -> None:
-    observe(ClaimKindResponse, payload, contract="claim_kind", call_site=call_site)
+def observe_claim_kind(payload: Any, *, call_site: str, wiki_root: Path | None = None) -> None:
+    observe(
+        ClaimKindResponse, payload, contract="claim_kind", call_site=call_site, wiki_root=wiki_root
+    )
 
 
-def observe_contradictions(payload: Any, *, call_site: str) -> None:
-    observe(ContradictionResponse, payload, contract="contradictions", call_site=call_site)
+def observe_contradictions(
+    payload: Any, *, call_site: str, wiki_root: Path | None = None
+) -> None:
+    observe(
+        ContradictionResponse,
+        payload,
+        contract="contradictions",
+        call_site=call_site,
+        wiki_root=wiki_root,
+    )
 
 
-def observe_resolutions(payload: Any, *, call_site: str) -> None:
-    observe(ResolutionResponse, payload, contract="resolutions", call_site=call_site)
+def observe_resolutions(payload: Any, *, call_site: str, wiki_root: Path | None = None) -> None:
+    observe(
+        ResolutionResponse,
+        payload,
+        contract="resolutions",
+        call_site=call_site,
+        wiki_root=wiki_root,
+    )
 
 
-def observe_tier2_classify(payload: Any, *, call_site: str) -> None:
-    observe(Tier2ClassifyResponse, payload, contract="tiers.tier2", call_site=call_site)
+def observe_tier2_classify(
+    payload: Any, *, call_site: str, wiki_root: Path | None = None
+) -> None:
+    observe(
+        Tier2ClassifyResponse,
+        payload,
+        contract="tiers.tier2",
+        call_site=call_site,
+        wiki_root=wiki_root,
+    )
 
 
-def observe_tier3_merge_ops(payload: Any, *, call_site: str) -> None:
-    observe(Tier3MergeOpsResponse, payload, contract="tiers.tier3-merge", call_site=call_site)
+def observe_tier3_merge_ops(
+    payload: Any, *, call_site: str, wiki_root: Path | None = None
+) -> None:
+    observe(
+        Tier3MergeOpsResponse,
+        payload,
+        contract="tiers.tier3-merge",
+        call_site=call_site,
+        wiki_root=wiki_root,
+    )

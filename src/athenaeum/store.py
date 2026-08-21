@@ -822,43 +822,54 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         name="llm-schema-observations-ledger",
         persistence_class="operational",
         operational_scope="store-durable",
-        location="cache dir (relocation mechanism added, not yet wired — see source_ref)",
+        location="wiki root, with a legacy-store cache-dir fallback (see source_ref)",
         source_ref=(
             "llm_schemas.py:134 OBSERVATIONS_FILENAME (design note §5.2 table row 8 "
             "'observations.jsonl'). Issue athenaeum#980 AC4: "
-            "llm_schemas.durable_observations_path() implements the behind-the-seam "
-            "location with a legacy-store fallback, but is NOT wired to any of "
-            "record_observation's five scattered validation call sites in this slice "
-            "(see that function's docstring) — physical relocation is a follow-up"
+            "llm_schemas.durable_observations_path() resolves behind the seam with "
+            "the same legacy-store fallback as the spend ledger. observe()/"
+            "observe_parse_failure() and all five wrapper functions "
+            "(observe_query_topics/observe_claim_kind/observe_contradictions/"
+            "observe_resolutions/observe_tier2_classify/observe_tier3_merge_ops) now "
+            "accept wiki_root=, threaded from every call chain up to its available "
+            "root (query_topics.py, claim_kind.py -> librarian.py's ctx.wiki_root, "
+            "contradictions.py/resolutions.py -> merge.py's wiki_root, tiers.py -> "
+            "batch.py/merge.py's wiki_root)"
         ),
     ),
     ArtifactDeclaration(
         name="spend-ledger",
         persistence_class="operational",
         operational_scope="store-durable",
-        location="cache dir (relocation mechanism added, not yet wired — see source_ref)",
+        location="wiki root, with a legacy-store cache-dir fallback (see source_ref)",
         source_ref=(
             "spend.py:129 LEDGER_FILENAME (design note §5.2 table row 8 'spend.jsonl'). "
-            "Issue athenaeum#980 AC4: spend.durable_ledger_path() implements the "
-            "behind-the-seam location with a legacy-store fallback, and "
-            "resolve_ledger_path()/record_spend()/record_spend_per_knob_provider() all "
-            "accept an opt-in wiki_root= to use it — but no caller passes it in this "
-            "slice (wiring every write AND every read call site together, so reports "
-            "never go blind mid-migration, is a follow-up; see PR body)"
+            "Issue athenaeum#980 AC4: spend.durable_ledger_path() resolves behind the "
+            "seam (an existing installation's populated cache-dir ledger keeps "
+            "resolving there until migrated; a fresh or already-migrated store resolves "
+            "to wiki_root). Every production write AND read call site now passes "
+            "wiki_root= (librarian.py x3, drain.py, _cmd_drain.py, _cmd_lifecycle.py, "
+            "status.py, backlog_price_sheet.py, ordinary_night_table.py, answers.py, "
+            "query_topics.py + _cmd_query.py, memory_class_backfill.py) — see "
+            "tests/test_spend.py::TestDurableLedgerPath::test_no_split_brain_on_a_fresh_store"
         ),
     ),
     ArtifactDeclaration(
         name="push-records-ledger",
         persistence_class="operational",
         operational_scope="store-durable",
-        location="cache dir (relocation mechanism added, not yet wired — see source_ref)",
+        location="wiki root, with a legacy-store cache-dir fallback (see source_ref)",
         source_ref=(
             "push_metrics.py:80 PUSH_RECORDS_FILENAME (design note §5.2 table row 8 "
             "'_push_records.jsonl'). Issue athenaeum#980 AC4: "
-            "push_metrics.durable_push_records_path() implements the behind-the-seam "
-            "location with a legacy-store fallback, and record_push() accepts an "
-            "opt-in wiki_root= to use it — but no caller passes it in this slice "
-            "(same read/write coordination follow-up as the spend ledger)"
+            "push_metrics.durable_push_records_path() resolves behind the seam with the "
+            "same legacy-store fallback as the spend ledger. Every production write AND "
+            "read call site now passes wiki_root= (mcp_server.py's record_push, "
+            "compute_baseline/sample_sessions/build_coverage_worksheet/"
+            "determine_references/run_reference_determination and their "
+            "_cmd_push_metrics.py/librarian.py callers, usage_report.py + a new "
+            "--path/--knowledge-root flag on `athenaeum usage-report`) — see "
+            "tests/test_push_metrics.py::TestDurablePushRecordsPath::test_no_split_brain_on_a_fresh_store"
         ),
     ),
     ArtifactDeclaration(
