@@ -101,7 +101,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -124,6 +123,7 @@ from athenaeum.models import TokenUsage, parse_frontmatter
 from athenaeum.prompt_safety import data_only_clause, fence_untrusted
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
 from athenaeum.rules import ShapeRule, default_shape_rule_dispositions_path
+from athenaeum.store import append_line_durable
 from athenaeum.tiers import _record_usage
 
 log = logging.getLogger(__name__)
@@ -173,19 +173,12 @@ def proposal_item_id(source: str, key_fingerprint: str) -> str:
 
 
 def _append_jsonl_line(path: Path, line: str) -> None:
-    """Append one line to *path* durably (``O_APPEND`` + fsync).
-
-    Duplicated (not imported) per this codebase's per-module-ledger house
-    style -- see :mod:`athenaeum.quarantine` / :mod:`athenaeum.calibration` /
-    :mod:`athenaeum.rules`'s own copies.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-    try:
-        os.write(fd, line.encode("utf-8"))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    """Append one line to *path* durably (``O_APPEND`` + fsync), via
+    :func:`athenaeum.store.append_line_durable` — the single shared
+    implementation issue athenaeum#980 (S5) collapsed this module's copy (and
+    every other per-module-ledger house-style copy) onto (design note §2.4 /
+    §6.2)."""
+    append_line_durable(path, line.encode("utf-8"))
 
 
 def read_rule_proposals_ledger(

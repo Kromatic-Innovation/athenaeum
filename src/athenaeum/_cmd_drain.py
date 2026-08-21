@@ -140,7 +140,7 @@ def cmd_drain(args: argparse.Namespace) -> int:
         print("Raw backlog is empty — nothing to drain.")
         return 0
 
-    records = spend.read_ledger(spend.resolve_ledger_path(config))
+    records = spend.read_ledger(spend.resolve_ledger_path(config, wiki_root=wiki_root))
     tokens = drain_advisor.observed_tokens_per_file(records)
     if tokens is None:
         avg_input = drain_advisor.DEFAULT_AVG_INPUT_TOKENS_PER_FILE

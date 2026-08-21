@@ -332,7 +332,9 @@ def cmd_spend(args: argparse.Namespace) -> int:
         ledger_path = args.ledger.expanduser().resolve()
     else:
         ledger_path = spend.resolve_ledger_path(
-            config, cache_dir=resolve_cache_dir(args.cache_dir).resolve()
+            config,
+            cache_dir=resolve_cache_dir(args.cache_dir).resolve(),
+            wiki_root=target / "wiki",
         )
 
     try:

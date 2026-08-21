@@ -1059,7 +1059,9 @@ def _recall_via_backend(
                 backend=backend_name,
                 hits=_pushed_hits,
             )
-            push_metrics.record_push(record, cache_dir=cache_dir, config=config)
+            push_metrics.record_push(
+                record, cache_dir=cache_dir, config=config, wiki_root=wiki_root
+            )
     except Exception:  # recall must never fail over telemetry
         log.debug("push-metrics: push-record instrumentation failed", exc_info=True)
 

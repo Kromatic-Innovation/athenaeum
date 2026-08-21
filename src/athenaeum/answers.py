@@ -1064,6 +1064,9 @@ def ingest_answers(
         run_type="answers",
         provider=resolve_provider(config, knob="resolve"),
         config=config,
+        # pending_path is <wiki_root>/_pending_questions.md (module docstring),
+        # so its parent IS wiki_root — issue athenaeum#980 AC4.
+        wiki_root=pending_path.parent,
     )
 
     if ingested == 0:
