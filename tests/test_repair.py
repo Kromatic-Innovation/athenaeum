@@ -7,6 +7,7 @@ import io
 from contextlib import redirect_stdout
 from pathlib import Path
 
+import pytest
 import yaml
 
 from athenaeum import cli
@@ -626,6 +627,132 @@ def test_cli_legacy_slugs_unknown_slug_returns_1(tmp_path: Path, capsys) -> None
     captured = capsys.readouterr()
     assert "unknown-slug-xyz" in captured.err
     assert "ABORTED" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# repair --bounce-fold (issue athenaeum#1006 / athenaeum#850)
+
+_BOUNCE_FOLD_PERSON_RECORD = (
+    "---\n"
+    "uid: '19052'\n"
+    "name: Alex Example - contact record\n"
+    "contact_of: Alex Example\n"
+    "pii: true\n"
+    "emails:\n"
+    "  - alex@example.org\n"
+    "---\n\n"
+    "Archival contact data migrated off entity page 'Alex Example'.\n"
+)
+
+
+def _write_bounce_fold_store(tmp_path: Path) -> Path:
+    """A contacts surface in exactly the shape athenaeum#850 observed: a
+    person record plus a slug-keyed record stranded with a bounce mark for
+    the same address."""
+    contacts_root = tmp_path / "contacts"
+    contacts_root.mkdir()
+    (contacts_root / "19052-alex-example.md").write_text(
+        _BOUNCE_FOLD_PERSON_RECORD, encoding="utf-8"
+    )
+    (contacts_root / "contact-alex-example-org.md").write_text(
+        "---\n"
+        "identifier: alex@example.org\n"
+        "pii: true\n"
+        "bounce_diagnostic: 550 5.1.1 user unknown\n"
+        "observed_at: '2026-08-05'\n"
+        "valid_until: '2026-08-05'\n"
+        "source: script:voltaire-bounce-relay\n"
+        "---\n\nContact record.\n",
+        encoding="utf-8",
+    )
+    return contacts_root
+
+
+def test_cli_bounce_fold_dry_run_returns_2_and_does_not_write(tmp_path: Path) -> None:
+    contacts_root = _write_bounce_fold_store(tmp_path)
+    orphan = contacts_root / "contact-alex-example-org.md"
+    before = orphan.read_text(encoding="utf-8")
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = cli.main(["repair", "--bounce-fold", "--contacts-root", str(contacts_root)])
+
+    assert rc == 2
+    out = buf.getvalue()
+    assert "bounce-fold" in out
+    assert "DRY RUN" in out
+    assert "pairs_found: 1" in out
+    assert "folded:      0" in out
+    assert "residual:    1" in out
+    assert orphan.read_text(encoding="utf-8") == before
+
+
+def test_cli_bounce_fold_apply_returns_0_and_folds(tmp_path: Path) -> None:
+    contacts_root = _write_bounce_fold_store(tmp_path)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = cli.main(
+            ["repair", "--bounce-fold", "--apply", "--contacts-root", str(contacts_root)]
+        )
+
+    assert rc == 0
+    out = buf.getvalue()
+    assert "APPLY" in out
+    assert "pairs_found: 1" in out
+    assert "folded:      1" in out
+    assert "residual:    0" in out
+    person = (contacts_root / "19052-alex-example.md").read_text(encoding="utf-8")
+    assert "550 5.1.1 user unknown" in person
+
+
+def test_cli_bounce_fold_idempotent_re_run_reports_zero(tmp_path: Path) -> None:
+    """AC 3: find -> fold -> idempotent re-run reports zero."""
+    contacts_root = _write_bounce_fold_store(tmp_path)
+
+    first = cli.main(
+        ["repair", "--bounce-fold", "--apply", "--contacts-root", str(contacts_root)]
+    )
+    assert first == 0
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        second = cli.main(
+            ["repair", "--bounce-fold", "--apply", "--contacts-root", str(contacts_root)]
+        )
+    assert second == 0
+    out = buf.getvalue()
+    assert "pairs_found: 0" in out
+    assert "folded:      0" in out
+    assert "residual:    0" in out
+
+
+def test_cli_bounce_fold_clean_store_returns_0(tmp_path: Path) -> None:
+    contacts_root = tmp_path / "contacts"
+    contacts_root.mkdir()
+    (contacts_root / "19052-alex-example.md").write_text(
+        _BOUNCE_FOLD_PERSON_RECORD, encoding="utf-8"
+    )
+
+    rc = cli.main(["repair", "--bounce-fold", "--contacts-root", str(contacts_root)])
+
+    assert rc == 0
+
+
+def test_cli_bounce_fold_missing_contacts_root_returns_1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = cli.main(["repair", "--bounce-fold", "--contacts-root", str(tmp_path / "absent")])
+
+    assert rc == 1
+    assert "Contacts root not found" in capsys.readouterr().err
+
+
+def test_cli_repair_help_mentions_bounce_fold(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["repair", "--help"])
+    assert excinfo.value.code == 0
+    assert "bounce-fold" in capsys.readouterr().out
 
 
 def test_legacy_scalar_re_retired_from_provenance() -> None:
