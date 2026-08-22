@@ -273,6 +273,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `intake.py`/`librarian.py`'s reject precedent rather than `tiers.py`'s
   post-LLM coerce-to-`reference` (coercing here would misfile a fold into
   the wrong bucket instead of preserving it for correct reclassification).
+
+- **`_fallback_embeddings()` hashed tokens with the PYTHONHASHSEED-salted
+  builtin `hash()`, making fallback cluster vectors nondeterministic
+  across processes (athenaeum#1050, flaked CI run 32379062624).** The
+  hashing-trick degradation path (`clusters.py`, engaged when chromadb has
+  no usable index) derived both a token's feature index (`hash(tok) %
+  dim`) and its sign (`hash(tok + "_s") % 2`) from Python's builtin
+  `hash()`, which is salted per-process for `str`/`bytes` as a DoS
+  mitigation — so the same token landed at a different index/sign in
+  every process, and every cosine similarity derived from a fallback
+  vector (and therefore every cluster formed from it) changed run to run.
+  Both call sites now derive their index and sign from a single unsalted
+  `hashlib.sha256` digest per token, so the same token always maps to the
+  same index and sign in every process. **Behaviour change, not a pure
+  bug fix**: this shifts every fallback-path cluster vector, and
+  therefore the content-addressed cluster ids derived from cluster
+  membership, for any corpus whose clustering ever engages the
+  hashing-trick fallback (chromadb absent or its index unbuilt) — a
+  previously-formed fallback-path cluster may now group differently and
+  receive a new id. Real chromadb-embedded clusters (the default, hot
+  path) are unaffected.
+
 ### Added
 
 - **`storage.mapping` completeness lint + the deferred `(read_policy,
