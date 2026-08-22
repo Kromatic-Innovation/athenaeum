@@ -23,6 +23,9 @@ Load-bearing fixtures:
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -637,6 +640,48 @@ class TestFallbackEmbedder:
         )
         assert clusters
         assert all(c.embedder == EMBEDDER_CHROMADB_DEFAULT for c in clusters)
+
+    def test_fallback_embeddings_stable_across_pythonhashseed(
+        self, singleton_pair_root: Path
+    ) -> None:
+        """Issue athenaeum#1050: ``_fallback_embeddings`` hashed tokens with the
+        builtin ``hash()``, which is salted per-process by ``PYTHONHASHSEED``
+        (a str/bytes DoS mitigation) — so the same token mapped to a
+        different feature index/sign in every process, and every cosine
+        derived from a fallback vector changed run to run (flaked CI run
+        32379062624). Spawns two subprocesses with explicit, DIFFERENT
+        ``PYTHONHASHSEED`` values and asserts they compute a byte-identical
+        fingerprint of ``_fallback_embeddings`` output for the same files —
+        this would NOT have held before the fix (see the manual before/after
+        digest check in the PR description for the failing-before proof;
+        asserting the negative here would make this test depend on the
+        pre-fix implementation staying importable, which it no longer is).
+        """
+        script = (
+            "import hashlib, json, sys\n"
+            "from pathlib import Path\n"
+            "from athenaeum.clusters import _fallback_embeddings\n"
+            "from athenaeum.librarian import discover_auto_memory_files\n"
+            f"files = discover_auto_memory_files(Path({str(singleton_pair_root)!r}))\n"
+            "vecs = _fallback_embeddings(files)\n"
+            "payload = json.dumps(vecs, sort_keys=True).encode()\n"
+            "sys.stdout.write(hashlib.sha256(payload).hexdigest())\n"
+        )
+
+        digests = set()
+        for seed in ("0", "1"):
+            proc = subprocess.run(
+                [sys.executable, "-c", script],
+                env={**os.environ, "PYTHONHASHSEED": seed},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            digests.add(proc.stdout.strip())
+
+        assert len(digests) == 1, (
+            f"_fallback_embeddings vectors differ across PYTHONHASHSEED: {digests}"
+        )
 
 
 # ---------------------------------------------------------------------------
