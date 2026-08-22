@@ -277,3 +277,73 @@ class TestWriteSnapshot:
         text = docs_path.read_text(encoding="utf-8")
         assert ont.SECTION_HEADING in text
         assert "INDETERMINATE" in text
+
+
+class TestOperatorSuppliedOverrides:
+    """Issue athenaeum#1095 AC5: calls/file, files/day and wall-clock/file
+    must be explicit named inputs, defaulting to the existing derived path
+    with unchanged provenance when omitted."""
+
+    def test_omitting_overrides_preserves_the_derived_path(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        (root / "raw").mkdir(parents=True)
+        result = ont.build_ordinary_night_table(root)
+        assert result.files_per_day == 0.0
+        assert result.files_per_day_source == "measured (trailing window, lower bound)"
+        assert result.calls_per_file is None
+        assert result.wall_clock_per_file_seconds is None
+        # Pins the DEFAULT branch of render_snapshot_entry's files_per_day_line
+        # ternary byte-for-byte (issue athenaeum#1095 follow-up) — the
+        # operator-supplied branch is pinned separately below; this is the
+        # analogous default-path pin backlog-price already has for its own
+        # raw_backlog_count line.
+        text = ont.render_snapshot_entry(result)
+        assert (
+            "- files_per_day (ordinary intake, lower bound over trailing "
+            "14d, n=0): 0.000" in text
+        )
+
+    def test_calls_per_file_override_takes_effect(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        (root / "raw").mkdir(parents=True)
+        result = ont.build_ordinary_night_table(root, calls_per_file=7.5)
+        assert result.calls_per_file == 7.5
+        assert result.calls_per_file_source == "operator-supplied"
+
+    def test_files_per_day_override_takes_effect(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        (root / "raw").mkdir(parents=True)
+        result = ont.build_ordinary_night_table(root, files_per_day=3.0)
+        assert result.files_per_day == 3.0
+        assert result.files_per_day_source == "operator-supplied"
+        assert result.files_per_day_sample_count == 0
+
+    def test_wall_clock_per_file_seconds_override_takes_effect(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        (root / "raw").mkdir(parents=True)
+        result = ont.build_ordinary_night_table(
+            root, calls_per_file=1.0, files_per_day=2.0, wall_clock_per_file_seconds=10.0
+        )
+        assert result.wall_clock_per_file_seconds == 10.0
+        assert result.wall_clock_source == "operator-supplied"
+        assert result.ordinary_seconds_total == 20.0  # 10.0 * 2.0 files/day
+
+    def test_overrides_flow_into_the_closure_verdict(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        (root / "raw").mkdir(parents=True)
+        result = ont.build_ordinary_night_table(
+            root,
+            calls_per_file=1.0,
+            files_per_day=1.0,
+            wall_clock_per_file_seconds=1.0,
+        )
+        assert result.verdict == "closes"
+        assert result.nightly_calls_total == 1.0
+        assert result.nightly_seconds_total == 1.0
+
+    def test_override_provenance_visible_in_rendered_snapshot(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        (root / "raw").mkdir(parents=True)
+        result = ont.build_ordinary_night_table(root, files_per_day=6.5)
+        text = ont.render_snapshot_entry(result)
+        assert "files_per_day: 6.500 [operator-supplied]" in text
