@@ -68,7 +68,8 @@ def add_enumerate_subparser(subparsers: argparse._SubParsersAction) -> None:
         "enumerate",
         help="Enumerate every entity of a declared type matching field "
         "predicates — no query text (issue athenaeum#965). The generalized "
-        "form of `athenaeum people`; does not deprecate or change it.",
+        "form of the former `athenaeum people` (removed, athenaeum#1079) — "
+        "see docs/recall-architecture.md's capability-parity table.",
     )
     parser.add_argument(
         "--type",
