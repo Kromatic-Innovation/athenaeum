@@ -408,11 +408,18 @@ class TestSuppressionGates:
 
         Bodies are near-identical (differing only in the filename-derived
         ``name``/stem token — file paths must be distinct) so the
-        deterministic hashing-trick vectors land at ~0.62-0.67 pairwise
-        cosine — a lower ``threshold`` (0.6, vs. 0.8 for the real-vector
-        variant of this test) reliably clusters all 6 into one clique
-        without depending on the real embedder this test deliberately
-        disables.
+        hashing-trick vectors land at a uniform ~0.667 (2/3) pairwise
+        cosine across all 15 pairs — a lower ``threshold`` (0.6, vs. 0.8
+        for the real-vector variant of this test) reliably clusters all 6
+        into one clique without depending on the real embedder this test
+        deliberately disables. Issue athenaeum#1050: ``_fallback_embeddings`` now
+        hashes tokens with ``hashlib.sha256`` instead of the
+        PYTHONHASHSEED-salted builtin ``hash()``, so this 0.667 figure is a
+        fixed, measured constant (verified stable across
+        ``PYTHONHASHSEED`` in this repo's CI) rather than a per-process
+        range — pre-athenaeum#1050 this same fixture landed anywhere in
+        ~0.62-0.67 depending on the run's random hash seed, which is
+        exactly what made this test flaky (CI run 32379062624).
         """
         import logging
 
