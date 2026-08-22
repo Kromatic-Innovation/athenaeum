@@ -292,6 +292,16 @@ class TestOperatorSuppliedOverrides:
         assert result.files_per_day_source == "measured (trailing window, lower bound)"
         assert result.calls_per_file is None
         assert result.wall_clock_per_file_seconds is None
+        # Pins the DEFAULT branch of render_snapshot_entry's files_per_day_line
+        # ternary byte-for-byte (issue athenaeum#1095 follow-up) — the
+        # operator-supplied branch is pinned separately below; this is the
+        # analogous default-path pin backlog-price already has for its own
+        # raw_backlog_count line.
+        text = ont.render_snapshot_entry(result)
+        assert (
+            "- files_per_day (ordinary intake, lower bound over trailing "
+            "14d, n=0): 0.000" in text
+        )
 
     def test_calls_per_file_override_takes_effect(self, tmp_path: Path) -> None:
         root = tmp_path / "knowledge"
