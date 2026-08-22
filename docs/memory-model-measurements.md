@@ -6,6 +6,31 @@ the reproducible command that generated it. This file is committed —
 `docs/memory-model.md` (the design lock) is never touched by any command
 that writes here.
 
+## Reproducing the measurement pack
+
+Issue athenaeum#713's three read-only measurement-pack artifacts, and the
+operator-supplied override flags issue athenaeum#1095 added so artifact 1's
+measured figures can feed artifacts 2 and 3 directly:
+
+- `athenaeum measure shadow-linkage` — shadow-mode complete-linkage cluster
+  population over the live wiki store (zero LLM calls).
+- `athenaeum measure backlog-price` — backlog price sheet + decision-inflow
+  sensitivity table. Optional overrides (issue athenaeum#1095 AC3):
+  `--backlog-count INT`, `--calls-per-file FLOAT`,
+  `--wall-clock-per-file-seconds FLOAT`. Each defaults to the
+  measured/derived value; passing one records `operator-supplied` provenance
+  in the written snapshot.
+- `athenaeum measure ordinary-night` — ordinary-night steady-state table
+  (closes/does-not-close verdict against the nightly call/wall-clock
+  budgets). Optional overrides (issue athenaeum#1095 AC5):
+  `--calls-per-file FLOAT`, `--files-per-day FLOAT`,
+  `--wall-clock-per-file-seconds FLOAT`. Same operator-supplied provenance
+  rule as `backlog-price`.
+
+All three write/append a dated snapshot into this file unless `--dry-run` is
+passed, and support `--json` for machine-readable output; see each
+subcommand's own `--help` for the full flag list.
+
 ## Push-precision and coverage baseline
 
 ### Snapshot 2026-08-20T00:09:51.592236Z
