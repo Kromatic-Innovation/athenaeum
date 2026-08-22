@@ -16,7 +16,7 @@ Sixteen sibling ``_cmd_*.py`` modules each own one or a few related
 subcommands' argparse setup plus their handler(s):
 ``_cmd_lifecycle`` (init/status/disable/enable/spend), ``_cmd_serve``
 (serve), ``_cmd_run`` (run), ``_cmd_index`` (reindex/rebuild-index/compile/
-registry/ingest/session-end), ``_cmd_query`` (recall/people/query-topics/
+registry/ingest/session-end), ``_cmd_query`` (recall/query-topics/
 stopwords/test-mcp), ``_cmd_pending`` (ingest-answers/ingest-merges/
 reresolve-questions), ``_cmd_curate`` (dedupe/claims/auto-memory),
 ``_cmd_decay`` (decay-sweep, issue athenaeum#904), ``_cmd_repair`` (repair),
@@ -116,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_run_subparser(subparsers)  # run
     add_query_subparsers(
         subparsers
-    )  # test-mcp, people, query-topics, stopwords, recall
+    )  # test-mcp, query-topics, stopwords, recall
     add_enumerate_subparser(subparsers)  # enumerate (issue athenaeum#965)
     add_pending_subparsers(
         subparsers
