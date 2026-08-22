@@ -170,13 +170,22 @@ def _fallback_embeddings(
 ) -> dict[str, list[float]]:
     """Hashing-trick fallback for when chromadb has no usable index.
 
-    Deterministic, no external deps. Produces a fixed-dim sparse vector
-    by hashing tokens from the file's name/description/body. Used only
-    when the VectorBackend cannot return embeddings (e.g. optional
-    chromadb extra not installed, or the index was never built). This
-    is NOT a replacement embedder — it's a graceful-degradation path
-    that keeps clustering available and testable without chromadb, and
-    it is documented in the PR body.
+    Deterministic across processes and PYTHONHASHSEED values, no external
+    deps. Produces a fixed-dim sparse vector by hashing tokens from the
+    file's name/description/body. Used only when the VectorBackend cannot
+    return embeddings (e.g. optional chromadb extra not installed, or the
+    index was never built). This is NOT a replacement embedder — it's a
+    graceful-degradation path that keeps clustering available and testable
+    without chromadb, and it is documented in the PR body.
+
+    Issue athenaeum#1050: the feature index and sign bit are derived from a single
+    ``hashlib.sha256`` digest of each token's UTF-8 bytes — NOT Python's
+    builtin ``hash()``, which is salted per-process (``PYTHONHASHSEED``, a
+    str/bytes DoS mitigation) and therefore mapped the same token to a
+    different index/sign in every process, making fallback vectors — and
+    every cosine derived from them — nondeterministic run to run.
+    ``hashlib.sha256`` is unsalted, so the same token always lands at the
+    same index with the same sign in every process, on every interpreter.
 
     The hash feature space still reuses the shared MiniLM dimension
     (384) so the rest of the pipeline sees vectors of the expected
@@ -197,9 +206,12 @@ def _fallback_embeddings(
             out[str(am.path)] = vec
             continue
         for tok in tokens:
-            idx = hash(tok) % dim
-            # sign trick for mild decorrelation
-            sign = 1.0 if (hash(tok + "_s") % 2 == 0) else -1.0
+            digest = hashlib.sha256(tok.encode("utf-8")).digest()
+            idx = int.from_bytes(digest[:4], "big") % dim
+            # sign trick for mild decorrelation — a separate digest byte,
+            # not a second hash call, but still independent of the index
+            # byte range consumed above.
+            sign = 1.0 if digest[4] % 2 == 0 else -1.0
             vec[idx] += sign
         # l2-normalize so cosine is well-defined
         norm = math.sqrt(sum(x * x for x in vec))
