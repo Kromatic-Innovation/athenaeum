@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum measure backlog-price`/`ordinary-night` operator-supplied
+  input overrides, price-table and doc-drift pinning tests (athenaeum#1095,
+  the remaining delta on athenaeum#713's measurement pack, whose generator
+  code itself already shipped in merged PR 1021).** `build_price_sheet` gains
+  `--backlog-count`/`--calls-per-file`/`--wall-clock-per-file-seconds`
+  overrides (AC3(a)(b)(c)) and `build_ordinary_night_table` gains
+  `--calls-per-file`/`--files-per-day`/`--wall-clock-per-file-seconds`
+  (AC5) — each defaults to `None` (today's derived path, byte-identical
+  output), and recording `operator-supplied` provenance in the written
+  snapshot when passed. Adds a test pinning that the price sheet prices
+  through the SAME active per-MTok rate table `athenaeum.spend`'s reprice
+  path reads (AC3(d) — no second price list), a test pinning that a
+  generator's own `write_snapshot` replaces only its own section on a
+  repeat run (AC6), a `## Reproducing the measurement pack` section in
+  `docs/memory-model-measurements.md` listing all three exact invocations
+  (AC7), and a test pinning those invocations against each module's own
+  `REPRODUCE_COMMAND` constant.
+
 - **`street-address` sensitivity recogniser — fixture-bounded, bound to `pii`
   by default (athenaeum#991, S2 of `docs/sensitivity-class-vocabulary.md` §9).**
   A third built-in `SensitivityRecognizer` (alongside `email`/`phone`,
