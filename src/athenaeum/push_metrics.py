@@ -24,12 +24,17 @@ Three pieces:
   reference-determination record marking which pushed ids were actually
   referenced afterward. ``precision = referenced / pushed`` per session.
 - **Coverage audit** (:func:`build_coverage_worksheet`): samples N sessions'
-  push records, re-runs each session's queries against the CURRENT index to
-  find candidate hits that scored but were not in the pushed set, and emits a
-  worksheet file for a human reviewer to mark relevant-but-missed. The miss
-  rate a reviewer records is the coverage-floor baseline — this module can
-  compute the CANDIDATE list but not the miss rate itself (that needs a human
-  judgment call this module must not fabricate).
+  push records and emits a worksheet of the STRUCTURAL facts derivable from
+  hash-only records — candidate-pool size, tier/scope concentration, and how
+  much of a session's window-mate pool a tier/scope filter removes — plus the
+  policy-set bounds those facts imply. It does NOT emit a per-candidate
+  relevance-marking column or a ``coverage_miss_rate`` figure: push records
+  retain only a query HASH (never the raw query text, by athenaeum#711
+  design), so nothing recoverable exists to judge whether a candidate was
+  actually relevant, and a "miss rate" computed anyway would be a policy-set
+  bracket dressed as a measurement, not a measurement. See athenaeum#1036
+  (the ruling that withdrew per-candidate marking from this module's scope)
+  for the full rationale.
 
 **Why reference-determination needed a small new hook instead of reusing
 :mod:`athenaeum.transcript_verify` as-is:** ``verify_user_stated`` and
@@ -60,6 +65,7 @@ import json
 import logging
 import os
 import random
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -917,9 +923,12 @@ def render_snapshot_section(baseline: BaselineWindow, *, coverage_note: str) -> 
 
 
 _COVERAGE_PENDING_NOTE = (
-    "n/a — awaits operator review of the coverage worksheet "
-    "(`athenaeum push-metrics coverage-audit`); see that command's output "
-    "file for the sampled sessions and candidate misses a human must mark"
+    "not measurable — push records retain only a query hash by design "
+    "(athenaeum#711), so relevance is not recoverable and no miss rate can "
+    "be computed; `athenaeum push-metrics coverage-audit` reports the "
+    "structural facts that ARE derivable (candidate-pool size, tier/scope "
+    "concentration, window-mate filter removal) plus policy-set bounds, "
+    "never a measured rate (athenaeum#1036)"
 )
 
 
@@ -1033,7 +1042,93 @@ def sample_sessions(
     return sorted(rng.sample(sessions, n))
 
 
-_MISS_RATE_FORMULA = "missed / (pushed + missed)"
+#: Opens every worksheet (issue athenaeum#1036 AC3): states, in plain
+#: language, what this artifact cannot establish and why — so a reader of
+#: the worksheet file carries the caveat without needing to know this issue
+#: exists.
+LIMITATION_STATEMENT = (
+    "This worksheet cannot establish a measured coverage-floor miss rate. "
+    "Push records store a query HASH, never the raw query text — a "
+    "deliberate design decision (athenaeum#711) that keeps free-text "
+    "content out of the ledger. Without the query, there is no way to "
+    "re-run a session's search against the live index or ask a human "
+    "reviewer whether a specific unpushed candidate was actually relevant "
+    "to what that session was looking for — so no per-candidate relevance "
+    "marking is possible, and no true miss rate can be recovered from these "
+    "records. What follows are the structural facts that ARE derivable from "
+    "hash-only records — candidate-pool size, tier/scope concentration, and "
+    "how much of a session's window-mate pool a tier/scope filter removes — "
+    "plus the policy-set bounds those facts imply. Every bound below is "
+    "labelled policy-set, never measured (athenaeum#1036)."
+)
+
+
+def _tier_scope_concentration(items: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Structural fact: how concentrated the pushed set is in one tier/scope
+    pairing (issue athenaeum#1036 AC2).
+
+    ``degenerate`` is ``True`` when the sample contains at most one distinct
+    tier/scope pairing — the case where a window-mate filter keyed on
+    tier/scope pairing cannot discriminate at all (every window-mate item
+    trivially shares the one pairing present), so any filter-removal figure
+    computed over it would look like ordinary filter behaviour while
+    actually measuring nothing. Callers must report this flag rather than
+    silently averaging over it (athenaeum#1036 AC5).
+    """
+    counts: Counter[tuple[str, str]] = Counter()
+    for item in items:
+        counts[(str(item.get("tier", "")), str(item.get("scope", "")))] += 1
+    total = sum(counts.values())
+    if total == 0:
+        return {
+            "total_pushed_items": 0,
+            "top_pairing": None,
+            "top_pairing_item_count": 0,
+            "share_of_pushed_items": None,
+            "distinct_pairing_count": 0,
+            "degenerate": False,
+            "degenerate_note": None,
+        }
+    (top_tier, top_scope), top_count = counts.most_common(1)[0]
+    distinct = len(counts)
+    degenerate = distinct <= 1
+    return {
+        "total_pushed_items": total,
+        "top_pairing": {"tier": top_tier, "scope": top_scope},
+        "top_pairing_item_count": top_count,
+        "share_of_pushed_items": top_count / total,
+        "distinct_pairing_count": distinct,
+        "degenerate": degenerate,
+        "degenerate_note": (
+            "every pushed item in this sample shares a single tier/scope "
+            "pairing — the window-mate filter cannot discriminate on "
+            "tier/scope here, so any filter-removal figure reported "
+            "alongside this is an artifact of the degenerate distribution, "
+            "not evidence of filter behaviour"
+            if degenerate
+            else None
+        ),
+    }
+
+
+def _policy_set_bounds(pushed_count: int, candidate_pool_size: int) -> dict[str, Any]:
+    """Policy-set endpoints of the miss-rate interval this design implies —
+    explicitly labelled as policy-set, never measured, both endpoints named
+    (issue athenaeum#1036 AC2).
+    """
+    denom = pushed_count + candidate_pool_size
+    upper = (candidate_pool_size / denom) if denom else None
+    return {
+        "lower_bound": 0.0,
+        "lower_bound_label": "none of the candidate-pool ids were relevant-missed",
+        "upper_bound": upper,
+        "upper_bound_label": (
+            "every candidate-pool id was relevant-missed"
+            if upper is not None
+            else "undefined — pushed_count and candidate_pool_size are both 0"
+        ),
+        "note": "policy-set, not measured — see the worksheet's top-level 'limitation' field",
+    }
 
 
 def build_coverage_worksheet(
@@ -1047,26 +1142,32 @@ def build_coverage_worksheet(
 ) -> dict[str, Any]:
     """Build the coverage-audit worksheet payload for *n* sampled sessions.
 
-    Per sampled session: the pushed-id set (from its push records) plus
-    CANDIDATE ids — pages the session's own recorded queries would still
-    match against the CURRENT index — that are NOT in the pushed set. A human
-    reviewer marks each candidate relevant-or-not; the miss rate they record
-    is the coverage-floor baseline. This function can only emit the
-    candidates — it must never guess the miss rate itself.
+    Issue athenaeum#1036 (operator ruling, option (c)): this worksheet
+    reports STRUCTURAL facts derivable from hash-only push records — it does
+    NOT emit a per-candidate relevance-marking column or a
+    ``coverage_miss_rate`` figure. Push records retain only a query HASH,
+    never the raw query text (deliberate athenaeum#711 design), so nothing
+    recoverable exists to judge whether a candidate page was relevant to the
+    session that didn't push it. See :data:`LIMITATION_STATEMENT` (also the
+    worksheet's own ``limitation`` field) for the full statement.
 
-    Note: push records retain only a query HASH, not the raw query text (by
-    design — no content in the ledger), so this cannot re-run the original
-    query against the live index. Instead each session's candidate list is
-    the set of pages pushed to ANY OTHER session **in the sample window**
-    (issue athenaeum#986 — the other ``n - 1`` sampled sessions only, never
-    the whole ledger corpus) that **share at least one tier/scope pairing**
-    with this session's own pushed set — the honest candidate signal
-    available without storing raw query text. A page pushed only to a
-    session outside the sample, or pushed with a tier/scope pairing this
-    session never received, is never a candidate. Where re-running the
-    literal query is required for a tighter candidate set, an operator can
-    extend this worksheet with `athenaeum recall <query>` by hand; the
-    worksheet says so explicitly.
+    Per sampled session, the candidate pool is the set of pages pushed to
+    ANY OTHER session **in the sample window** (issue athenaeum#986 — the
+    other ``n - 1`` sampled sessions only, never the whole ledger corpus)
+    that **share at least one tier/scope pairing** with this session's own
+    pushed set — the honest structural signal available without storing raw
+    query text. A page pushed only to a session outside the sample, or
+    pushed with a tier/scope pairing this session never received, is never a
+    candidate.
+
+    The payload's ``structural_summary`` reports, over the whole sample:
+    tier/scope concentration of the pushed set (:func:`_tier_scope_concentration`,
+    flagging a degenerate single-pairing distribution rather than silently
+    averaging over it), how much of each session's window-mate pool the
+    tier/scope filter removes (aggregate + per-session range), and the
+    policy-set miss-rate bounds those two facts imply
+    (:func:`_policy_set_bounds`). Each session entry additionally carries its
+    own ``candidate_pool_size`` and ``filter_removed_fraction``.
 
     ``exclude_sessions`` (issue athenaeum#986, same semantics as
     :func:`compute_baseline`'s ``exclude_sessions`` — athenaeum#791): known-
@@ -1076,13 +1177,6 @@ def build_coverage_worksheet(
     in the ledger, and how many push records they contributed, are always
     reported on the returned payload (``excluded_sessions`` /
     ``excluded_push_records``) — empty/zero when no exclusion was requested.
-
-    Each session entry also carries ``pushed_count`` and ``candidate_count``,
-    and the payload carries ``miss_rate_formula``, so the coverage-floor miss
-    rate a reviewer computes after marking ``reviewer_verdict`` is
-    reproducible from the worksheet file alone (issue athenaeum#986):
-    ``missed = count of verdicts == "relevant-missed"``; ``miss_rate =
-    missed / (pushed_count + missed)``.
 
     Each requested ``exclude_sessions`` value is resolved via
     :func:`_resolve_exclude_sessions` against every session id in the full
@@ -1112,50 +1206,77 @@ def build_coverage_worksheet(
         if sid in by_session:
             by_session[sid].append(rec)
 
-    # Per-session pushed ids and tier/scope pairs, restricted to the sample
-    # window (the sampled sessions only — never the whole ledger).
+    # Per-session pushed ids, tier/scope pairs, and raw pushed items
+    # (undeduplicated — concentration is a fact about pushed ITEMS),
+    # restricted to the sample window (the sampled sessions only — never
+    # the whole ledger).
     session_pushed_ids: dict[str, set[str]] = {}
     session_pairs: dict[str, set[tuple[str, str]]] = {}
+    session_items: dict[str, list[dict[str, Any]]] = {}
     for sid in session_ids:
         pushed: set[str] = set()
         pairs: set[tuple[str, str]] = set()
+        items: list[dict[str, Any]] = []
         for rec in by_session[sid]:
             for item in rec.get("items", []):
                 pid = item.get("id")
                 if isinstance(pid, str):
                     pushed.add(pid)
                     pairs.add((str(item.get("tier", "")), str(item.get("scope", ""))))
+                    items.append(item)
         session_pushed_ids[sid] = pushed
         session_pairs[sid] = pairs
+        session_items[sid] = items
 
-    sessions_out = []
+    all_sampled_items = [item for sid in session_ids for item in session_items[sid]]
+    concentration = _tier_scope_concentration(all_sampled_items)
+
+    sessions_out: list[dict[str, Any]] = []
+    total_before_filter = 0
+    total_after_filter = 0
+    per_session_removed_fractions: list[float] = []
     for sid in session_ids:
         own_pushed = session_pushed_ids[sid]
         own_pairs = session_pairs[sid]
-        candidates: set[str] = set()
+        before_filter: set[str] = set()
+        after_filter: set[str] = set()
         for other_sid in session_ids:
             if other_sid == sid:
                 continue
-            for rec in by_session[other_sid]:
-                for item in rec.get("items", []):
-                    pid = item.get("id")
-                    if not isinstance(pid, str) or pid in own_pushed:
-                        continue
-                    pair = (str(item.get("tier", "")), str(item.get("scope", "")))
-                    if pair in own_pairs:
-                        candidates.add(pid)
+            for item in session_items[other_sid]:
+                pid = item.get("id")
+                if not isinstance(pid, str) or pid in own_pushed:
+                    continue
+                before_filter.add(pid)
+                pair = (str(item.get("tier", "")), str(item.get("scope", "")))
+                if pair in own_pairs:
+                    after_filter.add(pid)
         pushed_ids = sorted(own_pushed)
-        candidate_ids = sorted(candidates)
+        candidate_ids = sorted(after_filter)
+        removed_fraction = (
+            1 - (len(after_filter) / len(before_filter)) if before_filter else None
+        )
+        if removed_fraction is not None:
+            per_session_removed_fractions.append(removed_fraction)
+        total_before_filter += len(before_filter)
+        total_after_filter += len(after_filter)
         sessions_out.append(
             {
                 "session_id": sid,
                 "pushed": pushed_ids,
                 "pushed_count": len(pushed_ids),
                 "candidates_not_pushed": candidate_ids,
-                "candidate_count": len(candidate_ids),
-                "reviewer_verdict": {c: "TODO" for c in candidate_ids},
+                "candidate_pool_size": len(candidate_ids),
+                "window_mate_pool_before_filter": len(before_filter),
+                "filter_removed_fraction": removed_fraction,
             }
         )
+
+    aggregate_removed_fraction = (
+        1 - (total_after_filter / total_before_filter) if total_before_filter else None
+    )
+    pushed_total = sum(s["pushed_count"] for s in sessions_out)
+    candidate_total = sum(s["candidate_pool_size"] for s in sessions_out)
 
     found_excluded_sessions = sorted(
         {sid for r in excluded_records if isinstance(sid := r.get("session_id"), str) and sid}
@@ -1167,18 +1288,27 @@ def build_coverage_worksheet(
         "wiki_root": str(wiki_root),
         "search_backend": search_backend,
         "sampled_session_count": len(session_ids),
+        "limitation": LIMITATION_STATEMENT,
+        "structural_summary": {
+            "tier_scope_concentration": concentration,
+            "window_mate_filter": {
+                "before_filter_id_count": total_before_filter,
+                "after_filter_id_count": total_after_filter,
+                "removed_fraction": aggregate_removed_fraction,
+                "removed_fraction_range": {
+                    "min": min(per_session_removed_fractions)
+                    if per_session_removed_fractions
+                    else None,
+                    "max": max(per_session_removed_fractions)
+                    if per_session_removed_fractions
+                    else None,
+                },
+            },
+            "policy_set_miss_rate_bounds": _policy_set_bounds(pushed_total, candidate_total),
+        },
         "sessions": sessions_out,
         "excluded_sessions": found_excluded_sessions,
         "excluded_push_records": len(excluded_records),
-        "miss_rate_formula": _MISS_RATE_FORMULA,
-        "instructions": (
-            "For each session, mark every id in candidates_not_pushed's "
-            "reviewer_verdict as 'relevant-missed' or 'not-relevant'. Then, "
-            "per session, missed = count of verdicts == 'relevant-missed' "
-            f"and coverage miss rate = {_MISS_RATE_FORMULA} (pushed = this "
-            "session's pushed_count field). Aggregate across all sessions in "
-            "this worksheet once every verdict is filled in."
-        ),
     }
 
 

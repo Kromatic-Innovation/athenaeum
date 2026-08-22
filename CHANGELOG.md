@@ -554,6 +554,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Coverage-audit worksheet now reports structural facts instead of an
+  unmarkable relevance column (athenaeum#1036, operator ruling option (c)).**
+  `push_metrics.build_coverage_worksheet` no longer emits a per-candidate
+  `reviewer_verdict` marking column or a `coverage_miss_rate` figure —
+  push records retain only a query HASH, never the raw query text
+  (deliberate athenaeum#711 design), so nothing recoverable exists to judge
+  candidate relevance and a miss rate computed anyway would be a
+  policy-set bracket dressed as a measurement. The worksheet now opens
+  with a plain-language `limitation` statement and reports the structural
+  facts hash-only records DO support: tier/scope concentration of the
+  pushed set (flagging a degenerate single-pairing distribution rather
+  than silently averaging over it), each session's `candidate_pool_size`
+  and window-mate `filter_removed_fraction` (aggregate + range), and
+  `policy_set_miss_rate_bounds` with both endpoints explicitly labelled
+  policy-set, never measured. The push-record ledger schema
+  (`src/athenaeum/push_metrics.py`) is unchanged; a new test asserts no
+  raw query text reaches the ledger file on the default `record_push`
+  path. The optional AC (a config key to opt into storing query text
+  alongside the hash) is skipped — see the PR description for why.
+
 - **Dropped the redundant `push: [develop]` trigger from `oss-readiness.yml`
   (athenaeum#816).** The workflow now runs on `pull_request: branches:
   [develop]` only. Develop's strict required-status-checks ruleset
