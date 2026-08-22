@@ -252,6 +252,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Shape-rule evaluation now reaches one level below a configured
+  `recall.extra_intake_roots` entry, so a `preserve` rule targeting
+  hestia's lane logs can finally match (athenaeum#1096, closes the second
+  of the two gaps athenaeum#974 was titled to close).** `run_shape_rule_phase`
+  sourced candidates only from `intake.discover_raw_files`, which
+  deliberately never descends into a source directory that is itself an
+  extra-intake root (default `raw/auto-memory`) — correct for intake, but
+  it meant a rule targeting `raw/auto-memory/hestia-lanes/` loaded clean
+  and matched zero candidates forever. Design-note option 1: a new
+  `intake.discover_shape_rule_extra_intake_files` (one level below an
+  extra-intake-root source directory, `RawFile.source` still the
+  top-level source name) feeds the shape-rule phase ONLY — intake
+  discovery is untouched. Also reconciles `_cmd_lifecycle.py`'s
+  `--with-rules` help text, which pointed operators at the aggregate
+  `wiki/_shape_rules_applied.jsonl` (silent when a rule matches nothing —
+  precisely the prior bug's symptom) instead of the per-record
+  `wiki/_shape_rule_dispositions.jsonl` (athenaeum#975) that also logs `no-match`.
 - **`storage lint-pii` now scans `raw/`, reported as a separate,
   non-gating surface (athenaeum#1049, filed from the athenaeum#949
   close-out).** `_cmd_storage_lint_pii` resolved its scan root as
@@ -555,6 +572,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   migration; no sweep/currency/bucket behavior changes.
 
 ### Changed
+
+- **Coverage-audit worksheet now reports structural facts instead of an
+  unmarkable relevance column (athenaeum#1036, operator ruling option (c)).**
+  `push_metrics.build_coverage_worksheet` no longer emits a per-candidate
+  `reviewer_verdict` marking column or a `coverage_miss_rate` figure —
+  push records retain only a query HASH, never the raw query text
+  (deliberate athenaeum#711 design), so nothing recoverable exists to judge
+  candidate relevance and a miss rate computed anyway would be a
+  policy-set bracket dressed as a measurement. The worksheet now opens
+  with a plain-language `limitation` statement and reports the structural
+  facts hash-only records DO support: tier/scope concentration of the
+  pushed set (flagging a degenerate single-pairing distribution rather
+  than silently averaging over it), each session's `candidate_pool_size`
+  and window-mate `filter_removed_fraction` (aggregate + range), and
+  `policy_set_miss_rate_bounds` with both endpoints explicitly labelled
+  policy-set, never measured. The push-record ledger schema
+  (`src/athenaeum/push_metrics.py`) is unchanged; a new test asserts no
+  raw query text reaches the ledger file on the default `record_push`
+  path. The optional AC (a config key to opt into storing query text
+  alongside the hash) is skipped — see the PR description for why.
 
 - **Dropped the redundant `push: [develop]` trigger from `oss-readiness.yml`
   (athenaeum#816).** The workflow now runs on `pull_request: branches:

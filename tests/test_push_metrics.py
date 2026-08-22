@@ -281,6 +281,32 @@ class TestRecordPush:
         )
         assert push_metrics.record_push(record, cache_dir=tmp_path) is False
 
+    def test_no_raw_query_text_reaches_the_ledger_file_on_default_path(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#1036 AC4: the push-record ledger schema is unchanged —
+        this asserts it directly against the FILE ``record_push`` writes on
+        the default (instrumentation-enabled, no special config) path, not
+        just the in-memory ``PushRecord.to_dict()`` shape.
+        """
+        record = push_metrics.build_push_record(
+            session_id="s1",
+            query="jane doe personal cell number, project moonshot budget",
+            backend="fts5",
+            hits=[("f.md", {"uid": "u1"}, "body text nobody should see")],
+        )
+        assert push_metrics.record_push(record, cache_dir=tmp_path) is True
+
+        ledger_path = push_metrics.push_records_path(tmp_path)
+        raw_text = ledger_path.read_text(encoding="utf-8")
+
+        assert "jane" not in raw_text.lower()
+        assert "personal cell" not in raw_text.lower()
+        assert "moonshot" not in raw_text.lower()
+        assert "body text" not in raw_text.lower()
+        # The hash IS present — that's the sanctioned correlation signal.
+        assert record.query_hash in raw_text
+
     def test_noop_when_no_items(self, tmp_path: Path) -> None:
         record = push_metrics.build_push_record(
             session_id="s1", query="q", backend="fts5", hits=[]
@@ -791,7 +817,13 @@ class TestCoverageWorksheet:
         assert "pushed1" not in s1["candidates_not_pushed"]
         assert "other2" in s1["candidates_not_pushed"]
 
-    def test_reviewer_verdict_starts_as_todo(self, tmp_path: Path) -> None:
+    def test_no_marking_column_and_structural_fields_populated(self, tmp_path: Path) -> None:
+        """athenaeum#1036 AC1/AC2/AC5: no per-candidate relevance-marking
+        column and no ``coverage_miss_rate`` presented as a measurement;
+        instead the structural facts (candidate-pool size, tier/scope
+        concentration, window-mate filter removal, policy-set bounds) are
+        populated, on a synthetic ledger.
+        """
         cache = tmp_path
         rec1 = push_metrics.build_push_record(
             session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "a"}, "b")]
@@ -804,9 +836,89 @@ class TestCoverageWorksheet:
         ws = push_metrics.build_coverage_worksheet(
             n=2, wiki_root=tmp_path / "wiki", cache_dir=cache, seed=1
         )
+
+        # No marking column, no coverage_miss_rate figure anywhere.
+        assert "reviewer_verdict" not in json.dumps(ws)
+        assert "coverage_miss_rate" not in json.dumps(ws)
+        assert "miss_rate_formula" not in ws
+
+        # Opens with a plain-language limitation statement (AC3).
+        assert "limitation" in ws
+        assert "query" in ws["limitation"].lower()
+        assert "athenaeum#711" in ws["limitation"]
+
+        # Structural facts populated (AC2).
+        summary = ws["structural_summary"]
+        concentration = summary["tier_scope_concentration"]
+        assert concentration["total_pushed_items"] == 2
+        assert concentration["share_of_pushed_items"] == pytest.approx(1.0)
+
+        window_filter = summary["window_mate_filter"]
+        assert window_filter["before_filter_id_count"] == 2
+        assert window_filter["after_filter_id_count"] == 2
+        assert window_filter["removed_fraction"] == pytest.approx(0.0)
+
+        bounds = summary["policy_set_miss_rate_bounds"]
+        assert bounds["lower_bound"] == 0.0
+        assert bounds["lower_bound_label"]
+        assert bounds["upper_bound"] is not None
+        assert bounds["upper_bound_label"]
+        assert "policy-set" in bounds["note"]
+
         for session in ws["sessions"]:
-            for verdict in session["reviewer_verdict"].values():
-                assert verdict == "TODO"
+            assert "reviewer_verdict" not in session
+            assert "candidate_pool_size" in session
+            assert "window_mate_pool_before_filter" in session
+            assert "filter_removed_fraction" in session
+
+    def test_degenerate_tier_scope_distribution_is_flagged(self, tmp_path: Path) -> None:
+        """athenaeum#1036 AC5: a ledger where every sampled session's pushed
+        items share exactly one tier/scope pairing is reported as
+        degenerate, not silently averaged into a filter-removal figure that
+        would look like ordinary filter behaviour.
+        """
+        cache = tmp_path
+        for i, sid in enumerate(["s1", "s2", "s3"]):
+            rec = push_metrics.build_push_record(
+                session_id=sid,
+                query="q",
+                backend="fts5",
+                hits=[(f"f{i}.md", {"uid": f"u{i}", "access": "internal"}, "b")],
+            )
+            push_metrics.record_push(rec, cache_dir=cache)
+
+        ws = push_metrics.build_coverage_worksheet(
+            n=3, wiki_root=tmp_path / "wiki", cache_dir=cache, seed=1
+        )
+        concentration = ws["structural_summary"]["tier_scope_concentration"]
+        assert concentration["degenerate"] is True
+        assert concentration["distinct_pairing_count"] == 1
+        assert concentration["degenerate_note"] is not None
+        assert "degenerate" in concentration["degenerate_note"]
+
+    def test_non_degenerate_distribution_is_not_flagged(self, tmp_path: Path) -> None:
+        cache = tmp_path
+        rec1 = push_metrics.build_push_record(
+            session_id="s1",
+            query="q",
+            backend="fts5",
+            hits=[("f.md", {"uid": "secret1", "access": "secret"}, "b")],
+        )
+        rec2 = push_metrics.build_push_record(
+            session_id="s2",
+            query="q",
+            backend="fts5",
+            hits=[("f.md", {"uid": "internal2", "access": "internal"}, "b")],
+        )
+        push_metrics.record_push(rec1, cache_dir=cache)
+        push_metrics.record_push(rec2, cache_dir=cache)
+        ws = push_metrics.build_coverage_worksheet(
+            n=2, wiki_root=tmp_path / "wiki", cache_dir=cache, seed=1
+        )
+        concentration = ws["structural_summary"]["tier_scope_concentration"]
+        assert concentration["degenerate"] is False
+        assert concentration["degenerate_note"] is None
+        assert concentration["distinct_pairing_count"] == 2
 
     def test_write_coverage_worksheet_is_a_file_not_console_only(self, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
@@ -910,14 +1022,14 @@ class TestCoverageWorksheet:
         for session in ws["sessions"]:
             # Bounded by the OTHER 9 sampled sessions' items, never the
             # whole 300-item corpus.
-            assert session["candidate_count"] <= 9 * items_per_session
-            assert session["candidate_count"] < corpus_size
+            assert session["candidate_pool_size"] <= 9 * items_per_session
+            assert session["candidate_pool_size"] < corpus_size
 
-    def test_worksheet_records_miss_rate_formula_and_inputs(self, tmp_path: Path) -> None:
-        """athenaeum#986 AC3: the worksheet records the miss-rate formula and
-        its inputs (pushed_count per session), so a reviewer can recompute
-        the coverage miss rate from the worksheet file alone once verdicts
-        are filled in — no need to re-derive it from the instructions prose.
+    def test_policy_set_bounds_reproducible_from_worksheet_fields(self, tmp_path: Path) -> None:
+        """athenaeum#1036 AC2: the policy-set miss-rate bounds are
+        reproducible from the worksheet's own ``pushed_count`` /
+        ``candidate_pool_size`` fields, and both endpoints are named labels,
+        not just bare numbers.
         """
         cache = tmp_path
         rec1 = push_metrics.build_push_record(
@@ -932,18 +1044,19 @@ class TestCoverageWorksheet:
         ws = push_metrics.build_coverage_worksheet(
             n=2, wiki_root=tmp_path / "wiki", cache_dir=cache, seed=1
         )
-        assert ws["miss_rate_formula"] == "missed / (pushed + missed)"
         s1 = next(s for s in ws["sessions"] if s["session_id"] == "s1")
         assert s1["pushed_count"] == len(s1["pushed"]) == 1
-        assert s1["candidate_count"] == len(s1["candidates_not_pushed"]) == 1
+        assert s1["candidate_pool_size"] == len(s1["candidates_not_pushed"]) == 1
 
-        # Simulate a reviewer marking the one candidate relevant-missed, then
-        # recompute the miss rate from worksheet fields alone.
-        for cid in s1["reviewer_verdict"]:
-            s1["reviewer_verdict"][cid] = "relevant-missed"
-        missed = sum(1 for v in s1["reviewer_verdict"].values() if v == "relevant-missed")
-        miss_rate = missed / (s1["pushed_count"] + missed)
-        assert miss_rate == pytest.approx(0.5)
+        bounds = ws["structural_summary"]["policy_set_miss_rate_bounds"]
+        # Aggregate upper bound = total candidates / (total pushed + total candidates).
+        pushed_total = sum(s["pushed_count"] for s in ws["sessions"])
+        candidate_total = sum(s["candidate_pool_size"] for s in ws["sessions"])
+        expected_upper = candidate_total / (pushed_total + candidate_total)
+        assert bounds["upper_bound"] == pytest.approx(expected_upper)
+        assert bounds["lower_bound"] == 0.0
+        assert "relevant-missed" in bounds["upper_bound_label"]
+        assert "relevant-missed" in bounds["lower_bound_label"]
 
     def test_exclude_session_drops_from_sample_and_candidates(self, tmp_path: Path) -> None:
         """athenaeum#986 AC2: ``--exclude-session`` semantics at the function
