@@ -18,6 +18,14 @@ copied three times — the same "one place, not N" discipline
 module and is already shipped/tested) — this is not a refactor of that
 function, just the shared primitive its three new siblings build on.
 
+**Reading pinned by issue athenaeum#1095 (AC6):** "replaces" in the AC's
+"replaces its own section, not the whole document" means each generator
+replaces/updates only its OWN ``##`` section — it ACCUMULATES dated
+sub-entries within that section and never overwrites an earlier one, and it
+never touches a sibling ``##`` section's heading or entries. A destructive
+whole-document or whole-section overwrite would discard measurement history,
+which the AC's own document-scope-vs-section-scope framing rules out.
+
 Layering: L2 utility. Imports only :mod:`athenaeum.atomic_io`.
 """
 

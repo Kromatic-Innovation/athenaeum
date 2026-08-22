@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Ordinary-night steady-state table (issue athenaeum#713, artifact 3).
 
+Reproduce with: ``athenaeum measure ordinary-night`` (see
+:data:`REPRODUCE_COMMAND` below; issue athenaeum#1095 AC7 requires the exact
+invocation live in this module's own docstring, not only ``CHANGELOG.md``).
+
 The v6 comparator slice (child of athenaeum#709) does not start until this table
 **closes** — shows an ordinary night's total call and wall-clock load,
 INCLUDING the comparator regime's amortized addition, fitting inside both the
@@ -258,6 +262,7 @@ class OrdinaryNightResult:
     """Full ordinary-night steady-state table."""
 
     files_per_day: float
+    files_per_day_source: str
     files_per_day_sample_count: int
     intake_window_days: int
     calls_per_file: float | None
@@ -283,6 +288,7 @@ class OrdinaryNightResult:
         return {
             "generated": self.generated,
             "files_per_day": self.files_per_day,
+            "files_per_day_source": self.files_per_day_source,
             "files_per_day_sample_count": self.files_per_day_sample_count,
             "intake_window_days": self.intake_window_days,
             "calls_per_file": self.calls_per_file,
@@ -317,6 +323,9 @@ def build_ordinary_night_table(
     intake_window_days: int = DEFAULT_INTAKE_WINDOW_DAYS,
     now: datetime | None = None,
     repo_root: Path | None = None,
+    calls_per_file: float | None = None,
+    files_per_day: float | None = None,
+    wall_clock_per_file_seconds: float | None = None,
 ) -> OrdinaryNightResult:
     """Build the ordinary-night steady-state table.
 
@@ -330,36 +339,75 @@ def build_ordinary_night_table(
             default (the conservative "regime adds nothing yet" state).
         nights_in_wave, total_nights: Wave-cadence inputs for the duty-cycle
             check; ``None`` (default) reports the duty cycle as n/a.
+        calls_per_file: Operator-supplied override for calls/file (issue
+            athenaeum#1095 AC5). ``None`` (default) re-derives it from the
+            spend ledger via :func:`athenaeum.drain_advisor.observed_calls_per_file`,
+            exactly as before this override existed.
+        files_per_day: Operator-supplied override for files/day of ordinary
+            intake (issue athenaeum#1095 AC5). ``None`` (default) re-derives
+            it via :func:`measure_files_per_day` — the trailing-window
+            lower-bound scan of ``raw/`` is skipped entirely when an override
+            is supplied, so ``files_per_day_sample_count`` reports ``0`` in
+            that case (no measurement was taken to sample-count).
+        wall_clock_per_file_seconds: Operator-supplied override for
+            wall-clock/file (issue athenaeum#1095 AC5). ``None`` (default)
+            re-derives it from ``summary_log_records``, exactly as before
+            this override existed.
     """
     resolved_config = config if config is not None else load_config(knowledge_root)
 
-    files_per_day, sample_count = measure_files_per_day(
-        knowledge_root, config=resolved_config, window_days=intake_window_days, now=now
-    )
+    if files_per_day is not None:
+        resolved_files_per_day = files_per_day
+        sample_count = 0
+        files_per_day_source = "operator-supplied"
+    else:
+        resolved_files_per_day, sample_count = measure_files_per_day(
+            knowledge_root, config=resolved_config, window_days=intake_window_days, now=now
+        )
+        files_per_day_source = "measured (trailing window, lower bound)"
 
     ledger = read_ledger(
         resolve_ledger_path(
             resolved_config, cache_dir=cache_dir, wiki_root=knowledge_root / "wiki"
         )
     )
-    calls_per_file = observed_calls_per_file(ledger)
-    calls_source = "ledger" if calls_per_file is not None else "none (no librarian ledger history)"
+    resolved_calls_per_file: float | None
+    if calls_per_file is not None:
+        resolved_calls_per_file = calls_per_file
+        calls_source = "operator-supplied"
+    else:
+        resolved_calls_per_file = observed_calls_per_file(ledger)
+        calls_source = (
+            "ledger"
+            if resolved_calls_per_file is not None
+            else "none (no librarian ledger history)"
+        )
 
-    wall_clock_per_file: float | None = None
-    wall_clock_source = "none (no run-summary log provided)"
-    if summary_log_records:
-        result = entity_phase_wall_clock_per_file(list(summary_log_records))
-        if result is not None:
-            wall_clock_per_file, _n = result
-            wall_clock_source = "run-summary log (entity phase)"
-        else:
-            wall_clock_source = "none (run-summary log provided but no usable entity-phase data)"
+    if wall_clock_per_file_seconds is not None:
+        resolved_wall_clock_per_file: float | None = wall_clock_per_file_seconds
+        wall_clock_source = "operator-supplied"
+    else:
+        resolved_wall_clock_per_file = None
+        wall_clock_source = "none (no run-summary log provided)"
+        if summary_log_records:
+            result = entity_phase_wall_clock_per_file(list(summary_log_records))
+            if result is not None:
+                resolved_wall_clock_per_file, _n = result
+                wall_clock_source = "run-summary log (entity phase)"
+            else:
+                wall_clock_source = (
+                    "none (run-summary log provided but no usable entity-phase data)"
+                )
 
     ordinary_calls_total = (
-        calls_per_file * files_per_day if calls_per_file is not None else None
+        resolved_calls_per_file * resolved_files_per_day
+        if resolved_calls_per_file is not None
+        else None
     )
     ordinary_seconds_total = (
-        wall_clock_per_file * files_per_day if wall_clock_per_file is not None else None
+        resolved_wall_clock_per_file * resolved_files_per_day
+        if resolved_wall_clock_per_file is not None
+        else None
     )
 
     resolved_amortized = amortized if amortized is not None else AmortizedLoadAssumptions()
@@ -386,12 +434,13 @@ def build_ordinary_night_table(
     )
 
     return OrdinaryNightResult(
-        files_per_day=files_per_day,
+        files_per_day=resolved_files_per_day,
+        files_per_day_source=files_per_day_source,
         files_per_day_sample_count=sample_count,
         intake_window_days=intake_window_days,
-        calls_per_file=calls_per_file,
+        calls_per_file=resolved_calls_per_file,
         calls_per_file_source=calls_source,
-        wall_clock_per_file_seconds=wall_clock_per_file,
+        wall_clock_per_file_seconds=resolved_wall_clock_per_file,
         wall_clock_source=wall_clock_source,
         ordinary_calls_total=ordinary_calls_total,
         ordinary_seconds_total=ordinary_seconds_total,
@@ -437,6 +486,13 @@ def render_snapshot_entry(result: OrdinaryNightResult) -> str:
         else "n/a (wave cadence not yet defined)"
     )
 
+    files_per_day_line = (
+        f"- files_per_day (ordinary intake, lower bound over trailing "
+        f"{result.intake_window_days}d, n={result.files_per_day_sample_count}): "
+        f"{result.files_per_day:.3f}"
+        if result.files_per_day_source != "operator-supplied"
+        else f"- files_per_day: {result.files_per_day:.3f} [{result.files_per_day_source}]"
+    )
     lines = [
         f"### Snapshot {result.generated}",
         "",
@@ -444,9 +500,7 @@ def render_snapshot_entry(result: OrdinaryNightResult) -> str:
         "",
         f"**{_VERDICT_SENTENCE[result.verdict]}**",
         "",
-        f"- files_per_day (ordinary intake, lower bound over trailing "
-        f"{result.intake_window_days}d, n={result.files_per_day_sample_count}): "
-        f"{result.files_per_day:.3f}",
+        files_per_day_line,
         f"- calls_per_file: {_n(result.calls_per_file)} [{result.calls_per_file_source}]",
         f"- wall_clock_per_file_seconds: {_n(result.wall_clock_per_file_seconds)} "
         f"[{result.wall_clock_source}]",

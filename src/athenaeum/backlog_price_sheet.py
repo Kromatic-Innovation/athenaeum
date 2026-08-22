@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Backlog price sheet + decision-inflow sensitivity table (issue athenaeum#713, artifact 2).
 
+Reproduce with: ``athenaeum measure backlog-price`` (see :data:`REPRODUCE_COMMAND`
+below; issue athenaeum#1095 AC7 requires the exact invocation live in this
+module's own docstring, not only ``CHANGELOG.md``).
+
 Prices what it costs to drain the raw-intake backlog under the plan the v6
 design actually specifies: apply write-refusal classes and retention packs
 RETROACTIVELY, before compiling (never compile what the model would refuse),
@@ -191,6 +195,7 @@ class PriceSheetResult:
     """Full backlog price sheet: measured backlog + costs + sensitivity table."""
 
     backlog_count: int
+    backlog_count_source: str
     calls_per_file: float | None
     calls_per_file_source: str
     avg_input_tokens_per_file: float
@@ -213,6 +218,7 @@ class PriceSheetResult:
         return {
             "generated": self.generated,
             "backlog_count": self.backlog_count,
+            "backlog_count_source": self.backlog_count_source,
             "calls_per_file": self.calls_per_file,
             "calls_per_file_source": self.calls_per_file_source,
             "avg_input_tokens_per_file": self.avg_input_tokens_per_file,
@@ -243,6 +249,9 @@ def build_price_sheet(
     human_daily_budget: int = DEFAULT_HUMAN_DAILY_BUDGET,
     six_month_days: int = DEFAULT_SIX_MONTH_DAYS,
     repo_root: Path | None = None,
+    backlog_count: int | None = None,
+    calls_per_file: float | None = None,
+    wall_clock_per_file_seconds: float | None = None,
 ) -> PriceSheetResult:
     """Build the backlog price sheet.
 
@@ -262,21 +271,50 @@ def build_price_sheet(
             backlog a write-refusal/retention-pack pre-filter would exclude.
             ``None`` (default) — that classifier does not exist yet in this
             codebase — reports the "with prefilter" column as n/a.
+        backlog_count: Operator-supplied override for the backlog file count
+            (issue athenaeum#1095 AC3(a)). ``None`` (default) re-derives it
+            from :func:`athenaeum.intake.discover_raw_files`, exactly as
+            before this override existed. When supplied, recorded as
+            ``backlog_count_source == "operator-supplied"``.
+        calls_per_file: Operator-supplied override for calls/file (issue
+            athenaeum#1095 AC3(b)). ``None`` (default) re-derives it from the
+            spend ledger via :func:`athenaeum.drain_advisor.observed_calls_per_file`.
+            When supplied, recorded as ``calls_per_file_source ==
+            "operator-supplied"``.
+        wall_clock_per_file_seconds: Operator-supplied override for
+            wall-clock/file (issue athenaeum#1095 AC3(c)). ``None`` (default)
+            re-derives it from ``summary_log_records``, exactly as before
+            this override existed. When supplied, recorded as
+            ``wall_clock_source == "operator-supplied"``.
     """
     from athenaeum.tiers import DEFAULT_WRITE_MODEL
 
     raw_root = knowledge_root / "raw"
     resolved_config = config if config is not None else load_config(knowledge_root)
 
-    backlog = len(discover_raw_files(raw_root, resolved_config))
+    if backlog_count is not None:
+        backlog = backlog_count
+        backlog_source = "operator-supplied"
+    else:
+        backlog = len(discover_raw_files(raw_root, resolved_config))
+        backlog_source = "re-counted, not copied"
 
     ledger = read_ledger(
         resolve_ledger_path(
             resolved_config, cache_dir=cache_dir, wiki_root=knowledge_root / "wiki"
         )
     )
-    calls_per_file = observed_calls_per_file(ledger)
-    calls_source = "ledger" if calls_per_file is not None else "none (no librarian ledger history)"
+    resolved_calls_per_file: float | None
+    if calls_per_file is not None:
+        resolved_calls_per_file = calls_per_file
+        calls_source = "operator-supplied"
+    else:
+        resolved_calls_per_file = observed_calls_per_file(ledger)
+        calls_source = (
+            "ledger"
+            if resolved_calls_per_file is not None
+            else "none (no librarian ledger history)"
+        )
 
     tokens = observed_tokens_per_file(ledger)
     if tokens is not None:
@@ -289,15 +327,21 @@ def build_price_sheet(
         )
         tokens_source = "code-default fallback (no ledger history) — NOT a measured figure"
 
-    wall_clock_per_file: float | None = None
-    wall_clock_source = "none (no run-summary log provided)"
-    if summary_log_records:
-        result = entity_phase_wall_clock_per_file(list(summary_log_records))
-        if result is not None:
-            wall_clock_per_file, _n = result
-            wall_clock_source = "run-summary log (entity phase)"
-        else:
-            wall_clock_source = "none (run-summary log provided but no usable entity-phase data)"
+    if wall_clock_per_file_seconds is not None:
+        resolved_wall_clock_per_file: float | None = wall_clock_per_file_seconds
+        wall_clock_source = "operator-supplied"
+    else:
+        resolved_wall_clock_per_file = None
+        wall_clock_source = "none (no run-summary log provided)"
+        if summary_log_records:
+            result = entity_phase_wall_clock_per_file(list(summary_log_records))
+            if result is not None:
+                resolved_wall_clock_per_file, _n = result
+                wall_clock_source = "run-summary log (entity phase)"
+            else:
+                wall_clock_source = (
+                    "none (run-summary log provided but no usable entity-phase data)"
+                )
 
     write_model = DEFAULT_WRITE_MODEL
 
@@ -310,7 +354,7 @@ def build_price_sheet(
         batch=True,
     )
     wall_clock_without = (
-        wall_clock_per_file * backlog if wall_clock_per_file is not None else None
+        resolved_wall_clock_per_file * backlog if resolved_wall_clock_per_file is not None else None
     )
 
     cost_with: float | None = None
@@ -325,8 +369,8 @@ def build_price_sheet(
             config=resolved_config,
             batch=True,
         )
-        if wall_clock_per_file is not None:
-            wall_clock_with = wall_clock_per_file * remaining
+        if resolved_wall_clock_per_file is not None:
+            wall_clock_with = resolved_wall_clock_per_file * remaining
 
     sensitivity = sensitivity_table(
         backlog,
@@ -337,12 +381,13 @@ def build_price_sheet(
 
     return PriceSheetResult(
         backlog_count=backlog,
-        calls_per_file=calls_per_file,
+        backlog_count_source=backlog_source,
+        calls_per_file=resolved_calls_per_file,
         calls_per_file_source=calls_source,
         avg_input_tokens_per_file=avg_input,
         avg_output_tokens_per_file=avg_output,
         tokens_source=tokens_source,
-        wall_clock_per_file_seconds=wall_clock_per_file,
+        wall_clock_per_file_seconds=resolved_wall_clock_per_file,
         wall_clock_source=wall_clock_source,
         write_model=write_model,
         cost_without_prefilter_usd=cost_without,
@@ -381,7 +426,7 @@ def render_snapshot_entry(result: PriceSheetResult) -> str:
         "",
         f"Reproduce with: `{REPRODUCE_COMMAND}`",
         "",
-        f"- raw_backlog_count: {result.backlog_count} (re-counted, not copied)",
+        f"- raw_backlog_count: {result.backlog_count} ({result.backlog_count_source})",
         f"- calls_per_file: {_or_na(result.calls_per_file)} [{result.calls_per_file_source}]",
         f"- avg_input_tokens_per_file: {result.avg_input_tokens_per_file:.0f} "
         f"[{result.tokens_source}]",
