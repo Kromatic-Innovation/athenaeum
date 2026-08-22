@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shadow-mode complete-linkage measurement (issue athenaeum#713, artifact 1).
 
+Reproduce with: ``athenaeum measure shadow-linkage`` (see
+:data:`REPRODUCE_COMMAND` below; issue athenaeum#1095 AC7 requires the exact
+invocation live in this module's own docstring, not only ``CHANGELOG.md``).
+
 The v6 comparator slice (child of athenaeum#709) is gated on knowing the TRUE
 post-athenaeum#681 candidate/proposal population before it is built — the
 historical "~36 proposals/night" anchor was measured under single-linkage

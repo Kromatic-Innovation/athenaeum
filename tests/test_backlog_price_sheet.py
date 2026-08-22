@@ -182,3 +182,98 @@ class TestWriteSnapshot:
         text = docs_path.read_text(encoding="utf-8")
         assert bps.SECTION_HEADING in text
         assert "raw_backlog_count: 4" in text
+
+
+class TestOperatorSuppliedOverrides:
+    """Issue athenaeum#1095 AC3(a)(b)(c): backlog count, calls/file and
+    wall-clock/file must be explicitly overridable, defaulting to the
+    existing derived path with unchanged provenance when omitted."""
+
+    def test_omitting_overrides_preserves_the_derived_path(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        _write_raw_files(root / "raw", "source-a", 5)
+        result = bps.build_price_sheet(root)
+        assert result.backlog_count == 5
+        assert result.backlog_count_source == "re-counted, not copied"
+        assert result.calls_per_file is None
+        assert "none" in result.calls_per_file_source
+        assert result.wall_clock_per_file_seconds is None
+
+    def test_backlog_count_override_takes_effect(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        _write_raw_files(root / "raw", "source-a", 5)
+        result = bps.build_price_sheet(root, backlog_count=9999)
+        assert result.backlog_count == 9999
+        assert result.backlog_count_source == "operator-supplied"
+        # Sensitivity table and cost are computed against the override, not
+        # the real (5-file) raw tree.
+        rate = result.sensitivity[0].rate_per_100
+        assert result.sensitivity[0].decisions == round(9999 * rate / 100)
+
+    def test_calls_per_file_override_takes_effect(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        _write_raw_files(root / "raw", "source-a", 1)
+        result = bps.build_price_sheet(root, calls_per_file=42.5)
+        assert result.calls_per_file == 42.5
+        assert result.calls_per_file_source == "operator-supplied"
+
+    def test_wall_clock_per_file_seconds_override_takes_effect(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        _write_raw_files(root / "raw", "source-a", 4)
+        result = bps.build_price_sheet(root, wall_clock_per_file_seconds=12.0)
+        assert result.wall_clock_per_file_seconds == 12.0
+        assert result.wall_clock_source == "operator-supplied"
+        assert result.wall_clock_without_prefilter_seconds == 48.0  # 12.0 * 4 files
+
+    def test_override_provenance_visible_in_json_dict(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        _write_raw_files(root / "raw", "source-a", 2)
+        result = bps.build_price_sheet(
+            root,
+            backlog_count=10,
+            calls_per_file=1.0,
+            wall_clock_per_file_seconds=2.0,
+        )
+        payload = result.to_dict()
+        assert payload["backlog_count_source"] == "operator-supplied"
+        assert payload["calls_per_file_source"] == "operator-supplied"
+        assert payload["wall_clock_source"] == "operator-supplied"
+
+    def test_override_provenance_visible_in_rendered_snapshot(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        _write_raw_files(root / "raw", "source-a", 2)
+        result = bps.build_price_sheet(root, backlog_count=10)
+        text = bps.render_snapshot_entry(result)
+        assert "raw_backlog_count: 10 (operator-supplied)" in text
+
+
+class TestPriceTableInvariant:
+    """Issue athenaeum#1095 AC3(d): pins that the price sheet prices through
+    the SAME single active per-MTok rate table athenaeum.spend's reprice
+    path reads (athenaeum.models._ACTIVE_MODEL_RATES_USD_PER_MTOK, via
+    athenaeum.models._rates_for_model / configure_model_rates) — never a
+    second, independently-maintained price list. Perturbing the active table
+    must move the price sheet's dollar figure proportionally; a hardcoded
+    second price list would leave cost_without_prefilter_usd unchanged
+    across the two configured rates below, failing the proportionality
+    assertion. tests/conftest.py's autouse `_reset_model_rates` fixture
+    restores the default table after this test.
+    """
+
+    def test_price_sheet_cost_moves_with_the_active_rate_table(self, tmp_path: Path) -> None:
+        from athenaeum.models import configure_model_rates
+
+        root = tmp_path / "knowledge"
+        _write_raw_files(root / "raw", "source-a", 10)
+        baseline = bps.build_price_sheet(root)
+
+        configure_model_rates({baseline.write_model: (2.0, 2.0)})
+        at_2 = bps.build_price_sheet(root)
+
+        configure_model_rates({baseline.write_model: (4.0, 4.0)})
+        at_4 = bps.build_price_sheet(root)
+
+        assert at_2.cost_without_prefilter_usd != baseline.cost_without_prefilter_usd
+        assert at_4.cost_without_prefilter_usd == pytest.approx(
+            at_2.cost_without_prefilter_usd * 2, rel=1e-9
+        )

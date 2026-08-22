@@ -116,6 +116,9 @@ def cmd_backlog_price(args: argparse.Namespace) -> int:
         prefilter_excluded_fraction=args.prefilter_excluded_fraction,
         human_daily_budget=args.human_daily_budget,
         six_month_days=args.six_month_days,
+        backlog_count=args.backlog_count,
+        calls_per_file=args.calls_per_file,
+        wall_clock_per_file_seconds=args.wall_clock_per_file_seconds,
     )
 
     docs_path = args.docs_path.expanduser().resolve()
@@ -187,6 +190,9 @@ def cmd_ordinary_night(args: argparse.Namespace) -> int:
         nights_in_wave=args.nights_in_wave,
         total_nights=args.total_nights,
         intake_window_days=args.intake_window_days,
+        calls_per_file=args.calls_per_file,
+        files_per_day=args.files_per_day,
+        wall_clock_per_file_seconds=args.wall_clock_per_file_seconds,
     )
 
     docs_path = args.docs_path.expanduser().resolve()
@@ -281,6 +287,32 @@ def add_measure_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Day count marking the 6-month horizon a sensitivity row can "
         "breach (default: 182).",
     )
+    price_p.add_argument(
+        "--backlog-count",
+        type=int,
+        default=None,
+        help="Operator-supplied override for the backlog file count (issue "
+        "athenaeum#1095 AC3(a)). Omit to re-derive it from the live raw/ tree "
+        "(default). When supplied, the snapshot records "
+        "backlog_count_source=operator-supplied.",
+    )
+    price_p.add_argument(
+        "--calls-per-file",
+        type=float,
+        default=None,
+        help="Operator-supplied override for calls/file (issue athenaeum#1095 "
+        "AC3(b)). Omit to re-derive it from the spend ledger (default). When "
+        "supplied, the snapshot records calls_per_file_source=operator-supplied.",
+    )
+    price_p.add_argument(
+        "--wall-clock-per-file-seconds",
+        type=float,
+        default=None,
+        help="Operator-supplied override for wall-clock/file (issue "
+        "athenaeum#1095 AC3(c)). Omit to re-derive it from --summary-log "
+        "(default). When supplied, the snapshot records "
+        "wall_clock_source=operator-supplied.",
+    )
     price_p.set_defaults(func=cmd_backlog_price)
 
     night_p = m_sub.add_parser(
@@ -323,6 +355,32 @@ def add_measure_subparser(subparsers: argparse._SubParsersAction) -> None:
     night_p.add_argument("--audit-sampling-seconds-per-night", type=float, default=0.0)
     night_p.add_argument("--nights-in-wave", type=int, default=None)
     night_p.add_argument("--total-nights", type=int, default=None)
+    night_p.add_argument(
+        "--calls-per-file",
+        type=float,
+        default=None,
+        help="Operator-supplied override for calls/file (issue athenaeum#1095 "
+        "AC5). Omit to re-derive it from the spend ledger (default). When "
+        "supplied, the snapshot records calls_per_file_source=operator-supplied.",
+    )
+    night_p.add_argument(
+        "--files-per-day",
+        type=float,
+        default=None,
+        help="Operator-supplied override for files/day of ordinary intake "
+        "(issue athenaeum#1095 AC5). Omit to re-derive it from the trailing "
+        "--intake-window-days scan of raw/ (default). When supplied, the "
+        "snapshot records files_per_day_source=operator-supplied.",
+    )
+    night_p.add_argument(
+        "--wall-clock-per-file-seconds",
+        type=float,
+        default=None,
+        help="Operator-supplied override for wall-clock/file (issue "
+        "athenaeum#1095 AC5). Omit to re-derive it from --summary-log "
+        "(default). When supplied, the snapshot records "
+        "wall_clock_source=operator-supplied.",
+    )
     night_p.set_defaults(func=cmd_ordinary_night)
 
 
