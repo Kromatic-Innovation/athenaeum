@@ -117,7 +117,7 @@ from athenaeum.config import (
     resolve_shape_rules_max_records_per_run,
 )
 from athenaeum.corrections import compute_correction_id
-from athenaeum.intake import discover_raw_files
+from athenaeum.intake import discover_raw_files, discover_shape_rule_extra_intake_files
 from athenaeum.models import (
     MEMORY_BUCKETS,
     RawFile,
@@ -1304,12 +1304,24 @@ def run_shape_rule_phase(
     deadline_check: Callable[[], bool] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Load rules, evaluate every candidate raw file
-    `intake.discover_raw_files` returns against them (first-match-wins), and
-    for each match either EMIT a correction batch (live mode) or record the
-    disposition without writing (observe mode, or an actual `fallthrough`
-    rule) — then append one ledger line per `(rule, mode)` pairing with its
-    denominator, tagged `rule@version`.
+    """Load rules, evaluate every candidate raw file from
+    `intake.discover_raw_files` PLUS `intake.discover_shape_rule_extra_intake_files`
+    against them (first-match-wins), and for each match either EMIT a
+    correction batch (live mode) or record the disposition without writing
+    (observe mode, or an actual `fallthrough` rule) — then append one
+    ledger line per `(rule, mode)` pairing with its denominator, tagged
+    `rule@version`.
+
+    Issue athenaeum#1096: `discover_raw_files` deliberately never descends into a
+    source directory that is itself a configured `recall.extra_intake_roots`
+    entry (default `raw/auto-memory`) -- that exemption is correct for
+    INTAKE (see that function's docstring) but left the shape-rule phase
+    unable to see a tree like `raw/auto-memory/hestia-lanes/`, so a
+    `preserve` rule targeting it could never match. This phase, and only
+    this phase, also sources candidates from
+    :func:`intake.discover_shape_rule_extra_intake_files` -- files one level
+    below an extra-intake-root source directory -- so shape rules can
+    evaluate that tree while intake discovery stays exactly as it was.
 
     A record's disposition tally distinguishes `emit`/`fallthrough` (a
     LIVE-mode rule that actually acted) from `observed-emit`/
@@ -1343,7 +1355,16 @@ def run_shape_rule_phase(
         return summary
 
     max_records = resolve_shape_rules_max_records_per_run(config)
-    candidates = discover_raw_files(raw_root, config)
+    # Issue athenaeum#1096: the extra-intake-root subtree (default
+    # `raw/auto-memory`) is appended AFTER ordinary intake candidates, not
+    # merged in place -- this phase's own first-match-wins / max-records
+    # ordering is otherwise unspecified and untested; appending is the
+    # minimal change that makes the extra-intake tree reachable at all
+    # without disturbing the existing candidate order for every other
+    # source.
+    candidates = discover_raw_files(raw_root, config) + discover_shape_rule_extra_intake_files(
+        raw_root, config
+    )
 
     # Per-(rule, mode) tallies -- keyed so an observe-mode pass and a
     # live-mode pass for the SAME rule (an operator edited it mid-run

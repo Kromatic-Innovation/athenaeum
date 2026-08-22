@@ -233,6 +233,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Shape-rule evaluation now reaches one level below a configured
+  `recall.extra_intake_roots` entry, so a `preserve` rule targeting
+  hestia's lane logs can finally match (athenaeum#1096, closes the second
+  of the two gaps athenaeum#974 was titled to close).** `run_shape_rule_phase`
+  sourced candidates only from `intake.discover_raw_files`, which
+  deliberately never descends into a source directory that is itself an
+  extra-intake root (default `raw/auto-memory`) — correct for intake, but
+  it meant a rule targeting `raw/auto-memory/hestia-lanes/` loaded clean
+  and matched zero candidates forever. Design-note option 1: a new
+  `intake.discover_shape_rule_extra_intake_files` (one level below an
+  extra-intake-root source directory, `RawFile.source` still the
+  top-level source name) feeds the shape-rule phase ONLY — intake
+  discovery is untouched. Also reconciles `_cmd_lifecycle.py`'s
+  `--with-rules` help text, which pointed operators at the aggregate
+  `wiki/_shape_rules_applied.jsonl` (silent when a rule matches nothing —
+  precisely the prior bug's symptom) instead of the per-record
+  `wiki/_shape_rule_dispositions.jsonl` (athenaeum#975) that also logs `no-match`.
 - **`storage lint-pii` now scans `raw/`, reported as a separate,
   non-gating surface (athenaeum#1049, filed from the athenaeum#949
   close-out).** `_cmd_storage_lint_pii` resolved its scan root as
