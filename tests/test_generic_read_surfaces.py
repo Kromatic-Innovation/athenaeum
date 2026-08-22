@@ -638,27 +638,19 @@ class TestCliRecallWithPii:
         assert scans == 1
 
 
-class TestCmdPeopleIsUntouched:
-    """`athenaeum query people` is deliberately NOT changed (athenaeum#886 out-of-scope).
-
-    Confirmed explicitly rather than left ambiguous as to whether it was
-    forgotten: it is a separate multi-flag LISTING command over wiki
-    frontmatter, not a uid read, and it grows no excluded-field flag here.
-    """
-
-    def test_people_command_has_no_excluded_field_flags(self) -> None:
-        flags = _subcommand_flags("people")
-
-        assert not flags & {"--include-excluded", "--include-contact", "--with-pii"}
-
+class TestExcludedFieldFlagsAreExactlyTheIntendedCommands:
     def test_the_commands_that_DO_gain_flags_are_exactly_the_intended_two(
         self,
     ) -> None:
-        """The complement of the assertion above — what did change, and only that.
+        """What gained excluded-field flags at athenaeum#886, and only that.
 
         A third command, ``person``, also gained excluded-field flags at the
         same time as ``entity`` — it was removed in athenaeum#888 once every
-        known consumer had migrated to ``entity``, so only two remain here.
+        known consumer had migrated to ``entity``. A fourth command,
+        ``people``, was deliberately NOT changed at athenaeum#886 (it is a
+        separate multi-flag LISTING command over wiki frontmatter, not a uid
+        read) and was later removed outright, unrelated to excluded-field
+        flags, in athenaeum#1079. Only two remain here.
         """
         assert "--with-pii" in _subcommand_flags("recall")
         assert "--usage-class" in _subcommand_flags("recall")
