@@ -526,6 +526,91 @@ def discover_raw_files(
     return files
 
 
+def discover_shape_rule_extra_intake_files(
+    raw_root: Path, config: dict[str, Any] | None = None
+) -> list[RawFile]:
+    """Find raw files one level below each ``recall.extra_intake_roots``
+    entry (default ``raw/auto-memory``), for the SHAPE-RULE PHASE only
+    (issue athenaeum#1096).
+
+    :func:`discover_raw_files` deliberately never descends into a source
+    directory that is itself a configured extra-intake root -- see its
+    docstring's "one exception" paragraph. That tree already has its own
+    dedicated INTAKE discovery function (:func:`discover_auto_memory_files`)
+    and its own frontmatter schema, and letting ordinary intake discovery
+    also walk it would double-discover every auto-memory file as if it were
+    an ordinary entity raw file, through the wrong schema and the wrong
+    tier ladder. That reasoning is specific to *intake*.
+
+    `run_shape_rule_phase` (:mod:`athenaeum.rules`) is not intake -- it
+    classifies candidates against operator-authored shape rules (a
+    `match:` predicate on `source`/`format`/regex) and, for a `preserve`
+    rule, records a disposition without compiling anything into wiki
+    prose. Nothing about that phase requires or benefits from staying
+    blind to a tree like `raw/auto-memory/hestia-lanes/` -- where hestia
+    writes lane-log records one level below the extra-intake root
+    (`writeLaneRecord`, hestia's `src/lane-record.ts`) -- so a `preserve`
+    rule targeting that tree can never match today, only because its
+    candidates never reach shape-rule evaluation at all.
+
+    Mirrors :func:`discover_raw_files`'s own one-level-below subdir walk --
+    same candidate-filtering logic, via the shared
+    :func:`_discover_raw_files_in_dir` helper, same bound of exactly ONE
+    level, never deeper -- but INVERTS its exemption: this function visits
+    ONLY a source directory that IS a configured extra-intake root, and
+    only that source's direct subdirectories. It does not re-walk the
+    extra-intake root's own top level (:func:`discover_raw_files` already
+    scans it, and finds nothing there by construction -- see that
+    function's docstring), and it does not visit any non-extra-intake
+    source (already covered by :func:`discover_raw_files` itself).
+
+    A nested file's ``RawFile.source`` is still the TOP-LEVEL source
+    directory name (e.g. ``auto-memory``, never ``auto-memory/<scope>``),
+    matching :func:`discover_raw_files`'s own convention, so a shape rule's
+    `match.source` keeps meaning "which `raw/<source>/` tree" here too.
+
+    Intentionally a SEPARATE function, not a parameter added to
+    :func:`discover_raw_files`, and not called from any intake call site --
+    the only caller is :func:`athenaeum.rules.run_shape_rule_phase`, so
+    ordinary intake discovery (compile, drain, status, merge, ...) is
+    provably unchanged by this function's existence.
+    """
+    files: list[RawFile] = []
+    if not raw_root.exists():
+        return files
+
+    non_intake = resolve_non_intake_sources(config)
+    raw_file_max_bytes = resolve_raw_file_max_bytes(config)
+    exempt_refs = load_exempt(raw_root.parent)
+    extra_intake_roots = {
+        p.resolve() for p in resolve_extra_intake_roots(raw_root.parent, config)
+    }
+
+    for source_dir in sorted(raw_root.iterdir()):
+        if not source_dir.is_dir():
+            continue
+        source = source_dir.name
+        if source in non_intake:
+            continue
+        if source == "answers":
+            continue
+        if source_dir.resolve() not in extra_intake_roots:
+            continue
+        for entry in sorted(os.scandir(source_dir), key=lambda e: e.name):
+            if not entry.is_dir():
+                continue
+            subdir = Path(entry.path)
+            files.extend(
+                _discover_raw_files_in_dir(
+                    subdir,
+                    source=source,
+                    exempt_refs=exempt_refs,
+                    raw_file_max_bytes=raw_file_max_bytes,
+                )
+            )
+    return files
+
+
 def discover_raw_backlog_bytes(
     raw_root: Path, config: dict[str, Any] | None = None
 ) -> int:
