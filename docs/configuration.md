@@ -978,7 +978,15 @@ index.
 - `athenaeum push-metrics baseline` computes precision over a window and
   writes a dated snapshot into `docs/memory-model-measurements.md`.
   `athenaeum push-metrics coverage-audit` samples sessions into a worksheet
-  file a human reviewer marks for the coverage-floor miss rate.
+  file — but, because push records retain only a query HASH and never the
+  raw query text, that worksheet cannot support a per-candidate relevance
+  marking or a measured coverage-floor miss rate. It instead reports the
+  structural facts hash-only records DO support (candidate-pool size,
+  tier/scope concentration, how much a tier/scope filter removes from each
+  session's window-mate pool) plus the policy-set bounds those facts imply,
+  opening with a plain-language statement of what it cannot establish and
+  why (athenaeum#1036, the ruling that withdrew per-candidate marking from
+  this command's scope).
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
