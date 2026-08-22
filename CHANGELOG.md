@@ -249,7 +249,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--with-rules` help text, which pointed operators at the aggregate
   `wiki/_shape_rules_applied.jsonl` (silent when a rule matches nothing —
   precisely the prior bug's symptom) instead of the per-record
-  `wiki/_shape_rule_dispositions.jsonl` (#975) that also logs `no-match`.
+  `wiki/_shape_rule_dispositions.jsonl` (athenaeum#975) that also logs `no-match`.
 - **`storage lint-pii` now scans `raw/`, reported as a separate,
   non-gating surface (athenaeum#1049, filed from the athenaeum#949
   close-out).** `_cmd_storage_lint_pii` resolved its scan root as

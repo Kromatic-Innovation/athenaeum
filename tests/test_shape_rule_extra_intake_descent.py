@@ -11,7 +11,7 @@ lane logs could load cleanly and still match zero candidates forever.
 
 Design-note option 1 (the issue's stated preference): let shape-rule
 evaluation reach one level below an `extra_intake_roots` entry, while
-leaving *intake* discovery exactly as #974 left it. This file proves each
+leaving *intake* discovery exactly as athenaeum#974 left it. This file proves each
 acceptance criterion:
 
 - AC1: a file at `raw/auto-memory/<scope>/<name>.md` is evaluated by the
@@ -141,7 +141,7 @@ class TestExtraIntakeCandidateDiscovery:
 
 class TestIntakeDiscoveryUnchanged:
     """AC2: `discover_raw_files` over the same extra-intake-root tree is
-    byte-for-byte what #974 left it — this issue adds a SEPARATE candidate
+    byte-for-byte what athenaeum#974 left it — this issue adds a SEPARATE candidate
     source for shape rules, it does not touch intake discovery itself."""
 
     def test_discover_raw_files_still_finds_nothing_under_extra_intake_root(
@@ -184,7 +184,7 @@ class TestShapeRulePhaseReachesAutoMemory:
     ) -> None:
         # Documents the bug this issue fixes: a rule targeting the
         # auto-memory tree, run against ONLY `discover_raw_files`'
-        # candidates (i.e. what the phase saw before #1096), never sees the
+        # candidates (i.e. what the phase saw before athenaeum#1096), never sees the
         # file at all.
         raw_root = tmp_path / "raw"
         _write_raw_jsonl(
