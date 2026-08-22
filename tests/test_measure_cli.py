@@ -144,6 +144,42 @@ class TestBacklogPriceCli:
         assert rc == 1
         assert "error" in err
 
+    def test_operator_supplied_overrides_flow_through(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1095 AC3: --backlog-count/--calls-per-file/
+        --wall-clock-per-file-seconds are threaded from the CLI into
+        build_price_sheet, and the snapshot records operator-supplied
+        provenance for each."""
+        knowledge_root = tmp_path / "knowledge"
+        (knowledge_root / "raw").mkdir(parents=True)
+        docs_path = tmp_path / "measurements.md"
+        rc, out = _run(
+            [
+                "measure",
+                "backlog-price",
+                "--path",
+                str(knowledge_root),
+                "--docs-path",
+                str(docs_path),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--backlog-count",
+                "500",
+                "--calls-per-file",
+                "3.5",
+                "--wall-clock-per-file-seconds",
+                "1.5",
+                "--json",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(out)
+        assert payload["backlog_count"] == 500
+        assert payload["backlog_count_source"] == "operator-supplied"
+        assert payload["calls_per_file"] == 3.5
+        assert payload["calls_per_file_source"] == "operator-supplied"
+        assert payload["wall_clock_per_file_seconds"] == 1.5
+        assert payload["wall_clock_source"] == "operator-supplied"
+
 
 class TestOrdinaryNightCli:
     def test_writes_snapshot_even_when_indeterminate(self, tmp_path: Path) -> None:
@@ -192,3 +228,39 @@ class TestOrdinaryNightCli:
         assert rc == 0
         payload = json.loads(out)
         assert payload["amortized"]["comparator_pairs_per_night"] == 10.0
+
+    def test_operator_supplied_overrides_flow_through(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1095 AC5: --calls-per-file/--files-per-day/
+        --wall-clock-per-file-seconds are threaded from the CLI into
+        build_ordinary_night_table, and the snapshot records
+        operator-supplied provenance for each."""
+        knowledge_root = tmp_path / "knowledge"
+        (knowledge_root / "raw").mkdir(parents=True)
+        docs_path = tmp_path / "measurements.md"
+        rc, out = _run(
+            [
+                "measure",
+                "ordinary-night",
+                "--path",
+                str(knowledge_root),
+                "--docs-path",
+                str(docs_path),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--calls-per-file",
+                "2.0",
+                "--files-per-day",
+                "5.0",
+                "--wall-clock-per-file-seconds",
+                "1.0",
+                "--json",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(out)
+        assert payload["calls_per_file"] == 2.0
+        assert payload["calls_per_file_source"] == "operator-supplied"
+        assert payload["files_per_day"] == 5.0
+        assert payload["files_per_day_source"] == "operator-supplied"
+        assert payload["wall_clock_per_file_seconds"] == 1.0
+        assert payload["wall_clock_source"] == "operator-supplied"

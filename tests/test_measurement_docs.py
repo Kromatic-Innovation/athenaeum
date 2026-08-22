@@ -7,6 +7,10 @@ from pathlib import Path
 
 from athenaeum.measurement_docs import DOCS_HEADER, append_measurement_section
 
+_REPO_DOCS_PATH = (
+    Path(__file__).resolve().parents[1] / "docs" / "memory-model-measurements.md"
+)
+
 
 class TestAppendMeasurementSection:
     def test_creates_file_with_header_when_absent(self, tmp_path: Path) -> None:
@@ -90,3 +94,59 @@ class TestAppendMeasurementSection:
         assert text.count("## Artifact A") == 1
         assert text.count("## Artifact B") == 1
         assert "- y: 9" in text
+
+
+class TestGeneratorWriterReplacesOnlyItsOwnSection:
+    """Issue athenaeum#1095 AC6: a real generator's ``write_snapshot`` (not
+    just the shared ``append_measurement_section`` primitive exercised
+    above) must replace/update only its OWN section on a repeat run —
+    never a sibling section, and never by duplicating its own heading."""
+
+    def test_backlog_price_sheet_write_snapshot_preserves_sibling_section(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum import backlog_price_sheet as bps
+
+        docs_path = tmp_path / "measurements.md"
+
+        # Seed the doc with an unrelated sibling section FIRST.
+        append_measurement_section(
+            docs_path,
+            section_heading="## Some Other Artifact",
+            entry_markdown="### Snapshot 2026-01-01\n\n- z: 1\n",
+        )
+        before = docs_path.read_text(encoding="utf-8")
+
+        raw_dir = tmp_path / "knowledge" / "raw" / "s"
+        raw_dir.mkdir(parents=True)
+        (raw_dir / "20260801T000000Z-aaaaaaaa.md").write_text("x")
+
+        # Run the generator's OWN writer twice.
+        result1 = bps.build_price_sheet(tmp_path / "knowledge")
+        bps.write_snapshot(result1, docs_path=docs_path)
+        result2 = bps.build_price_sheet(tmp_path / "knowledge")
+        bps.write_snapshot(result2, docs_path=docs_path)
+
+        after = docs_path.read_text(encoding="utf-8")
+
+        # The sibling section (and everything before it) is byte-identical —
+        # both generator runs only ever append after it / insert inside their
+        # own later section.
+        assert after.startswith(before)
+        assert after.count("## Some Other Artifact") == 1
+        assert after.count(bps.SECTION_HEADING) == 1
+
+
+class TestReproducingSectionInvocations:
+    """Issue athenaeum#1095 AC7(c): docs/memory-model-measurements.md's own
+    'Reproducing the measurement pack' section must list all three exact
+    invocations, pinned against each module's own REPRODUCE_COMMAND constant
+    so the doc cannot silently drift out of sync with the CLI."""
+
+    def test_docs_lists_all_three_exact_invocations(self) -> None:
+        from athenaeum import backlog_price_sheet, ordinary_night_table, shadow_linkage
+
+        text = _REPO_DOCS_PATH.read_text(encoding="utf-8")
+        assert shadow_linkage.REPRODUCE_COMMAND in text
+        assert backlog_price_sheet.REPRODUCE_COMMAND in text
+        assert ordinary_night_table.REPRODUCE_COMMAND in text
