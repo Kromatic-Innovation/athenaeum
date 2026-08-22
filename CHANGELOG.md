@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`athenaeum people` CLI subcommand (athenaeum#1079).** Deprecated in
+  athenaeum#966 in favour of the generalized `athenaeum enumerate --type
+  person --where ...` primitive (athenaeum#964/#965); removed now per an
+  operator ruling that the deprecation-window constraint did not apply
+  (every caller is this workspace's own operator/agent sessions, and
+  releases are cut on demand). `--top-touch N` and `--format table|tsv`
+  are dropped without replacement, per `docs/recall-architecture.md`'s
+  capability-parity table — every other surface has a direct `enumerate`
+  equivalent. The parser registration, `cmd_people`, and
+  `PEOPLE_SURFACE_DEPRECATION` are removed from `src/athenaeum/_cmd_query.py`;
+  the tests exercising the removed surface (`tests/test_people_deprecation.py`
+  and the `people`-specific tests in `tests/test_cli.py` /
+  `tests/test_generic_read_surfaces.py`) are removed rather than left
+  asserting against nothing — the replacing `enumerate --type person`
+  coverage in `tests/test_enumeration.py` / `tests/test_cmd_enumerate.py`
+  was already in place.
+
 ### Added
 
 - **`athenaeum measure backlog-price`/`ordinary-night` operator-supplied

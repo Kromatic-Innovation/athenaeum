@@ -450,8 +450,13 @@ with `recall(with_pii=True)` or `read_entity` by the returned `uid`. What
 these two specific field names (as predicate or output), matching the flag
 CONTRACT `recall` uses, not its join mechanism.
 
-**Capability parity with `athenaeum people`.** This issue does not
-deprecate or change `athenaeum people` (that is athenaeum#966). Per surface:
+**Capability parity with `athenaeum people`.** `athenaeum people` was
+deprecated by athenaeum#966 in favour of the generalized primitive below and
+has since been REMOVED (athenaeum#1079) now that every reproducible surface
+had a landed `enumerate` equivalent — same disposition athenaeum#888 applied
+to the athenaeum#887 `person` parity precedent. The table below is kept as a
+historical record of the mapping; per surface, as `athenaeum people` stood
+before removal:
 
 | `athenaeum people` surface | Generalized `enumerate` expression | Notes |
 |---|---|---|
@@ -461,9 +466,9 @@ deprecate or change `athenaeum people` (that is athenaeum#966). Per surface:
 | `--title-regex PATTERN` (repeatable, AND) | `--where current_title,linkedin_position_at_connect:regex:PATTERN` (repeatable) | Reproduced exactly. |
 | `--company-regex PATTERN` (repeatable, AND) | `--where current_company,linkedin_company_at_connect:regex:PATTERN` (repeatable) | Reproduced exactly. |
 | Default order: `warm_score` desc | `--sort warm_score` (descending is `enumerate`'s own default) | Reproduced exactly, with ZERO special-casing — `warm_score` is itself a plain stored frontmatter field (`cmd_people` reads it with a bare `meta.get("warm_score")`); `enumerate`'s generic sort mechanism handles it identically to any other field. This is the intended generalization, not a coincidence. |
-| `--top-touch N` (switches order to `meeting_count_24mo*3 + sent_count_24mo`, top N) | **Dropped.** | A genuinely COMPUTED composite with no single backing frontmatter field — the exact shape AC amendment 3 names as out of scope ("computed orderings ... are out of scope here"). A caller wanting this still uses `athenaeum people --top-touch`. |
+| `--top-touch N` (switches order to `meeting_count_24mo*3 + sent_count_24mo`, top N) | **Dropped, without replacement (athenaeum#1079).** | A genuinely COMPUTED composite with no single backing frontmatter field — the exact shape AC amendment 3 names as out of scope ("computed orderings ... are out of scope here"). The athenaeum#1079 caller search found no in-repo caller depending on it. |
 | `--limit N` (`0` = unlimited) | `--limit N` (`0` = unlimited) | Reproduced exactly, same semantics. |
-| `--format table\|tsv` | **Dropped.** `enumerate` prints one JSON document. | Presentation-layer concern outside a generalized primitive's scope; JSON is the strictly more general shape a caller can render as either table or TSV itself. |
+| `--format table\|tsv` | **Dropped, without replacement (athenaeum#1079).** `enumerate` prints one JSON document. | Presentation-layer concern outside a generalized primitive's scope; JSON is the strictly more general shape a caller can render as either table or TSV itself. |
 
 ## Load-bearing invariants
 

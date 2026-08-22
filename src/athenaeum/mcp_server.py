@@ -1630,9 +1630,10 @@ def create_server(
         discover this deployment's entity classes and their fields — this
         deployment's classes today: {_entity_classes_str}.
 
-        Does NOT deprecate or change `athenaeum people` — see
-        docs/recall-architecture.md's capability-parity table for the
-        generalized expression that reproduces each of its surfaces.
+        `athenaeum people` (deprecated by athenaeum#966) has been REMOVED
+        (athenaeum#1079) now that this generalized primitive covers every
+        reproducible surface — see docs/recall-architecture.md's
+        capability-parity table for the historical per-flag mapping.
 
         Args:
             entity_type: The declared entity class to enumerate (a page's
