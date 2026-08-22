@@ -379,6 +379,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching slices 1 and 2's own precedent (athenaeum#1022, athenaeum#1023)
   of deferring the bump to the slice that actually changes runtime
   behavior.
+- **Sensitivity routing wired into the librarian raw sweep (athenaeum#1025,
+  slice 4/4 — the FINAL slice — of athenaeum#949's design note).**
+  `librarian.process_one` now calls slice 2's `route_sensitive_values()`
+  first thing, before Tier 0's passthrough write and before Tier 1/2/3 read
+  `raw.content` at all — the ONE dispatch point every tier passes through
+  (design note §0/§4), so this single hook protects all four tiers,
+  including both LLM exposures (Tier 2's classify prompt, Tier 3's
+  `raw.content[:2000]` fallback observation). Scoped to the raw file's body
+  only, spliced back onto the untouched frontmatter preamble, so a routed
+  substitution can never corrupt frontmatter. Skipped under `--dry-run`,
+  matching every other side-effecting Tier-0 step in `process_one`
+  (`tier0_passthrough`/`tier0_handle_upsert`/`tier0_bounce_mark` all take a
+  `dry_run` flag and avoid writes) — a vault write is itself a disk write
+  this preview mode must not make. **This is the first slice with an
+  actual runtime behavior change**, gated entirely behind
+  `sensitivity.routing.enabled` (dark by default, athenaeum#1022): with
+  routing unset or off, `process_one`'s output is byte-for-byte unchanged
+  from pre-athenaeum#949 behavior. `SensitivityRoutingError` (slice 2's
+  fail-closed exception) propagates out of `process_one` uncaught — the
+  entity-tier sweep loop's existing generic exception handler already
+  leaves the raw file untouched on disk and writes no wiki page for it, so
+  this slice changes no exception-handling code, only what can raise.
+  Idempotent by construction: a re-swept raw file (the sweep runs nightly
+  over append-only `raw/`) mints the identical deterministic vault record
+  id and overwrites it byte-identically rather than duplicating it (slice
+  2's AC11 guarantee, exercised here at the `process_one` integration
+  level too). New `tests/test_librarian_sensitivity_routing.py` covers the
+  Tier 0 passthrough pointer-substitution path (frontmatter intact), the
+  Tier 2/3 path (asserting the raw value never appears in the mocked LLM
+  call's own request payload, not merely the resulting wiki page), the
+  fail-closed propagation path, the routing-disabled regression, and
+  re-sweep idempotency. See `docs/sensitivity-value-routing.md` for the
+  full design and `docs/configuration.md` → "Sensitivity routing" for the
+  config surface.
 - **Dimension registry + kernel dimensions (athenaeum#714).** Root of the
   memory-model v6 dimension chain (child of epic athenaeum#709; athenaeum#715,
   athenaeum#716, athenaeum#719 all depend on this). New `src/athenaeum/dimensions.py`:
