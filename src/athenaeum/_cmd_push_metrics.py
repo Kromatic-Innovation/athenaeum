@@ -14,9 +14,11 @@ Two subcommands over :mod:`athenaeum.push_metrics`:
                        persist — a prior version wrote a placeholder here
                        unconditionally).
 - ``coverage-audit``  sample N sessions' push records and emit a FILE
-                       worksheet a human reviewer marks relevant-but-missed
-                       on; the worksheet's miss rate (once reviewed) is the
-                       coverage-floor baseline.
+                       worksheet of the structural facts derivable from
+                       hash-only records (candidate-pool size, tier/scope
+                       concentration, window-mate filter removal, policy-set
+                       bounds) — never a per-candidate relevance marking or a
+                       measured miss rate (issue athenaeum#1036).
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` —
@@ -139,8 +141,11 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
             f"{output_path}\n"
             f"excluded_sessions: {excluded_sessions_str}\n"
             f"excluded_push_records: {worksheet['excluded_push_records']}\n"
-            "Mark each candidate's reviewer_verdict, then compute the "
-            "coverage-floor miss rate from the completed worksheet."
+            "This worksheet reports structural facts only (candidate-pool "
+            "size, tier/scope concentration, window-mate filter removal, "
+            "policy-set bounds) — see the worksheet's own 'limitation' "
+            "field for why a measured coverage miss rate is not "
+            "recoverable from hash-only push records."
         )
     return 0
 
@@ -225,8 +230,11 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
 
     coverage_p = p_sub.add_parser(
         "coverage-audit",
-        help="Sample N sessions' push records into a reviewer worksheet "
-        "(pushed set + candidate misses) for the coverage-floor baseline.",
+        help="Sample N sessions' push records into a worksheet of the "
+        "structural facts hash-only records support (candidate-pool size, "
+        "tier/scope concentration, filter removal, policy-set bounds) — "
+        "never a per-candidate marking or a measured miss rate "
+        "(athenaeum#1036).",
     )
     _add_common(coverage_p)
     coverage_p.add_argument(
