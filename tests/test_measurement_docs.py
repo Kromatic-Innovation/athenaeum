@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 from athenaeum.measurement_docs import DOCS_HEADER, append_measurement_section
@@ -137,11 +138,57 @@ class TestGeneratorWriterReplacesOnlyItsOwnSection:
         assert after.count(bps.SECTION_HEADING) == 1
 
 
+def _find_subparsers_action(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
+    """Return *parser*'s own ``_SubParsersAction``, or raise if it has none.
+
+    Walking ``parser._actions`` (rather than the public-but-narrower
+    ``add_subparsers()`` return value, which a caller several frames away
+    does not have) is the standard way to recover a previously-registered
+    subparsers action from an already-built ``ArgumentParser`` — used below
+    to reach the REAL, currently-registered subcommand names instead of a
+    second hand-copied literal.
+    """
+    for action in parser._actions:  # argparse has no public accessor for this
+        if isinstance(action, argparse._SubParsersAction):
+            return action
+    raise AssertionError(f"no subparsers action found on {parser.prog!r}")
+
+
 class TestReproducingSectionInvocations:
     """Issue athenaeum#1095 AC7(c): docs/memory-model-measurements.md's own
     'Reproducing the measurement pack' section must list all three exact
     invocations, pinned against each module's own REPRODUCE_COMMAND constant
-    so the doc cannot silently drift out of sync with the CLI."""
+    so the doc cannot silently drift out of sync with the CLI.
+
+    Quine finding (athenaeum#1095 follow-up): the docs-contains assertion
+    alone cannot catch CLI-vs-docs drift, because REPRODUCE_COMMAND is
+    itself just a hardcoded string with no coupling to the argparse
+    registration in ``_cmd_measure.py`` — renaming a subcommand there would
+    leave this test green while the documented command 404s. Closing the
+    loop requires BOTH links in the chain: CLI (real registered subparser
+    choices, via ``athenaeum.cli.build_parser()``) -> REPRODUCE_COMMAND
+    constant -> docs.
+    """
+
+    def test_reproduce_command_subcommand_is_actually_registered(self) -> None:
+        import shlex
+
+        from athenaeum import backlog_price_sheet, ordinary_night_table, shadow_linkage
+        from athenaeum.cli import build_parser
+
+        top_parser = build_parser()
+        top_subparsers = _find_subparsers_action(top_parser)
+        measure_parser = top_subparsers.choices["measure"]
+        measure_subparsers = _find_subparsers_action(measure_parser)
+
+        for module in (shadow_linkage, backlog_price_sheet, ordinary_night_table):
+            tokens = shlex.split(module.REPRODUCE_COMMAND)
+            assert tokens[:2] == ["athenaeum", "measure"], module.REPRODUCE_COMMAND
+            assert tokens[2] in measure_subparsers.choices, (
+                f"{module.__name__}.REPRODUCE_COMMAND names subcommand "
+                f"{tokens[2]!r}, which is not among the actually-registered "
+                f"`athenaeum measure` subparsers {sorted(measure_subparsers.choices)}"
+            )
 
     def test_docs_lists_all_three_exact_invocations(self) -> None:
         from athenaeum import backlog_price_sheet, ordinary_night_table, shadow_linkage
