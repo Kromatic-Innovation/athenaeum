@@ -756,6 +756,81 @@ def resolve_min_merge_confidence(config: dict[str, Any] | None) -> float:
     return 0.0
 
 
+def resolve_intake_runtime_floor(config: dict[str, Any] | None) -> float:
+    """Resolve ``librarian.intake_runtime_floor`` (issue athenaeum#1102).
+
+    Reserves a MINIMUM share of ``max_runtime`` for the intake path that
+    feeds C4 (auto-memory C2 cluster / C3 merge / C4 contradiction-detect /
+    resolve) — the phase :func:`athenaeum.librarian.librarian_entity_runtime_share`
+    (athenaeum#440) *caps* the entity phase against, but never itself
+    *guarantees* anything to the phases after it. athenaeum#608 needs an
+    honest per-contract LLM schema-mismatch rate and cannot compute one: the
+    resolution contract had 7 observations because the resolver made ~1 call
+    on the 2026-08-06 run, and the entity phase's wall-clock overrun (93.6%
+    of a 3944s window on 3 files) is why. This floor is the lever an operator
+    can arm to reserve intake a guaranteed minimum of the SAME wall-clock
+    window ``entity_runtime_share`` already caps the entity phase against —
+    :func:`athenaeum.librarian._arm_run_deadline` combines the two by taking
+    the EARLIER (tighter) of the two candidate entity deadlines, so whichever
+    constraint binds actually wins.
+
+    **Unit (deliberate choice, athenaeum#1102):** a fraction of ``max_runtime``
+    WALL-CLOCK, mirroring ``entity_runtime_share`` exactly — not an LLM-call
+    count, even though calls are the resource athenaeum#608 ultimately counts.
+    The nightly window itself is wall-clock, the athenaeum#1102 motivating
+    data (entity consuming 93.6% of wall-clock while nowhere near
+    ``max_api_calls``) is a wall-clock-shaped failure, and the entity phase
+    already stops independently on the run-level call ceiling
+    (``ctx.usage.api_calls >= ctx.max_api_calls``) regardless of this floor —
+    a calls-based floor would duplicate a cap that already exists. What nothing
+    guarantees today is that the entity phase leaves intake any WALL-CLOCK
+    TIME to spend its own calls in; that is exactly what this floor reserves.
+
+    DEFAULT 0.0 (OFF, issue athenaeum#1102 AC4): arming this needs a value
+    chosen against measured figures (athenaeum#608's own review) — an operator
+    decision, out of scope for this issue. No seed in ``_DEFAULTS`` (athenaeum#231)
+    so the code default stays reachable. With the key unset, phase scheduling
+    is byte-for-byte identical to before this issue.
+
+    Only ``0 < floor < 1`` reserves anything (AC6: a non-positive or malformed
+    value falls through to disabled, matching :func:`resolve_max_merge_sources`'s
+    own "0 disables" convention — env authoritative including a parsed zero or
+    negative value, via :func:`_env_number`, which WARNs on a genuinely
+    malformed value rather than swallowing it silently). AC7: a floor ``>= 1.0``
+    (reserving the WHOLE window or more) is REFUSED, not clamped — it falls
+    through to disabled exactly like any other out-of-range value, mirroring
+    :func:`athenaeum.librarian.librarian_entity_runtime_share`'s own
+    ``0 < share < 1`` guard. Refusing (rather than clamping to some
+    less-than-1 ceiling) means a misconfigured floor can never invert the
+    starvation this issue fixes by starving the ENTITY phase instead — the
+    reserve simply does not arm, which is the same as never having set the
+    key.
+
+    Env ``ATHENAEUM_INTAKE_RUNTIME_FLOOR`` > yaml
+    ``librarian.intake_runtime_floor`` > this default (``0.0``).
+    """
+    default = 0.0
+
+    def _in_range(value: float) -> float:
+        return value if 0.0 < value < 1.0 else default
+
+    env_value = _env_number("ATHENAEUM_INTAKE_RUNTIME_FLOOR", float)
+    if env_value is not None:
+        return _in_range(env_value)
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("intake_runtime_floor")
+            if raw is None or isinstance(raw, bool):
+                return default
+            try:
+                yaml_value = float(raw)
+            except (TypeError, ValueError):
+                return default
+            return _in_range(yaml_value)
+    return default
+
+
 def _resolve_sample_rate(
     config: dict[str, Any] | None, *, env_var: str, key: str, default: float
 ) -> float:
