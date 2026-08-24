@@ -455,14 +455,24 @@ def entity_read(
     return json.dumps(result.to_dict(), indent=2, default=pii.json_date_default)
 
 
+#: Prefix federated off-corpus hits are tagged with before being merged into
+#: a corpus hit list (issue athenaeum#984 AC1). A fixed literal, not the
+#: off-corpus root's on-disk ``.name`` — the extra-roots convention
+#: ``_resolve_hit_path`` otherwise uses matches by directory name, which an
+#: operator's off-corpus ``surface_root`` has no reason to share.
+_OFF_CORPUS_HIT_PREFIX = "off-corpus/"
+
+
 def _resolve_hit_path(
     filename: str,
     wiki_root: Path,
     extra_roots: list[Path],
+    *,
+    off_corpus_root: Path | None = None,
 ) -> tuple[Path | None, str]:
     """Resolve an indexed filename back to an on-disk path + display label.
 
-    Indexed filenames come in two shapes:
+    Indexed filenames come in three shapes:
 
     - Wiki entries: bare name (``lean-startup.md``). Resolved against
       ``wiki_root`` with the ``wiki/`` display prefix.
@@ -471,11 +481,21 @@ def _resolve_hit_path(
       remainder resolved against that root. Display prefix is
       ``<root_name>/`` so the path a human sees matches the indexed
       filename.
+    - Off-corpus entries (issue athenaeum#984): ``off-corpus/<relpath>`` —
+      the fixed :data:`_OFF_CORPUS_HIT_PREFIX`, applied only to hits
+      federated in from :func:`athenaeum.off_corpus.query_off_corpus`
+      (see ``_recall_via_backend``). Resolved against *off_corpus_root*
+      when supplied; never confused with an extra root's ``.name`` match.
 
     Returns ``(path, display_prefix)``. ``path`` is ``None`` when the
-    file cannot be located (stale index, renamed directory); callers
+    file cannot be located (stale index, renamed directory, or an
+    off-corpus hit resolved with no *off_corpus_root* supplied); callers
     should render the hit with an empty body rather than crash.
     """
+    if off_corpus_root is not None and filename.startswith(_OFF_CORPUS_HIT_PREFIX):
+        rel = filename[len(_OFF_CORPUS_HIT_PREFIX) :]
+        return off_corpus_root / rel, filename
+
     if "/" not in filename:
         # Wiki entry: flat, shallow.
         return wiki_root / filename, f"wiki/{filename}"
@@ -484,9 +504,10 @@ def _resolve_hit_path(
     for root in extra_roots:
         if root.name == root_name:
             return root / rel, filename
-    # Unknown root (index built against a different config). Return the
-    # indexed filename verbatim so callers still see what matched rather
-    # than a silent empty render.
+    # Unknown root (index built against a different config, or an
+    # off-corpus hit with no off_corpus_root supplied). Return the indexed
+    # filename verbatim so callers still see what matched rather than a
+    # silent empty render.
     return None, filename
 
 
@@ -624,6 +645,7 @@ def _reorder_hits_by_currency(
     *,
     wiki_root: Path,
     extra_roots: list[Path],
+    off_corpus_root: Path | None = None,
 ) -> list[tuple[str, str, float]]:
     """Stable-partition *hits* so an expired daily-bucket page sorts after
     every other hit, without changing the relative order within either group
@@ -650,7 +672,9 @@ def _reorder_hits_by_currency(
     deprioritized: list[tuple[str, str, float]] = []
     for hit in hits:
         filename = hit[0]
-        page_path, _ = _resolve_hit_path(filename, wiki_root, extra_roots)
+        page_path, _ = _resolve_hit_path(
+            filename, wiki_root, extra_roots, off_corpus_root=off_corpus_root
+        )
         fm: dict[str, object] = {}
         if page_path is not None and page_path.is_file():
             try:
@@ -927,6 +951,44 @@ def _recall_via_backend(
             "Rebuild it with `athenaeum reindex` and retry."
         )
 
+    # Issue athenaeum#984 (AC1): federate the off-corpus index shard into
+    # this SAME recall call. A no-op (``off_corpus_root`` stays ``None``)
+    # when ``off_corpus.enabled`` is unset (the default) — see
+    # ``athenaeum.off_corpus.query_off_corpus``'s docstring. Queried with
+    # the IDENTICAL ``backend_name`` the primary query just used, which is
+    # what makes ``merge_ranked_hits``'s score-sort valid (see that
+    # function's docstring) — the two hit lists come from the same scorer,
+    # just against two different cache dirs/roots, so neither the corpus
+    # nor the off-corpus index silently dominates the merge.
+    off_corpus_root: Path | None = None
+    try:
+        from athenaeum import off_corpus
+
+        knowledge_root = wiki_root.parent
+        off_corpus_result = off_corpus.query_off_corpus(
+            config,
+            knowledge_root,
+            effective_cache,
+            query,
+            backend_name=backend_name,
+            top_k=top_k,
+            caller_audience=caller_audience,
+            type_filter=type_filter,
+        )
+        if off_corpus_result is not None:
+            off_corpus_hits, off_corpus_root = off_corpus_result
+            tagged_off_corpus_hits = [
+                (f"{_OFF_CORPUS_HIT_PREFIX}{filename}", name, score)
+                for filename, name, score in off_corpus_hits
+            ]
+            hits = off_corpus.merge_ranked_hits(hits, tagged_off_corpus_hits, top_k)
+    except off_corpus.OffCorpusConfigError as exc:
+        # A misconfigured off_corpus (e.g. an adapter root inside the git
+        # tree) must never fail an otherwise-good corpus recall — log and
+        # fall back to corpus-only hits, matching the "must never raise
+        # for an off-corpus problem" contract query_off_corpus documents.
+        log.warning("recall: off_corpus query skipped — misconfigured: %s", exc)
+
     # Issue athenaeum#964: an unrecognized ``type_filter`` value is NOT an error and
     # never reads as a plain "nothing matched" — it names the classes this
     # deployment actually has, computed against the SAME declared/observed
@@ -956,7 +1018,10 @@ def _recall_via_backend(
     # how many, so every filter/count below is unaffected by this call.
     if not history:
         hits = _reorder_hits_by_currency(
-            hits, wiki_root=wiki_root, extra_roots=extra_roots
+            hits,
+            wiki_root=wiki_root,
+            extra_roots=extra_roots,
+            off_corpus_root=off_corpus_root,
         )
 
     tokens = tokenize_keyword_query(query)
@@ -990,6 +1055,7 @@ def _recall_via_backend(
             filename,
             wiki_root,
             extra_roots,
+            off_corpus_root=off_corpus_root,
         )
         body = ""
         display_name: object = name

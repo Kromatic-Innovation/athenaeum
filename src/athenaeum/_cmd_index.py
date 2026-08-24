@@ -447,6 +447,30 @@ def cmd_registry(args: argparse.Namespace) -> int:
     return 0
 
 
+def _rebuild_off_corpus_index_if_live(
+    config: dict,
+    knowledge_root: Path,
+    cache_dir: Path,
+    as_of: object,
+    incremental: bool,
+) -> None:
+    """Keep the off-corpus index shard current alongside `athenaeum reindex`
+    (issue athenaeum#984 Wiring AC) — the same hook `athenaeum.librarian.reindex`
+    carries for `session-end`/`run`, duplicated here because this command
+    calls `build_fts5_index`/`build_vector_index` directly rather than
+    through `librarian.reindex()` (an existing duplication this command
+    already has between its two backend branches, not one this issue
+    introduces). A strict no-op when `off_corpus.enabled` is unset (the
+    default) or *as_of* is set (a historical rewind index has no
+    off-corpus-shard counterpart in this issue's scope).
+    """
+    if as_of is not None:
+        return
+    from athenaeum import off_corpus
+
+    off_corpus.build_off_corpus_index(config, knowledge_root, cache_dir, incremental=incremental)
+
+
 def cmd_rebuild_index(args: argparse.Namespace) -> int:
     import time
 
@@ -524,6 +548,7 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
                 f"Vector index rebuilt{as_of_note} ({mode}): {count} pages "
                 f"(wiki + {len(extra_roots)} extra root(s))"
             )
+            _rebuild_off_corpus_index_if_live(cfg, knowledge_root, cache_dir, as_of, incremental)
             _reindex_summary(command, backend, mode, count, t0, 0)
             return 0
 
@@ -539,6 +564,7 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
                 full_rehash_max_age_days=full_rehash_max_age_days,
                 config=cfg,
             )
+            _rebuild_off_corpus_index_if_live(cfg, knowledge_root, cache_dir, as_of, incremental)
             print(
                 f"FTS5 index rebuilt{as_of_note} ({mode}): {count} pages "
                 f"(wiki + {len(extra_roots)} extra root(s))"
