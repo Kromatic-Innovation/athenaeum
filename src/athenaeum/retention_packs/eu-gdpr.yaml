@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# GDPR-oriented retention pack (athenaeum#985 AC9).
+#
+# Defaults toward off-corpus storage and shorter retention windows, in
+# keeping with GDPR's storage-limitation and erasure-right posture. This is
+# a reasonable starting point, not legal advice or a compliance
+# certification -- an operator should review it before relying on it.
+# Selected via `erasure.retention_pack: eu-gdpr` in athenaeum.yaml.
+#
+# `jurisdiction: unknown` is INTENTIONALLY ABSENT here too -- see
+# us-default.yaml's header comment; the same hard-coded conservative default
+# applies regardless of which pack is active.
+name: eu-gdpr
+version: 1
+description: >-
+  GDPR-oriented retention pack. EU-subject PII is stored off-corpus by
+  default rather than merely demoted; US-subject PII gets a shorter
+  demote-cold window than us-default.yaml grants it.
+default_action: store-off-corpus
+rules:
+  - memory_class: entity
+    data_class: pii
+    jurisdiction: eu
+    action: store-off-corpus
+  - memory_class: fact
+    data_class: pii
+    jurisdiction: eu
+    action: delete-after
+    period: P1Y
+  - memory_class: entity
+    data_class: pii
+    jurisdiction: us
+    action: demote-cold
+    period: P3Y
+  - memory_class: fact
+    data_class: pii
+    jurisdiction: us
+    action: demote-cold
+    period: P1Y

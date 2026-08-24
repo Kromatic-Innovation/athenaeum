@@ -105,13 +105,13 @@ def _env_number(name: str, cast: Callable[[str], _T]) -> _T | None:
         return cast(raw)
     except (TypeError, ValueError):
         logger.warning(
-            "Ignoring malformed %s=%r (expected %s); falling back to "
-            "yaml/default.",
+            "Ignoring malformed %s=%r (expected %s); falling back to yaml/default.",
             name,
             raw,
             getattr(cast, "__name__", str(cast)),
         )
         return None
+
 
 # Issue athenaeum#519/#521 (H9 + L3): the single canonical default cache-dir location
 # and the single resolver honouring the ``ATHENAEUM_CACHE_DIR`` override.
@@ -494,9 +494,7 @@ def resolve_ephemeral_scopes(config: dict[str, Any] | None) -> list[str]:
         if isinstance(cfg, dict) and "ephemeral_scopes" in cfg:
             raw = cfg.get("ephemeral_scopes")
             if isinstance(raw, list):
-                return [
-                    str(g).strip() for g in raw if isinstance(g, str) and str(g).strip()
-                ]
+                return [str(g).strip() for g in raw if isinstance(g, str) and str(g).strip()]
     return list(_DEFAULT_EPHEMERAL_SCOPES)
 
 
@@ -516,9 +514,7 @@ def resolve_operational_markers(config: dict[str, Any] | None) -> list[str]:
             raw = cfg.get("operational_markers")
             if isinstance(raw, list):
                 return [
-                    str(m).strip().lower()
-                    for m in raw
-                    if isinstance(m, str) and str(m).strip()
+                    str(m).strip().lower() for m in raw if isinstance(m, str) and str(m).strip()
                 ]
     return []
 
@@ -758,6 +754,81 @@ def resolve_min_merge_confidence(config: dict[str, Any] | None) -> float:
             if value > 0.0:
                 return value
     return 0.0
+
+
+def resolve_intake_runtime_floor(config: dict[str, Any] | None) -> float:
+    """Resolve ``librarian.intake_runtime_floor`` (issue athenaeum#1102).
+
+    Reserves a MINIMUM share of ``max_runtime`` for the intake path that
+    feeds C4 (auto-memory C2 cluster / C3 merge / C4 contradiction-detect /
+    resolve) — the phase :func:`athenaeum.librarian.librarian_entity_runtime_share`
+    (athenaeum#440) *caps* the entity phase against, but never itself
+    *guarantees* anything to the phases after it. athenaeum#608 needs an
+    honest per-contract LLM schema-mismatch rate and cannot compute one: the
+    resolution contract had 7 observations because the resolver made ~1 call
+    on the 2026-08-06 run, and the entity phase's wall-clock overrun (93.6%
+    of a 3944s window on 3 files) is why. This floor is the lever an operator
+    can arm to reserve intake a guaranteed minimum of the SAME wall-clock
+    window ``entity_runtime_share`` already caps the entity phase against —
+    :func:`athenaeum.librarian._arm_run_deadline` combines the two by taking
+    the EARLIER (tighter) of the two candidate entity deadlines, so whichever
+    constraint binds actually wins.
+
+    **Unit (deliberate choice, athenaeum#1102):** a fraction of ``max_runtime``
+    WALL-CLOCK, mirroring ``entity_runtime_share`` exactly — not an LLM-call
+    count, even though calls are the resource athenaeum#608 ultimately counts.
+    The nightly window itself is wall-clock, the athenaeum#1102 motivating
+    data (entity consuming 93.6% of wall-clock while nowhere near
+    ``max_api_calls``) is a wall-clock-shaped failure, and the entity phase
+    already stops independently on the run-level call ceiling
+    (``ctx.usage.api_calls >= ctx.max_api_calls``) regardless of this floor —
+    a calls-based floor would duplicate a cap that already exists. What nothing
+    guarantees today is that the entity phase leaves intake any WALL-CLOCK
+    TIME to spend its own calls in; that is exactly what this floor reserves.
+
+    DEFAULT 0.0 (OFF, issue athenaeum#1102 AC4): arming this needs a value
+    chosen against measured figures (athenaeum#608's own review) — an operator
+    decision, out of scope for this issue. No seed in ``_DEFAULTS`` (athenaeum#231)
+    so the code default stays reachable. With the key unset, phase scheduling
+    is byte-for-byte identical to before this issue.
+
+    Only ``0 < floor < 1`` reserves anything (AC6: a non-positive or malformed
+    value falls through to disabled, matching :func:`resolve_max_merge_sources`'s
+    own "0 disables" convention — env authoritative including a parsed zero or
+    negative value, via :func:`_env_number`, which WARNs on a genuinely
+    malformed value rather than swallowing it silently). AC7: a floor ``>= 1.0``
+    (reserving the WHOLE window or more) is REFUSED, not clamped — it falls
+    through to disabled exactly like any other out-of-range value, mirroring
+    :func:`athenaeum.librarian.librarian_entity_runtime_share`'s own
+    ``0 < share < 1`` guard. Refusing (rather than clamping to some
+    less-than-1 ceiling) means a misconfigured floor can never invert the
+    starvation this issue fixes by starving the ENTITY phase instead — the
+    reserve simply does not arm, which is the same as never having set the
+    key.
+
+    Env ``ATHENAEUM_INTAKE_RUNTIME_FLOOR`` > yaml
+    ``librarian.intake_runtime_floor`` > this default (``0.0``).
+    """
+    default = 0.0
+
+    def _in_range(value: float) -> float:
+        return value if 0.0 < value < 1.0 else default
+
+    env_value = _env_number("ATHENAEUM_INTAKE_RUNTIME_FLOOR", float)
+    if env_value is not None:
+        return _in_range(env_value)
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("intake_runtime_floor")
+            if raw is None or isinstance(raw, bool):
+                return default
+            try:
+                yaml_value = float(raw)
+            except (TypeError, ValueError):
+                return default
+            return _in_range(yaml_value)
+    return default
 
 
 def _resolve_sample_rate(
@@ -1387,9 +1458,7 @@ def resolve_page_warn_bytes(config: dict[str, Any] | None) -> int:
     never a block. See :func:`_resolve_positive_int_knob` for the coercion
     contract.
     """
-    return _resolve_positive_int_knob(
-        config, "page_warn_bytes", "ATHENAEUM_PAGE_WARN_BYTES", 8192
-    )
+    return _resolve_positive_int_knob(config, "page_warn_bytes", "ATHENAEUM_PAGE_WARN_BYTES", 8192)
 
 
 def resolve_page_flag_bytes(config: dict[str, Any] | None) -> int:
@@ -1401,9 +1470,7 @@ def resolve_page_flag_bytes(config: dict[str, Any] | None) -> int:
     Kept comfortably below the tier-3 merge body cap so flagging precedes any
     hard merge-budget pressure. See :func:`_resolve_positive_int_knob`.
     """
-    return _resolve_positive_int_knob(
-        config, "page_flag_bytes", "ATHENAEUM_PAGE_FLAG_BYTES", 16384
-    )
+    return _resolve_positive_int_knob(config, "page_flag_bytes", "ATHENAEUM_PAGE_FLAG_BYTES", 16384)
 
 
 def resolve_raw_file_max_bytes(config: dict[str, Any] | None) -> int:
@@ -1765,8 +1832,11 @@ def resolve_spend_max_tokens_per_run(config: dict[str, Any] | None) -> int | Non
     ``spend.max_tokens_per_run`` yaml > ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
-        config, "spend", "max_tokens_per_run",
-        "ATHENAEUM_SPEND_MAX_TOKENS_PER_RUN", cast=int,
+        config,
+        "spend",
+        "max_tokens_per_run",
+        "ATHENAEUM_SPEND_MAX_TOKENS_PER_RUN",
+        cast=int,
     )
 
 
@@ -1779,8 +1849,11 @@ def resolve_spend_max_tokens_per_day(config: dict[str, Any] | None) -> int | Non
     yaml > ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
-        config, "spend", "max_tokens_per_day",
-        "ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY", cast=int,
+        config,
+        "spend",
+        "max_tokens_per_day",
+        "ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY",
+        cast=int,
     )
 
 
@@ -1793,8 +1866,11 @@ def resolve_spend_max_usd_per_run(config: dict[str, Any] | None) -> float | None
     ``spend.max_usd_per_run`` yaml > ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
-        config, "spend", "max_usd_per_run",
-        "ATHENAEUM_SPEND_MAX_USD_PER_RUN", cast=float,
+        config,
+        "spend",
+        "max_usd_per_run",
+        "ATHENAEUM_SPEND_MAX_USD_PER_RUN",
+        cast=float,
     )
 
 
@@ -1807,8 +1883,11 @@ def resolve_spend_max_usd_per_day(config: dict[str, Any] | None) -> float | None
     ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
-        config, "spend", "max_usd_per_day",
-        "ATHENAEUM_SPEND_MAX_USD_PER_DAY", cast=float,
+        config,
+        "spend",
+        "max_usd_per_day",
+        "ATHENAEUM_SPEND_MAX_USD_PER_DAY",
+        cast=float,
     )
 
 
@@ -1827,8 +1906,11 @@ def resolve_spend_weekly_token_limit(config: dict[str, Any] | None) -> int | Non
     ``spend.weekly_token_limit`` yaml > ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
-        config, "spend", "weekly_token_limit",
-        "ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT", cast=int,
+        config,
+        "spend",
+        "weekly_token_limit",
+        "ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT",
+        cast=int,
     )
 
 
@@ -1844,8 +1926,11 @@ def resolve_spend_max_pct_per_day(config: dict[str, Any] | None) -> float | None
     ``spend.max_pct_per_day`` yaml > ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
-        config, "spend", "max_pct_per_day",
-        "ATHENAEUM_SPEND_MAX_PCT_PER_DAY", cast=float,
+        config,
+        "spend",
+        "max_pct_per_day",
+        "ATHENAEUM_SPEND_MAX_PCT_PER_DAY",
+        cast=float,
     )
 
 
@@ -2036,9 +2121,7 @@ def preflight_model_rates(resolved_models: Iterable[tuple[str, str]]) -> str | N
     a miss would otherwise (silently) fail at cost-calculation time.
     """
     unpriced = [
-        (knob, model)
-        for knob, model in resolved_models
-        if model and not model_has_price(model)
+        (knob, model) for knob, model in resolved_models if model and not model_has_price(model)
     ]
     if not unpriced:
         return None
@@ -3398,3 +3481,66 @@ def resolve_verdict_epoch_batch_interval_days(config: dict[str, Any] | None) -> 
         "ATHENAEUM_VERDICT_EPOCH_BATCH_INTERVAL_DAYS",
         30,
     )
+
+
+# ---------------------------------------------------------------------------
+# Erasure retention packs (issue athenaeum#985, AC9)
+# ---------------------------------------------------------------------------
+
+
+def resolve_retention_pack_selection(config: dict[str, Any] | None) -> str:
+    """Resolve which retention pack is ACTIVE (issue athenaeum#985, AC9).
+
+    Precedence: env ``ATHENAEUM_RETENTION_PACK`` > yaml ``erasure.retention_pack``
+    > default ``"us-default"``. This is the SELECTION axis only — it names
+    which pack (of :func:`athenaeum.erasure.available_retention_packs`'s
+    result) governs; the pack's own rule table is a separate axis
+    (:func:`resolve_retention_pack_overrides`), mirroring how
+    :func:`resolve_sensitivity_routing` keeps "is a class routed" separate
+    from :func:`resolve_sensitivity_classes`' "what does the class contain."
+    An empty/whitespace-only override at either tier is treated as unset.
+    """
+    env = os.environ.get("ATHENAEUM_RETENTION_PACK")
+    if env and env.strip():
+        return env.strip()
+    if isinstance(config, dict):
+        erasure_cfg = config.get("erasure")
+        if isinstance(erasure_cfg, dict):
+            raw = erasure_cfg.get("retention_pack")
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    return "us-default"
+
+
+def resolve_retention_pack_overrides(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Resolve ``erasure.retention_packs.<name>`` operator-authored pack overrides/additions.
+
+    Returns the RAW (still-unvalidated) per-pack mapping dicts keyed by pack
+    name — :func:`athenaeum.erasure.available_retention_packs` validates each
+    and builds the :class:`~athenaeum.erasure.RetentionPack` objects, exactly
+    mirroring :func:`resolve_sensitivity_classes`'s split with
+    :func:`athenaeum.sensitivity.available_classes`. Returns an EMPTY dict
+    when unset — the two packaged packs (``us-default``, ``eu-gdpr``) are
+    still resolved regardless, from ``src/athenaeum/retention_packs/*.yaml``,
+    not from this function — so this resolver is NOT seeded in
+    ``_DEFAULTS`` (issue athenaeum#231's rule: seeding here would make the
+    packaged-file default unreachable). Non-string keys and non-mapping
+    values are dropped defensively; a malformed entry surfaces loudly later,
+    at pack-build time, with the pack name in the message.
+    """
+    if not isinstance(config, dict):
+        return {}
+    erasure_cfg = config.get("erasure") or {}
+    if not isinstance(erasure_cfg, dict):
+        return {}
+    raw = erasure_cfg.get("retention_packs")
+    if not isinstance(raw, dict):
+        return {}
+    packs: dict[str, dict[str, Any]] = {}
+    for name, definition in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(definition, dict):
+            continue
+        packs[name.strip()] = definition
+    return packs

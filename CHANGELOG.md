@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Erasure classification and taint-propagation rules (athenaeum#985,
+  split (c) of athenaeum#718's re-scope).** New `athenaeum.erasure` module:
+  HMAC-keyed content hashes for erasure-class claims with a purgeable
+  per-corpus key (`load_or_create_erasure_key` / `purge_erasure_key` /
+  `erasure_content_hash`); opaque, uid-based person-entity slugs and pair
+  ids (`opaque_person_slug` / `opaque_pair_id`) so erasure-class ledgers
+  never carry a name; conservative default classification
+  (`classify_retention` — a data subject with unknown jurisdiction is
+  always erasure-class, enforced ahead of any retention-pack lookup); the
+  three taint rules — derivation (`classify_inference_taint`, working
+  against `## Inference` blocks), re-ingestion by provenance
+  (`classify_by_provenance` / `off_corpus_recall_source`, never re-guessed
+  from content), and push-is-egress (`EGRESS_DISCLOSURE`, carried in every
+  redaction-ledger record); the redaction ledger itself
+  (`RedactionLedgerRecord` — structurally "that-and-why, never what," with
+  no content field on the dataclass at all); and retention policy packs as
+  YAML data (`src/athenaeum/retention_packs/us-default.yaml`,
+  `.../eu-gdpr.yaml`, loaded by `available_retention_packs` /
+  `resolve_active_retention_pack`), selected/overridden via the new
+  `erasure.retention_pack` / `erasure.retention_packs.<name>`
+  `athenaeum.yaml` keys (`athenaeum.config.resolve_retention_pack_selection`
+  / `resolve_retention_pack_overrides`). Also documents (never implements)
+  the last-resort in-git history-rewrite remediation path for misclassified
+  content, with its blast radius stated (`docs/security-posture.md` §2.4).
+  No production caller is migrated onto this module in this slice — same
+  posture `athenaeum.sensitivity` shipped under for its S1a/S1b — so the
+  nightly librarian run and every existing write/read path are byte-for-byte
+  unchanged with these keys at their defaults.
+
 ### Documentation
 
 - **`docs/merge-inflow-restoration.md` §5 and §9 annotated with outcomes
@@ -112,6 +143,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   issue. New `athenaeum.yaml` keys (`push_budget.tokens_per_turn`,
   `librarian.memory_tier_sweep_enabled`, `memory_tiers.demote_after_days`)
   documented in `docs/configuration.md` with defaults.
+
+- **Per-phase reason-for-exit, a durable run-summary ledger, and an
+  intake-runtime-floor reserve for the librarian window (athenaeum#1102).** The
+  nightly window was shared between the entity phase and the intake path
+  that feeds C4 with no governance and no record: athenaeum#608 needs an honest
+  per-contract LLM schema-mismatch rate and cannot compute one — the
+  `resolution` contract had 7 observations because the resolver made ~1 call
+  on the 2026-08-06 run, a symptom of the entity phase's wall-clock overrun,
+  and the claimed "~85% of the window" figure existed only as a claim in an
+  issue body because nothing emitted it. Two halves:
+  - **Instrumentation.** Every phase segment on the `librarian-run-summary`
+    line now carries a `reason=` token (`completed` / `entity-share` /
+    `deadline` / `budget`, mirroring `wiki/_deferred_work.md`'s existing
+    vocabulary). `run()` also appends one JSON-native record per run to a
+    new durable ledger, `<cache_dir>/run_summary.jsonl`
+    (`athenaeum.run_summary_log.write_run_summary_record` /
+    `read_run_summary_ledger`, mirroring the athenaeum#378 spend ledger's
+    `append_line_durable` convention) — a form a later run can aggregate
+    over, not prose a consumer has to parse out of a log line.
+  - **Floor.** A new `librarian.intake_runtime_floor` config key
+    (`ATHENAEUM_INTAKE_RUNTIME_FLOOR` / `resolve_intake_runtime_floor` in
+    `config.py`, beside `resolve_max_merge_sources` and its siblings)
+    reserves a minimum share of `max_runtime` for the intake path, combined
+    with the existing `entity_runtime_share` (athenaeum#440) by taking whichever
+    of the two implied entity deadlines is EARLIER. Wall-clock unit,
+    deliberately mirroring `entity_runtime_share` rather than an LLM-call
+    count (see `docs/configuration.md` for the rationale). Defaults to
+    disabled (`0.0`) — with the key unset, phase scheduling is byte-for-byte
+    identical to pre-athenaeum#1102 behaviour (AC4). A non-positive or malformed
+    value falls through to disabled, matching `resolve_max_merge_sources`'s
+    convention (AC6); a floor `>= 1.0` is REFUSED, not clamped, so it can
+    never starve the entity phase in the opposite direction (AC7). Arming
+    the floor on a live installation is an explicit operator decision (needs
+    a value chosen against measured figures) and stays out of scope here —
+    that review belongs with athenaeum#608.
 
 - **First live-store snapshots from the memory-model measurement pack, appended
   to `docs/memory-model-measurements.md` (Refs athenaeum#713).** Ran all three
