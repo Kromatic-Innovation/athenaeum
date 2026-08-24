@@ -1004,6 +1004,8 @@ def record_pair_decision(
     authority_basis: str = "implicit-superuser",
     comparator_version: str | None = None,
     at: str | None = None,
+    config: dict[str, Any] | None = None,
+    knowledge_root: Path | None = None,
 ) -> dict[str, Any]:
     """Record one verdict for a pair the pipeline just decided, end to end.
 
@@ -1016,21 +1018,65 @@ def record_pair_decision(
     cluster disposition — this function never walks the corpus, so ledger
     growth stays linear in cluster-level dispositions (issue athenaeum#712 AC).
 
-    Computes both sides' content hashes, refuses (via
-    :func:`refuse_if_erasure_class`) if either source is erasure-class
-    content, builds the :class:`Basis` + :class:`VerdictEntry`, and appends.
+    Computes both sides' content hashes, builds the :class:`Basis` +
+    :class:`VerdictEntry`, and appends it to whichever ledger the pair
+    belongs on.
 
-    Returns ``{"ok": bool, "error_code": str|None, "pair": str|None}``.
-    Never raises for an ordinary refusal (erasure-class, unreadable source)
-    — those are reported in the return value so a caller (which must not
-    let a ledger write block the merge it is recording) can log and
-    continue.
+    **Off-corpus routing (issue athenaeum#984 AC3).** If EITHER source is
+    erasure-class (:func:`refuse_if_erasure_class`'s existing detection —
+    the sensitivity signal athenaeum#712 already gates a refusal on; real
+    HMAC-keyed erasure-class hashing is athenaeum#985's separate scope, not
+    this function's), the pair is a cross-boundary or fully-off-corpus pair
+    and must never reach the in-git ledger. *config* and *knowledge_root*
+    (both optional, ``None`` by default) are what let this function route
+    such a pair to the off-corpus ledger shard
+    (:func:`athenaeum.off_corpus.append_verdict_off_corpus`) instead of
+    refusing it outright: when both are supplied AND
+    ``off_corpus.enabled`` resolves true with a valid ``off_corpus.adapter``,
+    the pair is written there. Any caller that omits *config*/*knowledge_root*
+    (or whose deployment has not configured off-corpus) gets the exact
+    pre-athenaeum#984 behavior: refuse and drop, logged, never written
+    anywhere — this is the "documented config key defaulting to off" the
+    issue's Wiring AC describes; ``config=None``/``knowledge_root=None`` is
+    the off state.
+
+    Returns ``{"ok": bool, "error_code": str|None, "pair": str|None}``, plus
+    ``"ledger": "off-corpus"`` on a pair routed off-git. Never raises for an
+    ordinary refusal (erasure-class with no off-corpus store configured,
+    unreadable source) — those are reported in the return value so a caller
+    (which must not let a ledger write block the merge it is recording) can
+    log and continue.
     """
     try:
-        for src in (source_a, source_b):
-            refusal = refuse_if_erasure_class(Path(src))
-            if refusal is not None:
-                log.warning("verdicts: refusing pair write — %s", refusal)
+        erasure_class_sources = [
+            src
+            for src in (source_a, source_b)
+            if refuse_if_erasure_class(Path(src)) is not None
+        ]
+
+        write_off_corpus = False
+        if erasure_class_sources:
+            if config is not None and knowledge_root is not None:
+                from athenaeum import off_corpus
+
+                try:
+                    write_off_corpus = (
+                        off_corpus.off_corpus_adapter(config) is not None
+                    )
+                except off_corpus.OffCorpusConfigError as exc:
+                    log.warning(
+                        "verdicts: off_corpus is enabled but misconfigured (%s) — "
+                        "refusing pair write instead of risking a misrouted write",
+                        exc,
+                    )
+                    write_off_corpus = False
+            if not write_off_corpus:
+                log.warning(
+                    "verdicts: refusing pair write — erasure-class source(s): %s "
+                    "(off_corpus not configured; see docs/configuration.md "
+                    "'Off-corpus store')",
+                    erasure_class_sources,
+                )
                 return {"ok": False, "error_code": "erasure_class_refused", "pair": None}
 
         id_a = page_id_for_path(Path(source_a))
@@ -1065,6 +1111,16 @@ def record_pair_decision(
             at=at,
             decided_by=decided_by,
         )
+
+        if write_off_corpus:
+            from athenaeum import off_corpus
+
+            assert knowledge_root is not None  # write_off_corpus implies both were given
+            off_corpus.append_verdict_off_corpus(
+                config, knowledge_root, entry.to_dict(), at=entry.at
+            )
+            return {"ok": True, "error_code": None, "pair": entry.pair, "ledger": "off-corpus"}
+
         append_verdict(wiki_root, entry, lock=lock)
         return {"ok": True, "error_code": None, "pair": entry.pair}
     except Exception as exc:  # noqa: BLE001 — a ledger write must never break

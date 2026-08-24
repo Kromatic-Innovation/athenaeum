@@ -1004,6 +1004,42 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         source_ref="config.py:185 'athenaeum.yaml' (design note §5.2 R3 box, issue "
         "athenaeum#980 AC5)",
     ),
+    # -- off-corpus purgeable surface (design note §8, issue athenaeum#984) --
+    # AC4: the purgeable surface's derived/operational artifacts, declared
+    # through this SAME R3 catalogue every other store artifact declares
+    # through — not a second abstraction. Both index shards are reconstructible
+    # from off-corpus content (a rebuild), matching the main corpus index
+    # shards' 'derived' classification above; the ledger shard is durable and
+    # not reconstructible, matching the other 'operational'/'store-durable'
+    # ledgers above, just physically on the off-corpus purgeable store instead
+    # of the wiki root.
+    ArtifactDeclaration(
+        name="off-corpus-fts5-index-db",
+        persistence_class="derived",
+        operational_scope=None,
+        location="cache dir (off-corpus/ subdirectory)",
+        source_ref="off_corpus.py _OFF_CORPUS_CACHE_SUBDIR (issue athenaeum#984 AC1, "
+        "design note §8 table row 1: 'a surface declaring purgeable, plus derived "
+        "artifacts scoped to it')",
+    ),
+    ArtifactDeclaration(
+        name="off-corpus-vector-collection",
+        persistence_class="derived",
+        operational_scope=None,
+        location="cache dir (off-corpus/ subdirectory)",
+        source_ref="off_corpus.py _OFF_CORPUS_CACHE_SUBDIR (issue athenaeum#984 AC1, "
+        "design note §8 table row 1)",
+    ),
+    ArtifactDeclaration(
+        name="off-corpus-ledger-shard",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="off-corpus purgeable surface "
+        "(storage.adapters.<off_corpus.adapter>.surface_root)",
+        source_ref="off_corpus.py LEDGER_DIRNAME (issue athenaeum#984 AC3, design note "
+        "§8 table row 3: 'an operational/store-durable artifact on a purgeable "
+        "surface (R3)')",
+    ),
 )
 
 

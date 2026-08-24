@@ -470,6 +470,13 @@ def _apply_merge_answer(
             verdict=verdict_value,
             decided_by=f"pipeline:merge-{decision}",
             lock=lock,
+            # Issue athenaeum#984 (AC3): let record_pair_decision route an
+            # erasure-class or cross-boundary pair to the off-corpus ledger
+            # shard instead of refusing it. A no-op when off_corpus.enabled
+            # is unset (the default) — record_pair_decision falls back to
+            # its pre-athenaeum#984 refuse-and-drop behavior.
+            config=config,
+            knowledge_root=wiki_root.parent,
         )
 
     return DecisionAnswerOutcome(
