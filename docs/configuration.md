@@ -1671,6 +1671,97 @@ thread through the SAME lock the CLI command already holds.
 is the sanctioned read path (mirrors `athenaeum merges`) — hand-parsing
 `wiki/_verdicts/*.jsonl` directly is not supported.
 
+## Off-corpus store (athenaeum#984) — off by default
+
+An indexable, purgeable surface for erasure-class content: its own FTS5 +
+vector index shard (never the main corpus index), federated into `recall`,
+plus a ledger shard for verdicts that touch off-corpus claims — never the
+in-git ledger the "Verdict ledger" section above documents. Ships in
+`src/athenaeum/off_corpus.py`, split (b) of the athenaeum#718 re-scope under
+the whole-store adapter design lock (athenaeum#911,
+[`docs/whole-store-adapter-design.md`](whole-store-adapter-design.md) §8).
+
+**Why a genuine erasure needs a store outside the git working tree.** The
+wiki store is a git repository with history, clones, and remotes — an in-git
+"erasure" survives in history on every clone until a rewrite is force-pushed
+everywhere. `off_corpus.adapter` must therefore name a `storage.adapters`
+entry whose `surface_root` resolves OUTSIDE `knowledge_root` entirely (not
+merely outside `wiki/`) — `athenaeum` refuses loudly at first use if it
+resolves inside the git working tree, rather than silently declaring a
+surface "purgeable" that a stray `git add -A` could still sweep into
+history.
+
+**Wiring decision (athenaeum#984 AC, mirrors the verdict ledger's shape).**
+With the flag on, three real integration points fire:
+
+- `athenaeum.librarian.reindex` (the engine behind `athenaeum reindex` /
+  `session-end` / the nightly `athenaeum run`'s downstream reindex) builds
+  the off-corpus FTS5 **and** vector index shards alongside the main corpus
+  index, every time.
+- `recall` (the MCP tool) federates the off-corpus index shard into the
+  SAME call, merging hit lists ranked by score so neither index silently
+  dominates.
+- `athenaeum.verdicts.record_pair_decision` (the `ingest-answers`
+  merge-decision recorder — see "Verdict ledger" above) routes a pair with
+  an erasure-class side to the off-corpus ledger shard instead of refusing
+  it. This requires **both** `off_corpus.enabled` and
+  `librarian.verdict_ledger_enabled` — the verdict-ledger flag still gates
+  the whole verdicts subsystem; this flag additionally redirects the
+  erasure-class case within it.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Off-corpus store | `ATHENAEUM_OFF_CORPUS_ENABLED` | `off_corpus.enabled` | `false` (**off**) | Gates the whole subsystem: the off-corpus index build, federated recall, and off-corpus ledger routing. See [`resolve_off_corpus_enabled`](../src/athenaeum/config.py). |
+| Off-corpus adapter | — (yaml-only) | `off_corpus.adapter` | `null` | Name of a `storage.adapters` entry (see [`docs/storage-adapter-contract.md`](storage-adapter-contract.md)) whose `surface_root` backs the off-corpus store. Required when `off_corpus.enabled` is true; `athenaeum` raises `OffCorpusConfigError` if unset, unknown, or resolves inside the knowledge root. See [`resolve_off_corpus_adapter_name`](../src/athenaeum/config.py). |
+
+```yaml
+off_corpus:
+  enabled: true
+  adapter: erasure-off-corpus
+
+storage:
+  mapping:
+    erasure-claim: erasure-off-corpus   # example entity class; athenaeum#985 decides real classification
+  adapters:
+    erasure-off-corpus:
+      backing_store: markdown
+      surface_root: /abs/path/outside/the/knowledge/root   # MUST be outside the git working tree
+      corpus_policy:
+        embedded: false      # never joins the MAIN corpus FTS5/vector index
+        recallable: true     # federated recall may surface it (Layer C `recallable` check)
+        merge_eligible: false
+```
+
+**With the flag off:** `athenaeum reindex`/`session-end`/`run`, `recall`, and
+`record_pair_decision` are byte-identical to before athenaeum#984 — no
+`off-corpus/` cache-dir subdirectory, no federated hits, and an erasure-class
+verdict pair is refused exactly as it was before this issue (never silently
+written anywhere).
+
+**Store layout**, under the configured `off_corpus.adapter`'s `surface_root`:
+
+- `<relpath>.md` — off-corpus content, addressed by
+  `StoreKey(surface=<adapter name>, key=<relpath>)` through the SAME
+  `athenaeum.store.Store` protocol/`FilesystemStore` implementation the
+  main corpus uses — a second instance, physically rooted elsewhere, not a
+  second storage abstraction (design note §8.5).
+- `_verdicts/<YYYY-MM>.jsonl` — the off-corpus ledger shard, append-only
+  JSONL, same `O_APPEND` + fsync durability as the in-git ledger. No
+  compaction/epoch-registry counterpart in athenaeum#984's scope.
+
+**Index shards**, under `<cache_dir>/off-corpus/` (never git-tracked, like
+every other derived index artifact — see "What the contract governs" in
+[`docs/store-contract.md`](store-contract.md)): `wiki-index.db` (FTS5) and
+`wiki-vectors/` (chromadb), rebuilt incrementally on the same cadence as the
+main corpus index.
+
+**Single-store erasure delete.** `athenaeum.off_corpus.erase_off_corpus_record`
+deletes the content key and immediately rebuilds both index shards
+incrementally in the same call — the manifest add/changed/removed delta
+(athenaeum#348/#977) prunes the record's FTS5 row and vector embedding, so a
+caller observes the record gone from content AND from federated recall
+after one call, with no separate reindex step to remember.
+
 ## Dimension registry (athenaeum#714)
 
 Root of the memory-model v6 dimension chain (child of epic athenaeum#709;

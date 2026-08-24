@@ -547,6 +547,168 @@ class TestErasureClassGuard:
 
 
 # ---------------------------------------------------------------------------
+# Off-corpus ledger-shard routing (issue athenaeum#984 AC3)
+# ---------------------------------------------------------------------------
+
+
+class TestOffCorpusLedgerRouting:
+    """A pair with an erasure-class side must land on the off-corpus ledger
+    shard, in the SAME purgeable store as the off-corpus index — never the
+    in-git ledger above. This is deliberately the SAME fixture shape as
+    ``TestErasureClassGuard.test_record_pair_decision_refuses_erasure_class_pair``
+    (a cross-boundary pair: one erasure-class source, one ordinary corpus
+    source) so the only variable between "refuse" and "route off-corpus" is
+    whether *config*/*knowledge_root* are supplied — proving the off state
+    is unchanged and the on state is additive, not a behavior swap."""
+
+    @staticmethod
+    def _off_corpus_config(off_corpus_dir: Path) -> dict:
+        return {
+            "off_corpus": {"enabled": True, "adapter": "off-corpus-test"},
+            "storage": {
+                "adapters": {
+                    "off-corpus-test": {
+                        "backing_store": "markdown",
+                        "surface_root": str(off_corpus_dir),
+                        "corpus_policy": {
+                            "embedded": False,
+                            "recallable": True,
+                            "merge_eligible": False,
+                        },
+                    },
+                },
+            },
+        }
+
+    def test_cross_boundary_pair_routes_to_off_corpus_and_not_git(
+        self, tmp_path: Path
+    ) -> None:
+        """AC3's adversarial test: EXACTLY ONE side of the pair is
+        erasure-class (the other is an ordinary corpus page) — a
+        cross-boundary pair, not a fully-off-corpus one — and it must still
+        route off-git in its entirety, never split or partially hashed into
+        the in-git ledger."""
+        from athenaeum import off_corpus
+
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        pii_page = wiki_root / "jane.md"
+        pii_page.write_text(
+            "---\nname: Jane\ntype: person\npii: true\n---\nfact\n", encoding="utf-8"
+        )
+        ordinary = wiki_root / "topic.md"
+        _write_page(ordinary, name="topic")
+
+        off_corpus_dir = tmp_path / "off-corpus-store"
+        off_corpus_dir.mkdir()
+        config = self._off_corpus_config(off_corpus_dir)
+
+        lock = RunLock(knowledge_root)
+        with lock:
+            result = record_pair_decision(
+                wiki_root,
+                source_a=str(pii_page),
+                source_b=str(ordinary),
+                verdict="duplicate",
+                decided_by="pipeline:merge-approve",
+                lock=lock,
+                config=config,
+                knowledge_root=knowledge_root,
+            )
+
+        assert result["ok"] is True
+        assert result["ledger"] == "off-corpus"
+
+        # AC3's core assertion: the pair must NOT appear in git (the in-git
+        # ledger stays empty).
+        assert ledger_count(wiki_root) == 0
+
+        # ...and MUST appear in the off-corpus ledger shard, physically
+        # outside the git working tree (off_corpus_dir is a sibling of
+        # knowledge_root, never a subdirectory of it).
+        store = off_corpus.off_corpus_store(config, knowledge_root)
+        assert store is not None
+        assert knowledge_root not in off_corpus_dir.parents
+
+        import json as _json
+
+        ledger_dir = off_corpus_dir / off_corpus.LEDGER_DIRNAME
+        assert ledger_dir.is_dir()
+        partitions = list(ledger_dir.glob("*.jsonl"))
+        assert len(partitions) == 1
+        lines = [
+            _json.loads(line)
+            for line in partitions[0].read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert len(lines) == 1
+        assert lines[0]["pair"] == result["pair"]
+
+    def test_fully_off_corpus_pair_also_routes_off_git(self, tmp_path: Path) -> None:
+        """Both sides erasure-class — the simpler, non-adversarial case,
+        checked too so the adversarial cross-boundary test above is not the
+        only coverage."""
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        jane = wiki_root / "jane.md"
+        jane.write_text(
+            "---\nname: Jane\ntype: person\npii: true\n---\nfact one\n", encoding="utf-8"
+        )
+        jane2 = wiki_root / "jane2.md"
+        jane2.write_text(
+            "---\nname: Jane 2\ntype: person\npii: true\n---\nfact two\n", encoding="utf-8"
+        )
+
+        off_corpus_dir = tmp_path / "off-corpus-store"
+        off_corpus_dir.mkdir()
+        config = self._off_corpus_config(off_corpus_dir)
+
+        lock = RunLock(knowledge_root)
+        with lock:
+            result = record_pair_decision(
+                wiki_root,
+                source_a=str(jane),
+                source_b=str(jane2),
+                verdict="duplicate",
+                decided_by="pipeline:merge-approve",
+                lock=lock,
+                config=config,
+                knowledge_root=knowledge_root,
+            )
+        assert result["ok"] is True
+        assert result["ledger"] == "off-corpus"
+        assert ledger_count(wiki_root) == 0
+
+    def test_without_config_still_refuses_exactly_as_before(self, tmp_path: Path) -> None:
+        """The pre-athenaeum#984 default: config/knowledge_root omitted ->
+        refuse-and-drop, byte-identical to before this issue."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True)
+        pii_page = wiki_root / "jane.md"
+        pii_page.write_text(
+            "---\nname: Jane\ntype: person\npii: true\n---\nfact\n", encoding="utf-8"
+        )
+        ordinary = wiki_root / "topic.md"
+        _write_page(ordinary, name="topic")
+
+        lock = RunLock(tmp_path)
+        with lock:
+            result = record_pair_decision(
+                wiki_root,
+                source_a=str(pii_page),
+                source_b=str(ordinary),
+                verdict="duplicate",
+                decided_by="pipeline:merge-approve",
+                lock=lock,
+            )
+        assert result["ok"] is False
+        assert result["error_code"] == "erasure_class_refused"
+        assert ledger_count(wiki_root) == 0
+
+
+# ---------------------------------------------------------------------------
 # ensure_ledger_initialized — the "flag on" run-finalize contract
 # ---------------------------------------------------------------------------
 

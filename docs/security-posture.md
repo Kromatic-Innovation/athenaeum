@@ -180,6 +180,59 @@ Deliberately **not** answered here: *who* may request which class
 address is still deliverable — that is `is_bounced_identifier`, a separate
 question with a separate predicate. A caller about to send needs both.
 
+### 2.4 Off-corpus erasure boundary (athenaeum#984)
+
+**The boundary this section documents is physical, not merely policy.** The
+wiki store is a git repository with history, clones, and remotes — a delete
+committed there survives in history on every clone until a rewrite is
+force-pushed everywhere, so it is not an erasure. `athenaeum.off_corpus`
+(split (b) of the athenaeum#718 re-scope, `docs/whole-store-adapter-design.md`
+§8) gives erasure-class content a genuinely separate, non-git-tracked store:
+a delete there (`athenaeum.off_corpus.erase_off_corpus_record`) is a real
+`os.unlink`-level removal, with no git history for it to survive in.
+
+- **Enforced at configuration time, not merely documented.**
+  `athenaeum.off_corpus.off_corpus_root` refuses (`OffCorpusConfigError`,
+  fail-closed) to resolve an `off_corpus.adapter` whose `surface_root` lands
+  inside `knowledge_root` at all — not just outside `wiki/`, which is all the
+  existing `excluded` storage-adapter surface (§2's "off-corpus excluded
+  surfaces") guarantees. A misconfigured off-corpus surface cannot silently
+  become git-tracked and defeat the erasure guarantee; it fails to resolve at
+  all.
+- **`capabilities.purgeable`/`capabilities.versioned` are real, not just
+  declared.** The `Store` this module builds is constructed with the
+  off-corpus root itself as its `FilesystemStore` `knowledge_root` argument
+  (see `athenaeum.store.FilesystemStore`'s `versioned` capability: whether
+  `knowledge_root/.git` exists) — so `versioned` reads `False` for the
+  physically-correct reason (no `.git` there), not because the flag was
+  hand-set.
+- **Single-store, single-operation erasure.** `erase_off_corpus_record`
+  deletes the content key and incrementally rebuilds BOTH off-corpus index
+  shards (FTS5 + vector) in the same call, so a caller cannot observe an
+  intermediate state where the content is gone but a stale index shard still
+  serves it through `recall`.
+- **Federation does not widen the audience gate.** An off-corpus hit
+  federated into `recall` (see
+  [`docs/recall-architecture.md`](recall-architecture.md#off-corpus-federation-athenaeum984))
+  passes through the SAME Layer C `is_page_authorized`/`recallable` checks
+  every other hit does — no off-corpus-specific carve-out exists in that
+  code path. An operator controls whether off-corpus content is recallable
+  AT ALL, independent of `off_corpus.enabled`, by the SAME
+  `storage.adapters.<name>.corpus_policy.recallable` flag §2 already
+  documents for the `excluded` surface.
+- **The ledger boundary is symmetric.** `athenaeum.verdicts.record_pair_decision`
+  routes a verdict pair with an erasure-class side (`refuse_if_erasure_class`
+  — the same `pii:`-flag signal athenaeum#712 already gated a refusal on;
+  real HMAC-keyed erasure classification is athenaeum#985's separate scope,
+  not this module's) to the off-corpus ledger shard instead of the in-git
+  ledger, INCLUDING a cross-boundary pair where only one side is
+  erasure-class — the whole pair routes off-git, never a partial write. See
+  [`docs/configuration.md`](configuration.md#off-corpus-store-athenaeum984--off-by-default).
+- **Off by default.** With `off_corpus.enabled` unset, none of this code
+  runs — no off-corpus index, no federation, and `record_pair_decision`
+  keeps its pre-athenaeum#984 behavior of refusing (not writing anywhere) an
+  erasure-class pair.
+
 ## 3. Dependency-upgrade policy
 
 This repo follows the Kromatic maintenance-posture playbook, with one critical adaptation: **the package's own upper-bound caps in `pyproject.toml` define what Dependabot can propose at all.** Auto-merge eligibility is layered on top of those caps.
