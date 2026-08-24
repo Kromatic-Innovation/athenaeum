@@ -180,6 +180,99 @@ Deliberately **not** answered here: *who* may request which class
 address is still deliverable — that is `is_bounced_identifier`, a separate
 question with a separate predicate. A caller about to send needs both.
 
+### 2.4 Erasure classification and taint rules (athenaeum#985)
+
+`athenaeum.erasure` (split (c) of athenaeum#718's re-scope, athenaeum#911
+design lock §8) is the classification and taint-propagation layer that
+decides *which* content is erasure-class and *what may be written about it*
+— independent of where the bytes ultimately land (that is athenaeum#984's
+off-corpus storage mechanics, a separate slice this one does not depend on
+or wire into). Two pieces of that layer are recorded here rather than only
+in code, per athenaeum#985's own acceptance criteria.
+
+#### Erasure egress disclosure
+
+**Erasure is a single-store delete of every copy the system controls** —
+the corpus, any off-corpus surface, and the HMAC-keyed hash pointers
+`athenaeum.erasure.erasure_content_hash` writes — **plus enumerable-but-
+unreachable copies in session transcripts and downstream agent outputs.**
+
+Recall into a session is an egress event. Once erasure-class content has
+been pushed into a session (a human's chat transcript, an agent's own
+working memory, a log a downstream tool wrote from that session's output),
+athenaeum's erasure cascade has no reach into it — those copies are outside
+every store this library controls. This is stated here as a **disclosed
+gap, not a silent one**: `athenaeum.erasure.EGRESS_DISCLOSURE` carries this
+exact guarantee into every redaction-ledger record's `to_dict()` output
+(`athenaeum.erasure.RedactionLedgerRecord`), so an operator reading the
+ledger after an erasure sees the disclosure attached to the action, not just
+in this document.
+
+This does not weaken the erasure guarantee for what the system DOES
+control — it says precisely what "erasure" does and does not reach, the
+same posture §2.2's L6 note takes for the outbound-LLM path ("the outbound
+path is not a PII boundary... this section is the 'write it down' half").
+Closing the session-log gap itself is a separate, parked question (egress
+*refusal*, athenaeum#428) — this module documents the gap honestly; it does
+not close it.
+
+#### Erasure remediation: misclassified in-git content
+
+`athenaeum.erasure`'s taint rules (derivation, re-ingestion, push-is-egress)
+and its conservative default (an unknown-jurisdiction data subject is always
+erasure-class) exist to keep erasure-class content off the git-versioned
+corpus in the first place. When they fail — a claim is misclassified and
+lands in git anyway — git's own durability, the exact property that makes
+ordinary content recoverable, is what makes an in-git "erasure" a lie: a
+`git rm` alone leaves the content in history on every clone until a rewrite
+is force-pushed everywhere (`docs/whole-store-adapter-design.md` §4.5).
+
+The named remediation, **last resort, not a routine tool**:
+
+1. **Identify every commit that ever introduced the misclassified content**
+   (`git log -p --all -- <path>`, or a full-history grep if the content
+   moved paths). A single `git rm` commit does NOT remove it from history —
+   this step is what a naive remediation misses.
+2. **Rewrite history** with a purpose-built tool (`git filter-repo`
+   recommended over the deprecated `git filter-branch`; BFG Repo-Cleaner is
+   an alternative) to strip the content from every commit that carries it.
+3. **Force-push the rewritten history to every remote.**
+4. **Blast radius — stated, not glossed over:**
+   - **Every machine with a clone must re-clone.** A rewritten history is a
+     different set of commit SHAs; a machine that pulls/merges against its
+     old clone resurrects the stripped content on the next sync. There is
+     no incremental-update path — this is the cost of a git-durability
+     erasure remediation, and it is the reason the ordinary case is
+     "classify correctly before it enters git," not "rewrite history after."
+   - **Ledger re-anchor.** Every durable record that names a commit SHA as a
+     recovery/provenance pointer into the rewritten range — the decay-sweep
+     ledger's `recovering_commit`
+     (`athenaeum.decay_sweep.SweepLedgerRecord.recovering_commit`), the
+     merge-provenance ledger, any other SHA-keyed record — points at a SHA
+     that no longer exists post-rewrite. Those records must be re-anchored
+     to the corresponding SHA in the new history (`git filter-repo` and BFG
+     both emit an old-SHA-to-new-SHA mapping for exactly this purpose); an
+     un-reconciled ledger entry is a dangling pointer, not a security
+     defect, but it will read as one to a future auditor unless it is fixed
+     in the same remediation pass.
+   - **Any external reference to a stripped commit SHA** (an issue comment,
+     a CI run's logged SHA, a teammate's local branch) goes stale the same
+     way a clone does.
+5. **Redaction-ledger entry, written as part of the remediation, not
+   after.** `athenaeum.erasure.build_history_rewrite_remediation_record`
+   builds the entry (reason code `history-rewrite-remediation`,
+   `action_taken: refuse-write`) — this function BUILDS the record; it does
+   not perform the rewrite itself. The record carries the same "that-and-
+   why, never what" guarantee every redaction-ledger entry carries (§2.4's
+   sibling AC8): which opaque subject reference, which data/memory class,
+   the HMAC-keyed content hash for correlation — never the content that was
+   misclassified.
+
+This protocol is **documented, not implemented** — athenaeum#985 ships the
+classification/taint machinery and the ledger-entry builder; it does not
+ship a history-rewrite command, and it never runs against live data (see
+that issue's "Out of scope").
+
 ## 3. Dependency-upgrade policy
 
 This repo follows the Kromatic maintenance-posture playbook, with one critical adaptation: **the package's own upper-bound caps in `pyproject.toml` define what Dependabot can propose at all.** Auto-merge eligibility is layered on top of those caps.

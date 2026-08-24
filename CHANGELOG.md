@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Erasure classification and taint-propagation rules (athenaeum#985,
+  split (c) of athenaeum#718's re-scope).** New `athenaeum.erasure` module:
+  HMAC-keyed content hashes for erasure-class claims with a purgeable
+  per-corpus key (`load_or_create_erasure_key` / `purge_erasure_key` /
+  `erasure_content_hash`); opaque, uid-based person-entity slugs and pair
+  ids (`opaque_person_slug` / `opaque_pair_id`) so erasure-class ledgers
+  never carry a name; conservative default classification
+  (`classify_retention` — a data subject with unknown jurisdiction is
+  always erasure-class, enforced ahead of any retention-pack lookup); the
+  three taint rules — derivation (`classify_inference_taint`, working
+  against `## Inference` blocks), re-ingestion by provenance
+  (`classify_by_provenance` / `off_corpus_recall_source`, never re-guessed
+  from content), and push-is-egress (`EGRESS_DISCLOSURE`, carried in every
+  redaction-ledger record); the redaction ledger itself
+  (`RedactionLedgerRecord` — structurally "that-and-why, never what," with
+  no content field on the dataclass at all); and retention policy packs as
+  YAML data (`src/athenaeum/retention_packs/us-default.yaml`,
+  `.../eu-gdpr.yaml`, loaded by `available_retention_packs` /
+  `resolve_active_retention_pack`), selected/overridden via the new
+  `erasure.retention_pack` / `erasure.retention_packs.<name>`
+  `athenaeum.yaml` keys (`athenaeum.config.resolve_retention_pack_selection`
+  / `resolve_retention_pack_overrides`). Also documents (never implements)
+  the last-resort in-git history-rewrite remediation path for misclassified
+  content, with its blast radius stated (`docs/security-posture.md` §2.4).
+  No production caller is migrated onto this module in this slice — same
+  posture `athenaeum.sensitivity` shipped under for its S1a/S1b — so the
+  nightly librarian run and every existing write/read path are byte-for-byte
+  unchanged with these keys at their defaults.
+
 ### Removed
 
 - **`athenaeum people` CLI subcommand (athenaeum#1079).** Deprecated in
