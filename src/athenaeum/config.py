@@ -105,13 +105,13 @@ def _env_number(name: str, cast: Callable[[str], _T]) -> _T | None:
         return cast(raw)
     except (TypeError, ValueError):
         logger.warning(
-            "Ignoring malformed %s=%r (expected %s); falling back to "
-            "yaml/default.",
+            "Ignoring malformed %s=%r (expected %s); falling back to yaml/default.",
             name,
             raw,
             getattr(cast, "__name__", str(cast)),
         )
         return None
+
 
 # Issue athenaeum#519/#521 (H9 + L3): the single canonical default cache-dir location
 # and the single resolver honouring the ``ATHENAEUM_CACHE_DIR`` override.
@@ -494,9 +494,7 @@ def resolve_ephemeral_scopes(config: dict[str, Any] | None) -> list[str]:
         if isinstance(cfg, dict) and "ephemeral_scopes" in cfg:
             raw = cfg.get("ephemeral_scopes")
             if isinstance(raw, list):
-                return [
-                    str(g).strip() for g in raw if isinstance(g, str) and str(g).strip()
-                ]
+                return [str(g).strip() for g in raw if isinstance(g, str) and str(g).strip()]
     return list(_DEFAULT_EPHEMERAL_SCOPES)
 
 
@@ -516,9 +514,7 @@ def resolve_operational_markers(config: dict[str, Any] | None) -> list[str]:
             raw = cfg.get("operational_markers")
             if isinstance(raw, list):
                 return [
-                    str(m).strip().lower()
-                    for m in raw
-                    if isinstance(m, str) and str(m).strip()
+                    str(m).strip().lower() for m in raw if isinstance(m, str) and str(m).strip()
                 ]
     return []
 
@@ -1387,9 +1383,7 @@ def resolve_page_warn_bytes(config: dict[str, Any] | None) -> int:
     never a block. See :func:`_resolve_positive_int_knob` for the coercion
     contract.
     """
-    return _resolve_positive_int_knob(
-        config, "page_warn_bytes", "ATHENAEUM_PAGE_WARN_BYTES", 8192
-    )
+    return _resolve_positive_int_knob(config, "page_warn_bytes", "ATHENAEUM_PAGE_WARN_BYTES", 8192)
 
 
 def resolve_page_flag_bytes(config: dict[str, Any] | None) -> int:
@@ -1401,9 +1395,7 @@ def resolve_page_flag_bytes(config: dict[str, Any] | None) -> int:
     Kept comfortably below the tier-3 merge body cap so flagging precedes any
     hard merge-budget pressure. See :func:`_resolve_positive_int_knob`.
     """
-    return _resolve_positive_int_knob(
-        config, "page_flag_bytes", "ATHENAEUM_PAGE_FLAG_BYTES", 16384
-    )
+    return _resolve_positive_int_knob(config, "page_flag_bytes", "ATHENAEUM_PAGE_FLAG_BYTES", 16384)
 
 
 def resolve_raw_file_max_bytes(config: dict[str, Any] | None) -> int:
@@ -1678,8 +1670,11 @@ def resolve_spend_max_tokens_per_run(config: dict[str, Any] | None) -> int | Non
     ``spend.max_tokens_per_run`` yaml > ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
-        config, "spend", "max_tokens_per_run",
-        "ATHENAEUM_SPEND_MAX_TOKENS_PER_RUN", cast=int,
+        config,
+        "spend",
+        "max_tokens_per_run",
+        "ATHENAEUM_SPEND_MAX_TOKENS_PER_RUN",
+        cast=int,
     )
 
 
@@ -1692,8 +1687,11 @@ def resolve_spend_max_tokens_per_day(config: dict[str, Any] | None) -> int | Non
     yaml > ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
-        config, "spend", "max_tokens_per_day",
-        "ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY", cast=int,
+        config,
+        "spend",
+        "max_tokens_per_day",
+        "ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY",
+        cast=int,
     )
 
 
@@ -1706,8 +1704,11 @@ def resolve_spend_max_usd_per_run(config: dict[str, Any] | None) -> float | None
     ``spend.max_usd_per_run`` yaml > ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
-        config, "spend", "max_usd_per_run",
-        "ATHENAEUM_SPEND_MAX_USD_PER_RUN", cast=float,
+        config,
+        "spend",
+        "max_usd_per_run",
+        "ATHENAEUM_SPEND_MAX_USD_PER_RUN",
+        cast=float,
     )
 
 
@@ -1720,8 +1721,11 @@ def resolve_spend_max_usd_per_day(config: dict[str, Any] | None) -> float | None
     ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
-        config, "spend", "max_usd_per_day",
-        "ATHENAEUM_SPEND_MAX_USD_PER_DAY", cast=float,
+        config,
+        "spend",
+        "max_usd_per_day",
+        "ATHENAEUM_SPEND_MAX_USD_PER_DAY",
+        cast=float,
     )
 
 
@@ -1740,8 +1744,11 @@ def resolve_spend_weekly_token_limit(config: dict[str, Any] | None) -> int | Non
     ``spend.weekly_token_limit`` yaml > ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
-        config, "spend", "weekly_token_limit",
-        "ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT", cast=int,
+        config,
+        "spend",
+        "weekly_token_limit",
+        "ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT",
+        cast=int,
     )
 
 
@@ -1757,8 +1764,11 @@ def resolve_spend_max_pct_per_day(config: dict[str, Any] | None) -> float | None
     ``spend.max_pct_per_day`` yaml > ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
-        config, "spend", "max_pct_per_day",
-        "ATHENAEUM_SPEND_MAX_PCT_PER_DAY", cast=float,
+        config,
+        "spend",
+        "max_pct_per_day",
+        "ATHENAEUM_SPEND_MAX_PCT_PER_DAY",
+        cast=float,
     )
 
 
@@ -1949,9 +1959,7 @@ def preflight_model_rates(resolved_models: Iterable[tuple[str, str]]) -> str | N
     a miss would otherwise (silently) fail at cost-calculation time.
     """
     unpriced = [
-        (knob, model)
-        for knob, model in resolved_models
-        if model and not model_has_price(model)
+        (knob, model) for knob, model in resolved_models if model and not model_has_price(model)
     ]
     if not unpriced:
         return None
@@ -3311,3 +3319,66 @@ def resolve_verdict_epoch_batch_interval_days(config: dict[str, Any] | None) -> 
         "ATHENAEUM_VERDICT_EPOCH_BATCH_INTERVAL_DAYS",
         30,
     )
+
+
+# ---------------------------------------------------------------------------
+# Erasure retention packs (issue athenaeum#985, AC9)
+# ---------------------------------------------------------------------------
+
+
+def resolve_retention_pack_selection(config: dict[str, Any] | None) -> str:
+    """Resolve which retention pack is ACTIVE (issue athenaeum#985, AC9).
+
+    Precedence: env ``ATHENAEUM_RETENTION_PACK`` > yaml ``erasure.retention_pack``
+    > default ``"us-default"``. This is the SELECTION axis only — it names
+    which pack (of :func:`athenaeum.erasure.available_retention_packs`'s
+    result) governs; the pack's own rule table is a separate axis
+    (:func:`resolve_retention_pack_overrides`), mirroring how
+    :func:`resolve_sensitivity_routing` keeps "is a class routed" separate
+    from :func:`resolve_sensitivity_classes`' "what does the class contain."
+    An empty/whitespace-only override at either tier is treated as unset.
+    """
+    env = os.environ.get("ATHENAEUM_RETENTION_PACK")
+    if env and env.strip():
+        return env.strip()
+    if isinstance(config, dict):
+        erasure_cfg = config.get("erasure")
+        if isinstance(erasure_cfg, dict):
+            raw = erasure_cfg.get("retention_pack")
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    return "us-default"
+
+
+def resolve_retention_pack_overrides(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Resolve ``erasure.retention_packs.<name>`` operator-authored pack overrides/additions.
+
+    Returns the RAW (still-unvalidated) per-pack mapping dicts keyed by pack
+    name — :func:`athenaeum.erasure.available_retention_packs` validates each
+    and builds the :class:`~athenaeum.erasure.RetentionPack` objects, exactly
+    mirroring :func:`resolve_sensitivity_classes`'s split with
+    :func:`athenaeum.sensitivity.available_classes`. Returns an EMPTY dict
+    when unset — the two packaged packs (``us-default``, ``eu-gdpr``) are
+    still resolved regardless, from ``src/athenaeum/retention_packs/*.yaml``,
+    not from this function — so this resolver is NOT seeded in
+    ``_DEFAULTS`` (issue athenaeum#231's rule: seeding here would make the
+    packaged-file default unreachable). Non-string keys and non-mapping
+    values are dropped defensively; a malformed entry surfaces loudly later,
+    at pack-build time, with the pack name in the message.
+    """
+    if not isinstance(config, dict):
+        return {}
+    erasure_cfg = config.get("erasure") or {}
+    if not isinstance(erasure_cfg, dict):
+        return {}
+    raw = erasure_cfg.get("retention_packs")
+    if not isinstance(raw, dict):
+        return {}
+    packs: dict[str, dict[str, Any]] = {}
+    for name, definition in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(definition, dict):
+            continue
+        packs[name.strip()] = definition
+    return packs

@@ -1440,6 +1440,61 @@ existing generic exception handler — unmodified by this slice — which
 already leaves the raw file untouched on disk and writes no wiki page for
 it (§6/AC10).
 
+## Erasure classification and retention packs (athenaeum#985)
+
+The classification and taint-propagation layer for erasure-class content
+(`athenaeum.erasure`, split (c) of athenaeum#718's re-scope — see
+`docs/whole-store-adapter-design.md` §8). **No production caller is
+migrated onto this module in this slice** — it ships fully implemented and
+fully tested, mirroring the precedent `docs/configuration.md`'s own
+"Sensitivity classes" section above documents for `athenaeum.sensitivity`'s
+S1a/S1b ("no caller was migrated... that was slice S3"). With every key
+below at its default, nothing in the librarian pipeline or `remember()`
+write path changes behavior — these keys govern only the (currently
+unwired) classification helpers themselves.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Active retention pack | `ATHENAEUM_RETENTION_PACK` | `erasure.retention_pack` | `us-default` | Selects which retention pack (of the two packaged packs, plus any operator-defined ones below) governs `athenaeum.erasure.classify_retention`. Unset/empty at either tier falls through to the next. |
+| Retention pack overrides/additions | — | `erasure.retention_packs.<name>` | `{}` (packaged packs only) | Operator-authored pack definitions. Reusing a packaged name (`us-default`, `eu-gdpr`) **overrides it wholesale** (no field-level merge — an override that omits `rules:` gets an empty list, not the packaged pack's table), the same "config wins, wholesale" rule the Sensitivity classes section above documents. A new name adds a new pack. No env override — a pack definition has no single scalar encoding. |
+| Erasure HMAC key location | — | — (always `<cache_dir>/_erasure_hmac_key`) | machine-local, under the resolved cache dir | Not independently configurable — resolves through the existing `resolve_cache_dir` precedence (`arg > ATHENAEUM_CACHE_DIR env > ~/.cache/athenaeum`), same as every other cache-dir ledger/key in this repo. See "Reversible defaults taken" in the athenaeum#985 PR for why this key is deliberately machine-local rather than store-durable. |
+
+**Retention-pack shape.** Each pack is YAML data (`src/athenaeum/retention_packs/us-default.yaml`,
+`.../eu-gdpr.yaml`), never a Python literal — "packs are data, not code" is
+athenaeum#985's own AC9 wording. A pack has a `default_action` (+ optional
+`default_period`) and a `rules:` list of `{memory_class, data_class,
+jurisdiction, action, period?}` entries. `action` is one of `refuse-write |
+store-off-corpus | demote-cold | delete-after | retain-until`; `period`
+(an opaque string, e.g. `"P7Y"`) is required for the last two, unused by
+the first three. `data_class` names a sensitivity class (`docs/sensitivity-class-vocabulary.md`
+— `pii` is the only one athenaeum ships); `memory_class` names an
+`athenaeum.memory_class.MEMORY_CLASSES` value.
+
+**Unknown jurisdiction is always erasure-class — no pack can loosen this.**
+`athenaeum.erasure.classify_retention` enforces AC3's conservative default
+(a data subject whose jurisdiction is unknown at write time is erasure-class)
+BEFORE any pack lookup runs — a pack defining a `jurisdiction: unknown`
+row of its own is never reached for that case. Neither packaged pack
+defines one, for the same reason. Where the data subject's jurisdiction IS
+known, a pack keys on the **subject's** jurisdiction, not only the
+operator's deployment jurisdiction — `docs/configuration.md`'s two packaged
+examples both carry both a `jurisdiction: us` and a `jurisdiction: eu` row
+for exactly this reason.
+
+**Reconciling with the decay-bucket mapping (issue athenaeum#969,
+`docs/provenance-shape.md` §8.8).** That doc commits `bucket: daily` to
+compile to a `delete-after <period>` rule keyed by `(memory_class,
+data_class)`, once a pack exists for that key. `athenaeum.erasure.reconcile_bucket_daily_with_pack`
+computes that mapping now that a pack exists, but — per that function's own
+docstring — this athenaeum#985 PR does **not** wire it into
+`athenaeum.decay_sweep`'s live sweep behavior; `decay_sweep.py` is
+unmodified and imports nothing from `athenaeum.erasure`.
+
+**Example `athenaeum.yaml`: unchanged.** The defaults need no config — a
+deployment with no `erasure:` block behaves exactly as it does today
+(nothing calls these functions on any write/read path yet). The example at
+the end of this file is not amended for this section.
+
 ## Authority manifest (athenaeum#426)
 
 | Knob | Env var | YAML key | Default | What it does |
