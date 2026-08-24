@@ -28,6 +28,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **First live-store snapshots from the memory-model measurement pack, appended
+  to `docs/memory-model-measurements.md` (Refs athenaeum#713).** Ran all three
+  `athenaeum measure` commands (`shadow-linkage`, `backlog-price`,
+  `ordinary-night`) against the operator's own `~/knowledge` store and
+  committed the resulting snapshots: complete-linkage comparator pair count
+  3008 (vs. 1,917,870 under single-linkage), a backlog price sheet over
+  2986 files, and an ordinary-night steady-state table whose verdict is
+  `closes` against the nightly call/wall-clock budgets — conditional on the
+  TTL-recheck/invalidation-wave/audit-sampling terms, which are not yet
+  built and are therefore recorded as `n/a`/zero rather than fabricated.
+  Added a governing preamble ahead of the three new sections framing them
+  as single-sample, calibration-not-configuration, corpus-dependent
+  measurements, and inviting other operators to contribute snapshots from
+  their own wikis — the artifacts are aggregate-only by construction (see
+  `shadow_linkage.py`'s `to_dict()` and its cluster-member-count reduction).
+
 - **`athenaeum measure backlog-price`/`ordinary-night` operator-supplied
   input overrides, price-table and doc-drift pinning tests (athenaeum#1095,
   the remaining delta on athenaeum#713's measurement pack, whose generator
