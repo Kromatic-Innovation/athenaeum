@@ -1034,7 +1034,8 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         name="off-corpus-ledger-shard",
         persistence_class="operational",
         operational_scope="store-durable",
-        location="off-corpus purgeable surface (storage.adapters.<off_corpus.adapter>.surface_root)",
+        location="off-corpus purgeable surface "
+        "(storage.adapters.<off_corpus.adapter>.surface_root)",
         source_ref="off_corpus.py LEDGER_DIRNAME (issue athenaeum#984 AC3, design note "
         "§8 table row 3: 'an operational/store-durable artifact on a purgeable "
         "surface (R3)')",
