@@ -2017,6 +2017,56 @@ Both accept `--json`. This is the registry's consumer for this issue — the
 five-verdict comparator that will consume the full algebra automatically is
 a separate, future child of epic athenaeum#709.
 
+## Memory tiers and push budget (athenaeum#718) — off by default
+
+Retrieval-cost tiers (hot/warm/cold/refused — see `athenaeum.memory_tiers`'
+module docstring for the full model) and the token-denominated unprompted
+push budget. **Not to be confused with `athenaeum.tiers`** (the unrelated
+T0-T4 entity-compilation pipeline) — these are two different, deliberately
+non-overlapping vocabularies.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Push token budget | `ATHENAEUM_PUSH_TOKEN_BUDGET` | `push_budget.tokens_per_turn` | `1200` | The one dial for how many tokens an UNPROMPTED push (`recall_search(..., unprompted=True)`) may spend this turn — hits are ranked by relevance x tier x coordinate-fit and greedily selected while the running total stays within budget. Has no effect on an ordinary (`unprompted=False`, the default) recall call, which returns every matching tier unbudgeted, exactly as before this issue existed. |
+| Automatic tier sweep enabled | `ATHENAEUM_MEMORY_TIER_SWEEP_ENABLED` | `librarian.memory_tier_sweep_enabled` | `false` | When `true`, the nightly `athenaeum run` scans the wiki and applies automatic hot<->warm `memory_tier:` movement (class-default/age/precision demotion, promote-on-use) — see `athenaeum.memory_tiers.run_tier_sweep`. Off (the default): the phase returns immediately, no page is scanned or written, and the nightly run is byte-identical to this issue not existing. `axiom`-class pages are NEVER touched by this sweep regardless of this setting — the only path to demoting an axiom's tier is `athenaeum.memory_tiers.demote_axiom_tier`, which requires a human-supplied reason and records into the `_axiom_governance.jsonl` ledger. |
+| Tier-movement demote-after window | `ATHENAEUM_MEMORY_TIER_DEMOTE_AFTER_DAYS` | `memory_tiers.demote_after_days` | `60` | Shared threshold for two of the sweep's three demotion triggers: a hot claim with no usage record at all past this many days, or a hot claim pushed but never referenced whose last push is older than this many days. The third trigger (class-default: `superseded_by`/`deprecated`) ignores this knob and is unconditional. Only consulted when the sweep itself is enabled. |
+
+```yaml
+push_budget:
+  tokens_per_turn: 1200   # the one push-budget dial (issue athenaeum#718)
+librarian:
+  memory_tier_sweep_enabled: false   # off by default; see docs/configuration.md
+memory_tiers:
+  demote_after_days: 60
+```
+
+**The four tiers, in brief** (hot/warm reversible metadata; cold/refused are
+read-only bridges onto already-shipped mechanisms, not new per-page state):
+
+- **hot** — indexed, eligible for unprompted push under the token budget above.
+- **warm** — indexed, explicit recall only (never appears in an
+  `unprompted=True` result set).
+- **cold** — reuses `athenaeum.storage.is_embedded(type, config)` (the
+  existing class+config storage-adapter mechanism, issue athenaeum#429/athenaeum#911) —
+  **not** a new per-page flag. A per-page cold override is net-new work
+  nominated for issue athenaeum#716; this issue does not build it.
+- **refused** — never written. `athenaeum.memory_tiers.is_refused` is a
+  read-only bridge onto the already-shipped never-ingest gate
+  (`athenaeum.never_ingest`, issue athenaeum#968) — no new refusal logic here.
+
+**Usage sensor**: tier movement's age/precision demotion triggers consume
+`athenaeum.usage_report.get_claim_usage`/`compute_usage_report` exclusively
+(issue athenaeum#968's documented interface) — never re-reads
+`_push_records.jsonl`/`_push_references.jsonl` directly. This wiring is
+explicitly **not** a deletion/retention policy: nothing in this issue
+deletes a claim because it was unused, only moves its retrieval-cost tier.
+
+**Recall hit header**: every recall hit (regardless of `unprompted`) now
+carries a `**Tier:** <tier>` segment, plus a `**Scope:** <relation>` segment
+when the caller passes `session_scope=` and the page carries a
+`claimed_scope` (issue athenaeum#714's `scope` dimension) — so the consuming
+agent sees why a hit was pushed/shown.
+
 ## Recall and search
 
 | Knob | CLI flag | Env var | YAML key | Default | What it does |
@@ -2132,6 +2182,12 @@ recall:
 push_metrics:
   enabled: true    # on by default; passive push-precision/coverage measurement (athenaeum#711)
 
+push_budget:
+  tokens_per_turn: 1200   # the one push-budget dial; unprompted-push token cap (athenaeum#718)
+
+memory_tiers:
+  demote_after_days: 60   # age/precision demotion threshold for the tier sweep (athenaeum#718)
+
 librarian:
   cluster_threshold: 0.55
   cluster_output: raw/_librarian-clusters.jsonl
@@ -2170,6 +2226,7 @@ librarian:
   verdict_ledger_enabled: false              # off by default; verdict ledger + basis (athenaeum#712)
   verdict_epoch_batch_interval_days: 30      # comparator-epoch bump batching interval (athenaeum#712)
   ingestion_gate_enabled: false               # off by default; skip auto-memory phase if push-metrics precision is unhealthy (athenaeum#968)
+  memory_tier_sweep_enabled: false            # off by default; automatic hot<->warm tier movement (athenaeum#718)
   delta:
     enabled: true               # delta-scoped incremental compile on client=None path (athenaeum#370)
     max_affected_clusters: 8    # > this many clusters touched => full compile (athenaeum#370)
