@@ -1094,7 +1094,14 @@ def _recall_via_backend(
                 tier=memory_tier,
                 scope_relation=relation,
                 relevance=float(score),
-                tokens=estimate_tokens(snip),
+                # Issue athenaeum#718: meter the FULLY RENDERED block --
+                # path/tags/uid/type/meta/tier-scope/links/excluded headers
+                # plus the snippet -- never just `snip` alone. The token
+                # budget must bound what actually gets pushed into the
+                # session; metering only the snippet undercounts by the
+                # header overhead (which this issue's own tier/scope segment
+                # adds to) and lets the budget be consistently overrun.
+                tokens=estimate_tokens(block),
             )
         )
 
