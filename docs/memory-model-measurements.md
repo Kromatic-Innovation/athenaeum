@@ -64,6 +64,94 @@ Reproduce with: `athenaeum push-metrics baseline`
 - athenaeum_version: 0.16.4
 - git_sha: 5513d80f0188
 
+## Coverage floor
+
+### Snapshot 2026-08-24T01:59:26.698117Z
+
+Reproduce with: `athenaeum push-metrics coverage-audit --n 10 --seed 998`
+
+**No `coverage_miss_rate` is recorded, and none will be.** Push records store a
+query *hash* and never the raw query text — a deliberate athenaeum#711 design
+decision that keeps free-text content out of the ledger. Without the query text a
+reviewer cannot reconstruct what a session was looking for, so no per-candidate
+relevance marking is possible and no miss rate is recoverable from the ledger.
+Any bracket published here would be policy-set rather than measured, and a
+ratified guess reads as measured — which is worse than no number at all. The
+athenaeum#1036 rework of the audit removed the per-candidate marking column
+entirely. This section is that disposition; the `coverage_miss_rate: n/a —
+awaits operator review` note carried by the two snapshots above is **superseded**
+by it, and no operator review is pending.
+
+What the reworked (athenaeum#1036) worksheet does emit is structural, and is
+recorded below.
+
+Provenance stamp:
+
+- run date: 2026-08-24T01:59:26.698117Z
+- run source: the reworked athenaeum#1036 worksheet, executed against the live
+  store from the deploy install at `~/local-deploys/athenaeum` (editable
+  install), git_sha `d72f6350b1cc`
+- athenaeum_version: 0.19.26 (taken from the running source tree — the packaged
+  `.dist-info` metadata is stale and self-reports 0.19.25)
+- store snapshot identity: wiki root `~/knowledge/wiki`, 23056 pages; search
+  backend `fts5`; ledger `_push_records.jsonl` sha256 `29c7e9dbd59cab3c…`
+  (153 records), `_push_references.jsonl` sha256 `dad74217059215b8…` (5 records)
+
+Sample:
+
+- sampled_session_count: 10
+- excluded_sessions: none
+- excluded_push_records: 0
+
+Candidate pool:
+
+- total candidate-pool size across the 10 sampled sessions: 824
+- per-session candidate-pool size range: 69–88
+
+Tier/scope concentration of the pushed set:
+
+- total_pushed_items: 105
+- distinct tier/scope pairings: 4
+- top pairing: tier `internal` / scope `owner` — 98 items,
+  share_of_pushed_items 0.9333
+- degenerate: false
+
+Window-mate filter (the proportion the athenaeum#986 filter removes):
+
+- before_filter_id_count: 887
+- after_filter_id_count: 824
+- removed_fraction: 0.0710
+- per-session removed_fraction range: 0.0235–0.0886
+
+Policy-set bounds — **policy-set, not measured.** These are not an interval on
+any quantity this run observed; each endpoint is the arithmetic consequence of a
+marking policy applied to the candidate pool, and the endpoint reached is chosen
+entirely by that policy, not by retrieval behaviour:
+
+- lower bound 0.0000, under the policy "none of the candidate-pool ids were
+  relevant-missed"
+- upper bound 0.8889, under the policy "every candidate-pool id was
+  relevant-missed"
+
+Pairing with the precision baseline: this run sits beside the precision figure
+of 0.8710 from the 2026-08-20T00:09:51.592236Z snapshot above. The pairing is
+apples-to-apples on **exclusion discipline** — both runs excluded zero sessions
+and zero push records (`excluded_sessions: none`, `excluded_push_records: 0` on
+each), so neither figure is shaped by a filtered-out population. It is not a
+claim of a shared window or a shared population: the precision snapshot covers
+65 sessions and 221 push records, this audit samples 10 sessions and 105 pushed
+items.
+
+What would supersede this disposition: the two better signals recorded as future
+work on athenaeum#1036 — **re-search-as-miss-signal** (a session re-issuing a
+search as evidence the first push missed) and **active session feedback** (a
+session reporting back on what it actually used). Either produces relevance
+evidence without putting query text in the ledger. Until one lands, the coverage
+floor stays deliberately unrecorded.
+
+Redaction: ids-only throughout — counts and ratios only, no page titles, no
+query fragments, no person-identifying content, no raw session ids.
+
 ## Interpreting the measurement-pack snapshots (shadow-linkage, backlog-price, ordinary-night)
 
 The three sections below (issue athenaeum#713) are a single, dated snapshot
