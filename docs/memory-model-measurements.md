@@ -127,7 +127,13 @@ Window-mate filter (the proportion the athenaeum#986 filter removes):
 Policy-set bounds — **policy-set, not measured.** These are not an interval on
 any quantity this run observed; each endpoint is the arithmetic consequence of a
 marking policy applied to the candidate pool, and the endpoint reached is chosen
-entirely by that policy, not by retrieval behaviour:
+entirely by that policy, not by retrieval behaviour. The denominator below is
+**not** `total_pushed_items` (105, the raw undeduplicated item count above) —
+it is the sum of each sampled session's own *distinct* pushed-id count (103),
+matching `build_coverage_worksheet`'s `pushed_total`. The two counts diverge
+because one session pushed at least one id more than once across separate push
+records; `total_pushed_items` counts every push record's items, `pushed_total`
+counts distinct ids per session:
 
 - lower bound 0.0000, under the policy "none of the candidate-pool ids were
   relevant-missed"
