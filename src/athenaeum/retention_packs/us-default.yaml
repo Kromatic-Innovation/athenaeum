@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Baseline US-oriented retention pack (athenaeum#985 AC9).
+#
+# This is a reasonable starting point, not a legal compliance certification
+# -- an operator should review it before relying on it. It is selected by
+# default (`erasure.retention_pack: us-default`, itself the default value of
+# that key) but can be overridden or replaced entirely via
+# `erasure.retention_packs.<name>` in athenaeum.yaml.
+#
+# `jurisdiction: unknown` is INTENTIONALLY ABSENT from this table. Per AC3's
+# conservative default, an unknown data-subject jurisdiction always resolves
+# to `store-off-corpus` -- enforced by `athenaeum.erasure.classify_retention`
+# itself, ahead of any pack lookup, so no pack (built-in or operator-authored)
+# can loosen it by omission or by mistake.
+#
+# Action vocabulary: refuse-write | store-off-corpus | demote-cold |
+# delete-after <period> | retain-until <period>. `period` is an opaque
+# string carried through for a future enforcement slice to interpret
+# (athenaeum#985 ships the classification and the data shape, not execution
+# against live data -- see the issue's "Out of scope").
+name: us-default
+version: 1
+description: >-
+  Baseline US retention pack. Known-jurisdiction PII about US subjects gets
+  a bounded retention window; unknown-jurisdiction subjects fall through to
+  the hard-coded conservative default (store-off-corpus), never this file's
+  default_action.
+default_action: demote-cold
+rules:
+  - memory_class: entity
+    data_class: pii
+    jurisdiction: us
+    action: retain-until
+    period: P7Y
+  - memory_class: fact
+    data_class: pii
+    jurisdiction: us
+    action: demote-cold
+    period: P2Y
+  - memory_class: entity
+    data_class: pii
+    jurisdiction: eu
+    action: store-off-corpus
+  - memory_class: fact
+    data_class: pii
+    jurisdiction: eu
+    action: store-off-corpus

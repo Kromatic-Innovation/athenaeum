@@ -36,8 +36,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from athenaeum.config import resolve_cache_dir
 from athenaeum.librarian import EXIT_GRACEFUL_PARTIAL, _render_run_summary, run
 from athenaeum.merge import RunDeadlineExceeded, merge_clusters_to_wiki
+from athenaeum.run_summary_log import (
+    default_run_summary_ledger_path,
+    read_run_summary_ledger,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers (mirrors tests/test_librarian_merge.py's fixture conventions)
@@ -305,6 +310,57 @@ class TestCleanRunSummary:
         assert "resolver_opus=" in line
         assert "created=1" in line
         assert "files=1" in line
+
+
+class TestDurableRunSummaryLedger:
+    """Issue athenaeum#1102 AC2: a real ``run()`` also writes the durable JSONL
+    sibling of the prose line above, not just in isolated unit tests of the
+    writer. ``ATHENAEUM_CACHE_DIR`` is redirected to a per-test tmp dir by
+    the autouse ``_isolate_cache_dir`` fixture in conftest.py, so this never
+    touches the operator's real ``~/.cache/athenaeum``.
+    """
+
+    def test_run_appends_one_durable_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path, n_files=0)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+        )
+
+        assert rc == 0
+        ledger_path = default_run_summary_ledger_path()
+        assert ledger_path == resolve_cache_dir() / "run_summary.jsonl"
+        records = read_run_summary_ledger(ledger_path)
+        assert len(records) == 1
+        record = records[0]
+        assert record["total_secs"] >= 0.0
+        assert "entity" in record["phases"]
+        # AC1: every phase's ledger entry carries a reason-for-exit.
+        assert record["phases"]["entity"]["reason"] == "completed"
+
+    def test_two_runs_append_two_records(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path, n_files=0)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+
+        for _ in range(2):
+            rc = run(
+                raw_root=root / "raw",
+                wiki_root=root / "wiki",
+                knowledge_root=root,
+                max_api_calls=100,
+            )
+            assert rc == 0
+
+        records = read_run_summary_ledger(default_run_summary_ledger_path())
+        assert len(records) == 2
 
 
 # ---------------------------------------------------------------------------
