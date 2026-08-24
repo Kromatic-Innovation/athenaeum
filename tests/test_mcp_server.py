@@ -369,9 +369,11 @@ class TestRecallHeaderRendering:
 
     def test_bare_page_matches_pre_325_shape(self, tmp_path: Path) -> None:
         # A page with none of source/updated/valid/status renders the original
-        # Tags-then-blank-then-snippet shape (no blank metadata line inserted)
-        # -- with the issue athenaeum#964 Uid/Type lines (always rendered, unlike
-        # the omit-at-default athenaeum#325 header) directly after Tags.
+        # Tags-then-blank-then-snippet shape (no blank athenaeum#325 metadata line
+        # inserted) -- with the issue athenaeum#964 Uid/Type lines (always
+        # rendered, unlike the omit-at-default athenaeum#325 header) directly
+        # after Tags, and the issue athenaeum#718 Tier line (also always
+        # rendered) directly after Type.
         wiki = self._wiki(tmp_path)
         (wiki / "terse.md").write_text(
             "---\n"
@@ -381,7 +383,7 @@ class TestRecallHeaderRendering:
             "A terse page about migrations.\n"
         )
         result = recall_search(wiki, "migrations terse")
-        assert "**Tags:** plain\n**Uid:** —\n**Type:** —\n\n" in result
+        assert "**Tags:** plain\n**Uid:** —\n**Type:** —\n**Tier:** warm\n\n" in result
 
     def test_withheld_contested_page_leaks_no_status(self, tmp_path: Path) -> None:
         # Safety lock (athenaeum#325 raison d'etre): a restricted caller must not see a
@@ -405,6 +407,111 @@ class TestRecallHeaderRendering:
         )
         assert "**Status:**" not in result
         assert "Secret dispute" not in result
+
+
+# ---------------------------------------------------------------------------
+# Tier + push budget (issue athenaeum#718)
+# ---------------------------------------------------------------------------
+
+
+class TestRecallTierAndPushBudget:
+    def _wiki(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        return wiki
+
+    def test_tier_segment_shows_hot_for_guideline(self, tmp_path: Path) -> None:
+        wiki = self._wiki(tmp_path)
+        (wiki / "rule.md").write_text(
+            "---\nname: A rule\ntype: principle\nmemory_class: guideline\n---\n\n"
+            "Always validate input.\n"
+        )
+        result = recall_search(wiki, "validate input")
+        assert "**Tier:** hot" in result
+
+    def test_tier_segment_shows_warm_for_entity(self, tmp_path: Path) -> None:
+        wiki = self._wiki(tmp_path)
+        (wiki / "p.md").write_text(
+            "---\nuid: u1\nname: Alice\ntype: person\n---\n\nAlice works here.\n"
+        )
+        result = recall_search(wiki, "Alice works")
+        assert "**Tier:** warm" in result
+
+    def test_scope_segment_appears_only_with_session_scope(self, tmp_path: Path) -> None:
+        wiki = self._wiki(tmp_path)
+        (wiki / "p.md").write_text(
+            "---\nname: Scoped note\ntype: feedback\nclaimed_scope: org/team\n---\n\n"
+            "A scoped note about the rollout.\n"
+        )
+        without = recall_search(wiki, "scoped rollout")
+        assert "**Scope:**" not in without
+
+        withit = recall_search(wiki, "scoped rollout", session_scope="org/team")
+        assert "**Scope:** equal" in withit
+
+    def test_unprompted_default_false_is_byte_identical(self, tmp_path: Path) -> None:
+        wiki = self._wiki(tmp_path)
+        (wiki / "p.md").write_text(
+            "---\nname: Plain\ntype: feedback\n---\n\nA plain note about widgets.\n"
+        )
+        default_call = recall_search(wiki, "plain widgets")
+        explicit_false = recall_search(wiki, "plain widgets", unprompted=False)
+        assert default_call == explicit_false
+
+    def test_unprompted_excludes_warm_tier(self, tmp_path: Path) -> None:
+        wiki = self._wiki(tmp_path)
+        # entity -> warm by class default.
+        (wiki / "p.md").write_text(
+            "---\nuid: u1\nname: Alice\ntype: person\n---\n\nAlice knows about widgets.\n"
+        )
+        prompted = recall_search(wiki, "Alice widgets")
+        assert "Alice" in prompted
+
+        unprompted = recall_search(wiki, "Alice widgets", unprompted=True)
+        assert "No wiki pages matched" in unprompted
+
+    def test_unprompted_includes_hot_tier(self, tmp_path: Path) -> None:
+        wiki = self._wiki(tmp_path)
+        (wiki / "rule.md").write_text(
+            "---\nname: A rule\ntype: principle\nmemory_class: guideline\n---\n\n"
+            "Always validate widgets on input.\n"
+        )
+        result = recall_search(wiki, "validate widgets", unprompted=True)
+        assert "A rule" in result
+
+    def test_unprompted_enforces_token_budget_at_the_boundary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.push_metrics import estimate_tokens
+
+        wiki = self._wiki(tmp_path)
+        query = "validate widgets shipping"
+        body = "Always validate widgets thoroughly before shipping any release.\n"
+        (wiki / "rule1.md").write_text(
+            "---\nname: Rule widget one\ntype: principle\nmemory_class: guideline\n---\n\n"
+            + body
+        )
+        # A generous budget admits the one hot hit.
+        monkeypatch.delenv("ATHENAEUM_PUSH_TOKEN_BUDGET", raising=False)
+        admitted = recall_search(wiki, query, unprompted=True)
+        assert "Rule widget one" in admitted
+
+        # Compute the EXACT snippet token cost `select_for_push` sees
+        # internally (same `_snippet`/`estimate_tokens` calls
+        # `_recall_via_backend` makes), so the boundary assertion below is
+        # exact, not approximate.
+        snippet_tokens = estimate_tokens(_snippet(body, _tokenize_query(query)))
+        assert snippet_tokens > 0
+
+        # Exactly at the snippet's token cost: still admitted (`<=` budget).
+        monkeypatch.setenv("ATHENAEUM_PUSH_TOKEN_BUDGET", str(snippet_tokens))
+        at_boundary = recall_search(wiki, query, unprompted=True)
+        assert "Rule widget one" in at_boundary
+
+        # One token under: excluded -- the boundary itself.
+        monkeypatch.setenv("ATHENAEUM_PUSH_TOKEN_BUDGET", str(snippet_tokens - 1))
+        under_boundary = recall_search(wiki, query, unprompted=True)
+        assert "No wiki pages matched" in under_boundary
 
 
 # ---------------------------------------------------------------------------

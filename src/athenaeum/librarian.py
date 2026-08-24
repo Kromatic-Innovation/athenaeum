@@ -118,6 +118,7 @@ from athenaeum.config import (
     resolve_full_compile_every_days,
     resolve_heartbeat_interval,
     resolve_live_delta_enabled,
+    resolve_memory_tier_sweep_enabled,
     resolve_model,
     resolve_model_rates,
     resolve_pull_before_run,
@@ -2904,6 +2905,11 @@ class RunContext:
     # when the config gate is off -- a disabled phase never touches this
     # field, distinguishing "didn't run" from "ran and saw nothing").
     rule_proposals_summary: dict[str, Any] | None = None
+    # Issue athenaeum#718: run-summary counts from ``_run_memory_tier_sweep_phase``
+    # (``None`` until that phase runs, including when the config gate is off --
+    # a disabled phase never touches this field, distinguishing "didn't run"
+    # from "ran and swept nothing").
+    memory_tier_sweep_summary: dict[str, Any] | None = None
     # Issue athenaeum#968: run-summary counts from the never-ingest gate applied
     # in ``_run_auto_memory_phase`` (``None`` until that phase runs) -- how
     # many auto-memory candidates were excluded this run because they
@@ -3740,6 +3746,61 @@ def _run_rule_proposal_phase(ctx: RunContext) -> None:
             summary["skipped_draft_invalid"],
             summary["skipped_no_client"],
             summary["skipped_deadline"],
+        )
+
+
+def _run_memory_tier_sweep_phase(ctx: RunContext) -> None:
+    """Automatic hot<->warm memory-tier movement (issue athenaeum#718), closing
+    the "tier movement is metadata, reversible, mostly automatic" AC.
+
+    **Config-gated OFF by default**
+    (:func:`~athenaeum.config.resolve_memory_tier_sweep_enabled`,
+    ``librarian.memory_tier_sweep_enabled``, mirroring
+    `_run_rule_proposal_phase`'s config-gate shape). With every new athenaeum#718
+    key at its default this function returns immediately: no page is
+    scanned, no `memory_tier:` field is written, `ctx.memory_tier_sweep_summary`
+    stays ``None`` -- the nightly run is behaviorally unchanged, per the
+    issue's DoD ("with every new key at its default, the nightly librarian
+    run is behaviourally unchanged. Verify by running it.").
+
+    Deterministic and LLM-free (unlike `_run_rule_proposal_phase`, this
+    makes zero model calls -- see :func:`athenaeum.memory_tiers.run_tier_sweep`),
+    so it does not need its own spend/provider wiring. Runs here -- after
+    auto-memory and the rule-proposal phase, immediately before finalize,
+    NOT reached by a `merge_only`/`cluster_only` run (both already returned
+    above) -- so any page auto-memory compiled or merged THIS run is visible
+    to the sweep's own scan, mirroring `_run_rule_proposal_phase`'s "make
+    this run's own writes visible to a later phase in this SAME run"
+    rationale.
+
+    Skipped whenever ``ctx.deadline_tripped`` (mirrors the rule-proposal
+    phase's own guard) -- a run that already blew its wall-clock budget must
+    not open a brand-new (even LLM-free) scan of the whole wiki afterward.
+    """
+    if not resolve_memory_tier_sweep_enabled(ctx.config):
+        return
+    if ctx.deadline_tripped or ctx.deadline_exceeded():
+        ctx.memory_tier_sweep_summary = {"skipped_deadline_tripped": True}
+        return
+
+    from athenaeum.memory_tiers import run_tier_sweep
+
+    report = run_tier_sweep(
+        ctx.wiki_root,
+        config=ctx.config,
+        cache_dir=_resolve_cache_dir(None),
+        now=ctx.now,
+        dry_run=ctx.dry_run,
+    )
+    ctx.memory_tier_sweep_summary = report.to_dict()
+    if report.changed:
+        log.info(
+            "memory-tier sweep: %d page(s) scanned, %d moved, %d axiom-skipped, "
+            "%d error(s)",
+            report.scanned,
+            len(report.changed),
+            report.skipped_axiom,
+            len(report.errors),
         )
 
 
@@ -5908,6 +5969,14 @@ def run(
     # phases earlier in the run — see `_run_rule_proposal_phase`'s docstring
     # for the full ordering + deadline rationale.
     _run_rule_proposal_phase(ctx)
+
+    # Phase: automatic memory-tier sweep (issue athenaeum#718) -- config-gated
+    # OFF by default, so a no-op for every run until an operator opts in.
+    # Runs immediately after the rule-proposal phase (same reachability as
+    # that phase: NOT reached by merge_only/cluster_only) -- see
+    # `_run_memory_tier_sweep_phase`'s docstring for the full ordering
+    # rationale.
+    _run_memory_tier_sweep_phase(ctx)
 
     # Phase: finalize (spend summary + ledger, post-run push, page-size
     # guardrail, pending-merge revalidation advisor, summary emit, drain

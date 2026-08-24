@@ -39,6 +39,7 @@ from athenaeum.librarian import (
     _resolve_run_config,
     _run_git_vcs_io,
     _run_intake_audit_phase,
+    _run_memory_tier_sweep_phase,
     _run_preconditions,
     _run_rule_proposal_phase,
     _run_wiki_dedup_phase,
@@ -932,6 +933,76 @@ class TestRunRuleProposalPhase:
         assert ctx.usage.per_knob["rule_proposals"]["output_tokens"] == 22
         assert ctx.knob_providers["rule_proposals"] == "api"
         assert ctx.knob_models["rule_proposals"]  # resolved to a concrete model id
+
+
+# ---------------------------------------------------------------------------
+# _run_memory_tier_sweep_phase (issue athenaeum#718 -- automatic hot<->warm
+# tier movement, config-gated off by default)
+# ---------------------------------------------------------------------------
+
+
+class TestRunMemoryTierSweepPhase:
+    """Verification bar (athenaeum#718 DoD: "with every new key at its default,
+    the nightly librarian run is behaviourally unchanged. Verify by running
+    it. Then run again with tiering on and observe.") -- gate-off no-op,
+    gate-on scans and moves a qualifying page, an expired deadline skips the
+    phase."""
+
+    def _wiki_with_superseded_page(self, tmp_path: Path) -> Path:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        (wiki_root / "page1.md").write_text(
+            "---\nuid: p1\nname: Old guidance\ntype: principle\n"
+            "memory_class: guideline\nsuperseded_by: winner\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        return wiki_root
+
+    def test_noop_when_gate_off_by_default(self, tmp_path: Path) -> None:
+        wiki_root = self._wiki_with_superseded_page(tmp_path)
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root, now=_NOW)
+        ctx.config = {}
+        before = (wiki_root / "page1.md").read_text(encoding="utf-8")
+        _run_memory_tier_sweep_phase(ctx)
+        after = (wiki_root / "page1.md").read_text(encoding="utf-8")
+        assert before == after
+        assert ctx.memory_tier_sweep_summary is None
+
+    def test_noop_when_gate_explicitly_false(self, tmp_path: Path) -> None:
+        wiki_root = self._wiki_with_superseded_page(tmp_path)
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root, now=_NOW)
+        ctx.config = {"librarian": {"memory_tier_sweep_enabled": False}}
+        _run_memory_tier_sweep_phase(ctx)
+        assert ctx.memory_tier_sweep_summary is None
+
+    def test_gate_on_sweeps_and_demotes(self, tmp_path: Path) -> None:
+        wiki_root = self._wiki_with_superseded_page(tmp_path)
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root, now=_NOW)
+        ctx.config = {"librarian": {"memory_tier_sweep_enabled": True}}
+        _run_memory_tier_sweep_phase(ctx)
+        assert ctx.memory_tier_sweep_summary is not None
+        assert len(ctx.memory_tier_sweep_summary["changed"]) == 1
+        text = (wiki_root / "page1.md").read_text(encoding="utf-8")
+        assert "memory_tier: warm" in text
+
+    def test_deadline_already_expired_skips_phase(self, tmp_path: Path) -> None:
+        wiki_root = self._wiki_with_superseded_page(tmp_path)
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root, now=_NOW)
+        ctx.config = {"librarian": {"memory_tier_sweep_enabled": True}}
+        ctx.run_deadline = 0.0
+        ctx.max_runtime = 60
+        _run_memory_tier_sweep_phase(ctx)
+        assert ctx.memory_tier_sweep_summary == {"skipped_deadline_tripped": True}
+        before_after = (wiki_root / "page1.md").read_text(encoding="utf-8")
+        assert "memory_tier:" not in before_after
+
+    def test_deadline_tripped_flag_skips_phase(self, tmp_path: Path) -> None:
+        wiki_root = self._wiki_with_superseded_page(tmp_path)
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root, now=_NOW)
+        ctx.config = {"librarian": {"memory_tier_sweep_enabled": True}}
+        ctx.deadline_tripped = True
+        _run_memory_tier_sweep_phase(ctx)
+        assert ctx.memory_tier_sweep_summary == {"skipped_deadline_tripped": True}
 
 
 if __name__ == "__main__":
