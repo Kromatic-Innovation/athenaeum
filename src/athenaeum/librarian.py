@@ -117,6 +117,7 @@ from athenaeum.config import (
     resolve_extra_intake_roots,
     resolve_full_compile_every_days,
     resolve_heartbeat_interval,
+    resolve_intake_runtime_floor,
     resolve_live_delta_enabled,
     resolve_memory_tier_sweep_enabled,
     resolve_model,
@@ -200,6 +201,10 @@ from athenaeum.quarantine import quarantine_file as _quarantine_file
 from athenaeum.registry import collect_handles
 from athenaeum.rule_proposals import DEFAULT_RULE_PROPOSALS_MODEL, run_rule_proposal_detection
 from athenaeum.rules import run_shape_rule_phase
+from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home now
+    RUN_SUMMARY_PREFIX,
+    write_run_summary_record,
+)
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
@@ -2695,10 +2700,6 @@ def _write_deferred_manifest(
 # ordering, or exit code is affected by any of this.
 # ---------------------------------------------------------------------------
 
-#: Stable prefix for the one-line, key=value, machine-greppable run summary.
-RUN_SUMMARY_PREFIX = "librarian-run-summary"
-
-
 def _render_schema_fragment_attribution(
     state: "dict[str, tuple[str, bool]]",
 ) -> str:
@@ -2739,11 +2740,19 @@ def _render_run_summary(
 
         librarian-run-summary total_secs=12.3 \
             schema_fragments=observation-filter:default,_entity-template:a1b2c3d4 \
-            prompt_manifest=9f8e7d6c zero_yield=0 | wiki-dedup secs=0.1 | \
-            entity secs=4.2 calls=6 created=2 updated=1 escalated=0 files=3 | \
+            prompt_manifest=9f8e7d6c zero_yield=0 | wiki-dedup secs=0.1 reason=completed | \
+            entity secs=4.2 calls=6 created=2 updated=1 escalated=0 files=3 reason=completed | \
             auto-memory secs=7.8 detector_haiku=4 resolver_opus=1 \
-            sweep_pairs=0 clusters_merged=2 escalations=0 | retire secs=0.1 | \
-            reresolve secs=0.05 calls=0
+            sweep_pairs=0 clusters_merged=2 escalations=0 reason=completed | \
+            retire secs=0.1 reason=completed | reresolve secs=0.05 calls=0 reason=completed
+
+    Every phase's ``fields`` carries a ``reason`` token (issue athenaeum#1102 AC1) —
+    ``"completed"`` for a phase that ran to normal completion, or a
+    phase-specific yield/trip label (e.g. the entity phase's ``"entity-share"``
+    / ``"deadline"`` / ``"budget"``, mirroring :func:`_write_deferred_manifest`'s
+    ``reason=`` vocabulary) distinguishing "completed its work" from
+    "exhausted its share of the window" — machine-readable per phase per run,
+    not prose a consumer has to parse out of the WARNING text above it.
 
     ``total_secs`` sums the per-phase elapsed times (NOT independently timed)
     so it is always internally consistent with the phase breakdown.
@@ -3070,6 +3079,18 @@ class RunContext:
                 zero_yield_consecutive=self.zero_yield_consecutive,
             ),
         )
+        # Issue athenaeum#1102 (AC2): a durable, machine-readable SIBLING of the
+        # prose line above — one JSONL record per run, appended under the
+        # cache dir (see `run_summary_log.default_run_summary_ledger_path`'s
+        # docstring for why not `wiki_root`). `write_run_summary_record`
+        # never raises on its own (mirrors `spend.record_spend`'s contract),
+        # but wrapped anyway — same defensive posture as the two `try`
+        # blocks above: this is pure observability and must never affect a
+        # run's outcome.
+        try:
+            write_run_summary_record(self.run_profile)
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: durable ledger write skipped: %s", exc)
 
     def stop_on_deadline(self, phase: str) -> int:
         """Commit partial progress and return EXIT_GRACEFUL_PARTIAL (75) when
@@ -3478,10 +3499,37 @@ def _arm_run_deadline(ctx: RunContext) -> None:
     # depends on. ``None`` whenever the run deadline is disabled or the share is
     # opted out of.
     _entity_share = librarian_entity_runtime_share(ctx.config)
-    ctx.entity_deadline = (
+    _entity_deadline_from_share = (
         ctx.run_deadline - (1.0 - _entity_share) * ctx.max_runtime
         if ctx.run_deadline is not None and _entity_share > 0.0
         else None
+    )
+    # Issue athenaeum#1102: the intake-path floor is a SEPARATE, opt-in
+    # guarantee, not a replacement for the athenaeum#440 share above — the share
+    # caps what entity may take, the floor reserves a minimum for intake
+    # regardless of what the share alone would have left it. Derived from
+    # ``run_deadline`` exactly like the share (same "upstream phase time eats
+    # the reserve, never the other way round" property). ``None`` whenever
+    # the run deadline is disabled or the floor is unset/disabled
+    # (:func:`~athenaeum.config.resolve_intake_runtime_floor`'s default).
+    _intake_floor = resolve_intake_runtime_floor(ctx.config)
+    _entity_deadline_from_floor = (
+        ctx.run_deadline - _intake_floor * ctx.max_runtime
+        if ctx.run_deadline is not None and _intake_floor > 0.0
+        else None
+    )
+    # The entity phase must yield at whichever candidate is EARLIER — the
+    # tighter of "entity has used its own permitted share" and "intake's
+    # reserved floor is about to be encroached on". With the floor unset
+    # (``_entity_deadline_from_floor is None``) this is byte-identical to the
+    # pre-athenaeum#1102 single-candidate computation (AC4).
+    _entity_deadline_candidates = [
+        d
+        for d in (_entity_deadline_from_share, _entity_deadline_from_floor)
+        if d is not None
+    ]
+    ctx.entity_deadline = (
+        min(_entity_deadline_candidates) if _entity_deadline_candidates else None
     )
 
     # Issue athenaeum#530 (H2): surface truncation/deferral to callers (e.g. ingest())
@@ -3946,8 +3994,15 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
         finally:
             # Issue athenaeum#464: recorded even on the swallowed-exception path so the
             # summary still reflects the wall-clock this phase actually spent.
+            # Issue athenaeum#1102 (AC1): this phase has no yield/budget concept
+            # of its own (a failure is logged and swallowed, never a partial
+            # stop), so its reason-for-exit is always "completed".
             ctx.run_profile.append(
-                ("wiki-dedup", time.monotonic() - _wiki_dedup_start, {})
+                (
+                    "wiki-dedup",
+                    time.monotonic() - _wiki_dedup_start,
+                    {"reason": "completed"},
+                )
             )
 
     # Issue athenaeum#396: deadline boundary check after the athenaeum#290 wiki-dedup pass. That
@@ -3995,6 +4050,9 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
         )
     except RunDeadlineExceeded as exc:
         return ctx.stop_on_deadline(exc.phase)
+    # Issue athenaeum#1102 (AC1): a ``RunDeadlineExceeded`` above returns before
+    # this append is ever reached, so reaching here always means the phase
+    # completed.
     ctx.run_profile.append(
         (
             "auto-memory",
@@ -4007,6 +4065,7 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
                 ),
                 "clusters_merged": _merge_only_stats.get("entries_merged", 0),
                 "escalations": _merge_only_stats.get("escalations_written", 0),
+                "reason": "completed",
             },
         )
     )
@@ -4033,7 +4092,8 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
                         len(_retire_report.index_pruned)
                         if _retire_report is not None
                         else 0
-                    )
+                    ),
+                    "reason": "completed",  # issue athenaeum#1102 AC1
                 },
             )
         )
@@ -4050,7 +4110,10 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
             (
                 "reresolve",
                 time.monotonic() - _reresolve_start,
-                {"calls": ctx.usage.api_calls - _reresolve_calls_before},
+                {
+                    "calls": ctx.usage.api_calls - _reresolve_calls_before,
+                    "reason": "completed",  # issue athenaeum#1102 AC1
+                },
             )
         )
         # A merge-only run is a clean run from the manifest's
@@ -4867,6 +4930,18 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             if _entity_calls
             else 0
         )
+        # Issue athenaeum#1102 (AC1): reason-for-exit, distinguishing a clean
+        # completion from a share/floor/deadline/budget-driven yield —
+        # machine-readable (not just the WARNING text above) so a later run
+        # can tell "completed its work" apart from "exhausted its share of
+        # the window" without parsing prose. Reuses the SAME classification
+        # the deferred-manifest block above already computed
+        # (``manifest_reason``) whenever there was anything to defer; the
+        # conditional expression short-circuits to ``"completed"`` without
+        # evaluating ``manifest_reason`` when ``ctx.deferred_refs`` is empty
+        # (including the "no raw files at all" path, which never reaches the
+        # block that assigns it) — so this is never an ``UnboundLocalError``.
+        _entity_exit_reason = manifest_reason if ctx.deferred_refs else "completed"
         ctx.run_profile.append(
             (
                 "entity",
@@ -4877,6 +4952,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     "updated": ctx.total_updated,
                     "escalated": ctx.total_escalated,
                     "files": ctx.processed_count,
+                    "reason": _entity_exit_reason,
                     "out_tok_per_call": _entity_out_tok_per_call,
                     # athenaeum#472: only render when non-zero so a clean run's summary
                     # line is unchanged, but an operator watching a drain sees
@@ -5205,6 +5281,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                     "escalations": _merge_stats.get(
                         "escalations_written", 0
                     ),
+                    "reason": "deadline",  # issue athenaeum#1102 AC1
                 },
             )
         )
@@ -5221,6 +5298,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 ),
                 "clusters_merged": _merge_stats.get("entries_merged", 0),
                 "escalations": _merge_stats.get("escalations_written", 0),
+                "reason": "completed",  # issue athenaeum#1102 AC1
             },
         )
     )
@@ -5319,7 +5397,8 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                         len(_retire_report.index_pruned)
                         if _retire_report is not None
                         else 0
-                    )
+                    ),
+                    "reason": "completed",  # issue athenaeum#1102 AC1
                 },
             )
         )
@@ -5337,7 +5416,10 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             (
                 "reresolve",
                 time.monotonic() - _reresolve_start,
-                {"calls": ctx.usage.api_calls - _reresolve_calls_before},
+                {
+                    "calls": ctx.usage.api_calls - _reresolve_calls_before,
+                    "reason": "completed",  # issue athenaeum#1102 AC1
+                },
             )
         )
     return None

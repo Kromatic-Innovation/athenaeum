@@ -36,6 +36,39 @@ Every default figure on this page is verified against the code under
 | API call budget | `--max-api-calls` | `ATHENAEUM_MAX_API_CALLS` | `librarian.max_api_calls` | `800` | Run-level cap on estimated API calls (athenaeum#220, raised from 200). A budget-tripped run is DEGRADED: it writes `wiki/_deferred_work.md` and defers remaining intake. Env `0` is valid (defers the entire intake); the CLI flag rejects `0`. |
 | Wall-clock deadline | `--max-runtime` | `ATHENAEUM_MAX_RUNTIME` | `librarian.max_runtime` | `3600` | Run-level wall-clock deadline in **seconds** (athenaeum#396). Bounds the WHOLE run — the post-compile phases (C4 detector, athenaeum#290 wiki-dedup, C3 merge/resolver) AND the per-file entity loop — checked at file/cluster/phase boundaries. On trip the run commits partial progress, releases the lock, writes `wiki/_deferred_work.md`, and exits `75` (`EXIT_GRACEFUL_PARTIAL`, resumable — see [exit-codes.md](exit-codes.md) for the full table and how it differs from the external-kill `124`). A value `<= 0` disables the deadline entirely (unbounded run). The default gives an un-wrapped manual run the same ~1h bound the nightly run gets from its external `timeout` wrapper. |
 | Entity-phase runtime share | — | `ATHENAEUM_ENTITY_RUNTIME_SHARE` | `librarian.entity_runtime_share` | `0.6` | Fraction of `max_runtime` the **entity phase** may spend claiming new raw files (athenaeum#440). `max_runtime` is a single budget shared by every phase, and the entity loop otherwise stops only when the WHOLE budget is gone — measured on the live corpus, entity took 3690s of a 3944s window (93.6%) on 3 files and the C4 contradiction detector downstream of it got **0 seconds on 10+ consecutive nights**. This reserves the remainder for the auto-memory compile and C4: once the share is spent the entity phase stops taking new files, defers the rest to `wiki/_deferred_work.md` (resumable, like the athenaeum#220 budget trip), and the run **continues** into C2-C4 rather than exiting `75`. Checked at the per-file boundary, so a file already in flight may overrun the share by its own duration — this bounds when the phase stops *taking* work, not when it stops working. Any value outside `0 < share < 1` disables the reserve (pre-athenaeum#440 behaviour); inert when `max_runtime <= 0`. |
+| Intake-path runtime floor | — | `ATHENAEUM_INTAKE_RUNTIME_FLOOR` | `librarian.intake_runtime_floor` | `0.0` (OFF) | Fraction of `max_runtime` **reserved as a minimum** for the intake path that feeds C4 (athenaeum#1102) — the guarantee `entity_runtime_share` above does not itself make: that knob only *caps* what the entity phase may take, it never *reserves* anything for what runs after it. athenaeum#608 needs an honest per-contract LLM schema-mismatch rate and could not compute one — the `resolution` contract had 7 observations because the resolver made ~1 call on the 2026-08-06 run, a symptom of the entity phase's wall-clock overrun. **Arming this is an operator decision** (out of scope for athenaeum#1102 itself — it needs a value chosen against measured figures, athenaeum#608's own review) — the default is OFF and, unset, phase scheduling is byte-for-byte identical to before this knob existed. When set, the entity phase yields at whichever of `entity_runtime_share`'s own cap and this floor's implied deadline is EARLIER — so the two combine rather than one silently overriding the other. **Unit is wall-clock** (a fraction of `max_runtime`), deliberately mirroring `entity_runtime_share` rather than an LLM-call count: the window itself is wall-clock and the entity phase already stops independently on the `max_api_calls` ceiling regardless of this floor, so a calls-based floor would duplicate an existing cap — what nothing else guarantees is that entity leaves intake any wall-clock time to spend its own calls in. A floor `>= 1.0` (reserving the WHOLE window or more) is **refused, not clamped** — it falls through to disabled exactly like any other out-of-range value, so a misconfigured floor can never starve the ENTITY phase in the opposite direction. Any value outside `0 < floor < 1` (including a malformed one) falls through to disabled, matching `max_merge_sources`'s "0 disables" convention. |
+
+> **Instrumentation — per-phase reason-for-exit, and a durable ledger (athenaeum#1102, paired with `intake_runtime_floor` above).**
+> Every phase segment on the `librarian-run-summary` line (and its durable
+> ledger sibling below) now carries a `reason=` token distinguishing a clean
+> completion (`reason=completed`) from a share/floor-driven yield
+> (`reason=entity-share`, the entity phase only — fired whichever of
+> `entity_runtime_share` or `intake_runtime_floor` bound first) or a
+> deadline/budget trip (`reason=deadline` / `reason=budget`) — the same
+> vocabulary `wiki/_deferred_work.md`'s `reason:` header already uses. This
+> answers athenaeum#608's original question ("did the resolver get a
+> representative window, or was it starved?") from the record itself, not
+> from re-deriving it against a WARNING line.
+>
+> The `librarian-run-summary` prose line is unconditionally emitted every
+> run but, unless an operator's deployment happens to pipe logs somewhere
+> durable, is not itself queryable across runs — exactly the gap athenaeum#1102's
+> own motivation names ("the ~85% figure exists only as a claim in an issue
+> body, because nothing emits it"). `run()` now ALSO appends one JSONL
+> record per run to `<cache_dir>/run_summary.jsonl`
+> (`athenaeum.run_summary_log.write_run_summary_record`) — the same
+> `append_line_durable` + `resolve_cache_dir` convention the athenaeum#378 spend
+> ledger uses, under the cache dir rather than `wiki_root` for the same
+> reason `zero_yield_state.json` is (see that module's docstring): by the
+> time `emit_run_summary` runs, the entity phase's own `git_snapshot` commit
+> has already happened, so a `wiki_root` write here would leave an
+> uncommitted straggler file every run. Each record is
+> `{"v": 1, "ts": "...", "total_secs": ..., "phases": {"<name>": {"secs": ..., ...,
+> "reason": "..."}, ...}}` — JSON-native fields, not stringified `key=value`
+> tokens, so a later run (athenaeum#608, or any consumer) can aggregate across runs
+> without re-parsing prose. Purely additive observability: no phase logic,
+> ordering, or exit code is affected, and a ledger-write failure is logged at
+> debug level and swallowed, never breaking the run it measures.
 
 See [exit-codes.md](exit-codes.md) for the full `athenaeum run` exit-code table (`0` / `1` / `75` / `124`).
 | Stuck-file threshold | — | `ATHENAEUM_STUCK_FILE_THRESHOLD` | `librarian.stuck_file_threshold` | `3` | Consecutive-run failure count after which a raw file is treated as **stuck** (athenaeum#663). `tier3_write` is all-or-nothing per raw file (a partial write cannot leave the wiki half-merged), so one reliably-failing LLM call — e.g. an entity page large enough to time out every night — otherwise discards the file's other successful merges and the file is retried WHOLE every run, forever, silently. A file that fails on the **same content** this many runs running is instead SKIPPED (it stops consuming an LLM call each night) and surfaced as machine-detectable run state: `out_run_stats["stuck_files"]` (ref, consecutive failures, failing `kind:name` action, last error) plus a greppable `librarian-stuck-file` WARNING and a `stuck=N` field on the run-summary line. State lives in `wiki/_stuck_files.json` (keyed by ref + content hash, so editing the file resets its count); a run that finally succeeds on the file clears its entry. Must be `>= 1` (below that would quarantine a file on its first transient failure); non-numeric / non-positive / bool values fall back to the default. |
@@ -1440,6 +1473,61 @@ existing generic exception handler — unmodified by this slice — which
 already leaves the raw file untouched on disk and writes no wiki page for
 it (§6/AC10).
 
+## Erasure classification and retention packs (athenaeum#985)
+
+The classification and taint-propagation layer for erasure-class content
+(`athenaeum.erasure`, split (c) of athenaeum#718's re-scope — see
+`docs/whole-store-adapter-design.md` §8). **No production caller is
+migrated onto this module in this slice** — it ships fully implemented and
+fully tested, mirroring the precedent `docs/configuration.md`'s own
+"Sensitivity classes" section above documents for `athenaeum.sensitivity`'s
+S1a/S1b ("no caller was migrated... that was slice S3"). With every key
+below at its default, nothing in the librarian pipeline or `remember()`
+write path changes behavior — these keys govern only the (currently
+unwired) classification helpers themselves.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Active retention pack | `ATHENAEUM_RETENTION_PACK` | `erasure.retention_pack` | `us-default` | Selects which retention pack (of the two packaged packs, plus any operator-defined ones below) governs `athenaeum.erasure.classify_retention`. Unset/empty at either tier falls through to the next. |
+| Retention pack overrides/additions | — | `erasure.retention_packs.<name>` | `{}` (packaged packs only) | Operator-authored pack definitions. Reusing a packaged name (`us-default`, `eu-gdpr`) **overrides it wholesale** (no field-level merge — an override that omits `rules:` gets an empty list, not the packaged pack's table), the same "config wins, wholesale" rule the Sensitivity classes section above documents. A new name adds a new pack. No env override — a pack definition has no single scalar encoding. |
+| Erasure HMAC key location | — | — (always `<cache_dir>/_erasure_hmac_key`) | machine-local, under the resolved cache dir | Not independently configurable — resolves through the existing `resolve_cache_dir` precedence (`arg > ATHENAEUM_CACHE_DIR env > ~/.cache/athenaeum`), same as every other cache-dir ledger/key in this repo. See "Reversible defaults taken" in the athenaeum#985 PR for why this key is deliberately machine-local rather than store-durable. |
+
+**Retention-pack shape.** Each pack is YAML data (`src/athenaeum/retention_packs/us-default.yaml`,
+`.../eu-gdpr.yaml`), never a Python literal — "packs are data, not code" is
+athenaeum#985's own AC9 wording. A pack has a `default_action` (+ optional
+`default_period`) and a `rules:` list of `{memory_class, data_class,
+jurisdiction, action, period?}` entries. `action` is one of `refuse-write |
+store-off-corpus | demote-cold | delete-after | retain-until`; `period`
+(an opaque string, e.g. `"P7Y"`) is required for the last two, unused by
+the first three. `data_class` names a sensitivity class (`docs/sensitivity-class-vocabulary.md`
+— `pii` is the only one athenaeum ships); `memory_class` names an
+`athenaeum.memory_class.MEMORY_CLASSES` value.
+
+**Unknown jurisdiction is always erasure-class — no pack can loosen this.**
+`athenaeum.erasure.classify_retention` enforces AC3's conservative default
+(a data subject whose jurisdiction is unknown at write time is erasure-class)
+BEFORE any pack lookup runs — a pack defining a `jurisdiction: unknown`
+row of its own is never reached for that case. Neither packaged pack
+defines one, for the same reason. Where the data subject's jurisdiction IS
+known, a pack keys on the **subject's** jurisdiction, not only the
+operator's deployment jurisdiction — `docs/configuration.md`'s two packaged
+examples both carry both a `jurisdiction: us` and a `jurisdiction: eu` row
+for exactly this reason.
+
+**Reconciling with the decay-bucket mapping (issue athenaeum#969,
+`docs/provenance-shape.md` §8.8).** That doc commits `bucket: daily` to
+compile to a `delete-after <period>` rule keyed by `(memory_class,
+data_class)`, once a pack exists for that key. `athenaeum.erasure.reconcile_bucket_daily_with_pack`
+computes that mapping now that a pack exists, but — per that function's own
+docstring — this athenaeum#985 PR does **not** wire it into
+`athenaeum.decay_sweep`'s live sweep behavior; `decay_sweep.py` is
+unmodified and imports nothing from `athenaeum.erasure`.
+
+**Example `athenaeum.yaml`: unchanged.** The defaults need no config — a
+deployment with no `erasure:` block behaves exactly as it does today
+(nothing calls these functions on any write/read path yet). The example at
+the end of this file is not amended for this section.
+
 ## Authority manifest (athenaeum#426)
 
 | Knob | Env var | YAML key | Default | What it does |
@@ -2017,6 +2105,7 @@ librarian:
   max_api_calls: 800
   max_runtime: 3600             # run-level wall-clock deadline in seconds; <= 0 disables (athenaeum#396)
   entity_runtime_share: 0.6     # entity phase's share of max_runtime; rest reserved for C4 (athenaeum#440)
+  intake_runtime_floor: 0.0     # 0.0 = OFF; minimum max_runtime share reserved for intake/C4 (athenaeum#1102)
   stuck_file_threshold: 3       # consecutive-failure count before a raw file is skipped as stuck (athenaeum#663)
   raw_file_max_bytes: 5242880          # per-raw-file byte bound; 5 MiB (athenaeum#898)
   raw_file_max_api_calls: 60           # per-raw-file LLM-call bound (athenaeum#898, recalibrated athenaeum#994)
