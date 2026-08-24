@@ -28,7 +28,6 @@ import pytest
 from athenaeum import off_corpus
 from athenaeum.search import build_fts5_index
 from athenaeum.store import ARTIFACT_REGISTRY
-
 from tests.conftest import init_git_repo
 
 
