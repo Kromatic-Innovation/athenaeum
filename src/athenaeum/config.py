@@ -1714,6 +1714,93 @@ def resolve_ingestion_gate_enabled(config: dict[str, Any] | None) -> bool:
     return False
 
 
+def resolve_push_token_budget(config: dict[str, Any] | None) -> int:
+    """Resolve the unprompted push budget in tokens-per-turn (issue athenaeum#718).
+
+    The one documented dial for how much recall pushes into a turn
+    unprompted (the "hot" retrieval-cost tier only — see
+    :mod:`athenaeum.memory_tiers`, deliberately "the entire expensive-and-
+    noisy dial" per that issue's AC). Enforced at
+    :func:`athenaeum.mcp_server._recall_via_backend`'s ``unprompted=True``
+    path (:func:`athenaeum.memory_tiers.select_for_push`): hits are ranked
+    by relevance x tier x coordinate-fit and greedily included, in that
+    order, while the running token total (:func:`athenaeum.push_metrics.estimate_tokens`)
+    stays within this budget — a hit that would exceed it is skipped, never
+    truncated.
+
+    Precedence: ``ATHENAEUM_PUSH_TOKEN_BUDGET`` env > ``push_budget.tokens_per_turn``
+    yaml > ``1200``. A malformed env value WARNs and falls through (see
+    :func:`_env_number`); a non-int / ``<= 0`` yaml value falls through to
+    the default. No seed in ``_DEFAULTS`` (issue athenaeum#231).
+    """
+    value = _env_number("ATHENAEUM_PUSH_TOKEN_BUDGET", int)
+    if value is not None and value > 0:
+        return value
+    if isinstance(config, dict):
+        cfg = config.get("push_budget")
+        if isinstance(cfg, dict):
+            raw = cfg.get("tokens_per_turn")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                return raw
+    return 1200
+
+
+def resolve_memory_tier_sweep_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve whether the automatic memory-tier sweep runs (issue athenaeum#718).
+
+    OFF by default — a new, additive librarian phase
+    (:func:`athenaeum.librarian._run_memory_tier_sweep_phase`) that can
+    rewrite a page's ``memory_tier:`` frontmatter field (demote hot -> warm,
+    promote warm -> hot; see :mod:`athenaeum.memory_tiers`), so it must not
+    change the nightly run's behavior for any existing operator until they
+    opt in (DoD: "lands dark behind a documented config key defaulting to
+    off"). Precedence: ``ATHENAEUM_MEMORY_TIER_SWEEP_ENABLED`` env >
+    ``librarian.memory_tier_sweep_enabled`` yaml > ``False``. Any env value
+    other than a falsey token (``0`` / ``false`` / ``no`` / ``off``,
+    case-insensitive) is truthy; a non-bool yaml value falls through to the
+    default. No seed in ``_DEFAULTS`` (issue athenaeum#231) — mirrors
+    :func:`resolve_ingestion_gate_enabled`'s shape.
+    """
+    env = os.environ.get("ATHENAEUM_MEMORY_TIER_SWEEP_ENABLED")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false", "no", "off", "")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("memory_tier_sweep_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
+def resolve_memory_tier_demote_after_days(config: dict[str, Any] | None) -> int:
+    """Resolve the age-without-use / precision-grace window in days (issue athenaeum#718).
+
+    Shared threshold :func:`athenaeum.memory_tiers.evaluate_tier_movement`
+    uses for two of its three automatic hot -> warm demotion triggers: a hot
+    claim with no usage record at all after this many days, or a hot claim
+    that HAS been pushed but never referenced and whose last push is older
+    than this many days. The third trigger (class-default: superseded/
+    deprecated) is unconditional and ignores this knob.
+
+    Precedence: ``ATHENAEUM_MEMORY_TIER_DEMOTE_AFTER_DAYS`` env >
+    ``memory_tiers.demote_after_days`` yaml > ``60``. A malformed env value
+    WARNs and falls through (see :func:`_env_number`); a non-int / ``<= 0``
+    yaml value falls through to the default. No seed in ``_DEFAULTS``
+    (issue athenaeum#231).
+    """
+    value = _env_number("ATHENAEUM_MEMORY_TIER_DEMOTE_AFTER_DAYS", int)
+    if value is not None and value > 0:
+        return value
+    if isinstance(config, dict):
+        cfg = config.get("memory_tiers")
+        if isinstance(cfg, dict):
+            raw = cfg.get("demote_after_days")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                return raw
+    return 60
+
+
 def resolve_spend_ledger_path(config: dict[str, Any] | None) -> Path | None:
     """Resolve an explicit spend-ledger path override (env > yaml > None) (athenaeum#378).
 

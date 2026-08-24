@@ -81,6 +81,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Memory tiers + push budget — retrieval-cost tiering, token-denominated
+  push, and coordinate-fit ranking (athenaeum#718, split (a) of the athenaeum#911
+  memory-model v6 three-way split; (b) off-corpus storage is athenaeum#984, (c)
+  erasure/taint is athenaeum#985).** New `athenaeum.memory_tiers` module —
+  deliberately NOT `athenaeum.tiers` (the unrelated T0-T4 entity-compilation
+  pipeline; both modules cross-reference the warning). Four retrieval-cost
+  tiers (hot/warm/cold/refused) as classes, not storage: hot is indexed and
+  eligible for unprompted push under a token budget; warm is indexed,
+  explicit-recall-only; cold reuses the existing class+config
+  `storage.is_embedded` mechanism verbatim (issue athenaeum#911's shipped
+  per-page-override gap is deliberately NOT closed here — nominated once
+  to athenaeum#716, with this issue as its second consumer); refused is a
+  read-only bridge onto the already-shipped never-ingest gate
+  (`athenaeum.never_ingest`, issue athenaeum#968). Push selection is
+  `relevance x tier x coordinate-fit` (`memory_tiers.push_score`) —
+  coordinate fit rewards a claim's `claimed_scope`
+  containing/contained-by the session's scope (issue athenaeum#714's `scope`
+  dimension, `dimensions.compare_hierarchy`) over a sibling (disjoint)
+  scope. `recall_search`/`_recall_via_backend` (`athenaeum.mcp_server`)
+  gain `unprompted`/`session_scope` keyword args — `unprompted=False`
+  (every existing caller, including the MCP `recall` tool) is byte-identical
+  to this issue not existing; `unprompted=True` restricts to hot tier,
+  re-ranks, and greedily selects within
+  `config.resolve_push_token_budget`'s `push_budget.tokens_per_turn` (one
+  documented dial, default 1200), enforced at the boundary (a candidate that
+  would exceed the budget is skipped, never truncated). Every recall hit
+  (regardless of `unprompted`) now carries a `**Tier:** <tier>` header
+  segment, plus `**Scope:** <relation>` when `session_scope` is supplied —
+  "why was this pushed." Tier movement is reversible `memory_tier:`
+  frontmatter metadata, mostly automatic via the new
+  `_run_memory_tier_sweep_phase` librarian phase (config-gated OFF by
+  default, `librarian.memory_tier_sweep_enabled` — with the key at its
+  default the nightly run is unchanged; verified both ways, see PR): demote
+  by class default (`superseded_by`/`deprecated`, issue athenaeum#191's
+  existing vocabulary), by age-without-use, and by measured recall
+  precision (pushed-but-never-referenced) — the last two consuming
+  `athenaeum.usage_report.get_claim_usage`/`compute_usage_report`
+  EXCLUSIVELY (issue athenaeum#968's documented interface; never re-reads the
+  push/reference JSONL ledgers directly), sharing one
+  `memory_tiers.demote_after_days` threshold (default 60 days). Promote on
+  use (a warm claim that was actually referenced) or human pin (an explicit
+  `memory_tier: hot`). **`axiom`-class pages never auto-move** — the sweep
+  skips them outright; the only path that can demote an axiom's tier is the
+  new `memory_tiers.demote_axiom_tier`, which requires a human-supplied
+  reason/by and records into `axiom_governance`'s `_axiom_governance.jsonl`
+  ledger BEFORE touching the page, so no axiom tier change can happen
+  without a matching governance row (tested). This is explicitly NOT a
+  deletion/retention policy — nothing here deletes a claim for being
+  unused, only moves its retrieval-cost tier. Push-precision instrumentation
+  (`push_metrics.record_push`/`PushedItem`) is untouched by design — its
+  existing `tier`/`scope` fields mean access-control tier / audience scope,
+  a DIFFERENT vocabulary this issue deliberately does not overload; the new
+  `unprompted=True` path still produces the same `(filename, fm, snippet)`
+  triples that instrumentation reads. **The post-change push-precision
+  measurement against the LIVE corpus is out of this container's reach**
+  (no live-corpus access, `athenaeum push-metrics baseline` is a refused
+  mutating operation) — handed back to the operator per the issue's "Live
+  knowledge-store access boundary"; see the PR description and the comment
+  on athenaeum#718 for the exact command and the follow-up verification
+  issue. New `athenaeum.yaml` keys (`push_budget.tokens_per_turn`,
+  `librarian.memory_tier_sweep_enabled`, `memory_tiers.demote_after_days`)
+  documented in `docs/configuration.md` with defaults.
+
 - **Off-corpus indexable storage: federated recall, single-store erasure
   delete, and an off-corpus ledger shard (athenaeum#984).** Split (b) of the
   athenaeum#718 re-scope under the whole-store adapter design lock
