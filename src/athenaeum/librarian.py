@@ -6654,6 +6654,19 @@ def reindex(
             full_rehash_max_age_days=full_rehash_max_age_days,
             config=config,
         )
+
+    # Issue athenaeum#984 (AC1 Wiring): keep the off-corpus index shard current on
+    # the SAME cadence as the main corpus index, so a caller never has to
+    # remember a second reindex step. A strict no-op when off_corpus.enabled
+    # is unset (the default) — this is the "nightly librarian run
+    # behaviourally unchanged at defaults" guarantee the Wiring AC requires;
+    # see athenaeum.off_corpus.build_off_corpus_index's docstring.
+    from athenaeum import off_corpus
+
+    off_corpus.build_off_corpus_index(
+        config, knowledge_root, resolved_cache, incremental=incremental
+    )
+
     return backend_name, pages
 
 

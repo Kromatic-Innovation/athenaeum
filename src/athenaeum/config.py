@@ -3311,3 +3311,49 @@ def resolve_verdict_epoch_batch_interval_days(config: dict[str, Any] | None) -> 
         "ATHENAEUM_VERDICT_EPOCH_BATCH_INTERVAL_DAYS",
         30,
     )
+
+
+def resolve_off_corpus_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the off-corpus indexable-store master switch (issue athenaeum#984). DEFAULT OFF.
+
+    Gates the ENTIRE off-corpus subsystem (:mod:`athenaeum.off_corpus`): with
+    this off, :func:`athenaeum.librarian.reindex` never touches a second
+    index, ``recall`` never federates a second result set, and
+    :func:`athenaeum.verdicts.record_pair_decision` keeps its pre-athenaeum#984
+    behavior of refusing (not writing) an erasure-class pair — byte-identical
+    to before this issue existed. Mirrors :func:`resolve_verdict_ledger_enabled`'s
+    shape exactly: env ``ATHENAEUM_OFF_CORPUS_ENABLED`` (``1``/``true``/``yes``/``on``,
+    case-insensitive) > yaml ``off_corpus.enabled`` > default ``False``. No seed
+    in ``_DEFAULTS`` (issue athenaeum#231's precedent). Non-bool yaml values and
+    unrecognized env strings fall through to off.
+    """
+    env = os.environ.get("ATHENAEUM_OFF_CORPUS_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("off_corpus")
+        if isinstance(cfg, dict):
+            raw = cfg.get("enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
+def resolve_off_corpus_adapter_name(config: dict[str, Any] | None) -> str | None:
+    """Resolve the ``storage.adapters`` entry name that backs the off-corpus
+    purgeable surface (issue athenaeum#984). yaml-only, no env var — a physical
+    surface name is not the shape of knob this repo's env-var convention
+    covers (mirrors ``storage.mapping``/``storage.adapters`` themselves,
+    which are also yaml-only). Returns ``None`` when unset; a ``None`` name
+    with :func:`resolve_off_corpus_enabled` true is a configuration error
+    :mod:`athenaeum.off_corpus` raises loudly (D6: fail closed, loudly) —
+    this resolver itself stays defensive/non-raising like every other
+    resolver in this module.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("off_corpus")
+        if isinstance(cfg, dict):
+            raw = cfg.get("adapter")
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    return None
