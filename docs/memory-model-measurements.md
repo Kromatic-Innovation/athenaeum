@@ -70,7 +70,8 @@ Reproduce with: `athenaeum push-metrics baseline`
 
 Reproduce with: `athenaeum push-metrics coverage-audit --n 10 --seed 998`
 
-**No `coverage_miss_rate` is recorded, and none will be.** Push records store a
+**No `coverage_miss_rate` is recorded here, and none is derivable from the
+ledger as it stands.** Push records store a
 query *hash* and never the raw query text — a deliberate athenaeum#711 design
 decision that keeps free-text content out of the ledger. Without the query text a
 reviewer cannot reconstruct what a session was looking for, so no per-candidate
