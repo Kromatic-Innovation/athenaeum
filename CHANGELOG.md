@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **`docs/merge-inflow-restoration.md` §5 and §9 annotated with outcomes
+  (athenaeum#1093).** §5 records the ratification: `librarian.max_merge_sources`
+  raised from 5 to 8 (operator decision, 2026-08-22), written to the operative
+  `~/knowledge/athenaeum.yaml` and runtime-confirmed on 2026-08-23 (commit
+  `f2e862be3`), and the instrument-before-change condition explicitly
+  overridden by the operator with the daily merge-readout routine serving as
+  the instrumentation. Carries forward the two caveats from that ratification:
+  athenaeum#1005 refuted `_fallback_embeddings` as the over-clustering cause
+  (11,066/11,066 stamped suppression lines read `embedder=chromadb-default`),
+  so some fraction of newly-admitted proposals are genuine over-clusters; and
+  the 4,227-suppressions-over-~2.4-days figure is not reconciled against
+  athenaeum#784's measured 127-132/night and must not be used for tuning until
+  a distinct-cluster count exists. §9 is annotated as resolved, citing
+  athenaeum#1088, which fixed `docs/configuration.md`'s two stale
+  `max_merge_sources` default references (25 → 5); the annotation drops the
+  original line numbers (already stale at filing time) in favor of the table
+  row and example-block key. Docs-only; no code changed, and the code default
+  of 5 in `src/athenaeum/config.py` is unchanged — the ratified value lives
+  only in the operator's live store.
+
 ### Removed
 
 - **`athenaeum people` CLI subcommand (athenaeum#1079).** Deprecated in

@@ -221,6 +221,41 @@ at all three — **it is a stream-restoration/reviewer-capacity decision**:
   widens the aperture further without more evidence to justify the extra
   margin over 8.
 
+**Ratified (athenaeum#1093):** the operator ratified **8** on 2026-08-22,
+taking the midpoint of the candidate range above on stream-restoration/
+reviewer-capacity grounds (§4's zero-T2-exposure guarantee held identically
+at 6, 8, and 10, so it was never a safety tiebreak). `librarian.max_merge_sources`
+was written to the operative `~/knowledge/athenaeum.yaml` on 2026-08-23
+(commit `f2e862be3`) and the resolved value was confirmed at runtime rather
+than assumed from the file — `resolve_max_merge_sources` returned `8`.
+
+The instrument-before-change condition this section's "measured, not
+estimated" discipline called for was explicitly overridden by the operator
+on 2026-08-23: rather than standing up dedicated instrumentation before the
+flip, the daily merge-readout routine serves as the instrumentation, with
+the trade accepted that the first few days are unmetered. Reasoning on the
+record: get the good-morning routine surfacing merges daily again, see how
+many merge proposals actually arrive per day, and adjust if spurious merges
+turn out to be too frequent.
+
+Two caveats carried forward from that ratification, both bearing on how the
+next tuning pass should read the data this restores:
+
+- athenaeum#1005 refuted `_fallback_embeddings` as the cause of
+  over-clustering — all 11,066 of 11,066 stamped suppression lines checked
+  read `embedder=chromadb-default`, none `fallback-hashing`. Over-clusters
+  are occurring under good embeddings, so some fraction of the proposals
+  this change newly admits to the queue are genuine over-clusters, not held-
+  back legitimate merges. T2's safe class still requires ≤3 pages, so a
+  7-source merge can never auto-apply — the failure mode is a noisier
+  decision queue, not silent wiki corruption.
+- The 4,227-suppressions-over-~2.4-days figure logged around the same time
+  is **not** reconciled against athenaeum#784's measured 127-132/night and
+  must not be used to tune this value until a distinct-cluster count exists
+  — the gap is most likely repeated re-suppression of the same clusters
+  across runs rather than that many distinct clusters, but that has not been
+  verified.
+
 ## 6. Instrumentation needed to settle AC1's distribution
 
 To make the next ratification cycle a measurement instead of another bounded
@@ -289,3 +324,13 @@ code default and `config.py`'s own inline example, but never touched
 `docs/configuration.md`'s two occurrences. This is a real, confirmed doc
 defect — left unfixed here per this issue's analysis-only scope; flagging for
 the orchestrator to decide whether it warrants its own follow-up.
+
+**Fixed (athenaeum#1088):** both occurrences now document the active default
+of `5`. The config-key table row (`docs/configuration.md`, "Merge-proposal
+source cap") reads "Default `5` (active) — tightened from `25`
+(athenaeum#421, settled design)"; the example `athenaeum.yaml` block's
+`max_merge_sources` line also reads `5`. The line numbers above (61, 1899)
+had already drifted once by the time this issue was filed (1899 → 1933); as
+of this annotation the example block sits at line 1980, so this note cites
+the table row's name and the example block's key rather than a line number
+that will keep drifting.
