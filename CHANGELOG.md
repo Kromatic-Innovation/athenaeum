@@ -81,6 +81,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Off-corpus indexable storage: federated recall, single-store erasure
+  delete, and an off-corpus ledger shard (athenaeum#984).** Split (b) of the
+  athenaeum#718 re-scope under the whole-store adapter design lock
+  (athenaeum#911, `docs/whole-store-adapter-design.md` §8) — built on S1
+  (athenaeum#976, the `Store` protocol + `FilesystemStore`) and S3
+  (athenaeum#978, the `versioned` capability). New `src/athenaeum/off_corpus.py`:
+  a physically separate, genuinely non-git-tracked `Store` instance (the
+  SAME `Store`/`FilesystemStore` S1 shipped, not a second storage
+  abstraction) gets its own FTS5 + vector index shard, federated into the
+  `recall` MCP tool by score (`athenaeum.off_corpus.merge_ranked_hits`);
+  `erase_off_corpus_record` deletes content and prunes both index shards in
+  one call; `record_pair_decision` (`src/athenaeum/verdicts.py`) now routes
+  a verdict pair with an erasure-class side — including a cross-boundary
+  pair — to the off-corpus ledger shard instead of refusing it. Off by
+  default (`off_corpus.enabled`, see `docs/configuration.md` "Off-corpus
+  store"); the purgeable surface's `derived`/`operational` artifacts are
+  declared in `athenaeum.store.ARTIFACT_REGISTRY`, the same R3 catalogue
+  every other store artifact declares through.
+
 - **Per-phase reason-for-exit, a durable run-summary ledger, and an
   intake-runtime-floor reserve for the librarian window (athenaeum#1102).** The
   nightly window was shared between the entity phase and the intake path
