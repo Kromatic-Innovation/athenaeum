@@ -111,6 +111,12 @@ include = [
     # entries above: a bundled resource an operator opts into at runtime
     # must actually ship in the wheel, not just in git.
     "src/athenaeum/rule_examples/**/*.yaml",
+    # Packaged default retention policy packs (issue athenaeum#985, AC9) --
+    # "packs are data, not code": the shipped `us-default`/`eu-gdpr` packs
+    # are YAML files loaded via importlib.resources
+    # (athenaeum.erasure.available_retention_packs), not a Python literal,
+    # so they must actually ship in the wheel like rule_examples/ above.
+    "src/athenaeum/retention_packs/**/*.yaml",
 ]
 
 # Ship the bundled skills/ directory (adapter-authoring, issue athenaeum#419) INSIDE the
