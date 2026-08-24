@@ -1,41 +1,78 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pure parser for ``librarian-run-summary`` log lines (issue athenaeum#713).
+"""``librarian-run-summary`` reader/writer (issues athenaeum#713, athenaeum#1102).
 
-:mod:`athenaeum.librarian` already emits one greppable
-``librarian-run-summary total_secs=... | entity secs=... calls=... files=...
-| ...`` line per run (:func:`athenaeum.librarian._render_run_summary`,
-issue athenaeum#464) — but only to whatever log sink the deployment wraps the
-run in (e.g. the nightly cron's log file); it is not itself persisted to a
-durable, queryable ledger the way the spend ledger is. There is therefore no
-in-repo, in-process source for **wall-clock-per-file**, which the athenaeum#713
-measurement pack needs for both the backlog price sheet (artifact 2) and the
-ordinary-night steady-state table (artifact 3): calls/file and tokens/file
-come from the spend ledger (:mod:`athenaeum.spend`,
-:func:`athenaeum.drain_advisor.observed_tokens_per_file`), but wall-clock/file
-has no ledger field to read (issue athenaeum#713's plan step 2: "measurement
-collection for calls/file and wall-clock/file from EXISTING run-summary and
-spend data rather than re-deriving it").
+:mod:`athenaeum.librarian` emits one greppable ``librarian-run-summary
+total_secs=... | entity secs=... calls=... files=... | ...`` line per run
+(:func:`athenaeum.librarian._render_run_summary`, issue athenaeum#464) — but
+only to whatever log sink the deployment wraps the run in (e.g. the nightly
+cron's log file); prose in a log message, not itself persisted to a durable,
+queryable ledger the way the spend ledger is. There is therefore no in-repo,
+in-process source for **wall-clock-per-file** (issue athenaeum#713) or for a
+**per-phase, per-run record a later run can aggregate over** without parsing
+that prose (issue athenaeum#1102 AC1/AC2 — athenaeum#608's per-contract LLM
+schema-mismatch rate needs exactly this: the ``resolution`` contract's 7
+observations are a symptom of the entity phase's wall-clock overrun, and nothing
+before athenaeum#1102 recorded that overrun anywhere durable).
 
-This module is that read-only instrument: it parses ``librarian-run-summary``
-lines (from a log file the operator points it at — the SAME log the
-``reasoning-tier-measurements.md`` precedent grepped by hand, issue athenaeum#784)
-into structured records, and derives the entity-phase wall-clock/file ratio
-from the ``entity`` phase segment's ``secs=``/``files=`` fields. Pure text
-parsing — it never opens the log file itself; callers pass in text (or a
-path) they already have. No LLM calls, no store mutation.
+Two halves, both read-only of the run they instrument (neither ever affects
+phase logic, ordering, or exit code):
 
-Layering: L2 utility. Imports nothing from athenaeum except the stable
-``RUN_SUMMARY_PREFIX`` constant (so a prefix rename in ``librarian.py`` is a
-one-line fix here too, never a silently-stale string literal).
+* **Parser** (athenaeum#713, unchanged): :func:`parse_run_summary_line` /
+  :func:`parse_run_summary_text` / :func:`parse_run_summary_log` read
+  ``librarian-run-summary`` lines from a log file the operator points them at
+  (the SAME log the ``reasoning-tier-measurements.md`` precedent grepped by
+  hand, issue athenaeum#784) into :class:`RunSummaryRecord`. Pure text parsing —
+  never opens the log file itself except via the explicit ``_log`` suffix
+  helper; callers pass in text (or a path) they already have.
+* **Durable ledger** (athenaeum#1102, new): :func:`write_run_summary_record` appends
+  ONE JSONL record per run to a durable, machine-readable ledger under the
+  athenaeum cache dir — mirroring :mod:`athenaeum.spend`'s
+  ``append_line_durable`` + :func:`athenaeum.config.resolve_cache_dir`
+  convention exactly (see :func:`default_run_summary_ledger_path`'s docstring
+  for why the CACHE dir, not ``wiki_root`` — the same reasoning
+  :mod:`athenaeum.zero_yield` documents for its own state file).
+  :func:`read_run_summary_ledger` reads it back, tolerating a torn trailing
+  line exactly like :func:`athenaeum.spend.read_ledger`. This is the form
+  AC2 asks for — a record, not a log line an operator has to have piped
+  somewhere durable themselves.
+
+Layering: L2 utility/leaf. Imports :mod:`athenaeum.config` (L2) and
+:mod:`athenaeum.store` (L0/L1) for the ledger half — the same two modules
+:mod:`athenaeum.spend` imports, for the same reason. Imports NOTHING from
+:mod:`athenaeum.librarian` (issue athenaeum#1102: ``RUN_SUMMARY_PREFIX`` moved HERE,
+which is now the format's canonical owner, and ``librarian.py`` imports it
+back — the reverse of the pre-athenaeum#1102 direction). That is deliberate:
+``RunContext.emit_run_summary`` (in ``librarian.py``) calls
+:func:`write_run_summary_record` at the end of every run, so a
+``run_summary_log -> librarian`` edge would close a 2-node import cycle the
+day that call landed (see ``tests/test_import_graph_acyclic.py``, which walks
+top-level AND function-local imports and fails on ANY multi-node SCC).
+Keeping this module a true leaf — ``librarian.py`` depends on it, never the
+other way — is what lets ``emit_run_summary`` import it directly.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from athenaeum.librarian import RUN_SUMMARY_PREFIX
+from athenaeum.config import resolve_cache_dir
+from athenaeum.store import append_line_durable
+
+log = logging.getLogger(__name__)
+
+#: Stable prefix for the one-line, key=value, machine-greppable run summary
+#: (issue athenaeum#464). Canonical HERE (moved from ``librarian.py`` in issue
+#: athenaeum#1102 so this module can stay a leaf — see the module docstring's
+#: layering note); ``librarian.py`` imports this name rather than defining
+#: its own copy, so a rename is still a one-line fix, just from the other
+#: direction.
+RUN_SUMMARY_PREFIX = "librarian-run-summary"
 
 #: Matches ``key=value`` tokens where value has no whitespace — the shape
 #: every field in a ``librarian-run-summary`` line uses (``total_secs=12.3``,
@@ -160,3 +197,154 @@ def entity_phase_wall_clock_per_file(
     if total_files <= 0:
         return None
     return (total_secs / total_files, total_files)
+
+
+# ---------------------------------------------------------------------------
+# Durable ledger (issue athenaeum#1102 AC1/AC2)
+# ---------------------------------------------------------------------------
+
+#: Ledger schema version — bump additively if the record shape changes.
+RUN_SUMMARY_LEDGER_VERSION = 1
+
+#: Ledger filename under the cache dir (mirrors ``athenaeum.spend.LEDGER_FILENAME``).
+RUN_SUMMARY_LEDGER_FILENAME = "run_summary.jsonl"
+
+
+def default_run_summary_ledger_path(cache_dir: Path | None = None) -> Path:
+    """Resolve the durable run-summary ledger path: ``<cache_dir>/run_summary.jsonl``.
+
+    Under the CACHE dir (:func:`athenaeum.config.resolve_cache_dir`), not
+    ``wiki_root``. :meth:`athenaeum.librarian.RunContext.emit_run_summary` is
+    called at the END of a run on every exit path — including after the
+    entity phase's own ``git_snapshot`` commit, the LAST commit point in the
+    normal flow — so a write under the knowledge repo here would leave an
+    uncommitted straggler file in the working tree every single run. Mirrors
+    :mod:`athenaeum.zero_yield`'s documented reasoning ("Why the cache dir,
+    not ``wiki_root``" in its module docstring) and
+    :func:`athenaeum.spend.default_ledger_path` exactly.
+    """
+    base = cache_dir if cache_dir is not None else resolve_cache_dir()
+    return Path(base).expanduser() / RUN_SUMMARY_LEDGER_FILENAME
+
+
+def build_run_summary_ledger_record(
+    profile: "list[tuple[str, float, dict]]",
+    *,
+    ts: datetime | None = None,
+) -> dict[str, Any]:
+    """Build one durable ledger record from a ``run()`` profile.
+
+    Mirrors :func:`athenaeum.librarian._render_run_summary`'s input shape
+    exactly (the same *profile* list :meth:`~athenaeum.librarian.RunContext.
+    emit_run_summary` already threads to the prose renderer) but keeps every
+    field JSON-native (int / float / str / bool) instead of stringifying it
+    into a ``key=value`` token — the AC2 distinction between "a
+    machine-readable record" and "prose inside a log message". ``phases`` is
+    keyed by phase name (the same grouping :class:`RunSummaryRecord` uses for
+    the parsed prose form), each value a ``{"secs": float, **fields}`` dict —
+    including each phase's ``reason`` field (athenaeum#1102 AC1), so a later run can
+    aggregate "completed" vs "entity-share"/"deadline"/"budget" yields across
+    runs without re-parsing prose.
+    """
+    stamp = (ts if ts is not None else datetime.now(tz=timezone.utc)).astimezone(
+        timezone.utc
+    )
+    total_secs = sum(secs for _phase, secs, _fields in profile)
+    phases: dict[str, dict[str, Any]] = {}
+    for phase, secs, fields in profile:
+        phases[phase] = {"secs": round(secs, 3), **fields}
+    return {
+        "v": RUN_SUMMARY_LEDGER_VERSION,
+        "ts": stamp.isoformat().replace("+00:00", "Z"),
+        "total_secs": round(total_secs, 3),
+        "phases": phases,
+    }
+
+
+def write_run_summary_record(
+    profile: "list[tuple[str, float, dict]]",
+    *,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+    ts: datetime | None = None,
+) -> bool:
+    """Append one durable run-summary record. Best-effort (issue athenaeum#1102 AC2).
+
+    Mirrors :func:`athenaeum.spend.record_spend`'s contract: never raises —
+    every failure is logged (debug level; this is pure observability, not a
+    correctness-affecting ledger) and swallowed, since a ledger write must
+    never break or slow the run it measures. No-ops (returns ``False``) when
+    *profile* is empty — an early-abort path with nothing yet to report; the
+    prose ``librarian-run-summary`` line is unconditional even then, so this
+    is a deliberate, narrower gate (an empty record carries no aggregable
+    information). Returns ``True`` when a record was written.
+    """
+    if not profile:
+        return False
+    try:
+        record = build_run_summary_ledger_record(profile, ts=ts)
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        append_line_durable(
+            target, (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — a ledger write must never break a run
+        log.debug(
+            "run-summary ledger write skipped (%s): %s", type(exc).__name__, exc
+        )
+        return False
+
+
+def read_run_summary_ledger(
+    ledger_path: Path,
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Read durable run-summary ledger records, tolerating a torn trailing line.
+
+    Mirrors :func:`athenaeum.spend.read_ledger` exactly: malformed lines (a
+    crash mid-write, or hand-editing) are skipped, not fatal; a missing file
+    reads as "no history yet" (``[]``). Optional ``since``/``until`` bounds
+    filter by ``ts`` (inclusive lower, exclusive upper); a record with an
+    unparseable ``ts`` is dropped when a bound is given.
+    """
+    if not ledger_path.exists():
+        return []
+    try:
+        raw_text = ledger_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # torn trailing write or hand-edit; skip
+        if not isinstance(record, dict):
+            continue
+        if since is not None or until is not None:
+            raw_ts = record.get("ts")
+            parsed_ts: datetime | None = None
+            if isinstance(raw_ts, str):
+                try:
+                    parsed_ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                except ValueError:
+                    parsed_ts = None
+            if parsed_ts is None:
+                continue
+            if parsed_ts.tzinfo is None:
+                parsed_ts = parsed_ts.replace(tzinfo=timezone.utc)
+            if since is not None and parsed_ts < since:
+                continue
+            if until is not None and parsed_ts >= until:
+                continue
+        records.append(record)
+    return records
