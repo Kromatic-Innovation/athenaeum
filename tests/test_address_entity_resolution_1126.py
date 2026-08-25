@@ -186,6 +186,116 @@ class TestDecline:
         assert outcome.kept == []
         assert outcome.declined == ((name, "ambiguous-subject"),)
 
+    def test_not_handle_shaped_declines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pin the defensive not-handle-shaped branch (athenaeum#1126 QA nit).
+
+        Given the caller already ran ``sole_email_token`` before reaching
+        this branch, ``resolve_handle_query`` returning ``None`` for a
+        value that just passed the email-shape check should not happen in
+        production today — but the branch exists and must not silently
+        read as dead code in a future coverage report.
+        """
+        knowledge = tmp_path / "knowledge"
+        (knowledge / "wiki").mkdir(parents=True)
+
+        monkeypatch.setattr(identity_resolution, "resolve_handle_query", lambda *a, **k: None)
+
+        classified = [_classified("alex@example.org")]
+        outcome = resolve_address_named_classifications(
+            classified,
+            knowledge_root=knowledge,
+            wiki_root=knowledge / "wiki",
+            config=EXCLUDED_CONFIG,
+        )
+
+        assert outcome.kept == []
+        assert outcome.declined == (("alex@example.org", "not-handle-shaped"),)
+        assert outcome.resolved == ()
+
+
+# ---------------------------------------------------------------------------
+# All four RESOLUTION_REASONS thread through this seam unchanged
+# ---------------------------------------------------------------------------
+
+
+def _corpus_for_record_without_uid(knowledge: Path, address: str) -> None:
+    (knowledge / "wiki").mkdir(parents=True)
+    _write_record(
+        pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG),
+        "no-uid-contact.md",
+        uid=None,
+        fields=f"emails:\n  - {address}\n",
+    )
+
+
+def _corpus_for_ambiguous(knowledge: Path, address: str) -> None:
+    _write_page(knowledge / "wiki", "casey", name="Casey One")
+    _write_page(knowledge / "wiki", "jordan", name="Jordan Two")
+    contacts_root = pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+    _write_record(
+        contacts_root, "casey-contact.md", uid="casey", fields=f"emails:\n  - {address}\n"
+    )
+    _write_record(
+        contacts_root, "jordan-contact.md", uid="jordan", fields=f"emails:\n  - {address}\n"
+    )
+
+
+def _corpus_for_orphan_uid(knowledge: Path, address: str) -> None:
+    (knowledge / "wiki").mkdir(parents=True)
+    _write_record(
+        pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG),
+        "orphan-contact.md",
+        uid="nowhere",
+        fields=f"emails:\n  - {address}\n",
+    )
+
+
+def _corpus_for_no_match(knowledge: Path, address: str) -> None:
+    (knowledge / "wiki").mkdir(parents=True)
+
+
+class TestAllResolutionReasonsThreadThrough:
+    """athenaeum#1126 QA nit: the single ``no-match`` case in ``TestDecline``
+    gave 100% *line* coverage of ``resolution.reason or "no-match"`` without
+    ever driving the other three closed-vocabulary reasons through this
+    seam. Each is a real production shape on the excluded-contacts surface,
+    not a hypothetical — swept together so the four-member
+    ``RESOLUTION_REASONS`` vocabulary is visibly exhaustive at one call
+    site."""
+
+    @pytest.mark.parametrize(
+        ("reason", "build_corpus"),
+        [
+            ("no-match", _corpus_for_no_match),
+            ("record-without-uid", _corpus_for_record_without_uid),
+            ("ambiguous", _corpus_for_ambiguous),
+            ("orphan-uid", _corpus_for_orphan_uid),
+        ],
+        ids=["no-match", "record-without-uid", "ambiguous", "orphan-uid"],
+    )
+    def test_reason_threads_through_unchanged(
+        self,
+        tmp_path: Path,
+        reason: str,
+        build_corpus: Callable[[Path, str], None],
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        address = "subject@example.org"
+        build_corpus(knowledge, address)
+
+        classified = [_classified(address)]
+        outcome = resolve_address_named_classifications(
+            classified,
+            knowledge_root=knowledge,
+            wiki_root=knowledge / "wiki",
+            config=EXCLUDED_CONFIG,
+        )
+
+        assert outcome.kept == []
+        assert outcome.declined == ((address, reason),)
+
 
 # ---------------------------------------------------------------------------
 # No-op fast path — no lookup of any kind for a non-address classification
