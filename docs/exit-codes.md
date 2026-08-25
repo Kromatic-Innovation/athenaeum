@@ -8,8 +8,9 @@ table.
 
 | Code | Name | Meaning | Resumable? |
 |---|---|---|---|
-| `0` | — | Clean run. No failed files, no budget/deadline trip (or `--strict-budget` is off and one tripped anyway). | n/a |
-| `1` | — | A file failed processing (retried next run), or `--strict-budget` is set and the run deferred work under the API-call budget. | Yes — deferred/failed work is picked up by the next run. |
+| `0` | — | Clean run — no failed files, no budget/deadline/spend-ceiling trip, no `EXIT_LIBRARIAN_REFUSAL`-eligible zero-progress trip; or `--strict-budget` is off and a non-zero-progress trip happened anyway; or `--allow-degraded` waived an otherwise-refusal-eligible zero-progress trip. | n/a |
+| `1` | — | A file failed processing (retried next run), or `--strict-budget` is set and the run deferred work under any resource budget/ceiling. | Yes — deferred/failed work is picked up by the next run. |
+| `3` | `EXIT_LIBRARIAN_REFUSAL` | **DEGRADED REFUSAL (issue athenaeum#1135): the run stopped early for a resource reason (`reason=budget` / `spend-ceiling` / `entity-share`) AND committed ZERO files.** Before this code existed, this case fell through to `0` — indistinguishable from a genuine success by exit code, the exact gap this issue closes (`athenaeum drain` already refused loudly on the analogous "made ZERO progress" condition; this brings `athenaeum run` up to the same standard). The `librarian-run-degraded reason=<reason> files=0 [spend=<consumed>/<cap>]` marker line (ERROR) is ALWAYS logged when the predicate holds, regardless of this code — see "Why 3 is its own code" below. Default-ON (no flag needed to opt in); `--allow-degraded` opts OUT (exits `0` instead, marker line still fires); `--strict-budget` takes precedence when both flags are set (its broader "any deferral" check runs first and returns `1`). | **Yes** — nothing was lost; the deferred intake is picked up exactly like any other budget/deadline trip. |
 | `75` | `EXIT_GRACEFUL_PARTIAL` | **athenaeum's own internal wall-clock deadline tripped.** Partial progress is committed (`git_snapshot`), the remaining/deferred intake is left on disk (`wiki/_deferred_work.md`), and the run stopped itself *before* anything external intervened. | **Yes.** Nothing was killed; the next run continues from where this one stopped. |
 | `124` | `EXIT_EXTERNAL_KILL` | **An external kill signal (SIGTERM/SIGINT) was delivered to the process** — matching coreutils `timeout`(1) semantics, which itself exits 124 when it SIGTERMs a child that overran its wall clock. athenaeum's opt-in signal handler (`install_signal_handlers=True`, the CLI default) makes a best-effort partial-progress commit before re-raising this code, but the STOP REQUEST originated outside athenaeum's own deadline logic. | Best-effort — whatever was committed before the signal is resumable, but the commit itself is not guaranteed (a SIGKILL after the `timeout` grace period gives the handler no chance to run at all). |
 
@@ -37,6 +38,70 @@ reacting to a delivered SIGTERM/SIGINT. Every internal deadline-check path —
 branch, and every `RunDeadlineExceeded` catch site — returns `75`
 (`EXIT_GRACEFUL_PARTIAL`) instead. Both constants are defined in
 `src/athenaeum/librarian.py` next to `DEFAULT_MAX_RUNTIME`.
+
+## Why 3 is its own code (issue athenaeum#1135)
+
+Before this issue, a run that stopped early for a resource reason (budget /
+spend-ceiling / entity-share) and, as a result, compiled ZERO files fell all
+the way through `run()`'s return-code cascade to the default `0` — the SAME
+code a fully successful run returns. A monitoring session reported such a
+run as healthy 190s after it had exited having done nothing: every
+deterministic phase still ran, the git snapshot commit (a no-op) still
+happened, the `librarian-run-summary` line still logged
+`calls=0 created=0 ... files=0 reason=budget`, but nothing in the exit code
+said so. `athenaeum drain` (`src/athenaeum/drain.py`) already refuses loudly
+on the analogous "a window made ZERO progress" condition (`log.error(...
+"stopping loudly to avoid a spin")`, exit `1`); `EXIT_LIBRARIAN_REFUSAL`
+brings the plain `athenaeum run` entry path up to that same standard.
+
+`3` is not reused from anywhere else in this table (`0`/`1`/`75`/`124` are
+all already spoken for) and is not a `sysexits.h` reservation the way `75`
+is — it is simply the smallest unused small integer, matching this project's
+existing convention of picking a small distinct code (`1`) for a generic
+"something didn't fully succeed" condition and reserving specific codes
+(`75`, `124`) only where a consumer needs to distinguish causes. `3` is
+distinguishable from `75` (wall-clock deadline — already non-zero and
+already resumable regardless of files committed, so it does not need this
+code layered on top: the `EXIT_GRACEFUL_PARTIAL` branch in `run()`'s
+finalize cascade is checked and returns FIRST, before the athenaeum#1135
+check) and from `124` (nothing external intervened).
+
+**The contract:** `run()` returns `EXIT_LIBRARIAN_REFUSAL` only when (a) the
+entity phase's `reason` (`RunContext.entity_exit_reason`) names an early
+stop — `deadline`, `entity-share`, `budget`, or `spend-ceiling` — that is
+not `"completed"`, AND (b) the run committed zero files
+(`RunContext.files_processed_count == 0`, the same run-level figure the
+athenaeum#899 zero-yield alarm reads), AND (c) the caller did not pass
+`allow_degraded=True` (the CLI `--allow-degraded` flag). The
+`librarian-run-degraded reason=<reason> files=0 [spend=<consumed>/<cap>]`
+marker line (logged at ERROR) fires whenever (a) and (b) hold, REGARDLESS of
+`(c)` — the exit code is the opt-out; the log line never is, so a cron
+wrapper that only greps logs (rather than checking `$?`) still catches a
+`--allow-degraded` run. Both constants (`EXIT_LIBRARIAN_REFUSAL` and the
+predicate helpers) live in `src/athenaeum/librarian.py` next to
+`EXIT_GRACEFUL_PARTIAL` / `EXIT_EXTERNAL_KILL`.
+
+**Deliberately separate from the athenaeum#899 zero-yield alarm**
+(`_zero_yield_tripped`, `src/athenaeum/zero_yield.py`): that predicate
+requires `api_calls > 0` (a run that made zero calls is idle, not
+wasteful) — exactly the gap `EXIT_LIBRARIAN_REFUSAL` fills, since a
+budget-already-exhausted run trips the ceiling check BEFORE spending a
+single call this run (`calls=0`). Neither predicate's logic feeds the
+other.
+
+**Propagation:** `athenaeum ingest` and `athenaeum session-end` both call
+`librarian.run()` directly and propagate its return value unchanged (see the
+top of this doc) — so a zero-progress refusal surfaces as
+`EXIT_LIBRARIAN_REFUSAL` from those callers too, exactly like every other
+code in this table already does. Two observable, and in both cases
+beneficial, downstream effects of this propagation: `ingest()`'s
+"stamp this ingest as successful" write (guarded by `exit_code == 0`) is
+skipped for a run that compiled nothing, and `session_end()`'s
+change-gated reindex step (`should_reindex`, also guarded by
+`exit_code == 0`) is skipped rather than reindexing a wiki that provably did
+not change. Neither path narrows what it reports beyond the exit code
+itself; `IngestResult`/`SessionEndResult`'s other fields (`compiled`,
+`new_or_changed`, etc.) are computed exactly as before.
 
 ## Consumers
 
