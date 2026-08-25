@@ -555,6 +555,7 @@ so an unset value degrades silently to the default rather than failing.
 | Tier-2 classify | `ATHENAEUM_CLASSIFY_MAX_TOKENS` (`4096`) | `ATHENAEUM_CLASSIFY_THINKING` (`disabled`) |
 | Tier-2 classify retry (strict-JSON reminder) | `ATHENAEUM_CLASSIFY_RETRY_MAX_TOKENS` (`8192`) | — (no thinking knob) |
 | Contradiction detector | `ATHENAEUM_CONTRADICTION_DETECT_MAX_TOKENS` (`1024`) | `ATHENAEUM_CONTRADICTION_DETECT_THINKING` (`disabled`) |
+| Comparator content-relation (Gate 2, athenaeum#715 — see below; not wired into any pipeline yet) | `ATHENAEUM_COMPARATOR_CONTENT_RELATION_MAX_TOKENS` (`1024`) | `ATHENAEUM_COMPARATOR_CONTENT_RELATION_THINKING` (`disabled`) |
 | Free-text edit (resolver amend) | `ATHENAEUM_FREETEXT_EDIT_MAX_TOKENS` (`8192`) | `ATHENAEUM_FREETEXT_EDIT_THINKING` (`adaptive`) |
 | Tier-3 merge — create (new page) | `ATHENAEUM_MERGE_CREATE_MAX_TOKENS` (`6144`) | `ATHENAEUM_MERGE_CREATE_THINKING` (`adaptive`) |
 | Tier-3 merge — full echo | `ATHENAEUM_MERGE_FULL_MAX_TOKENS` (`12288`) | `ATHENAEUM_MERGE_FULL_THINKING` (`adaptive`) |
@@ -1758,6 +1759,41 @@ thread through the SAME lock the CLI command already holds.
 **How to inspect it.** `athenaeum verdicts {count,list-by-verdict,show-one-pair,show-stale}`
 is the sanctioned read path (mirrors `athenaeum merges`) — hand-parsing
 `wiki/_verdicts/*.jsonl` directly is not supported.
+
+## Five-verdict comparator (athenaeum#715) — off by default
+
+The pairwise comparator that will eventually POPULATE the verdict ledger
+above with real verdicts (`duplicate | contradiction | specialization |
+distinct | underdetermined`). Ships in `src/athenaeum/comparator.py`: a typed
+Gate 1 over the dimension registry's (athenaeum#714) separator dimensions,
+falling through to exactly one LLM judgement (Gate 2, `content_relation`)
+only when Gate 1 cannot settle the pair. See that module's docstring for the
+full algorithm.
+
+**Landed dark (athenaeum#715 AC).** This module is not called from any
+pipeline entry point yet — that cut-over (wiring it into `athenaeum run` /
+`ingest-answers` the way the verdict ledger's own two integration points
+work) is an explicit, separate, future step. `ATHENAEUM_COMPARATOR_ENABLED`
+therefore has **no live reader in `src/` today**; it exists purely so that
+future wiring step has a documented, default-off gate to check, mirroring
+`ATHENAEUM_VERDICT_LEDGER_ENABLED`'s shape exactly.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Comparator | `ATHENAEUM_COMPARATOR_ENABLED` | `librarian.comparator_enabled` | `false` (**off**) | Reserved for the future pipeline cut-over — see [`resolve_comparator_enabled`](../src/athenaeum/config.py). Not read anywhere in `src/` yet. |
+
+```yaml
+librarian:
+  comparator_enabled: true
+```
+
+**Gate 2's model/spend knobs** follow the same per-stage `…_MAX_TOKENS` /
+`…_THINKING` shape as every other stage — see the table in the "Per-stage
+model routing" section above (`ATHENAEUM_COMPARATOR_CONTENT_RELATION_MAX_TOKENS`,
+default `1024`; `ATHENAEUM_COMPARATOR_CONTENT_RELATION_THINKING`, default
+`disabled`). Gate 2 itself reuses the shared `classify` MODEL knob
+(`ATHENAEUM_CLASSIFY_MODEL`) rather than adding a fourth model dial — the
+same sharing `athenaeum.contradictions`'s detector already does.
 
 ## Off-corpus store (athenaeum#984) — off by default
 
