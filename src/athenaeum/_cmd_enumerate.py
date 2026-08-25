@@ -128,9 +128,10 @@ def add_enumerate_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--with-pii",
         dest="with_pii",
         action="store_true",
-        help="Required to predicate or select `do_not_email` / "
-        "`google_contact_*` fields (issue athenaeum#965 AC amendment 1). "
-        "Same flag contract `recall --with-pii` already uses.",
+        help="Required to predicate or select `google_contact_*` fields "
+        "(issue athenaeum#965 AC amendment 1). Same flag contract "
+        "`recall --with-pii` already uses. NOT required for `do_not_email` "
+        "(ungated by athenaeum#1122).",
     )
     parser.add_argument(
         "--audience",

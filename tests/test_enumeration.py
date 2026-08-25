@@ -289,10 +289,29 @@ class TestAudienceScoping:
 
 class TestPiiGatedFields:
     def test_is_pii_gated_field(self) -> None:
-        assert is_pii_gated_field("do_not_email") is True
+        # athenaeum#1122: `do_not_email` (and its reason/date) are NOT gated —
+        # the operator ruled they are not PII. `google_contact_*` still is.
+        assert is_pii_gated_field("do_not_email") is False
+        assert is_pii_gated_field("do_not_email_reason") is False
+        assert is_pii_gated_field("do_not_email_date") is False
         assert is_pii_gated_field("google_contact_kromatic") is True
         assert is_pii_gated_field("google_contact") is True
         assert is_pii_gated_field("current_company") is False
+
+    def test_do_not_email_as_output_field_does_not_require_with_pii(
+        self, enum_wiki: Path, tmp_path: Path
+    ) -> None:
+        result = enumerate_entities(
+            enum_wiki,
+            _cache(tmp_path),
+            entity_type="person",
+            fields=["do_not_email"],
+        )
+        by_uid = {h["uid"]: h for h in result.hits}
+        assert by_uid["u-alice"]["do_not_email"] is True
+        assert by_uid["u-bob"]["do_not_email"] is False
+        # Carol never set the field at all — present with a null, not omitted.
+        assert by_uid["u-carol"]["do_not_email"] is None
 
     def test_pii_field_as_output_field_requires_with_pii(
         self, enum_wiki: Path, tmp_path: Path
@@ -302,7 +321,7 @@ class TestPiiGatedFields:
                 enum_wiki,
                 _cache(tmp_path),
                 entity_type="person",
-                fields=["do_not_email"],
+                fields=["google_contact_kromatic"],
             )
 
     def test_pii_field_as_predicate_requires_with_pii(
@@ -317,9 +336,11 @@ class TestPiiGatedFields:
                 predicates=[pred],
             )
 
-    def test_with_pii_true_allows_output_field(
+    def test_with_pii_true_still_allows_do_not_email_output_field(
         self, enum_wiki: Path, tmp_path: Path
     ) -> None:
+        # with_pii=True must remain harmless for an ungated field — it is
+        # simply no longer required for this one.
         result = enumerate_entities(
             enum_wiki,
             _cache(tmp_path),
@@ -330,13 +351,14 @@ class TestPiiGatedFields:
         by_uid = {h["uid"]: h for h in result.hits}
         assert by_uid["u-alice"]["do_not_email"] is True
         assert by_uid["u-bob"]["do_not_email"] is False
-        # Carol never set the field at all — present with a null, not omitted.
         assert by_uid["u-carol"]["do_not_email"] is None
 
-    def test_do_not_email_not_equal_true_predicate(
+    def test_do_not_email_not_equal_true_predicate_without_with_pii(
         self, enum_wiki: Path, tmp_path: Path
     ) -> None:
-        # Amendment 1's own example: `do_not_email != true`.
+        # AC: the ne-predicate's own motivating example
+        # (`do_not_email != true`) must succeed WITHOUT with_pii=True and
+        # return the expected uids (athenaeum#1122).
         pred = FieldPredicate(
             fields=("do_not_email",), kind="eq", value="true", negate=True
         )
@@ -345,11 +367,68 @@ class TestPiiGatedFields:
             _cache(tmp_path),
             entity_type="person",
             predicates=[pred],
-            with_pii=True,
         )
         uids = {h["uid"] for h in result.hits}
         assert "u-alice" not in uids  # do_not_email: true — excluded
         assert {"u-bob", "u-carol"} <= uids
+
+    def test_google_contact_prefix_gating_unwidened(self, enum_wiki: Path, tmp_path: Path) -> None:
+        # Pin that athenaeum#1122 did not touch the prefix set: both the bare
+        # prefix and a concrete google_contact_* field stay gated.
+        assert is_pii_gated_field("google_contact") is True
+        assert is_pii_gated_field("google_contact_kromatic") is True
+        with pytest.raises(ValueError, match="with_pii"):
+            enumerate_entities(
+                enum_wiki,
+                _cache(tmp_path),
+                entity_type="person",
+                fields=["google_contact_kromatic"],
+            )
+        result = enumerate_entities(
+            enum_wiki,
+            _cache(tmp_path),
+            entity_type="person",
+            fields=["google_contact_kromatic"],
+            with_pii=True,
+        )
+        by_uid = {h["uid"]: h for h in result.hits}
+        assert by_uid["u-alice"]["google_contact_kromatic"] == "gc-alice"
+
+    def test_do_not_email_predicate_still_respects_audience_scoping(
+        self, enum_wiki: Path, tmp_path: Path
+    ) -> None:
+        # AC: audience scoping (athenaeum#538, fail-closed) is unaffected by
+        # ungating do_not_email — a restricted caller_audience must never
+        # receive a page it may not read, predicate or not.
+        pred = FieldPredicate(
+            fields=("do_not_email",), kind="eq", value="true", negate=True
+        )
+        result = enumerate_entities(
+            enum_wiki,
+            _cache(tmp_path),
+            entity_type="person",
+            predicates=[pred],
+            caller_audience={"someone-else"},
+        )
+        # Bob (do_not_email: false) would match the predicate, but carries no
+        # audience grant, so a caller restricted to "someone-else" must still
+        # see nothing.
+        assert result.hits == ()
+
+        # Positive half, so a vacuous pass (predicate matched nothing at all)
+        # can't masquerade as scoping working: with the SAME predicate but a
+        # caller_audience that DOES grant access, Carol (audience: [ops],
+        # do_not_email unset so `!= true` matches) comes back. That proves
+        # the empty result above came from audience scoping, not the
+        # predicate.
+        scoped_result = enumerate_entities(
+            enum_wiki,
+            _cache(tmp_path),
+            entity_type="person",
+            predicates=[pred],
+            caller_audience={"ops"},
+        )
+        assert [h["uid"] for h in scoped_result.hits] == ["u-carol"]
 
 
 class TestPagination:
