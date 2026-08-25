@@ -46,6 +46,7 @@ from athenaeum.batch import (
 from athenaeum.cli import main
 from athenaeum.intake import discover_raw_files
 from athenaeum.librarian import (
+    EXIT_LIBRARIAN_REFUSAL,
     FALLBACK_ACCESS,
     FALLBACK_TAGS,
     librarian_batch_mode,
@@ -827,7 +828,11 @@ class TestBatchBudget:
             max_api_calls=0,
             batch_mode=True,
         )
-        assert rc == 0
+        # Issue athenaeum#1135: a zero-budget run that submits and processes
+        # nothing is EXACTLY the zero-progress DEGRADED REFUSAL (early-stop
+        # reason + zero files committed) -- exits EXIT_LIBRARIAN_REFUSAL (3),
+        # not the pre-athenaeum#1135 0.
+        assert rc == EXIT_LIBRARIAN_REFUSAL
         assert client.batches.submitted == []
         manifest = root / "wiki" / "_deferred_work.md"
         assert manifest.exists()
@@ -972,7 +977,11 @@ class TestBatchSpendCeiling:
             max_api_calls=100,
             batch_mode=True,
         )
-        assert rc == 0
+        # Issue athenaeum#1135: zero files committed + an early-stop reason ==
+        # the zero-progress DEGRADED REFUSAL, regardless of whether the trip
+        # happened in the synchronous entity loop or (as here) batch.py's
+        # own tier-2/tier-3 spend-ceiling checks.
+        assert rc == EXIT_LIBRARIAN_REFUSAL
         # Exactly ONE batch submitted (tier-2 classify); tier-3 was gated.
         assert len(client.batches.submitted) == 1
         # No entity page created — every tier-3 create was deferred, not written
@@ -1017,7 +1026,8 @@ class TestBatchSpendCeiling:
             max_api_calls=100,
             batch_mode=True,
         )
-        assert rc == 0
+        # Issue athenaeum#1135: same zero-progress DEGRADED REFUSAL as above.
+        assert rc == EXIT_LIBRARIAN_REFUSAL
         # Ceiling already breached → NO batch submitted at all.
         assert client.batches.submitted == []
         assert "widget" not in " ".join(_wiki_snapshot(root)).lower()

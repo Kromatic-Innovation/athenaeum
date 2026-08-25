@@ -299,6 +299,28 @@ EXIT_GRACEFUL_PARTIAL = 75
 # themselves (issue athenaeum#897 AC2) — only the signal handler does.
 EXIT_EXTERNAL_KILL = 124
 
+# Issue athenaeum#1135: a run that stopped early for a RESOURCE reason (the
+# run-level API-call budget, a metered/subscription spend ceiling, or the
+# athenaeum#440 entity-phase runtime-share reserve) and, as a result, committed
+# ZERO files is a DEGRADED REFUSAL, not a success -- before this issue such a
+# run fell all the way through to the default `return 0` (the same code a
+# fully-successful run returns), making it indistinguishable from success by
+# exit code alone. Distinct from EXIT_GRACEFUL_PARTIAL (75): that code is
+# reserved for athenaeum's own WALL-CLOCK deadline trip specifically (and is
+# already non-zero regardless of files committed, so it does not need this
+# code layered on top). Distinct from EXIT_EXTERNAL_KILL (124): nothing
+# external intervened here. `run()` returns this value ONLY when (a) the
+# entity phase's `reason` (`RunContext.entity_exit_reason`) names an early
+# stop that is not a plain "completed", AND (b) the run committed zero files
+# (`RunContext.files_processed_count == 0` -- the same figure the athenaeum#899
+# zero-yield alarm uses for "files actually drained this run"), AND (c) the
+# caller did not pass `allow_degraded=True` (the CLI `--allow-degraded`
+# escape hatch for a deliberate deterministic-phases-only run). The
+# `librarian-run-degraded` marker line (see `_run_finalize_phase`) is emitted
+# whenever (a) and (b) hold, REGARDLESS of `allow_degraded` -- the exit code
+# is the opt-out, the log line never is.
+EXIT_LIBRARIAN_REFUSAL = 3
+
 # SessionEnd path outer kill timeout + inner-runtime derivation (issue
 # athenaeum#896). The SessionEnd wrapper that invokes ``athenaeum session-end``
 # (``code-workspace-config/scripts/hooks/knowledge-rebuild-index.sh`` — a
@@ -2864,11 +2886,14 @@ def _write_deferred_manifest(
     run, but they are not "deferred by budget" so they get their own section.
 
     ``reason`` (issue athenaeum#396) selects the header wording: ``"budget"`` (the
-    athenaeum#220 API-call-budget trip), ``"deadline"`` (the wall-clock deadline trip),
-    or ``"entity-share"`` (issue athenaeum#440 — the entity phase yielded the rest of
-    the window to the downstream C4 detector). The rest of the manifest — the
-    counts and the deferred-file list — is identical either way; only the
-    explanatory header differs.
+    athenaeum#220 API-call-COUNT-budget trip), ``"deadline"`` (the wall-clock
+    deadline trip), ``"entity-share"`` (issue athenaeum#440 — the entity phase
+    yielded the rest of the window to the downstream C4 detector), or
+    ``"spend-ceiling"`` (issue athenaeum#1135 — a metered-dollar or
+    subscription-token :func:`athenaeum.spend.ceiling_tripped` breach,
+    distinct from the plain call-count budget above). The rest of the
+    manifest — the counts and the deferred-file list — is identical either
+    way; only the explanatory header differs.
     """
     path = wiki_root / DEFERRED_MANIFEST_NAME
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2896,6 +2921,18 @@ def _write_deferred_manifest(
             "The raw files below were NOT processed this run; they remain on",
             "disk and the next run picks them up automatically. This file is",
             "overwritten on every tripped run and removed by the next clean run.",
+        ]
+    elif reason == "spend-ceiling":
+        header = [
+            "# Deferred work — librarian run spend ceiling exhausted",
+            "",
+            "The last librarian run stopped early because a metered-dollar or",
+            "subscription-token spend ceiling (librarian.spend_max_usd_per_*,",
+            "spend_max_tokens_per_*, issue athenaeum#378) was breached — distinct",
+            "from the plain API-call-COUNT budget below. The raw files below",
+            "were NOT processed this run; they remain on disk and the next run",
+            "picks them up automatically. This file is overwritten on every",
+            "tripped run and removed by the next clean run.",
         ]
     else:
         header = [
@@ -3222,6 +3259,28 @@ class RunContext:
     # athenaeum#220-style deferral — remaining intake is resumable, the run continues
     # into C2-C4, and it exits 0 unless a LATER phase trips the real deadline.
     entity_budget_tripped: bool = False
+    # Issue athenaeum#1135: the entity loop's ``spend.ceiling_tripped()`` check (a
+    # metered-dollar or subscription-token day/run ceiling, NOT the plain
+    # ``max_api_calls`` count) fired. Kept distinct from the generic
+    # ``manifest_reason == "budget"`` bucket below so a spend-ceiling refusal
+    # is separately greppable from an ordinary call-count budget trip — the
+    # two used to be folded into one indistinguishable "budget" label.
+    spend_ceiling_tripped: bool = False
+    # Issue athenaeum#1135: the entity phase's own exit-reason token, mirroring the
+    # ``reason=`` field it writes into ``ctx.run_profile`` (see
+    # ``_run_entity_tier_phase``) -- stored here (rather than only inline in
+    # the profile dict) so the finalize phase's zero-progress-refusal
+    # predicate can read it without re-deriving the same classification.
+    # ``None`` when the entity phase never ran at all (``cluster_only`` /
+    # ``merge_only``), distinguishing "no entity phase" from "entity phase
+    # completed cleanly" (``"completed"``).
+    entity_exit_reason: str | None = None
+    # Issue athenaeum#1135: CLI ``--allow-degraded`` escape hatch. When True, a
+    # zero-progress refusal (see ``EXIT_LIBRARIAN_REFUSAL``) still logs the
+    # ``librarian-run-degraded`` marker line but the run exits 0 instead of
+    # ``EXIT_LIBRARIAN_REFUSAL`` -- the explicit opt-in for a deliberate
+    # deterministic-phases-only / budget-starved run (AC3).
+    allow_degraded: bool = False
     raw_files: list[Any] = field(default_factory=list)
     # Issue athenaeum#663: raw files surfaced as STUCK this run — either they crossed the
     # consecutive-failure threshold this run, or they were already over it and
@@ -4848,6 +4907,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     _ceiling,
                                 )
                                 ctx.deferred_refs = [r.ref for r in ctx.raw_files[i:]]
+                                # Issue athenaeum#1135: distinct from the generic
+                                # ``max_api_calls`` count-budget trip above --
+                                # see ``spend_ceiling_tripped``'s field
+                                # docstring.
+                                ctx.spend_ceiling_tripped = True
                                 break
 
                         log.info("Processing: %s", raw.ref)
@@ -5098,11 +5162,13 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         _write_stuck_ledger(ctx.wiki_root, stuck_ledger)
 
                 # Issue athenaeum#220: a budget-tripped run must be visibly DEGRADED,
-                # not "Done". Exit code stays 0 (not a crash — the deferred
-                # files are picked up by the next run), but the summary line
-                # is machine-greppable and a manifest records exactly what
-                # was deferred. A clean run clears any stale manifest left
-                # by a previous tripped run.
+                # not "Done" (not a crash — the deferred files are picked up by
+                # the next run), but the summary line is machine-greppable and
+                # a manifest records exactly what was deferred. Exit code is
+                # 0 by default here (still true), UNLESS this run ALSO
+                # committed zero files -- see EXIT_LIBRARIAN_REFUSAL and
+                # ``_run_finalize_phase`` (issue athenaeum#1135). A clean run
+                # clears any stale manifest left by a previous tripped run.
                 if ctx.deferred_refs:
                     # Issue athenaeum#396: the entity loop defers remaining intake
                     # for either reason; label the manifest + summary with
@@ -5116,6 +5182,16 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # phase stopped, on purpose, to leave C4 a window.
                         degraded_reason = "entity phase runtime share exhausted"
                         manifest_reason = "entity-share"
+                    elif ctx.spend_ceiling_tripped:
+                        # Issue athenaeum#1135: a metered-dollar or subscription-token
+                        # spend ceiling (``spend.ceiling_tripped``), distinct
+                        # from the plain ``max_api_calls`` count budget below
+                        # -- the two used to be folded into one generic
+                        # "budget" label, which is exactly what made a
+                        # spend-exhausted refusal indistinguishable from an
+                        # ordinary call-count trip in the run summary.
+                        degraded_reason = "spend ceiling exhausted"
+                        manifest_reason = "spend-ceiling"
                     else:
                         degraded_reason = "budget exhausted"
                         manifest_reason = "budget"
@@ -5201,6 +5277,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         # (including the "no raw files at all" path, which never reaches the
         # block that assigns it) — so this is never an ``UnboundLocalError``.
         _entity_exit_reason = manifest_reason if ctx.deferred_refs else "completed"
+        # Issue athenaeum#1135: mirror onto ``ctx`` (not just the local var / the
+        # run_profile dict) so the finalize phase's zero-progress-refusal
+        # predicate can read it without re-deriving the same classification.
+        ctx.entity_exit_reason = _entity_exit_reason
         ctx.run_profile.append(
             (
                 "entity",
@@ -5720,6 +5800,101 @@ def _zero_yield_tripped(ctx: "RunContext", previous_deferred_refs: "list[str]") 
     return not resolved_since_last_run
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1135: the zero-progress REFUSAL. A monitoring session reported
+# a run as healthy 190s after it had exited having compiled NOTHING because
+# its spend budget was already exhausted BEFORE the entity loop claimed its
+# first file -- every deterministic phase still ran, the run still commits
+# (an empty commit is a no-op git-side), and the run-summary line still reads
+# ``calls=0 created=0 ... files=0 reason=budget``, but the exit code was 0,
+# indistinguishable from success. ``athenaeum drain`` already refuses loudly
+# on the analogous "made ZERO progress" condition (``drain.py``'s
+# "stopping loudly to avoid a spin"); this brings the plain ``athenaeum run``
+# entry path up to the same standard.
+#
+# Deliberately COMPLEMENTARY to, not merged with, the athenaeum#899 zero-yield alarm
+# (``_zero_yield_tripped`` above): zero-yield requires ``api_calls > 0`` (a
+# run that made zero calls is idle, not wasteful) -- exactly the gap this
+# predicate fills, since a budget-already-exhausted run trips the ceiling
+# check BEFORE spending a single call this run (``calls=0``). Neither
+# predicate's logic feeds the other; a budget refusal never flips the
+# zero-yield alarm and vice versa.
+# ---------------------------------------------------------------------------
+
+#: The entity phase's ``reason=`` vocabulary (mirrors ``manifest_reason`` in
+#: ``_run_entity_tier_phase``) that means "stopped early for a resource
+#: reason", as opposed to ``"completed"`` (normal completion -- including a
+#: completion that still has a non-nil ``reason``, e.g. the athenaeum#440
+#: entity-share yield, so this predicate is keyed on the ACTUAL early-stop
+#: values, never merely "reason is not None"). ``None`` (entity phase never
+#: ran -- ``cluster_only``/``merge_only``) is likewise excluded.
+_LIBRARIAN_EARLY_STOP_REASONS = frozenset(
+    {"deadline", "entity-share", "budget", "spend-ceiling"}
+)
+
+
+def _librarian_run_refusal_tripped(ctx: "RunContext") -> bool:
+    """True when this run stopped early for a resource reason AND committed nothing.
+
+    Both conditions must hold:
+
+    1. ``ctx.entity_exit_reason`` names an early stop (see
+       ``_LIBRARIAN_EARLY_STOP_REASONS``) -- NOT ``"completed"`` and NOT
+       ``None`` (entity phase skipped entirely).
+    2. ``ctx.files_processed_count == 0`` -- the SAME run-level "files
+       actually drained this run" figure the athenaeum#899 zero-yield alarm reads
+       (see ``_zero_yield_tripped``), not a re-derivation.
+    """
+    return (
+        ctx.entity_exit_reason in _LIBRARIAN_EARLY_STOP_REASONS
+        and ctx.files_processed_count == 0
+    )
+
+
+def _format_budget_window_spend(ctx: "RunContext") -> str | None:
+    """Render today's spend against the configured per-day cap (issue athenaeum#1135 AC2).
+
+    Reuses :func:`athenaeum.spend.spend_today` and the SAME provider-path
+    branch :func:`athenaeum.spend.ceiling_tripped` uses to pick dollars
+    (metered API) vs. tokens (subscription) -- never a blended figure.
+    Returns ``None`` when no per-day ceiling is configured for the run's
+    path, so the marker line simply omits the ``spend=`` token rather than
+    rendering a meaningless ``None/None``.
+
+    Best-effort: wrapped in a blanket ``except`` so a reporting failure can
+    NEVER break or slow the run it measures -- the same contract every other
+    spend-ledger read in this module already honors (see
+    ``spend.ceiling_tripped``'s own headroom-warning try/except).
+    """
+    try:
+        from athenaeum.config import (
+            resolve_spend_max_tokens_per_day,
+            resolve_spend_max_usd_per_day,
+        )
+
+        is_subscription = (
+            spend.ledger_provider(ctx.provider) == spend.PROVIDER_CLAUDE_CLI
+        )
+        ledger_path = spend.resolve_ledger_path(ctx.config, wiki_root=ctx.wiki_root)
+        today = spend.spend_today(ledger_path)
+        if is_subscription:
+            token_cap = resolve_spend_max_tokens_per_day(ctx.config)
+            if token_cap is None:
+                return None
+            return f"{int(today['subscription_tokens']):,}/{int(token_cap):,} tokens"
+        usd_cap = resolve_spend_max_usd_per_day(ctx.config)
+        if usd_cap is None:
+            return None
+        return f"${today['api_usd']:.2f}/${usd_cap:.2f}"
+    except Exception as exc:  # noqa: BLE001 — must never break or slow the run
+        log.debug(
+            "librarian-run-degraded: spend-window reporting skipped (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
 def _run_finalize_phase(ctx: RunContext) -> int:
     """Finalize: run-level spend summary + athenaeum#378 ledger write, post-run push,
     the athenaeum#310 page-size guardrail, the athenaeum#481 pending-merge revalidation
@@ -5981,6 +6156,29 @@ def _run_finalize_phase(ctx: RunContext) -> int:
     # drained run from a partial one regardless of exit code.
     ctx.export_run_stats()
 
+    # Issue athenaeum#1135: evaluate + LOG the zero-progress refusal BEFORE any of
+    # the return statements below, so the ``librarian-run-degraded`` marker
+    # line fires unconditionally whenever the predicate holds -- regardless
+    # of which return path (deadline / failed-files / strict-budget /
+    # refusal / clean) this call ends up taking, and regardless of
+    # ``allow_degraded``. The exit code is the opt-out (AC3); the log line
+    # never is.
+    # NAME COLLISION WARNING: this is a DISTINCT log line/prefix
+    # (``librarian-run-degraded``) from ``_render_run_summary``'s own
+    # ``degraded=N`` token (entity-count of degraded CLASSIFICATIONS, an
+    # unrelated per-file parse-quality metric — see that field's own comment
+    # a few hundred lines up). Deliberately never reused or overloaded; a
+    # cron wrapper greps the FULL ``librarian-run-degraded`` token, not the
+    # substring ``degraded``.
+    _librarian_refusal = _librarian_run_refusal_tripped(ctx)
+    if _librarian_refusal:
+        _spend_window = _format_budget_window_spend(ctx)
+        log.error(
+            "librarian-run-degraded reason=%s files=0%s",
+            ctx.entity_exit_reason,
+            f" spend={_spend_window}" if _spend_window else "",
+        )
+
     if ctx.deadline_tripped:
         log.warning(
             "librarian: run stopped at the wall-clock deadline — exiting %d "
@@ -5997,10 +6195,23 @@ def _run_finalize_phase(ctx: RunContext) -> int:
     # Issue athenaeum#227: opt-in strict mode for exit-code-based alerting. The
     # default stays 0 (a trip is not a crash — the next run picks the
     # deferred files up), but operators who alert on exit codes can ask
-    # for a nonzero exit when the budget tripped.
+    # for a nonzero exit when the budget tripped. Broader than the
+    # athenaeum#1135 refusal below (fires on ANY deferral, not just a
+    # zero-files one) and checked first, so a run with both flags set gets
+    # this code's nonzero exit either way.
     if ctx.deferred_refs and ctx.strict_budget:
         log.warning("strict_budget: budget-tripped run — exiting nonzero")
         return 1
+
+    # Issue athenaeum#1135: the DEFAULT-ON nonzero exit (unlike strict_budget
+    # above, no flag is needed to opt IN) for the narrower zero-progress
+    # refusal -- distinguishable "compiled nothing" from a genuine success
+    # by exit code, per AC1. ``--allow-degraded`` (``ctx.allow_degraded``)
+    # is the opt-OUT, for a deliberate deterministic-phases-only /
+    # budget-starved run (AC3); the marker line above already fired either
+    # way.
+    if _librarian_refusal and not ctx.allow_degraded:
+        return EXIT_LIBRARIAN_REFUSAL
 
     return 0
 
@@ -6030,10 +6241,12 @@ def run(
     heartbeat: Callable[[], None] | None = None,
     out_run_stats: dict[str, Any] | None = None,
     lock: Any = None,
+    allow_degraded: bool = False,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error,
     EXIT_GRACEFUL_PARTIAL (75) on its own internal deadline trip (issue
-    athenaeum#897; full exit-code contract: docs/exit-codes.md).
+    athenaeum#897), EXIT_LIBRARIAN_REFUSAL (3) on a zero-progress DEGRADED
+    refusal (issue athenaeum#1135; full exit-code contract: docs/exit-codes.md).
 
     When ``cluster_only`` is True, only the C2 auto-memory discovery +
     clustering pass runs; the entity tier pipeline is skipped entirely.
@@ -6070,6 +6283,20 @@ def run(
     return 1 instead of the default 0, for exit-code-based alerting (e.g.
     the CLI ``--strict-budget`` flag). All other DEGRADED-path behavior —
     warning summary, deferred-work manifest, git snapshot — is unchanged.
+    Broader than ``allow_degraded`` below (fires on ANY deferral, not just a
+    zero-files one) and takes precedence when both are set (checked first).
+
+    ``allow_degraded`` (issue athenaeum#1135) is the escape hatch for the
+    DEFAULT-ON ``EXIT_LIBRARIAN_REFUSAL`` (3) exit: when the run stopped
+    early for a resource reason (budget / spend-ceiling / entity-share /
+    deadline-adjacent) AND committed ZERO files, ``run()`` returns 3 instead
+    of the pre-athenaeum#1135 0 — UNLESS ``allow_degraded=True`` (e.g. the CLI
+    ``--allow-degraded`` flag), in which case it returns 0 as before. Either
+    way, the ``librarian-run-degraded`` marker line is still logged at
+    ERROR — this flag controls only the exit code, never the log line. The
+    escape hatch is for a DELIBERATE deterministic-phases-only /
+    budget-starved run where a caller already knows nothing will compile and
+    does not want that treated as a failure.
 
     ``batch_mode`` (issue athenaeum#236) routes the entity-tier LLM calls through
     the Anthropic Messages Batch API (50% token discount, latency-tolerant)
@@ -6204,6 +6431,9 @@ def run(
     # Issue athenaeum#909: same "set after construction" rationale as
     # ``entity_changed_paths`` above.
     ctx.full_contradiction_sweep = full_contradiction_sweep
+    # Issue athenaeum#1135: same "set after construction" rationale as
+    # ``entity_changed_paths`` / ``full_contradiction_sweep`` above.
+    ctx.allow_degraded = allow_degraded
     ctx.lock = lock
     ctx.api_key = os.environ.get("ANTHROPIC_API_KEY")
     ctx.config = load_config(knowledge_root)
