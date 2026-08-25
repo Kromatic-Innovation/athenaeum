@@ -107,6 +107,49 @@ class TestDetectDoNotEmailFact:
             is None
         )
 
+    def test_optout_list_mention_with_unrelated_email_declines(self) -> None:
+        # A single email IS present, but the statement merely mentions an
+        # opt-out list in passing — it never asserts this address is on it.
+        # Issue athenaeum#1121 names exactly this shape as one that must not
+        # fire (the earlier revision of this recognizer had a bare "manual
+        # opt-out list" phrase-match that would have wrongly stamped the
+        # mailbox named here, not the person the statement is actually
+        # about — this test exercises that branch directly, since the
+        # no-email variant above never reaches it).
+        assert (
+            detect_do_not_email_fact(
+                "The opt-out list is maintained by ops; ping ops@example.com for access."
+            )
+            is None
+        )
+
+    def test_not_on_optout_list_negation_declines(self) -> None:
+        # A statement that explicitly asserts the person is NOT on the list
+        # must not be read as an opt-out. (The "opted out" / "asked not to
+        # be emailed" phrases below are deliberately left un-negation-aware —
+        # see the PR discussion for why that residual gap is accepted.)
+        assert (
+            detect_do_not_email_fact(
+                "someone@example.com was reviewed and is not on the manual opt-out list."
+            )
+            is None
+        )
+
+    def test_negated_optout_phrase_still_fires_by_design(self) -> None:
+        # Known, accepted limitation: "opted out" / the reported-opt-out
+        # phrases are not negation-aware, so "has NOT opted out" still
+        # matches. Unlike the mailbox-mismatch case above (a different
+        # ENTITY than the statement names), this is an over-inclusive mark
+        # on the CORRECT entity — exactly the shape issue athenaeum#1121's
+        # fail-safe ruling accepts ("a false positive costs one un-emailed
+        # contact; prefer setting the field"). Documented here rather than
+        # left unexercised.
+        fact = detect_do_not_email_fact(
+            "someone@example.com has not opted out of any list we maintain."
+        )
+        assert fact is not None
+        assert fact.identifier == "someone@example.com"
+
     def test_multiple_addresses_declines(self) -> None:
         assert (
             detect_do_not_email_fact("Do not email a@example.com or b@example.com.")

@@ -1135,16 +1135,18 @@ def tier0_do_not_email_mark(
     if observed_at is not None:
         merged_meta["do_not_email_date"] = str(observed_at)
 
-    if dry_run:
-        return entity, True
-
     updated_today = date.today().isoformat()
     merged_meta["updated"] = updated_today
     entity.updated = updated_today
 
     # Schema-gate the merged frontmatter before write — same guarantee
-    # tier0_handle_upsert gives.
+    # tier0_handle_upsert gives, and (like that sibling) BEFORE the dry-run
+    # short-circuit, so a dry-run preview also catches a schema violation
+    # rather than reporting success on a merge that would fail to write.
     validate_wiki_meta(merged_meta)
+
+    if dry_run:
+        return entity, True
 
     atomic_write_text(
         existing_path,

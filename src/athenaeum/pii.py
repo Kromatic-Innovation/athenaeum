@@ -1690,8 +1690,7 @@ _DO_NOT_EMAIL_INSTRUCTION_RE = re.compile(
 #: difference is provenance (who said it), not whether the person opted out.
 _DO_NOT_EMAIL_OPTOUT_RE = re.compile(
     r"\basked (?:not to be (?:emailed|contacted)|to (?:stop receiving email|opt out|unsubscribe))\b"
-    r"|\bopted out\b"
-    r"|\bmanual opt-?out list\b",
+    r"|\bopted out\b",
     re.I,
 )
 
