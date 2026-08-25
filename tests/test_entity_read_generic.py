@@ -21,6 +21,11 @@ are issues athenaeum#885/#886). Structure mirrors the issue's acceptance criteri
   regression.
 - ``TestLibrarianThreadsOneIndex`` — the index is built ONCE above
   ``process_one`` and threaded down, not rebuilt per raw file.
+- ``TestReadEntityPreparedIndexes`` — issue athenaeum#1124's ``read_entity``
+  half: optional prepared ``excluded_index``/``entity_index`` parameters,
+  byte-identical default behaviour with neither supplied, and the
+  counter-based regression guard (``EntityIndex`` built once,
+  ``iter_contact_records`` scanned once, across N uid reads).
 
 Fixtures follow the ``EXCLUDED_CONFIG`` + tmp-path corpus-builder idiom used
 throughout this suite's excluded-read tests.
@@ -34,7 +39,7 @@ from pathlib import Path
 import pytest
 
 from athenaeum import pii
-from athenaeum.models import RawFile
+from athenaeum.models import EntityIndex, RawFile
 from athenaeum.pii import (
     CONTACT_DATA_FIELDS,
     EXCLUDED_RECORD_BOOKKEEPING_FIELDS,
@@ -223,12 +228,10 @@ class TestFieldPolicy:
             }
         }
 
-        assert resolve_excluded_fields("pii", config, {"emails": [], "phones": []}) == (
-            "emails",
+        assert resolve_excluded_fields("pii", config, {"emails": [], "phones": []}) == ("emails",)
+        assert resolve_excluded_fields("vendor", config, {"account_numbers": [], "other": []}) == (
+            "account_numbers",
         )
-        assert resolve_excluded_fields(
-            "vendor", config, {"account_numbers": [], "other": []}
-        ) == ("account_numbers",)
 
     def test_explicit_empty_list_is_honoured_literally(self) -> None:
         """An operator saying "no data fields" differs from not configuring the class."""
@@ -303,9 +306,7 @@ class TestNonPersonSurfaceClass:
         """Honest by construction — no field is silently neither value nor marker."""
         knowledge = self._vendor_corpus(tmp_path)
 
-        read = read_entity(
-            knowledge, TWO_SURFACE_CONFIG, "acme", surface_class="vendor"
-        )
+        read = read_entity(knowledge, TWO_SURFACE_CONFIG, "acme", surface_class="vendor")
 
         assert read is not None
         assert read.contact == {}
@@ -318,9 +319,7 @@ class TestNonPersonSurfaceClass:
         knowledge = tmp_path / "knowledge"
         _write_wiki_entity(knowledge / "wiki", "acme", entity_type="vendor")
 
-        read = read_entity(
-            knowledge, TWO_SURFACE_CONFIG, "acme", surface_class="vendor"
-        )
+        read = read_entity(knowledge, TWO_SURFACE_CONFIG, "acme", surface_class="vendor")
 
         assert read is not None
         assert read.contact == {} and read.redactions == ()
@@ -435,9 +434,7 @@ class TestExcludedRecordIndex:
                 pii.resolve_contact_record(root, address)
             )
 
-    def test_register_never_reorders_an_already_indexed_identifier(
-        self, tmp_path: Path
-    ) -> None:
+    def test_register_never_reorders_an_already_indexed_identifier(self, tmp_path: Path) -> None:
         """Batch resolution must be stable regardless of interleaved writes."""
         root = tmp_path / "excluded"
         first = _write_record(
@@ -456,9 +453,7 @@ class TestExcludedRecordIndex:
 
     def test_register_is_idempotent(self, tmp_path: Path) -> None:
         root = tmp_path / "excluded"
-        record = _write_record(
-            root, "a.md", uid="a", fields="emails:\n  - alex@example.org\n"
-        )
+        record = _write_record(root, "a.md", uid="a", fields="emails:\n  - alex@example.org\n")
         index = ExcludedRecordIndex(root)
 
         index.register(record)
@@ -469,9 +464,7 @@ class TestExcludedRecordIndex:
     def test_register_picks_up_a_merged_identifier_wholesale(self, tmp_path: Path) -> None:
         """A single-key insert would miss the MERGE case — re-index the record."""
         root = tmp_path / "excluded"
-        record = _write_record(
-            root, "a.md", uid="a", fields="emails:\n  - first@example.org\n"
-        )
+        record = _write_record(root, "a.md", uid="a", fields="emails:\n  - first@example.org\n")
         index = ExcludedRecordIndex(root)
         assert index.by_identifier("second@example.org") is None
 
@@ -485,9 +478,7 @@ class TestExcludedRecordIndex:
         assert index.by_identifier("second@example.org") == record
         assert index.by_identifier("first@example.org") == record
 
-    def test_shared_index_mints_exactly_one_record_for_one_address(
-        self, tmp_path: Path
-    ) -> None:
+    def test_shared_index_mints_exactly_one_record_for_one_address(self, tmp_path: Path) -> None:
         """athenaeum#850 regression: two marks, one batch, one index, ONE record."""
         root = tmp_path / "excluded"
         root.mkdir(parents=True)
@@ -588,3 +579,145 @@ class TestLibrarianThreadsOneIndex:
         librarian.tier0_bounce_mark(raw, wiki_root, config=EXCLUDED_CONFIG)
 
         assert seen == [None]
+
+
+class TestReadEntityPreparedIndexes:
+    """athenaeum#1124 — optional prepared ``excluded_index``/``entity_index``
+    on ``read_entity``. Additive: neither is built when both are supplied,
+    and default behaviour with neither supplied is byte-identical to today.
+    """
+
+    def test_default_behaviour_unaffected_when_neither_supplied(self, tmp_path: Path) -> None:
+        knowledge = _person_corpus(tmp_path)
+
+        result = read_entity(
+            knowledge,
+            EXCLUDED_CONFIG,
+            "alex",
+            surface_class="pii",
+            include_excluded=True,
+        )
+
+        assert result is not None
+        assert result.uid == "alex"
+        assert result.contact["emails"] == ["alex@example.org"]
+
+    def test_prepared_indexes_return_the_same_read_as_unprepared(self, tmp_path: Path) -> None:
+        knowledge = _person_corpus(tmp_path)
+        contacts_root = contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+
+        unprepared = read_entity(
+            knowledge,
+            EXCLUDED_CONFIG,
+            "alex",
+            surface_class="pii",
+            include_excluded=True,
+        )
+        prepared = read_entity(
+            knowledge,
+            EXCLUDED_CONFIG,
+            "alex",
+            surface_class="pii",
+            include_excluded=True,
+            excluded_index=ExcludedRecordIndex(contacts_root),
+            entity_index=EntityIndex(knowledge / "wiki"),
+        )
+
+        assert unprepared is not None
+        assert prepared is not None
+        assert prepared.contact == unprepared.contact
+        assert prepared.redactions == unprepared.redactions
+        assert prepared.classifications == unprepared.classifications
+        assert prepared.do_not_email == unprepared.do_not_email
+
+    def test_prepared_path_uses_excluded_index_by_uid_not_the_full_scan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC: ``resolve_contact_record_for_uid``'s full scan is replaced by
+        ``excluded_index.by_uid(uid)`` on the prepared path."""
+        knowledge = _person_corpus(tmp_path)
+        contacts_root = contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+
+        def _explode(*args: object, **kwargs: object) -> Path | None:
+            raise AssertionError(
+                "the prepared path must resolve via excluded_index.by_uid, "
+                "not resolve_contact_record_for_uid's full scan"
+            )
+
+        monkeypatch.setattr(pii, "resolve_contact_record_for_uid", _explode)
+
+        result = read_entity(
+            knowledge,
+            EXCLUDED_CONFIG,
+            "alex",
+            surface_class="pii",
+            include_excluded=True,
+            excluded_index=ExcludedRecordIndex(contacts_root),
+            entity_index=EntityIndex(knowledge / "wiki"),
+        )
+
+        assert result is not None
+        assert result.contact["emails"] == ["alex@example.org"]
+
+    def test_n_uid_reads_build_entity_index_once_and_scan_contacts_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The counter-based regression guard (not a timing assertion):
+        resolving N uids in one process must construct ``EntityIndex``
+        exactly once and call ``iter_contact_records`` exactly once,
+        regardless of N."""
+        knowledge = tmp_path / "knowledge"
+        contacts_root = excluded_surface_root("pii", knowledge, EXCLUDED_CONFIG)
+        n = 4
+        uids = [f"p{i}" for i in range(n)]
+        for uid in uids:
+            _write_wiki_entity(knowledge / "wiki", uid, name=f"Person {uid}")
+            _write_record(
+                contacts_root,
+                f"{uid}.md",
+                uid=uid,
+                fields=f"emails:\n  - {uid}@example.org\n",
+            )
+
+        entity_index_builds = 0
+        original_entity_init = EntityIndex.__init__
+
+        def _counting_entity_init(self: EntityIndex, wiki_root: Path) -> None:
+            nonlocal entity_index_builds
+            entity_index_builds += 1
+            original_entity_init(self, wiki_root)
+
+        monkeypatch.setattr(EntityIndex, "__init__", _counting_entity_init)
+
+        iter_contact_records_calls = 0
+        original_iter = pii.iter_contact_records
+
+        def _counting_iter(root: Path) -> list[Path]:
+            nonlocal iter_contact_records_calls
+            iter_contact_records_calls += 1
+            return original_iter(root)
+
+        monkeypatch.setattr(pii, "iter_contact_records", _counting_iter)
+
+        excluded_index = ExcludedRecordIndex(contacts_root)
+        entity_index = EntityIndex(knowledge / "wiki")
+        assert entity_index_builds == 1
+        assert iter_contact_records_calls == 0  # lazy — no scan until first lookup
+
+        for uid in uids:
+            result = read_entity(
+                knowledge,
+                EXCLUDED_CONFIG,
+                uid,
+                surface_class="pii",
+                include_excluded=True,
+                excluded_index=excluded_index,
+                entity_index=entity_index,
+            )
+            assert result is not None
+            assert result.uid == uid
+
+        assert entity_index_builds == 1, "EntityIndex must not be rebuilt per uid"
+        assert iter_contact_records_calls == 1, (
+            "iter_contact_records must be called exactly once for the whole batch, not once per uid"
+        )
