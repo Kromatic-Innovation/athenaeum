@@ -38,6 +38,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nightly librarian run and every existing write/read path are byte-for-byte
   unchanged with these keys at their defaults.
 
+### Changed
+
+- **`enumerate_entities` no longer PII-gates `do_not_email` (athenaeum#1122).**
+  `athenaeum.enumeration._PII_GATED_EXACT_FIELDS` is now empty:
+  `is_pii_gated_field("do_not_email")` (and `_reason` / `_date`) returns
+  `False`, so `enumerate_entities(predicates=["do_not_email != true"])` and
+  `athenaeum enumerate --where do_not_email:ne:true` both work without
+  `with_pii=True` / `--with-pii`. Operator-ruled: the field is a plain
+  suppression-opt-out boolean read from ordinary on-page frontmatter, with
+  no excluded-surface record join — not a durable cross-system identifier
+  like `google_contact_*`, which stays gated unchanged. Unrelated to, and
+  does not change, the separate `recall` / `read_entity` reverse-lookup
+  path, where `with_pii=True` stays required because there the lookup key
+  is an email address on the excluded surface.
+
 ### Documentation
 
 - **`docs/merge-inflow-restoration.md` §5 and §9 annotated with outcomes

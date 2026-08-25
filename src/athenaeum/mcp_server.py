@@ -1824,10 +1824,12 @@ def create_server(
                 beyond the always-present `uid`/`type`/`name`. A field
                 absent from a page is included as `null`, never silently
                 omitted, so every hit has the same shape.
-            with_pii: Required to reference `do_not_email` or
-                `google_contact_*` as a predicate field OR a requested
-                output field — the SAME flag contract `recall(with_pii=...)`
-                already uses. Default `False`.
+            with_pii: Required to reference `google_contact_*` as a
+                predicate field OR a requested output field — the SAME flag
+                contract `recall(with_pii=...)` already uses. Default
+                `False`. `do_not_email` (and its `_reason`/`_date`
+                companions) do NOT require this flag (athenaeum#1122) —
+                they are plain frontmatter fields, not PII-gated.
 
         Returns:
             A dict with `hits` (each carrying `uid`, `type`, `name`, plus
