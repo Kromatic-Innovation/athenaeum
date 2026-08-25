@@ -117,7 +117,14 @@ def _install_fake_supersession(monkeypatch: pytest.MonkeyPatch, decide: Any) -> 
 
 
 def _uninstall_supersession(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delitem(sys.modules, "athenaeum.supersession", raising=False)
+    """Make ``import athenaeum.supersession`` raise ImportError.
+
+    Deleting the sys.modules entry is NOT enough once the real module exists
+    on disk -- the import machinery simply re-imports it. Binding the name to
+    ``None`` is the documented way to make an import of it fail, which is the
+    condition this branch's fallback is for.
+    """
+    monkeypatch.setitem(sys.modules, "athenaeum.supersession", None)
 
 
 # ---------------------------------------------------------------------------
