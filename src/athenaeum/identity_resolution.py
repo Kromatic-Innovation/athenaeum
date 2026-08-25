@@ -170,6 +170,34 @@ def _detect_email_handle(query: str) -> str | None:
     return matches[0]
 
 
+def carries_email_shape(text: str) -> bool:
+    """True iff *text* contains at least one email-shaped token (athenaeum#1126).
+
+    A thin public wrapper over the same conservative, LOCAL shape check
+    (:data:`_EMAIL_SHAPE_RE`) :func:`_detect_email_handle` already uses — the
+    email-shape regex stays owned by this one module rather than being
+    duplicated elsewhere (e.g. :mod:`athenaeum.tiers`, which uses this
+    function as its tier-2 fast-path gate). Like the module-private detector,
+    this is DETECTION only, never comparison/lookup: the substring that makes
+    this ``True`` is normalized through :func:`athenaeum.pii.normalize_identifier`
+    downstream, before any resolution happens — see the module docstring.
+    """
+    return _EMAIL_SHAPE_RE.search(text) is not None
+
+
+def sole_email_token(text: str) -> str | None:
+    """The lone email-shaped token in *text*, or ``None`` (athenaeum#1126).
+
+    Public alias for :func:`_detect_email_handle`, which already implements
+    exactly this: conservative by design, returning ``None`` when *text*
+    carries zero OR two-or-more email-shaped tokens (a name naming two
+    addresses is not a reverse lookup for either of them). DETECTION only —
+    see :func:`carries_email_shape` and the module docstring for why the
+    matched substring is never used for comparison/lookup directly.
+    """
+    return _detect_email_handle(text)
+
+
 def _registry_handle_matches(registry_entities: dict[str, Any], value: str) -> list[str]:
     """Every uid whose registry handles (any :data:`SOURCE_HANDLE_KEYS` field) carry *value*.
 
