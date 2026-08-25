@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum run` refuses loudly when it compiled nothing (athenaeum#1135).**
+  A run whose spend/API-call budget was already exhausted before the entity
+  loop claimed its first file ran every deterministic phase and exited `0`
+  — indistinguishable from a genuine success, even though it committed zero
+  files. `athenaeum run` now returns the new `EXIT_LIBRARIAN_REFUSAL` (`3`)
+  by default whenever the entity phase stopped early for a resource reason
+  (`reason=deadline` / `entity-share` / `budget` / the new `spend-ceiling`,
+  split out of the previously overloaded generic `budget` bucket so a
+  metered-dollar/subscription-token ceiling trip is separately greppable
+  from a plain API-call-count trip) AND the run committed zero files —
+  distinct from `EXIT_GRACEFUL_PARTIAL` (`75`, the wall-clock deadline trip,
+  already non-zero regardless of files committed) and from the existing
+  opt-in `--strict-budget` (broader: any deferral, not just a zero-files
+  one; wins when both flags are set). The new `--allow-degraded` flag exits
+  `0` instead, for a deliberate deterministic-phases-only / budget-starved
+  run — but a dedicated `librarian-run-degraded reason=<reason> files=0
+  [spend=<consumed>/<cap>]` marker line (ERROR) is logged either way, so a
+  cron wrapper that only greps logs still catches it. This brings the plain
+  `athenaeum run` entry path up to the same standard `athenaeum drain`
+  already holds itself to (its own "made ZERO progress — stopping loudly"
+  refusal is unchanged). `athenaeum spend` also gains an additive
+  `budget_window` figure (today's spend against the configured per-day
+  ceiling, alongside the existing `--since`-window totals) so the report
+  agrees with what the ceiling would actually stop right now. Full
+  contract: [`docs/exit-codes.md`](docs/exit-codes.md).
+
 - **Five-verdict comparator, phase 2 — verdict effects, supersession
   substrate, the two instruments, and the pending-queue re-run
   (athenaeum#715).** Everything the comparator core landed dark in the
