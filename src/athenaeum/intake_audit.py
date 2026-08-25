@@ -95,7 +95,13 @@ from athenaeum.config import (
 )
 from athenaeum.corrections import find_correction_batches
 from athenaeum.fingerprint import RESOLVED_CONTRADICTIONS_RELPATH
-from athenaeum.intake import _AUTO_MEMORY_SKIP_NAMES, AUTO_MEMORY_FILE_RE, RAW_FILE_RE
+from athenaeum.intake import (
+    _AUTO_MEMORY_SKIP_NAMES,
+    AUTO_MEMORY_FILE_RE,
+    RAW_FILE_RE,
+    auto_memory_type_from_frontmatter,
+)
+from athenaeum.models import parse_frontmatter
 
 log = logging.getLogger(__name__)
 
@@ -187,13 +193,24 @@ def find_unclaimed_raw_files(
     for fpath in sorted(raw_root.rglob("*")):
         if not fpath.is_file():
             continue
-        if fpath.name == ".gitkeep" or fpath.name in _AUTO_MEMORY_SKIP_NAMES:
+        if fpath.name in (".gitkeep", ".DS_Store"):
+            # Filesystem detritus, never intake and never an operator decision.
+            continue
+        if fpath.name in _AUTO_MEMORY_SKIP_NAMES:
             continue
         if fpath.resolve() == resolved_contradictions_path:
             continue
         rel = fpath.relative_to(raw_root)
         parts = rel.parts
         source = parts[0]
+        if len(parts) == 1 and fpath.name.startswith("_"):
+            # The librarian's OWN working files at raw root --
+            # `_librarian-clusters-*.jsonl` and friends. `discover_raw_files`
+            # never sees them (it iterates DIRECTORIES under raw_root), so
+            # flagging them made the audit raise a decision about its own
+            # process output. Generalises the athenaeum#198
+            # `_resolved_contradictions.jsonl` special case above.
+            continue
         if source == _ANSWERS_SOURCE or source in non_intake:
             continue
         if len(parts) >= 2 and f"{source}/{fpath.name}" in exempt_refs:
@@ -235,10 +252,38 @@ def find_unclaimed_raw_files(
             if RAW_FILE_RE.match(fpath.name):
                 # Legitimate silent fall-through -- see module docstring.
                 continue
+            if _declares_auto_memory_type(fpath):
+                # Filename misses the convention but the file declares its own
+                # type in frontmatter, which `discover_auto_memory_files` now
+                # honours -- claimed, not unrecognised. Kept in lockstep with
+                # that function via the shared
+                # `auto_memory_type_from_frontmatter` predicate.
+                continue
             out.append(
                 UnclaimedFile(
                     path=fpath,
                     reason=REASON_MISSING_NAMING_CONVENTION,
+                    group_key=group_key,
+                )
+            )
+            continue
+
+        if len(parts) == 3:
+            # raw/<source>/<subdir>/<file> where <source> is NOT an extra-intake
+            # root -- athenaeum#974 gave `discover_raw_files` a one-level-deep
+            # walk below each source dir, with the same extension-only claim
+            # rule it applies at the source's own top level. This audit did not
+            # model that descent, so every file in such a subdir was reported
+            # `unrecognised shape` WHILE BEING CLAIMED AND QUEUED. Measured on
+            # the live store 2026-08-25: 2849 of 7622 flagged files were this
+            # false positive, dominated by `raw/drive/<pipeline>-intake/`.
+            group_key = f"{source}/{parts[1]}"
+            if ext in (".md", ".jsonl"):
+                continue
+            out.append(
+                UnclaimedFile(
+                    path=fpath,
+                    reason=REASON_UNMATCHED_EXTENSION,
                     group_key=group_key,
                 )
             )
@@ -253,6 +298,23 @@ def find_unclaimed_raw_files(
         )
 
     return out
+
+
+def _declares_auto_memory_type(fpath: Path) -> bool:
+    """True when *fpath*'s own frontmatter declares a recognised memory type.
+
+    Mirrors :func:`athenaeum.intake.discover_auto_memory_files`'s frontmatter
+    fallback so a file that discovery now CLAIMS is never simultaneously
+    reported here as unclaimed. Fails closed: an unreadable or frontmatter-less
+    file returns ``False`` and stays flagged, which is the safe direction --
+    a visible decision rather than a silent drop.
+    """
+    try:
+        text = fpath.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    meta, _body = parse_frontmatter(text)
+    return auto_memory_type_from_frontmatter(meta) is not None
 
 
 def _group_fingerprint(reason: str, group_key: str) -> str:
