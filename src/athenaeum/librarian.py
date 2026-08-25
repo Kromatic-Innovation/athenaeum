@@ -212,8 +212,11 @@ from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
 from athenaeum.store import FilesystemStore
 from athenaeum.tiers import (
+    TIER2_ADDRESS_RESOLVED_MARKER,
+    TIER2_ADDRESS_UNRESOLVED_MARKER,
     Tier2ParseStats,
     partition_code_artifact_classifications,
+    resolve_address_named_classifications,
     schema_fragment_state,
     tier1_programmatic_match,
     tier2_classify,
@@ -1528,16 +1531,63 @@ def process_one(
     for _name in _dropped_code:
         log.info("  T3 create skipped (issue athenaeum#680, code artifact): %s", _name)
 
+    # Issue athenaeum#1126: a candidate whose name is a bare email address must
+    # not become a NEW entity named after that address — resolve it to the
+    # entity that owns the address (via the sanctioned recall reverse lookup)
+    # or decline it loudly rather than mint an orphan address-named page.
+    # excluded_index is the run's shared ExcludedRecordIndex
+    # (athenaeum#883, athenaeum#1124) so the O(corpus) contacts scan is paid
+    # once, not per address.
+    address_outcome = resolve_address_named_classifications(
+        classified,
+        knowledge_root=wiki_root.parent,
+        wiki_root=wiki_root,
+        config=config,
+        excluded_index=excluded_index,
+    )
+    classified = address_outcome.kept
+    for _address, _uid, _display_name in address_outcome.resolved:
+        log.info(
+            "%s: address=%s uid=%s name=%r",
+            TIER2_ADDRESS_RESOLVED_MARKER,
+            _address,
+            _uid,
+            _display_name,
+        )
+    address_escalations: list[EscalationItem] = []
+    for _ref_name, _reason in address_outcome.declined:
+        log.warning(
+            "%s: ref=%s address=%s reason=%s",
+            TIER2_ADDRESS_UNRESOLVED_MARKER,
+            raw.ref,
+            _ref_name,
+            _reason,
+        )
+        address_escalations.append(
+            EscalationItem(
+                raw_ref=raw.ref,
+                entity_name=_ref_name,
+                conflict_type="classification_failed",
+                description=(
+                    f"This statement's subject ({_ref_name!r}) is an email "
+                    "address that resolves to no known entity (reason: "
+                    f"{_reason}); no address-named page was created "
+                    "(athenaeum#1126). The statement text follows so the "
+                    f"fact is not lost:\n\n{raw.content[:2000]}"
+                ),
+            )
+        )
+
     # Build actions
     actions: list[EntityAction] = []
     for c in classified:
         actions.append(
             EntityAction(
-                kind="create",
+                kind="create" if c.is_new else "update",
                 name=c.name,
-                entity_type=c.entity_type,
-                tags=c.tags,
-                access=c.access,
+                entity_type=c.entity_type if c.is_new else "",
+                tags=c.tags if c.is_new else [],
+                access=c.access if c.is_new else "",
                 existing_uid=c.existing_uid,
                 observations=c.observations or raw.content[:2000],
             )
@@ -1559,6 +1609,23 @@ def process_one(
 
     if not actions:
         log.info("  No actions needed for %s", raw.ref)
+        if address_escalations:
+            # Issue athenaeum#1126: the raw file is unlinked after this run
+            # regardless of outcome (below, on the write path) — if the ONLY
+            # classification for this file was a declined address, the
+            # early return above would otherwise destroy the fact silently.
+            # Flush the escalation(s) through the same write/escalate seam
+            # the normal completion path uses.
+            _apply_tier3_results(
+                result,
+                new_entities=[],
+                pending_updates=[],
+                updated_uids=[],
+                escalations=address_escalations,
+                wiki_root=wiki_root,
+                index=index,
+                config=config,
+            )
         return result
 
     # --- Tier 3: LLM-call phase (issue athenaeum#898: writes NOTHING yet) ---
@@ -1597,7 +1664,7 @@ def process_one(
             new_entities=exc.new_entities,
             pending_updates=exc.pending_updates,
             updated_uids=exc.updated_uids,
-            escalations=exc.escalations,
+            escalations=address_escalations + exc.escalations,
             wiki_root=wiki_root,
             index=index,
             config=config,
@@ -1610,7 +1677,7 @@ def process_one(
         new_entities=new_entities,
         pending_updates=pending_updates,
         updated_uids=updated_uids,
-        escalations=escalations,
+        escalations=address_escalations + escalations,
         wiki_root=wiki_root,
         index=index,
         config=config,
