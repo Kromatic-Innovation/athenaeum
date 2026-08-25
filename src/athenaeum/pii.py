@@ -1012,9 +1012,7 @@ class CorpusPiiFinding:
     phones: list[str]
 
 
-def iter_corpus_files(
-    wiki_root: Path, *, exclude: Iterable[Path] = ()
-) -> list[Path]:
+def iter_corpus_files(wiki_root: Path, *, exclude: Iterable[Path] = ()) -> list[Path]:
     """Return every regular file under *wiki_root*, recursively, sorted.
 
     Unlike the entity-page scans (:func:`athenaeum.storage_migrate.iter_entity_pages`,
@@ -1055,9 +1053,7 @@ def iter_corpus_files(
     return out
 
 
-def scan_corpus_pii(
-    wiki_root: Path, *, exclude: Iterable[Path] = ()
-) -> list[CorpusPiiFinding]:
+def scan_corpus_pii(wiki_root: Path, *, exclude: Iterable[Path] = ()) -> list[CorpusPiiFinding]:
     """Scan every file under *wiki_root* for inline email/phone tokens.
 
     Returns one :class:`CorpusPiiFinding` per file that carries any
@@ -1153,9 +1149,7 @@ class PiiAdjudication:
     @property
     def unexplained_count(self) -> int:
         """Number of tokens no allowlist entry explains — the gate's subject."""
-        return sum(
-            len(f.unexplained_emails) + len(f.unexplained_phones) for f in self.findings
-        )
+        return sum(len(f.unexplained_emails) + len(f.unexplained_phones) for f in self.findings)
 
     @property
     def adjudicated_count(self) -> int:
@@ -1199,10 +1193,7 @@ def load_pii_allowlist(path: Path) -> tuple[list[PiiAllowlistEntry], list[str]]:
     if raw is None:
         return [], errors
     if not isinstance(raw, list):
-        return [], [
-            f"{path}: top-level YAML must be a list of entries, "
-            f"got {type(raw).__name__}"
-        ]
+        return [], [f"{path}: top-level YAML must be a list of entries, got {type(raw).__name__}"]
 
     entries: list[PiiAllowlistEntry] = []
     seen: set[str] = set()
@@ -1451,9 +1442,7 @@ def append_supersession(
     an :class:`Observation`.
     """
     record = build_supersession_record(retracts=retracts, reason=reason, at=at)
-    target = (
-        log_path if log_path is not None else default_supersession_log_path(contacts_root)
-    )
+    target = log_path if log_path is not None else default_supersession_log_path(contacts_root)
     _append_jsonl_line(target, json.dumps(record, separators=(",", ":")) + "\n")
     return Supersession(retracts=record["retracts"], reason=record["reason"], at=record["at"])
 
@@ -1486,9 +1475,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def read_observations(
-    contacts_root: Path, *, log_path: Path | None = None
-) -> list[Observation]:
+def read_observations(contacts_root: Path, *, log_path: Path | None = None) -> list[Observation]:
     """Read every well-formed observation record, in file order."""
     target = log_path if log_path is not None else default_observation_log_path(contacts_root)
     out: list[Observation] = []
@@ -1508,13 +1495,9 @@ def read_observations(
     return out
 
 
-def read_supersessions(
-    contacts_root: Path, *, log_path: Path | None = None
-) -> list[Supersession]:
+def read_supersessions(contacts_root: Path, *, log_path: Path | None = None) -> list[Supersession]:
     """Read every well-formed supersession record, in file order."""
-    target = (
-        log_path if log_path is not None else default_supersession_log_path(contacts_root)
-    )
+    target = log_path if log_path is not None else default_supersession_log_path(contacts_root)
     out: list[Supersession] = []
     for rec in _read_jsonl(target):
         try:
@@ -2268,9 +2251,7 @@ def contact_classification_entries(meta: dict[str, Any] | None) -> list[dict[str
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
-def classification_for_value(
-    meta: dict[str, Any] | None, identifier: str
-) -> ContactClassification:
+def classification_for_value(meta: dict[str, Any] | None, identifier: str) -> ContactClassification:
     """The classification recorded for *identifier* on *meta*.
 
     Always returns a :class:`ContactClassification` — never ``None``. A value
@@ -2297,14 +2278,10 @@ def classification_for_value(
                     usage_class=usage_class or USAGE_CLASS_UNCLASSIFIED,
                     source=entry.get("source"),
                     observed_at=(
-                        str(entry["observed_at"])
-                        if entry.get("observed_at") is not None
-                        else None
+                        str(entry["observed_at"]) if entry.get("observed_at") is not None else None
                     ),
                 )
-    return ContactClassification(
-        identifier=identifier, usage_class=USAGE_CLASS_UNCLASSIFIED
-    )
+    return ContactClassification(identifier=identifier, usage_class=USAGE_CLASS_UNCLASSIFIED)
 
 
 def is_outreach_eligible(meta: dict[str, Any] | None, identifier: str) -> bool:
@@ -2342,9 +2319,7 @@ DO_NOT_EMAIL_FIELD = "do_not_email"
 #: Strings a ``do_not_email:`` value may carry that mean "no mark". Anything
 #: else non-empty means the mark IS set: the failure direction of a typo must
 #: be a false SKIP (recoverable by a human), never a false SEND (not).
-_DO_NOT_EMAIL_FALSEY: frozenset[str] = frozenset(
-    {"", "false", "no", "none", "null", "0", "off"}
-)
+_DO_NOT_EMAIL_FALSEY: frozenset[str] = frozenset({"", "false", "no", "none", "null", "0", "off"})
 
 
 @dataclass(frozen=True)
@@ -3034,16 +3009,12 @@ def find_orphaned_bounce_marks(contacts_root: Path) -> list[OrphanedBounceMark]:
         )
         if person is not None:
             orphaned.append(
-                OrphanedBounceMark(
-                    identifier=identifier, bounce_record=path, person_record=person
-                )
+                OrphanedBounceMark(identifier=identifier, bounce_record=path, person_record=person)
             )
     return orphaned
 
 
-def fold_orphaned_bounce_marks(
-    contacts_root: Path, *, dry_run: bool = False
-) -> BounceFoldReport:
+def fold_orphaned_bounce_marks(contacts_root: Path, *, dry_run: bool = False) -> BounceFoldReport:
     """Fold every stranded mark onto the person record, reporting the count.
 
     For each pair :func:`find_orphaned_bounce_marks` reports, replays the mark
@@ -3191,9 +3162,7 @@ def resolve_excluded_fields(
     if not isinstance(record_meta, Mapping):
         return ()
     return tuple(
-        str(name)
-        for name in record_meta
-        if str(name) not in EXCLUDED_RECORD_BOOKKEEPING_FIELDS
+        str(name) for name in record_meta if str(name) not in EXCLUDED_RECORD_BOOKKEEPING_FIELDS
     )
 
 
@@ -3447,9 +3416,7 @@ class EntityRead:
     # `dataclass_field`, not `field` — two long-standing functions in this
     # module use `field` as a loop variable, and importing the bare name would
     # shadow them (ruff F402).
-    classifications: dict[str, list[ContactClassification]] = dataclass_field(
-        default_factory=dict
-    )
+    classifications: dict[str, list[ContactClassification]] = dataclass_field(default_factory=dict)
     validity: dict[str, list[IdentifierValidity]] = dataclass_field(default_factory=dict)
     do_not_email: DoNotEmailState = dataclass_field(
         default_factory=lambda: DoNotEmailState(marked=False)
@@ -3466,17 +3433,14 @@ class EntityRead:
             "redactions": [marker.to_dict() for marker in self.redactions],
             "contact_included": self.contact_included,
             "contact_record_path": (
-                str(self.contact_record_path)
-                if self.contact_record_path is not None
-                else None
+                str(self.contact_record_path) if self.contact_record_path is not None else None
             ),
             "classifications": {
                 name: [item.to_dict() for item in values]
                 for name, values in self.classifications.items()
             },
             "validity": {
-                name: [item.to_dict() for item in values]
-                for name, values in self.validity.items()
+                name: [item.to_dict() for item in values] for name, values in self.validity.items()
             },
             "do_not_email": self.do_not_email.to_dict(),
         }
@@ -3668,6 +3632,8 @@ def read_entity(
     surface_class: str,
     include_excluded: bool = False,
     usage_classes: Collection[str] | None = None,
+    excluded_index: "ExcludedRecordIndex | None" = None,
+    entity_index: EntityIndex | None = None,
 ) -> EntityRead | None:
     """Read one entity's wiki page, with excluded data gated by *include_excluded*.
 
@@ -3706,6 +3672,37 @@ def read_entity(
             widens nor narrows it.
         usage_classes: Restrict returned values to these usage classes
             (issue athenaeum#866), exactly as the former person-shaped read.
+        excluded_index: An already-built :class:`ExcludedRecordIndex` over
+            *surface_class*'s surface (issue athenaeum#1124), for a caller
+            resolving several uids on the ambiguous-handle branch — each
+            call otherwise pays :func:`resolve_contact_record_for_uid`'s full
+            :func:`iter_contact_records` scan on its own (97.8% of one
+            profiled call; see the issue). When supplied, its
+            :meth:`~ExcludedRecordIndex.by_uid` replaces that scan; the
+            caller is responsible for building it over the SAME
+            *surface_class* root (:func:`excluded_surface_root`) this call
+            would otherwise resolve — a mismatched surface is not detected
+            here (unlike :func:`athenaeum.identity_resolution._assemble_contact_values`,
+            which can compare roots because it also computes them; this
+            function is simply told the index to use). ``None`` (the
+            default, and every pre-athenaeum#1124 caller) resolves the
+            single uid itself, exactly as before. **Staleness
+            (athenaeum#850):** valid only for a read-only window —
+            :func:`mark_bounced` mints records and merges identifiers onto
+            existing ones, so a caller interleaving bounce writes with reads
+            in the same process must rebuild or invalidate this index at
+            that boundary.
+        entity_index: An already-built
+            :class:`~athenaeum.models.EntityIndex` over the compiled wiki,
+            for the same batch-of-uids reason. ``None`` (the default) builds
+            one per call. Prefer :func:`read_entities` when resolving many
+            uids at once — it builds both indexes for the whole batch
+            without the caller assembling them by hand; these parameters
+            exist for a caller (like the ambiguous-handle branch, which
+            calls this once per candidate uid rather than once for all of
+            them) that cannot restructure itself into a single
+            :func:`read_entities` call but can still hold one pair of
+            indexes across those calls.
 
     Returns:
         An :class:`EntityRead`, or ``None`` when *uid* resolves to no wiki
@@ -3713,23 +3710,30 @@ def read_entity(
         NOT one: the page is returned with empty data and no markers.
 
     Cost:
-        Builds both O(corpus) indexes per call, as the former person-shaped
-        read always has (~28s against the live 16,928-page store, of which
-        25.2s is ``EntityIndex``). **Resolving more than one uid: use
-        :func:`read_entities`.** A caller that already HAS the page and its
-        frontmatter — ``recall`` — should call
+        With neither *excluded_index* nor *entity_index* supplied, builds
+        both O(corpus) indexes per call, as the former person-shaped read
+        always has (~28s against the live 16,928-page store, of which 25.2s
+        is ``EntityIndex``). **Resolving more than one uid: use
+        :func:`read_entities`, or hold prepared indexes across repeated
+        calls via the parameters above.** A caller that already HAS the page
+        and its frontmatter — ``recall`` — should call
         :func:`assemble_excluded_read` directly and build no index at all.
     """
-    contacts_root = excluded_surface_root(surface_class, knowledge_root, config)
-    # Single lookup: resolve just this uid rather than indexing the whole
-    # surface. Same one-scan cost, but it warns only about a collision on the
-    # uid actually asked for — the batch builder's corpus-wide warning would
-    # be noise in a one-uid read.
-    record_path = resolve_contact_record_for_uid(contacts_root, uid)
+    if excluded_index is not None:
+        record_path = excluded_index.by_uid(uid)
+    else:
+        contacts_root = excluded_surface_root(surface_class, knowledge_root, config)
+        # Single lookup: resolve just this uid rather than indexing the whole
+        # surface. Same one-scan cost, but it warns only about a collision on
+        # the uid actually asked for — the batch builder's corpus-wide
+        # warning would be noise in a one-uid read.
+        record_path = resolve_contact_record_for_uid(contacts_root, uid)
     contact_records = {} if record_path is None else {str(uid).strip(): record_path}
     return _entity_read_from_indexes(
         uid,
-        entity_index=EntityIndex(knowledge_root / "wiki"),
+        entity_index=(
+            entity_index if entity_index is not None else EntityIndex(knowledge_root / "wiki")
+        ),
         contact_records=contact_records,
         include_excluded=include_excluded,
         wanted_classes=frozenset(usage_classes) if usage_classes is not None else None,
@@ -3801,7 +3805,7 @@ class IdentifierFacts:
             "identifier": self.identifier,
             "known": self.known,
             "uid": self.uid,
-            "record_path": str(self.record_path) if self.record_path is not None else None,
+            "record_path": (str(self.record_path) if self.record_path is not None else None),
             "classification": (
                 self.classification.to_dict() if self.classification is not None else None
             ),

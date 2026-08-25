@@ -90,7 +90,13 @@ if TYPE_CHECKING:
     # Annotation-only, mirroring the lazy-import convention every module in
     # this read path already follows (`mcp_server.py`, `_cmd_query.py`) — the
     # real import stays local to each function that needs it.
-    from athenaeum.pii import DoNotEmailState, IdentifierValidity, RedactionMarker
+    from athenaeum.models import EntityIndex
+    from athenaeum.pii import (
+        DoNotEmailState,
+        ExcludedRecordIndex,
+        IdentifierValidity,
+        RedactionMarker,
+    )
 
 #: Minimal LOCAL email-shape check used only to DETECT a handle-shaped query
 #: (D2(a)). Never used for comparison/lookup — the matched substring is
@@ -202,16 +208,32 @@ class _Walk:
     candidate_uids: tuple[str, ...] = ()
 
 
-def _walk_email_handle(knowledge_root: Path, value: str, *, config: dict[str, Any] | None) -> _Walk:
+def _walk_email_handle(
+    knowledge_root: Path,
+    value: str,
+    *,
+    config: dict[str, Any] | None,
+    excluded_index: ExcludedRecordIndex | None = None,
+) -> _Walk:
     """``email -> contact record(s) -> uid(s)`` (D3), mirroring `_resolve_email_handle`.
 
     Deduped by uid, not by record: several records carrying the SAME uid are
     one person described twice, not an ambiguous address.
+
+    *excluded_index* (athenaeum#1124): an already-built
+    :class:`~athenaeum.pii.ExcludedRecordIndex` over the ``pii`` contacts
+    surface (the same root :func:`athenaeum.pii.contacts_surface_root`
+    resolves), for a caller resolving many handles in one process. ``None``
+    (the default) builds one here exactly as before — byte-identical to the
+    pre-athenaeum#1124 behaviour.
     """
     from athenaeum import pii
 
-    contacts_root = pii.contacts_surface_root(knowledge_root, config)
-    index = pii.ExcludedRecordIndex(contacts_root)
+    if excluded_index is not None:
+        index = excluded_index
+    else:
+        contacts_root = pii.contacts_surface_root(knowledge_root, config)
+        index = pii.ExcludedRecordIndex(contacts_root)
     records = index.all_by_identifier(value)
     if not records:
         return _Walk(kind="unresolvable", reason="no-match")
@@ -334,6 +356,7 @@ def _assemble_contact_values(
     config: dict[str, Any] | None,
     with_pii: bool,
     usage_classes: Collection[str] | None,
+    excluded_index: ExcludedRecordIndex | None = None,
 ) -> tuple[tuple[ContactValueFact, ...], tuple[RedactionMarker, ...]]:
     """``(contact_values, redactions)`` for a page that survived both Layer-C drops.
 
@@ -357,6 +380,15 @@ def _assemble_contact_values(
     (:func:`athenaeum.mcp_server._excluded_block_for_hit`). It cannot widen
     anything and never perturbs the ``with_pii=False`` redaction-marker path,
     since that branch returns before *usage_classes* would apply.
+
+    *excluded_index* (athenaeum#1124): an already-built
+    :class:`~athenaeum.pii.ExcludedRecordIndex`, reused ONLY when its
+    ``contacts_root`` matches *surface_root* below — a page class whose
+    mapped surface differs from the caller's prepared surface (e.g. a
+    non-``person`` class routed to its own adapter) still gets a freshly
+    built index for its own surface rather than being silently joined
+    against the wrong one. ``None`` (the default) builds one here exactly
+    as before.
     """
     from athenaeum import pii
     from athenaeum.storage import is_excluded
@@ -366,7 +398,10 @@ def _assemble_contact_values(
         return (), ()
 
     surface_root = pii.excluded_surface_root(surface_class, knowledge_root, config)
-    index = pii.ExcludedRecordIndex(surface_root)
+    if excluded_index is not None and excluded_index.contacts_root == surface_root:
+        index = excluded_index
+    else:
+        index = pii.ExcludedRecordIndex(surface_root)
     record_path = index.by_uid(uid)
     record_meta = pii.read_bounce_record(record_path) if record_path is not None else None
 
@@ -474,6 +509,8 @@ def _finish(
     config: dict[str, Any] | None,
     with_pii: bool,
     usage_classes: Collection[str] | None,
+    excluded_index: ExcludedRecordIndex | None = None,
+    entity_index: EntityIndex | None = None,
 ) -> HandleResolution:
     """Turn a resolved/unresolved walk outcome into the full response (D5/D6).
 
@@ -482,8 +519,17 @@ def _finish(
     drop reports ``reason="no-match"``, fail-closed, and performs NO
     excluded-surface lookup at all. Only a page that survives both reaches
     :func:`_assemble_contact_values` (D6 step 4).
+
+    **Gating is structurally unaffected by *entity_index*/*excluded_index***
+    (athenaeum#1124): both prepared indexes are used ONLY to locate a page
+    and, later, an excluded record — never to decide whether the page is
+    returned. Steps 2 and 3 below read `page_fm` (freshly parsed from disk
+    either way) and run unconditionally, strictly BEFORE
+    :func:`_assemble_contact_values` is ever reached — a prepared index
+    changes what a lookup costs, never what it is permitted to see.
     """
-    from athenaeum.models import EntityIndex, is_page_authorized, parse_frontmatter
+    from athenaeum.models import EntityIndex as _EntityIndex
+    from athenaeum.models import is_page_authorized, parse_frontmatter
     from athenaeum.storage import is_recallable, storage_policy_configured
 
     if walk.kind == "unresolvable":
@@ -492,7 +538,7 @@ def _finish(
     uid = walk.uid
     assert uid is not None  # a "resolved" walk always carries a uid
 
-    index = EntityIndex(wiki_root)
+    index = entity_index if entity_index is not None else _EntityIndex(wiki_root)
     page_path = index.get_by_uid(uid)
     if page_path is None or not page_path.exists() or not index.has_entity_format(page_path):
         return _orphan_uid(handle, with_pii=with_pii)
@@ -522,6 +568,7 @@ def _finish(
         config=config,
         with_pii=with_pii,
         usage_classes=usage_classes,
+        excluded_index=excluded_index,
     )
 
     display_name_raw = page_fm.get("name")
@@ -549,6 +596,8 @@ def resolve_handle_query(
     config: dict[str, Any] | None = None,
     with_pii: bool = False,
     usage_classes: Collection[str] | None = None,
+    excluded_index: ExcludedRecordIndex | None = None,
+    entity_index: EntityIndex | None = None,
 ) -> HandleResolution | None:
     """The one entry point both ``recall`` implementations call (D7).
 
@@ -581,6 +630,31 @@ def resolve_handle_query(
             *with_pii* — it filters WITHIN the excluded-value join and never
             widens it, and never perturbs the ``with_pii=False``
             redaction-marker path.
+        excluded_index: An already-built
+            :class:`~athenaeum.pii.ExcludedRecordIndex` over the ``pii``
+            contacts surface, for a caller resolving many handles in one
+            process (issue athenaeum#1124) — a 22,078-page/12,967-record corpus
+            otherwise rebuilds both O(corpus) indexes on EVERY call. ``None``
+            (the default, and every pre-athenaeum#1124 caller) builds one
+            per call exactly as before; behaviour is byte-identical either
+            way. **Staleness (athenaeum#850):** valid only for a read-only
+            window — :func:`athenaeum.pii.mark_bounced` mints records and
+            merges identifiers onto existing ones, so a caller interleaving
+            bounce writes with resolution reads in the same process must
+            rebuild or invalidate this index at that boundary rather than
+            keep resolving through a now-stale one.
+        entity_index: An already-built
+            :class:`~athenaeum.models.EntityIndex` over the compiled wiki,
+            for the same reason. ``None`` (the default) builds one per call.
+            Not subject to the athenaeum#850 staleness concern itself, but a
+            long-lived process that also compiles new wiki pages between
+            resolutions should rebuild it at that boundary for the same
+            reason.
+
+    Gating is unaffected either way: :func:`_finish`'s audience and
+    ``recallable`` checks run against frontmatter parsed fresh from disk on
+    every call, strictly before any excluded-surface lookup — a prepared
+    index changes only what a lookup costs, never what it is allowed to see.
     """
     from athenaeum import corrections
 
@@ -589,7 +663,9 @@ def resolve_handle_query(
         from athenaeum import pii
 
         normalized = pii.normalize_identifier(email_handle)
-        walk = _walk_email_handle(knowledge_root, normalized, config=config)
+        walk = _walk_email_handle(
+            knowledge_root, normalized, config=config, excluded_index=excluded_index
+        )
         return _finish(
             knowledge_root,
             wiki_root,
@@ -599,6 +675,8 @@ def resolve_handle_query(
             config=config,
             with_pii=with_pii,
             usage_classes=usage_classes,
+            excluded_index=excluded_index,
+            entity_index=entity_index,
         )
 
     stripped = _strip_interrogative_framing(query)
@@ -622,4 +700,6 @@ def resolve_handle_query(
         config=config,
         with_pii=with_pii,
         usage_classes=usage_classes,
+        excluded_index=excluded_index,
+        entity_index=entity_index,
     )

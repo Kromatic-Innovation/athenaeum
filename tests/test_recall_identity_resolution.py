@@ -40,6 +40,7 @@ import pytest
 from athenaeum import identity_resolution, pii
 from athenaeum._cmd_query import cmd_recall
 from athenaeum.mcp_server import recall_search
+from athenaeum.models import EntityIndex
 
 EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
 
@@ -260,7 +261,10 @@ class TestResolvedHandleCarriesFactFields:
     def test_contact_values_carry_classification_bounce_and_validity(self, corpus: Path) -> None:
         payload = json.loads(
             recall_search(
-                corpus / "wiki", "alex@example.org", config=EXCLUDED_CONFIG, with_pii=True
+                corpus / "wiki",
+                "alex@example.org",
+                config=EXCLUDED_CONFIG,
+                with_pii=True,
             )
         )
 
@@ -292,7 +296,10 @@ class TestResolvedHandleCarriesFactFields:
 
         payload = json.loads(
             recall_search(
-                knowledge / "wiki", "sam@example.org", config=EXCLUDED_CONFIG, with_pii=True
+                knowledge / "wiki",
+                "sam@example.org",
+                config=EXCLUDED_CONFIG,
+                with_pii=True,
             )
         )
 
@@ -312,7 +319,10 @@ class TestResolvedHandleCarriesFactFields:
 
         payload = json.loads(
             recall_search(
-                knowledge / "wiki", "sam@example.org", config=EXCLUDED_CONFIG, with_pii=True
+                knowledge / "wiki",
+                "sam@example.org",
+                config=EXCLUDED_CONFIG,
+                with_pii=True,
             )
         )
 
@@ -338,13 +348,19 @@ class TestWithPiiGatingAndLayerOrdering:
         # caller already knows what they asked about) — but the excluded
         # VALUE must never appear anywhere in `contact_values`/`redactions`.
         assert "alex@example.org" not in json.dumps(
-            {"contact_values": payload["contact_values"], "redactions": payload["redactions"]}
+            {
+                "contact_values": payload["contact_values"],
+                "redactions": payload["redactions"],
+            }
         )
 
     def test_with_pii_true_exposes_values_and_empties_redactions(self, corpus: Path) -> None:
         payload = json.loads(
             recall_search(
-                corpus / "wiki", "alex@example.org", config=EXCLUDED_CONFIG, with_pii=True
+                corpus / "wiki",
+                "alex@example.org",
+                config=EXCLUDED_CONFIG,
+                with_pii=True,
             )
         )
 
@@ -627,7 +643,10 @@ class TestParseableWithoutNaturalLanguage:
     def test_fields_have_stable_parseable_types(self, corpus: Path) -> None:
         payload = json.loads(
             recall_search(
-                corpus / "wiki", "alex@example.org", config=EXCLUDED_CONFIG, with_pii=True
+                corpus / "wiki",
+                "alex@example.org",
+                config=EXCLUDED_CONFIG,
+                with_pii=True,
             )
         )
 
@@ -790,7 +809,10 @@ class TestBothEntryPoints:
 
         mcp_payload = json.loads(
             recall_search(
-                corpus / "wiki", "alex@example.org", config=EXCLUDED_CONFIG, with_pii=True
+                corpus / "wiki",
+                "alex@example.org",
+                config=EXCLUDED_CONFIG,
+                with_pii=True,
             )
         )
 
@@ -938,3 +960,200 @@ class TestHandleDetectionIsConservative:
 
         assert payload["resolved"] is False
         assert payload["reason"] == "orphan-uid"
+
+
+class TestPreparedIndexGatingParity:
+    """athenaeum#1124 — the prepared-index path must apply the SAME D6
+    audience/`recallable` gating `_finish` already applies on the unprepared
+    path. This is the one thing that must not regress: a prepared index must
+    never become a way to bypass that gating."""
+
+    def test_restricted_caller_still_denied_on_prepared_path(self, tmp_path: Path) -> None:
+        """No `access:` on the page -> a restricted caller is unauthorized
+        (fail-closed), exactly as on the unprepared path — even though both
+        indexes are prepared and `with_pii=True` is requested."""
+        knowledge = tmp_path / "knowledge"
+        _write_page(knowledge / "wiki", "alex", name="Alex Widget")
+        _write_record(
+            pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG),
+            "alex-contact.md",
+            uid="alex",
+            fields="emails:\n  - alex@example.org\n",
+        )
+        excluded_index = pii.ExcludedRecordIndex(
+            pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+        )
+        entity_index = EntityIndex(knowledge / "wiki")
+
+        result = identity_resolution.resolve_handle_query(
+            knowledge,
+            knowledge / "wiki",
+            "alex@example.org",
+            caller_audience=RESTRICTED,
+            config=EXCLUDED_CONFIG,
+            with_pii=True,
+            excluded_index=excluded_index,
+            entity_index=entity_index,
+        )
+
+        assert result is not None
+        assert result.resolved is False
+        assert result.reason == "no-match"
+        assert result.uid is None
+        assert result.contact_values == ()
+        assert result.redactions == ()
+
+    def test_non_recallable_page_still_denied_on_prepared_path(self, tmp_path: Path) -> None:
+        knowledge = tmp_path / "knowledge"
+        _write_page(knowledge / "wiki", "alex", name="Alex Widget")
+        _write_record(
+            pii.contacts_surface_root(knowledge, UNRECALLABLE_CONFIG),
+            "alex-contact.md",
+            uid="alex",
+            fields="emails:\n  - alex@example.org\n",
+        )
+        excluded_index = pii.ExcludedRecordIndex(
+            pii.contacts_surface_root(knowledge, UNRECALLABLE_CONFIG)
+        )
+        entity_index = EntityIndex(knowledge / "wiki")
+
+        result = identity_resolution.resolve_handle_query(
+            knowledge,
+            knowledge / "wiki",
+            "alex@example.org",
+            config=UNRECALLABLE_CONFIG,
+            with_pii=True,
+            excluded_index=excluded_index,
+            entity_index=entity_index,
+        )
+
+        assert result is not None
+        assert result.resolved is False
+        assert result.reason == "no-match"
+        assert result.contact_values == ()
+
+    def test_authorized_caller_still_receives_values_on_prepared_path(self, tmp_path: Path) -> None:
+        """The positive control for the two denial tests above: a caller that
+        legitimately survives both gates still gets values through the
+        prepared path — the fix does not accidentally over-restrict either."""
+        knowledge = tmp_path / "knowledge"
+        _write_page(knowledge / "wiki", "alex", name="Alex Widget", extra="access: open\n")
+        _write_record(
+            pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG),
+            "alex-contact.md",
+            uid="alex",
+            fields="emails:\n  - alex@example.org\n",
+        )
+        excluded_index = pii.ExcludedRecordIndex(
+            pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+        )
+        entity_index = EntityIndex(knowledge / "wiki")
+
+        result = identity_resolution.resolve_handle_query(
+            knowledge,
+            knowledge / "wiki",
+            "alex@example.org",
+            caller_audience=RESTRICTED,
+            config=EXCLUDED_CONFIG,
+            with_pii=True,
+            excluded_index=excluded_index,
+            entity_index=entity_index,
+        )
+
+        assert result is not None
+        assert result.resolved is True
+        assert result.uid == "alex"
+        assert result.contact_values[0].identifier == "alex@example.org"
+
+    def test_prepared_path_matches_unprepared_path_byte_for_byte(self, corpus: Path) -> None:
+        """Same query, same config: the prepared and unprepared paths must
+        return identical `HandleResolution.to_dict()` payloads."""
+        excluded_index = pii.ExcludedRecordIndex(pii.contacts_surface_root(corpus, EXCLUDED_CONFIG))
+        entity_index = EntityIndex(corpus / "wiki")
+
+        unprepared = identity_resolution.resolve_handle_query(
+            corpus, corpus / "wiki", "alex@example.org", config=EXCLUDED_CONFIG, with_pii=True
+        )
+        prepared = identity_resolution.resolve_handle_query(
+            corpus,
+            corpus / "wiki",
+            "alex@example.org",
+            config=EXCLUDED_CONFIG,
+            with_pii=True,
+            excluded_index=excluded_index,
+            entity_index=entity_index,
+        )
+
+        assert unprepared is not None
+        assert prepared is not None
+        assert prepared.to_dict() == unprepared.to_dict()
+
+
+class TestPreparedIndexCounterGuard:
+    """athenaeum#1124's regression guard: a COUNTER assertion, not a timing
+    assertion (it must not drift with host speed or corpus growth). Resolving
+    N handles in one process must construct `models.EntityIndex` exactly
+    once and call `pii.iter_contact_records` exactly once, regardless of N."""
+
+    def test_n_handles_build_entity_index_once_and_scan_contacts_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        contacts_root = pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+        n = 5
+        for i in range(n):
+            uid = f"person{i}"
+            _write_page(knowledge / "wiki", uid, name=f"Person {i}")
+            _write_record(
+                contacts_root,
+                f"{uid}-contact.md",
+                uid=uid,
+                fields=f"emails:\n  - person{i}@example.org\n",
+            )
+
+        entity_index_builds = 0
+        original_entity_init = EntityIndex.__init__
+
+        def _counting_entity_init(self: EntityIndex, wiki_root: Path) -> None:
+            nonlocal entity_index_builds
+            entity_index_builds += 1
+            original_entity_init(self, wiki_root)
+
+        monkeypatch.setattr(EntityIndex, "__init__", _counting_entity_init)
+
+        iter_contact_records_calls = 0
+        original_iter = pii.iter_contact_records
+
+        def _counting_iter(root: Path) -> list[Path]:
+            nonlocal iter_contact_records_calls
+            iter_contact_records_calls += 1
+            return original_iter(root)
+
+        monkeypatch.setattr(pii, "iter_contact_records", _counting_iter)
+
+        # The one-time, process-lifetime build a caller like maecenas'
+        # `default_resolver`/`default_uid_reader` closures perform once.
+        excluded_index = pii.ExcludedRecordIndex(contacts_root)
+        entity_index = EntityIndex(knowledge / "wiki")
+        assert entity_index_builds == 1
+        assert iter_contact_records_calls == 0  # ExcludedRecordIndex is lazy
+
+        for i in range(n):
+            result = identity_resolution.resolve_handle_query(
+                knowledge,
+                knowledge / "wiki",
+                f"person{i}@example.org",
+                config=EXCLUDED_CONFIG,
+                with_pii=True,
+                excluded_index=excluded_index,
+                entity_index=entity_index,
+            )
+            assert result is not None
+            assert result.resolved is True
+            assert result.uid == f"person{i}"
+
+        assert entity_index_builds == 1, "EntityIndex must not be rebuilt per handle"
+        assert iter_contact_records_calls == 1, (
+            "iter_contact_records must be called exactly once for the whole batch, "
+            "not once per handle"
+        )
