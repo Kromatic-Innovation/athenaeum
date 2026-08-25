@@ -24,6 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     asserter declaring **no** grants is *incomparable* rather than *lesser* —
     plain set inclusion would otherwise rank every granted asserter above
     every ungranted intake, which is backwards for a destructive decision.
+  - `athenaeum.supersession` — auto-supersession of the **located claim**,
+    behind its own `librarian.auto_supersession_enabled` switch inside the
+    already-off comparator gate. Applies only when every precondition holds
+    (standing-state claim kind on both sides, no `overlaps` relation, winner
+    strictly later on observed-time and no earlier on recorded-time, an
+    asserter route of same-asserter / strictly-greater-authority /
+    equal-or-incomparable-with-corroboration, and no third conflicting live
+    claim at the winner's coordinates), each individually tested. Route (a)
+    is rate-limited per-claim (the third self-revision inside 90 days
+    queue-flags — oscillation) and per-asserter (more than 10 in a trailing
+    week suspends the route — diffuse drift). A contradiction with no located
+    passage queues rather than retiring anything page-globally, and
+    `enact_supersession` raises rather than returning `None`, so "nothing
+    happened" can never read as "done".
   - `athenaeum.verdict_effects` — the storage-side effect of each verdict.
     `duplicate` produces an **evidence artifact** (overlapping passages side
     by side, a structurally-chosen canonical side, the coordinate-match
