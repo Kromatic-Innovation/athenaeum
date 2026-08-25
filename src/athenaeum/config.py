@@ -3465,6 +3465,38 @@ def resolve_verdict_ledger_enabled(config: dict[str, Any] | None) -> bool:
     return False
 
 
+def resolve_comparator_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the five-verdict comparator opt-in (issue athenaeum#715). DEFAULT OFF.
+
+    Gates the comparator subsystem (:mod:`athenaeum.comparator`): with this
+    off, nothing changes for any existing operator — the comparator is not
+    called from any pipeline phase in athenaeum#715 (that wiring is an explicit,
+    separate, future cut-over step; see that issue's Scope-boundaries
+    section), so this knob currently has no live reader in ``src/`` and
+    exists purely so the future wiring step has a documented,
+    default-off gate to check, exactly mirroring how
+    :mod:`athenaeum.verdicts` never reads
+    :func:`resolve_verdict_ledger_enabled` itself — the gate belongs to
+    whichever CALLER decides whether to invoke the subsystem, not to the
+    subsystem being gated. Mirrors :func:`resolve_verdict_ledger_enabled`'s
+    shape exactly: env ``ATHENAEUM_COMPARATOR_ENABLED``
+    (``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+    ``librarian.comparator_enabled`` > default ``False``. No seed in
+    ``_DEFAULTS`` (issue athenaeum#231). Non-bool yaml values and unrecognized env
+    strings fall through to off.
+    """
+    env = os.environ.get("ATHENAEUM_COMPARATOR_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("comparator_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
 def resolve_verdict_epoch_batch_interval_days(config: dict[str, Any] | None) -> int:
     """Resolve the comparator-epoch batching interval in days (issue athenaeum#712).
 
