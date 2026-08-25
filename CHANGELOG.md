@@ -9,6 +9,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Five-verdict comparator, phase 2 — verdict effects, supersession
+  substrate, the two instruments, and the pending-queue re-run
+  (athenaeum#715).** Everything the comparator core landed dark in the
+  previous release needed in order to *do* something with a verdict, still
+  gated behind `librarian.comparator_enabled` (**default off**):
+
+  - `athenaeum.asserter_authority` — authority as a **partial order** over
+    declared asserter grants (set inclusion over a cycle-safe closure under
+    a configurable implication graph), with four outcomes:
+    `greater | less | equal | incomparable`. Incomparable is treated as
+    EQUAL authority, so an incomparable-peer conflict takes the
+    corroboration-or-queue path instead of silently picking a winner, and an
+    asserter declaring **no** grants is *incomparable* rather than *lesser* —
+    plain set inclusion would otherwise rank every granted asserter above
+    every ungranted intake, which is backwards for a destructive decision.
+  - `athenaeum.supersession` — auto-supersession of the **located claim**,
+    behind its own `librarian.auto_supersession_enabled` switch inside the
+    already-off comparator gate. Applies only when every precondition holds
+    (standing-state claim kind on both sides, no `overlaps` relation, winner
+    strictly later on observed-time and no earlier on recorded-time, an
+    asserter route of same-asserter / strictly-greater-authority /
+    equal-or-incomparable-with-corroboration, and no third conflicting live
+    claim at the winner's coordinates), each individually tested. Route (a)
+    is rate-limited per-claim (the third self-revision inside 90 days
+    queue-flags — oscillation) and per-asserter (more than 10 in a trailing
+    week suspends the route — diffuse drift). A contradiction with no located
+    passage queues rather than retiring anything page-globally, and
+    `enact_supersession` raises rather than returning `None`, so "nothing
+    happened" can never read as "done".
+  - `athenaeum.verdict_effects` — the storage-side effect of each verdict.
+    `duplicate` produces an **evidence artifact** (overlapping passages side
+    by side, a structurally-chosen canonical side, the coordinate-match
+    table) under `wiki/_fold_evidence/`, never an LLM-synthesized merged
+    body; `specialization` writes `refines:` on the specific claim and
+    nothing else in the module can write that field; `distinct` is
+    ledger-only with a separator breadcrumb; `underdetermined` queues a
+    small **coordinate request** and creates no merge proposal and no
+    conflict flag; `contradiction` routes to supersession or queues its
+    LOCATED passages. Framed items go to the existing unified
+    pending-decisions surface.
+  - `athenaeum.comparator_instruments` — the `compatible` **TTL re-check**
+    (re-compare after `librarian.compatible_recheck_days`, default 183, OR
+    `librarian.compatible_recheck_writes`, default 20, observed
+    content-adjacent writes; implemented by marking pairs stale so the
+    existing memoization re-compares them rather than inventing a second
+    freshness concept) and **sibling-scope widening proposals**, bounded by
+    `librarian.sibling_widening_budget` (default 25) with every over-budget
+    candidate counted and reported rather than silently dropped.
+  - `athenaeum merges recompare` (`athenaeum.recompare`) — re-runs the
+    comparator over every unresolved proposal in `_pending_merges.md` and
+    records a verdict per source **pair**. Dry-run by default; `--apply`
+    writes **to the ledger only**. There is no apply-a-merge path in the
+    command at all and it never opens `_pending_merges.md` for writing, so
+    the rule that PII-hazard proposals can never be approved is structural;
+    hazards are additionally identified *before* any comparison runs and
+    route to a human regardless of verdict.
+
+  New config knobs, all documented in `docs/configuration.md`:
+  `librarian.auto_supersession_enabled` (its own **off** switch inside the
+  already-off comparator gate), `standing_state_claim_kinds`,
+  `supersession_self_revision_window_days`, `supersession_claim_window_max`,
+  `supersession_asserter_weekly_max`, `authority_grant_implications`,
+  `compatible_recheck_days`, `compatible_recheck_writes`,
+  `sibling_widening_budget`, `sibling_widening_min_similarity`,
+  `sibling_widening_classes`. No confidence threshold is introduced
+  anywhere: similarity proposes candidates and never reaches a verdict.
+
+  **The cut-over is still outstanding** — the old duplicate-detection and
+  contradiction-detection paths still run, and athenaeum#715 requires they be
+  removed rather than left in parallel. `docs/contradiction-detection.md`
+  and `docs/conflict-resolution.md` now describe the unified operation and
+  say plainly that the rest of each document is still live behaviour.
+
 - **Five-verdict comparator, landed dark (athenaeum#715, child of the
   athenaeum#709 dimensional memory-model v6 epic).** New
   `athenaeum.comparator` module: ONE pairwise comparison returning exactly

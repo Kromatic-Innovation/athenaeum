@@ -131,10 +131,14 @@ widened bound is never tighter than either input on both edges.
 :mod:`athenaeum.librarian`, :mod:`athenaeum.decision_answers`, or any other
 pipeline entry point -- that cut-over is an explicit, separate, future step
 (see athenaeum#715's own Scope-boundaries section).
-:func:`athenaeum.config.resolve_comparator_enabled` exists so that FUTURE
-wiring has a documented, default-off knob to gate on, mirroring
-:func:`athenaeum.config.resolve_verdict_ledger_enabled`'s shape exactly;
-nothing in this module reads that knob itself (the same way
+:func:`athenaeum.config.resolve_comparator_enabled` is the documented,
+default-off knob that wiring gates on, mirroring
+:func:`athenaeum.config.resolve_verdict_ledger_enabled`'s shape exactly. Its
+one live reader is ``athenaeum merges recompare``
+(:mod:`athenaeum._cmd_merges`), the explicit opt-in command that re-runs this
+comparator over the pending merge queue -- which is a command an operator
+invokes, not a nightly phase, so the dark-in-the-pipeline property above is
+unaffected. Nothing in this module reads that knob itself (the same way
 :mod:`athenaeum.verdicts` never reads ``resolve_verdict_ledger_enabled`` --
 the gate belongs to the CALLER that decides whether to invoke the subsystem
 at all, not to the subsystem).
