@@ -43,7 +43,13 @@ import pytest
 from athenaeum import identity_resolution, pii
 from athenaeum.batch import process_batch_run
 from athenaeum.librarian import process_one
-from athenaeum.models import ClassifiedEntity, EntityIndex, RawFile, TokenUsage
+from athenaeum.models import (
+    ClassifiedEntity,
+    EntityIndex,
+    RawFile,
+    RawFileOverBudgetError,
+    TokenUsage,
+)
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL, resolve_address_named_classifications
 from tests.conftest import FakeLLMClient
 
@@ -485,6 +491,81 @@ class TestSyncTransportWiring:
         assert all(p.name == "_pending_questions.md" for p in pages)
 
 
+class TestOverBudgetInterleave:
+    """athenaeum#1126 QA blocking finding: process_one's RawFileOverBudgetError
+    except-block (librarian.py) flushes ``address_escalations + exc.escalations``
+    through ``_apply_tier3_results`` BEFORE re-raising — the one path where
+    writes and re-raise interleave, and precisely the fact-preservation
+    invariant this issue turns on. Drives it with a file whose
+    classifications include one DECLINED address (ghost@example.com) plus
+    one surviving ordinary action (Widget Alpha, which tier3_derive_actions
+    never gets to finish because the budget trips first)."""
+
+    def test_declined_address_escalation_survives_the_budget_trip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        raw = _raw(
+            knowledge / "raw" / "producer",
+            "Widget Alpha shipped. Also a note about ghost@example.com with no other subject.\n",
+        )
+
+        def _fake_tier2_classify(*_args: Any, **_kwargs: Any) -> list[ClassifiedEntity]:
+            return [
+                _classified("Widget Alpha", observations="Widget Alpha shipped."),
+                _classified(
+                    "ghost@example.com",
+                    observations=("Also a note about ghost@example.com with no other subject."),
+                ),
+            ]
+
+        monkeypatch.setattr("athenaeum.librarian.tier2_classify", _fake_tier2_classify)
+
+        def _fake_tier3_derive_actions(*_args: Any, **_kwargs: Any) -> Any:
+            # Simulates the budget tripping before Widget Alpha's create
+            # action completes: no partial progress of its own, so this
+            # test isolates address_escalations as the ONLY thing that
+            # must survive the interleave.
+            raise RawFileOverBudgetError(
+                raw.ref, bound="llm_calls", detail="1 call(s) > 1-call limit"
+            )
+
+        monkeypatch.setattr("athenaeum.librarian.tier3_derive_actions", _fake_tier3_derive_actions)
+
+        classify_client = MagicMock()
+        classify_client.messages.create.side_effect = AssertionError(
+            "tier2_classify is monkeypatched — the real classify client must never be called"
+        )
+        write_client = MagicMock()
+        write_client.messages.create.side_effect = AssertionError(
+            "tier3_derive_actions is monkeypatched to raise before any real call"
+        )
+
+        with pytest.raises(RawFileOverBudgetError):
+            process_one(
+                raw,
+                EntityIndex(wiki),
+                wiki,
+                classify_client,
+                valid_types=VALID_TYPES,
+                valid_tags=[],
+                valid_access=VALID_ACCESS,
+                config=EXCLUDED_CONFIG,
+                write_client=write_client,
+            )
+
+        # The declined address's escalation landed even though the file
+        # was never fully processed (the exception still propagated above).
+        pending = (wiki / "_pending_questions.md").read_text(encoding="utf-8")
+        assert "ghost@example.com" in pending
+        assert "no other subject" in pending
+        # Nothing else was written — the over-budget file's create action
+        # never completed, and no address-named page exists either.
+        assert list(wiki.glob("*.md")) == [wiki / "_pending_questions.md"]
+
+
 # ---------------------------------------------------------------------------
 # Batch-transport parity — batch.process_batch_run
 # ---------------------------------------------------------------------------
@@ -542,19 +623,29 @@ def _fake_client(responder: Callable[[dict[str, Any]], str]) -> SimpleNamespace:
     )
 
 
-def _classify_or_merge_responder(address_name: str) -> Callable[[dict[str, Any]], str]:
+def _classify_or_merge_responder(
+    address_name: str | list[str],
+) -> Callable[[dict[str, Any]], str]:
+    """Build a batch responder for both the tier-2 classify call and any
+    tier-3 merge call. *address_name* is a single subject name (the common
+    case) or a list of names, all returned as separate tier-2
+    classifications from ONE classify call (the mixed resolve+decline
+    case)."""
+    names = [address_name] if isinstance(address_name, str) else address_name
+
     def _responder(params: dict[str, Any]) -> str:
         user_msg = params["messages"][0]["content"]
         if params.get("model") == DEFAULT_CLASSIFY_MODEL:
             return json.dumps(
                 [
                     {
-                        "name": address_name,
+                        "name": name,
                         "entity_type": "person",
                         "tags": [],
                         "access": "internal",
                         "observations": user_msg[:200],
                     }
+                    for name in names
                 ]
             )
         if "## Existing page content" in user_msg:
@@ -648,4 +739,69 @@ class TestBatchTransportParity:
         assert "no other subject" in pending
         pages = list(wiki.glob("*.md"))
         assert all(p.name == "_pending_questions.md" for p in pages)
+        assert not raw.path.exists()
+
+    def test_mixed_resolve_and_decline_in_the_same_finalize_pass(self, tmp_path: Path) -> None:
+        """athenaeum#1126 QA blocking finding: neither prior batch test
+        proves batch.py:854's ``escalations = list(st.address_escalations)``
+        reaches ``tier4_escalate`` on the non-``st.done`` finalize path — one
+        covered an all-resolved file, the other an all-declined (``st.done``)
+        file. The production-realistic shape is ONE raw note naming both a
+        resolvable subject and an unresolvable one: the write (alex's page
+        update) and the escalation (ghost's decline) must both land in the
+        SAME finalize iteration."""
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        _write_page(wiki, "alex", name="Alex Widget")
+        _write_record(
+            pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG),
+            "alex-contact.md",
+            uid="alex",
+            fields="emails:\n  - alex@example.org\n",
+        )
+        raw = _raw(
+            knowledge / "raw" / "producer",
+            "Saw alex@example.org at the widget calibration meeting. Also a "
+            "note about ghost@example.com with no other subject.\n",
+        )
+
+        client = _fake_client(
+            _classify_or_merge_responder(["alex@example.org", "ghost@example.com"])
+        )
+        result = process_batch_run(
+            [raw],
+            EntityIndex(wiki),
+            wiki,
+            client,
+            VALID_TYPES,
+            [],
+            VALID_ACCESS,
+            usage=TokenUsage(),
+            config=EXCLUDED_CONFIG,
+            max_api_calls=100,
+            provider="api",
+            sleep=lambda _s: None,
+            write_client=client,
+        )
+
+        assert result.created == 0
+        assert result.updated == 1
+        assert result.escalated == 1
+        assert not result.failed_refs
+        # Two batches: one tier-2 classify, one tier-3 merge (the resolved
+        # address's update action) — this file had a surviving action, so
+        # it went through the main try branch, not the st.done early one.
+        assert len(client.messages.batches.submitted) == 2
+
+        page_text = (wiki / "alex.md").read_text(encoding="utf-8")
+        assert "Seen at calibration meeting." in page_text
+        pending = (wiki / "_pending_questions.md").read_text(encoding="utf-8")
+        assert "ghost@example.com" in pending
+        assert "no other subject" in pending
+        # Alex's page updated, the pending-questions escalation written —
+        # no address-named page anywhere.
+        assert sorted(p.name for p in wiki.glob("*.md")) == [
+            "_pending_questions.md",
+            "alex.md",
+        ]
         assert not raw.path.exists()
