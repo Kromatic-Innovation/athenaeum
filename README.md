@@ -525,14 +525,21 @@ Each merge item is rendered as an answerable question — the source pages are
 named by their frontmatter `name:` (not the uuid-slug) with a one-line gist
 each — because cosine topic-similarity alone is not "should-merge" and misleads
 without the pages' own words. The merges half is also available on its own via
-`athenaeum merges {list,next,count,revalidate,provenance}` (the mirror of
-`athenaeum questions`, plus two merge-only modes):
+`athenaeum merges {list,next,count,revalidate,recompare,provenance}` (the mirror of
+`athenaeum questions`, plus three merge-only modes):
 
 ```bash
 athenaeum merges list  [--limit N] [--json]        # all unresolved proposals
 athenaeum merges next  [--json]                     # the oldest unresolved proposal
 athenaeum merges count [--json]                     # "N unresolved (oldest: <iso-date>)"
 athenaeum merges revalidate [--apply] [--json]      # re-check the queue against the CURRENT gate
+athenaeum merges recompare [--apply] [--limit N] [--json]
+                                                    # re-run the five-verdict comparator over every
+                                                    # unresolved proposal and ledger a verdict per
+                                                    # source PAIR (athenaeum#715). Dry-run by default;
+                                                    # --apply writes to the LEDGER only — it never
+                                                    # approves, rejects, or archives a proposal, and
+                                                    # PII-hazard proposals always route to a human.
 athenaeum merges provenance [--canonical-slug S] [--merge-id ID] [--json]
 ```
 

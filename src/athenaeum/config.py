@@ -3622,3 +3622,327 @@ def resolve_retention_pack_overrides(config: dict[str, Any] | None) -> dict[str,
             continue
         packs[name.strip()] = definition
     return packs
+
+
+# ---------------------------------------------------------------------------
+# Five-verdict comparator, phase 2 (issue athenaeum#715) -- auto-supersession,
+# its rate limits, and the two instruments. Every knob here is inert unless
+# :func:`resolve_comparator_enabled` is on: the comparator subsystem is the
+# only caller, and it is itself gated. See ``docs/configuration.md``.
+# ---------------------------------------------------------------------------
+
+
+def resolve_auto_supersession_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the auto-supersession opt-in (issue athenaeum#715). DEFAULT OFF.
+
+    Auto-supersession RETIRES a claim -- the one genuinely destructive effect
+    in the comparator's verdict set -- so it ships behind its own switch
+    *inside* the already-off :func:`resolve_comparator_enabled` gate rather
+    than riding on it. An operator who wants the comparator's verdicts
+    without any automatic retirement turns this off and every contradiction
+    routes to the decision queue instead.
+
+    Env ``ATHENAEUM_AUTO_SUPERSESSION_ENABLED``
+    (``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+    ``librarian.auto_supersession_enabled`` > default ``False``. No seed in
+    ``_DEFAULTS`` (issue athenaeum#231).
+    """
+    env = os.environ.get("ATHENAEUM_AUTO_SUPERSESSION_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("auto_supersession_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
+def resolve_standing_state_claim_kinds(config: dict[str, Any] | None) -> frozenset[str]:
+    """Resolve which :data:`athenaeum.models.CLAIM_KINDS` count as STANDING STATE.
+
+    Issue athenaeum#715's first auto-supersession precondition is "it is a
+    standing-state fact" -- a claim about a state that holds until something
+    changes it, so that a later claim about the same coordinates genuinely
+    REPLACES it. The default set is ``fact``, ``decision``, ``policy``.
+
+    The three excluded kinds are excluded on purpose, and an operator
+    widening this set should know why:
+
+    - ``observation`` is a point-in-time event. A later observation does not
+      retire an earlier one; both happened.
+    - ``opinion`` is evaluative -- two asserters may hold different, both-valid
+      opinions. athenaeum#327 already routes an opinion pair to ``attribute_both``
+      rather than a precedence winner; auto-retiring one would contradict that.
+    - ``definition`` is timeless.
+
+    An UNCLASSIFIED claim (``claim_kind`` absent -- the fail-open ``""`` of
+    :func:`athenaeum.models.parse_claim_kind`) is never standing-state here.
+    That is deliberate fail-CLOSED behaviour for a destructive action: the
+    rest of the codebase fails open on an unclassified claim because the
+    consequence is only a missed optimisation, whereas here the consequence
+    is retiring a claim nobody classified.
+
+    Env ``ATHENAEUM_STANDING_STATE_CLAIM_KINDS`` (comma-separated) > yaml
+    ``librarian.standing_state_claim_kinds`` (a list) > the default set.
+    Values outside :data:`athenaeum.models.CLAIM_KINDS` are dropped; an empty
+    result falls through to the default rather than disabling every
+    precondition silently.
+    """
+    from athenaeum.models import CLAIM_KINDS
+
+    default = frozenset({"fact", "decision", "policy"})
+    raw_values: list[str] = []
+    env = os.environ.get("ATHENAEUM_STANDING_STATE_CLAIM_KINDS")
+    if env is not None:
+        raw_values = [part.strip() for part in env.split(",")]
+    elif isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("standing_state_claim_kinds")
+            if isinstance(raw, (list, tuple)):
+                raw_values = [str(part).strip() for part in raw if isinstance(part, str)]
+    resolved = frozenset(value for value in raw_values if value in CLAIM_KINDS)
+    return resolved or default
+
+
+def resolve_supersession_self_revision_window_days(config: dict[str, Any] | None) -> int:
+    """Resolve the PER-CLAIM self-revision rate-limit window, in days (athenaeum#715).
+
+    "The third auto-supersession of the same claim by the same asserter
+    within 90 days queue-flags instead of auto-applying" -- this is the 90.
+    Per-claim limits catch OSCILLATION (one asserter flip-flopping a single
+    fact); the per-asserter limit
+    (:func:`resolve_supersession_asserter_weekly_max`) catches diffuse drift.
+
+    Env ``ATHENAEUM_SUPERSESSION_SELF_REVISION_WINDOW_DAYS`` > yaml
+    ``librarian.supersession_self_revision_window_days`` > ``90``. See
+    :func:`_resolve_positive_int_knob` for the coercion contract.
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "supersession_self_revision_window_days",
+        "ATHENAEUM_SUPERSESSION_SELF_REVISION_WINDOW_DAYS",
+        90,
+    )
+
+
+def resolve_supersession_claim_window_max(config: dict[str, Any] | None) -> int:
+    """Resolve the PER-CLAIM self-revision cap inside the window (athenaeum#715).
+
+    The ORDINAL of the auto-supersession that must queue-flag rather than
+    auto-apply: at the default ``3``, the first two same-asserter
+    self-revisions of one claim inside
+    :func:`resolve_supersession_self_revision_window_days` auto-apply and the
+    third does not. Counting is over the audit trail
+    (:mod:`athenaeum.supersession`'s ledger), not over frontmatter.
+
+    Env ``ATHENAEUM_SUPERSESSION_CLAIM_WINDOW_MAX`` > yaml
+    ``librarian.supersession_claim_window_max`` > ``3``.
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "supersession_claim_window_max",
+        "ATHENAEUM_SUPERSESSION_CLAIM_WINDOW_MAX",
+        3,
+    )
+
+
+def resolve_supersession_asserter_weekly_max(config: dict[str, Any] | None) -> int:
+    """Resolve the PER-ASSERTER weekly self-revision cap (issue athenaeum#715).
+
+    "An asserter whose same-asserter auto-supersessions of single-source
+    facts exceed 10/week corpus-wide has condition (a) suspended pending
+    review" -- this is the 10. Unlike the per-claim limit, exceeding this
+    suspends condition (a) for that asserter ENTIRELY (every claim), because
+    the failure it catches is one sloppy or compromised writer drifting the
+    corpus a little in many places rather than oscillating in one.
+
+    Env ``ATHENAEUM_SUPERSESSION_ASSERTER_WEEKLY_MAX`` > yaml
+    ``librarian.supersession_asserter_weekly_max`` > ``10``.
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "supersession_asserter_weekly_max",
+        "ATHENAEUM_SUPERSESSION_ASSERTER_WEEKLY_MAX",
+        10,
+    )
+
+
+def resolve_compatible_recheck_days(config: dict[str, Any] | None) -> int:
+    """Resolve the ``compatible`` TTL re-check age, in days (issue athenaeum#715).
+
+    A ``compatible`` content relation is the one verdict that says "these two
+    coexist" WITHOUT a coordinate separating them, so it is the one most
+    likely to be falsified by later writes: the subject drifts and the two
+    pages start answering the same question. athenaeum#715 asks for a TTL
+    re-check "for high-write subjects -- default: re-compare after 6 months
+    or 20 content-adjacent writes"; this is the 6 months, as ``183`` days.
+    Either trigger firing is enough (see
+    :func:`resolve_compatible_recheck_writes`).
+
+    Env ``ATHENAEUM_COMPATIBLE_RECHECK_DAYS`` > yaml
+    ``librarian.compatible_recheck_days`` > ``183``.
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "compatible_recheck_days",
+        "ATHENAEUM_COMPATIBLE_RECHECK_DAYS",
+        183,
+    )
+
+
+def resolve_compatible_recheck_writes(config: dict[str, Any] | None) -> int:
+    """Resolve the ``compatible`` TTL re-check write count (issue athenaeum#715).
+
+    The "or 20 content-adjacent writes" half of the TTL above: once either
+    side of a ``compatible`` pair has accumulated this many content-changing
+    writes since the verdict was recorded, the pair is re-compared even if
+    :func:`resolve_compatible_recheck_days` has not elapsed.
+
+    Env ``ATHENAEUM_COMPATIBLE_RECHECK_WRITES`` > yaml
+    ``librarian.compatible_recheck_writes`` > ``20``.
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "compatible_recheck_writes",
+        "ATHENAEUM_COMPATIBLE_RECHECK_WRITES",
+        20,
+    )
+
+
+def resolve_sibling_widening_budget(config: dict[str, Any] | None) -> int:
+    """Resolve the per-run budget for sibling-scope widening probes (athenaeum#715).
+
+    The sibling-widening instrument deliberately spends Gate-2 calls on pairs
+    Gate 1 ALREADY settled as DISTINCT, to catch convergent local practice
+    that would otherwise stay permanently fragmented across sibling scopes.
+    That is unbounded LLM cost by construction, so athenaeum#715 requires it be
+    "bounded by a documented budget" -- this is that budget, counted in
+    ``content_relation`` calls per run. Set it to ``0``... you cannot: a
+    ``<= 0`` value falls through to the default per
+    :func:`_resolve_positive_int_knob`. Disable the instrument by leaving
+    :func:`resolve_comparator_enabled` off, or set the budget to ``1``.
+
+    Env ``ATHENAEUM_SIBLING_WIDENING_BUDGET`` > yaml
+    ``librarian.sibling_widening_budget`` > ``25``.
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "sibling_widening_budget",
+        "ATHENAEUM_SIBLING_WIDENING_BUDGET",
+        25,
+    )
+
+
+def resolve_sibling_widening_min_similarity(config: dict[str, Any] | None) -> float:
+    """Resolve the "top band" similarity floor for sibling widening (athenaeum#715).
+
+    Only TOP-BAND-similarity, scope-separated DISTINCTs get the extra
+    memoized ``content_relation`` call. Similarity's only job here is
+    PROPOSING which pairs to spend the budget on -- exactly as it proposes
+    merge candidates elsewhere -- and it never reaches a verdict, so this is
+    a candidate-generation knob and NOT one of the confidence thresholds
+    athenaeum#715 bans (those attach a scalar to a VERDICT; see
+    ``docs/configuration.md``).
+
+    Env ``ATHENAEUM_SIBLING_WIDENING_MIN_SIMILARITY`` > yaml
+    ``librarian.sibling_widening_min_similarity`` > ``0.85``. A parsed env
+    value is authoritative over yaml (issue athenaeum#524 M1); a ``bool`` /
+    non-numeric / out-of-``(0, 1]`` yaml value falls through to the default.
+    """
+    value = _env_number("ATHENAEUM_SIBLING_WIDENING_MIN_SIMILARITY", float)
+    if value is not None and 0.0 < value <= 1.0:
+        return value
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("sibling_widening_min_similarity")
+            if raw is not None and not isinstance(raw, bool):
+                try:
+                    parsed = float(raw)
+                except (TypeError, ValueError):
+                    return 0.85
+                if 0.0 < parsed <= 1.0:
+                    return parsed
+    return 0.85
+
+
+def resolve_sibling_widening_classes(config: dict[str, Any] | None) -> frozenset[str]:
+    """Resolve the "guideline-like" memory classes for sibling widening (athenaeum#715).
+
+    Scope-separated DISTINCTs are only probed for convergence in classes
+    where two sibling scopes independently arriving at the same rule is a
+    real, recurring pattern worth unifying -- ``guideline``, ``procedure``,
+    ``axiom``. A scope-separated pair of ``entity`` pages is two different
+    entities and probing it is pure cost.
+
+    Env ``ATHENAEUM_SIBLING_WIDENING_CLASSES`` (comma-separated) > yaml
+    ``librarian.sibling_widening_classes`` (a list) > the default set.
+    Values outside :data:`athenaeum.memory_class.MEMORY_CLASSES` are dropped;
+    an empty result falls through to the default.
+    """
+    from athenaeum.memory_class import MEMORY_CLASSES
+
+    default = frozenset({"guideline", "procedure", "axiom"})
+    raw_values: list[str] = []
+    env = os.environ.get("ATHENAEUM_SIBLING_WIDENING_CLASSES")
+    if env is not None:
+        raw_values = [part.strip() for part in env.split(",")]
+    elif isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("sibling_widening_classes")
+            if isinstance(raw, (list, tuple)):
+                raw_values = [str(part).strip() for part in raw if isinstance(part, str)]
+    resolved = frozenset(value for value in raw_values if value in MEMORY_CLASSES)
+    return resolved or default
+
+
+def resolve_authority_grant_implications(
+    config: dict[str, Any] | None,
+) -> dict[str, frozenset[str]]:
+    """Resolve the grant-implication map used to order asserter authority (athenaeum#715).
+
+    Authority in athenaeum#715 is a PARTIAL ORDER over the grants an asserter
+    declares, never a chain of ranks. This map is what makes the order
+    non-trivial: it declares which grants IMPLY which others, so that an
+    asserter holding ``admin`` compares as strictly greater than one holding
+    only ``reader`` without either having to enumerate the other's grants.
+
+    .. code-block:: yaml
+
+        librarian:
+          authority_grant_implications:
+            admin: [editor]
+            editor: [reader]
+
+    Yaml only -- an implication graph is not an emergency override and has no
+    sane env-var encoding. Default ``{}``: with no declared implications the
+    order degenerates to plain set inclusion over declared grants, which is
+    still a correct partial order (just a flatter one). Non-string keys,
+    non-list values, and non-string members are dropped defensively;
+    :func:`athenaeum.asserter_authority.grant_closure` is cycle-safe, so a
+    malformed cyclic map cannot hang a run.
+    """
+    if not isinstance(config, dict):
+        return {}
+    cfg = config.get("librarian")
+    if not isinstance(cfg, dict):
+        return {}
+    raw = cfg.get("authority_grant_implications")
+    if not isinstance(raw, dict):
+        return {}
+    implications: dict[str, frozenset[str]] = {}
+    for grant, implied in raw.items():
+        if not isinstance(grant, str) or not grant.strip():
+            continue
+        if not isinstance(implied, (list, tuple)):
+            continue
+        members = frozenset(
+            member.strip() for member in implied if isinstance(member, str) and member.strip()
+        )
+        if members:
+            implications[grant.strip()] = members
+    return implications
