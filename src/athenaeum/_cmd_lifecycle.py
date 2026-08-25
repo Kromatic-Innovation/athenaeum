@@ -387,12 +387,26 @@ def cmd_spend(args: argparse.Namespace) -> int:
         by_knob=args.by_knob,
     )
 
+    # Issue athenaeum#1135 (AC2/6): an ADDITIONAL day-scoped figure alongside the
+    # ``--since``-window totals above — today's spend against the SAME
+    # per-day ceiling ``athenaeum run``'s budget check (spend.ceiling_tripped)
+    # actually enforces, so the report agrees with what would stop a run
+    # right now. Never replaces the existing totals or narrows --since (see
+    # spend.budget_window_status's docstring for why). Best-effort: a
+    # failure here must not crash the whole report over an ADDITIVE section.
+    try:
+        budget_window = spend.budget_window_status(config, ledger_path=ledger_path)
+    except Exception:  # noqa: BLE001 — additive section, never breaks the report
+        budget_window = None
+
     if args.json:
         payload = {
             "since": since_dt.isoformat().replace("+00:00", "Z"),
             "ledger_path": str(ledger_path),
             **summary,
         }
+        if budget_window is not None:
+            payload["budget_window"] = budget_window
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(
@@ -404,4 +418,11 @@ def cmd_spend(args: argparse.Namespace) -> int:
                 by_knob=args.by_knob,
             )
         )
+        budget_window_line = (
+            spend.format_budget_window(budget_window)
+            if budget_window is not None
+            else None
+        )
+        if budget_window_line:
+            print(budget_window_line)
     return 0
