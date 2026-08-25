@@ -95,11 +95,14 @@ from athenaeum.provider import AnthropicBatchClientBackend, response_text
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
+    TIER2_ADDRESS_RESOLVED_MARKER,
+    TIER2_ADDRESS_UNRESOLVED_MARKER,
     Tier2ParseStats,
     existing_body_needs_full_echo,
     parse_merge_ops_response,
     parse_tier2_entities,
     partition_code_artifact_classifications,
+    resolve_address_named_classifications,
     stamp_merge_provenance,
     tier1_programmatic_match,
     tier2_reclassify_larger_budget,
@@ -287,6 +290,11 @@ class _FileState:
     )
     sync_merges: list[EntityAction] = field(default_factory=list)
     created: list[WikiEntity] = field(default_factory=list)
+    # Issue athenaeum#1126: Tier-4 escalations for declined address-shaped
+    # classifications, built at classification time and flushed at finalize
+    # (in BOTH branches that unlink the raw file) so the fact survives even
+    # when the declined address was this file's only classification.
+    address_escalations: list[EscalationItem] = field(default_factory=list)
     failed: bool = False
     done: bool = False
     # Set when the budget re-check at phase-2 assembly or before the
@@ -567,14 +575,60 @@ def process_batch_run(
                 _name,
                 st.raw.ref,
             )
+        # Issue athenaeum#1126: batch-transport parity with process_one — never
+        # mint a NEW entity named after a bare email address. No shared
+        # ExcludedRecordIndex is in scope on this transport (correctness
+        # first: excluded_index=None lets resolve_handle_query build its own
+        # per address, at the cost of the O(corpus) scan being repaid per
+        # address rather than shared across the run).
+        address_outcome = resolve_address_named_classifications(
+            classified,
+            knowledge_root=wiki_root.parent,
+            wiki_root=wiki_root,
+            config=config,
+            excluded_index=None,
+        )
+        classified = address_outcome.kept
+        for _address, _uid, _display_name in address_outcome.resolved:
+            log.info(
+                "%s: address=%s uid=%s name=%r (%s)",
+                TIER2_ADDRESS_RESOLVED_MARKER,
+                _address,
+                _uid,
+                _display_name,
+                st.raw.ref,
+            )
+        for _ref_name, _reason in address_outcome.declined:
+            log.warning(
+                "%s: ref=%s address=%s reason=%s",
+                TIER2_ADDRESS_UNRESOLVED_MARKER,
+                st.raw.ref,
+                _ref_name,
+                _reason,
+            )
+            st.address_escalations.append(
+                EscalationItem(
+                    raw_ref=st.raw.ref,
+                    entity_name=_ref_name,
+                    conflict_type="classification_failed",
+                    description=(
+                        f"This statement's subject ({_ref_name!r}) is an "
+                        "email address that resolves to no known entity "
+                        f"(reason: {_reason}); no address-named page was "
+                        "created (athenaeum#1126). The statement text "
+                        f"follows so the fact is not lost:\n\n"
+                        f"{st.raw.content[:2000]}"
+                    ),
+                )
+            )
         for c in classified:
             st.actions.append(
                 EntityAction(
-                    kind="create",
+                    kind="create" if c.is_new else "update",
                     name=c.name,
-                    entity_type=c.entity_type,
-                    tags=c.tags,
-                    access=c.access,
+                    entity_type=c.entity_type if c.is_new else "",
+                    tags=c.tags if c.is_new else [],
+                    access=c.access if c.is_new else "",
                     existing_uid=c.existing_uid,
                     observations=c.observations or st.raw.content[:2000],
                 )
@@ -778,6 +832,18 @@ def process_batch_run(
         if st.done:
             result.created += len(st.created)
             result.skipped += len(st.skipped)
+            if st.address_escalations:
+                # Issue athenaeum#1126: this file's ONLY classification(s)
+                # were declined address-shaped ones (no other actions), so
+                # ``st.done`` was set at classification time with nothing
+                # else to write. Flush the escalation(s) before unlinking —
+                # otherwise the raw file's deletion below destroys the fact.
+                tier4_escalate(
+                    st.address_escalations,
+                    wiki_root / "_pending_questions.md",
+                    config=resolved_config,
+                )
+                result.escalated += len(st.address_escalations)
             st.raw.path.unlink()
             log.info("  Deleted: %s", st.raw.path)
             continue
@@ -785,7 +851,7 @@ def process_batch_run(
             new_entities: list[WikiEntity] = []
             pending_updates: list[tuple[Path, str]] = []
             updated_uids: list[str] = []
-            escalations: list[EscalationItem] = []
+            escalations: list[EscalationItem] = list(st.address_escalations)
 
             for cid, action in st.create_ids:
                 msg = t3_results.get(cid)
