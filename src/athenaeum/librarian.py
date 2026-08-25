@@ -182,9 +182,11 @@ from athenaeum.never_ingest import (
     filter_never_ingest,
 )
 from athenaeum.pii import (
+    DoNotEmailFact,
     ExcludedRecordIndex,
     HardBounceFact,
     contacts_surface_root,
+    detect_do_not_email_fact,
     mark_bounced,
 )
 from athenaeum.progress import PhaseHeartbeat
@@ -988,6 +990,169 @@ def tier0_bounce_mark(
     return fact
 
 
+def tier0_do_not_email_mark(
+    raw: RawFile,
+    index: EntityIndex,
+    wiki_root: Path,
+    dry_run: bool = False,
+) -> tuple[WikiEntity, bool] | None:
+    """Deterministically stamp ``do_not_email: true`` onto an EXISTING wiki
+    page's frontmatter from a free-text opt-out statement, LLM-free (issue
+    athenaeum#1121).
+
+    Frontmatter is schema-driven and never LLM-authored (the Tier-3 prompts
+    explicitly forbid the model from touching it), so a do-not-email
+    statement compiled through the ordinary LLM tiers can only ever land as
+    body prose — reading, to a human, as an unambiguous opt-out, and reading,
+    to :func:`athenaeum.pii.do_not_email_state` (the sole structured
+    consumer), as unmarked. This tier-0 step closes that gap the same way
+    :func:`tier0_handle_upsert` closes the equivalent gap for source-handle
+    seeds: a deterministic merge onto an EXISTING page's frontmatter,
+    schema-gated by :func:`validate_wiki_meta`, idempotent, LLM-free.
+
+    Recognition is :func:`athenaeum.pii.detect_do_not_email_fact` — exactly
+    one email-shaped token plus a recognized do-not-email instruction or
+    reported-opt-out phrase, and NOT a hard-bounce report (that shape belongs
+    to :func:`tier0_bounce_mark` exclusively). A statement that does not
+    conform declines (``None``) and falls through to Tier 1/2/3 with today's
+    behaviour intact — nothing here is a new intake schema or a new
+    ``type:`` field.
+
+    Target-page resolution mirrors :func:`tier0_handle_upsert`'s shape
+    exactly (issue athenaeum#692's uid-then-name-fallback), because a bare
+    reported-opt-out statement about an address usually resolves, by name,
+    to an ADDRESS-NAMED page — which is frequently not the page the read
+    path actually consults for that person. A producer that already knows
+    the correct target page pins it explicitly:
+
+    - the raw's own frontmatter carries a ``uid`` → that EXACT page is the
+      target, no name/alias resolution involved. A pinned uid that does not
+      resolve to an existing page FAILS LOUDLY (logged at WARNING, declines)
+      rather than falling through to the LLM tiers and silently degrading to
+      body prose — the exact defect this issue exists to close, so silently
+      falling through here would reproduce it in a new place.
+    - no ``uid`` → resolve the detected email address by name/alias against
+      an existing entity-format page, exactly as :func:`tier0_handle_upsert`
+      does for a uid-less handle seed. No match declines and falls through
+      to Tier 1/2/3 unchanged (a statement about a brand-new address is not
+      this function's job — it does not create pages).
+
+    Never writes to the excluded/PII contacts surface (athenaeum#960 forbids
+    backfill there; athenaeum#1039's guard flags it) — the wiki page is the
+    sole authoring surface for this mark.
+
+    Idempotent: once ``do_not_email`` is already truthy on the existing
+    page, this is a no-op (``(entity, False)``, no rewrite, no ``updated``
+    bump) — provenance is recorded on first write and never overwritten by
+    a later, possibly differently-worded statement about the same address.
+    Otherwise ``do_not_email: true``, ``do_not_email_reason`` (the
+    statement's own wording), and ``do_not_email_date`` (the raw's
+    ``observed_at``, when present) are merged onto the existing frontmatter
+    and ``(entity, True)`` is returned.
+    """
+    meta, body_text = parse_frontmatter(raw.content)
+    fact: DoNotEmailFact | None = detect_do_not_email_fact(body_text)
+    if fact is None:
+        return None
+
+    pinned_uid = str(meta.get("uid", "") or "").strip()
+    if pinned_uid:
+        existing_path = index.get_by_uid(pinned_uid)
+        if existing_path is None or not existing_path.exists():
+            log.warning(
+                "  T0 do-not-email: statement pins uid %r but it does not "
+                "resolve to an existing page — mark NOT placed; falling "
+                "through would silently degrade to body prose (fix the "
+                "statement's uid)",
+                pinned_uid,
+            )
+            return None
+        resolved_uid = pinned_uid
+    else:
+        resolved = index.lookup(fact.identifier)
+        if resolved is None:
+            # Names no existing entity — this deterministic path only
+            # UPSERTS onto an existing page; a brand-new address is left to
+            # the LLM tiers, matching tier0_handle_upsert's uid-less
+            # fallback shape.
+            log.info(
+                "  T0 do-not-email: statement for %r names no existing "
+                "entity and pins no uid — leaving to LLM tiers",
+                fact.identifier,
+            )
+            return None
+        resolved_uid, existing_path = resolved
+        if (
+            not resolved_uid
+            or not existing_path.exists()
+            or not index.has_entity_format(existing_path)
+        ):
+            log.warning(
+                "  T0 do-not-email: statement for %r matched a non-entity "
+                "page %s — mark not placed",
+                fact.identifier,
+                existing_path.name,
+            )
+            return None
+
+    existing_meta, existing_body = parse_frontmatter(existing_path.read_text(encoding="utf-8"))
+    if not existing_meta:
+        return None
+
+    already_marked = bool(existing_meta.get("do_not_email"))
+
+    existing_type = str(existing_meta.get("type", "") or "").strip()
+    existing_name = str(existing_meta.get("name", "") or "").strip()
+    existing_aliases = existing_meta.get("aliases")
+    existing_tags = existing_meta.get("tags")
+    entity = WikiEntity(
+        uid=resolved_uid,
+        type=existing_type,
+        name=existing_name,
+        aliases=[
+            str(a)
+            for a in (existing_aliases if isinstance(existing_aliases, list) else [])
+            if a
+        ],
+        access=str(existing_meta.get("access", "internal")),
+        tags=[
+            str(t) for t in (existing_tags if isinstance(existing_tags, list) else []) if t
+        ],
+        created=str(existing_meta.get("created", date.today().isoformat())),
+        updated=str(existing_meta.get("updated", date.today().isoformat())),
+        body=existing_body,
+    )
+
+    if already_marked:
+        # True no-op: already marked, provenance already recorded. Do not
+        # rewrite, do not touch the existing reason/date.
+        return entity, False
+
+    merged_meta = dict(existing_meta)
+    merged_meta["do_not_email"] = True
+    merged_meta["do_not_email_reason"] = fact.reason
+    observed_at = meta.get("observed_at")
+    if observed_at is not None:
+        merged_meta["do_not_email_date"] = str(observed_at)
+
+    if dry_run:
+        return entity, True
+
+    updated_today = date.today().isoformat()
+    merged_meta["updated"] = updated_today
+    entity.updated = updated_today
+
+    # Schema-gate the merged frontmatter before write — same guarantee
+    # tier0_handle_upsert gives.
+    validate_wiki_meta(merged_meta)
+
+    atomic_write_text(
+        existing_path,
+        render_frontmatter(merged_meta) + "\n" + existing_body,
+    )
+    return entity, True
+
+
 def _apply_tier3_results(
     result: ProcessingResult,
     *,
@@ -1254,6 +1419,31 @@ def process_one(
             "  T0 bounce-mark: %s marked non-deliverable on the contacts surface",
             bounce_fact.identifier,
         )
+        return result
+
+    # --- Tier 0 (do-not-email mark): deterministic opt-out recognition onto
+    # an EXISTING wiki page's frontmatter (issue athenaeum#1121). Frontmatter
+    # is schema-driven and never LLM-authored, so without this step a
+    # do-not-email statement compiles to body prose only — see
+    # tier0_do_not_email_mark's docstring. Anything that does not conform
+    # (zero/multiple addresses, no recognized phrase, a hard-bounce report,
+    # no matching existing page) falls through to Tier 1/2/3 unchanged.
+    dne_upsert = tier0_do_not_email_mark(raw, index, wiki_root, dry_run=dry_run)
+    if dne_upsert is not None:
+        dne_entity, dne_changed = dne_upsert
+        if dne_changed:
+            log.info(
+                "  T0 do-not-email: %s → %s (do_not_email stamped)",
+                dne_entity.name,
+                dne_entity.filename,
+            )
+            result.updated.append(dne_entity.uid)
+        else:
+            log.info(
+                "  T0 do-not-email: %s → %s (already marked, no-op)",
+                dne_entity.name,
+                dne_entity.filename,
+            )
         return result
 
     # --- Tier 1: Programmatic matching ---

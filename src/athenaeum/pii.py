@@ -1676,6 +1676,99 @@ def detect_hard_bounce_fact(text: str) -> HardBounceFact | None:
     return HardBounceFact(identifier=emails[0], diagnostic=diagnostic)
 
 
+#: Direct-instruction shape: "do not email <address>", "don't email X",
+#: "must not be emailed", "should not be contacted by email". Matches the
+#: maecenas opt-out migration's exact wording (issue athenaeum#1121).
+_DO_NOT_EMAIL_INSTRUCTION_RE = re.compile(
+    r"\b(?:do not|don'?t|must not|should not) (?:e-?mail\b|contact\b.{0,40}\bemail)",
+    re.I,
+)
+
+#: Reported-opt-out shape: the statement attributes the "stop emailing me"
+#: request to the person themselves, rather than issuing it as an
+#: instruction. Issue athenaeum#1121 treats the two as equivalent — the
+#: difference is provenance (who said it), not whether the person opted out.
+_DO_NOT_EMAIL_OPTOUT_RE = re.compile(
+    r"\basked (?:not to be (?:emailed|contacted)|to (?:stop receiving email|opt out|unsubscribe))\b"
+    r"|\bopted out\b"
+    r"|\bmanual opt-?out list\b",
+    re.I,
+)
+
+
+@dataclass(frozen=True)
+class DoNotEmailFact:
+    """A do-not-email fact recognized in ordinary free-text raw intake.
+
+    ``identifier`` is the single email-shaped token the note names;
+    ``reason`` is the verbatim sentence the instruction/opt-out phrase was
+    found in (falling back to the first line of the note), used to populate
+    ``do_not_email_reason`` on the target wiki page (issue athenaeum#1121).
+    """
+
+    identifier: str
+    reason: str
+
+
+def detect_do_not_email_fact(text: str) -> DoNotEmailFact | None:
+    """Recognize a do-not-email fact in free text, or ``None`` — never guesses.
+
+    Issue athenaeum#1121: an intake statement sets ``do_not_email: true`` when
+    its subject is an address or a person and its predicate is that they must
+    not be emailed — covering both the direct instruction ("Do not email
+    ``<address>``") and the reported opt-out ("X asked to stop receiving
+    email"). Deliberately conservative, mirroring :func:`detect_hard_bounce_fact`'s
+    shape:
+
+    - exactly ONE email-shaped token (:func:`find_inline_emails`) — a note
+      naming zero or several addresses is ambiguous and left to reasoning,
+      not guessed at;
+    - a recognized instruction or reported-opt-out phrase
+      (:data:`_DO_NOT_EMAIL_INSTRUCTION_RE` / :data:`_DO_NOT_EMAIL_OPTOUT_RE`)
+      somewhere in the text;
+    - NOT a hard-bounce report (:func:`find_hard_bounce_code`) — a ``5.x.x``
+      diagnostic is a deliverability fact, never consent (maecenas#95's
+      operator ruling), and :func:`tier0_bounce_mark` owns that shape
+      exclusively.
+
+    Asymmetry governs the two thresholds above: a false positive here costs
+    one un-emailed contact; a false negative emails someone who asked not to
+    be. The single-address and bounce-exclusion gates keep false positives
+    rare without giving up on recall for the shapes this issue names.
+    """
+    emails = find_inline_emails(text or "")
+    if len(emails) != 1:
+        return None
+    if find_hard_bounce_code(text or "") is not None:
+        # Deliverability, not consent — leave it to tier0_bounce_mark.
+        return None
+    instruction_match = _DO_NOT_EMAIL_INSTRUCTION_RE.search(text or "")
+    optout_match = _DO_NOT_EMAIL_OPTOUT_RE.search(text or "")
+    if instruction_match is None and optout_match is None:
+        return None
+
+    # Reason = the sentence the matched phrase appears in, trimmed. Sentence
+    # boundaries require a following whitespace/end-of-string (not just any
+    # ``.``) so a domain period inside the matched email address itself
+    # (e.g. "namwil.com") is never mistaken for a sentence break. Falls back
+    # to the first non-empty line if sentence-splitting finds nothing (cannot
+    # happen for input that already matched above, but mirrors
+    # detect_hard_bounce_fact's defensive fallback shape).
+    match = instruction_match or optout_match
+    assert match is not None
+    body = text or ""
+    _sentence_break_re = re.compile(r"[.!?](?=\s|$)")
+    sentence_start = 0
+    for boundary in _sentence_break_re.finditer(body, 0, match.start()):
+        sentence_start = boundary.end()
+    end_boundary = _sentence_break_re.search(body, match.end())
+    sentence_end = end_boundary.end() if end_boundary is not None else len(body)
+    reason = body[sentence_start:sentence_end].strip()
+    if not reason:
+        reason = next((line.strip() for line in body.splitlines() if line.strip()), "")
+    return DoNotEmailFact(identifier=emails[0], reason=reason)
+
+
 def default_bounce_record_path(contacts_root: Path, identifier: str) -> Path:
     """Per-identifier contact-record path under the (excluded) contacts surface.
 
