@@ -929,6 +929,38 @@ class TestRunStrictBudgetFlag:
         assert captured["strict_budget"] is True
 
 
+class TestRunAllowDegradedFlag:
+    """Issue athenaeum#1135 — `run --allow-degraded` plumbs through to librarian.run."""
+
+    def test_default_is_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured = _capture_librarian_run(monkeypatch)
+        rc = main(["run", "--knowledge-root", str(tmp_path), "--dry-run"])
+        assert rc == 0
+        assert captured["allow_degraded"] is False
+
+    def test_flag_passes_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured = _capture_librarian_run(monkeypatch)
+        rc = main(
+            ["run", "--knowledge-root", str(tmp_path), "--dry-run", "--allow-degraded"]
+        )
+        assert rc == 0
+        assert captured["allow_degraded"] is True
+
+    def test_help_documents_the_exit_code(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["run", "--help"])
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        assert "--allow-degraded" in out
+        assert "3" in out
+
+
 def _claims_knowledge(tmp_path: Path) -> Path:
     """Knowledge dir with the SAME claim restated across two distinct entities."""
     knowledge = tmp_path / "knowledge"
