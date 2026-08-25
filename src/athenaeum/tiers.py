@@ -704,11 +704,19 @@ def resolve_address_named_classifications(
         # import cycle at module load time.
         from athenaeum.identity_resolution import resolve_handle_query
 
+        # with_pii=False (athenaeum#1126 QA finding): this gate consumes only
+        # resolution.resolved/.uid/.reason — never .contact_values/.redactions
+        # — and identity_resolution._finish's with_pii gating affects ONLY
+        # _assemble_contact_values' payload shape, never those three fields.
+        # The owning uid is all this seam needs, so it takes the redacted
+        # read rather than materializing real contact values into a write
+        # path that would discard them; resolution semantics are identical
+        # either way.
         resolution = resolve_handle_query(
             knowledge_root,
             wiki_root,
             address,
-            with_pii=True,
+            with_pii=False,
             config=config,
             excluded_index=excluded_index,
         )
