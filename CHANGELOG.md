@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Five-verdict comparator, landed dark (athenaeum#715, child of the
+  athenaeum#709 dimensional memory-model v6 epic).** New
+  `athenaeum.comparator` module: ONE pairwise comparison returning exactly
+  one of `duplicate | contradiction | specialization | distinct |
+  underdetermined`, replacing the separate duplicate-detection and
+  contradiction-detection reasoning. Gate 1 is a free typed check over
+  KNOWN coordinates of separator dimensions only (`enforced` state,
+  matching `applies_to`), composing athenaeum#714's relation algebra —
+  sequencers (`observed-time`, `recorded-time`) are excluded by
+  construction, so two observations of one fact at different observed-times
+  never exit as DISTINCT. Gate 2 (`content_relation`) is the ONLY LLM
+  judgement, runs last on pairs the free gate could not settle, is judged
+  cold (no resolved-corpus exemplar channel; page bodies stay untrusted
+  data), and returns LOCATED conflicting passages rather than a page-global
+  verdict. Verdicts memoize through athenaeum#712's ledger and carry the
+  full basis including a per-branch `comparator_version` (`v1.gate1` for
+  typed exits, `v1.gate2` for content-decided). No confidence thresholds
+  anywhere: model-reported confidence never ranks correctness and
+  similarity is never a verdict input. Coordinates widen on `duplicate`,
+  never narrow. The `predicate_instrument` free-text guess is recorded into
+  the basis and consumed by nothing. Gated behind the new
+  `librarian.comparator_enabled` knob (`ATHENAEUM_COMPARATOR_ENABLED`),
+  **default off** — no existing pipeline behaviour changes until the
+  cut-over lands.
+
 - **Erasure classification and taint-propagation rules (athenaeum#985,
   split (c) of athenaeum#718's re-scope).** New `athenaeum.erasure` module:
   HMAC-keyed content hashes for erasure-class claims with a purgeable
