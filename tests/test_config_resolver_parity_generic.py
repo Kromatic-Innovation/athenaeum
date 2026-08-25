@@ -81,6 +81,20 @@ resolver cannot silently join the exclusion set without this file changing):
   malformed ones warn and are dropped) — the same "excluded from generic,
   covered by a direct test" treatment ``resolve_model`` gets above.
 
+- ``resolve_standing_state_claim_kinds`` / ``resolve_sibling_widening_classes``
+  (issue athenaeum#715): both return a ``frozenset`` filtered against a CLOSED
+  vocabulary (``models.CLAIM_KINDS`` and ``memory_class.MEMORY_CLASSES``
+  respectively), and both fall through to their default when the filtered
+  result is empty. That is deliberate and load-bearing — a typo in
+  ``standing_state_claim_kinds`` must not silently widen the set of claims
+  auto-supersession may retire — but it means EVERY sentinel this prober can
+  construct is, by design, dropped as out-of-vocabulary and returns the
+  default, which looks identical to "never read the key". Same shape gap as
+  ``resolve_model_rates`` above, same treatment: excluded from the generic
+  probe, covered directly by ``TestClosedVocabularyResolversDirect`` at the
+  bottom of this file, which sets REAL in-vocabulary values and asserts both
+  the yaml key and the env var are read.
+
 Every other resolver goes through the full generic check.
 """
 
@@ -114,6 +128,12 @@ _RESOLVER_NAMES = sorted(name for name, _ in _ALL_RESOLVERS)
 _NO_YAML_KEY = frozenset({"resolve_cache_dir"})
 _GENERIC_HELPER_SIGNATURE = frozenset({"resolve_model"})
 _STRUCTURED_CONTAINER_VALUE = frozenset({"resolve_model_rates"})
+# Issue athenaeum#715: returns a frozenset filtered against a CLOSED vocabulary,
+# so every out-of-vocabulary sentinel correctly returns the default. Covered
+# directly by TestClosedVocabularyResolversDirect (see module docstring).
+_CLOSED_VOCABULARY_VALUE = frozenset(
+    {"resolve_standing_state_claim_kinds", "resolve_sibling_widening_classes"}
+)
 
 _ENV_VAR_RE = re.compile(r"^ATHENAEUM_[A-Z0-9_]+$")
 _YAML_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -136,9 +156,7 @@ def _call_site_string_literals(source: str) -> list[str]:
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                     literals.append(arg.value)
             for kw in node.keywords:
-                if isinstance(kw.value, ast.Constant) and isinstance(
-                    kw.value.value, str
-                ):
+                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
                     literals.append(kw.value.value)
             self.generic_visit(node)
 
@@ -153,9 +171,7 @@ def _called_private_helpers(source: str) -> list[str]:
 
     class _Visitor(ast.NodeVisitor):
         def visit_Call(self, node: ast.Call) -> None:
-            if isinstance(node.func, ast.Name) and node.func.id.startswith(
-                "_resolve"
-            ):
+            if isinstance(node.func, ast.Name) and node.func.id.startswith("_resolve"):
                 if node.func.id not in names:
                     names.append(node.func.id)
             self.generic_visit(node)
@@ -313,6 +329,7 @@ def test_exclusion_sets_are_subsets_of_enumerated_resolvers() -> None:
     assert _NO_YAML_KEY <= all_names
     assert _GENERIC_HELPER_SIGNATURE <= all_names
     assert _STRUCTURED_CONTAINER_VALUE <= all_names
+    assert _CLOSED_VOCABULARY_VALUE <= all_names
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +360,13 @@ class TestGenericResolverParity:
                 "sentinel battery cannot express; covered directly in "
                 "tests/test_pricing_config.py::TestResolveModelRates (see "
                 "module docstring)"
+            )
+        if name in _CLOSED_VOCABULARY_VALUE:
+            pytest.skip(
+                f"{name}: value is filtered against a closed vocabulary, so "
+                "every out-of-vocabulary sentinel correctly returns the "
+                "default; covered directly by "
+                "TestClosedVocabularyResolversDirect (see module docstring)"
             )
 
         # Clear every ATHENAEUM_* env var so a stray operator/CI env value
@@ -409,6 +433,13 @@ class TestGenericResolverParity:
         env_vars, _yaml_keys = _env_and_yaml_literals(fn)
         if not env_vars:
             pytest.skip(f"{name}: no env var literal discovered (by design)")
+        if name in _CLOSED_VOCABULARY_VALUE:
+            pytest.skip(
+                f"{name}: value is filtered against a closed vocabulary, so "
+                "every out-of-vocabulary sentinel correctly returns the "
+                "default; covered directly by "
+                "TestClosedVocabularyResolversDirect (see module docstring)"
+            )
 
         for key in list(__import__("os").environ):
             if key.startswith("ATHENAEUM_"):
@@ -496,3 +527,74 @@ class TestResolveModelDirect:
             "parity_probe", "ATHENAEUM_PARITY_PROBE_MODEL", "code-default", None
         )
         assert result == "code-default"
+
+
+# ---------------------------------------------------------------------------
+# The closed-vocabulary resolvers (issue athenaeum#715), covered directly: the
+# generic prober cannot express an in-vocabulary sentinel, so these set REAL
+# values and assert both channels are read — the same "excluded from generic,
+# covered by a direct test" treatment resolve_model_rates gets.
+# ---------------------------------------------------------------------------
+
+
+class TestClosedVocabularyResolversDirect:
+    def test_standing_state_claim_kinds_reads_its_yaml_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_STANDING_STATE_CLAIM_KINDS", raising=False)
+        resolved = config_mod.resolve_standing_state_claim_kinds(
+            {"librarian": {"standing_state_claim_kinds": ["fact"]}}
+        )
+        assert resolved == frozenset({"fact"})
+
+    def test_standing_state_claim_kinds_reads_its_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_STANDING_STATE_CLAIM_KINDS", "observation,fact")
+        assert config_mod.resolve_standing_state_claim_kinds(None) == frozenset(
+            {"observation", "fact"}
+        )
+
+    def test_standing_state_claim_kinds_env_beats_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_STANDING_STATE_CLAIM_KINDS", "policy")
+        resolved = config_mod.resolve_standing_state_claim_kinds(
+            {"librarian": {"standing_state_claim_kinds": ["fact"]}}
+        )
+        assert resolved == frozenset({"policy"})
+
+    def test_standing_state_claim_kinds_drops_out_of_vocabulary_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The load-bearing behaviour the generic prober trips over: a typo
+        # must NOT widen the set of claims auto-supersession may retire.
+        monkeypatch.setenv("ATHENAEUM_STANDING_STATE_CLAIM_KINDS", "factt,polcy")
+        assert config_mod.resolve_standing_state_claim_kinds(None) == frozenset(
+            {"fact", "decision", "policy"}
+        )
+
+    def test_sibling_widening_classes_reads_its_yaml_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_SIBLING_WIDENING_CLASSES", raising=False)
+        resolved = config_mod.resolve_sibling_widening_classes(
+            {"librarian": {"sibling_widening_classes": ["guideline"]}}
+        )
+        assert resolved == frozenset({"guideline"})
+
+    def test_sibling_widening_classes_reads_its_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_SIBLING_WIDENING_CLASSES", "entity,reference")
+        assert config_mod.resolve_sibling_widening_classes(None) == frozenset(
+            {"entity", "reference"}
+        )
+
+    def test_sibling_widening_classes_drops_out_of_vocabulary_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_SIBLING_WIDENING_CLASSES", "guidelines,nope")
+        assert config_mod.resolve_sibling_widening_classes(None) == frozenset(
+            {"guideline", "procedure", "axiom"}
+        )

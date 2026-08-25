@@ -20,6 +20,64 @@ For adjacent material:
 
 ---
 
+## The five-verdict comparator (athenaeum#715) — what replaces this, and when
+
+Everything below/above describes the **split paths**: duplicate detection
+(`merge.py`) and contradiction detection (`contradictions.py`) as two
+separate operations over the same clusters. That split is the defect
+athenaeum#715 exists to remove — it is how a 2,207-source cluster could be a
+merge candidate while the contradiction detector reported zero conflicts.
+
+**The replacement is ONE comparison returning FIVE verdicts**
+(`src/athenaeum/comparator.py`):
+
+```
+duplicate | contradiction | specialization | distinct | underdetermined
+```
+
+with two gates, cheapest first:
+
+- **Gate 1 — typed, free, no LLM.** Consults only the KNOWN coordinates of
+  SEPARATOR dimensions (athenaeum#714's registry) that are `enforced` and whose
+  `applies_to` matches both sides. Any `disjoint` relation exits immediately
+  as DISTINCT. **Sequencers (`observed-time`, `recorded-time`) are excluded
+  by construction** — they order beliefs about one territory and feed
+  supersession, they never make two claims DISTINCT.
+- **Gate 2 — `content_relation`, the ONE LLM judgement, and it runs LAST**,
+  only on pairs Gate 1 could not settle. It returns `equivalent |
+  conflicting | compatible`, judged **cold** (no exemplar/few-shot channel;
+  corpus page bodies are untrusted data), with conflicts **located** to
+  passages rather than a page-global verdict. `compatible` is the answer to
+  "these answer different questions about the same subject" — the measured
+  priority-vs-lifecycle false-conflict class — and yields DISTINCT(coexist).
+
+Every verdict is memoized in the athenaeum#712 verdict ledger, so a pair whose
+verdict is fresh is never re-compared and never re-spends an LLM call.
+**There are no confidence thresholds anywhere** in the new path: model
+self-reported confidence never ranks correctness (the two highest-confidence
+historical merge proposals were both wrong, at 0.84 and 0.82, while the one
+verified-correct cluster sat at 0.77), and similarity's only remaining job is
+proposing which pairs to compare.
+
+### Status: not yet cut over
+
+The comparator and its verdict effects (auto-supersession with its
+partial-order authority treatment and rate limits, evidence-artifact fold
+proposals, the `compatible` TTL re-check, sibling-scope widening probes) are
+**built and tested but gated off** behind `librarian.comparator_enabled`
+(default `false`) — see
+[`docs/configuration.md`](configuration.md#five-verdict-comparator-athenaeum715--off-by-default).
+
+**So everything else in this document still describes live behaviour.** The
+remaining step on athenaeum#715 is the cut-over itself: the split paths are to
+be **removed, not left running in parallel**. Until that lands, the one live
+reader of the new path is the explicit, opt-in
+`athenaeum merges recompare` command, which re-runs the comparator over the
+existing pending merge proposals and records a verdict per source pair —
+dry-run by default, and with no path to approving a merge at all.
+
+---
+
 ## 1. Pipeline overview
 
 ```
