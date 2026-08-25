@@ -1770,21 +1770,101 @@ falling through to exactly one LLM judgement (Gate 2, `content_relation`)
 only when Gate 1 cannot settle the pair. See that module's docstring for the
 full algorithm.
 
-**Landed dark (athenaeum#715 AC).** This module is not called from any
-pipeline entry point yet — that cut-over (wiring it into `athenaeum run` /
-`ingest-answers` the way the verdict ledger's own two integration points
-work) is an explicit, separate, future step. `ATHENAEUM_COMPARATOR_ENABLED`
-therefore has **no live reader in `src/` today**; it exists purely so that
-future wiring step has a documented, default-off gate to check, mirroring
-`ATHENAEUM_VERDICT_LEDGER_ENABLED`'s shape exactly.
+**Still landed dark (athenaeum#715 AC).** The comparator is not called from
+any *nightly* pipeline entry point — that cut-over (replacing, not
+paralleling, the existing merge and contradiction paths) is the remaining
+step on athenaeum#715, and the issue is explicit that the old paths must be
+**removed rather than left running alongside** the new one. Until then
+`ATHENAEUM_COMPARATOR_ENABLED` gates the comparator subsystem and everything
+built on it. Its one live reader today is the explicit, opt-in
+`athenaeum merges recompare` command below, which refuses to run when the
+gate is off rather than silently doing nothing.
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
-| Comparator | `ATHENAEUM_COMPARATOR_ENABLED` | `librarian.comparator_enabled` | `false` (**off**) | Reserved for the future pipeline cut-over — see [`resolve_comparator_enabled`](../src/athenaeum/config.py). Not read anywhere in `src/` yet. |
+| Comparator | `ATHENAEUM_COMPARATOR_ENABLED` | `librarian.comparator_enabled` | `false` (**off**) | Master gate for the comparator subsystem — see [`resolve_comparator_enabled`](../src/athenaeum/config.py). Every knob in the two tables below is inert while this is off. |
 
 ```yaml
 librarian:
   comparator_enabled: true
+```
+
+### Auto-supersession and its rate limits (athenaeum#715)
+
+Auto-supersession is the one genuinely **destructive** effect in the
+comparator's verdict set: it retires the located claim on the losing side of
+a contradiction. It therefore ships behind its **own** switch *inside* the
+already-off comparator gate — an operator who wants verdicts without any
+automatic retirement leaves this off and every contradiction routes to the
+decision queue instead.
+
+The preconditions themselves are not configurable (they are the issue's
+contract, implemented in `src/athenaeum/supersession.py`): the claim must be
+standing-state, no separator relation may be `overlaps`, the winner must be
+strictly later on observed-time and no earlier on recorded-time, the asserter
+must clear route (a) same-asserter / (b) strictly greater authority / (c)
+equal-or-**incomparable** authority with independent corroboration, and no
+third live claim at the same coordinates may conflict with the winner. What
+IS configurable is which claim kinds count as standing state, and the two
+rate limits that gate route (a).
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Auto-supersession | `ATHENAEUM_AUTO_SUPERSESSION_ENABLED` | `librarian.auto_supersession_enabled` | `false` (**off**) | Off ⇒ every contradiction queues; nothing is ever auto-retired. |
+| Standing-state kinds | `ATHENAEUM_STANDING_STATE_CLAIM_KINDS` (comma-separated) | `librarian.standing_state_claim_kinds` | `fact, decision, policy` | Which `claim_kind:` values are "standing state". `observation` (a point-in-time event), `opinion` (evaluative — athenaeum#327 already routes it to `attribute_both`) and `definition` (timeless) are excluded on purpose. An **unclassified** claim is never standing-state: fail-closed, because the consequence here is retiring a claim nobody classified. |
+| Per-claim window | `ATHENAEUM_SUPERSESSION_SELF_REVISION_WINDOW_DAYS` | `librarian.supersession_self_revision_window_days` | `90` | The window the per-claim limit counts over. |
+| Per-claim cap | `ATHENAEUM_SUPERSESSION_CLAIM_WINDOW_MAX` | `librarian.supersession_claim_window_max` | `3` | The **ordinal** that queue-flags: at `3`, the first two same-asserter self-revisions of one claim inside the window auto-apply and the third does not. Catches **oscillation**. |
+| Per-asserter cap | `ATHENAEUM_SUPERSESSION_ASSERTER_WEEKLY_MAX` | `librarian.supersession_asserter_weekly_max` | `10` | Trailing-7-day corpus-wide cap on one asserter's route-(a) auto-supersessions. Exceeding it **suspends route (a) entirely** for that asserter pending review. Catches **diffuse drift** by one sloppy or compromised writer — which a per-claim limit cannot see. |
+| Authority implications | *(yaml only)* | `librarian.authority_grant_implications` | `{}` | The grant-implication graph that makes the authority partial order non-trivial (`admin: [editor]`, `editor: [reader]`). With no graph the order degenerates to plain set inclusion over declared grants — still a correct partial order, just flatter. Cycle-safe. |
+
+Authority is a **partial order, not a chain**, and *incomparable* grants are
+treated as *equal* authority — so an incomparable-peer conflict takes the
+corroboration-or-queue path rather than silently picking a winner. An
+asserter that declares **no** grants at all is *incomparable* with a granted
+one, never *lesser*: plain set inclusion would otherwise rank every granted
+asserter above every ungranted Claude-session intake, which is exactly
+backwards for a destructive decision. See
+`src/athenaeum/asserter_authority.py`.
+
+```yaml
+librarian:
+  auto_supersession_enabled: true
+  standing_state_claim_kinds: [fact, decision, policy]
+  supersession_claim_window_max: 3
+  supersession_asserter_weekly_max: 10
+  authority_grant_implications:
+    admin: [editor]
+    editor: [reader]
+```
+
+### The two instruments (athenaeum#715)
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| `compatible` TTL (age) | `ATHENAEUM_COMPATIBLE_RECHECK_DAYS` | `librarian.compatible_recheck_days` | `183` (~6 months) | A `compatible` verdict is the one DISTINCT with **no coordinate** separating the pair, so it is the one most likely to be falsified by later writes. Past this age the pair is marked stale and re-compared. |
+| `compatible` TTL (writes) | `ATHENAEUM_COMPATIBLE_RECHECK_WRITES` | `librarian.compatible_recheck_writes` | `20` | The other half of the same TTL: either trigger firing is sufficient. "Content-adjacent writes" are counted by observed content-hash changes — see `src/athenaeum/comparator_instruments.py` for the exact, and deliberately stated, limitation of that proxy. |
+| Sibling-widening budget | `ATHENAEUM_SIBLING_WIDENING_BUDGET` | `librarian.sibling_widening_budget` | `25` | Hard per-run cap on Gate-2 calls spent probing scope-separated DISTINCTs for convergence. Pairs skipped for budget are **counted and reported**, never silently dropped. |
+| Sibling-widening band | `ATHENAEUM_SIBLING_WIDENING_MIN_SIMILARITY` | `librarian.sibling_widening_min_similarity` | `0.85` | Which pairs are worth spending that budget on. Candidate generation only — similarity never reaches a verdict here, exactly as it never does anywhere else in athenaeum#715. |
+| Sibling-widening classes | `ATHENAEUM_SIBLING_WIDENING_CLASSES` (comma-separated) | `librarian.sibling_widening_classes` | `guideline, procedure, axiom` | The "guideline-like" classes where two sibling scopes independently arriving at the same rule is a real pattern worth unifying. A scope-separated pair of `entity` pages is two different entities; probing it is pure cost. |
+
+### `athenaeum merges recompare` (athenaeum#715)
+
+The pending-queue re-run. Re-compares every **unresolved** proposal in
+`wiki/_pending_merges.md` and records a verdict per source **pair** in the
+verdict ledger. Dry-run by default, mirroring `athenaeum merges revalidate`;
+`--apply` writes **to the ledger only**.
+
+It never approves, rejects, or archives a proposal — it never opens
+`_pending_merges.md` for writing at all — and proposals identified as **PII
+hazards** (a `pii:` frontmatter flag, or inline contact data in the body) are
+identified *before* any comparison runs, are never compared, and route to a
+human regardless of verdict. `recompare.can_auto_apply()` returns `False`
+unconditionally so that guarantee is executable rather than merely
+documented.
+
+```console
+$ athenaeum merges recompare --limit 5          # dry-run: compare and report
+$ athenaeum merges recompare --apply --json     # write the verdicts to the ledger
 ```
 
 **Gate 2's model/spend knobs** follow the same per-stage `…_MAX_TOKENS` /

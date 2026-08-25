@@ -23,6 +23,10 @@ Six modes:
 - ``revalidate``  re-validate existing unresolved proposals against the
                    CURRENT suppression gate and archive stale ones (issue
                    athenaeum#481). Dry-run by default; ``--apply`` writes.
+- ``recompare``   re-run the five-verdict comparator over every unresolved
+                   proposal and ledger a verdict per source pair (issue
+                   athenaeum#715). Dry-run by default; ``--apply`` writes to the
+                   LEDGER only — never to ``_pending_merges.md``.
 - ``propose-fold`` propose folding source pages INTO a named canonical page
                    (issue athenaeum#747) — the operator-facing entry point for
                    the fold path, deriving merge_target_name / write_kind so
@@ -50,16 +54,12 @@ from athenaeum.provenance import read_merge_provenance
 
 
 def _resolve_merges_path(args: argparse.Namespace) -> Path:
-    knowledge_root = (
-        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
-    )
+    knowledge_root = (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     return knowledge_root / "wiki" / "_pending_merges.md"
 
 
 def _resolve_wiki_root(args: argparse.Namespace) -> Path:
-    knowledge_root = (
-        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
-    )
+    knowledge_root = (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     return knowledge_root / "wiki"
 
 
@@ -158,9 +158,7 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     # 1. Resolve the canonical --into page.
     into_path = _resolve_wiki_page(wiki_root, args.into)
     if into_path is None:
-        return _fail(
-            f"--into {args.into!r} is not an existing wiki page under {wiki_root}"
-        )
+        return _fail(f"--into {args.into!r} is not an existing wiki page under {wiki_root}")
 
     into_meta, _ = parse_frontmatter(into_path.read_text(encoding="utf-8"))
     name = into_meta.get("name") if isinstance(into_meta, dict) else None
@@ -195,8 +193,7 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
             return _fail(f"--source {s!r} is not an existing wiki page under {wiki_root}")
         if sp == into_path:
             return _fail(
-                f"--source {s!r} is the same page as --into; a page cannot be "
-                "folded into itself"
+                f"--source {s!r} is the same page as --into; a page cannot be folded into itself"
             )
         source_paths.append(sp)
 
@@ -263,9 +260,11 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     if args.json:
         sys.stdout.write(json.dumps(plan) + "\n")
         return 0
-    print(f"Queued fold proposal {merge_id} into {merge_target_name!r} "
-          f"({len(source_paths)} source(s)). Approve with the resolver "
-          "(`resolve_merge`) — approval is unchanged.")
+    print(
+        f"Queued fold proposal {merge_id} into {merge_target_name!r} "
+        f"({len(source_paths)} source(s)). Approve with the resolver "
+        "(`resolve_merge`) — approval is unchanged."
+    )
     return 0
 
 
@@ -280,9 +279,7 @@ def _cmd_revalidate(args: argparse.Namespace) -> int:
     from athenaeum.config import load_config
     from athenaeum.pending_merges import revalidate_pending_merges
 
-    knowledge_root = (
-        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
-    )
+    knowledge_root = (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     merges_path = knowledge_root / "wiki" / "_pending_merges.md"
     config = load_config(knowledge_root)
     apply = getattr(args, "apply", False)
@@ -316,16 +313,147 @@ def _cmd_revalidate(args: argparse.Namespace) -> int:
         return 0
 
     verb = "Retired" if result.applied else "Would retire"
-    print(
-        f"{verb} {len(result.retired)} stale proposal(s) against the current "
-        f"suppression gate:"
-    )
+    print(f"{verb} {len(result.retired)} stale proposal(s) against the current suppression gate:")
     for r in result.retired:
         print(f"  - {r.merge_target_name!r} ({r.n_sources} sources): {r.reason}")
     if not result.applied:
         print(
             "\nDry-run — no changes written. Re-run with --apply to archive "
             "them to _pending_merges_archive.md."
+        )
+    return 0
+
+
+def _cmd_recompare(args: argparse.Namespace) -> int:
+    """``athenaeum merges recompare [--apply]`` — issue athenaeum#715.
+
+    Re-run the five-verdict comparator over every UNRESOLVED proposal in
+    ``_pending_merges.md`` and record a verdict per source PAIR in the verdict
+    ledger. Dry-run by default, mirroring ``revalidate``'s shape.
+
+    ``--apply`` writes verdicts TO THE LEDGER. It never approves, rejects, or
+    archives a proposal, and this command never opens ``_pending_merges.md``
+    for writing — see :mod:`athenaeum.recompare`'s docstring for why that is
+    a structural guarantee rather than a policy.
+
+    Requires the comparator to be enabled
+    (:func:`athenaeum.config.resolve_comparator_enabled`); refuses otherwise
+    rather than silently doing nothing.
+    """
+    from athenaeum.config import load_config, resolve_comparator_enabled
+    from athenaeum.recompare import recompare_pending_merges
+    from athenaeum.runlock import RunLock
+
+    knowledge_root = (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    wiki_root = knowledge_root / "wiki"
+    config = load_config(knowledge_root)
+    apply = getattr(args, "apply", False)
+    limit = getattr(args, "limit", 0) or None
+
+    if not resolve_comparator_enabled(config):
+        print(
+            "The five-verdict comparator is disabled. Enable it with "
+            "ATHENAEUM_COMPARATOR_ENABLED=1 or librarian.comparator_enabled: true "
+            "before running this re-run (issue athenaeum#715).",
+            file=sys.stderr,
+        )
+        return 2
+
+    from athenaeum.provider import ProviderConfigError, build_llm_client
+
+    client = None
+    try:
+        # Issue athenaeum#786: Gate 2 is routed through the ``classify`` knob,
+        # exactly as :func:`athenaeum.comparator.content_relation` resolves it.
+        client = build_llm_client(config=config, knob="classify")
+    except ProviderConfigError as exc:
+        # Issue athenaeum#540 (M14): a provider MISCONFIGURATION is raised loudly
+        # by build_llm_client precisely so it never silently falls back to a
+        # different backend. Surface it and exit nonzero.
+        print(f"Provider misconfigured: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 — a genuine construction error (e.g.
+        # no API key for the api backend) is the intended offline degrade: leave
+        # the client None, so Gate 1 still decides what it can and every pair it
+        # cannot settle reports NO verdict rather than a fabricated one.
+        print(
+            f"No LLM client ({exc}); Gate 2 unavailable — pairs Gate 1 cannot "
+            "settle will report no verdict.",
+            file=sys.stderr,
+        )
+
+    if apply:
+        with RunLock(knowledge_root) as lock:
+            result = recompare_pending_merges(
+                wiki_root,
+                config=config,
+                client=client,
+                apply=True,
+                limit=limit,
+                lock=lock,
+            )
+    else:
+        result = recompare_pending_merges(
+            wiki_root, config=config, client=client, apply=False, limit=limit
+        )
+
+    if getattr(args, "json", False):
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "applied": result.applied,
+                    "total": result.total,
+                    "compared": result.compared,
+                    "skipped_fresh": result.skipped_fresh,
+                    "skipped_missing_source": result.skipped_missing_source,
+                    "pii_hazard_ids": result.pii_hazard_ids,
+                    "proposals": [
+                        {
+                            "id": r.proposal_id,
+                            "merge_target_name": r.merge_target_name,
+                            "aggregate": r.aggregate,
+                            "route": r.route,
+                            "pii_hazard": r.pii_hazard,
+                            "pii_hazard_reasons": r.pii_hazard_reasons,
+                            "pair_verdicts": r.pair_verdicts,
+                            "stored_confidence": r.stored_confidence,
+                            "notes": r.notes,
+                        }
+                        for r in result.proposals
+                    ],
+                }
+            )
+            + "\n"
+        )
+        return 0
+
+    verb = "Recorded" if result.applied else "Would record"
+    print(
+        f"{verb} verdicts for {result.total} unresolved proposal(s): "
+        f"{result.compared} pair comparison(s), {result.skipped_fresh} skipped "
+        f"as already-fresh, {result.skipped_missing_source} unreadable source(s)."
+    )
+    if result.pii_hazard_ids:
+        print(
+            f"\n{len(result.pii_hazard_ids)} PII-HAZARD proposal(s) — never "
+            "approved by this re-run, never auto-applied, routed to a human:"
+        )
+        for r in result.proposals:
+            if r.pii_hazard:
+                print(f"  - {r.merge_target_name!r} ({r.proposal_id})")
+                for reason in r.pii_hazard_reasons:
+                    print(f"      {reason}")
+    for r in result.proposals:
+        if r.pii_hazard:
+            continue
+        print(f"  {r.aggregate or 'no-verdict':16s} {r.merge_target_name!r}")
+        for note in r.notes:
+            print(f"      note: {note}")
+    if not result.applied:
+        print(
+            "\nDry-run — nothing written to the ledger. Re-run with --apply to "
+            "record these verdicts. This command never approves, rejects, or "
+            "archives a proposal in either mode."
         )
     return 0
 
@@ -346,16 +474,20 @@ def cmd_merges(args: argparse.Namespace) -> int:
         "provenance",
         "revalidate",
         "propose-fold",
+        "recompare",
     ):
         print(
             "usage: athenaeum merges "
-            "{list,next,count,provenance,revalidate,propose-fold} [...]",
+            "{list,next,count,provenance,revalidate,propose-fold,recompare} [...]",
             file=sys.stderr,
         )
         return 2
 
     if sub == "propose-fold":
         return _cmd_propose_fold(args)
+
+    if sub == "recompare":
+        return _cmd_recompare(args)
 
     if sub == "revalidate":
         return _cmd_revalidate(args)
@@ -385,9 +517,7 @@ def cmd_merges(args: argparse.Namespace) -> int:
     if sub == "count":
         oldest = merges[0]["created_at"] if merges else None
         if args.json:
-            sys.stdout.write(
-                json.dumps({"count": len(merges), "oldest": oldest}) + "\n"
-            )
+            sys.stdout.write(json.dumps({"count": len(merges), "oldest": oldest}) + "\n")
         elif not merges:
             print("0 unresolved")
         else:
@@ -461,14 +591,10 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Truncate to first N (default: 0 = unlimited).",
     )
 
-    next_p = m_sub.add_parser(
-        "next", help="Show the oldest unresolved merge (single block)."
-    )
+    next_p = m_sub.add_parser("next", help="Show the oldest unresolved merge (single block).")
     _add_common(next_p)
 
-    count_p = m_sub.add_parser(
-        "count", help="Print `N unresolved (oldest: <iso-date>)`."
-    )
+    count_p = m_sub.add_parser("count", help="Print `N unresolved (oldest: <iso-date>)`.")
     _add_common(count_p)
 
     revalidate_p = m_sub.add_parser(
@@ -487,6 +613,33 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
             "Archive proposals the current gate would suppress. Default: "
             "dry-run — report only, write nothing."
         ),
+    )
+
+    recompare_p = m_sub.add_parser(
+        "recompare",
+        help=(
+            "Re-run the five-verdict comparator over every unresolved merge "
+            "proposal and record a verdict per source pair in the verdict "
+            "ledger (issue athenaeum#715). Dry-run by default; --apply writes to "
+            "the LEDGER only — this command never approves, rejects, or "
+            "archives a proposal, and PII-hazard proposals always route to a "
+            "human regardless of verdict."
+        ),
+    )
+    _add_common(recompare_p)
+    recompare_p.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Append the computed verdicts to the verdict ledger. Default: "
+            "dry-run — compare and report, write nothing."
+        ),
+    )
+    recompare_p.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Only re-run the first N unresolved proposals (default: 0 = all).",
     )
 
     fold_p = m_sub.add_parser(
