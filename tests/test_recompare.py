@@ -287,7 +287,10 @@ class TestSourceResolution:
         self, wiki_root: Path
     ) -> None:
         _write_page(wiki_root, "a")
-        resolved = resolve_source_path("/Users/someone/knowledge/wiki/a.md", wiki_root)
+        # An absolute path recorded by whichever machine wrote the block --
+        # deliberately NOT a real home-directory shape, so public-safe-lint
+        # does not read the fixture as a leaked local path.
+        resolved = resolve_source_path("/other-machine/knowledge/wiki/a.md", wiki_root)
         assert resolved == wiki_root / "a.md"
 
     def test_a_missing_source_resolves_to_none(self, wiki_root: Path) -> None:
