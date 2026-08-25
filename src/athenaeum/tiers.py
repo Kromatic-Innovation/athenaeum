@@ -55,9 +55,16 @@ import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import anthropic
+
+if TYPE_CHECKING:
+    # Annotation-only (athenaeum#1126) — mirrors the lazy-import convention
+    # athenaeum.identity_resolution already follows: the real import stays
+    # local to the one function that needs it, to avoid a
+    # tiers <-> identity_resolution import cycle at module load time.
+    from athenaeum.pii import ExcludedRecordIndex
 
 from athenaeum._retry import with_retry
 from athenaeum.atomic_io import atomic_write_text
@@ -554,6 +561,182 @@ def partition_code_artifact_classifications(
         else:
             kept.append(c)
     return kept, dropped
+
+
+#: Stable, greppable WARNING marker (issue athenaeum#1126) logged whenever an
+#: address-shaped tier-2 classification could NOT be resolved to the entity
+#: that owns the address, and was therefore DECLINED rather than minted as an
+#: address-named page.
+TIER2_ADDRESS_UNRESOLVED_MARKER = "tier2-address-classification-unresolved"
+
+#: Companion INFO marker for the resolved case.
+TIER2_ADDRESS_RESOLVED_MARKER = "tier2-address-classification-resolved"
+
+
+@dataclass(frozen=True)
+class AddressResolutionOutcome:
+    """Result of :func:`resolve_address_named_classifications` (athenaeum#1126)."""
+
+    kept: list[ClassifiedEntity]
+    resolved: tuple[tuple[str, str, str], ...]  # (address, uid, display_name)
+    declined: tuple[tuple[str, str], ...]  # (address_or_name, reason)
+
+
+def resolve_address_named_classifications(
+    classified: list[ClassifiedEntity],
+    *,
+    knowledge_root: Path,
+    wiki_root: Path,
+    config: dict[str, Any] | None = None,
+    excluded_index: "ExcludedRecordIndex | None" = None,
+) -> AddressResolutionOutcome:
+    """Stop tier-2 from minting a NEW entity named after a bare email address (athenaeum#1126).
+
+    Sits immediately after :func:`partition_code_artifact_classifications` at
+    both transports (``librarian.process_one`` and ``batch.process_batch_run``),
+    same gate shape and same "shared by both transports" contract that
+    function established for the athenaeum#680 code-artifact gate.
+
+    **The defect this closes:** an intake statement whose subject is a bare
+    email address was classified as a NEW person entity NAMED AFTER that
+    address, minting an orphan wiki page nothing reads by address (structured
+    consumers read the contacts/excluded surface, not a wiki page name), and
+    putting a raw email address into a wiki page's ``name:``/title/filename
+    — the standing ``wiki-contacts-no-email`` violation.
+
+    **Per-classification semantics, in order:**
+
+    1. **Fast path.** :func:`~athenaeum.identity_resolution.carries_email_shape`
+       gates everything else: a classification whose name carries no
+       email-shaped token is returned UNCHANGED, with NO lookup of any kind —
+       no index build, no extra I/O. This must be byte-identical to
+       pre-athenaeum#1126 behaviour for the overwhelming majority of
+       classifications (which never carry an address at all).
+    2. A name carrying two-or-more email-shaped tokens
+       (:func:`~athenaeum.identity_resolution.sole_email_token` returns
+       ``None``) is DECLINED with reason ``"ambiguous-subject"`` — such a
+       name can never legitimately become a page name (AC4), and it names no
+       single address to resolve.
+    3. Otherwise the sole address is resolved through the SANCTIONED reverse
+       lookup, :func:`athenaeum.identity_resolution.resolve_handle_query`
+       (the same one-implementation seam ``recall`` uses) — never a new,
+       parallel address->uid walk. ``resolution is None`` (not handle-shaped
+       per the sanctioned detector — should not happen for a value that just
+       passed the email-shape check, but handled defensively) DECLINES with
+       reason ``"not-handle-shaped"``. ``resolution.resolved`` RESOLVES: the
+       classification is mutated in place (``is_new=False``,
+       ``existing_uid=resolution.uid``, ``name=resolution.display_name or
+       resolution.uid``) and kept. Any other outcome DECLINES with
+       ``resolution.reason`` (the closed ``RESOLUTION_REASONS`` vocabulary:
+       ``no-match``, ``record-without-uid``, ``ambiguous``, ``orphan-uid``).
+
+    A DECLINED classification is dropped from ``kept`` — it must never reach
+    a tier-3 ``create`` action.
+
+    **Decided behaviour when resolution finds nothing: DECLINE LOUDLY, never
+    create.** This is the product decision athenaeum#1126 delegated, and it is
+    documented here because it is the load-bearing choice this function makes:
+
+    The alternative AC3 allows — "create an entity that is not named after
+    the address" — requires inventing a name the classifier does not have.
+    Any synthesized name ("Unknown contact", a slugged fragment) mints an
+    UNNAMEABLE stub that no future statement can ever resolve to, which is
+    the same "non-empty and wrong" failure family this issue closes; and it
+    would need its own extra guards to keep AC4 (no address ever lands in a
+    page name) true. Declining satisfies AC4 unconditionally, with no
+    separate guard needed.
+
+    Declining ALONE would DESTROY the fact, because the entity loop unlinks
+    the raw file after processing regardless of outcome. So a decline is
+    always paired, by the caller, with a Tier-4 escalation to
+    ``_pending_questions.md`` — that escalation is what makes the decline
+    *loud* rather than silent, and is a hard part of this contract, not an
+    optional extra. (This function itself does not build the escalation —
+    see ``librarian.process_one`` / ``batch.process_batch_run`` for where the
+    ``declined`` tuples returned here become :class:`~athenaeum.models.EscalationItem`\\ s.)
+
+    Args:
+        classified: This file's tier-2 classifications, already passed
+            through :func:`partition_code_artifact_classifications`.
+        knowledge_root: Root of the knowledge base (parent of ``wiki/``) —
+            threaded straight through to :func:`resolve_handle_query`.
+        wiki_root: The compiled wiki directory — likewise threaded through.
+        config: Resolved ``athenaeum.yaml`` dict, threaded to the lookup.
+        excluded_index: An already-built
+            :class:`~athenaeum.pii.ExcludedRecordIndex` (issue athenaeum#883),
+            for a caller resolving many files' addresses in one run so the
+            O(corpus) contacts scan is paid once, not once per address.
+            ``None`` (the default) lets :func:`resolve_handle_query` build one
+            per call, exactly as its own default does.
+
+    Returns:
+        :class:`AddressResolutionOutcome` — ``kept`` (this file's
+        classifications after the gate, in original relative order:
+        non-address classifications and resolved addresses survive, declined
+        addresses do not), ``resolved`` (one ``(address, uid, display_name)``
+        tuple per resolved address, for an INFO log line), and ``declined``
+        (one ``(address_or_name, reason)`` tuple per declined classification,
+        for a WARNING log line and an escalation).
+    """
+    from athenaeum.identity_resolution import carries_email_shape, sole_email_token
+
+    kept: list[ClassifiedEntity] = []
+    resolved: list[tuple[str, str, str]] = []
+    declined: list[tuple[str, str]] = []
+
+    for c in classified:
+        if not carries_email_shape(c.name):
+            # Fast path (byte-identical to pre-athenaeum#1126 behaviour): no
+            # lookup of any kind for the overwhelming majority of
+            # classifications, which never carry an address at all.
+            kept.append(c)
+            continue
+
+        address = sole_email_token(c.name)
+        if address is None:
+            # 2+ addresses in one name: never a legitimate page name (AC4),
+            # and it names no single address to resolve.
+            declined.append((c.name, "ambiguous-subject"))
+            continue
+
+        # Lazy import (module-local, matching the convention this repo
+        # already uses on this path) to avoid a tiers <-> identity_resolution
+        # import cycle at module load time.
+        from athenaeum.identity_resolution import resolve_handle_query
+
+        # with_pii=False (athenaeum#1126 QA finding): this gate consumes only
+        # resolution.resolved/.uid/.reason — never .contact_values/.redactions
+        # — and identity_resolution._finish's with_pii gating affects ONLY
+        # _assemble_contact_values' payload shape, never those three fields.
+        # The owning uid is all this seam needs, so it takes the redacted
+        # read rather than materializing real contact values into a write
+        # path that would discard them; resolution semantics are identical
+        # either way.
+        resolution = resolve_handle_query(
+            knowledge_root,
+            wiki_root,
+            address,
+            with_pii=False,
+            config=config,
+            excluded_index=excluded_index,
+        )
+        if resolution is None:
+            # Not handle-shaped per the sanctioned detector — defensive; should
+            # not happen for a value that just passed the email-shape check.
+            declined.append((address, "not-handle-shaped"))
+            continue
+        if resolution.resolved and resolution.uid:
+            c.is_new = False
+            c.existing_uid = resolution.uid
+            c.name = resolution.display_name or resolution.uid
+            kept.append(c)
+            resolved.append((address, resolution.uid, c.name))
+        else:
+            declined.append((address, resolution.reason or "no-match"))
+
+    return AddressResolutionOutcome(
+        kept=kept, resolved=tuple(resolved), declined=tuple(declined)
+    )
 
 
 # ---------------------------------------------------------------------------
