@@ -136,6 +136,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nightly librarian run and every existing write/read path are byte-for-byte
   unchanged with these keys at their defaults.
 
+- **Tier-2 no longer mints a NEW entity named after a bare email address
+  (athenaeum#1126).** `athenaeum.tiers.resolve_address_named_classifications`
+  runs immediately after the athenaeum#680 code-artifact gate, at both
+  transports: an address-shaped classification is resolved to its owning
+  entity via the sanctioned `identity_resolution.resolve_handle_query`
+  reverse lookup (becoming an `update` action against that uid) or, when
+  resolution finds nothing, DECLINED and escalated to
+  `_pending_questions.md` — never minted as an address-named page. A
+  non-address classification takes an unchanged fast path with no lookup.
+
 ### Changed
 
 - **`enumerate_entities` no longer PII-gates `do_not_email` (athenaeum#1122).**
