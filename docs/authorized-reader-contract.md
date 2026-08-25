@@ -50,6 +50,27 @@ whether the address is on the excluded surface at all — never left to be
 inferred from an empty result. §3 below explains why that distinction is
 load-bearing.
 
+**A note on a different `do_not_email`, so the two are not conflated
+(athenaeum#1122).** Everything in this document — `DoNotEmailState`,
+`do_not_email_state`, `facts.do_not_email.marked` in §3's example — concerns
+the excluded-surface record this document is about, reached only through
+`recall`/`read_identifier_facts`/`read_entity` because its lookup KEY is an
+email address on that excluded surface. That is a separate mechanism from
+the plain `do_not_email:` frontmatter field a wiki page carries as an
+ordinary field, which `athenaeum.enumeration` reads and predicates on like
+any other field (`current_company`, `warm_score`, ...). The latter was gated
+behind `enumerate_entities`'s `with_pii=True` since this module's own
+introduction (athenaeum#965 AC amendment 1) until athenaeum#1122, on the
+theory that anything email-suppression-shaped needed the same guard as the
+excluded-surface record; the operator ruled that
+theory wrong — the frontmatter boolean (and its `_reason`/`_date`
+companions) has no excluded-surface join and no durable identifier value,
+so `enumerate_entities` no longer gates it. This document's
+`with_pii=True`, everywhere it appears above and below, refers only to the
+excluded-surface record join and is unaffected by that change; see
+`athenaeum/enumeration.py`'s "PII-gated fields" docstring section for the
+frontmatter-field gate's own rationale.
+
 ## 1. The authorized-reader model
 
 `pii: excluded` in `athenaeum.yaml`'s `storage.mapping` keeps a class of data

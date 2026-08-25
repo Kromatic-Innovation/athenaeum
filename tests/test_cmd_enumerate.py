@@ -130,6 +130,31 @@ class TestCmdEnumerate:
     def test_pii_field_without_flag_errors_cleanly(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        # google_contact_* stays gated after athenaeum#1122 (do_not_email was
+        # the only field ungated) — use it to pin the without-flag error path.
+        knowledge = _write_wiki(tmp_path)
+        args = argparse.Namespace(
+            entity_type="person",
+            where=[],
+            sort_key="name",
+            ascending=False,
+            limit=50,
+            cursor=None,
+            field=["google_contact_kromatic"],
+            with_pii=False,
+            audience=None,
+            path=knowledge,
+            cache_dir=tmp_path / "cache",
+        )
+        rc = cmd_enumerate(args)
+        assert rc == 1
+        assert "with_pii" in capsys.readouterr().err
+
+    def test_do_not_email_field_without_flag_succeeds(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # athenaeum#1122: do_not_email is no longer PII-gated — must succeed
+        # without with_pii.
         knowledge = _write_wiki(tmp_path)
         args = argparse.Namespace(
             entity_type="person",
@@ -145,8 +170,9 @@ class TestCmdEnumerate:
             cache_dir=tmp_path / "cache",
         )
         rc = cmd_enumerate(args)
-        assert rc == 1
-        assert "with_pii" in capsys.readouterr().err
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["hits"]
 
     def test_missing_wiki_root(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

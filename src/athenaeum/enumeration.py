@@ -47,23 +47,49 @@ a field this deployment doesn't use simply matches nothing rather than being
 rejected. ``entity_schema``'s reported ``fields`` per class is where a caller
 DISCOVERS what is predicable — this module does not re-validate against it.
 
-**PII-gated fields (AC amendment 1).** ``google_contact_*`` (the out-of-band
-contact join key) and ``do_not_email`` (the opt-out signal) are readable —
-as predicates AND as requested output fields — from the SAME on-page
-frontmatter as every other field, gated behind ``with_pii=True``: the
-identical flag CONTRACT ``recall(with_pii=...)`` already uses (a boolean
-gate a caller opts into), not the excluded-surface RECORD JOIN
-``recall(with_pii=True)`` performs for a person's contact data (see
-``pii.assemble_excluded_read``). That join resolves values from an
-off-corpus store for ONE hit at a time; reusing it here for every
-type-filtered candidate would be a materially heavier operation with no
-acceptance criterion asking for it. A caller that needs the full excluded-
-surface record for an enumerated hit still follows up with
-``recall(with_pii=True)`` or ``read_entity`` by the returned ``uid`` — this
-module's job is discovery (which uids match), not the deep contact read.
-Referencing either field without ``with_pii=True`` raises ``ValueError``
-up front rather than silently omitting it, so a caller cannot mistake
-"I forgot the flag" for "this field has no value".
+**PII-gated fields (AC amendment 1; narrowed by athenaeum#1122).** The gate
+exists for fields whose VALUE is not itself sensitive but whose presence is a
+durable, cross-system identifier — a key that lets a holder join this
+person's wiki page to an out-of-band store. ``google_contact_*`` is exactly
+that: a join key into a contact system outside the corpus. Gating it means a
+caller must opt in (``with_pii=True``, the identical flag CONTRACT
+``recall(with_pii=...)`` already uses — a boolean gate a caller opts into,
+not the excluded-surface RECORD JOIN ``recall(with_pii=True)`` performs for a
+person's contact data, see ``pii.assemble_excluded_read``) before this module
+will use it as a predicate or return it as an output field, from the SAME
+on-page frontmatter every other field is read from. Referencing a gated
+field without the flag raises ``ValueError`` up front rather than silently
+omitting it, so a caller cannot mistake "I forgot the flag" for "this field
+has no value".
+
+``do_not_email`` was gated here since ``athenaeum.enumeration``'s own
+introduction (issue athenaeum#965 AC amendment 1) until athenaeum#1122, on the
+theory that anything touching a person's email relationship warranted the
+same guard as a contact join key. The operator
+ruled that theory wrong: ``do_not_email`` is a suppression-opt-out BOOLEAN on
+ordinary on-page frontmatter, with no excluded-surface record join and no
+durable identifier value to protect — the same shape as ``current_company``
+or any other plain field this module never gated. Gating it bought no
+privacy protection while imposing a real cost: it made the SAFEST possible
+question — "who may I *not* contact" (``enumerate_entities(predicates=["do_not_email
+!= true"])``, the `ne`-predicate's own motivating example above) — require a
+*broader* grant than asking who someone works for. athenaeum#1122 removed
+``do_not_email`` from ``_PII_GATED_EXACT_FIELDS`` (now empty) and
+deliberately did not add ``do_not_email_reason`` / ``do_not_email_date`` in
+its place, for the same reason: a reason string and a date are no more a
+durable cross-system identifier than the boolean they annotate. This is
+unrelated to, and does not change, the separate ``recall`` / ``read_entity``
+reverse-lookup path, where ``with_pii=True`` stays required because there the
+lookup KEY is an email address on the excluded surface (see
+``docs/authorized-reader-contract.md``) — this module never looks anything
+up by address.
+
+A caller that needs the full excluded-surface record for an enumerated hit
+still follows up with ``recall(with_pii=True)`` or ``read_entity`` by the
+returned ``uid`` — reusing that join here for every type-filtered candidate
+would be a materially heavier operation with no acceptance criterion asking
+for it, and this module's job is discovery (which uids match), not the deep
+contact read.
 
 **Audience scoping (issue athenaeum#538).** Fail-closed, identical to every
 other read tool: :func:`athenaeum.models.is_page_authorized` re-checked
@@ -114,8 +140,12 @@ PREDICATE_KINDS: tuple[str, ...] = ("eq", "substring", "regex")
 #: are all durable-identifier fields sharing this one prefix). Checked at the
 #: API boundary before any candidate is read, so a caller that forgets the
 #: flag gets a loud, immediate error rather than a field that is silently
-#: absent from every hit.
-_PII_GATED_EXACT_FIELDS: frozenset[str] = frozenset({"do_not_email"})
+#: absent from every hit. Empty on purpose (athenaeum#1122 ungated
+#: ``do_not_email``, its last member) — kept, rather than deleted, as the
+#: honest declaration that the exact-name gate mechanism still exists and is
+#: simply unpopulated today; see the "PII-gated fields" section below for
+#: why nothing currently belongs here.
+_PII_GATED_EXACT_FIELDS: frozenset[str] = frozenset()
 _PII_GATED_FIELD_PREFIXES: tuple[str, ...] = ("google_contact",)
 
 

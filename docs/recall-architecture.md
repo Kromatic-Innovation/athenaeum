@@ -380,7 +380,8 @@ more field predicates, a sort key, and a limit — and no query string.
   `athenaeum people --company`'s `current_company` /
   `linkedin_company_at_connect` shape) — and a match kind: `eq` (exact),
   `substring`, or `regex`, all case-insensitive. `ne` is `eq` negated (e.g.
-  `do_not_email != true`), not a fourth independent kind.
+  `do_not_email != true`, usable without `with_pii` since athenaeum#1122 —
+  see the scoping note below), not a fourth independent kind.
 - A caller-named `sort_key` (any frontmatter field), descending by default.
   Ties — including an entire class sharing one sort value — are always
   broken by `uid` ascending, regardless of sort direction. Values that parse
@@ -394,11 +395,15 @@ more field predicates, a sort key, and a limit — and no query string.
 - Every hit carries `uid`, `type`, `name`. A caller may request additional
   declared `fields` per hit; a field absent on a given page is included as
   `null`, never silently omitted, so every hit has the same shape.
-- `google_contact_*` and `do_not_email` are usable as predicates AND as
-  requested output fields, gated behind `with_pii=True` — the SAME flag
-  contract `recall(with_pii=...)` already uses. Referencing either without
-  the flag raises (CLI: nonzero exit + message; MCP: an `error` key in the
-  response) rather than silently omitting the field.
+- `google_contact_*` is usable as a predicate AND as a requested output
+  field, gated behind `with_pii=True` — the SAME flag contract
+  `recall(with_pii=...)` already uses. Referencing it without the flag
+  raises (CLI: nonzero exit + message; MCP: an `error` key in the response)
+  rather than silently omitting the field. `do_not_email` (and its
+  `_reason` / `_date` companions) is usable the same way but is **not**
+  gated (athenaeum#1122 removed it from `_PII_GATED_EXACT_FIELDS`, which is
+  now empty) — see the scoping note below for why the two fields are no
+  longer treated alike.
 - Fail-closed audience scoping (issue athenaeum#538), identical to every other
   read tool: a restricted `caller_audience` never enumerates a page it may
   not read.
@@ -439,16 +444,32 @@ against a different `(entity_type, sort_key, descending)` than it was
 minted under raises/errors rather than silently returning nonsense.
 
 **PII-gated fields — scoping note.** `google_contact_*` and `do_not_email`
-are read from the SAME on-page frontmatter as every other field — this is
-NOT `recall(with_pii=True)`'s excluded-surface RECORD JOIN (which resolves
-values from an off-corpus contact store for one hit at a time via
+are BOTH read from the SAME on-page frontmatter as every other field — this
+is NOT `recall(with_pii=True)`'s excluded-surface RECORD JOIN (which
+resolves values from an off-corpus contact store for one hit at a time via
 `pii.assemble_excluded_read`). Enumeration's job is discovery — which
 `uid`s match — not the deep per-entity contact read; a caller that needs
 the full excluded-surface record for an enumerated hit still follows up
-with `recall(with_pii=True)` or `read_entity` by the returned `uid`. What
-`with_pii=True` adds here is narrower and cheaper: it is the access GATE on
-these two specific field names (as predicate or output), matching the flag
-CONTRACT `recall` uses, not its join mechanism.
+with `recall(with_pii=True)` or `read_entity` by the returned `uid`.
+
+Only `google_contact_*` is actually gated. The gate targets fields whose
+VALUE is a durable, cross-system join key — `google_contact_*` lets a
+holder join this wiki page to an out-of-band contact system — not fields
+that merely relate to email. `do_not_email` was gated on that broader,
+looser theory since this module's introduction (athenaeum#965 AC amendment 1)
+until athenaeum#1122, when the operator
+ruled it wrong: the field is a plain suppression-opt-out boolean with no
+excluded-surface join and no durable identifier value, the same shape as
+`current_company` or any other ungated field, and gating it made the
+*safest* possible question (`do_not_email != true`, the `ne`-predicate
+example above) require a *broader* grant than an unrelated one. athenaeum#1122
+removed `do_not_email` from `_PII_GATED_EXACT_FIELDS` (now empty) and
+deliberately left `do_not_email_reason` / `do_not_email_date` ungated too,
+for the identical reason. This is unrelated to the separate `recall` /
+`read_entity` reverse-lookup path, where `with_pii=True` stays required
+because there the lookup KEY is an email address on the excluded surface
+(`docs/authorized-reader-contract.md`) — enumeration never looks anything up
+by address, so that constraint never applied here.
 
 **Capability parity with `athenaeum people`.** `athenaeum people` was
 deprecated by athenaeum#966 in favour of the generalized primitive below and
