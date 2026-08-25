@@ -359,9 +359,12 @@ def recompare_pending_merges(
                     pair_verdicts[key] = dry.verdict
 
         aggregate = aggregate_verdict(pair_verdicts)
+        # athenaeum#715: "If the re-run's verdict for either is `duplicate`, it
+        # still routes to a human." That is unconditional here rather than a
+        # branch on the verdict: a hazardous proposal is never compared at
+        # all, so its aggregate is always None and there is no duplicate
+        # verdict to special-case. Routing is decided by the hazard alone.
         route = ROUTE_HUMAN if is_hazard else ROUTE_LEDGER
-        if is_hazard and aggregate == VERDICT_DUPLICATE:  # pragma: no cover - defensive
-            notes.append("duplicate verdict on a PII-hazard proposal still routes to a human")
         results.append(
             ProposalRecompare(
                 proposal_id=proposal.id,
