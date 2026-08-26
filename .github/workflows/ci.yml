@@ -19,9 +19,21 @@ name: CI
 # SHA that develop already tested, an independent main-triggered run would be
 # a pure duplicate of the develop run (CI-bill audit).
 
+# `workflow_dispatch` (athenaeum#1159) exists so a develop SHA can be stamped
+# with a `CI Required` check-run on demand. With `pull_request` as the only
+# trigger, no run ever attaches to a develop tip commit, and promote-main.yml's
+# gate (which reads check-runs off that tip, falling back to the PR head only
+# when the trees are byte-identical — cwc#2627) wedges until an unrelated push
+# lands. A manual dispatch on develop resolves it, and cwc#2749's terminal gate
+# rung dispatches this workflow programmatically for the same reason. Every job
+# below is unconditional (no `if:`, no `paths:` filter) and no step reads
+# `github.event.pull_request`, `github.head_ref` or `github.base_ref`, so the
+# `test`/`types`/`public-safe-lint` fan-in the aggregate reads behaves
+# identically on a dispatch event as on a pull_request event.
 on:
   pull_request:
     branches: [develop]
+  workflow_dispatch:
 
 # Cancel a superseded run when a newer commit lands on the same ref (M23,
 # hestia#548). Keyed on workflow + ref so runs for different pull requests
