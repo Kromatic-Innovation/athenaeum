@@ -92,6 +92,7 @@ wins** — a candidate file matches at most one rule per run.
 | `filename_glob` | the raw file's filename | glob pattern |
 | `key_fingerprint` | the matched RECORD's top-level key set (§3.1) | 16 lowercase hex chars |
 | `fields` | individual record field values, top-level OR nested (§3.2) | `{<field>: <predicate>}` |
+| `unclaimed` | whether the candidate is an audit-unclaimed file rather than an ordinary raw file (§3.4) | `true` \| `false` (default `false`) |
 
 ### 3.1 The "record" a rule matches against
 
@@ -174,6 +175,62 @@ One exception: a source directory that is itself a configured
 descended into here — that tree already has its own dedicated discovery
 function (`discover_auto_memory_files`) and frontmatter schema, so this
 descent would otherwise double-discover every auto-memory file.
+
+### 3.4 Matching audit-unclaimed files (issue athenaeum#1133)
+
+The unrecognised-raw-intake audit (issue athenaeum#836, `athenaeum.intake_audit`)
+finds files neither `discover_raw_files` nor `discover_auto_memory_files`
+would ever claim — wrong extension, or a filename that misses a naming
+convention — and, by default, only ever **raises a pending decision**
+about them (`_pending_questions.md`). It never disposes of them. This is
+the alternative path: an operator rule that opts in with `match: {unclaimed:
+true, ...}` can give such files a real disposition instead of only a
+notification.
+
+```yaml
+version: 1
+name: drop-empty-exports
+mode: observe
+match:
+  unclaimed: true
+  source: daily-activity
+  filename_glob: "*.txt"
+disposition: drop
+```
+
+**Opt-in is explicit, never inferred.** A plain rule (`unclaimed` omitted
+or `false`) matches only ordinary claimed candidates, exactly as before;
+an `unclaimed: true` rule matches *only* audit-unclaimed candidates. A
+rule can never match both kinds — this is a hard partition, not a
+preference.
+
+**What is legal against an unclaimed candidate:** `source`,
+`filename_glob` — both work off the file's path, which is all that is
+known about it. **What is illegal, rejected at rule LOAD time with an
+actionable error:**
+
+- `fields` — an unclaimed file has no parseable record (no frontmatter, no
+  first-line JSON) to match fields against.
+- `key_fingerprint` — same reason: no record, no key set to fingerprint.
+- `format` — typed as `md` \| `jsonl` only, so it can never equal an
+  unclaimed file's actual extension; it would silently never match.
+
+**Dispositions.** `drop`, `retain`, and `preserve` all work exactly as
+they do for an ordinary raw file — see §5. `fallthrough` is legal too (a
+no-op: the file is simply left for the intake audit's usual pending-decision
+path). `emit` and `rollup` are rejected at load time — both require a
+`correction` block that compiles record fields, and an unclaimed candidate
+has none. A `preserve` rule may still carry a `correction` referencing a
+`$field`, but resolving it against an empty record degrades safely to
+`transform-error` (the file is left untouched) — almost certainly a rule
+author's mistake, since there is no field to reference.
+
+**Default behaviour is unchanged.** With no `unclaimed: true` rule loaded
+(or no rule at all), an audit-unclaimed candidate is evaluated, matches
+nothing, and is left exactly where the intake audit would have found it —
+same pending-decision flow as before this issue. Resolving that pending
+decision remains available and is unaffected by this mechanism; the two
+are independent ways of answering the same underlying question.
 
 ---
 
