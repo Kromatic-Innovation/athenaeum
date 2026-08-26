@@ -158,7 +158,16 @@ class TestFormatBudgetWindowSpend:
         monkeypatch.setenv("ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY", "5000")
         ledger = tmp_path / "spend.jsonl"
         monkeypatch.setenv("ATHENAEUM_SPEND_LEDGER", str(ledger))
-        _write_ledger_record(ledger, provider="claude-cli", total_tokens=4000)
+        # input_tokens/output_tokens set explicitly (issue athenaeum#1137's
+        # cache-inclusive basis reads those fields, not total_tokens
+        # directly) — a real ledger row always carries them.
+        _write_ledger_record(
+            ledger,
+            provider="claude-cli",
+            input_tokens=4000,
+            output_tokens=0,
+            total_tokens=4000,
+        )
 
         ctx = _finalize_ctx(tmp_path)
         ctx.provider = "claude-cli"

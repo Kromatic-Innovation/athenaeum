@@ -512,6 +512,30 @@ class TestTokenUsage:
         assert usage.api_calls == 2
         assert usage.total_tokens == 425
 
+    def test_billable_tokens_includes_cache_but_total_tokens_excludes_it(self) -> None:
+        """AC1/AC2 (athenaeum#1137): billable_tokens is cache-inclusive;
+        total_tokens stays the cache-exclusive hestia contract, unchanged."""
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(254, 59_916, 1_169_154, 2_144_653)  # the recorded 56x-undercount shape
+        assert usage.total_tokens == 60_170
+        assert usage.billable_tokens == 3_373_977
+
+    def test_billable_tokens_does_not_double_count_batch_tokens(self) -> None:
+        """athenaeum#1137: add_batch_tokens folds batch traffic into the four
+        scalar counters (input/output/cache_creation/cache_read) via
+        add_tokens -- billable_tokens must sum only those four scalars, not
+        also add batch_input_tokens etc. on top, or a batch-heavy run would
+        be double-counted against a subscription ceiling."""
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add_batch_tokens(100, 50, 10, 5)
+        assert usage.batch_input_tokens == 100  # tracked separately for pricing...
+        assert usage.input_tokens == 100  # ...AND folded into the scalar counter
+        assert usage.billable_tokens == 165  # 100 + 50 + 10 + 5, counted once
+
     def test_estimated_cost(self) -> None:
         from athenaeum.models import TokenUsage
 

@@ -1298,6 +1298,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tripping the bound after it is quarantined out of the discovery set, so a
   chronically over-bound file is still never retried identically forever.
 
+### Fixed
+
+- **Subscription spend ceilings undercounted real consumption by ~56x
+  (athenaeum#1137).** `TokenUsage.total_tokens` (`input_tokens +
+  output_tokens`) excludes prompt-caching traffic — correct for the metered
+  API path, where cache is priced and reported separately, but wrong for
+  the `claude-cli` SUBSCRIPTION path, whose real quota draw lands
+  overwhelmingly in `cache_creation_input_tokens` /
+  `cache_read_input_tokens`. A real recorded run measured 254 input +
+  59,916 output tokens against 1,169,154 cache-creation + 2,144,653
+  cache-read tokens (3,373,977 real tokens vs. a 60,170 `total_tokens`
+  reading) — a `max_tokens_per_day` ceiling gated on `total_tokens` alone
+  would not trip until ~56M tokens of real consumption, effectively
+  disarming it. `TokenUsage` now exposes a SEPARATE `billable_tokens`
+  counter (input + output + cache-creation + cache-read; batch tokens are
+  not double-counted, since `add_batch_tokens` already folds them into the
+  four scalar counters) that the subscription branch of
+  `spend.ceiling_tripped` (per-run, per-day, and the athenaeum#785
+  weekly-derived ceiling), `spend.spend_today`'s `subscription_tokens`
+  figure, and `spend.record_spend`'s / `record_spend_per_knob_provider`'s
+  empty-run guard now compare against. `total_tokens` itself is UNCHANGED
+  in definition and every existing consumer — it remains the cross-repo
+  contract matching hestia's `cost-ledger.ts` `CostLedgerTokens` shape
+  (`tokens_by_model`/`tokens_by_knob`'s `{input, output, total}`), so
+  hestia's reader keeps reading byte-identical values. `athenaeum spend
+  --json`'s `subscription` bucket gains an additive `billable_tokens` field
+  (alongside the unchanged `total_tokens`) reporting the same cache-inclusive
+  figure the ceiling guards, so the report and the guard always agree; the
+  human-readable report's `Subscription` headline and its `--by-model` /
+  `--by-provider` / `--by-knob` subscription sub-lines now render this
+  figure too. A cache-only subscription run (zero input, zero output —
+  possible when every prompt hits a full cache) used to be silently
+  dropped from the ledger entirely by the same `total_tokens`-gated
+  no-op guard; it is now recorded.
+
 ### Removed
 
 - **`pii.read_person` / `pii.read_people`, the `read_person` MCP tool, and the
