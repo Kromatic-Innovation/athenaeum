@@ -27,6 +27,7 @@ from athenaeum.compiled_exempt import load_exempt
 from athenaeum.config import resolve_preserved_log_adapter, resolve_preserved_log_dir
 from athenaeum.corrections import find_correction_batches
 from athenaeum.intake import discover_raw_files
+from athenaeum.intake_audit import discover_unclaimed_shape_rule_candidates
 from athenaeum.rules import (
     PRESERVED_LOG_SOURCE_SCHEME,
     TERMINAL_DISPOSITIONS,
@@ -280,6 +281,38 @@ class TestPreserveMovesTheFile:
         assert summary["dispositions"] == {"observed-preserve": 1}
         assert raw_path.exists()
         assert not (tmp_path / PRESERVED).exists()
+
+
+class TestUnclaimedPreserve:
+    """issue athenaeum#1133 AC2: `preserve` works on an audit-unclaimed
+    file, same as `drop`/`retain`. No `correction` block -- a no-record
+    `preserve` rule must set `correction: null`, already legal
+    (`_CORRECTION_OPTIONAL`)."""
+
+    def test_preserve_moves_an_unclaimed_txt_file(self, tmp_path: Path) -> None:
+        _write_rule(
+            tmp_path / "rules",
+            "r1.yaml",
+            {
+                "version": 1,
+                "name": "preserve-stray-txt",
+                "mode": "live",
+                "match": {"unclaimed": True, "source": "hestia-lanes"},
+                "disposition": "preserve",
+            },
+        )
+        raw_path = tmp_path / "raw" / "hestia-lanes" / "dump.txt"
+        raw_path.parent.mkdir(parents=True)
+        raw_path.write_text("plain log text\n", encoding="utf-8")
+        candidates = discover_unclaimed_shape_rule_candidates(tmp_path / "raw", tmp_path)
+
+        summary = _run(tmp_path, unclaimed_candidates=candidates)
+
+        assert summary["dispositions"] == {"preserve": 1}
+        assert not raw_path.exists()
+        dest = tmp_path / PRESERVED / "hestia-lanes" / "dump.txt"
+        assert dest.is_file()
+        assert dest.read_text(encoding="utf-8") == "plain log text\n"
 
 
 class TestPreserveLedger:
