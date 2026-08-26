@@ -314,6 +314,87 @@ class TestUnclaimedPreserve:
         assert dest.is_file()
         assert dest.read_text(encoding="utf-8") == "plain log text\n"
 
+    def test_no_record_preserve_with_broken_field_correction_degrades_to_transform_error(
+        self, tmp_path: Path
+    ) -> None:
+        """`docs/shape-rules.md` §3.4: "a `preserve` rule may still carry a
+        `correction` referencing a `$field`, but resolving it against an
+        empty record degrades safely to `transform-error`" -- an unclaimed
+        candidate's record is always `{}` (no frontmatter, no first-line
+        JSON), so ANY `$field` reference in the correction is unresolvable.
+        Mirrors ``TestFactCarriesSourcePointer.test_transform_failure_leaves_the_log_in_raw``
+        for the claimed-file case; this is the no-record equivalent."""
+        _write_rule(
+            tmp_path / "rules",
+            "r1.yaml",
+            {
+                "version": 1,
+                "name": "preserve-stray-txt-with-correction",
+                "mode": "live",
+                "match": {"unclaimed": True, "source": "hestia-lanes"},
+                "disposition": "preserve",
+                "correction": _bounce_correction(),
+            },
+        )
+        raw_path = tmp_path / "raw" / "hestia-lanes" / "dump.txt"
+        raw_path.parent.mkdir(parents=True)
+        raw_path.write_text("plain log text\n", encoding="utf-8")
+        candidates = discover_unclaimed_shape_rule_candidates(tmp_path / "raw", tmp_path)
+
+        summary = _run(tmp_path, unclaimed_candidates=candidates)
+
+        assert summary["dispositions"] == {"transform-error": 1}
+        # The transform failure must leave the file exactly where it was --
+        # never half-moved.
+        assert raw_path.exists()
+        assert not (tmp_path / PRESERVED).exists()
+
+    def test_preserve_moves_an_unclaimed_file_via_storage_adapter(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """issue athenaeum#1132's storage-adapter seam
+        (``preserve_raw_file_via_store``) applied to an unclaimed candidate --
+        the code path is the same regardless of ``is_unclaimed``, but that
+        path is freshly rewritten by athenaeum#1132 and was explicitly called
+        out for verification, so it gets its own pin rather than resting on
+        "the code is identical" alone."""
+        outside = tmp_path_factory.mktemp("mural-outside-unclaimed")
+        adapter_name = "mural-archive-unclaimed"
+        config = {
+            "librarian": {"preserved_log_adapter": adapter_name},
+            "storage": {
+                "adapters": {
+                    adapter_name: {
+                        "backing_store": "filesystem",
+                        "surface_root": str(outside),
+                    }
+                }
+            },
+        }
+        _write_rule(
+            tmp_path / "rules",
+            "r1.yaml",
+            {
+                "version": 1,
+                "name": "preserve-stray-txt-via-adapter",
+                "mode": "live",
+                "match": {"unclaimed": True, "source": "hestia-lanes"},
+                "disposition": "preserve",
+            },
+        )
+        raw_path = tmp_path / "raw" / "hestia-lanes" / "dump.txt"
+        raw_path.parent.mkdir(parents=True)
+        raw_path.write_text("plain log text\n", encoding="utf-8")
+        candidates = discover_unclaimed_shape_rule_candidates(tmp_path / "raw", tmp_path)
+
+        summary = _run(tmp_path, config=config, unclaimed_candidates=candidates)
+
+        assert summary["dispositions"] == {"preserve": 1}
+        assert not raw_path.exists()
+        dest = outside / "hestia-lanes" / "dump.txt"
+        assert dest.is_file()
+        assert dest.read_text(encoding="utf-8") == "plain log text\n"
+
 
 class TestPreserveLedger:
     """AC3: the move is a terminal disposition in the audit ledger and
