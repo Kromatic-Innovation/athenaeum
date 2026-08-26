@@ -2244,6 +2244,41 @@ class TokenUsage:
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 
+    @property
+    def billable_tokens(self) -> int:
+        """Cache-inclusive token count (issue athenaeum#1137).
+
+        ``total_tokens`` (above) excludes prompt-caching traffic (issue
+        athenaeum#230) — correct for the metered API path, where cache
+        creation/read are priced and reported separately via
+        ``estimated_cost_usd``. The ``claude-cli`` SUBSCRIPTION path is
+        different: its quota is consumed by cache traffic too, and a real
+        recorded run measured 254 input + 59,916 output tokens against
+        1,169,154 cache-creation + 2,144,653 cache-read tokens — a
+        subscription ceiling gated on ``total_tokens`` alone undercounts
+        real consumption by ~56x. This is the cache-inclusive counter the
+        subscription branch of :func:`athenaeum.spend.ceiling_tripped` (and
+        :func:`athenaeum.spend.spend_today`) compares against instead.
+
+        Deliberately a SEPARATE counter from ``total_tokens`` rather than a
+        redefinition of it: ``total_tokens`` is a cross-repo contract (see
+        :func:`athenaeum.spend.tokens_by_model`'s docstring) matching
+        hestia's ``cost-ledger.ts`` ``CostLedgerTokens`` shape, which
+        excludes cache by definition — redefining it would silently change
+        what hestia reads.
+
+        Batch API tokens (issue athenaeum#236) are NOT added a second time
+        here: :meth:`add_batch_tokens` already folds them into the four
+        scalar counters below via ``add_tokens`` (see that method's body),
+        so they are already included in each of the four terms summed here.
+        """
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
+        )
+
     @staticmethod
     def _cost_for(
         input_tokens: int,
