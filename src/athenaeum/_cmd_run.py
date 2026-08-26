@@ -85,10 +85,27 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
     run_parser.add_argument(
         "--strict-budget",
         action="store_true",
-        help="Exit nonzero when the run trips the API call budget "
+        help="Exit nonzero (1) when the run trips the API call budget "
         "(the DEGRADED path) instead of the default 0. Opt-in, for "
         "exit-code-based alerting; the warning summary and deferred-work "
-        "manifest are written either way.",
+        "manifest are written either way. Broader than a zero-progress "
+        "refusal (fires on ANY deferral, not just a zero-files one) and "
+        "wins if both this and --allow-degraded are set.",
+    )
+    run_parser.add_argument(
+        "--allow-degraded",
+        action="store_true",
+        help="Exit 0 even when the run stopped early for a resource reason "
+        "(budget / spend-ceiling / entity-share) AND committed ZERO files "
+        "-- the athenaeum#1135 DEGRADED REFUSAL, which otherwise exits "
+        "EXIT_LIBRARIAN_REFUSAL (3) by default so a cron wrapper can tell "
+        "'compiled nothing' apart from success by exit code alone. The "
+        "'librarian-run-degraded reason=... files=0 ...' marker line is "
+        "still logged at ERROR either way -- this flag controls only the "
+        "exit code, not the log line. Opt-in escape hatch for a deliberate "
+        "deterministic-phases-only / budget-starved run. --strict-budget "
+        "takes precedence if both are set (see its help). Full exit-code "
+        "contract: docs/exit-codes.md.",
     )
     run_parser.add_argument(
         "--batch-mode",
@@ -205,6 +222,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             cluster_only=getattr(args, "cluster_only", False),
             merge_only=getattr(args, "merge_only", False),
             strict_budget=args.strict_budget,
+            allow_degraded=args.allow_degraded,
             batch_mode=args.batch_mode,
             retire=getattr(args, "retire", None),
             push_after_run=getattr(args, "push_after_run", None),
@@ -232,6 +250,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             cluster_only=getattr(args, "cluster_only", False),
             merge_only=getattr(args, "merge_only", False),
             strict_budget=args.strict_budget,
+            allow_degraded=args.allow_degraded,
             batch_mode=args.batch_mode,
             retire=getattr(args, "retire", None),
             push_after_run=getattr(args, "push_after_run", None),

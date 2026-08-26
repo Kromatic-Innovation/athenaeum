@@ -485,6 +485,143 @@ class TestCeiling:
 
 
 # ---------------------------------------------------------------------------
+# Budget window (issue athenaeum#1135 AC2/6) — today's spend vs. the per-day
+# ceiling, ADDITIVE to the --since-window report, never replacing it.
+# ---------------------------------------------------------------------------
+
+
+class TestBudgetWindowStatus:
+    def test_neither_path_configured(self, ledger: Path) -> None:
+        result = spend.budget_window_status(None, ledger_path=ledger)
+        assert result["api"] == {
+            "configured": False,
+            "cap_usd": None,
+            "consumed_usd": 0.0,
+            "remaining_usd": None,
+            "fraction_consumed": None,
+        }
+        assert result["subscription"] == {
+            "configured": False,
+            "cap_tokens": None,
+            "consumed_tokens": 0.0,
+            "remaining_tokens": None,
+            "fraction_consumed": None,
+        }
+
+    def test_api_path_reports_today_against_the_day_cap(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-07-15T01:00:00Z",
+                    "provider": "anthropic",
+                    "total_tokens": 100,
+                    "estimated_cost_usd": 15.33,
+                }
+            )
+            + "\n"
+        )
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", "15.00")
+        result = spend.budget_window_status(None, ledger_path=ledger, now=now)
+        assert result["api"]["configured"] is True
+        assert result["api"]["cap_usd"] == 15.00
+        assert result["api"]["consumed_usd"] == 15.33
+        assert result["api"]["remaining_usd"] == pytest.approx(-0.33)
+        assert result["subscription"]["configured"] is False
+
+    def test_subscription_path_reports_today_against_the_day_cap(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-07-15T01:00:00Z",
+                    "provider": "claude-cli",
+                    "total_tokens": 4000,
+                    "estimated_cost_usd": 0.0,
+                }
+            )
+            + "\n"
+        )
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY", "5000")
+        result = spend.budget_window_status(None, ledger_path=ledger, now=now)
+        assert result["subscription"]["configured"] is True
+        assert result["subscription"]["cap_tokens"] == 5000
+        assert result["subscription"]["consumed_tokens"] == 4000.0
+        assert result["subscription"]["remaining_tokens"] == 1000.0
+        assert result["subscription"]["fraction_consumed"] == pytest.approx(0.8)
+        assert result["api"]["configured"] is False
+
+    def test_never_blended_both_paths_independent(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with ledger.open("w", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "ts": "2026-07-15T01:00:00Z",
+                        "provider": "anthropic",
+                        "total_tokens": 100,
+                        "estimated_cost_usd": 3.0,
+                    }
+                )
+                + "\n"
+            )
+            f.write(
+                json.dumps(
+                    {
+                        "ts": "2026-07-15T02:00:00Z",
+                        "provider": "claude-cli",
+                        "total_tokens": 2000,
+                        "estimated_cost_usd": 0.0,
+                    }
+                )
+                + "\n"
+            )
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", "10.00")
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY", "9000")
+        result = spend.budget_window_status(None, ledger_path=ledger, now=now)
+        assert result["api"]["consumed_usd"] == 3.0
+        assert result["subscription"]["consumed_tokens"] == 2000.0
+
+
+class TestFormatBudgetWindow:
+    def test_none_when_nothing_configured(self) -> None:
+        result = spend.budget_window_status(None, ledger_path=Path("/nonexistent"))
+        assert spend.format_budget_window(result) is None
+
+    def test_renders_configured_api_slot(self) -> None:
+        window = {
+            "api": {
+                "configured": True,
+                "cap_usd": 15.0,
+                "consumed_usd": 7.5,
+                "remaining_usd": 7.5,
+                "fraction_consumed": 0.5,
+            },
+            "subscription": {
+                "configured": False,
+                "cap_tokens": None,
+                "consumed_tokens": 0.0,
+                "remaining_tokens": None,
+                "fraction_consumed": None,
+            },
+        }
+        rendered = spend.format_budget_window(window)
+        assert rendered is not None
+        assert "$7.50" in rendered
+        assert "$15.00" in rendered
+        assert "50%" in rendered
+
+
+# ---------------------------------------------------------------------------
 # Spend headroom + the warning that fires before a ceiling trips (athenaeum#926)
 # ---------------------------------------------------------------------------
 
@@ -915,6 +1052,43 @@ class TestSpendCommand:
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["record_count"] == 0
+
+    def test_json_output_includes_budget_window_when_configured(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue athenaeum#1135 AC2/6: an ADDITIVE ``budget_window`` key,
+        alongside the existing --since-window totals -- never replacing
+        them (the --since default stays 7d)."""
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", "15.00")
+        spend.record_spend(_api_usage(), run_type="librarian", provider="api")
+        rc = main(["spend", "--since", "30d", "--json", "--ledger", str(ledger)])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        # The existing --since-window totals are untouched.
+        assert payload["api"]["estimated_cost_usd"] > 0.0
+        # The additive figure.
+        assert payload["budget_window"]["api"]["configured"] is True
+        assert payload["budget_window"]["api"]["cap_usd"] == 15.00
+        assert payload["budget_window"]["api"]["consumed_usd"] > 0.0
+        assert payload["budget_window"]["subscription"]["configured"] is False
+
+    def test_human_output_includes_budget_window_line(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", "15.00")
+        spend.record_spend(_api_usage(), run_type="librarian", provider="api")
+        rc = main(["spend", "--since", "30d", "--ledger", str(ledger)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Budget window" in out
+
+    def test_human_output_omits_budget_window_when_unconfigured(
+        self, ledger: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = main(["spend", "--since", "30d", "--ledger", str(ledger)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Budget window" not in out
 
 
 # ---------------------------------------------------------------------------

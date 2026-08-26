@@ -43,12 +43,30 @@ Every default figure on this page is verified against the code under
 > ledger sibling below) now carries a `reason=` token distinguishing a clean
 > completion (`reason=completed`) from a share/floor-driven yield
 > (`reason=entity-share`, the entity phase only — fired whichever of
-> `entity_runtime_share` or `intake_runtime_floor` bound first) or a
-> deadline/budget trip (`reason=deadline` / `reason=budget`) — the same
-> vocabulary `wiki/_deferred_work.md`'s `reason:` header already uses. This
-> answers athenaeum#608's original question ("did the resolver get a
+> `entity_runtime_share` or `intake_runtime_floor` bound first), a
+> deadline trip (`reason=deadline`), an API-call-COUNT budget trip
+> (`reason=budget`), or — as of athenaeum#1135 — a metered-dollar/subscription-token
+> spend-ceiling trip (`reason=spend-ceiling`, distinct from the plain
+> call-count `reason=budget` above so the two are separately greppable) —
+> the same vocabulary `wiki/_deferred_work.md`'s `reason:` header already
+> uses. This answers athenaeum#608's original question ("did the resolver get a
 > representative window, or was it starved?") from the record itself, not
 > from re-deriving it against a WARNING line.
+>
+> **Zero-progress DEGRADED REFUSAL (athenaeum#1135).** When the entity phase's
+> `reason` names an early stop (any of the four non-`completed` values
+> above) AND the run committed zero files
+> (`files_processed_count == 0`), `athenaeum run` logs a dedicated
+> `librarian-run-degraded reason=<reason> files=0 [spend=<consumed>/<cap>]`
+> line at ERROR (a stable, distinct token from `render_run_summary`'s own
+> unrelated `degraded=` field — see that function's docstring) and exits
+> `EXIT_LIBRARIAN_REFUSAL` (`3`) instead of the pre-athenaeum#1135 `0` — so a
+> run that compiled NOTHING is distinguishable from a genuine success by
+> exit code alone, the same standard `athenaeum drain` already holds itself
+> to. `--allow-degraded` exits `0` instead (the marker line is still
+> logged either way); `--strict-budget` (broader: ANY deferral, not just a
+> zero-files one) takes precedence when both flags are set. Full contract:
+> [exit-codes.md](exit-codes.md).
 >
 > The `librarian-run-summary` prose line is unconditionally emitted every
 > run but, unless an operator's deployment happens to pipe logs somewhere
@@ -906,6 +924,7 @@ ratios.** The shape:
 | `by_model` | object | — | Present only with `--by-model`; each model maps to `{subscription, api, unknown}` sub-buckets. |
 | `by_run_type` | object | — | Present only with `--by-provider`; each run type maps to `{subscription, api, unknown}` sub-buckets. |
 | `by_knob` | object | — | Present only with `--by-knob` (issue athenaeum#781); each model knob (`classify` / `write` / `resolve` / `topic` / `reasoning_t1` / `reasoning_t2`) maps to `{subscription, api, unknown}` sub-buckets — the subscription/API split stays intact within each knob, never blended. |
+| `budget_window` | object | — | **Additive (issue athenaeum#1135).** A DIFFERENT question from every field above: those summarise the `--since` window (default 7d); this reports TODAY's spend against the configured PER-DAY ceiling — the same day-scoped figure `spend.ceiling_tripped` enforces during a run — so a consumer can tell whether the ceiling that would stop `athenaeum run` right now is close to tripping. Present unless the best-effort computation failed (never crashes the report). Two sub-objects, `api` and `subscription`, each `{configured, cap_usd\|cap_tokens, consumed_usd\|consumed_tokens, remaining_usd\|remaining_tokens, fraction_consumed}` — `configured=False` (with the rest `None`) when that path's per-day ceiling is unset, mirroring the existing `spend_headroom` slot contract. Never blended with the `--since` totals above or with each other. |
 
 Each **bucket** object carries: `input_tokens`, `output_tokens`,
 `cache_creation_input_tokens`, `cache_read_input_tokens`, `total_tokens`,
