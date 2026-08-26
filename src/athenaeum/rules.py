@@ -104,7 +104,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -1094,6 +1094,47 @@ def preserve_raw_file(
         return None
 
 
+class PreserveViaStoreOutcome(NamedTuple):
+    """Return contract for :func:`preserve_raw_file_via_store` (issue
+    athenaeum#1132, QA follow-up). See that function's docstring for what
+    each field means and why a plain ``Path | None`` stopped being enough --
+    ``preserve`` vs. ``preserve-orphaned-source`` is a real, ledger-visible
+    distinction the caller must not collapse.
+    """
+
+    dest_path: Path | None
+    freshly_written: bool
+    orphaned: bool
+
+
+def _store_object_matches(store: Store, key: StoreKey, data: bytes) -> bool:
+    """Whether the object already at *key* is byte-identical to *data*
+    (issue athenaeum#1132, QA follow-up) -- the ONLY signal
+    :func:`preserve_raw_file_via_store` accepts as proof that a
+    `StoreConflictError` collision is a convergent retry rather than a
+    genuine, unrelated conflict. Fails closed (returns ``False``, never
+    raises) when the existing object cannot even be read -- an unreadable
+    destination is never treated as a match.
+    """
+    try:
+        existing = store.read(key)
+    except (OSError, KeyError):
+        return False
+    return existing == data
+
+
+def _unlink_quietly(path: Path) -> bool:
+    """``Path.unlink()``, returning ``False`` instead of raising on
+    ``OSError`` -- the non-versioned-store removal step
+    :func:`preserve_raw_file_via_store` uses, where a failed removal is a
+    reportable (`preserve-orphaned-source`), not fatal, outcome."""
+    try:
+        path.unlink()
+        return True
+    except OSError:
+        return False
+
+
 def preserve_raw_file_via_store(
     knowledge_root: Path,
     raw_path: Path,
@@ -1102,7 +1143,7 @@ def preserve_raw_file_via_store(
     source: str,
     rule_tag: str,
     store: Store,
-) -> Path | None:
+) -> PreserveViaStoreOutcome:
     """MOVE a log-shaped raw file into a configured storage adapter's surface
     (issue athenaeum#1132) — the ``librarian.preserved_log_adapter``-routed
     counterpart to :func:`preserve_raw_file`, which stays byte-identical for
@@ -1111,18 +1152,34 @@ def preserve_raw_file_via_store(
     **Fail-closed ordering (AC5): put-then-remove, never move-then-confirm.**
     The source bytes are read and handed to :meth:`~athenaeum.store.Store.put`
     with ``expect=None`` (exclusive create) BEFORE the source is touched at
-    all. Only once ``put`` returns successfully is the source removed —
-    never the reverse, so a failed or unconfirmed write can never lose the
-    artifact. ``put`` can raise :class:`~athenaeum.store.StoreConflictError`
-    (a same-named artifact already exists at the destination) or ``OSError``
-    — notably ``EXDEV``, since a routed adapter is routinely on a different
-    filesystem than ``raw/`` (the mural corpus that motivates this issue is
-    exactly that case) — and this function does NOT catch either: the caller
-    (`run_shape_rule_phase`'s `preserve` branch) catches them, tallies the
-    existing `preserve-failed` disposition, logs, and leaves the raw file
-    untouched. Unlike :func:`preserve_raw_file`, there is no filename-suffix
-    retry on a destination collision — a collision is simply a failed
-    preserve.
+    all. Only once ``put`` returns successfully — directly, or via the
+    convergence path below — is the source removed, never the reverse, so a
+    failed or unconfirmed write can never lose the artifact. ``put`` can
+    raise ``OSError`` — notably ``EXDEV``, since a routed adapter is
+    routinely on a different filesystem than ``raw/`` (the mural corpus that
+    motivates this issue is exactly that case) — and this function does NOT
+    catch that: the caller (`run_shape_rule_phase`'s `preserve` branch)
+    catches it, tallies the existing `preserve-failed` disposition, logs,
+    and leaves the raw file untouched. Unlike :func:`preserve_raw_file`,
+    there is no filename-suffix retry on a destination collision.
+
+    **Convergence on a `StoreConflictError` collision (QA follow-up on issue
+    athenaeum#1132).** A collision at the exact destination key is NOT
+    automatically a genuine conflict: it is also exactly what a RETRY looks
+    like after a prior call's `put` succeeded but the source removal below
+    failed (the "orphaned source" case) — `discover_raw_files` re-surfaces
+    the still-present source on the next run, and the same rule re-attempts
+    the same `put` with the same bytes. The only safe way to tell these two
+    cases apart is to compare content: if the existing object at *dest_key*
+    is byte-identical to *raw_path*'s current content, this is that
+    convergence case, and the call proceeds to (re-)attempt removal instead
+    of failing. If the content differs, or the existing object cannot be
+    read at all, this is treated as a genuine, unrelated collision and the
+    original :class:`~athenaeum.store.StoreConflictError` propagates
+    unchanged — fail-closed, matching the pre-existing behavior exactly. A
+    NAME match alone is never sufficient; weakening this to skip the content
+    comparison would let a genuinely different, unrelated artifact silently
+    block (or worse, appear to satisfy) preservation.
 
     Removal of the (now-durably-copied) source mirrors
     :func:`_retire_raw_file`'s existing git-recoverable pattern when
@@ -1136,12 +1193,36 @@ def preserve_raw_file_via_store(
     at the adapter's surface by the time removal is attempted, so recovering
     the SOURCE's deletion via git is a nice-to-have, not a safety requirement.
 
-    Returns the resolved absolute destination path (for
-    :func:`preserved_log_source_pointer`), or ``None`` if *raw_path* no
-    longer exists (mirrors :func:`preserve_raw_file`'s early return).
+    **Ledger honesty (QA follow-up on issue athenaeum#1132).** This function
+    never itself tallies anything — it reports outcome via the returned
+    :class:`PreserveViaStoreOutcome` so the caller can distinguish full
+    success from a durably-written-but-not-yet-retired artifact. Tallying
+    the latter as plain `preserve` would be a live lie: the source stays in
+    `raw/`, `discover_raw_files` re-surfaces it, and the NEXT `put` attempt
+    at the same key would previously have hard-failed forever (no
+    suffix-retry) with no path back to a converged, honest state — exactly
+    the permanently-stuck-with-a-self-contradicting-ledger failure this
+    return contract and the convergence path above exist to prevent.
+
+    Returns a :class:`PreserveViaStoreOutcome`:
+
+    - ``dest_path`` — the resolved absolute destination (for
+      :func:`preserved_log_source_pointer`), or ``None`` if *raw_path* did
+      not exist to begin with (mirrors :func:`preserve_raw_file`'s early
+      return; ``freshly_written``/``orphaned`` are both ``False`` in that
+      case).
+    - ``freshly_written`` — ``True`` only when THIS call's own `put`
+      actually wrote the artifact (as opposed to finding it already present
+      via the convergence path). The caller uses this to avoid re-emitting
+      a correction record/batch for an artifact a PRIOR call already
+      compiled a fact from.
+    - ``orphaned`` — ``True`` when the artifact is durably written (fresh or
+      converged) but this call could not remove the source. The caller
+      tallies `preserve-orphaned-source` rather than `preserve` in that case
+      — never a false terminal success.
     """
     if not raw_path.exists():
-        return None
+        return PreserveViaStoreOutcome(dest_path=None, freshly_written=False, orphaned=False)
     dest_key = StoreKey(surface=adapter_name, key=f"{source}/{raw_path.name}")
     local_path_for = store.capabilities.local_path_for
     if local_path_for is None:  # pragma: no cover - every adapter in this repo is filesystem-backed
@@ -1152,7 +1233,21 @@ def preserve_raw_file_via_store(
         )
     dest_path = local_path_for(dest_key)
     data = raw_path.read_bytes()
-    store.put(dest_key, data, expect=None)  # may raise; caller handles fail-closed
+    freshly_written = True
+    try:
+        store.put(dest_key, data, expect=None)  # may raise; caller handles fail-closed
+    except StoreConflictError:
+        if not _store_object_matches(store, dest_key, data):
+            raise  # genuine collision (or unreadable) -- fail closed, unchanged
+        freshly_written = False
+        log.info(
+            "shape-rules: %s found %s already durably preserved at %s "
+            "(byte-identical) -- converging a prior run's orphaned source "
+            "instead of failing (issue athenaeum#1132)",
+            rule_tag,
+            raw_path,
+            dest_path,
+        )
     if store.capabilities.versioned:
         removed = _retire_raw_file(
             knowledge_root,
@@ -1163,31 +1258,23 @@ def preserve_raw_file_via_store(
             ),
             store=store,
         )
-        if not removed:
-            log.warning(
-                "shape-rules: %s preserved %s to %s via storage adapter %r "
-                "but could not git-remove the source -- the artifact is "
-                "safely duplicated, not lost, but the raw copy was left in "
-                "place for inspection",
-                rule_tag,
-                raw_path,
-                dest_path,
-                adapter_name,
-            )
     else:
-        try:
-            raw_path.unlink()
-        except OSError:
-            log.warning(
-                "shape-rules: %s preserved %s to %s via storage adapter %r "
-                "but could not remove the source -- the artifact is safely "
-                "duplicated, not lost, but the raw copy was left in place",
-                rule_tag,
-                raw_path,
-                dest_path,
-                adapter_name,
-            )
-    return dest_path
+        removed = _unlink_quietly(raw_path)
+    if not removed:
+        log.warning(
+            "shape-rules: %s preserved %s to %s via storage adapter %r but "
+            "could not remove the source -- tallying preserve-orphaned-source "
+            "rather than preserve; the artifact is safely durable, not lost, "
+            "but the raw copy was left in place for inspection and this run "
+            "will retry removal on its next pass (issue athenaeum#1132)",
+            rule_tag,
+            raw_path,
+            dest_path,
+            adapter_name,
+        )
+    return PreserveViaStoreOutcome(
+        dest_path=dest_path, freshly_written=freshly_written, orphaned=not removed
+    )
 
 
 def _retire_raw_file(
@@ -1488,9 +1575,14 @@ def run_shape_rule_phase(
     if not rules:
         return summary
 
-    resolved_store = store if store is not None else resolve_store_for_class(
-        None, config, knowledge_root
-    )
+    # Lazily resolved (issue athenaeum#1132, QA follow-up): building this
+    # unconditionally meant a config with NO preserve+adapter rule at all --
+    # e.g. an unrelated, malformed `storage.adapters` entry -- could abort
+    # the entire shape-rules run via `resolve_store_for_class`'s validation,
+    # a config error that was inert before this feature existed. Resolved
+    # (and cached) only the first time a `preserve` rule actually needs to
+    # route through an adapter, inside the loop below.
+    resolved_store: Store | None = None
     max_records = resolve_shape_rules_max_records_per_run(config)
     # Issue athenaeum#1096: the extra-intake-root subtree (default
     # `raw/auto-memory`) is appended AFTER ordinary intake candidates, not
@@ -1694,8 +1786,17 @@ def run_shape_rule_phase(
                     _tally(rule_tag, matched_rule.mode, "transform-error", raw=raw, record=record)
                     continue
             if preserved_adapter_name is not None:
+                if resolved_store is None:
+                    # Resolve (and cache) on first actual need, not up
+                    # front -- see the lazy-resolution note above
+                    # `max_records` (issue athenaeum#1132, QA follow-up).
+                    resolved_store = (
+                        store
+                        if store is not None
+                        else resolve_store_for_class(None, config, knowledge_root)
+                    )
                 try:
-                    dest = preserve_raw_file_via_store(
+                    outcome = preserve_raw_file_via_store(
                         knowledge_root,
                         raw.path,
                         adapter_name=preserved_adapter_name,
@@ -1704,13 +1805,14 @@ def run_shape_rule_phase(
                         store=resolved_store,
                     )
                 except (OSError, StoreConflictError) as exc:
-                    # AC5 fail-closed: `put` refused or failed (a same-named
-                    # destination, or EXDEV/another physical write error --
-                    # the expected case for a routed adapter on a different
-                    # filesystem, not an edge case). The raw file was never
-                    # touched. Reuse the existing `preserve-failed` tag --
-                    # this is the same outcome the local-directory path
-                    # already reports on a failed move.
+                    # AC5 fail-closed: `put` refused or failed (a genuine,
+                    # content-mismatched collision, or EXDEV/another
+                    # physical write error -- the expected case for a
+                    # routed adapter on a different filesystem, not an edge
+                    # case). The raw file was never touched. Reuse the
+                    # existing `preserve-failed` tag -- this is the same
+                    # outcome the local-directory path already reports on a
+                    # failed move.
                     log.warning(
                         "shape-rules: %s failed to preserve %s via storage "
                         "adapter %r (%s) -- raw file untouched",
@@ -1721,6 +1823,9 @@ def run_shape_rule_phase(
                     )
                     _tally(rule_tag, matched_rule.mode, "preserve-failed", raw=raw, record=record)
                     continue
+                dest = outcome.dest_path
+                freshly_written = outcome.freshly_written
+                orphaned = outcome.orphaned
             else:
                 assert preserved_dir is not None  # guaranteed by the check above
                 dest = preserve_raw_file(
@@ -1730,10 +1835,22 @@ def run_shape_rule_phase(
                     source=raw.source,
                     rule_tag=rule_tag,
                 )
+                # The local-directory path has no convergence concept (a
+                # collision is always suffixed into a fresh, unique
+                # destination -- never a retry against an existing key), so
+                # a successful move is always "fresh" and never orphaned.
+                freshly_written = True
+                orphaned = False
             if dest is None:
                 _tally(rule_tag, matched_rule.mode, "preserve-failed", raw=raw, record=record)
                 continue
-            if corr_record is not None and corr_spec is not None:
+            # Only emit the correction on the call that actually WROTE the
+            # artifact (issue athenaeum#1132, QA follow-up): a converged retry
+            # (`freshly_written=False`) means a PRIOR run already durably
+            # wrote this artifact and, if it carried a correction, already
+            # compiled and wrote that batch -- re-emitting it here would be
+            # a duplicate fact, not a fix.
+            if freshly_written and corr_record is not None and corr_spec is not None:
                 # Point the fact at the artifact WITHOUT disturbing its
                 # precedence. The declared `source` is capped at machine tier
                 # and validated at LOAD time; an unknown source type silently
@@ -1762,6 +1879,39 @@ def run_shape_rule_phase(
                     submitter=f"shape-rule:{rule_tag}",
                     records=[corr_record],
                 )
+            if orphaned:
+                # Ledger honesty (issue athenaeum#1132, QA follow-up): the
+                # artifact is durably written, but the source is still in
+                # raw/ -- tallying this as terminal `preserve` would
+                # contradict the ledger AND permanently jam the file (the
+                # next run's `put` would collide against its own prior
+                # write with no way to distinguish "already done" from "in
+                # conflict" if this call didn't already resolve that via
+                # content comparison). `_disposition_tier` gives this the
+                # same `None` (deferred) tier as `preserve-unconfigured` /
+                # `preserve-failed` by simply not being in
+                # `_TIER_0_DISPOSITIONS`.
+                _tally(
+                    rule_tag,
+                    matched_rule.mode,
+                    "preserve-orphaned-source",
+                    raw=raw,
+                    record=record,
+                )
+                log.info(
+                    "shape-rules: %s preserved %s to %s via storage adapter "
+                    "%r, but the source could not be removed -- tallied "
+                    "preserve-orphaned-source, will retry removal on the "
+                    "next run%s",
+                    rule_tag,
+                    raw.ref,
+                    dest,
+                    preserved_adapter_name,
+                    " (fact already compiled with a source pointer back to it)"
+                    if corr_record is not None
+                    else "",
+                )
+                continue
             _tally(rule_tag, matched_rule.mode, "preserve", raw=raw, record=record)
             log.info(
                 "shape-rules: %s preserved %s as a log artifact at %s%s",
