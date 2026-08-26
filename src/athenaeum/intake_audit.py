@@ -92,6 +92,7 @@ from athenaeum.config import (
     load_config,
     resolve_extra_intake_roots,
     resolve_non_intake_sources,
+    resolve_raw_file_max_bytes,
 )
 from athenaeum.corrections import find_correction_batches
 from athenaeum.fingerprint import RESOLVED_CONTRADICTIONS_RELPATH
@@ -101,7 +102,7 @@ from athenaeum.intake import (
     RAW_FILE_RE,
     auto_memory_type_from_frontmatter,
 )
-from athenaeum.models import parse_frontmatter
+from athenaeum.models import RawFile, parse_frontmatter
 
 log = logging.getLogger(__name__)
 
@@ -300,6 +301,71 @@ def find_unclaimed_raw_files(
     return out
 
 
+def discover_unclaimed_shape_rule_candidates(
+    raw_root: Path,
+    knowledge_root: Path,
+    config: dict[str, Any] | None = None,
+) -> list[RawFile]:
+    """Wrap :func:`find_unclaimed_raw_files` as :class:`RawFile` candidates
+    for the shape-rule phase (issue athenaeum#1133).
+
+    Deliberately lives HERE, not in :mod:`athenaeum.rules` — that module's
+    own docstring fixes it at Layering L3 (imports :mod:`athenaeum.intake`
+    and :mod:`athenaeum.corrections`, both L2, and neither imports back);
+    this module is L4 (imports :mod:`athenaeum.answers`). Importing this
+    module from ``rules.py`` would invert L3->L4 and reintroduce the cycle
+    the layering discipline exists to prevent. Instead, the CALLER
+    (:mod:`athenaeum.librarian`, which already imports both
+    :func:`find_unclaimed_raw_files` and
+    :func:`athenaeum.rules.run_shape_rule_phase`) resolves this list and
+    passes it into ``run_shape_rule_phase``'s ``unclaimed_candidates``
+    keyword — the same "separate discovery function, appended by the
+    caller" shape issue athenaeum#1096 established for
+    :func:`athenaeum.intake.discover_shape_rule_extra_intake_files`.
+
+    Each :class:`~athenaeum.models.UnclaimedFile` becomes one
+    :class:`~athenaeum.models.RawFile`, using the same fallback shape
+    :func:`athenaeum.intake._discover_raw_files_in_dir` already uses on a
+    ``RAW_FILE_RE`` mismatch — ``timestamp=""``, ``uuid8=""``,
+    ``max_content_bytes`` resolved from *config* — since an unclaimed file
+    by definition never matched that naming convention (if it had, it would
+    have been claimed by ordinary discovery instead).
+
+    ``RawFile.source`` is the TOP-LEVEL source directory, never the full
+    ``group_key`` — ``group_key`` can be ``"source/subdir"`` for the
+    nested-descent case (this module's ``len(parts) == 3`` branch above),
+    so it is split and only the first segment is kept, mirroring
+    :func:`athenaeum.intake.discover_raw_files`'s own convention (see also
+    :func:`athenaeum.intake.discover_shape_rule_extra_intake_files`'s
+    docstring, which states the same convention for its own nested
+    candidates). A shape rule's ``match.source`` therefore keeps meaning
+    "which ``raw/<source>/`` tree" for an unclaimed candidate too.
+
+    No de-duplication against :func:`athenaeum.intake.discover_raw_files` /
+    :func:`athenaeum.intake.discover_shape_rule_extra_intake_files` is
+    needed: :func:`find_unclaimed_raw_files` reimplements the claim
+    predicate those two functions apply, so its output is already disjoint
+    from theirs by construction (see that function's own docstring).
+    """
+    unclaimed = find_unclaimed_raw_files(raw_root, knowledge_root, config)
+    if config is None:
+        config = load_config(knowledge_root)
+    raw_file_max_bytes = resolve_raw_file_max_bytes(config)
+    out: list[RawFile] = []
+    for uf in unclaimed:
+        top_level_source = uf.group_key.split("/", 1)[0]
+        out.append(
+            RawFile(
+                path=uf.path,
+                source=top_level_source,
+                timestamp="",
+                uuid8="",
+                max_content_bytes=raw_file_max_bytes,
+            )
+        )
+    return out
+
+
 def _declares_auto_memory_type(fpath: Path) -> bool:
     """True when *fpath*'s own frontmatter declares a recognised memory type.
 
@@ -355,7 +421,11 @@ def _render_raise_text(
         "(issue athenaeum#836). Resolving this stops it from being raised "
         "again on a future run -- it does not, by itself, change what "
         "happens to the files; that remains a separate decision (see also "
-        "athenaeum#837 for the specific case of log-shaped intake).\n\n"
+        "athenaeum#837 for the specific case of log-shaped intake). "
+        "Alternatively (issue athenaeum#1133), an operator rule with "
+        "`match: {unclaimed: true, ...}` can give this whole group a "
+        "disposition (drop/retain/preserve) directly -- see "
+        "docs/shape-rules.md.\n\n"
         f"**Fingerprint**: {fingerprint}"
     )
     return question, context
