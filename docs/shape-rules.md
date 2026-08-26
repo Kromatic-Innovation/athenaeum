@@ -3,9 +3,11 @@
 # The shape-rule engine — declarative YAML rules that compile foreign shapes
 
 **Status:** MVP. Issues athenaeum#901 (engine: `emit`, `fallthrough`),
-athenaeum#903 (`drop`, `retain`, `rollup` + compiled-exempt retirement) and
-athenaeum#837 (`preserve` — the log-shaped intake family). All six dispositions
-now ship. Automatic rule generation is a later slice, not this one.
+athenaeum#903 (`drop`, `retain`, `rollup` + compiled-exempt retirement),
+athenaeum#837 (`preserve` — the log-shaped intake family) and athenaeum#1132 (`preserve`
+routed through a storage adapter, so its target can live outside the
+knowledge git repo). All six dispositions now ship. Automatic rule generation
+is a later slice, not this one.
 
 Companion to [`field-corrections.md`](field-corrections.md), which this
 document assumes throughout — the shape-rule engine's `emit` disposition
@@ -331,20 +333,60 @@ a source document. It is kept whole, kept out of the wiki, and referenced by
 whatever the librarian legitimately learns from it.
 
 **Configure the area first — the feature is opt-in twice over.** A `preserve`
-rule is inert until an operator names a folder under the knowledge root:
+rule is inert until an operator routes it somewhere. There are two ways to do
+that; a given deployment picks one:
 
 ```yaml
-# <knowledge_root>/athenaeum.yaml
+# <knowledge_root>/athenaeum.yaml — local, in-repo area (the original form)
 librarian:
   preserved_log_dir: logs
 ```
 
-Unconfigured, a matching record is tallied `preserve-unconfigured` and falls
-through to the reasoning tiers with the raw file untouched — never a silent
-move to a guessed location. A value that is absolute, or that escapes the
-knowledge root via `..`, is refused with a warning: a preserved artifact
-outside the knowledge git repo is neither versioned nor recoverable, which
-defeats preservation entirely.
+```yaml
+# <knowledge_root>/athenaeum.yaml — routed through a storage adapter (athenaeum#1132),
+# which may point outside the knowledge git repo entirely
+librarian:
+  preserved_log_adapter: mural-archive
+storage:
+  adapters:
+    mural-archive:
+      backing_store: filesystem
+      surface_root: /var/lib/athenaeum-archive   # absolute -- outside the repo
+```
+
+**Where an artifact actually lands is a routing decision, not a property of
+`preserve` itself.** `librarian.preserved_log_dir` names a folder *under the
+knowledge root* — relative, versioned by the same git repo as everything
+else, and unchanged since athenaeum#837. `librarian.preserved_log_adapter` names a
+registered `storage.adapters.<name>` (the same seam
+[`storage-adapter-contract.md`](storage-adapter-contract.md) and
+[`whole-store-adapter-design.md`](whole-store-adapter-design.md) document) and
+routes through it instead — its `surface_root` may be absolute, so the
+artifact can live on a different filesystem or mount than the knowledge repo,
+which is what makes a large corpus (hundreds of megabytes of exported board
+JSON, for example) preservable without committing it into a repo whose value
+is being small and diffable. Precedence when both are set: **the adapter
+wins**, and a warning names the shadowed directory — never a silent pick.
+Unconfigured (neither key set), a matching record is tallied
+`preserve-unconfigured` and falls through to the reasoning tiers with the raw
+file untouched — never a silent move to a guessed location. A
+`preserved_log_dir` value that is absolute, or that escapes the knowledge
+root via `..`, is refused with a warning — that key's contract is "a
+directory under the knowledge root"; an operator who wants to land outside it
+uses `preserved_log_adapter` instead. A `preserved_log_adapter` value naming
+an adapter that is not registered raises loudly — never a silent fallback to
+the directory.
+
+**Fail-closed ordering, and why EXDEV is the expected case, not an edge
+case.** The adapter-routed path never moves the raw file directly: it reads
+the source bytes, writes them to the adapter's surface first (an exclusive
+create — a same-named destination refuses rather than clobbering), and only
+removes the source once that write has actually succeeded. A routed adapter
+is routinely on a different filesystem than `raw/` — the mural corpus that
+motivated athenaeum#1132 is exactly that case — so a cross-device write failure is
+caught the same way any other write failure is: the raw file is left exactly
+where it was, and the record is tallied `preserve-failed`, same as a failed
+move on the local-directory path.
 
 **Why a move, and not `retain`.** `retain` (above) marks a file exempt *where
 it lies*, which is the weaker guarantee: the file stays in the intake tree, so
@@ -399,6 +441,17 @@ The locator after `#` is honest about what the extractor matched (§3.1): a raw
 file yields exactly one record, so the path plus that record's position locates
 it completely — `L1` for a `.jsonl`, `frontmatter` for a `.md`. When the
 extractor grows to multi-record files, that field carries the record index.
+
+**The pointer's scheme never varies by where the artifact was routed
+(athenaeum#1132) — only the path segment does.** `preserved-log:` names the
+provenance *kind*, which is the same fact regardless of backend; a
+`preserved_log_adapter`-routed artifact still produces a `preserved-log:`
+pointer, not a second scheme. What changes is the path segment: when the
+destination resolves under the knowledge root (`preserved_log_dir`, or an
+adapter whose `surface_root` happens to be relative) it is the same
+knowledge-root-relative form as before; when it does not (an out-of-repo
+adapter surface) it is an absolute POSIX path instead — the leading `/`
+disambiguates the two forms with no new field needed.
 
 **Ordering.** The correction is built *before* the move, so a transform that
 cannot resolve leaves the raw file exactly where it was (tallied
