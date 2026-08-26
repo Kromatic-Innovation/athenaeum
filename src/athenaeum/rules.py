@@ -113,6 +113,7 @@ from pydantic import ValidationError as PydanticValidationError
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.compiled_exempt import mark_exempt
 from athenaeum.config import (
+    resolve_preserved_log_adapter,
     resolve_preserved_log_dir,
     resolve_shape_rules_max_records_per_run,
 )
@@ -125,7 +126,14 @@ from athenaeum.models import (
     parse_frontmatter,
 )
 from athenaeum.provenance import parse_source
-from athenaeum.store import FilesystemStore, Store, append_line_durable
+from athenaeum.storage import StorageConfigError, available_adapters, resolve_store_for_class
+from athenaeum.store import (
+    FilesystemStore,
+    Store,
+    StoreConflictError,
+    StoreKey,
+    append_line_durable,
+)
 
 log = logging.getLogger(__name__)
 
@@ -966,6 +974,24 @@ def preserved_log_source_pointer(
     for a ``.md``. When the extractor grows to multi-record files this is the
     field that carries the record index; the format is deliberately shaped to
     take one now rather than needing a second pointer scheme later.
+
+    The path segment varies by DESTINATION, not by backend (issue athenaeum#1132,
+    AC4): the scheme names the provenance *kind*, which stays
+    ``preserved-log`` no matter what storage the artifact was routed through
+    (varying it per backend would be exactly the "second concept" this
+    pointer format is designed to avoid). When *preserved_path* resolves
+    under *knowledge_root* (the local ``librarian.preserved_log_dir`` case,
+    or a ``librarian.preserved_log_adapter`` whose adapter happens to resolve
+    inside the repo) the segment is the existing knowledge-root-relative
+    form, byte-identical to pre-athenaeum#1132 output. When it does not — an
+    out-of-repo adapter surface, the case this issue adds — the
+    ``relative_to`` call below raises ``ValueError`` and the ``except``
+    branch falls back to *preserved_path*'s own absolute POSIX form. That
+    fallback existed before this issue only as an accidental leak (nothing
+    could previously make ``preserved_path`` land outside ``knowledge_root``
+    at all); it is now the INTENDED, tested outside-repo pointer shape — the
+    leading ``/`` is what disambiguates a relative, in-repo segment from an
+    absolute, routed one, with no new field needed.
     """
     try:
         rel = preserved_path.resolve().relative_to(knowledge_root.resolve()).as_posix()
@@ -1066,6 +1092,102 @@ def preserve_raw_file(
             raw_path,
         )
         return None
+
+
+def preserve_raw_file_via_store(
+    knowledge_root: Path,
+    raw_path: Path,
+    *,
+    adapter_name: str,
+    source: str,
+    rule_tag: str,
+    store: Store,
+) -> Path | None:
+    """MOVE a log-shaped raw file into a configured storage adapter's surface
+    (issue athenaeum#1132) — the ``librarian.preserved_log_adapter``-routed
+    counterpart to :func:`preserve_raw_file`, which stays byte-identical for
+    the local, in-repo ``librarian.preserved_log_dir`` case.
+
+    **Fail-closed ordering (AC5): put-then-remove, never move-then-confirm.**
+    The source bytes are read and handed to :meth:`~athenaeum.store.Store.put`
+    with ``expect=None`` (exclusive create) BEFORE the source is touched at
+    all. Only once ``put`` returns successfully is the source removed —
+    never the reverse, so a failed or unconfirmed write can never lose the
+    artifact. ``put`` can raise :class:`~athenaeum.store.StoreConflictError`
+    (a same-named artifact already exists at the destination) or ``OSError``
+    — notably ``EXDEV``, since a routed adapter is routinely on a different
+    filesystem than ``raw/`` (the mural corpus that motivates this issue is
+    exactly that case) — and this function does NOT catch either: the caller
+    (`run_shape_rule_phase`'s `preserve` branch) catches them, tallies the
+    existing `preserve-failed` disposition, logs, and leaves the raw file
+    untouched. Unlike :func:`preserve_raw_file`, there is no filename-suffix
+    retry on a destination collision — a collision is simply a failed
+    preserve.
+
+    Removal of the (now-durably-copied) source mirrors
+    :func:`_retire_raw_file`'s existing git-recoverable pattern when
+    *knowledge_root* is a versioned store (`store.capabilities.versioned`):
+    the source's own content is snapshotted and then `git rm` + committed, so
+    its disappearance is itself recorded in git history — identical to how
+    `drop`/`emit` retirement already works. When *knowledge_root* is NOT a
+    git repo, a plain ``unlink()`` is used instead: unlike
+    :func:`_retire_raw_file`'s own refusal in that case, there is no data-loss
+    risk here to refuse against — the artifact is already confirmed durable
+    at the adapter's surface by the time removal is attempted, so recovering
+    the SOURCE's deletion via git is a nice-to-have, not a safety requirement.
+
+    Returns the resolved absolute destination path (for
+    :func:`preserved_log_source_pointer`), or ``None`` if *raw_path* no
+    longer exists (mirrors :func:`preserve_raw_file`'s early return).
+    """
+    if not raw_path.exists():
+        return None
+    dest_key = StoreKey(surface=adapter_name, key=f"{source}/{raw_path.name}")
+    local_path_for = store.capabilities.local_path_for
+    if local_path_for is None:  # pragma: no cover - every adapter in this repo is filesystem-backed
+        raise StorageConfigError(
+            f"storage adapter {adapter_name!r} has no local_path_for -- "
+            "librarian.preserved_log_adapter requires a filesystem-backed "
+            "adapter (issue athenaeum#1132)"
+        )
+    dest_path = local_path_for(dest_key)
+    data = raw_path.read_bytes()
+    store.put(dest_key, data, expect=None)  # may raise; caller handles fail-closed
+    if store.capabilities.versioned:
+        removed = _retire_raw_file(
+            knowledge_root,
+            raw_path,
+            snapshot_reason=f"before preservation via storage adapter {adapter_name!r}",
+            retire_reason=(
+                f"preserved via storage adapter {adapter_name!r} by {rule_tag}"
+            ),
+            store=store,
+        )
+        if not removed:
+            log.warning(
+                "shape-rules: %s preserved %s to %s via storage adapter %r "
+                "but could not git-remove the source -- the artifact is "
+                "safely duplicated, not lost, but the raw copy was left in "
+                "place for inspection",
+                rule_tag,
+                raw_path,
+                dest_path,
+                adapter_name,
+            )
+    else:
+        try:
+            raw_path.unlink()
+        except OSError:
+            log.warning(
+                "shape-rules: %s preserved %s to %s via storage adapter %r "
+                "but could not remove the source -- the artifact is safely "
+                "duplicated, not lost, but the raw copy was left in place",
+                rule_tag,
+                raw_path,
+                dest_path,
+                adapter_name,
+            )
+    return dest_path
 
 
 def _retire_raw_file(
@@ -1303,6 +1425,7 @@ def run_shape_rule_phase(
     config: dict[str, Any] | None,
     deadline_check: Callable[[], bool] | None = None,
     dry_run: bool = False,
+    store: Store | None = None,
 ) -> dict[str, Any]:
     """Load rules, evaluate every candidate raw file from
     `intake.discover_raw_files` PLUS `intake.discover_shape_rule_extra_intake_files`
@@ -1340,6 +1463,17 @@ def run_shape_rule_phase(
     Returns a summary dict: `rules_loaded`, `rules_skipped_malformed`,
     `files_evaluated`, `files_matched`, `dispositions` (disposition ->
     count across the whole run).
+
+    *store* (issue athenaeum#1132) is the injectable-for-tests
+    :class:`~athenaeum.store.Store` a `preserve` rule routes through when
+    `librarian.preserved_log_adapter` names an adapter -- same shape as
+    :mod:`athenaeum.quarantine`'s `store=` parameter. When omitted, a
+    :class:`~athenaeum.store.Store` covering every adapter this *config*
+    makes available is built via
+    :func:`athenaeum.storage.resolve_store_for_class`. Not consulted at all
+    when no matched rule's disposition is `preserve`, or when `preserve`
+    resolves to the local `librarian.preserved_log_dir` area (which never
+    touches this parameter -- :func:`preserve_raw_file` is unchanged).
     """
     summary: dict[str, Any] = {
         "rules_loaded": 0,
@@ -1354,6 +1488,9 @@ def run_shape_rule_phase(
     if not rules:
         return summary
 
+    resolved_store = store if store is not None else resolve_store_for_class(
+        None, config, knowledge_root
+    )
     max_records = resolve_shape_rules_max_records_per_run(config)
     # Issue athenaeum#1096: the extra-intake-root subtree (default
     # `raw/auto-memory`) is appended AFTER ordinary intake candidates, not
@@ -1498,17 +1635,43 @@ def run_shape_rule_phase(
                 _tally(rule_tag, matched_rule.mode, "observed-preserve", raw=raw, record=record)
                 continue
             preserved_dir = resolve_preserved_log_dir(config)
-            if preserved_dir is None:
+            preserved_adapter_name = resolve_preserved_log_adapter(config)
+            if preserved_adapter_name is not None and preserved_dir is not None:
+                # AC1 (issue athenaeum#1132): both configured -- the adapter wins.
+                # Loud, not silent: an operator who set both almost certainly
+                # meant to migrate off the local directory, and a silent
+                # shadow would be surprising.
+                log.warning(
+                    "shape-rules: %s has BOTH librarian.preserved_log_dir=%r "
+                    "and librarian.preserved_log_adapter=%r configured -- the "
+                    "adapter wins and shadows the directory (issue athenaeum#1132)",
+                    rule_tag,
+                    preserved_dir,
+                    preserved_adapter_name,
+                )
+            if preserved_adapter_name is None and preserved_dir is None:
                 log.warning(
                     "shape-rules: %s matched %s as log-shaped but no "
                     "preserved-log area is configured "
-                    "(librarian.preserved_log_dir) -- falling through to the "
-                    "reasoning tiers, raw file untouched",
+                    "(librarian.preserved_log_dir / "
+                    "librarian.preserved_log_adapter) -- falling through to "
+                    "the reasoning tiers, raw file untouched",
                     rule_tag,
                     raw.ref,
                 )
                 _tally(rule_tag, matched_rule.mode, "preserve-unconfigured", raw=raw, record=record)
                 continue
+            if preserved_adapter_name is not None:
+                # Fail closed, loudly (AC1): an adapter name that does not
+                # resolve must never silently fall back to the directory.
+                known_adapters = available_adapters(config)
+                if preserved_adapter_name not in known_adapters:
+                    raise StorageConfigError(
+                        f"librarian.preserved_log_adapter="
+                        f"{preserved_adapter_name!r} names an unknown storage "
+                        f"adapter; known adapters: {sorted(known_adapters)} "
+                        "(issue athenaeum#1132)"
+                    )
             # Build the correction BEFORE moving: a transform that cannot
             # resolve must leave the raw file exactly where it was, so the
             # record still reaches the tiers. Moving first would strand it.
@@ -1530,13 +1693,43 @@ def run_shape_rule_phase(
                     )
                     _tally(rule_tag, matched_rule.mode, "transform-error", raw=raw, record=record)
                     continue
-            dest = preserve_raw_file(
-                knowledge_root,
-                raw.path,
-                preserved_dir=preserved_dir,
-                source=raw.source,
-                rule_tag=rule_tag,
-            )
+            if preserved_adapter_name is not None:
+                try:
+                    dest = preserve_raw_file_via_store(
+                        knowledge_root,
+                        raw.path,
+                        adapter_name=preserved_adapter_name,
+                        source=raw.source,
+                        rule_tag=rule_tag,
+                        store=resolved_store,
+                    )
+                except (OSError, StoreConflictError) as exc:
+                    # AC5 fail-closed: `put` refused or failed (a same-named
+                    # destination, or EXDEV/another physical write error --
+                    # the expected case for a routed adapter on a different
+                    # filesystem, not an edge case). The raw file was never
+                    # touched. Reuse the existing `preserve-failed` tag --
+                    # this is the same outcome the local-directory path
+                    # already reports on a failed move.
+                    log.warning(
+                        "shape-rules: %s failed to preserve %s via storage "
+                        "adapter %r (%s) -- raw file untouched",
+                        rule_tag,
+                        raw.ref,
+                        preserved_adapter_name,
+                        exc,
+                    )
+                    _tally(rule_tag, matched_rule.mode, "preserve-failed", raw=raw, record=record)
+                    continue
+            else:
+                assert preserved_dir is not None  # guaranteed by the check above
+                dest = preserve_raw_file(
+                    knowledge_root,
+                    raw.path,
+                    preserved_dir=preserved_dir,
+                    source=raw.source,
+                    rule_tag=rule_tag,
+                )
             if dest is None:
                 _tally(rule_tag, matched_rule.mode, "preserve-failed", raw=raw, record=record)
                 continue
