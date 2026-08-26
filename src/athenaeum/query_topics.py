@@ -219,7 +219,7 @@ def extract_topics(
             )
             spend.record_spend(
                 _u,
-                run_type="query-topics",
+                run_type=spend.RUN_TYPE_QUERY_TOPICS,
                 provider=provider,
                 # Resolve via the single helper (issue athenaeum#734); `or None`
                 # preserves this ledger's None-when-unset semantics (the helper

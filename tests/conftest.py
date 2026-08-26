@@ -571,6 +571,35 @@ def _isolate_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _pin_spend_accounting_timezone_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the per-day spend-ceiling accounting timezone to UTC by default
+    for the whole suite (issue athenaeum#1136).
+
+    :func:`athenaeum.config.resolve_spend_accounting_timezone` defaults to
+    the HOST's local timezone when neither ``ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE``
+    nor a yaml ``spend.accounting_timezone`` key is set — the athenaeum#1136 fix
+    for a real production starvation bug (an operator's evening session was
+    exhausting the per-day ceiling before the UTC day rolled over, starving
+    a nightly run landing hours later in the same UTC day). Left unpinned
+    here, every PRE-EXISTING day-window test that hardcodes a fixed ``now=``
+    UTC timestamp (``test_spend.py``'s ``TestCeiling`` / ``TestBudgetWindowStatus``,
+    ``test_librarian_run_refusal.py``'s marker-line tests) would silently
+    start asserting a DIFFERENT day boundary depending on whatever timezone
+    happens to be configured on the machine running the suite — exactly the
+    environment-dependent flake ``_isolate_cache_dir`` above already guards
+    against for the cache dir. Pinning UTC preserves every pre-athenaeum#1136
+    test's original UTC-day intent regardless of host timezone.
+
+    The tests that specifically need a NON-UTC zone to prove the
+    athenaeum#1136 fix (``tests/test_spend_accounting_timezone.py``)
+    override this env var themselves — a later ``monkeypatch.setenv`` call
+    in the same test wins over this fixture's earlier one (same
+    ``monkeypatch`` stack, LIFO on teardown, last-write-wins while active).
+    """
+    monkeypatch.setenv("ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE", "UTC")
+
+
+@pytest.fixture(autouse=True)
 def _reset_model_rates() -> Iterator[None]:
     """Reset the ACTIVE per-MTok rate table to the code default after every
     test (issue athenaeum#783).

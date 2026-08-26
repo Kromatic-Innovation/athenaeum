@@ -961,6 +961,48 @@ class TestRunAllowDegradedFlag:
         assert "3" in out
 
 
+class TestRunTypeFlag:
+    """Issue athenaeum#1136 — `run --run-type` plumbs through to librarian.run,
+    so a scheduled nightly can declare itself for spend-ledger attribution."""
+
+    def test_default_is_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # None, not "librarian" -- the CLI leaves the default RESOLUTION
+        # (env > "librarian") to librarian.run() itself (librarian_run_type).
+        captured = _capture_librarian_run(monkeypatch)
+        rc = main(["run", "--knowledge-root", str(tmp_path), "--dry-run"])
+        assert rc == 0
+        assert captured["run_type"] is None
+
+    def test_flag_passes_the_value_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured = _capture_librarian_run(monkeypatch)
+        rc = main(
+            [
+                "run",
+                "--knowledge-root",
+                str(tmp_path),
+                "--dry-run",
+                "--run-type",
+                "librarian-nightly",
+            ]
+        )
+        assert rc == 0
+        assert captured["run_type"] == "librarian-nightly"
+
+    def test_help_documents_the_flag(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["run", "--help"])
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        assert "--run-type" in out
+        assert "ATHENAEUM_RUN_TYPE" in out
+
+
 def _claims_knowledge(tmp_path: Path) -> Path:
     """Knowledge dir with the SAME claim restated across two distinct entities."""
     knowledge = tmp_path / "knowledge"

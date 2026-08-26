@@ -60,8 +60,10 @@ import copy
 import logging
 import os
 from collections.abc import Callable, Iterable
+from datetime import datetime, timezone, tzinfo
 from pathlib import Path, PurePosixPath
 from typing import Any, TypeVar
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -1840,13 +1842,106 @@ def resolve_spend_max_tokens_per_run(config: dict[str, Any] | None) -> int | Non
     )
 
 
+def _system_local_timezone() -> tzinfo:
+    """Best-effort resolve the host's local timezone as a stdlib ``tzinfo``.
+
+    Tries ``/etc/localtime`` first — the standard Linux/macOS symlink into
+    the system zoneinfo database (``/usr/share/zoneinfo/<Region>/<City>``)
+    — which yields a NAMED :class:`~zoneinfo.ZoneInfo` that correctly
+    observes DST transitions on either side of a day boundary. Falls back to
+    ``datetime.now().astimezone().tzinfo`` — a fixed-offset ``timezone``
+    object, correct for "right now" but blind to a future/past DST shift —
+    when the symlink trick doesn't resolve (e.g. a container with no
+    zoneinfo symlink, or a platform that lays out its tz data differently).
+    Never raises: an unresolvable local zone falls all the way through to
+    UTC, matching this module's "never crash a run over a config/environment
+    quirk" contract for every other spend knob.
+    """
+    try:
+        link = os.path.realpath("/etc/localtime")
+        marker = "zoneinfo/"
+        idx = link.find(marker)
+        if idx != -1:
+            return ZoneInfo(link[idx + len(marker) :])
+    except (OSError, ZoneInfoNotFoundError, ValueError):
+        pass
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def resolve_spend_accounting_timezone(config: dict[str, Any] | None) -> tzinfo:
+    """Resolve the timezone the per-day spend ceilings account against (athenaeum#1136).
+
+    Every per-day ceiling (:func:`resolve_spend_max_tokens_per_day`,
+    :func:`resolve_spend_max_usd_per_day`, and the weekly-percent derivation
+    in :func:`resolve_spend_max_pct_per_day`) is enforced by
+    :func:`athenaeum.spend.ceiling_tripped` against
+    :func:`athenaeum.spend.spend_today`'s "since the start of the accounting
+    day" window — this is the knob that decides where that day BEGINS.
+
+    **Why this defaults to the system's local timezone, not UTC** (issue
+    athenaeum#1136): a per-day ceiling is an OPERATOR budget — "how much may be
+    spent today" means the operator's today. A UTC-midnight default silently
+    opens the accounting window mid-evening for any operator west of UTC:
+    for an operator in US Eastern time (UTC-4/-5), UTC midnight lands at
+    20:00/19:00 local — squarely inside a typical evening working session —
+    so that session can exhaust the WHOLE day's ceiling before a scheduled
+    job firing after local midnight (but still inside the SAME UTC calendar
+    day) ever gets a fresh window. That was observed in production: a
+    nightly librarian run at 02:16 local inherited a ceiling an evening
+    session had already exhausted three hours earlier, and compiled zero
+    entities on every observed night. Defaulting to UTC would leave this
+    starvation in place until an operator discovers the config key and sets
+    it themselves — exactly what makes it a bug rather than a setting. An
+    operator who already runs in UTC sees zero behavior change (their local
+    day already equals the UTC day).
+
+    Precedence: ``ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE`` env >
+    ``spend.accounting_timezone`` yaml > the system's local timezone (see
+    :func:`_system_local_timezone`). Both the env var and the yaml key take
+    an IANA zone name (e.g. ``America/New_York``). A name
+    :class:`~zoneinfo.ZoneInfo` cannot resolve — a typo, or a name absent
+    from the running system's tzdata — WARNs and falls back to UTC rather
+    than raising: a malformed timezone string must never crash a run any
+    more than a malformed number does elsewhere in this module (see
+    :func:`_env_number`).
+    """
+    env = os.environ.get("ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE")
+    name: str | None = None
+    source = "env"
+    if env is not None and env.strip():
+        name = env.strip()
+    elif isinstance(config, dict):
+        cfg = config.get("spend")
+        if isinstance(cfg, dict):
+            raw = cfg.get("accounting_timezone")
+            if isinstance(raw, str) and raw.strip():
+                name = raw.strip()
+                source = "yaml"
+    if name is None:
+        return _system_local_timezone()
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        logger.warning(
+            "spend.accounting_timezone=%r (from %s) is not a valid IANA "
+            "timezone name (%s) -- falling back to UTC for per-day spend "
+            "accounting (issue athenaeum#1136)",
+            name,
+            source,
+            exc,
+        )
+        return timezone.utc
+
+
 def resolve_spend_max_tokens_per_day(config: dict[str, Any] | None) -> int | None:
     """Resolve the per-day SUBSCRIPTION token ceiling (env > yaml > None) (athenaeum#378).
 
-    Summed across every ledger record on the subscription path since the start
-    of the current UTC day, plus the current run's accrued tokens. Precedence:
-    ``ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY`` env > ``spend.max_tokens_per_day``
-    yaml > ``None`` (no ceiling).
+    Summed across every ledger record on the subscription path since the
+    start of the current ACCOUNTING day (issue athenaeum#1136 — see
+    :func:`resolve_spend_accounting_timezone`; UTC by default only when the
+    operator's own local timezone is UTC), plus the current run's accrued
+    tokens. Precedence: ``ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY`` env >
+    ``spend.max_tokens_per_day`` yaml > ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
         config,
@@ -1877,10 +1972,12 @@ def resolve_spend_max_usd_per_run(config: dict[str, Any] | None) -> float | None
 def resolve_spend_max_usd_per_day(config: dict[str, Any] | None) -> float | None:
     """Resolve the per-day API DOLLAR ceiling (env > yaml > None) (athenaeum#378).
 
-    Summed across every ledger record on the metered API path since the start
-    of the current UTC day, plus the current run's accrued USD. Precedence:
-    ``ATHENAEUM_SPEND_MAX_USD_PER_DAY`` env > ``spend.max_usd_per_day`` yaml >
-    ``None`` (no ceiling).
+    Summed across every ledger record on the metered API path since the
+    start of the current ACCOUNTING day (issue athenaeum#1136 — see
+    :func:`resolve_spend_accounting_timezone`; UTC by default only when the
+    operator's own local timezone is UTC), plus the current run's accrued
+    USD. Precedence: ``ATHENAEUM_SPEND_MAX_USD_PER_DAY`` env >
+    ``spend.max_usd_per_day`` yaml > ``None`` (no ceiling).
     """
     return _resolve_optional_positive_number(
         config,
