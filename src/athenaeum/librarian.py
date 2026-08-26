@@ -89,7 +89,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from athenaeum import detection_state, spend, zero_yield
+from athenaeum import batch_state, detection_state, spend, zero_yield
 from athenaeum._retry import TransientAPIError
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.authority import AuthorityManifest, load_authority_manifest
@@ -2872,6 +2872,62 @@ def _quarantine_and_surface(
     return True
 
 
+def _sweep_pending_batch_leases() -> None:
+    """Release every EXPIRED pending-batch lease (issue athenaeum#1143 AC7).
+
+    Every clean (non-dry-run) exit path must call this — the full entity run,
+    the empty-intake early return, and the merge-only / cluster-only early
+    returns — so an expired lease cannot outlive the run that observed it and
+    strand the raw files it was holding. Deliberately mirrors
+    :func:`_clear_stale_deferred_manifest`'s call-site contract, and is paired
+    with it at all four sites so the enumeration cannot drift.
+
+    Only the LEASE is released; the handle itself is kept, because a batch
+    whose results are still retrievable can still be collected. Live leases are
+    left exactly as they are — an in-flight batch's refs must stay held across
+    the run boundary, which is the whole point of the sidecar.
+    """
+    released = batch_state.release_expired_leases(batch_state.resolve_cache_dir())
+    if released:
+        log.info(
+            "Released %d expired pending-batch lease(s) (%s) — their raw files "
+            "are claimable again (issue athenaeum#1143)",
+            len(released),
+            ", ".join(released),
+        )
+
+
+def _apply_pending_batch_leases(ctx: "RunContext") -> None:
+    """Drop leased raw files from this run's claim (issue athenaeum#1143 AC5/AC6).
+
+    Runs immediately after :func:`athenaeum.intake.discover_raw_files`, never
+    inside it: discovery stays pure filesystem enumeration (it still returns
+    leased files) and run-state awareness lives here, in the claim loop, where
+    the cohort is actually assembled.
+
+    Expired leases are released FIRST (AC6), so an abandoned batch's refs
+    become claimable again on this very pass rather than waiting a further
+    run. On a ``--dry-run`` the release is skipped — a dry run writes no state
+    (AC8) — but the filtering is identical either way, since
+    :func:`athenaeum.batch_state.leased_refs` already ignores expired leases.
+    """
+    cache_dir = batch_state.resolve_cache_dir()
+    if not ctx.dry_run:
+        _sweep_pending_batch_leases()
+    leased = batch_state.leased_refs(cache_dir)
+    if not leased:
+        return
+    kept = [raw for raw in ctx.raw_files if raw.ref not in leased]
+    skipped = len(ctx.raw_files) - len(kept)
+    if skipped:
+        log.info(
+            "Skipping %d raw file(s) leased by an in-flight batch — they are "
+            "collected, not re-submitted (issue athenaeum#1143)",
+            skipped,
+        )
+    ctx.raw_files = kept
+
+
 def _clear_stale_deferred_manifest(wiki_root: Path) -> None:
     """Remove a stale deferred-work manifest left by a budget-tripped run.
 
@@ -4479,6 +4535,7 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
         # perspective: clear a stale deferred-work manifest left by a
         # prior budget-tripped run (v0.7.3 release-gate review).
         _clear_stale_deferred_manifest(ctx.wiki_root)
+        _sweep_pending_batch_leases()
     _maybe_push_after_run(
         ctx.knowledge_root,
         config=ctx.config,
@@ -4565,6 +4622,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
     _entity_phase_output_before = ctx.usage.output_tokens
     if not ctx.cluster_only:
         ctx.raw_files = discover_raw_files(ctx.raw_root, ctx.config)
+        # Issue athenaeum#1143: a raw file held by an in-flight batch's lease is
+        # NOT claimable — re-claiming it would re-submit work already paid for.
+        _apply_pending_batch_leases(ctx)
         if not ctx.raw_files:
             # An empty entity intake is no longer a whole-run early return
             # (issue athenaeum#461): auto-memory compiles independently of raw
@@ -4576,6 +4636,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             # auto-memory block below is skipped for some reason.
             if not ctx.dry_run:
                 _clear_stale_deferred_manifest(ctx.wiki_root)
+                _sweep_pending_batch_leases()
             log.info("No raw files to process. Nothing to do.")
         else:
             total_intake = len(ctx.raw_files)
@@ -5260,6 +5321,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                 else:
                     if not ctx.dry_run:
                         _clear_stale_deferred_manifest(ctx.wiki_root)
+                        _sweep_pending_batch_leases()
                     log.info(
                         "Done: %d created, %d updated, %d escalated, %d skipped, %d failed",
                         ctx.total_created,
@@ -6578,6 +6640,7 @@ def run(
         # cluster-only run must not preserve a stale deferred manifest.
         if not dry_run:
             _clear_stale_deferred_manifest(wiki_root)
+            _sweep_pending_batch_leases()
         # Resolved to a concrete bool by ``_resolve_run_config`` above (athenaeum#546:
         # narrows ``bool | None`` — never fires for a valid run).
         assert ctx.push_after_run is not None

@@ -1413,6 +1413,55 @@ def resolve_lock_warn_stale_after(config: dict[str, Any] | None) -> float | None
     return default
 
 
+#: Default pending-batch raw-file lease, in seconds (issue athenaeum#1143).
+#:
+#: 72h. Shorter than the Batch API's 29-day result retention, so a
+#: still-collectible batch is always preferred over re-claiming its raw files.
+#: Longer than the API's 24h processing ceiling, so a slow batch is not
+#: abandoned mid-flight and its intake re-submitted at full price alongside it.
+DEFAULT_BATCH_LEASE_SECONDS = 259200.0
+
+
+def resolve_batch_lease_seconds(config: dict[str, Any] | None) -> float | None:
+    """Resolve the pending-batch raw-file lease in seconds (athenaeum#1143, default 72h).
+
+    :func:`athenaeum.batch_state.record_handle` leases the raw files a
+    submitted-but-uncollected batch was built from for this many seconds, and
+    the entity-phase claim loop skips a leased file until the lease expires —
+    so a submit-and-exit run cannot have its own intake rediscovered and
+    re-submitted, at full price, by the next run::
+
+        librarian:
+          batch_lease_seconds: 259200   # seconds; <= 0 disables leasing
+
+    Precedence: ``ATHENAEUM_BATCH_LEASE_SECONDS`` env, then
+    ``librarian.batch_lease_seconds`` yaml, then
+    :data:`DEFAULT_BATCH_LEASE_SECONDS` (72h). ``bool`` and non-numeric values
+    fall through to the default. A value ``<= 0`` disables leasing entirely
+    (returns ``None``) — the explicit operator opt-out, matching the
+    ``max_runtime`` escape-hatch convention and mirroring
+    :func:`resolve_lock_break_stale_after`'s shape exactly.
+    """
+    default = DEFAULT_BATCH_LEASE_SECONDS
+    value = _env_number("ATHENAEUM_BATCH_LEASE_SECONDS", float)
+    if value is not None:
+        return value if value > 0 else None
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("batch_lease_seconds")
+            if raw is None:
+                return default
+            if isinstance(raw, bool):
+                return default
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return default
+            return value if value > 0 else None
+    return default
+
+
 def _resolve_positive_int_knob(
     config: dict[str, Any] | None,
     key: str,
