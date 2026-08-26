@@ -24,6 +24,7 @@ import pytest
 
 from athenaeum.librarian import (
     DEFAULT_MAX_API_CALLS,
+    EXIT_LIBRARIAN_REFUSAL,
     librarian_max_api_calls,
     run,
 )
@@ -493,8 +494,14 @@ class TestMaxApiCallsPrecedence:
         """env "0" is a VALID cap (not a fallback): every file is deferred.
 
         Pinning the surprise: zero passes the ``value >= 0`` env gate, so a
-        run with ATHENAEUM_MAX_API_CALLS=0 trips immediately, defers the
-        whole intake, and still exits 0.
+        run with ATHENAEUM_MAX_API_CALLS=0 trips immediately and defers the
+        whole intake -- but issue athenaeum#1135 changed the exit code: this
+        is EXACTLY the zero-progress DEGRADED REFUSAL (early-stop reason +
+        zero files committed), so it now exits EXIT_LIBRARIAN_REFUSAL (3),
+        not 0. Before athenaeum#1135 this test asserted ``rc == 0`` -- the
+        precise "compiled nothing, looked like success" hole the issue
+        closes. See TestLibrarianRunRefusal below for the dedicated
+        athenaeum#1135 predicate/marker-line/allow_degraded coverage.
         """
         root = _seed_knowledge_root(tmp_path, n_files=2)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
@@ -511,7 +518,7 @@ class TestMaxApiCallsPrecedence:
             max_api_calls=None,
         )
 
-        assert rc == 0
+        assert rc == EXIT_LIBRARIAN_REFUSAL
         manifest = root / "wiki" / "_deferred_work.md"
         assert manifest.exists()
         text = manifest.read_text(encoding="utf-8")
@@ -520,6 +527,12 @@ class TestMaxApiCallsPrecedence:
         assert "20240411T120000Z-aabbccd1.md" in text
         messages = [r.getMessage() for r in caplog.records]
         assert any("budget exhausted (0/0)" in m for m in messages), messages
+        degraded_markers = [
+            r for r in caplog.records if r.getMessage().startswith("librarian-run-degraded")
+        ]
+        assert degraded_markers, [r.getMessage() for r in caplog.records]
+        assert degraded_markers[0].levelno == logging.ERROR
+        assert "reason=budget files=0" in degraded_markers[0].getMessage()
 
 
 # ---------------------------------------------------------------------------
@@ -557,7 +570,11 @@ class TestZeroBudgetStartupWarning:
             max_api_calls=None,
         )
 
-        assert rc == 0
+        # Issue athenaeum#1135: max_api_calls=0 trips immediately on this run's
+        # single file (files=0 processed) -- a zero-progress DEGRADED
+        # REFUSAL, not the plain 0 this test asserted pre-athenaeum#1135. The
+        # startup-warning behavior under test here is otherwise unchanged.
+        assert rc == EXIT_LIBRARIAN_REFUSAL
         zero_warnings = [
             r for r in caplog.records if "API budget is 0" in r.getMessage()
         ]
@@ -647,7 +664,9 @@ class TestZeroBudgetStartupWarning:
             max_api_calls=None,
         )
 
-        assert rc == 0
+        # Issue athenaeum#1135: same zero-progress DEGRADED REFUSAL as
+        # test_warning_fires_when_resolved_budget_is_zero above.
+        assert rc == EXIT_LIBRARIAN_REFUSAL
         messages = [r.getMessage() for r in caplog.records]
         assert any("API budget is 0" in m for m in messages), messages
 

@@ -854,6 +854,38 @@ def format_summary(
     return "\n".join(lines)
 
 
+def format_budget_window(budget_window: dict[str, Any]) -> str | None:
+    """Render :func:`budget_window_status` as one or two human report lines.
+
+    Issue athenaeum#1135 (AC2/6): an ADDITIONAL line alongside
+    :func:`format_summary`'s existing ``--since``-window totals — never a
+    replacement for them (the ``--since`` default stays 7d; see that
+    function's docstring for why narrowing it would lose information). Skips
+    a path entirely when its ceiling is unconfigured (``configured=False``),
+    mirroring :func:`spend_headroom_warning`'s "an unset ceiling never
+    reports" contract. Returns ``None`` when NEITHER path is configured, so
+    the caller can omit the section rather than print an empty header.
+    """
+    lines: list[str] = []
+    api = budget_window["api"]
+    if api["configured"]:
+        lines.append(
+            f"  Budget window (today, API)   ${api['consumed_usd']:.2f}"
+            f" / ${api['cap_usd']:.2f}"
+            f"  ({api['fraction_consumed'] * 100:.0f}%)"
+        )
+    sub = budget_window["subscription"]
+    if sub["configured"]:
+        lines.append(
+            f"  Budget window (today, sub)   {_fmt_tokens(int(sub['consumed_tokens']))}"
+            f" / {_fmt_tokens(int(sub['cap_tokens']))} tokens"
+            f"  ({sub['fraction_consumed'] * 100:.0f}%)"
+        )
+    if not lines:
+        return None
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Repricing (issue athenaeum#788) — recompute history at CURRENT rates, read-only
 # ---------------------------------------------------------------------------
@@ -1118,6 +1150,75 @@ def _headroom_slot(cap_usd: float | None, consumed_usd: float) -> dict[str, Any]
         # the cap, which the warning/trip messages want to name.
         "remaining_usd": cap_usd - consumed_usd,
         "fraction_consumed": consumed_usd / cap_usd,
+    }
+
+
+def _token_headroom_slot(
+    cap_tokens: float | None, consumed_tokens: float
+) -> dict[str, Any]:
+    """Token-denominated sibling of :func:`_headroom_slot`, for the subscription path.
+
+    Same ``configured``/``None``-vs-``0`` contract as :func:`_headroom_slot` —
+    kept as a separate function (rather than a unit parameter on the dollar
+    one) so neither report shape has to guess which unit a caller meant.
+    """
+    if cap_tokens is None:
+        return {
+            "configured": False,
+            "cap_tokens": None,
+            "consumed_tokens": consumed_tokens,
+            "remaining_tokens": None,
+            "fraction_consumed": None,
+        }
+    return {
+        "configured": True,
+        "cap_tokens": cap_tokens,
+        "consumed_tokens": consumed_tokens,
+        "remaining_tokens": cap_tokens - consumed_tokens,
+        "fraction_consumed": consumed_tokens / cap_tokens,
+    }
+
+
+def budget_window_status(
+    config: dict[str, Any] | None,
+    *,
+    ledger_path: Path | None = None,
+    cache_dir: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Today's spend against the configured per-day ceilings (issue athenaeum#1135 AC2/6).
+
+    The ``athenaeum spend`` report's ``--since`` window (default 7d) answers
+    "how much has this cost over time" — a DIFFERENT question from "is
+    today's spend approaching the ceiling that would stop a run RIGHT NOW".
+    Before this issue there was no single figure that put the two together:
+    an operator reading the 7-day report had no way to tell whether the
+    day-scoped budget ``athenaeum run`` actually enforces (via
+    :func:`ceiling_tripped`) was anywhere close to tripping. This reads the
+    SAME day-scoped window :func:`spend_today` (and therefore
+    :func:`ceiling_tripped`) uses, reported against BOTH per-day ceilings —
+    API dollars and subscription tokens — independently, mirroring this
+    module's never-blended-total philosophy (never combined into one
+    number). A pure read (no ledger write); never raises on its own — same
+    contract as :func:`spend_headroom`, which this is a day-scoped-report
+    sibling of (that one is per-run-usage-aware and warns pre-trip during a
+    run; this one is a standalone report a human or ``librarian-run-degraded``
+    marker line can consult at any time).
+    """
+    from athenaeum.config import (
+        resolve_spend_max_tokens_per_day,
+        resolve_spend_max_usd_per_day,
+    )
+
+    target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
+    today = spend_today(target, now=now)
+    usd_cap = resolve_spend_max_usd_per_day(config)
+    token_cap = resolve_spend_max_tokens_per_day(config)
+    return {
+        "api": _headroom_slot(usd_cap, today["api_usd"]),
+        "subscription": _token_headroom_slot(
+            token_cap, today["subscription_tokens"]
+        ),
     }
 
 
