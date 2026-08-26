@@ -13,8 +13,11 @@ names the one it covers.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import logging
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -223,6 +226,27 @@ class TestHandleContents:
         assert handle.refs["cid-a"].content_hash == batch_state.content_hash(a.path)
         assert handle.refs["cid-a"].content_hash != handle.refs["cid-b"].content_hash
 
+    def test_hash_is_the_documented_algorithm_not_merely_content_dependent(
+        self, tmp_path: Path
+    ) -> None:
+        """Pinned to an INDEPENDENTLY computed expectation.
+
+        Deriving the expected value from :func:`batch_state.content_hash`
+        itself would let any content-dependent-but-wrong algorithm pass; the
+        collect phase compares these hashes across runs, so the algorithm is
+        part of the contract, not an implementation detail.
+        """
+        expected = hashlib.sha256(b"alpha").hexdigest()[:16]
+        raw = _raw(tmp_path, "s", "2026-01-01T00-00-00-aaaaaaaa.md", body="alpha")
+        assert batch_state.content_hash(raw.path) == expected
+        _record(tmp_path, {"cid-a": raw})
+        assert batch_state.load(tmp_path)["msgbatch_1"].refs["cid-a"].content_hash == expected
+
+    def test_falsy_path_is_rejected_rather_than_resolved_to_cwd(self, tmp_path: Path) -> None:
+        """``Path("")`` resolves to the CWD — that must never become a lease."""
+        _record(tmp_path, {"cid-a": SimpleNamespace(ref="s/a.md", path="")})
+        assert batch_state.load(tmp_path)["msgbatch_1"].refs == {}
+
     def test_hash_is_taken_at_claim_time_not_read_time(self, tmp_path: Path) -> None:
         raw = _raw(tmp_path, "s", "2026-01-01T00-00-00-aaaaaaaa.md", body="original")
         claimed = batch_state.content_hash(raw.path)
@@ -308,6 +332,30 @@ class TestLeaseResolution:
         cfg = {"librarian": {"batch_lease_seconds": value}}
         assert config.resolve_batch_lease_seconds(cfg) is None
 
+    def test_record_handle_honors_a_yaml_lease_length_passed_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The shape a real submit-side caller uses: ``config=ctx.config``.
+
+        Testing the resolver in isolation leaves the plumbing INSIDE
+        ``record_handle`` untested — a passthrough that silently ignored its
+        ``config`` would still pass every other test in this class.
+        """
+        monkeypatch.delenv("ATHENAEUM_BATCH_LEASE_SECONDS", raising=False)
+        _record(
+            tmp_path,
+            {"cid-a": _raw(tmp_path, "s", "2026-01-01T00-00-00-aaaaaaaa.md")},
+            config={"librarian": {"batch_lease_seconds": 3600}},
+        )
+        assert batch_state.load(tmp_path)["msgbatch_1"].leased_until == "2026-08-26T13:00:00Z"
+
+    def test_record_handle_config_none_falls_back_to_the_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_BATCH_LEASE_SECONDS", raising=False)
+        _record(tmp_path, {"cid-a": _raw(tmp_path, "s", "2026-01-01T00-00-00-aaaaaaaa.md")})
+        assert batch_state.load(tmp_path)["msgbatch_1"].leased_until == "2026-08-29T12:00:00Z"
+
     def test_disabled_leasing_records_a_handle_with_no_lease(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -333,6 +381,45 @@ class TestClaimLoopFiltering:
         _record(tmp_path, {"c1": a, "c2": b})
         assert batch_state.leased_refs(tmp_path, now=NOW + timedelta(hours=1)) == {a.ref, b.ref}
         assert batch_state.leased_refs(tmp_path, now=NOW + timedelta(days=4)) == set()
+
+    def test_lease_expires_at_leased_until_not_one_tick_after(self, tmp_path: Path) -> None:
+        """Pins the tie-break so a future ``>`` -> ``>=`` edit cannot flip it."""
+        raw = _raw(tmp_path, "s", "2026-01-01T00-00-00-aaaaaaaa.md")
+        _record(tmp_path, {"c1": raw})
+        expiry = NOW + timedelta(seconds=config.DEFAULT_BATCH_LEASE_SECONDS)
+        assert batch_state.leased_refs(tmp_path, now=expiry - timedelta(seconds=1)) == {raw.ref}
+        assert batch_state.leased_refs(tmp_path, now=expiry) == set()
+
+    @pytest.mark.skipif(not hasattr(time, "tzset"), reason="POSIX tzset only")
+    def test_a_naive_now_is_read_as_utc_not_local(self, tmp_path: Path) -> None:
+        """A naive ``now`` must not be reinterpreted as LOCAL time.
+
+        Run under a deliberately non-UTC local zone (UTC+14). Under a plain
+        ``astimezone()`` the naive stamp would be read as +14 and the lease
+        would land 14h early; asserting this on a UTC-local machine — which
+        every container here happens to be — would prove nothing at all.
+
+        ``tzset()`` mutates PROCESS-GLOBAL C-level state that ``monkeypatch``
+        cannot restore on its own, and the suite runs under ``pytest-randomly``
+        — so the restore is an explicit ``finally``, not a fixture teardown
+        whose ordering would decide whether the rest of the run sees UTC+14.
+        """
+        original_tz = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "Pacific/Kiritimati"  # UTC+14, no DST
+            time.tzset()
+            raw = _raw(tmp_path, "s", "2026-01-01T00-00-00-aaaaaaaa.md")
+            _record(tmp_path, {"c1": raw}, now=NOW.replace(tzinfo=None))
+            handle = batch_state.load(tmp_path)["msgbatch_1"]
+            assert handle.leased_until == "2026-08-29T12:00:00Z"
+            naive_mid_lease = (NOW + timedelta(hours=1)).replace(tzinfo=None)
+            assert batch_state.leased_refs(tmp_path, now=naive_mid_lease) == {raw.ref}
+        finally:
+            if original_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = original_tz
+            time.tzset()
 
     def test_claim_pass_drops_leased_files_and_keeps_the_rest(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

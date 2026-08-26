@@ -93,8 +93,24 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_utc(ts: datetime) -> datetime:
+    """Coerce *ts* to an aware UTC datetime.
+
+    Every ``now=`` argument this module accepts crosses here first. A NAIVE
+    datetime is read as UTC rather than left to :meth:`datetime.astimezone`,
+    which would silently reinterpret it as LOCAL time — a lease written on a
+    UTC+13 machine would then be hours off, and a naive/aware comparison in
+    :meth:`PendingBatch.lease_active` would raise outright. The collect phase
+    this module is the foundation for will pass its own timestamps in; this is
+    where that stops being a footgun.
+    """
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
 def _fmt(ts: datetime) -> str:
-    return ts.astimezone(timezone.utc).strftime(_TS_FMT)
+    return _as_utc(ts).strftime(_TS_FMT)
 
 
 def _parse(ts: str) -> datetime | None:
@@ -150,7 +166,10 @@ class PendingBatch:
         until = _parse(self.leased_until)
         if until is None:
             return False
-        return until > (now or _now())
+        # Strictly ``>``: a lease held exactly to ``leased_until`` has expired
+        # AT that instant, not one tick after. Pinned by a boundary test —
+        # the tie-break must not flip silently.
+        return until > _as_utc(now or _now())
 
 
 def resolve_cache_dir() -> Path:
@@ -353,7 +372,7 @@ def record_handle(
     """
     if not batch_id:
         return None
-    stamp = now or _now()
+    stamp = _as_utc(now or _now())
     lease_seconds = resolve_lease_seconds(config)
     leased_until = (
         _fmt(stamp + timedelta(seconds=lease_seconds))
@@ -369,7 +388,10 @@ def record_handle(
             continue
         ref = getattr(raw, "ref", None)
         path = getattr(raw, "path", None)
-        if not isinstance(ref, str) or not ref or path is None:
+        if not isinstance(ref, str) or not ref or not path:
+            # A falsy ``path`` (not just ``None``) is rejected: ``Path("")``
+            # resolves to the process CWD, which would record a lease against
+            # a file that has nothing to do with this batch.
             continue
         absolute = Path(path).resolve()
         records[custom_id] = RefRecord(
@@ -436,7 +458,7 @@ def leased_refs(cache_dir: Path, *, now: datetime | None = None) -> set[str]:
     the one a writing run would compute, it just leaves the expired entries on
     disk for :func:`release_expired_leases` to clear.
     """
-    at = now or _now()
+    at = _as_utc(now or _now())
     refs: set[str] = set()
     for handle in load(cache_dir).values():
         if handle.lease_active(at):
@@ -456,7 +478,7 @@ def release_expired_leases(cache_dir: Path, *, now: datetime | None = None) -> l
     Returns the batch ids released, newest-store-order-independent (sorted), so
     the caller can log exactly what it freed. Never writes when nothing expired.
     """
-    at = now or _now()
+    at = _as_utc(now or _now())
     handles = load(cache_dir)
     released: list[str] = []
     for batch_id, handle in sorted(handles.items()):
