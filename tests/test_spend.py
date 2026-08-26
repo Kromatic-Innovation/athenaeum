@@ -71,6 +71,33 @@ def _api_usage(model: str = "claude-opus-4") -> TokenUsage:
 
 
 # ---------------------------------------------------------------------------
+# run_type vocabulary (issue athenaeum#1136)
+# ---------------------------------------------------------------------------
+
+
+class TestIsLibrarianRunType:
+    def test_bare_literal_is_a_family_member(self) -> None:
+        assert spend.is_librarian_run_type(spend.RUN_TYPE_LIBRARIAN) is True
+
+    def test_nightly_is_a_family_member(self) -> None:
+        assert spend.is_librarian_run_type(spend.RUN_TYPE_LIBRARIAN_NIGHTLY) is True
+
+    def test_unrelated_run_type_is_not_a_member(self) -> None:
+        assert spend.is_librarian_run_type(spend.RUN_TYPE_ANSWERS) is False
+        assert spend.is_librarian_run_type(spend.RUN_TYPE_QUERY_TOPICS) is False
+
+    def test_a_value_merely_containing_librarian_is_not_a_member(self) -> None:
+        # Must be an exact match or a "librarian-" PREFIX, not a substring
+        # anywhere -- "not-librarian" must not false-positive.
+        assert spend.is_librarian_run_type("not-librarian") is False
+
+    def test_non_string_input_returns_false_not_raise(self) -> None:
+        assert spend.is_librarian_run_type(None) is False
+        assert spend.is_librarian_run_type(42) is False
+        assert spend.is_librarian_run_type({"run_type": "librarian"}) is False
+
+
+# ---------------------------------------------------------------------------
 # build_record / record_spend — provider tagging + never-blend invariants
 # ---------------------------------------------------------------------------
 
@@ -239,6 +266,38 @@ class TestSummarize:
         assert "claude-opus-4" in s["by_model"]
         assert "librarian" in s["by_run_type"]
         assert "query-topics" in s["by_run_type"]
+
+    def test_by_provider_attributes_nightly_separately_from_session(
+        self, ledger: Path
+    ) -> None:
+        """Issue athenaeum#1136 AC2: `athenaeum spend --by-provider` (which,
+        despite its name, groups by ``run_type`` -- see the docstring above)
+        must attribute a scheduled nightly's burn SEPARATELY from an
+        interactive/session run's, once the nightly starts tagging itself
+        ``spend.RUN_TYPE_LIBRARIAN_NIGHTLY`` instead of the bare
+        ``spend.RUN_TYPE_LIBRARIAN`` a session run keeps using."""
+        session_usage = TokenUsage()
+        session_usage.add(1000, 200, 0, 0, model="claude-opus-4")
+        nightly_usage = TokenUsage()
+        nightly_usage.add(50_000, 10_000, 0, 0, model="claude-opus-4")
+
+        spend.record_spend(
+            session_usage, run_type=spend.RUN_TYPE_LIBRARIAN, provider="api"
+        )
+        spend.record_spend(
+            nightly_usage, run_type=spend.RUN_TYPE_LIBRARIAN_NIGHTLY, provider="api"
+        )
+
+        s = spend.summarize(spend.read_ledger(ledger), by_provider=True)
+        assert spend.RUN_TYPE_LIBRARIAN in s["by_run_type"]
+        assert spend.RUN_TYPE_LIBRARIAN_NIGHTLY in s["by_run_type"]
+        session_row = s["by_run_type"][spend.RUN_TYPE_LIBRARIAN]["api"]
+        nightly_row = s["by_run_type"][spend.RUN_TYPE_LIBRARIAN_NIGHTLY]["api"]
+        # Distinct, non-blended figures -- the nightly's much larger burn
+        # does not leak into the session's bucket or vice versa.
+        assert session_row["total_tokens"] == 1200
+        assert nightly_row["total_tokens"] == 60_000
+        assert nightly_row["estimated_cost_usd"] > session_row["estimated_cost_usd"]
 
     def test_format_summary_has_both_rows(self, ledger: Path) -> None:
         spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")

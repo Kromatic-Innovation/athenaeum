@@ -38,6 +38,7 @@ from typing import Any
 
 from athenaeum.config import resolve_model
 from athenaeum.models import _rates_for_model
+from athenaeum.spend import is_librarian_run_type
 from athenaeum.tiers import DEFAULT_WRITE_MODEL
 
 #: Stable, machine-greppable prefix for the end-of-run backlog-drain advisor
@@ -94,10 +95,19 @@ def _librarian_records_with_files(records: list[dict[str, Any]]) -> list[dict[st
     A ``files_processed`` field is present only on records written after issue
     athenaeum#470 (older records lack it and are skipped — they cannot inform a rate).
     ``bool`` is rejected explicitly (``True``/``False`` are ``int`` subclasses).
+
+    Matches the librarian ``run_type`` FAMILY (:func:`athenaeum.spend.is_librarian_run_type`)
+    rather than the exact ``"librarian"`` literal (issue athenaeum#1136): a
+    scheduled nightly compile now tags its ledger rows
+    ``run_type="librarian-nightly"`` so ``athenaeum spend --by-provider`` can
+    attribute burn to it separately, and an exact-literal match here would
+    have silently dropped every nightly row from the observed
+    files-per-night throughput this function feeds — degrading drain advice
+    with no error.
     """
     out: list[dict[str, Any]] = []
     for record in records:
-        if record.get("run_type") != "librarian":
+        if not is_librarian_run_type(record.get("run_type")):
             continue
         files = record.get("files_processed")
         if isinstance(files, bool) or not isinstance(files, int):

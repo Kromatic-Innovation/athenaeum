@@ -103,6 +103,24 @@ class TestEstimateFilesPerNight:
         assert source == "ledger"
         assert rate == 10.0
 
+    def test_nightly_run_type_still_counts_toward_the_rate(self) -> None:
+        """athenaeum#1136 BLOCKING TRAP regression: a scheduled nightly now tags
+        its ledger rows ``run_type="librarian-nightly"`` (distinct from the
+        plain ``"librarian"`` an interactive/session run keeps using, so
+        ``athenaeum spend --by-provider`` can attribute burn to it
+        separately). An exact ``run_type != "librarian"`` filter here would
+        have silently dropped every nightly row from this rate the moment
+        that landed — degrading drain advice with no error. Family-matching
+        (``spend.is_librarian_run_type``) must keep counting it."""
+        records = [
+            _ledger_record(files_processed=10, run_type="librarian"),
+            _ledger_record(files_processed=30, run_type="librarian-nightly"),
+            _ledger_record(files_processed=99, run_type="answers"),  # still excluded
+        ]
+        rate, source = drain_advisor.estimate_files_per_night(records)
+        assert source == "ledger"
+        assert rate == 20.0  # (10 + 30) / 2 -- the nightly row counted
+
     def test_fallback_to_this_run(self) -> None:
         rate, source = drain_advisor.estimate_files_per_night([], this_run_files=7)
         assert source == "this-run"

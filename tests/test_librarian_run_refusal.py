@@ -518,3 +518,99 @@ class TestDrainUnaffected:
         assert any(
             "made ZERO progress" in m and "stopping loudly" in m for m in messages
         ), messages
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1136 AC2 — the resolved ``ctx.run_type`` reaches the actual
+# ledger write in ``_run_finalize_phase`` (the normal end-of-run site),
+# not just the RunContext field.
+# ---------------------------------------------------------------------------
+
+
+class TestRunTypeThreadedIntoLedgerWrite:
+    def test_nightly_run_type_is_written_to_the_ledger(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ledger = tmp_path / "spend.jsonl"
+        monkeypatch.setenv("ATHENAEUM_SPEND_LEDGER", str(ledger))
+
+        ctx = _finalize_ctx(tmp_path)
+        ctx.provider = "api"
+        ctx.config = {}
+        ctx.run_type = "librarian-nightly"
+        ctx.usage = TokenUsage()
+        ctx.usage.add(500, 100, 0, 0, model="claude-3-5-haiku-20241022")
+
+        rc = _run_finalize_phase(ctx)
+
+        assert rc == 0
+        records = [json.loads(line) for line in ledger.read_text().splitlines()]
+        assert len(records) == 1
+        assert records[0]["run_type"] == "librarian-nightly"
+
+    def test_unset_run_type_still_writes_the_unchanged_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Belt-and-suspenders: even if a caller somehow reaches this phase
+        with ``ctx.run_type`` still ``None`` (bypassing ``_resolve_run_config``,
+        e.g. a hand-built RunContext in a future test), the ledger write
+        falls back to ``RUN_TYPE_LIBRARIAN`` rather than writing a literal
+        ``None`` or raising."""
+        ledger = tmp_path / "spend.jsonl"
+        monkeypatch.setenv("ATHENAEUM_SPEND_LEDGER", str(ledger))
+
+        ctx = _finalize_ctx(tmp_path)
+        ctx.provider = "api"
+        ctx.config = {}
+        assert ctx.run_type is None
+        ctx.usage = TokenUsage()
+        ctx.usage.add(500, 100, 0, 0, model="claude-3-5-haiku-20241022")
+
+        rc = _run_finalize_phase(ctx)
+
+        assert rc == 0
+        records = [json.loads(line) for line in ledger.read_text().splitlines()]
+        assert records[0]["run_type"] == "librarian"
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1136 AC4 — coordinate with athenaeum#1135 rather than duplicate it.
+# The athenaeum#1135 refusal mechanism (EXIT_LIBRARIAN_REFUSAL + the
+# librarian-run-degraded marker) is untouched by athenaeum#1136 -- this
+# asserts the INTERACTION: a nightly run that a spend-ceiling trip starved
+# (the exact athenaeum#1136 bug, reproduced under forced UTC-day accounting
+# in tests/test_spend_accounting_timezone.py::TestNightlyLocalDayAlignment)
+# still exits EXIT_LIBRARIAN_REFUSAL with the marker line, tagged with the
+# NIGHTLY run_type -- proving athenaeum#1135's exit-code contract and
+# athenaeum#1136's run_type attribution compose cleanly, without a second
+# refusal mechanism.
+# ---------------------------------------------------------------------------
+
+
+class TestNightlyInteractionWithRefusalMechanism:
+    def test_nightly_starved_by_a_spend_ceiling_still_exits_refusal_with_marker(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        ctx = _finalize_ctx(tmp_path)
+        ctx.run_type = "librarian-nightly"
+        ctx.usage = TokenUsage(api_calls=0)
+        ctx.raw_files = ["a.md", "b.md"]
+        ctx.deferred_refs = ["a.md", "b.md"]
+        # The reason a real ceiling_tripped() call would have returned under
+        # the OLD (pre-athenaeum#1136) UTC-day accounting for a nightly landing
+        # inside an evening session's exhausted UTC day -- see
+        # spend.ceiling_tripped's "per-day API dollar ceiling reached" branch.
+        ctx.entity_exit_reason = "spend-ceiling"
+        ctx.spend_ceiling_tripped = True
+
+        caplog.clear()
+        caplog.set_level(logging.INFO, logger="athenaeum.librarian")
+        rc = _run_finalize_phase(ctx)
+
+        assert rc == EXIT_LIBRARIAN_REFUSAL
+        markers = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("librarian-run-degraded")
+        ]
+        assert markers == ["librarian-run-degraded reason=spend-ceiling files=0"]

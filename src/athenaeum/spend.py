@@ -22,7 +22,16 @@ This module appends **one JSONL record per pipeline run** to
 * ``provider`` — ``claude-cli`` vs ``anthropic``. This field is the whole
   point: it makes "are we spending real money?" an empirical question rather
   than a grep over the code.
-* ``run_type`` — ``librarian`` / ``answers`` / ``query-topics`` / ...
+* ``run_type`` — ``librarian`` / ``answers`` / ``query-topics`` / ... A shared
+  constant set lives below (``RUN_TYPE_*``); a scheduled nightly compile
+  tags itself ``librarian-nightly`` (issue athenaeum#1136) rather than the
+  bare ``librarian`` an interactive/session run keeps using, so
+  ``athenaeum spend --by-provider`` (:func:`summarize`'s ``by_provider``)
+  can attribute burn to one apart from the other. Both belong to the SAME
+  librarian *family* — see :func:`is_librarian_run_type`, which
+  :mod:`athenaeum.drain_advisor` matches against instead of the exact
+  ``"librarian"`` literal so a nightly row still counts toward observed
+  drain throughput.
 * ``models`` — the serving model-id(s).
 * the FOUR token counters kept **separate** (cache-read is ~10x cheaper than
   input; collapsing them destroys the cost signal).
@@ -137,6 +146,47 @@ LEDGER_FILENAME = "spend.jsonl"
 #: report ("API $0.42") and ``claude-cli`` unchanged (the subscription path).
 PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_CLAUDE_CLI = "claude-cli"
+
+#: The ``run_type`` vocabulary (issue athenaeum#1136). Previously every call
+#: site passed a bare string literal with no shared source of truth — the
+#: module docstring's ``run_type`` line above was the only place the
+#: vocabulary was written down. ``RUN_TYPE_LIBRARIAN`` is UNCHANGED: every
+#: pre-athenaeum#1136 caller (and every non-nightly ``athenaeum run``
+#: invocation today) keeps writing this exact value, so an operator who
+#: never touches ``--run-type``/``ATHENAEUM_RUN_TYPE`` sees byte-identical
+#: ledger rows. ``RUN_TYPE_LIBRARIAN_NIGHTLY`` is the new value a scheduled
+#: nightly compile declares itself with, so ``athenaeum spend
+#: --by-provider`` can attribute burn to it separately from an interactive
+#: session — see :func:`is_librarian_run_type` for why this is a FAMILY
+#: (matched by prefix) rather than a second exact literal.
+RUN_TYPE_LIBRARIAN = "librarian"
+RUN_TYPE_LIBRARIAN_NIGHTLY = "librarian-nightly"
+RUN_TYPE_ANSWERS = "answers"
+RUN_TYPE_QUERY_TOPICS = "query-topics"
+RUN_TYPE_MEMORY_CLASS_BACKFILL = "memory-class-backfill"
+
+
+def is_librarian_run_type(run_type: object) -> bool:
+    """True for ``RUN_TYPE_LIBRARIAN`` and every member of its FAMILY (athenaeum#1136).
+
+    A family member is ``RUN_TYPE_LIBRARIAN`` itself, or any value prefixed
+    ``"librarian-"`` (currently only :data:`RUN_TYPE_LIBRARIAN_NIGHTLY`, but
+    written as a prefix match rather than a second exact literal so a future
+    librarian-family run_type doesn't need a THIRD call site updated to
+    match it). :mod:`athenaeum.drain_advisor` uses this — NOT an exact
+    ``== RUN_TYPE_LIBRARIAN`` comparison — to decide whether a ledger row
+    informs the observed files-per-night drain rate: matching only the bare
+    literal would silently drop every nightly row from that calculation the
+    moment the nightly started tagging itself distinctly, degrading drain
+    advice with no error (the exact trap this function exists to close).
+    Non-string input (missing/malformed ``run_type`` field on a hand-edited
+    or pre-v1 ledger row) returns ``False`` rather than raising.
+    """
+    if not isinstance(run_type, str):
+        return False
+    return run_type == RUN_TYPE_LIBRARIAN or run_type.startswith(
+        RUN_TYPE_LIBRARIAN + "-"
+    )
 
 
 def ledger_provider(resolved_provider: str | None) -> str:
