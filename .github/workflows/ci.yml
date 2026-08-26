@@ -4,23 +4,29 @@ name: CI
 # Semver-tag comment after each pin records the release the SHA maps to at
 # pin time. Keep in sync with release.yml pins.
 #
-# CI runs on develop only (PR + push). `main` never runs its own CI: it is
-# fast-forward-promoted from develop by promote-main.yml, which re-verifies
-# the required check-runs on the promoted SHA before pushing the ref update.
-# Since `main`'s tip is always the same commit SHA that develop already
-# tested, an independent main-triggered run would be a pure duplicate of
-# the develop run (CI-bill audit).
+# CI runs on pull requests targeting develop only. The `push: [develop]`
+# trigger was dropped (athenaeum#1031, epic cwc#2251): every post-merge push
+# run was a full duplicate of the PR run that had just tested the identical
+# tree (strict required status checks keep the PR head up to date with
+# develop). The one thing that still depended on it was promote-main.yml's
+# `CI Required` gate, which read check-runs off the develop tip SHA — a merge
+# commit only a push run ever stamps. cwc#2627 changed the canonical gate to
+# fall back to the PR head that produced the tip, accepting it only when the
+# two trees are byte-identical, so the evidence is still about the code being
+# promoted. `main` never runs its own CI either: it is fast-forward-promoted
+# from develop by promote-main.yml, which re-verifies the required check-runs
+# before pushing the ref update. Since `main`'s tip is always the same commit
+# SHA that develop already tested, an independent main-triggered run would be
+# a pure duplicate of the develop run (CI-bill audit).
 
 on:
-  push:
-    branches: [develop]
   pull_request:
     branches: [develop]
 
 # Cancel a superseded run when a newer commit lands on the same ref (M23,
-# hestia#548). Keyed on workflow + ref so a PR's push run and the post-merge
-# develop run stay independent, but stacked pushes to the same PR/branch
-# cancel the in-flight run instead of queueing a duplicate 3-leg matrix.
+# hestia#548). Keyed on workflow + ref so runs for different pull requests
+# stay independent, but stacked pushes to the same PR cancel the in-flight
+# run instead of queueing a duplicate 3-leg matrix.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
