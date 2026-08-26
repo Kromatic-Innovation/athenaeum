@@ -1091,23 +1091,50 @@ def format_reprice(reprice_summary: dict[str, Any], *, since_label: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _start_of_utc_day(now: datetime) -> datetime:
-    now = now.astimezone(timezone.utc)
-    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+def _start_of_accounting_day(
+    now: datetime, config: dict[str, Any] | None = None
+) -> datetime:
+    """Midnight of the CONFIGURED accounting day containing *now* (issue athenaeum#1136).
+
+    Renamed from ``_start_of_utc_day`` — that name stopped being accurate the
+    moment the day boundary became configurable. Resolves the accounting
+    timezone via :func:`athenaeum.config.resolve_spend_accounting_timezone`
+    (default: the operator's own system-local timezone, NOT UTC — see that
+    function's docstring for the starvation bug this fixes), converts *now*
+    into it, truncates to that zone's midnight, and converts the result BACK
+    to UTC — :func:`read_ledger`'s ``since=`` bound compares against each
+    record's ``ts``, which the ledger always stores in UTC (see
+    :func:`build_record`), so the boundary itself must be UTC even though it
+    was computed in local wall-clock time.
+    """
+    from athenaeum.config import resolve_spend_accounting_timezone
+
+    tz = resolve_spend_accounting_timezone(config)
+    local_now = now.astimezone(tz)
+    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return local_midnight.astimezone(timezone.utc)
 
 
 def spend_today(
     ledger_path: Path,
     *,
+    config: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, float]:
-    """Subscription tokens and API dollars recorded SO FAR in the current UTC day.
+    """Subscription tokens and API dollars recorded SO FAR in the current
+    ACCOUNTING day (issue athenaeum#1136 — see
+    :func:`athenaeum.config.resolve_spend_accounting_timezone`; the window
+    is UTC-midnight-aligned only when that resolves to UTC, no longer
+    unconditionally).
 
     Reads the ledger (tolerating torn lines). Used by the per-day ceiling to
-    account for spend already committed by earlier runs today.
+    account for spend already committed by earlier runs today. *config* is
+    passed through to the accounting-timezone resolver — omitted, it falls
+    back to the system-local default exactly like every other caller here
+    that doesn't have a config in scope.
     """
     now = now if now is not None else _now_utc()
-    records = read_ledger(ledger_path, since=_start_of_utc_day(now))
+    records = read_ledger(ledger_path, since=_start_of_accounting_day(now, config))
     tokens = 0
     usd = 0.0
     for record in records:
@@ -1211,7 +1238,7 @@ def budget_window_status(
     )
 
     target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
-    today = spend_today(target, now=now)
+    today = spend_today(target, config=config, now=now)
     usd_cap = resolve_spend_max_usd_per_day(config)
     token_cap = resolve_spend_max_tokens_per_day(config)
     return {
@@ -1264,7 +1291,7 @@ def spend_headroom(
 
     consumed_run = usage.estimated_cost_usd
     target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
-    prior_today = spend_today(target, now=now)["api_usd"]
+    prior_today = spend_today(target, config=config, now=now)["api_usd"]
     consumed_day = prior_today + consumed_run
 
     return {
@@ -1380,7 +1407,7 @@ def ceiling_tripped(
         day_cap = resolve_spend_max_tokens_per_day(config)
         if day_cap is not None:
             target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
-            prior = spend_today(target, now=now)["subscription_tokens"]
+            prior = spend_today(target, config=config, now=now)["subscription_tokens"]
             day_total = prior + usage.total_tokens
             if day_total >= day_cap:
                 return (
@@ -1396,15 +1423,16 @@ def ceiling_tripped(
         # never reaches the API branch below, so it cannot affect a metered
         # run — subscription notional and API real dollars are two metrics the
         # ledger never blends (athenaeum#487, cwc#1629). Day boundary matches every
-        # other per-day ceiling: UTC midnight via ``_start_of_utc_day``
-        # (``spend_today``), not a rolling 7-day window (deferred; see the
-        # athenaeum#785 design notes).
+        # other per-day ceiling: the configured ACCOUNTING day (issue
+        # athenaeum#1136) via ``_start_of_accounting_day`` (``spend_today``),
+        # not a rolling 7-day window (deferred; see the athenaeum#785 design
+        # notes).
         weekly_limit = resolve_spend_weekly_token_limit(config)
         max_pct = resolve_spend_max_pct_per_day(config)
         if weekly_limit is not None and max_pct is not None:
             effective_day_cap = weekly_limit / 7 * (max_pct / 100)
             target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
-            prior = spend_today(target, now=now)["subscription_tokens"]
+            prior = spend_today(target, config=config, now=now)["subscription_tokens"]
             day_total = prior + usage.total_tokens
             if day_total >= effective_day_cap:
                 return (
@@ -1439,7 +1467,7 @@ def ceiling_tripped(
     day_cap_usd = resolve_spend_max_usd_per_day(config)
     if day_cap_usd is not None:
         target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
-        prior = spend_today(target, now=now)["api_usd"]
+        prior = spend_today(target, config=config, now=now)["api_usd"]
         day_total = prior + usage.estimated_cost_usd
         if day_total >= day_cap_usd:
             return (

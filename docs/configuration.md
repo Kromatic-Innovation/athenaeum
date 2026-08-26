@@ -958,9 +958,10 @@ like the `max_api_calls` budget), never silently continuing. All ceilings are
 | Ledger enabled | `ATHENAEUM_SPEND_LEDGER_ENABLED` | `spend.ledger_enabled` | `true` | Write the durable spend ledger. Off is a clean no-op. |
 | Ledger path | `ATHENAEUM_SPEND_LEDGER` | `spend.ledger_path` | `~/.cache/athenaeum/spend.jsonl` | Override the ledger file location (test/relocation seam). |
 | Per-run token ceiling | `ATHENAEUM_SPEND_MAX_TOKENS_PER_RUN` | `spend.max_tokens_per_run` | — (off) | **Subscription path.** Stop the run when its total tokens reach this. |
-| Per-day token ceiling | `ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY` | `spend.max_tokens_per_day` | — (off) | **Subscription path.** Ledger tokens since UTC midnight + this run. |
+| Per-day token ceiling | `ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY` | `spend.max_tokens_per_day` | — (off) | **Subscription path.** Ledger tokens since the start of the configured accounting day (see "Accounting timezone" row below) + this run. |
 | Per-run dollar ceiling | `ATHENAEUM_SPEND_MAX_USD_PER_RUN` | `spend.max_usd_per_run` | — (off) | **API path.** Stop the run when its estimated USD reaches this. |
-| Per-day dollar ceiling | `ATHENAEUM_SPEND_MAX_USD_PER_DAY` | `spend.max_usd_per_day` | — (off) | **API path.** Ledger dollars since UTC midnight + this run. |
+| Per-day dollar ceiling | `ATHENAEUM_SPEND_MAX_USD_PER_DAY` | `spend.max_usd_per_day` | — (off) | **API path.** Ledger dollars since the start of the configured accounting day + this run. |
+| Accounting timezone | `ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE` | `spend.accounting_timezone` | the system's local timezone | IANA zone name (e.g. `America/New_York`) both per-day ceilings above account against (issue athenaeum#1136). **Not UTC by default** — see the rationale below. An unresolvable/misspelled name WARNs and falls back to UTC rather than crashing the run. |
 | Weekly subscription token limit | `ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT` | `spend.weekly_token_limit` | — (off) | **Subscription path.** The operator-declared weekly quota; a denominator, not a ceiling by itself (issue athenaeum#785). |
 | Max percent per day | `ATHENAEUM_SPEND_MAX_PCT_PER_DAY` | `spend.max_pct_per_day` | — (off) | **Subscription path.** Paired with the weekly limit above: `weekly_token_limit / 7 * max_pct_per_day / 100` becomes a SECOND, derived per-day token ceiling (issue athenaeum#785). |
 | Headroom warning threshold | `ATHENAEUM_SPEND_WARNING_THRESHOLD_PCT` | `spend.warning_threshold_pct` | `75` | **API path.** Log a warning, naming which cap and by how much, once a run ends at/above this percent of EITHER the per-run or per-day dollar ceiling — before either one trips (issue athenaeum#926). Unlike the ceilings above this is not opt-in: it always resolves to a usable value, but it warns only when at least one dollar ceiling is actually configured. |
@@ -983,11 +984,38 @@ trip, never only one. An unconfigured dollar ceiling never warns — headroom
 reports a distinct "not configured" state rather than reading as 0% or 100%
 consumed.
 
+**Accounting timezone, and why it defaults to LOCAL, not UTC (issue
+athenaeum#1136).** Both per-day ceilings above used to open a fresh window at
+UTC midnight, unconditionally. For an operator running several hours west of
+UTC that silently opens the window mid-evening rather than at the start of
+their day: in US Eastern time (UTC-4 in summer), UTC midnight lands at
+20:00 EDT — squarely inside a typical evening working session. A session
+that runs 20:00-23:00 local can exhaust the WHOLE day's ceiling by 23:00,
+and a scheduled job firing later that same local night (say 02:16 local) is
+still inside the SAME UTC calendar day — it inherits the exhausted ceiling
+and gets refused before it starts. This was observed in production: a
+nightly `athenaeum run` compiled zero entities on every observed night
+because an evening session had already spent the day's $15 ceiling three
+hours earlier. `spend.accounting_timezone` (env `ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE`)
+fixes this at the source by moving the day boundary to the operator's own
+local timezone — **the default, with no config at all** — rather than
+requiring an operator to discover and set a key before the bug goes away.
+An operator who already runs in UTC sees zero behavior change (their local
+day already equals the UTC day). Set it explicitly (an IANA name, e.g.
+`America/New_York`) when the accounting day should track a *different*
+timezone than the host machine's own — e.g. the ledger is written by a
+process running in a container pinned to UTC on behalf of an operator
+elsewhere. A misspelled/unresolvable zone name WARNs and falls back to UTC
+rather than crashing the run — the same "never crash a run over a config
+typo" contract every other spend knob in this table already holds itself
+to.
+
 ```yaml
 spend:
   # ledger_enabled: true          # on by default
   max_tokens_per_run: 2000000     # cap the nightly subscription burn
   max_usd_per_day: 5.00           # cap real API dollars per day
+  # accounting_timezone: America/New_York  # default: system-local; see rationale above
   weekly_token_limit: 700000      # declared weekly subscription quota
   max_pct_per_day: 50             # -> 50,000 token/day derived ceiling
   # warning_threshold_pct: 75     # warn at 75% of either dollar cap (default)
@@ -997,10 +1025,12 @@ The weekly-limit + max-percent-per-day pair (issue athenaeum#785) is a SECOND,
 independent way to bound the subscription per-day figure — derived rather
 than absolute, and strictly opt-in like every ceiling here: setting only one
 of the two does nothing (there is no denominator, or no percentage, to apply
-on its own). It reuses the same UTC-midnight day boundary as the per-day
-ceilings above (a rolling 7-day window is deliberately out of scope) and
-never gates the API path — a token-denominated percentage has no meaning
-there, and `subscription` notional tokens and `api` real dollars are two
+on its own). It reuses the same configured-accounting-day boundary (issue
+athenaeum#1136 — UTC-midnight-aligned only when `spend.accounting_timezone`
+resolves to UTC, no longer unconditionally) as the per-day ceilings above (a
+rolling 7-day window is deliberately out of scope) and never gates the API
+path — a token-denominated percentage has no meaning there, and
+`subscription` notional tokens and `api` real dollars are two
 metrics this ledger never blends (athenaeum#487, cwc#1629).
 
 ## Push-precision and coverage instrumentation (athenaeum#711)

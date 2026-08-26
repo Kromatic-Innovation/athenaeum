@@ -174,6 +174,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BEHAVIOUR CHANGE: the per-day spend ceiling now accounts against the
+  operator's LOCAL day by default, not UTC (athenaeum#1136).** `spend.max_usd_per_day`
+  / `spend.max_tokens_per_day` (and the weekly-percent derivation) used to
+  open a fresh accounting window at UTC midnight unconditionally. For an
+  operator running several hours west of UTC, that silently opened the
+  window mid-evening — in US Eastern time (UTC-4 in summer), UTC midnight
+  lands at 20:00 EDT, squarely inside a typical evening working session. A
+  session that ran 20:00-23:00 local could exhaust the WHOLE day's ceiling,
+  and a scheduled job firing later the SAME local night (but still inside
+  the same UTC calendar day) inherited nothing — this was observed in
+  production as a nightly `athenaeum run` compiling **zero** entities on
+  every observed night, refused with `Spend ceiling reached
+  ($15.03/$15.00 today)` roughly three hours after an evening session had
+  already spent it. The new `spend.accounting_timezone` config key (env
+  `ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE`; IANA name, e.g.
+  `America/New_York`) fixes this at the source: it now **defaults to the
+  system's local timezone**, not UTC, so the day boundary tracks the
+  operator's own day without any config at all. An operator who already
+  runs in UTC sees zero behavior change. A misspelled/unresolvable zone
+  name WARNs and falls back to UTC rather than crashing a run. Full
+  rationale and config table: [`docs/configuration.md`](docs/configuration.md).
+  `athenaeum.spend._start_of_utc_day`
+  is renamed `_start_of_accounting_day` (internal, not part of the public
+  API) and `athenaeum.spend.spend_today` gained an optional `config=`
+  parameter; both `ceiling_tripped()` branches (subscription tokens and API
+  dollars) move together.
+
 - **`enumerate_entities` no longer PII-gates `do_not_email` (athenaeum#1122).**
   `athenaeum.enumeration._PII_GATED_EXACT_FIELDS` is now empty:
   `is_pii_gated_field("do_not_email")` (and `_reason` / `_date`) returns
