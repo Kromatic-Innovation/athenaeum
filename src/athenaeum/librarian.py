@@ -2461,6 +2461,31 @@ def librarian_batch_mode(config: dict[str, object] | None = None) -> bool:
     return False
 
 
+def librarian_run_type(config: dict[str, object] | None = None) -> str:
+    """Resolve the ``run_type`` ledger-attribution tag from env > default (athenaeum#1136).
+
+    Shape mirrors :func:`librarian_batch_mode` (athenaeum#236) — the CLI
+    ``--run-type`` flag (resolved by the caller, ``_cmd_run.cmd_run``) wins
+    over the ``ATHENAEUM_RUN_TYPE`` env var read here — but with no yaml
+    key: this declares WHICH INVOCATION this is ("a scheduled nightly" vs.
+    "an interactive session"), not a static per-installation setting, so
+    there is no meaningful yaml default to define. The env var exists
+    because athenaeum ships no nightly cron wrapper of its own — the actual
+    wrapper lives in a DIFFERENT repo (``code-workspace-config``, not this
+    one; see docs/configuration.md "Reasoning-tier triggers") — and setting
+    an env var in that external cron/launchd invocation is far less
+    invasive than threading a new CLI flag through it. A blank/whitespace-
+    only env value falls through to the default. Default is
+    :data:`athenaeum.spend.RUN_TYPE_LIBRARIAN` — UNCHANGED from every
+    pre-athenaeum#1136 caller, so an operator who sets neither the flag nor
+    the env var sees byte-identical ledger rows.
+    """
+    env = os.environ.get("ATHENAEUM_RUN_TYPE")
+    if env is not None and env.strip():
+        return env.strip()
+    return spend.RUN_TYPE_LIBRARIAN
+
+
 def librarian_stuck_file_threshold(config: dict[str, object] | None = None) -> int:
     """Resolve the consecutive-failure threshold before a raw file is stuck (athenaeum#663).
 
@@ -3281,6 +3306,16 @@ class RunContext:
     # ``EXIT_LIBRARIAN_REFUSAL`` -- the explicit opt-in for a deliberate
     # deterministic-phases-only / budget-starved run (AC3).
     allow_degraded: bool = False
+    # Issue athenaeum#1136: which kind of caller this run declares itself as, for
+    # spend-ledger attribution (``athenaeum spend --by-provider`` groups by
+    # this value). ``None`` until ``_resolve_run_config`` resolves it (CLI
+    # ``--run-type`` > ``ATHENAEUM_RUN_TYPE`` env > ``spend.RUN_TYPE_LIBRARIAN``
+    # -- unchanged default, see ``librarian_run_type``); every write site
+    # downstream reads the RESOLVED ``ctx.run_type``, never the raw
+    # constructor argument, so it is never ``None`` by the time either
+    # ledger-write site (the SIGTERM/SIGINT partial-commit path and the
+    # normal end-of-run write) uses it.
+    run_type: str | None = None
     raw_files: list[Any] = field(default_factory=list)
     # Issue athenaeum#663: raw files surfaced as STUCK this run — either they crossed the
     # consecutive-failure threshold this run, or they were already over it and
@@ -3619,6 +3654,12 @@ def _resolve_run_config(ctx: RunContext) -> int | None:
     # env > yaml > default off).
     if ctx.batch_mode is None:
         ctx.batch_mode = librarian_batch_mode(ctx.config)
+
+    # Issue athenaeum#1136: resolve which kind of caller this run declares
+    # itself as (explicit arg > env > default RUN_TYPE_LIBRARIAN — no yaml,
+    # see librarian_run_type's docstring for why).
+    if ctx.run_type is None:
+        ctx.run_type = librarian_run_type(ctx.config)
 
     # Issue athenaeum#330/#573: batch mode is API-only — the Messages Batch API is an
     # Anthropic-endpoint feature with no ``claude`` CLI equivalent. This is now
@@ -4641,7 +4682,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.usage,
                     ctx.knob_providers,
                     ctx.knob_models,
-                    run_type="librarian",
+                    run_type=ctx.run_type or spend.RUN_TYPE_LIBRARIAN,
                     default_provider=ctx.provider,
                     files_processed=ctx.processed_count,
                     wiki_root=ctx.wiki_root,
@@ -5876,7 +5917,7 @@ def _format_budget_window_spend(ctx: "RunContext") -> str | None:
             spend.ledger_provider(ctx.provider) == spend.PROVIDER_CLAUDE_CLI
         )
         ledger_path = spend.resolve_ledger_path(ctx.config, wiki_root=ctx.wiki_root)
-        today = spend.spend_today(ledger_path)
+        today = spend.spend_today(ledger_path, config=ctx.config)
         if is_subscription:
             token_cap = resolve_spend_max_tokens_per_day(ctx.config)
             if token_cap is None:
@@ -5953,7 +5994,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
             ctx.usage,
             ctx.knob_providers,
             ctx.knob_models,
-            run_type="librarian",
+            run_type=ctx.run_type or spend.RUN_TYPE_LIBRARIAN,
             default_provider=ctx.provider,
             files_processed=ctx.files_processed_count,
             wiki_root=ctx.wiki_root,
@@ -6242,6 +6283,7 @@ def run(
     out_run_stats: dict[str, Any] | None = None,
     lock: Any = None,
     allow_degraded: bool = False,
+    run_type: str | None = None,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error,
     EXIT_GRACEFUL_PARTIAL (75) on its own internal deadline trip (issue
@@ -6297,6 +6339,20 @@ def run(
     escape hatch is for a DELIBERATE deterministic-phases-only /
     budget-starved run where a caller already knows nothing will compile and
     does not want that treated as a failure.
+
+    ``run_type`` (issue athenaeum#1136) declares which kind of caller this run
+    is, for spend-ledger attribution: ``athenaeum spend --by-provider``
+    groups ledger rows by this value, so an operator can tell a scheduled
+    nightly compile's burn apart from an interactive session's. When
+    ``None`` (the default) it resolves via env ``ATHENAEUM_RUN_TYPE`` >
+    :data:`athenaeum.spend.RUN_TYPE_LIBRARIAN` (see
+    :func:`librarian_run_type`); an explicit value (e.g. the CLI
+    ``--run-type`` flag) wins over the env var. The resolved value is
+    written to BOTH ledger-write sites — the normal end-of-run record and
+    the SIGTERM/SIGINT partial-commit record — so an interrupted nightly
+    still attributes correctly. Default stays
+    :data:`~athenaeum.spend.RUN_TYPE_LIBRARIAN`, byte-identical to every
+    pre-athenaeum#1136 caller.
 
     ``batch_mode`` (issue athenaeum#236) routes the entity-tier LLM calls through
     the Anthropic Messages Batch API (50% token discount, latency-tolerant)
@@ -6434,6 +6490,9 @@ def run(
     # Issue athenaeum#1135: same "set after construction" rationale as
     # ``entity_changed_paths`` / ``full_contradiction_sweep`` above.
     ctx.allow_degraded = allow_degraded
+    # Issue athenaeum#1136: same rationale; resolved (CLI arg > env > default)
+    # by ``_resolve_run_config`` below, alongside batch_mode/max_runtime/etc.
+    ctx.run_type = run_type
     ctx.lock = lock
     ctx.api_key = os.environ.get("ANTHROPIC_API_KEY")
     ctx.config = load_config(knowledge_root)

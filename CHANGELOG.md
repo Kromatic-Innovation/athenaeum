@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum run --run-type` / `ATHENAEUM_RUN_TYPE` declares which kind of
+  caller a run is, for spend-ledger attribution (athenaeum#1136).** Previously
+  every `record_spend` call site hardcoded a bare `run_type` string literal
+  with no shared vocabulary — `athenaeum.spend` now exposes `RUN_TYPE_LIBRARIAN`,
+  `RUN_TYPE_LIBRARIAN_NIGHTLY`, `RUN_TYPE_ANSWERS`, `RUN_TYPE_QUERY_TOPICS`,
+  and `RUN_TYPE_MEMORY_CLASS_BACKFILL` constants, and every existing call
+  site (`librarian.py`, `answers.py`, `query_topics.py`,
+  `memory_class_backfill.py`) now uses them. A scheduled nightly compile can
+  now declare itself via the new flag/env var so `athenaeum spend
+  --by-provider` (which, despite its name, groups by `run_type`) attributes
+  its burn separately from an interactive session's — pass
+  `--run-type librarian-nightly` or set `ATHENAEUM_RUN_TYPE=librarian-nightly`.
+  Default stays the unchanged `librarian`, so an operator who touches
+  neither sees byte-identical ledger rows. Both librarian ledger-write
+  sites (the normal end-of-run write and the SIGTERM/SIGINT partial-commit
+  write) thread the resolved value. `RUN_TYPE_LIBRARIAN` and
+  `RUN_TYPE_LIBRARIAN_NIGHTLY` are members of the same librarian *family* —
+  `athenaeum.spend.is_librarian_run_type` matches either — and
+  `athenaeum.drain_advisor`'s observed-files-per-night estimator now
+  matches the family instead of the exact `"librarian"` literal, so a
+  nightly's ledger rows still inform backlog-drain ETAs instead of silently
+  vanishing from that calculation.
+
 - **`athenaeum run` refuses loudly when it compiled nothing (athenaeum#1135).**
   A run whose spend/API-call budget was already exhausted before the entity
   loop claimed its first file ran every deterministic phase and exited `0`

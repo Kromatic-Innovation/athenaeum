@@ -439,6 +439,9 @@ class TestResolveRunConfig:
         assert ctx.retire is True
         assert ctx.push_after_run is False
         assert ctx.pull_before_run is False
+        # Issue athenaeum#1136: unset CLI arg + unset env resolves to the
+        # unchanged pre-athenaeum#1136 default.
+        assert ctx.run_type == "librarian"
 
     def test_explicit_args_win_over_defaults(self, tmp_path: Path) -> None:
         ctx = _make_ctx(
@@ -452,6 +455,7 @@ class TestResolveRunConfig:
             pull_before_run=True,
         )
         ctx.provider = "api"
+        ctx.run_type = "librarian-nightly"
         assert _resolve_run_config(ctx) is None
         assert ctx.max_api_calls == 42
         assert ctx.max_files == 7
@@ -459,6 +463,27 @@ class TestResolveRunConfig:
         assert ctx.retire is False
         assert ctx.push_after_run is True
         assert ctx.pull_before_run is True
+        # Issue athenaeum#1136: an explicit (non-None) value is left alone by
+        # _resolve_run_config -- it does not overwrite an already-set run_type.
+        assert ctx.run_type == "librarian-nightly"
+
+    def test_run_type_resolved_from_env_when_unset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_RUN_TYPE", "librarian-nightly")
+        ctx = _make_ctx(tmp_path)
+        ctx.provider = "api"
+        assert _resolve_run_config(ctx) is None
+        assert ctx.run_type == "librarian-nightly"
+
+    def test_run_type_blank_env_falls_through_to_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_RUN_TYPE", "   ")
+        ctx = _make_ctx(tmp_path)
+        ctx.provider = "api"
+        assert _resolve_run_config(ctx) is None
+        assert ctx.run_type == "librarian"
 
     def test_batch_mode_rejected_for_claude_cli_provider(
         self, tmp_path: Path
