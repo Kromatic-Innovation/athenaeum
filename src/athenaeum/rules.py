@@ -243,7 +243,20 @@ class FieldPredicate(BaseModel):
 
 class MatchSpec(BaseModel):
     """`match:` block. Every key is optional; an omitted key matches
-    anything. All present keys must hold (AND) for the rule to match."""
+    anything. All present keys must hold (AND) for the rule to match.
+
+    ``unclaimed`` (issue athenaeum#1133) opts a rule INTO matching candidates
+    from :func:`athenaeum.intake_audit.discover_unclaimed_shape_rule_candidates`
+    -- files the intake audit (issue athenaeum#836) reports as unrecognised,
+    which by definition have neither a parseable frontmatter/JSONL record
+    nor an extension `discover_raw_files` would ever claim. Explicit opt-in,
+    never inferred from `format: null`: `format` is already optional for
+    ORDINARY rules (any `.md`/`.jsonl` candidate, unclaimed or not), so
+    treating an absent `format` as "this rule wants unclaimed files" would
+    misfire on every existing rule that simply doesn't care about format.
+    Default `False` so every rule written before this issue keeps matching
+    only ordinary (claimed) candidates, unchanged.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -252,6 +265,7 @@ class MatchSpec(BaseModel):
     filename_glob: str | None = None
     key_fingerprint: str | None = None
     fields: dict[str, FieldPredicate] = Field(default_factory=dict)
+    unclaimed: bool = False
 
     @field_validator("key_fingerprint")
     @classmethod
@@ -264,7 +278,51 @@ class MatchSpec(BaseModel):
             )
         return v
 
-    def matches(self, *, raw: RawFile, record: dict[str, Any], fmt: str) -> bool:
+    @model_validator(mode="after")
+    def _validate_unclaimed_compat(self) -> "MatchSpec":
+        # Issue athenaeum#1133 AC4: a `.txt`/`.json` unclaimed candidate has no
+        # parseable record -- `fields`/`key_fingerprint` would resolve
+        # `(False, None)` against `{}` forever and the rule would silently
+        # never match. `format` is a permanently-unsatisfiable trap for the
+        # same reason: it is typed `Literal["md","jsonl"] | None`, so it can
+        # never equal an unclaimed file's actual extension. All three are
+        # caught HERE, at load time, rather than left to silently never
+        # match at evaluation time.
+        if self.unclaimed:
+            if self.fields:
+                raise ValueError(
+                    "match.unclaimed rules cannot use match.fields (no "
+                    "record exists to match against) -- use "
+                    "match.filename_glob instead"
+                )
+            if self.key_fingerprint is not None:
+                raise ValueError(
+                    "match.unclaimed rules cannot use match.key_fingerprint "
+                    "(no record exists to match against) -- use "
+                    "match.filename_glob instead"
+                )
+            if self.format is not None:
+                raise ValueError(
+                    "match.unclaimed rules cannot use match.format (an "
+                    "unclaimed candidate's extension is never .md/.jsonl -- "
+                    "that is why it is unclaimed) -- use "
+                    "match.filename_glob instead"
+                )
+        return self
+
+    def matches(
+        self,
+        *,
+        raw: RawFile,
+        record: dict[str, Any],
+        fmt: str,
+        is_unclaimed: bool = False,
+    ) -> bool:
+        # Issue athenaeum#1133: a hard partition, not a documentation hint --
+        # without it, a rule with an otherwise-empty `match:` block (every
+        # key above is optional) would match every candidate of BOTH kinds.
+        if self.unclaimed != is_unclaimed:
+            return False
         if self.source is not None and raw.source != self.source:
             return False
         if self.format is not None and fmt != self.format:
@@ -717,6 +775,20 @@ class ShapeRule(BaseModel):
         if self.disposition != "rollup" and self.rollup is not None:
             raise ValueError(
                 f"disposition {self.disposition!r} must not carry a 'rollup' block"
+            )
+        # Issue athenaeum#1133: `emit`/`rollup` both require a `correction`
+        # block whose whole purpose is compiling record fields -- meaningless
+        # against an unclaimed candidate's `{}` record. Rejected at load
+        # time; the coherent rule is "an `unclaimed` rule may only assert
+        # things that don't require record content" (drop/retain/preserve/
+        # fallthrough).
+        if self.match.unclaimed and self.disposition in _CORRECTION_REQUIRED:
+            raise ValueError(
+                f"match.unclaimed rules cannot use disposition "
+                f"{self.disposition!r} (it requires a 'correction' block, "
+                "which compiles record fields that do not exist for an "
+                "unclaimed candidate) -- use drop/retain/preserve/"
+                "fallthrough instead"
             )
         return self
 
@@ -1513,6 +1585,7 @@ def run_shape_rule_phase(
     deadline_check: Callable[[], bool] | None = None,
     dry_run: bool = False,
     store: Store | None = None,
+    unclaimed_candidates: list[RawFile] | None = None,
 ) -> dict[str, Any]:
     """Load rules, evaluate every candidate raw file from
     `intake.discover_raw_files` PLUS `intake.discover_shape_rule_extra_intake_files`
@@ -1561,6 +1634,20 @@ def run_shape_rule_phase(
     when no matched rule's disposition is `preserve`, or when `preserve`
     resolves to the local `librarian.preserved_log_dir` area (which never
     touches this parameter -- :func:`preserve_raw_file` is unchanged).
+
+    *unclaimed_candidates* (issue athenaeum#1133) is the CALLER-resolved output of
+    :func:`athenaeum.intake_audit.discover_unclaimed_shape_rule_candidates`
+    -- files the intake audit (issue athenaeum#836) reports as unrecognised,
+    appended to the ordinary candidate list exactly as
+    `intake.discover_shape_rule_extra_intake_files`'s output already is.
+    Not resolved by this function itself: :mod:`athenaeum.intake_audit` is
+    Layering L4 and this module is L3, so importing it here would invert
+    the documented acyclic boundary -- see that function's docstring. Each
+    candidate from this list is evaluated with `is_unclaimed=True`
+    (:meth:`MatchSpec.matches`'s hard partition), so only a rule whose
+    `match.unclaimed` is `True` can ever match it, and vice versa. `None`
+    (the default) preserves this function's pre-athenaeum#1133 candidate set
+    verbatim.
     """
     summary: dict[str, Any] = {
         "rules_loaded": 0,
@@ -1591,9 +1678,18 @@ def run_shape_rule_phase(
     # minimal change that makes the extra-intake tree reachable at all
     # without disturbing the existing candidate order for every other
     # source.
-    candidates = discover_raw_files(raw_root, config) + discover_shape_rule_extra_intake_files(
-        raw_root, config
-    )
+    # Issue athenaeum#1133: `unclaimed_candidates` is appended last, same
+    # convention, and each is paired with `is_unclaimed=True` so the
+    # per-candidate loop below can enforce `MatchSpec`'s hard partition.
+    candidates: list[tuple[RawFile, bool]] = [
+        (r, False)
+        for r in (
+            discover_raw_files(raw_root, config)
+            + discover_shape_rule_extra_intake_files(raw_root, config)
+        )
+    ]
+    if unclaimed_candidates:
+        candidates.extend((r, True) for r in unclaimed_candidates)
 
     # Per-(rule, mode) tallies -- keyed so an observe-mode pass and a
     # live-mode pass for the SAME rule (an operator edited it mid-run
@@ -1638,7 +1734,7 @@ def run_shape_rule_phase(
             )
 
     evaluated = 0
-    for raw in candidates:
+    for raw, is_unclaimed in candidates:
         if deadline_check is not None and deadline_check():
             break
         if evaluated >= max_records:
@@ -1648,7 +1744,12 @@ def run_shape_rule_phase(
 
         record, fmt = _record_and_format(raw)
         matched_rule = next(
-            (r for r in rules if r.match.matches(raw=raw, record=record, fmt=fmt)), None
+            (
+                r
+                for r in rules
+                if r.match.matches(raw=raw, record=record, fmt=fmt, is_unclaimed=is_unclaimed)
+            ),
+            None,
         )
         if matched_rule is None:
             # Issue athenaeum#975: the interesting shapes for athenaeum#905's detector are
