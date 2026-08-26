@@ -659,6 +659,33 @@ class TestPreservedLogAdapterRouting:
         assert dest.is_file()
         assert json.loads(dest.read_text(encoding="utf-8")) == {"e": 1}
 
+    def test_versioned_knowledge_root_removes_source_via_git(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """Coverage follow-up: when `knowledge_root` IS a git repo, source
+        removal for the adapter-routed path goes through `_retire_raw_file`
+        (git rm + commit) -- the git-recoverable branch every OTHER test in
+        this class skips, since they all use a non-git `tmp_path` to
+        exercise the plain-unlink branch instead."""
+        _git_init(tmp_path)
+        outside = tmp_path_factory.mktemp("mural-outside")
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+
+        summary = _run(tmp_path, config=self._adapter_config(outside))
+
+        assert summary["dispositions"] == {"preserve": 1}
+        assert not raw_path.exists()
+        dest = outside / "hestia-lanes" / "20260815T000000Z-aa.jsonl"
+        assert dest.is_file()
+        # The removal was committed to git history, mirroring
+        # TestPreserveMovesTheFile's own git-path assertion for the local
+        # directory case.
+        log_output = _git(tmp_path, "log", "--oneline").stdout
+        assert "preserved via storage adapter" in log_output
+
     def test_both_keys_set_adapter_wins_and_shadow_warning_is_logged(
         self,
         tmp_path: Path,
