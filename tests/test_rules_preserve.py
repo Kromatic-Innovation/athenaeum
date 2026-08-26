@@ -15,6 +15,7 @@ Each test class is annotated with the acceptance criterion it proves.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 
@@ -23,15 +24,21 @@ import yaml
 from pydantic import ValidationError as PydanticValidationError
 
 from athenaeum.compiled_exempt import load_exempt
-from athenaeum.config import resolve_preserved_log_dir
+from athenaeum.config import resolve_preserved_log_adapter, resolve_preserved_log_dir
 from athenaeum.corrections import find_correction_batches
 from athenaeum.intake import discover_raw_files
 from athenaeum.rules import (
+    PRESERVED_LOG_SOURCE_SCHEME,
     TERMINAL_DISPOSITIONS,
+    PreserveViaStoreOutcome,
     ShapeRule,
+    default_shape_rule_dispositions_path,
+    preserve_raw_file_via_store,
     preserved_log_source_pointer,
     run_shape_rule_phase,
 )
+from athenaeum.storage import StorageConfigError
+from athenaeum.store import FilesystemStore
 
 PRESERVED = "logs"
 
@@ -116,6 +123,17 @@ def _ledger_lines(tmp_path: Path) -> list[dict]:
     ]
 
 
+def _disposition_rows(tmp_path: Path) -> list[dict]:
+    path = default_shape_rule_dispositions_path(tmp_path / "wiki")
+    if not path.is_file():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 class TestPreservedLogAreaConfig:
     """AC1: the operator can configure a preserved-log area."""
 
@@ -144,6 +162,39 @@ class TestPreservedLogAreaConfig:
         # A preserved artifact outside the knowledge git repo is neither
         # versioned nor recoverable -- which defeats preservation entirely.
         assert resolve_preserved_log_dir({"librarian": {"preserved_log_dir": bad}}) is None
+
+
+class TestPreservedLogAdapterConfig:
+    """athenaeum#1132, QA follow-up: direct unit coverage for
+    resolve_preserved_log_adapter, mirroring TestPreservedLogAreaConfig
+    above -- this key had none until now, and its
+    `not isinstance(config, dict)` guard (config.py, the None case below)
+    was unreached by the whole suite."""
+
+    def test_configured_adapter_is_resolved(self) -> None:
+        assert (
+            resolve_preserved_log_adapter(
+                {"librarian": {"preserved_log_adapter": "mural-archive"}}
+            )
+            == "mural-archive"
+        )
+
+    def test_surrounding_whitespace_is_stripped(self) -> None:
+        assert (
+            resolve_preserved_log_adapter(
+                {"librarian": {"preserved_log_adapter": "  mural-archive  "}}
+            )
+            == "mural-archive"
+        )
+
+    def test_unset_is_none_so_the_feature_is_opt_in(self) -> None:
+        assert resolve_preserved_log_adapter(None) is None
+        assert resolve_preserved_log_adapter({}) is None
+        assert resolve_preserved_log_adapter({"librarian": {}}) is None
+        assert (
+            resolve_preserved_log_adapter({"librarian": {"preserved_log_adapter": "  "}})
+            is None
+        )
 
 
 class TestPreserveMovesTheFile:
@@ -562,6 +613,431 @@ class TestFactCarriesSourcePointer:
         assert summary["dispositions"] == {"transform-error": 1}
         assert raw_path.exists()
         assert not (tmp_path / PRESERVED).exists()
+
+
+class TestPreservedLogAdapterRouting:
+    """athenaeum#1132: `librarian.preserved_log_adapter` routes `preserve` through
+    the whole-store adapter seam (`athenaeum.store.Store` /
+    `athenaeum.storage.available_adapters`) instead of the local, in-repo
+    `librarian.preserved_log_dir` area -- the seam that lets a preserved log
+    land OUTSIDE the knowledge git repo."""
+
+    ADAPTER_NAME = "mural-archive"
+
+    def _adapter_config(self, outside_root: Path, *, dir_also: str | None = None) -> dict:
+        cfg: dict = {
+            "librarian": {"preserved_log_adapter": self.ADAPTER_NAME},
+            "storage": {
+                "adapters": {
+                    self.ADAPTER_NAME: {
+                        "backing_store": "filesystem",
+                        "surface_root": str(outside_root),
+                    }
+                }
+            },
+        }
+        if dir_also is not None:
+            cfg["librarian"]["preserved_log_dir"] = dir_also
+        return cfg
+
+    def test_absolute_out_of_repo_adapter_moves_the_file(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """(a): an absolute, out-of-repo adapter surface -- the file lands
+        there and the source is removed from `raw/`."""
+        outside = tmp_path_factory.mktemp("mural-outside")
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+
+        summary = _run(tmp_path, config=self._adapter_config(outside))
+
+        assert summary["dispositions"] == {"preserve": 1}
+        assert not raw_path.exists()
+        dest = outside / "hestia-lanes" / "20260815T000000Z-aa.jsonl"
+        assert dest.is_file()
+        assert json.loads(dest.read_text(encoding="utf-8")) == {"e": 1}
+
+    def test_versioned_knowledge_root_removes_source_via_git(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """Coverage follow-up: when `knowledge_root` IS a git repo, source
+        removal for the adapter-routed path goes through `_retire_raw_file`
+        (git rm + commit) -- the git-recoverable branch every OTHER test in
+        this class skips, since they all use a non-git `tmp_path` to
+        exercise the plain-unlink branch instead."""
+        _git_init(tmp_path)
+        outside = tmp_path_factory.mktemp("mural-outside")
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+
+        summary = _run(tmp_path, config=self._adapter_config(outside))
+
+        assert summary["dispositions"] == {"preserve": 1}
+        assert not raw_path.exists()
+        dest = outside / "hestia-lanes" / "20260815T000000Z-aa.jsonl"
+        assert dest.is_file()
+        # The removal was committed to git history, mirroring
+        # TestPreserveMovesTheFile's own git-path assertion for the local
+        # directory case.
+        log_output = _git(tmp_path, "log", "--oneline").stdout
+        assert "preserved via storage adapter" in log_output
+
+    def test_both_keys_set_adapter_wins_and_shadow_warning_is_logged(
+        self,
+        tmp_path: Path,
+        tmp_path_factory: pytest.TempPathFactory,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """(b): both `preserved_log_dir` and `preserved_log_adapter` set --
+        the adapter wins, and the shadowing is logged, not silent."""
+        outside = tmp_path_factory.mktemp("mural-outside")
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+
+        with caplog.at_level(logging.WARNING):
+            summary = _run(
+                tmp_path, config=self._adapter_config(outside, dir_also=PRESERVED)
+            )
+
+        assert summary["dispositions"] == {"preserve": 1}
+        assert not raw_path.exists()
+        assert (outside / "hestia-lanes" / "20260815T000000Z-aa.jsonl").is_file()
+        # The directory area was NOT used.
+        assert not (tmp_path / PRESERVED).exists()
+        assert "shadows" in caplog.text
+        assert "preserved_log_dir" in caplog.text
+        assert "preserved_log_adapter" in caplog.text
+
+    def test_dir_only_and_neither_set_stay_byte_identical(self, tmp_path: Path) -> None:
+        """(c): AC3, no forced migration -- only-dir-set and neither-set are
+        unaffected by the adapter seam existing at all. Regression pin."""
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+        # `_run`'s default config sets only `preserved_log_dir`.
+        summary = _run(tmp_path)
+        assert summary["dispositions"] == {"preserve": 1}
+        assert not raw_path.exists()
+        assert (
+            tmp_path / PRESERVED / "hestia-lanes" / "20260815T000000Z-aa.jsonl"
+        ).is_file()
+
+        raw_path2 = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260816T000000Z-bb.jsonl", {"e": 2}
+        )
+        summary2 = _run(tmp_path, config={})  # neither key set
+        assert summary2["dispositions"] == {"preserve-unconfigured": 1}
+        assert raw_path2.exists()
+
+    def test_put_failure_leaves_source_untouched_and_tallies_preserve_failed(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """(d): fail-closed. `Store.put` raising (EXDEV is the expected case
+        for a routed adapter on a different filesystem, not an edge case)
+        must leave the source provably untouched, tally `preserve-failed`,
+        and never let the exception escape `run_shape_rule_phase`."""
+        outside = tmp_path_factory.mktemp("mural-outside")
+        store = FilesystemStore(tmp_path, {self.ADAPTER_NAME: outside})
+
+        def _raise_exdev(*_args: object, **_kwargs: object) -> str:
+            raise OSError(18, "Invalid cross-device link")  # errno.EXDEV
+
+        store.put = _raise_exdev  # type: ignore[method-assign]
+
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+        original_bytes = raw_path.read_bytes()
+
+        summary = _run(tmp_path, config=self._adapter_config(outside), store=store)
+
+        assert summary["dispositions"] == {"preserve-failed": 1}
+        assert raw_path.exists()
+        assert raw_path.read_bytes() == original_bytes
+        assert not (outside / "hestia-lanes").exists()
+
+    def test_pointer_for_outside_repo_destination_is_a_resolvable_absolute_path(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """(e): the pointer format for the outside-repo case is a resolvable
+        absolute path; the SCHEME does not vary by backend."""
+        outside = tmp_path_factory.mktemp("mural-outside")
+        dest = outside / "hestia-lanes" / "a.jsonl"
+        dest.parent.mkdir(parents=True)
+        dest.write_text("{}\n", encoding="utf-8")
+
+        pointer = preserved_log_source_pointer(tmp_path, dest, fmt="jsonl")
+
+        assert pointer == f"{PRESERVED_LOG_SOURCE_SCHEME}:{dest.as_posix()}#L1"
+        path_segment = pointer.split(":", 1)[1].split("#", 1)[0]
+        assert Path(path_segment).is_absolute()
+        assert Path(path_segment).is_file()
+
+    def test_worked_example_pointer_resolves_to_absolute_outside_repo_path(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """(e), end-to-end: a fact compiled from an adapter-routed preserved
+        log carries a pointer that resolves to the real, outside-repo file."""
+        outside = tmp_path_factory.mktemp("mural-outside")
+        _write_rule(
+            tmp_path / "rules", "r1.yaml", _preserve_rule(correction=_bounce_correction())
+        )
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "hestia-lanes",
+            "20260815T000000Z-aa.jsonl",
+            {
+                "email": "jon@smith.com",
+                "status": "bounced",
+                "status_date": "2026-08-15",
+                "observed_at": "2026-08-15T00:00:00Z",
+            },
+        )
+
+        summary = _run(tmp_path, config=self._adapter_config(outside))
+        assert summary["dispositions"] == {"preserve": 1}
+
+        batch_path, _source, _envelope = find_correction_batches(tmp_path / "raw")[0]
+        record = next(
+            json.loads(line)
+            for line in batch_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and json.loads(line).get("record") == "correction"
+        )
+        dest = outside / "hestia-lanes" / "20260815T000000Z-aa.jsonl"
+        assert record["source"]["ref"] == f"{PRESERVED_LOG_SOURCE_SCHEME}:{dest.as_posix()}#L1"
+        assert record["source"]["type"] == "script"  # precedence not demoted
+        pointed_at = Path(record["source"]["ref"].split(":", 1)[1].split("#", 1)[0])
+        assert pointed_at.is_file()
+
+    def test_unknown_adapter_name_raises_storage_config_error(self, tmp_path: Path) -> None:
+        """(f): a `preserved_log_adapter` naming an adapter that does not
+        exist fails LOUDLY -- never a silent fallback to the directory."""
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+        config = {"librarian": {"preserved_log_adapter": "does-not-exist"}}
+
+        with pytest.raises(StorageConfigError):
+            _run(tmp_path, config=config)
+
+    def test_different_content_collision_still_fails_closed(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """QA follow-up (1b): a same-named object with DIFFERENT content at
+        the destination is a genuine, unrelated collision. Content equality
+        is the only signal that authorizes convergence -- a name match
+        alone must never be enough, or a genuinely different artifact could
+        silently be treated as "already preserved"."""
+        outside = tmp_path_factory.mktemp("mural-outside")
+        dest_dir = outside / "hestia-lanes"
+        dest_dir.mkdir(parents=True)
+        (dest_dir / "20260815T000000Z-aa.jsonl").write_text(
+            json.dumps({"e": "unrelated pre-existing content"}) + "\n", encoding="utf-8"
+        )
+
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+        original_bytes = raw_path.read_bytes()
+
+        summary = _run(tmp_path, config=self._adapter_config(outside))
+
+        assert summary["dispositions"] == {"preserve-failed": 1}
+        assert raw_path.exists()
+        assert raw_path.read_bytes() == original_bytes
+        # The pre-existing, unrelated destination content was NOT clobbered.
+        assert json.loads(
+            (dest_dir / "20260815T000000Z-aa.jsonl").read_text(encoding="utf-8")
+        ) == {"e": "unrelated pre-existing content"}
+
+    def test_orphaned_source_is_tallied_honestly_not_as_preserve(
+        self,
+        tmp_path: Path,
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """QA follow-up (1a): a durable `put` whose source removal fails
+        must NEVER be tallied as terminal `preserve` -- that would
+        contradict the ledger (the file is still in raw/) and, without the
+        convergence path, jam every subsequent run forever. Also pins the
+        `_disposition_tier` treatment: `preserve-orphaned-source` is
+        deferred (`tier: null`), same as `preserve-unconfigured` /
+        `preserve-failed`."""
+        import athenaeum.rules as rules_mod
+
+        outside = tmp_path_factory.mktemp("mural-outside")
+        monkeypatch.setattr(rules_mod, "_unlink_quietly", lambda _path: False)
+
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+
+        summary = _run(tmp_path, config=self._adapter_config(outside))
+
+        assert summary["dispositions"] == {"preserve-orphaned-source": 1}
+        # The artifact IS durably written...
+        dest = outside / "hestia-lanes" / "20260815T000000Z-aa.jsonl"
+        assert dest.is_file()
+        assert json.loads(dest.read_text(encoding="utf-8")) == {"e": 1}
+        # ...but the source was NOT removed -- unlike a real `preserve`.
+        assert raw_path.exists()
+
+        rows = _disposition_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["disposition"] == "preserve-orphaned-source"
+        assert rows[0]["tier"] is None
+
+    def test_identical_content_collision_converges_on_a_second_run(
+        self,
+        tmp_path: Path,
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """QA follow-up (1b): after an orphaned-source run, a second run's
+        `put` collides against the SAME bytes at the SAME key -- that must
+        read as "already preserved, finish the job" rather than a hard
+        failure, so a transient removal glitch does not jam the file
+        forever. Also proves no duplicate correction batch is written for
+        the converged retry."""
+        import athenaeum.rules as rules_mod
+
+        outside = tmp_path_factory.mktemp("mural-outside")
+        _write_rule(
+            tmp_path / "rules", "r1.yaml", _preserve_rule(correction=_bounce_correction())
+        )
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw",
+            "hestia-lanes",
+            "20260815T000000Z-aa.jsonl",
+            {
+                "email": "jon@smith.com",
+                "status": "bounced",
+                "status_date": "2026-08-15",
+                "observed_at": "2026-08-15T00:00:00Z",
+            },
+        )
+
+        # First run: force the removal step to fail -- orphaned source, but
+        # the fact is still compiled (the artifact is durably in place).
+        monkeypatch.setattr(rules_mod, "_unlink_quietly", lambda _path: False)
+        first = _run(tmp_path, config=self._adapter_config(outside))
+        assert first["dispositions"] == {"preserve-orphaned-source": 1}
+        assert raw_path.exists()
+        assert len(find_correction_batches(tmp_path / "raw")) == 1
+
+        # Second run: removal works again. The file is still discovered
+        # (still in raw/), the rule still matches, `put` collides against
+        # the SAME bytes it wrote last time -- converge instead of failing.
+        monkeypatch.undo()
+        second = _run(tmp_path, config=self._adapter_config(outside))
+
+        assert second["dispositions"] == {"preserve": 1}
+        assert not raw_path.exists()
+        dest = outside / "hestia-lanes" / "20260815T000000Z-aa.jsonl"
+        assert dest.is_file()
+        # No duplicate correction batch from the converged retry.
+        assert len(find_correction_batches(tmp_path / "raw")) == 1
+
+    def test_unrelated_malformed_adapter_entry_does_not_break_a_run_with_no_adapter_routed_preserve(
+        self, tmp_path: Path
+    ) -> None:
+        """QA follow-up (2): the adapter-covering Store must be resolved
+        LAZILY -- a config error in an adapter this run never actually
+        routes through (no `preserve` rule sets `preserved_log_adapter` at
+        all) must not abort a run that never needed it. Before this fix,
+        `resolve_store_for_class` ran unconditionally for every run."""
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())  # dir-routed only
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+        config = {
+            "librarian": {"preserved_log_dir": PRESERVED},  # no preserved_log_adapter
+            "storage": {
+                "adapters": {
+                    # Missing the required `surface_root` -- malformed, and
+                    # entirely unrelated to this run's dir-routed preserve.
+                    "broken": {"backing_store": "filesystem"}
+                }
+            },
+        }
+
+        summary = _run(tmp_path, config=config)
+
+        assert summary["dispositions"] == {"preserve": 1}
+        assert not raw_path.exists()
+        assert (tmp_path / PRESERVED / "hestia-lanes" / "20260815T000000Z-aa.jsonl").is_file()
+
+    def test_preserve_raw_file_via_store_returns_untouched_outcome_when_source_already_gone(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """QA follow-up (4): direct unit test for the `raw_path.exists()`
+        early return, mirroring `preserve_raw_file`'s own None-return
+        contract -- previously uncovered by the whole suite."""
+        outside = tmp_path_factory.mktemp("mural-outside")
+        store = FilesystemStore(tmp_path, {self.ADAPTER_NAME: outside})
+        missing = tmp_path / "raw" / "hestia-lanes" / "does-not-exist.jsonl"
+
+        outcome = preserve_raw_file_via_store(
+            tmp_path,
+            missing,
+            adapter_name=self.ADAPTER_NAME,
+            source="hestia-lanes",
+            rule_tag="hestia-lane-log@1",
+            store=store,
+        )
+
+        assert outcome == PreserveViaStoreOutcome(
+            dest_path=None, freshly_written=False, orphaned=False
+        )
+        assert not (outside / "hestia-lanes").exists()  # the store was never touched
+
+    def test_store_object_matches_fails_closed_when_destination_unreadable(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """Coverage follow-up: `_store_object_matches` -- the convergence
+        path's discriminator -- must fail closed (never raise, never claim
+        a match) when the existing object at the destination cannot even be
+        read. A monkeypatched `put` failure elsewhere in this class never
+        exercises THIS function's own except branch, since `put` succeeding
+        or failing is orthogonal to whether a later `read` succeeds."""
+        from athenaeum.rules import _store_object_matches
+        from athenaeum.store import StoreKey
+
+        outside = tmp_path_factory.mktemp("mural-outside")
+        store = FilesystemStore(tmp_path, {self.ADAPTER_NAME: outside})
+
+        def _raise_oserror(*_args: object, **_kwargs: object) -> bytes:
+            raise OSError("boom")
+
+        store.read = _raise_oserror  # type: ignore[method-assign]
+
+        key = StoreKey(surface=self.ADAPTER_NAME, key="hestia-lanes/a.jsonl")
+        assert _store_object_matches(store, key, b"data") is False
+
+    def test_unlink_quietly_returns_false_on_a_real_oserror(self, tmp_path: Path) -> None:
+        """Coverage follow-up: the actual filesystem failure path for
+        `_unlink_quietly`, not just the monkeypatched full-function
+        replacement other tests use to force an orphaned source."""
+        from athenaeum.rules import _unlink_quietly
+
+        # unlink() on a directory raises IsADirectoryError (an OSError
+        # subclass) -- a portable way to exercise the except branch without
+        # depending on filesystem permission semantics.
+        directory = tmp_path / "not-a-file"
+        directory.mkdir()
+        assert _unlink_quietly(directory) is False
 
 
 class TestPreserveRuleSchema:

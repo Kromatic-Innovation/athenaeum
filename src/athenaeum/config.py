@@ -575,11 +575,25 @@ def resolve_preserved_log_dir(config: dict[str, Any] | None) -> str | None:
     Returns the operator's value as a **relative POSIX path string**, or
     ``None`` when unset or unusable. Rejected (with a ``log.warning``, never a
     raise — an unusable value must not take the nightly run down): an absolute
-    path, and any value escaping the knowledge root via ``..``. Both would
-    write outside the knowledge git repo, which is precisely where a preserved
-    artifact must not go — outside the repo it is neither versioned nor
-    recoverable, and the whole point of preservation is that the artifact
-    survives.
+    path, and any value escaping the knowledge root via ``..``.
+
+    This key is deliberately scoped to the LOCAL, in-repo case only — an
+    operator who needs a preserved artifact to land outside the knowledge
+    root uses ``librarian.preserved_log_adapter`` instead (see
+    :func:`resolve_preserved_log_adapter`, issue athenaeum#1132), which routes
+    through a registered :mod:`athenaeum.storage` adapter whose resolved root
+    may be absolute. Before athenaeum#1132 the absolute/escaping rejection here was
+    reasoned as a blanket prohibition — "outside the repo it is neither
+    versioned nor recoverable" — but S3 (issue athenaeum#978) replaced the old
+    ``.git``-existence gate with a declared, per-store
+    ``Store.capabilities.versioned``/recoverability capability that a
+    non-git surface can satisfy on its own terms. "Outside the repo" is
+    therefore no longer categorically unrecoverable, it is a property of
+    whichever store an artifact is routed through — checked there, not
+    assumed impossible here. This resolver still refuses an absolute or
+    escaping value, but now simply because THIS key's contract is "a
+    directory under the knowledge root": a scoping rule, not a
+    recoverability argument.
 
     DEFAULT-NONE: a fresh install has no preserved area, so a `preserve` rule
     is inert until an operator configures one (the feature is opt-in twice
@@ -596,9 +610,10 @@ def resolve_preserved_log_dir(config: dict[str, Any] | None) -> str | None:
     candidate = raw.strip()
     if PurePosixPath(candidate).is_absolute() or Path(candidate).is_absolute():
         logger.warning(
-            "librarian.preserved_log_dir %r is an absolute path — a preserved "
-            "log must live inside the knowledge git repo to be versioned and "
-            "recoverable. Ignoring (issue athenaeum#837).",
+            "librarian.preserved_log_dir %r is an absolute path — this key is "
+            "scoped to the local, in-repo preserved area; use "
+            "librarian.preserved_log_adapter (issue athenaeum#1132) to route "
+            "outside the knowledge root. Ignoring (issue athenaeum#837).",
             candidate,
         )
         return None
@@ -612,6 +627,45 @@ def resolve_preserved_log_dir(config: dict[str, Any] | None) -> str | None:
         return None
     normalized = PurePosixPath(candidate).as_posix().strip("/")
     return normalized or None
+
+
+def resolve_preserved_log_adapter(config: dict[str, Any] | None) -> str | None:
+    """Resolve the preserved-log routing adapter from
+    ``librarian.preserved_log_adapter`` (issue athenaeum#1132).
+
+    Names a registered ``storage.adapters.<name>`` (see
+    :mod:`athenaeum.storage`) that the `preserve` disposition
+    (:mod:`athenaeum.rules`) should route through INSTEAD of the local,
+    in-repo area :func:`resolve_preserved_log_dir` names — the seam that lets
+    a preserved log land outside the knowledge git repo (a different
+    filesystem, a mounted corpus, an operator-defined adapter whose
+    ``surface_root`` is absolute), which ``preserved_log_dir`` structurally
+    cannot do. When both keys are set, the adapter wins and the rules engine
+    logs a warning that it shadows ``preserved_log_dir`` — see
+    :mod:`athenaeum.rules`'s `preserve` branch.
+
+    This resolver only reads the operator's raw string; it does **not**
+    validate that the named adapter actually exists — that check belongs to
+    :mod:`athenaeum.storage` (:func:`athenaeum.storage.available_adapters`),
+    which this L2 config module must not import (it would cycle back:
+    ``storage.py`` already imports ``config.py`` to resolve its own adapter
+    definitions). The caller resolving an unknown adapter name raises
+    :class:`athenaeum.storage.StorageConfigError` loudly rather than
+    silently falling back to the local directory.
+
+    Returns ``None`` when unset or blank — DEFAULT-NONE, matching
+    :func:`resolve_preserved_log_dir`: a fresh install has no adapter
+    override configured. No seed in ``_DEFAULTS`` (issue athenaeum#231).
+    """
+    if not isinstance(config, dict):
+        return None
+    cfg = config.get("librarian")
+    if not isinstance(cfg, dict):
+        return None
+    raw = cfg.get("preserved_log_adapter")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw.strip()
 
 
 def resolve_min_cluster_cohesion(config: dict[str, Any] | None) -> float:
