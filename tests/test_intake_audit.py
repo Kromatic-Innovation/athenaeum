@@ -29,15 +29,18 @@ from pathlib import Path
 
 from athenaeum.answers import list_unanswered, parse_pending_questions, resolve_by_id
 from athenaeum.compiled_exempt import mark_exempt
+from athenaeum.intake import discover_raw_files
 from athenaeum.intake_audit import (
     REASON_MISSING_NAMING_CONVENTION,
     REASON_UNMATCHED_EXTENSION,
     REASON_UNRECOGNISED_SHAPE,
     UnclaimedFile,
+    discover_unclaimed_shape_rule_candidates,
     find_unclaimed_raw_files,
     raise_unclaimed_files,
     run_intake_audit,
 )
+from athenaeum.models import RawFile
 
 
 def _write(root: Path, rel: str, content: str = "hello\n") -> Path:
@@ -165,6 +168,75 @@ class TestFindUnclaimedRawFiles:
         raw = tmp_path / "raw"
         _write(raw, "auto-memory/scope-a/MEMORY.md", "index\n")
         assert find_unclaimed_raw_files(raw, tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1133 AC1: unclaimed files as shape-rule candidates
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverUnclaimedShapeRuleCandidates:
+    """`discover_unclaimed_shape_rule_candidates` wraps
+    `find_unclaimed_raw_files`'s output as `RawFile`s for the shape-rule
+    phase, without disturbing `find_unclaimed_raw_files` or
+    `discover_raw_files` themselves."""
+
+    def test_one_raw_file_per_unclaimed_file(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        _write(raw, "daily-activity/20260410T090000Z.csv", "a,b,c\n")
+        found = discover_unclaimed_shape_rule_candidates(raw, tmp_path)
+        assert len(found) == 1
+        assert isinstance(found[0], RawFile)
+        assert found[0].path == raw / "daily-activity" / "20260410T090000Z.csv"
+        assert found[0].timestamp == ""
+        assert found[0].uuid8 == ""
+
+    def test_source_is_the_top_level_directory_for_a_simple_group_key(
+        self, tmp_path: Path
+    ) -> None:
+        raw = tmp_path / "raw"
+        _write(raw, "daily-activity/20260410T090000Z.csv", "a,b,c\n")
+        found = discover_unclaimed_shape_rule_candidates(raw, tmp_path)
+        assert found[0].source == "daily-activity"
+
+    def test_source_is_the_top_level_directory_for_a_nested_group_key(
+        self, tmp_path: Path
+    ) -> None:
+        # `group_key` for an auto-memory scope dir is "source/scope" --
+        # `RawFile.source` must still be just "source", not the full key,
+        # or every `match.source` rule against a nested unclaimed file
+        # would silently break.
+        raw = tmp_path / "raw"
+        _write(raw, "auto-memory/scope-a/lane_foo.md", "---\n---\nbody\n")
+        found = discover_unclaimed_shape_rule_candidates(raw, tmp_path)
+        assert len(found) == 1
+        assert found[0].source == "auto-memory"
+        assert found[0].ref == "auto-memory/lane_foo.md"
+
+    def test_empty_when_nothing_unclaimed(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        _write(raw, "sessions/20260810T120000Z-abcdef01.md", "---\n---\nbody\n")
+        assert discover_unclaimed_shape_rule_candidates(raw, tmp_path) == []
+
+    def test_discover_raw_files_output_unaffected(self, tmp_path: Path) -> None:
+        # AC3's byte-for-byte guarantee starts here: this function is a pure
+        # wrapper that reads the filesystem, it must never influence
+        # ordinary intake discovery.
+        raw = tmp_path / "raw"
+        _write(raw, "sessions/20260810T120000Z-abcdef01.md", "---\n---\nbody\n")
+        _write(raw, "daily-activity/20260410T090000Z.csv", "a,b,c\n")
+        before = discover_raw_files(raw, {})
+        discover_unclaimed_shape_rule_candidates(raw, tmp_path)
+        after = discover_raw_files(raw, {})
+        assert before == after
+        assert len(before) == 1  # only the recognised sessions/ file
+
+    def test_max_content_bytes_resolved_from_config(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        _write(raw, "daily-activity/20260410T090000Z.csv", "a,b,c\n")
+        config = {"librarian": {"raw_file_max_bytes": 5}}
+        found = discover_unclaimed_shape_rule_candidates(raw, tmp_path, config)
+        assert found[0].max_content_bytes == 5
 
 
 # ---------------------------------------------------------------------------

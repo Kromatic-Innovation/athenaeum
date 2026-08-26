@@ -27,6 +27,7 @@ from athenaeum.compiled_exempt import (
 )
 from athenaeum.corrections import find_correction_batches
 from athenaeum.intake import discover_raw_files
+from athenaeum.intake_audit import discover_unclaimed_shape_rule_candidates
 from athenaeum.rules import (
     TERMINAL_DISPOSITIONS,
     ShapeRule,
@@ -412,6 +413,99 @@ class TestRetainDisposition:
         assert summary["dispositions"] == {"observed-retain": 1}
         assert load_exempt(tmp_path) == set()
         assert len(discover_raw_files(tmp_path / "raw")) == 1
+
+
+def _write_unclaimed_txt(raw_root: Path, source: str, name: str, content: str = "plain\n") -> Path:
+    d = raw_root / source
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / name
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+class TestUnclaimedDrop:
+    """issue athenaeum#1133 AC2: `drop` works on an audit-unclaimed file (a
+    `.txt` export `discover_raw_files` would never claim)."""
+
+    def test_drop_retires_an_unclaimed_txt_file(self, tmp_path: Path) -> None:
+        _git_init(tmp_path)
+        _write_rule(
+            tmp_path / "rules",
+            "r1.yaml",
+            {
+                "version": 1,
+                "name": "drop-stray-txt",
+                "mode": "live",
+                "match": {"unclaimed": True, "source": "daily-activity"},
+                "disposition": "drop",
+            },
+        )
+        raw_path = _write_unclaimed_txt(tmp_path / "raw", "daily-activity", "dump.txt")
+        candidates = discover_unclaimed_shape_rule_candidates(tmp_path / "raw", tmp_path)
+
+        summary = _run(tmp_path, unclaimed_candidates=candidates)
+
+        assert summary["dispositions"] == {"drop": 1}
+        assert not raw_path.exists()
+
+    def test_ordinary_drop_rule_never_matches_an_unclaimed_candidate(
+        self, tmp_path: Path
+    ) -> None:
+        _git_init(tmp_path)
+        _write_rule(tmp_path / "rules", "r1.yaml", _drop_rule(match={"source": "daily-activity"}))
+        raw_path = _write_unclaimed_txt(tmp_path / "raw", "daily-activity", "dump.txt")
+        candidates = discover_unclaimed_shape_rule_candidates(tmp_path / "raw", tmp_path)
+
+        summary = _run(tmp_path, unclaimed_candidates=candidates)
+
+        assert summary["files_matched"] == 0
+        assert raw_path.exists()
+
+
+class TestUnclaimedRetain:
+    """issue athenaeum#1133 AC2: `retain` works on an audit-unclaimed file."""
+
+    def test_retain_marks_an_unclaimed_txt_file_exempt(self, tmp_path: Path) -> None:
+        _write_rule(
+            tmp_path / "rules",
+            "r1.yaml",
+            {
+                "version": 1,
+                "name": "retain-stray-txt",
+                "mode": "live",
+                "match": {"unclaimed": True, "source": "daily-activity"},
+                "disposition": "retain",
+            },
+        )
+        raw_path = _write_unclaimed_txt(tmp_path / "raw", "daily-activity", "dump.txt")
+        candidates = discover_unclaimed_shape_rule_candidates(tmp_path / "raw", tmp_path)
+
+        summary = _run(tmp_path, unclaimed_candidates=candidates)
+
+        assert summary["dispositions"] == {"retain": 1}
+        assert raw_path.exists()
+        assert load_exempt(tmp_path) == {"daily-activity/dump.txt"}
+
+    def test_observe_mode_writes_nothing(self, tmp_path: Path) -> None:
+        _write_rule(
+            tmp_path / "rules",
+            "r1.yaml",
+            {
+                "version": 1,
+                "name": "retain-stray-txt",
+                "mode": "observe",
+                "match": {"unclaimed": True, "source": "daily-activity"},
+                "disposition": "retain",
+            },
+        )
+        raw_path = _write_unclaimed_txt(tmp_path / "raw", "daily-activity", "dump.txt")
+        candidates = discover_unclaimed_shape_rule_candidates(tmp_path / "raw", tmp_path)
+
+        summary = _run(tmp_path, unclaimed_candidates=candidates)
+
+        assert summary["dispositions"] == {"observed-retain": 1}
+        assert raw_path.exists()
+        assert load_exempt(tmp_path) == set()
 
 
 class TestCompiledExemptManifest:

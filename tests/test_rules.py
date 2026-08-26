@@ -375,6 +375,160 @@ class TestMatchSpec:
         assert not spec.matches(raw=raw, record={}, fmt="jsonl")
 
 
+class TestMatchSpecUnclaimed:
+    """`match.unclaimed` (issue athenaeum#1133): the opt-in that lets a rule
+    reach audit-unclaimed candidates, its load-time illegal-key guard, and
+    the hard partition `matches()` enforces between the two candidate
+    kinds."""
+
+    def _raw(self, tmp_path: Path, source: str, name: str) -> RawFile:
+        d = tmp_path / "raw" / source
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / name
+        p.write_text("hello\n", encoding="utf-8")
+        return RawFile(path=p, source=source, timestamp="", uuid8="")
+
+    def test_default_is_false_and_only_matches_ordinary_candidates(
+        self, tmp_path: Path
+    ) -> None:
+        spec = MatchSpec.model_validate({"source": "s"})
+        raw = self._raw(tmp_path, "s", "a.txt")
+        assert spec.matches(raw=raw, record={}, fmt="txt")
+        assert not spec.matches(raw=raw, record={}, fmt="txt", is_unclaimed=True)
+
+    def test_unclaimed_true_matches_only_unclaimed_candidates(
+        self, tmp_path: Path
+    ) -> None:
+        spec = MatchSpec.model_validate({"unclaimed": True, "source": "s"})
+        raw = self._raw(tmp_path, "s", "a.txt")
+        assert spec.matches(raw=raw, record={}, fmt="txt", is_unclaimed=True)
+        assert not spec.matches(raw=raw, record={}, fmt="txt", is_unclaimed=False)
+
+    def test_partition_holds_even_with_an_otherwise_empty_match_block(
+        self, tmp_path: Path
+    ) -> None:
+        # Every OTHER key in `match:` is optional -- without the hard
+        # partition, a bare `{unclaimed: true}` (or its false-default
+        # sibling) would match every candidate of BOTH kinds.
+        unclaimed_spec = MatchSpec.model_validate({"unclaimed": True})
+        ordinary_spec = MatchSpec.model_validate({})
+        raw = self._raw(tmp_path, "s", "a.txt")
+        assert unclaimed_spec.matches(raw=raw, record={}, fmt="txt", is_unclaimed=True)
+        assert not unclaimed_spec.matches(
+            raw=raw, record={}, fmt="txt", is_unclaimed=False
+        )
+        assert ordinary_spec.matches(raw=raw, record={}, fmt="txt", is_unclaimed=False)
+        assert not ordinary_spec.matches(
+            raw=raw, record={}, fmt="txt", is_unclaimed=True
+        )
+
+    def test_unclaimed_with_fields_rejected_at_load_time(self) -> None:
+        with pytest.raises(PydanticValidationError, match="match.fields"):
+            MatchSpec.model_validate(
+                {"unclaimed": True, "fields": {"status": {"exact": "x"}}}
+            )
+
+    def test_unclaimed_with_key_fingerprint_rejected_at_load_time(self) -> None:
+        fp = record_key_fingerprint({"a": 1})
+        with pytest.raises(PydanticValidationError, match="match.key_fingerprint"):
+            MatchSpec.model_validate({"unclaimed": True, "key_fingerprint": fp})
+
+    def test_unclaimed_with_format_rejected_at_load_time(self) -> None:
+        with pytest.raises(PydanticValidationError, match="match.format"):
+            MatchSpec.model_validate({"unclaimed": True, "format": "md"})
+
+    def test_unclaimed_source_and_filename_glob_are_legal(
+        self, tmp_path: Path
+    ) -> None:
+        spec = MatchSpec.model_validate(
+            {"unclaimed": True, "source": "s", "filename_glob": "*.txt"}
+        )
+        raw = self._raw(tmp_path, "s", "a.txt")
+        assert spec.matches(raw=raw, record={}, fmt="txt", is_unclaimed=True)
+
+    def test_unclaimed_rule_rejects_emit_disposition_at_load_time(self) -> None:
+        with pytest.raises(PydanticValidationError, match="cannot use disposition 'emit'"):
+            ShapeRule.model_validate(
+                {
+                    "version": 1,
+                    "name": "r",
+                    "match": {"unclaimed": True, "source": "s"},
+                    "disposition": "emit",
+                    "correction": {
+                        "target": {"uid": "u"},
+                        "op": "set",
+                        "field": "f",
+                        "value": 1,
+                        "source": "script:x",
+                    },
+                }
+            )
+
+    def test_unclaimed_rule_rejects_rollup_disposition_at_load_time(self) -> None:
+        with pytest.raises(
+            PydanticValidationError, match="cannot use disposition 'rollup'"
+        ):
+            ShapeRule.model_validate(
+                {
+                    "version": 1,
+                    "name": "r",
+                    "match": {"unclaimed": True, "source": "s"},
+                    "disposition": "rollup",
+                    "rollup": {"group_by": "$x", "aggregate": "count"},
+                    "correction": {
+                        "target": {"uid": "u"},
+                        "op": "set",
+                        "field": "f",
+                        "value": 1,
+                        "source": "script:x",
+                    },
+                }
+            )
+
+    def test_unclaimed_rule_allows_drop_retain_preserve_fallthrough(self) -> None:
+        for disposition in ("drop", "retain", "fallthrough"):
+            rule = ShapeRule.model_validate(
+                {
+                    "version": 1,
+                    "name": "r",
+                    "match": {"unclaimed": True, "source": "s"},
+                    "disposition": disposition,
+                }
+            )
+            assert rule.disposition == disposition
+        preserve_rule = ShapeRule.model_validate(
+            {
+                "version": 1,
+                "name": "r",
+                "match": {"unclaimed": True, "source": "s"},
+                "disposition": "preserve",
+            }
+        )
+        assert preserve_rule.disposition == "preserve"
+
+    def test_load_rules_records_a_rule_load_error_naming_fields(
+        self, tmp_path: Path
+    ) -> None:
+        rules_dir = tmp_path / "rules"
+        rules_dir.mkdir()
+        (rules_dir / "bad.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "name": "r",
+                    "match": {"unclaimed": True, "fields": {"a": {"exact": 1}}},
+                    "disposition": "drop",
+                }
+            ),
+            encoding="utf-8",
+        )
+        rules, errors = load_rules(tmp_path)
+        assert rules == []
+        assert len(errors) == 1
+        assert isinstance(errors[0], RuleLoadError)
+        assert "match.fields" in errors[0].reason
+
+
 class TestResolveFieldPath:
     """Unit coverage for :func:`resolve_field_path` directly (issue
     athenaeum#974 AC1), independent of the ``MatchSpec.matches`` wiring above."""
