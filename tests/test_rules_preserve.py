@@ -15,6 +15,7 @@ Each test class is annotated with the acceptance criterion it proves.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 
@@ -27,11 +28,14 @@ from athenaeum.config import resolve_preserved_log_dir
 from athenaeum.corrections import find_correction_batches
 from athenaeum.intake import discover_raw_files
 from athenaeum.rules import (
+    PRESERVED_LOG_SOURCE_SCHEME,
     TERMINAL_DISPOSITIONS,
     ShapeRule,
     preserved_log_source_pointer,
     run_shape_rule_phase,
 )
+from athenaeum.storage import StorageConfigError
+from athenaeum.store import FilesystemStore
 
 PRESERVED = "logs"
 
@@ -562,6 +566,195 @@ class TestFactCarriesSourcePointer:
         assert summary["dispositions"] == {"transform-error": 1}
         assert raw_path.exists()
         assert not (tmp_path / PRESERVED).exists()
+
+
+class TestPreservedLogAdapterRouting:
+    """athenaeum#1132: `librarian.preserved_log_adapter` routes `preserve` through
+    the whole-store adapter seam (`athenaeum.store.Store` /
+    `athenaeum.storage.available_adapters`) instead of the local, in-repo
+    `librarian.preserved_log_dir` area -- the seam that lets a preserved log
+    land OUTSIDE the knowledge git repo."""
+
+    ADAPTER_NAME = "mural-archive"
+
+    def _adapter_config(self, outside_root: Path, *, dir_also: str | None = None) -> dict:
+        cfg: dict = {
+            "librarian": {"preserved_log_adapter": self.ADAPTER_NAME},
+            "storage": {
+                "adapters": {
+                    self.ADAPTER_NAME: {
+                        "backing_store": "filesystem",
+                        "surface_root": str(outside_root),
+                    }
+                }
+            },
+        }
+        if dir_also is not None:
+            cfg["librarian"]["preserved_log_dir"] = dir_also
+        return cfg
+
+    def test_absolute_out_of_repo_adapter_moves_the_file(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """(a): an absolute, out-of-repo adapter surface -- the file lands
+        there and the source is removed from `raw/`."""
+        outside = tmp_path_factory.mktemp("mural-outside")
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+
+        summary = _run(tmp_path, config=self._adapter_config(outside))
+
+        assert summary["dispositions"] == {"preserve": 1}
+        assert not raw_path.exists()
+        dest = outside / "hestia-lanes" / "20260815T000000Z-aa.jsonl"
+        assert dest.is_file()
+        assert json.loads(dest.read_text(encoding="utf-8")) == {"e": 1}
+
+    def test_both_keys_set_adapter_wins_and_shadow_warning_is_logged(
+        self,
+        tmp_path: Path,
+        tmp_path_factory: pytest.TempPathFactory,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """(b): both `preserved_log_dir` and `preserved_log_adapter` set --
+        the adapter wins, and the shadowing is logged, not silent."""
+        outside = tmp_path_factory.mktemp("mural-outside")
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+
+        with caplog.at_level(logging.WARNING):
+            summary = _run(
+                tmp_path, config=self._adapter_config(outside, dir_also=PRESERVED)
+            )
+
+        assert summary["dispositions"] == {"preserve": 1}
+        assert not raw_path.exists()
+        assert (outside / "hestia-lanes" / "20260815T000000Z-aa.jsonl").is_file()
+        # The directory area was NOT used.
+        assert not (tmp_path / PRESERVED).exists()
+        assert "shadows" in caplog.text
+        assert "preserved_log_dir" in caplog.text
+        assert "preserved_log_adapter" in caplog.text
+
+    def test_dir_only_and_neither_set_stay_byte_identical(self, tmp_path: Path) -> None:
+        """(c): AC3, no forced migration -- only-dir-set and neither-set are
+        unaffected by the adapter seam existing at all. Regression pin."""
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+        # `_run`'s default config sets only `preserved_log_dir`.
+        summary = _run(tmp_path)
+        assert summary["dispositions"] == {"preserve": 1}
+        assert not raw_path.exists()
+        assert (
+            tmp_path / PRESERVED / "hestia-lanes" / "20260815T000000Z-aa.jsonl"
+        ).is_file()
+
+        raw_path2 = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260816T000000Z-bb.jsonl", {"e": 2}
+        )
+        summary2 = _run(tmp_path, config={})  # neither key set
+        assert summary2["dispositions"] == {"preserve-unconfigured": 1}
+        assert raw_path2.exists()
+
+    def test_put_failure_leaves_source_untouched_and_tallies_preserve_failed(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """(d): fail-closed. `Store.put` raising (EXDEV is the expected case
+        for a routed adapter on a different filesystem, not an edge case)
+        must leave the source provably untouched, tally `preserve-failed`,
+        and never let the exception escape `run_shape_rule_phase`."""
+        outside = tmp_path_factory.mktemp("mural-outside")
+        store = FilesystemStore(tmp_path, {self.ADAPTER_NAME: outside})
+
+        def _raise_exdev(*_args: object, **_kwargs: object) -> str:
+            raise OSError(18, "Invalid cross-device link")  # errno.EXDEV
+
+        store.put = _raise_exdev  # type: ignore[method-assign]
+
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+        raw_path = _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+        original_bytes = raw_path.read_bytes()
+
+        summary = _run(tmp_path, config=self._adapter_config(outside), store=store)
+
+        assert summary["dispositions"] == {"preserve-failed": 1}
+        assert raw_path.exists()
+        assert raw_path.read_bytes() == original_bytes
+        assert not (outside / "hestia-lanes").exists()
+
+    def test_pointer_for_outside_repo_destination_is_a_resolvable_absolute_path(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """(e): the pointer format for the outside-repo case is a resolvable
+        absolute path; the SCHEME does not vary by backend."""
+        outside = tmp_path_factory.mktemp("mural-outside")
+        dest = outside / "hestia-lanes" / "a.jsonl"
+        dest.parent.mkdir(parents=True)
+        dest.write_text("{}\n", encoding="utf-8")
+
+        pointer = preserved_log_source_pointer(tmp_path, dest, fmt="jsonl")
+
+        assert pointer == f"{PRESERVED_LOG_SOURCE_SCHEME}:{dest.as_posix()}#L1"
+        path_segment = pointer.split(":", 1)[1].split("#", 1)[0]
+        assert Path(path_segment).is_absolute()
+        assert Path(path_segment).is_file()
+
+    def test_worked_example_pointer_resolves_to_absolute_outside_repo_path(
+        self, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """(e), end-to-end: a fact compiled from an adapter-routed preserved
+        log carries a pointer that resolves to the real, outside-repo file."""
+        outside = tmp_path_factory.mktemp("mural-outside")
+        _write_rule(
+            tmp_path / "rules", "r1.yaml", _preserve_rule(correction=_bounce_correction())
+        )
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "hestia-lanes",
+            "20260815T000000Z-aa.jsonl",
+            {
+                "email": "jon@smith.com",
+                "status": "bounced",
+                "status_date": "2026-08-15",
+                "observed_at": "2026-08-15T00:00:00Z",
+            },
+        )
+
+        summary = _run(tmp_path, config=self._adapter_config(outside))
+        assert summary["dispositions"] == {"preserve": 1}
+
+        batch_path, _source, _envelope = find_correction_batches(tmp_path / "raw")[0]
+        record = next(
+            json.loads(line)
+            for line in batch_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and json.loads(line).get("record") == "correction"
+        )
+        dest = outside / "hestia-lanes" / "20260815T000000Z-aa.jsonl"
+        assert record["source"]["ref"] == f"{PRESERVED_LOG_SOURCE_SCHEME}:{dest.as_posix()}#L1"
+        assert record["source"]["type"] == "script"  # precedence not demoted
+        pointed_at = Path(record["source"]["ref"].split(":", 1)[1].split("#", 1)[0])
+        assert pointed_at.is_file()
+
+    def test_unknown_adapter_name_raises_storage_config_error(self, tmp_path: Path) -> None:
+        """(f): a `preserved_log_adapter` naming an adapter that does not
+        exist fails LOUDLY -- never a silent fallback to the directory."""
+        _write_rule(tmp_path / "rules", "r1.yaml", _preserve_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw", "hestia-lanes", "20260815T000000Z-aa.jsonl", {"e": 1}
+        )
+        config = {"librarian": {"preserved_log_adapter": "does-not-exist"}}
+
+        with pytest.raises(StorageConfigError):
+            _run(tmp_path, config=config)
 
 
 class TestPreserveRuleSchema:
