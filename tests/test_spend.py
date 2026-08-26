@@ -139,6 +139,27 @@ class TestRecordSpend:
         assert spend.record_spend(TokenUsage(), run_type="librarian", provider="api") is False
         assert spend.read_ledger(ledger) == []
 
+    def test_cache_only_subscription_usage_is_not_dropped(self, ledger: Path) -> None:
+        """athenaeum#1137: the no-op guard is
+        ``usage.api_calls == 0 and usage.total_tokens == 0`` -- a subscription
+        usage that only ever went through ``add_tokens`` (the callee side of
+        the athenaeum#239 attempt-counting split, where the CALLER bumps
+        ``api_calls`` separately) genuinely has ``api_calls == 0`` on the
+        object record_spend sees. With cache-only traffic (zero input, zero
+        output), ``total_tokens`` was ALSO 0, so the AND-gate read "nothing
+        happened" and silently dropped a run that actually spent 1.5M
+        subscription tokens -- undercounting spend_today the same way the
+        ceiling comparisons did. The guard must use billable_tokens."""
+        u = TokenUsage()
+        u.add_tokens(0, 0, 500_000, 1_000_000, model="claude-sonnet-4-6")
+        assert u.api_calls == 0
+        assert u.total_tokens == 0  # the old guard's condition was satisfied
+        assert u.billable_tokens == 1_500_000  # ...but real spend happened
+        assert spend.record_spend(u, run_type="librarian", provider="claude-cli") is True
+        rec = spend.read_ledger(ledger)[0]
+        assert rec["cache_creation_input_tokens"] == 500_000
+        assert rec["cache_read_input_tokens"] == 1_000_000
+
     def test_disabled_writes_nothing(self, ledger: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ATHENAEUM_SPEND_LEDGER_ENABLED", "false")
         wrote = spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
@@ -480,6 +501,29 @@ class TestCeiling:
         small.add(100, 50, 0, 0)
         assert spend.ceiling_tripped(small, provider="claude-cli") is None
 
+    def test_cache_heavy_run_trips_the_per_run_ceiling_it_used_to_evade(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4 (athenaeum#1137): regression fixture is the recorded 2026-08-06
+        claude-cli run this issue is about — 254 input, 59,916 output,
+        1,169,154 cache-creation, 2,144,653 cache-read (real consumption
+        3,373,977 tokens; total_tokens reads only 60,170, a 56.1x
+        undercount). A 1,000,000-token per-run ceiling must trip against
+        the real figure -- and provably would NOT have tripped under the
+        old total_tokens-gated comparison, proving this is a behavior
+        change, not a no-op test."""
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_TOKENS_PER_RUN", "1000000")
+        usage = TokenUsage()
+        usage.add(254, 59_916, 1_169_154, 2_144_653, model="claude-sonnet-4-6")
+
+        assert usage.total_tokens == 60_170  # would NOT have tripped a 1M cap
+        assert usage.billable_tokens == 3_373_977
+
+        reason = spend.ceiling_tripped(usage, provider="claude-cli")
+        assert reason is not None
+        assert "per-run subscription token ceiling reached" in reason
+        assert "3,373,977" in reason
+
     def test_api_per_run_dollar_ceiling(
         self, ledger: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -519,12 +563,18 @@ class TestCeiling:
     ) -> None:
         now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
         # Prior subscription spend today: 1200 tokens (from _sub_usage).
+        # input_tokens/output_tokens set explicitly (a real ledger row
+        # always carries them, per build_record) so this fixture stays
+        # accurate under the cache-inclusive basis (issue athenaeum#1137)
+        # even though it has no cache traffic of its own.
         ledger.parent.mkdir(parents=True, exist_ok=True)
         ledger.write_text(
             json.dumps(
                 {
                     "ts": "2026-07-15T01:00:00Z",
                     "provider": "claude-cli",
+                    "input_tokens": 1200,
+                    "output_tokens": 0,
                     "total_tokens": 1200,
                     "estimated_cost_usd": 0.0,
                 }
@@ -541,6 +591,58 @@ class TestCeiling:
         # A small run staying under the day cap does not trip.
         monkeypatch.setenv("ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY", "5000")
         assert spend.ceiling_tripped(cur, provider="claude-cli", now=now) is None
+
+    def test_spend_today_sums_cache_traffic_off_a_real_ledger_row(
+        self, ledger: Path
+    ) -> None:
+        """AC3 (athenaeum#1137): spend_today's subscription_tokens figure
+        must be computed on the same cache-inclusive basis as the ceiling
+        it feeds -- proven here with a REAL ledger row (written via
+        record_spend -> build_record, not a hand-rolled dict) carrying
+        genuine cache traffic, so the four-field read off the record is
+        exercised end to end."""
+        now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+        usage = TokenUsage()
+        usage.add(254, 59_916, 1_169_154, 2_144_653, model="claude-sonnet-4-6")
+        usage.subscription_covered = True
+        with_patch = spend.build_record(
+            usage,
+            run_type="librarian",
+            provider="claude-cli",
+            ts=datetime(2026, 7, 15, 1, 0, tzinfo=timezone.utc),
+        )
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(json.dumps(with_patch) + "\n")
+
+        today = spend.spend_today(ledger, now=now)
+        assert today["subscription_tokens"] == 3_373_977.0  # NOT the 60,170 total_tokens
+
+    def test_older_row_missing_cache_fields_degrades_to_input_plus_output(
+        self, ledger: Path
+    ) -> None:
+        """AC3: a pre-cache-tracking ledger row (no cache_creation_input_tokens
+        / cache_read_input_tokens fields at all) must default those to 0
+        rather than crash or misread -- degrading gracefully to exactly
+        today's (pre-athenaeum#1137) figure."""
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-07-15T01:00:00Z",
+                    "provider": "claude-cli",
+                    "input_tokens": 800,
+                    "output_tokens": 400,
+                    "total_tokens": 1200,
+                    "estimated_cost_usd": 0.0,
+                    # cache_creation_input_tokens / cache_read_input_tokens
+                    # deliberately absent.
+                }
+            )
+            + "\n"
+        )
+        now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+        today = spend.spend_today(ledger, now=now)
+        assert today["subscription_tokens"] == 1200.0
 
 
 # ---------------------------------------------------------------------------
@@ -596,11 +698,16 @@ class TestBudgetWindowStatus:
     ) -> None:
         now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
         ledger.parent.mkdir(parents=True, exist_ok=True)
+        # input_tokens/output_tokens set explicitly (issue athenaeum#1137's
+        # cache-inclusive basis reads those fields, not total_tokens
+        # directly) — a real ledger row always carries them.
         ledger.write_text(
             json.dumps(
                 {
                     "ts": "2026-07-15T01:00:00Z",
                     "provider": "claude-cli",
+                    "input_tokens": 4000,
+                    "output_tokens": 0,
                     "total_tokens": 4000,
                     "estimated_cost_usd": 0.0,
                 }
@@ -638,6 +745,11 @@ class TestBudgetWindowStatus:
                     {
                         "ts": "2026-07-15T02:00:00Z",
                         "provider": "claude-cli",
+                        # input_tokens/output_tokens set explicitly (issue
+                        # athenaeum#1137's cache-inclusive basis) — a real
+                        # ledger row always carries them.
+                        "input_tokens": 2000,
+                        "output_tokens": 0,
                         "total_tokens": 2000,
                         "estimated_cost_usd": 0.0,
                     }
@@ -935,11 +1047,15 @@ class TestWeeklyPctCeiling:
     ) -> None:
         now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
         ledger.parent.mkdir(parents=True, exist_ok=True)
+        # input_tokens/output_tokens set explicitly (issue athenaeum#1137's
+        # cache-inclusive basis) — a real ledger row always carries them.
         ledger.write_text(
             json.dumps(
                 {
                     "ts": "2026-07-15T01:00:00Z",
                     "provider": "claude-cli",
+                    "input_tokens": 45_000,
+                    "output_tokens": 0,
                     "total_tokens": 45_000,
                     "estimated_cost_usd": 0.0,
                 }
@@ -1099,6 +1215,46 @@ class TestSpendCommand:
         assert "Subscription" in out
         assert "API" in out
 
+    def test_json_billable_tokens_agrees_with_the_guarded_figure(
+        self, ledger: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """AC5 (athenaeum#1137): the REPORTED subscription consumption must
+        equal the figure the ceiling actually GUARDS -- a ceiling the report
+        cannot corroborate is exactly the defect this issue closes.
+        total_tokens stays present and cache-exclusive (AC2, additive)."""
+        usage = TokenUsage()
+        usage.add(254, 59_916, 1_169_154, 2_144_653, model="claude-sonnet-4-6")
+        usage.subscription_covered = True
+        assert spend.record_spend(usage, run_type="librarian", provider="claude-cli")
+
+        rc = main(["spend", "--since", "30d", "--json", "--ledger", str(ledger)])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+
+        # The guarded figure -- exactly what ceiling_tripped compares.
+        assert usage.billable_tokens == 3_373_977
+        assert payload["subscription"]["billable_tokens"] == 3_373_977
+        # total_tokens is unchanged and stays present alongside it (AC2).
+        assert payload["subscription"]["total_tokens"] == 60_170
+
+    def test_human_output_headline_is_billable_not_total(
+        self, ledger: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """AC5: the human-readable ``Subscription`` line reports the same
+        cache-inclusive figure as the JSON contract and the ceiling guard,
+        not the cache-exclusive total_tokens (which would read as a mere
+        60k here against a real 3.37M-token run)."""
+        usage = TokenUsage()
+        usage.add(254, 59_916, 1_169_154, 2_144_653, model="claude-sonnet-4-6")
+        usage.subscription_covered = True
+        spend.record_spend(usage, run_type="librarian", provider="claude-cli")
+
+        rc = main(["spend", "--since", "30d", "--ledger", str(ledger)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "3.4M" in out  # _fmt_tokens(3_373_977) -- the billable figure
+        assert "60k" not in out  # NOT the cache-exclusive total_tokens figure
+
     def test_invalid_since_returns_2(
         self, ledger: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -1208,6 +1364,44 @@ class TestSchemaV2:
         per_model_sum = sum(_reprice(m, e) for m, e in tbm.items())
         assert rec["notional_usd"] > 0.0
         assert round(per_model_sum, 6) == rec["notional_usd"]
+
+    def test_total_tokens_unchanged_and_excludes_cache_for_a_cache_heavy_run(
+        self, ledger: Path
+    ) -> None:
+        """AC2 (athenaeum#1137): billable_tokens (the new cache-inclusive
+        counter) must NOT change total_tokens's definition or value anywhere
+        it is written or read -- total_tokens is the hestia cost-ledger.ts
+        contract (tokens_by_model's {input, output, total}) and stays
+        cache-exclusive so hestia's reader keeps reading byte-identical
+        values. Uses the recorded 56x-undercount shape (254 input, 59,916
+        output, 1,169,154 cache-creation, 2,144,653 cache-read) so a real
+        regression here (total_tokens accidentally absorbing cache) would
+        be caught at a figure large enough to be unmissable."""
+        u = TokenUsage()
+        u.add(254, 59_916, 1_169_154, 2_144_653, model="claude-sonnet-4-6")
+        u.subscription_covered = True
+        assert spend.record_spend(u, run_type="librarian", provider="claude-cli")
+        rec = spend.read_ledger(ledger)[0]
+
+        # Row-level total_tokens: input + output only, exactly as before.
+        assert rec["total_tokens"] == 60_170
+        assert rec["input_tokens"] == 254
+        assert rec["output_tokens"] == 59_916
+        assert rec["cache_creation_input_tokens"] == 1_169_154
+        assert rec["cache_read_input_tokens"] == 2_144_653
+
+        # tokens_by_model's hestia-contract {input, output, total} shape:
+        # total excludes cache, matching the row-level figure above.
+        entry = rec["tokens_by_model"]["claude-sonnet-4-6"]
+        assert entry["total"] == 60_170
+        assert entry["total"] == entry["input"] + entry["output"]
+
+        # The bucket-level report (athenaeum spend / --json) keeps
+        # total_tokens at the SAME cache-exclusive figure -- billable_tokens
+        # is ADDITIVE, not a replacement.
+        summary = spend.summarize([rec])
+        assert summary["subscription"]["total_tokens"] == 60_170
+        assert summary["subscription"]["billable_tokens"] == 3_373_977
 
     def test_tokens_by_model_preserves_cache_and_batch_splits(self, ledger: Path) -> None:
         """The per-model entry is a SUPERSET of hestia's core shape — it keeps
@@ -1810,6 +2004,32 @@ class TestRecordSpendPerKnobProvider:
             )
             is False
         )
+
+    def test_cache_only_usage_is_not_dropped(self, ledger: Path) -> None:
+        """athenaeum#1137: this function has its OWN copy of record_spend's
+        no-op guard, checked BEFORE the per-provider split -- a cache-only
+        knob (zero input, zero output) must not be silently dropped here
+        either, independent of record_spend's own guard being fixed."""
+        usage = TokenUsage()
+        usage.add_tokens(
+            0, 0, 200_000, 900_000, model="claude-sonnet-4-6", knob="write"
+        )
+        assert usage.api_calls == 0
+        assert usage.total_tokens == 0
+
+        assert (
+            spend.record_spend_per_knob_provider(
+                usage,
+                {"write": "claude-cli"},
+                {"write": "claude-sonnet-4-6"},
+                run_type="librarian",
+                default_provider="claude-cli",
+            )
+            is True
+        )
+        rec = spend.read_ledger(ledger)[0]
+        assert rec["cache_creation_input_tokens"] == 200_000
+        assert rec["cache_read_input_tokens"] == 900_000
 
 
 # ---------------------------------------------------------------------------

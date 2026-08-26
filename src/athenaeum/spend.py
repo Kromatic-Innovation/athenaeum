@@ -437,7 +437,12 @@ def record_spend(
         if not resolve_spend_ledger_enabled(config):
             return False
         # Nothing happened — don't clutter the ledger with empty runs.
-        if usage.api_calls == 0 and usage.total_tokens == 0:
+        # ``billable_tokens`` (issue athenaeum#1137), not ``total_tokens``: a
+        # subscription run consisting only of cache traffic (zero input,
+        # zero output) would otherwise read as "nothing happened" and be
+        # silently dropped from the ledger, the same cache-blind bug one
+        # layer down from the ceiling comparisons this issue fixes.
+        if usage.api_calls == 0 and usage.billable_tokens == 0:
             return False
         record = build_record(
             usage,
@@ -521,7 +526,11 @@ def record_spend_per_knob_provider(
     ``knob=`` tag) also ride on the *default_provider* row, so no token
     silently vanishes from the ledger.
     """
-    if usage.api_calls == 0 and usage.total_tokens == 0:
+    # Cache-inclusive basis (issue athenaeum#1137) — same reasoning as
+    # record_spend's identical guard above; this function short-circuits
+    # BEFORE ever reaching that guard for a multi-provider run, so it needs
+    # the same fix independently.
+    if usage.api_calls == 0 and usage.billable_tokens == 0:
         return False
 
     providers_used = {
@@ -696,6 +705,12 @@ def _blank_bucket() -> dict[str, Any]:
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "total_tokens": 0,
+        # Cache-inclusive sibling of ``total_tokens`` (issue athenaeum#1137) —
+        # ADDITIVE, never replaces it (AC2: total_tokens stays the hestia
+        # cost-ledger.ts contract). input + output + cache_creation +
+        # cache_read, matching TokenUsage.billable_tokens exactly so the
+        # reported subscription figure agrees with the guarded one.
+        "billable_tokens": 0,
         "api_calls": 0,
         "estimated_cost_usd": 0.0,
         "records": 0,
@@ -729,6 +744,25 @@ def resolve_billing_bucket(record: dict[str, Any]) -> str:
     return "unknown"
 
 
+def _record_billable_tokens(record: dict[str, Any]) -> int:
+    """Cache-inclusive token count for one ledger ROW (issue athenaeum#1137).
+
+    The record-dict sibling of :attr:`TokenUsage.billable_tokens` — same
+    four-field sum, but reading a JSONL row's fields instead of a live
+    accumulator's. :func:`build_record` has always written
+    ``cache_creation_input_tokens`` / ``cache_read_input_tokens`` as their
+    own top-level fields (no ledger migration needed); a pre-cache-tracking
+    row simply lacks them and they default to 0, degrading gracefully to
+    the row's ``input_tokens + output_tokens`` (== its ``total_tokens``).
+    """
+    return (
+        int(record.get("input_tokens", 0) or 0)
+        + int(record.get("output_tokens", 0) or 0)
+        + int(record.get("cache_creation_input_tokens", 0) or 0)
+        + int(record.get("cache_read_input_tokens", 0) or 0)
+    )
+
+
 def _accumulate(bucket: dict[str, Any], record: dict[str, Any]) -> None:
     for key in (
         "input_tokens",
@@ -739,6 +773,7 @@ def _accumulate(bucket: dict[str, Any], record: dict[str, Any]) -> None:
         "api_calls",
     ):
         bucket[key] += int(record.get(key, 0) or 0)
+    bucket["billable_tokens"] += _record_billable_tokens(record)
     bucket["estimated_cost_usd"] += float(record.get("estimated_cost_usd", 0.0) or 0.0)
     bucket["records"] += 1
 
@@ -857,8 +892,11 @@ def format_summary(
     sub = summary["subscription"]
     api = summary["api"]
     lines = [f"Athenaeum spend (since {since_label}):"]
+    # Headline figure is the cache-inclusive ``billable_tokens`` (issue
+    # athenaeum#1137), not ``total_tokens`` — this is what the subscription
+    # ceilings actually gate on, so the report and the guard agree (AC5).
     lines.append(
-        f"  Subscription  {_fmt_tokens(sub['total_tokens'])} tokens"
+        f"  Subscription  {_fmt_tokens(sub['billable_tokens'])} tokens"
         f"  ({sub['api_calls']} calls, {sub['records']} run(s))"
     )
     lines.append(
@@ -880,7 +918,7 @@ def format_summary(
         for rt, slot in sorted(summary["by_run_type"].items()):
             s, a = slot["subscription"], slot["api"]
             lines.append(
-                f"    {rt:<14} sub {_fmt_tokens(s['total_tokens'])} tok"
+                f"    {rt:<14} sub {_fmt_tokens(s['billable_tokens'])} tok"
                 f"  / api ${a['estimated_cost_usd']:.2f}"
             )
     if by_model and summary.get("by_model"):
@@ -888,7 +926,7 @@ def format_summary(
         for model, slot in sorted(summary["by_model"].items()):
             s, a = slot["subscription"], slot["api"]
             lines.append(
-                f"    {model:<28} sub {_fmt_tokens(s['total_tokens'])} tok"
+                f"    {model:<28} sub {_fmt_tokens(s['billable_tokens'])} tok"
                 f"  / api ${a['estimated_cost_usd']:.2f}"
             )
     if by_knob and summary.get("by_knob"):
@@ -898,7 +936,7 @@ def format_summary(
         for knob, slot in sorted(summary["by_knob"].items()):
             s, a = slot["subscription"], slot["api"]
             lines.append(
-                f"    {knob:<28} sub {_fmt_tokens(s['total_tokens'])} tok"
+                f"    {knob:<28} sub {_fmt_tokens(s['billable_tokens'])} tok"
                 f"  / api ${a['estimated_cost_usd']:.2f}"
             )
     return "\n".join(lines)
@@ -1189,7 +1227,13 @@ def spend_today(
     usd = 0.0
     for record in records:
         if record.get("provider") == PROVIDER_CLAUDE_CLI:
-            tokens += int(record.get("total_tokens", 0) or 0)
+            # Cache-inclusive basis (issue athenaeum#1137), not
+            # ``total_tokens`` — the per-day ceiling this feeds
+            # (``ceiling_tripped``) compares the current run's
+            # ``usage.billable_tokens`` against this same prior-spend
+            # figure, so both sides of the comparison must use the same
+            # basis or the sum undercounts real consumption.
+            tokens += _record_billable_tokens(record)
         else:
             usd += float(record.get("estimated_cost_usd", 0.0) or 0.0)
     return {"subscription_tokens": float(tokens), "api_usd": usd}
@@ -1420,6 +1464,10 @@ def ceiling_tripped(
     bounded in TOKENS (per-run and per-day), the metered ``anthropic`` API path
     in DOLLARS (per-run and per-day). The per-day figures add spend already
     committed earlier today (from the ledger) to the current run's accrual.
+    The subscription TOKEN figure is ``usage.billable_tokens`` (issue
+    athenaeum#1137) — input + output + cache-creation + cache-read — NOT
+    ``usage.total_tokens``, which excludes cache and undercounted a real
+    recorded run by ~56x; see :attr:`athenaeum.models.TokenUsage.billable_tokens`.
     A FIFTH, subscription-only ceiling (issue athenaeum#785) derives a second
     per-day token figure from a declared weekly limit and a percentage of it
     (``weekly_token_limit / 7 * max_pct_per_day / 100``); it is independent of
@@ -1448,17 +1496,25 @@ def ceiling_tripped(
     is_subscription = ledger_provider(provider) == PROVIDER_CLAUDE_CLI
 
     if is_subscription:
+        # Cache-inclusive basis (issue athenaeum#1137): ``usage.billable_tokens``,
+        # not ``usage.total_tokens``. The subscription path's real
+        # consumption lands overwhelmingly in prompt-cache traffic
+        # (cache_creation_input_tokens / cache_read_input_tokens), which
+        # ``total_tokens`` excludes by design (it is the hestia
+        # cost-ledger.ts contract — see ``tokens_by_model``'s docstring). A
+        # ceiling gated on ``total_tokens`` alone measured ~56x too small
+        # against a real recorded run and was effectively disarmed.
         run_cap = resolve_spend_max_tokens_per_run(config)
-        if run_cap is not None and usage.total_tokens >= run_cap:
+        if run_cap is not None and usage.billable_tokens >= run_cap:
             return (
                 f"per-run subscription token ceiling reached "
-                f"({usage.total_tokens:,}/{run_cap:,} tokens)"
+                f"({usage.billable_tokens:,}/{run_cap:,} tokens)"
             )
         day_cap = resolve_spend_max_tokens_per_day(config)
         if day_cap is not None:
             target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
             prior = spend_today(target, config=config, now=now)["subscription_tokens"]
-            day_total = prior + usage.total_tokens
+            day_total = prior + usage.billable_tokens
             if day_total >= day_cap:
                 return (
                     f"per-day subscription token ceiling reached "
@@ -1483,7 +1539,7 @@ def ceiling_tripped(
             effective_day_cap = weekly_limit / 7 * (max_pct / 100)
             target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
             prior = spend_today(target, config=config, now=now)["subscription_tokens"]
-            day_total = prior + usage.total_tokens
+            day_total = prior + usage.billable_tokens
             if day_total >= effective_day_cap:
                 return (
                     f"per-day subscription percent-of-weekly ceiling reached "
