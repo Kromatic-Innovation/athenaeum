@@ -194,6 +194,21 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
         "JSONL from the last C2 run and emit wiki/auto-*.md entries. "
         "Skips discovery, clustering, and the entity tier pipeline.",
     )
+    run_parser.add_argument(
+        "--run-type",
+        type=str,
+        default=None,
+        help="Declare which caller invoked this run, for spend-ledger "
+        "attribution (issue athenaeum#1136): `athenaeum spend --by-provider` "
+        "groups ledger rows by this value, so an operator can tell a "
+        "scheduled nightly compile's burn apart from an interactive "
+        "session's. Default: ATHENAEUM_RUN_TYPE env, then 'librarian' "
+        "(unchanged pre-athenaeum#1136 behavior). The nightly wrapper — "
+        "which lives in a different repo, not this one — is expected to "
+        "set the env var rather than pass this flag, since an env var is "
+        "easier for an external cron/launchd invocation to set; pass "
+        "'librarian-nightly' for that case.",
+    )
     _add_lock_args(run_parser)
     run_parser.set_defaults(func=cmd_run)
 
@@ -231,6 +246,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             full_contradiction_sweep=getattr(
                 args, "full_contradiction_sweep", False
             ),
+            run_type=getattr(args, "run_type", None),
         )
 
     from athenaeum.config import load_config
@@ -260,6 +276,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             full_contradiction_sweep=getattr(
                 args, "full_contradiction_sweep", False
             ),
+            run_type=getattr(args, "run_type", None),
             # Issue athenaeum#526 (H10): thread the run lock's heartbeat into the
             # librarian so its per-phase/per-file loop refreshes the lockfile's
             # heartbeat — making heartbeat_age_seconds report progress age, not

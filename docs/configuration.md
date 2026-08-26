@@ -101,6 +101,7 @@ See [exit-codes.md](exit-codes.md) for the full `athenaeum run` exit-code table 
 | Code-artifact allowlist | — | — | `librarian.code_artifact_allowlist` | `[]` | Entity names that must **never** be treated as code artifacts (athenaeum#680) — the escape hatch for a deployment that legitimately tracks a document by filename. Wins over the file-shape check, case-insensitively (mirrors `junk_match_allowlist`). |
 | Non-intake sources | — | — | `librarian.non_intake_sources` | `[]` | `raw/<source>/` directories excluded from entity intake WHOLE (athenaeum#843). Any tool that writes its own **operational artifacts** into `raw/<source>/` — the same tree `remember()`-authored content uses — otherwise becomes nightly LLM-classification load: action logs and state dumps match the `*.md` / `*.jsonl` glob, are not correction-batch envelopes, and so reach `tier2_classify` → `tier3_write` as if they were memory content (a multi-megabyte log gets read whole and handed to the classifier). Names are matched against the directory name exactly — no globbing, no case folding. Skipped before any glob work, the same way the built-in `answers` skip (athenaeum#414) works; this is a second, operator-controlled mechanism alongside it, not a replacement. Default-empty, so an unconfigured install discovers exactly what it did before. |
 | Strict budget exit | `--strict-budget` | — | — | off | Make a budget-tripped (DEGRADED) run exit nonzero instead of `0`, for exit-code-based alerting (athenaeum#227). |
+| Run type | `--run-type` | `ATHENAEUM_RUN_TYPE` | — | `librarian` | Declares which kind of caller this run is, for spend-ledger attribution (issue athenaeum#1136): `athenaeum spend --by-provider` groups ledger rows by this value, so an operator can tell a scheduled nightly compile's burn apart from an interactive session's. No yaml key — this is a per-invocation declaration, not a static setting. There is no shipped nightly cron wrapper in this repo (see "Reasoning-tier triggers" below); the external wrapper — a different repo — is expected to set the env var (`librarian-nightly`) rather than pass the flag, since an env var is easier for a cron/launchd invocation to set. `athenaeum.spend.is_librarian_run_type` matches this value and every `librarian-*`-prefixed sibling as one FAMILY (so `athenaeum.drain_advisor`'s observed-throughput estimator still counts a nightly row); only the bare literal is ever written by this repo's own callers. |
 | Batch API mode | `--batch-mode` / `--no-batch-mode` | `ATHENAEUM_BATCH_MODE` | `librarian.batch_mode` | off | Submit tier-2/tier-3 LLM calls via the [Anthropic Messages Batch API](https://platform.claude.com/docs/en/build-with-claude/batch-processing) at a 50% token discount (athenaeum#236). Latency-tolerant: most batches finish within an hour, 24h worst case — intended for the nightly run. Same-page tier-3 merges stay synchronous; the budget cap is enforced at batch-assembly time (re-checked per file at phase-2 assembly and before the synchronous merges). `--no-batch-mode` forces the synchronous path even when env/yaml turn batch mode on. |
 | Cluster threshold | — | — | `librarian.cluster_threshold` | `0.55` | Cosine cutoff for auto-memory near-duplicate clustering (C2, athenaeum#196). Higher = tighter clusters. |
 | Cluster output | — | — | `librarian.cluster_output` | `raw/_librarian-clusters.jsonl` | Canonical cluster JSONL path, resolved relative to the knowledge root. Each run also writes a timestamped sibling. |
@@ -922,7 +923,7 @@ ratios.** The shape:
 | `api` | object (bucket) | **dollars** | The metered `anthropic` path. `estimated_cost_usd` is real money. |
 | `unknown` | object (bucket) | **tokens** | Rows whose billing mode could **not** be determined (no known `billing_mode` and no recognised `provider` — a hand-edited or corrupt row). **Always present** (blank when none) so *unknown is a distinct state from zero*: a consumer must never mistake an undeterminable row for API spend, or for no activity. Never folded into `api`/`subscription`; report its **tokens**, since its unit is by definition unknown. |
 | `by_model` | object | — | Present only with `--by-model`; each model maps to `{subscription, api, unknown}` sub-buckets. |
-| `by_run_type` | object | — | Present only with `--by-provider`; each run type maps to `{subscription, api, unknown}` sub-buckets. |
+| `by_run_type` | object | — | Present only with `--by-provider`; each run type maps to `{subscription, api, unknown}` sub-buckets. Since issue athenaeum#1136, a scheduled nightly librarian compile tags its rows `librarian-nightly` — a distinct key from the bare `librarian` an interactive/session run keeps using — so this attributes the two apart. |
 | `by_knob` | object | — | Present only with `--by-knob` (issue athenaeum#781); each model knob (`classify` / `write` / `resolve` / `topic` / `reasoning_t1` / `reasoning_t2`) maps to `{subscription, api, unknown}` sub-buckets — the subscription/API split stays intact within each knob, never blended. |
 | `budget_window` | object | — | **Additive (issue athenaeum#1135).** A DIFFERENT question from every field above: those summarise the `--since` window (default 7d); this reports TODAY's spend against the configured PER-DAY ceiling — the same day-scoped figure `spend.ceiling_tripped` enforces during a run — so a consumer can tell whether the ceiling that would stop `athenaeum run` right now is close to tripping. Present unless the best-effort computation failed (never crashes the report). Two sub-objects, `api` and `subscription`, each `{configured, cap_usd\|cap_tokens, consumed_usd\|consumed_tokens, remaining_usd\|remaining_tokens, fraction_consumed}` — `configured=False` (with the rest `None`) when that path's per-day ceiling is unset, mirroring the existing `spend_headroom` slot contract. Never blended with the `--since` totals above or with each other. |
 
@@ -958,9 +959,10 @@ like the `max_api_calls` budget), never silently continuing. All ceilings are
 | Ledger enabled | `ATHENAEUM_SPEND_LEDGER_ENABLED` | `spend.ledger_enabled` | `true` | Write the durable spend ledger. Off is a clean no-op. |
 | Ledger path | `ATHENAEUM_SPEND_LEDGER` | `spend.ledger_path` | `~/.cache/athenaeum/spend.jsonl` | Override the ledger file location (test/relocation seam). |
 | Per-run token ceiling | `ATHENAEUM_SPEND_MAX_TOKENS_PER_RUN` | `spend.max_tokens_per_run` | — (off) | **Subscription path.** Stop the run when its total tokens reach this. |
-| Per-day token ceiling | `ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY` | `spend.max_tokens_per_day` | — (off) | **Subscription path.** Ledger tokens since UTC midnight + this run. |
+| Per-day token ceiling | `ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY` | `spend.max_tokens_per_day` | — (off) | **Subscription path.** Ledger tokens since the start of the configured accounting day (see "Accounting timezone" row below) + this run. |
 | Per-run dollar ceiling | `ATHENAEUM_SPEND_MAX_USD_PER_RUN` | `spend.max_usd_per_run` | — (off) | **API path.** Stop the run when its estimated USD reaches this. |
-| Per-day dollar ceiling | `ATHENAEUM_SPEND_MAX_USD_PER_DAY` | `spend.max_usd_per_day` | — (off) | **API path.** Ledger dollars since UTC midnight + this run. |
+| Per-day dollar ceiling | `ATHENAEUM_SPEND_MAX_USD_PER_DAY` | `spend.max_usd_per_day` | — (off) | **API path.** Ledger dollars since the start of the configured accounting day + this run. |
+| Accounting timezone | `ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE` | `spend.accounting_timezone` | the system's local timezone | IANA zone name (e.g. `America/New_York`) both per-day ceilings above account against (issue athenaeum#1136). **Not UTC by default** — see the rationale below. An unresolvable/misspelled name WARNs and falls back to UTC rather than crashing the run. |
 | Weekly subscription token limit | `ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT` | `spend.weekly_token_limit` | — (off) | **Subscription path.** The operator-declared weekly quota; a denominator, not a ceiling by itself (issue athenaeum#785). |
 | Max percent per day | `ATHENAEUM_SPEND_MAX_PCT_PER_DAY` | `spend.max_pct_per_day` | — (off) | **Subscription path.** Paired with the weekly limit above: `weekly_token_limit / 7 * max_pct_per_day / 100` becomes a SECOND, derived per-day token ceiling (issue athenaeum#785). |
 | Headroom warning threshold | `ATHENAEUM_SPEND_WARNING_THRESHOLD_PCT` | `spend.warning_threshold_pct` | `75` | **API path.** Log a warning, naming which cap and by how much, once a run ends at/above this percent of EITHER the per-run or per-day dollar ceiling — before either one trips (issue athenaeum#926). Unlike the ceilings above this is not opt-in: it always resolves to a usable value, but it warns only when at least one dollar ceiling is actually configured. |
@@ -983,11 +985,38 @@ trip, never only one. An unconfigured dollar ceiling never warns — headroom
 reports a distinct "not configured" state rather than reading as 0% or 100%
 consumed.
 
+**Accounting timezone, and why it defaults to LOCAL, not UTC (issue
+athenaeum#1136).** Both per-day ceilings above used to open a fresh window at
+UTC midnight, unconditionally. For an operator running several hours west of
+UTC that silently opens the window mid-evening rather than at the start of
+their day: in US Eastern time (UTC-4 in summer), UTC midnight lands at
+20:00 EDT — squarely inside a typical evening working session. A session
+that runs 20:00-23:00 local can exhaust the WHOLE day's ceiling by 23:00,
+and a scheduled job firing later that same local night (say 02:16 local) is
+still inside the SAME UTC calendar day — it inherits the exhausted ceiling
+and gets refused before it starts. This was observed in production: a
+nightly `athenaeum run` compiled zero entities on every observed night
+because an evening session had already spent the day's $15 ceiling three
+hours earlier. `spend.accounting_timezone` (env `ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE`)
+fixes this at the source by moving the day boundary to the operator's own
+local timezone — **the default, with no config at all** — rather than
+requiring an operator to discover and set a key before the bug goes away.
+An operator who already runs in UTC sees zero behavior change (their local
+day already equals the UTC day). Set it explicitly (an IANA name, e.g.
+`America/New_York`) when the accounting day should track a *different*
+timezone than the host machine's own — e.g. the ledger is written by a
+process running in a container pinned to UTC on behalf of an operator
+elsewhere. A misspelled/unresolvable zone name WARNs and falls back to UTC
+rather than crashing the run — the same "never crash a run over a config
+typo" contract every other spend knob in this table already holds itself
+to.
+
 ```yaml
 spend:
   # ledger_enabled: true          # on by default
   max_tokens_per_run: 2000000     # cap the nightly subscription burn
   max_usd_per_day: 5.00           # cap real API dollars per day
+  # accounting_timezone: America/New_York  # default: system-local; see rationale above
   weekly_token_limit: 700000      # declared weekly subscription quota
   max_pct_per_day: 50             # -> 50,000 token/day derived ceiling
   # warning_threshold_pct: 75     # warn at 75% of either dollar cap (default)
@@ -997,10 +1026,12 @@ The weekly-limit + max-percent-per-day pair (issue athenaeum#785) is a SECOND,
 independent way to bound the subscription per-day figure — derived rather
 than absolute, and strictly opt-in like every ceiling here: setting only one
 of the two does nothing (there is no denominator, or no percentage, to apply
-on its own). It reuses the same UTC-midnight day boundary as the per-day
-ceilings above (a rolling 7-day window is deliberately out of scope) and
-never gates the API path — a token-denominated percentage has no meaning
-there, and `subscription` notional tokens and `api` real dollars are two
+on its own). It reuses the same configured-accounting-day boundary (issue
+athenaeum#1136 — UTC-midnight-aligned only when `spend.accounting_timezone`
+resolves to UTC, no longer unconditionally) as the per-day ceilings above (a
+rolling 7-day window is deliberately out of scope) and never gates the API
+path — a token-denominated percentage has no meaning there, and
+`subscription` notional tokens and `api` real dollars are two
 metrics this ledger never blends (athenaeum#487, cwc#1629).
 
 ## Push-precision and coverage instrumentation (athenaeum#711)

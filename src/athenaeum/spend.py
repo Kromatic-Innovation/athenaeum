@@ -22,7 +22,16 @@ This module appends **one JSONL record per pipeline run** to
 * ``provider`` — ``claude-cli`` vs ``anthropic``. This field is the whole
   point: it makes "are we spending real money?" an empirical question rather
   than a grep over the code.
-* ``run_type`` — ``librarian`` / ``answers`` / ``query-topics`` / ...
+* ``run_type`` — ``librarian`` / ``answers`` / ``query-topics`` / ... A shared
+  constant set lives below (``RUN_TYPE_*``); a scheduled nightly compile
+  tags itself ``librarian-nightly`` (issue athenaeum#1136) rather than the
+  bare ``librarian`` an interactive/session run keeps using, so
+  ``athenaeum spend --by-provider`` (:func:`summarize`'s ``by_provider``)
+  can attribute burn to one apart from the other. Both belong to the SAME
+  librarian *family* — see :func:`is_librarian_run_type`, which
+  :mod:`athenaeum.drain_advisor` matches against instead of the exact
+  ``"librarian"`` literal so a nightly row still counts toward observed
+  drain throughput.
 * ``models`` — the serving model-id(s).
 * the FOUR token counters kept **separate** (cache-read is ~10x cheaper than
   input; collapsing them destroys the cost signal).
@@ -137,6 +146,47 @@ LEDGER_FILENAME = "spend.jsonl"
 #: report ("API $0.42") and ``claude-cli`` unchanged (the subscription path).
 PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_CLAUDE_CLI = "claude-cli"
+
+#: The ``run_type`` vocabulary (issue athenaeum#1136). Previously every call
+#: site passed a bare string literal with no shared source of truth — the
+#: module docstring's ``run_type`` line above was the only place the
+#: vocabulary was written down. ``RUN_TYPE_LIBRARIAN`` is UNCHANGED: every
+#: pre-athenaeum#1136 caller (and every non-nightly ``athenaeum run``
+#: invocation today) keeps writing this exact value, so an operator who
+#: never touches ``--run-type``/``ATHENAEUM_RUN_TYPE`` sees byte-identical
+#: ledger rows. ``RUN_TYPE_LIBRARIAN_NIGHTLY`` is the new value a scheduled
+#: nightly compile declares itself with, so ``athenaeum spend
+#: --by-provider`` can attribute burn to it separately from an interactive
+#: session — see :func:`is_librarian_run_type` for why this is a FAMILY
+#: (matched by prefix) rather than a second exact literal.
+RUN_TYPE_LIBRARIAN = "librarian"
+RUN_TYPE_LIBRARIAN_NIGHTLY = "librarian-nightly"
+RUN_TYPE_ANSWERS = "answers"
+RUN_TYPE_QUERY_TOPICS = "query-topics"
+RUN_TYPE_MEMORY_CLASS_BACKFILL = "memory-class-backfill"
+
+
+def is_librarian_run_type(run_type: object) -> bool:
+    """True for ``RUN_TYPE_LIBRARIAN`` and every member of its FAMILY (athenaeum#1136).
+
+    A family member is ``RUN_TYPE_LIBRARIAN`` itself, or any value prefixed
+    ``"librarian-"`` (currently only :data:`RUN_TYPE_LIBRARIAN_NIGHTLY`, but
+    written as a prefix match rather than a second exact literal so a future
+    librarian-family run_type doesn't need a THIRD call site updated to
+    match it). :mod:`athenaeum.drain_advisor` uses this — NOT an exact
+    ``== RUN_TYPE_LIBRARIAN`` comparison — to decide whether a ledger row
+    informs the observed files-per-night drain rate: matching only the bare
+    literal would silently drop every nightly row from that calculation the
+    moment the nightly started tagging itself distinctly, degrading drain
+    advice with no error (the exact trap this function exists to close).
+    Non-string input (missing/malformed ``run_type`` field on a hand-edited
+    or pre-v1 ledger row) returns ``False`` rather than raising.
+    """
+    if not isinstance(run_type, str):
+        return False
+    return run_type == RUN_TYPE_LIBRARIAN or run_type.startswith(
+        RUN_TYPE_LIBRARIAN + "-"
+    )
 
 
 def ledger_provider(resolved_provider: str | None) -> str:
@@ -1091,23 +1141,50 @@ def format_reprice(reprice_summary: dict[str, Any], *, since_label: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _start_of_utc_day(now: datetime) -> datetime:
-    now = now.astimezone(timezone.utc)
-    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+def _start_of_accounting_day(
+    now: datetime, config: dict[str, Any] | None = None
+) -> datetime:
+    """Midnight of the CONFIGURED accounting day containing *now* (issue athenaeum#1136).
+
+    Renamed from ``_start_of_utc_day`` — that name stopped being accurate the
+    moment the day boundary became configurable. Resolves the accounting
+    timezone via :func:`athenaeum.config.resolve_spend_accounting_timezone`
+    (default: the operator's own system-local timezone, NOT UTC — see that
+    function's docstring for the starvation bug this fixes), converts *now*
+    into it, truncates to that zone's midnight, and converts the result BACK
+    to UTC — :func:`read_ledger`'s ``since=`` bound compares against each
+    record's ``ts``, which the ledger always stores in UTC (see
+    :func:`build_record`), so the boundary itself must be UTC even though it
+    was computed in local wall-clock time.
+    """
+    from athenaeum.config import resolve_spend_accounting_timezone
+
+    tz = resolve_spend_accounting_timezone(config)
+    local_now = now.astimezone(tz)
+    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return local_midnight.astimezone(timezone.utc)
 
 
 def spend_today(
     ledger_path: Path,
     *,
+    config: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, float]:
-    """Subscription tokens and API dollars recorded SO FAR in the current UTC day.
+    """Subscription tokens and API dollars recorded SO FAR in the current
+    ACCOUNTING day (issue athenaeum#1136 — see
+    :func:`athenaeum.config.resolve_spend_accounting_timezone`; the window
+    is UTC-midnight-aligned only when that resolves to UTC, no longer
+    unconditionally).
 
     Reads the ledger (tolerating torn lines). Used by the per-day ceiling to
-    account for spend already committed by earlier runs today.
+    account for spend already committed by earlier runs today. *config* is
+    passed through to the accounting-timezone resolver — omitted, it falls
+    back to the system-local default exactly like every other caller here
+    that doesn't have a config in scope.
     """
     now = now if now is not None else _now_utc()
-    records = read_ledger(ledger_path, since=_start_of_utc_day(now))
+    records = read_ledger(ledger_path, since=_start_of_accounting_day(now, config))
     tokens = 0
     usd = 0.0
     for record in records:
@@ -1211,7 +1288,7 @@ def budget_window_status(
     )
 
     target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
-    today = spend_today(target, now=now)
+    today = spend_today(target, config=config, now=now)
     usd_cap = resolve_spend_max_usd_per_day(config)
     token_cap = resolve_spend_max_tokens_per_day(config)
     return {
@@ -1264,7 +1341,7 @@ def spend_headroom(
 
     consumed_run = usage.estimated_cost_usd
     target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
-    prior_today = spend_today(target, now=now)["api_usd"]
+    prior_today = spend_today(target, config=config, now=now)["api_usd"]
     consumed_day = prior_today + consumed_run
 
     return {
@@ -1380,7 +1457,7 @@ def ceiling_tripped(
         day_cap = resolve_spend_max_tokens_per_day(config)
         if day_cap is not None:
             target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
-            prior = spend_today(target, now=now)["subscription_tokens"]
+            prior = spend_today(target, config=config, now=now)["subscription_tokens"]
             day_total = prior + usage.total_tokens
             if day_total >= day_cap:
                 return (
@@ -1396,15 +1473,16 @@ def ceiling_tripped(
         # never reaches the API branch below, so it cannot affect a metered
         # run — subscription notional and API real dollars are two metrics the
         # ledger never blends (athenaeum#487, cwc#1629). Day boundary matches every
-        # other per-day ceiling: UTC midnight via ``_start_of_utc_day``
-        # (``spend_today``), not a rolling 7-day window (deferred; see the
-        # athenaeum#785 design notes).
+        # other per-day ceiling: the configured ACCOUNTING day (issue
+        # athenaeum#1136) via ``_start_of_accounting_day`` (``spend_today``),
+        # not a rolling 7-day window (deferred; see the athenaeum#785 design
+        # notes).
         weekly_limit = resolve_spend_weekly_token_limit(config)
         max_pct = resolve_spend_max_pct_per_day(config)
         if weekly_limit is not None and max_pct is not None:
             effective_day_cap = weekly_limit / 7 * (max_pct / 100)
             target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
-            prior = spend_today(target, now=now)["subscription_tokens"]
+            prior = spend_today(target, config=config, now=now)["subscription_tokens"]
             day_total = prior + usage.total_tokens
             if day_total >= effective_day_cap:
                 return (
@@ -1439,7 +1517,7 @@ def ceiling_tripped(
     day_cap_usd = resolve_spend_max_usd_per_day(config)
     if day_cap_usd is not None:
         target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
-        prior = spend_today(target, now=now)["api_usd"]
+        prior = spend_today(target, config=config, now=now)["api_usd"]
         day_total = prior + usage.estimated_cost_usd
         if day_total >= day_cap_usd:
             return (

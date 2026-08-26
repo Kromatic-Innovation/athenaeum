@@ -1061,7 +1061,7 @@ def ingest_answers(
 
     spend.record_spend(
         usage,
-        run_type="answers",
+        run_type=spend.RUN_TYPE_ANSWERS,
         provider=resolve_provider(config, knob="resolve"),
         config=config,
         # pending_path is <wiki_root>/_pending_questions.md (module docstring),

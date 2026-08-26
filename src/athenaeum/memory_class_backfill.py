@@ -443,7 +443,7 @@ def classify_residual(
             batch_usage.add(*_counts, model=model, knob="classify")
             spend.record_spend(
                 batch_usage,
-                run_type="memory-class-backfill",
+                run_type=spend.RUN_TYPE_MEMORY_CLASS_BACKFILL,
                 provider=provider,
                 session_id=session_id,
                 config=config,

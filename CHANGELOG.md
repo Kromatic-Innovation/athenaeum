@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum run --run-type` / `ATHENAEUM_RUN_TYPE` declares which kind of
+  caller a run is, for spend-ledger attribution (athenaeum#1136).** Previously
+  every `record_spend` call site hardcoded a bare `run_type` string literal
+  with no shared vocabulary — `athenaeum.spend` now exposes `RUN_TYPE_LIBRARIAN`,
+  `RUN_TYPE_LIBRARIAN_NIGHTLY`, `RUN_TYPE_ANSWERS`, `RUN_TYPE_QUERY_TOPICS`,
+  and `RUN_TYPE_MEMORY_CLASS_BACKFILL` constants, and every existing call
+  site (`librarian.py`, `answers.py`, `query_topics.py`,
+  `memory_class_backfill.py`) now uses them. A scheduled nightly compile can
+  now declare itself via the new flag/env var so `athenaeum spend
+  --by-provider` (which, despite its name, groups by `run_type`) attributes
+  its burn separately from an interactive session's — pass
+  `--run-type librarian-nightly` or set `ATHENAEUM_RUN_TYPE=librarian-nightly`.
+  Default stays the unchanged `librarian`, so an operator who touches
+  neither sees byte-identical ledger rows. Both librarian ledger-write
+  sites (the normal end-of-run write and the SIGTERM/SIGINT partial-commit
+  write) thread the resolved value. `RUN_TYPE_LIBRARIAN` and
+  `RUN_TYPE_LIBRARIAN_NIGHTLY` are members of the same librarian *family* —
+  `athenaeum.spend.is_librarian_run_type` matches either — and
+  `athenaeum.drain_advisor`'s observed-files-per-night estimator now
+  matches the family instead of the exact `"librarian"` literal, so a
+  nightly's ledger rows still inform backlog-drain ETAs instead of silently
+  vanishing from that calculation.
+
 - **`athenaeum run` refuses loudly when it compiled nothing (athenaeum#1135).**
   A run whose spend/API-call budget was already exhausted before the entity
   loop claimed its first file ran every deterministic phase and exited `0`
@@ -173,6 +196,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-address classification takes an unchanged fast path with no lookup.
 
 ### Changed
+
+- **BEHAVIOUR CHANGE: the per-day spend ceiling now accounts against the
+  operator's LOCAL day by default, not UTC (athenaeum#1136).** `spend.max_usd_per_day`
+  / `spend.max_tokens_per_day` (and the weekly-percent derivation) used to
+  open a fresh accounting window at UTC midnight unconditionally. For an
+  operator running several hours west of UTC, that silently opened the
+  window mid-evening — in US Eastern time (UTC-4 in summer), UTC midnight
+  lands at 20:00 EDT, squarely inside a typical evening working session. A
+  session that ran 20:00-23:00 local could exhaust the WHOLE day's ceiling,
+  and a scheduled job firing later the SAME local night (but still inside
+  the same UTC calendar day) inherited nothing — this was observed in
+  production as a nightly `athenaeum run` compiling **zero** entities on
+  every observed night, refused with `Spend ceiling reached
+  ($15.03/$15.00 today)` roughly three hours after an evening session had
+  already spent it. The new `spend.accounting_timezone` config key (env
+  `ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE`; IANA name, e.g.
+  `America/New_York`) fixes this at the source: it now **defaults to the
+  system's local timezone**, not UTC, so the day boundary tracks the
+  operator's own day without any config at all. An operator who already
+  runs in UTC sees zero behavior change. A misspelled/unresolvable zone
+  name WARNs and falls back to UTC rather than crashing a run. Full
+  rationale and config table: [`docs/configuration.md`](docs/configuration.md).
+  `athenaeum.spend._start_of_utc_day`
+  is renamed `_start_of_accounting_day` (internal, not part of the public
+  API) and `athenaeum.spend.spend_today` gained an optional `config=`
+  parameter; both `ceiling_tripped()` branches (subscription tokens and API
+  dollars) move together.
 
 - **`enumerate_entities` no longer PII-gates `do_not_email` (athenaeum#1122).**
   `athenaeum.enumeration._PII_GATED_EXACT_FIELDS` is now empty:
