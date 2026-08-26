@@ -152,7 +152,11 @@ from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE
     discover_raw_files,
     tier0_passthrough,
 )
-from athenaeum.intake_audit import find_unclaimed_raw_files, raise_unclaimed_files
+from athenaeum.intake_audit import (
+    discover_unclaimed_shape_rule_candidates,
+    find_unclaimed_raw_files,
+    raise_unclaimed_files,
+)
 from athenaeum.merge import (
     RunDeadlineExceeded,
     derive_topic_slug,
@@ -3933,6 +3937,19 @@ def _run_shape_rule_phase(ctx: RunContext) -> None:
     Makes ZERO LLM calls — every write this phase performs (correction
     batch write, ledger append, raw-file git-retirement) is mechanical, same
     invariant `_run_correction_phase` asserts for itself.
+
+    Issue athenaeum#1133: also resolves
+    :func:`athenaeum.intake_audit.discover_unclaimed_shape_rule_candidates`
+    and passes it as `unclaimed_candidates` -- files the intake audit
+    (issue athenaeum#836) would otherwise only ever raise a pending
+    decision about now also reach rule evaluation, so an operator-authored
+    `match: {unclaimed: true, ...}` rule can dispose of them. With zero
+    such rules loaded (the default), this is inert: `run_shape_rule_phase`
+    returns before touching any candidate when `rules` is empty, and a
+    loaded rule that does not opt into `unclaimed: true` never matches one
+    of these candidates (`MatchSpec`'s hard partition) -- so AC3's
+    byte-for-byte default behaviour holds regardless of how many unclaimed
+    files exist.
     """
     _shape_rules_share = resolve_shape_rules_runtime_share(ctx.config)
     shape_rules_deadline: float | None = None
@@ -3946,6 +3963,9 @@ def _run_shape_rule_phase(ctx: RunContext) -> None:
     def _deadline_check() -> bool:
         return shape_rules_deadline is not None and time.monotonic() >= shape_rules_deadline
 
+    unclaimed_candidates = discover_unclaimed_shape_rule_candidates(
+        ctx.raw_root, ctx.knowledge_root, ctx.config
+    )
     _shape_rules_calls_before = ctx.usage.api_calls
     summary = run_shape_rule_phase(
         raw_root=ctx.raw_root,
@@ -3954,6 +3974,7 @@ def _run_shape_rule_phase(ctx: RunContext) -> None:
         config=ctx.config,
         deadline_check=_deadline_check,
         dry_run=ctx.dry_run,
+        unclaimed_candidates=unclaimed_candidates,
     )
     assert ctx.usage.api_calls == _shape_rules_calls_before, (
         "shape-rule phase must make zero LLM calls (issue athenaeum#901) -- "
