@@ -929,7 +929,17 @@ ratios.** The shape:
 
 Each **bucket** object carries: `input_tokens`, `output_tokens`,
 `cache_creation_input_tokens`, `cache_read_input_tokens`, `total_tokens`,
-`api_calls`, `records` (all ints), and `estimated_cost_usd` (float).
+`billable_tokens`, `api_calls`, `records` (all ints), and `estimated_cost_usd`
+(float). `billable_tokens` (issue athenaeum#1137, additive) is
+`input_tokens + output_tokens + cache_creation_input_tokens +
+cache_read_input_tokens` — the cache-inclusive figure the subscription
+ceilings (`spend.max_tokens_per_run` / `max_tokens_per_day` /
+`max_pct_per_day`) actually compare against; `total_tokens` (`input_tokens +
+output_tokens` only) is unchanged and stays present for the hestia
+`cost-ledger.ts` reader (see the "Cache-inclusive subscription ceilings"
+note above). For the `subscription` bucket, prefer `billable_tokens` when
+reporting consumption against a configured ceiling — it is the only figure
+guaranteed to agree with what the guard enforced.
 
 Two invariants the contract guarantees, and one thing it deliberately omits:
 
@@ -958,19 +968,39 @@ like the `max_api_calls` budget), never silently continuing. All ceilings are
 |---|---|---|---|---|
 | Ledger enabled | `ATHENAEUM_SPEND_LEDGER_ENABLED` | `spend.ledger_enabled` | `true` | Write the durable spend ledger. Off is a clean no-op. |
 | Ledger path | `ATHENAEUM_SPEND_LEDGER` | `spend.ledger_path` | `~/.cache/athenaeum/spend.jsonl` | Override the ledger file location (test/relocation seam). |
-| Per-run token ceiling | `ATHENAEUM_SPEND_MAX_TOKENS_PER_RUN` | `spend.max_tokens_per_run` | — (off) | **Subscription path.** Stop the run when its total tokens reach this. |
-| Per-day token ceiling | `ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY` | `spend.max_tokens_per_day` | — (off) | **Subscription path.** Ledger tokens since the start of the configured accounting day (see "Accounting timezone" row below) + this run. |
+| Per-run token ceiling | `ATHENAEUM_SPEND_MAX_TOKENS_PER_RUN` | `spend.max_tokens_per_run` | — (off) | **Subscription path.** Stop the run when its **billable tokens** (input + output + cache-creation + cache-read — see "Cache-inclusive subscription ceilings" below) reach this. |
+| Per-day token ceiling | `ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY` | `spend.max_tokens_per_day` | — (off) | **Subscription path.** Ledger **billable tokens** since the start of the configured accounting day (see "Accounting timezone" row below) + this run's billable tokens. |
 | Per-run dollar ceiling | `ATHENAEUM_SPEND_MAX_USD_PER_RUN` | `spend.max_usd_per_run` | — (off) | **API path.** Stop the run when its estimated USD reaches this. |
 | Per-day dollar ceiling | `ATHENAEUM_SPEND_MAX_USD_PER_DAY` | `spend.max_usd_per_day` | — (off) | **API path.** Ledger dollars since the start of the configured accounting day + this run. |
 | Accounting timezone | `ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE` | `spend.accounting_timezone` | the system's local timezone | IANA zone name (e.g. `America/New_York`) both per-day ceilings above account against (issue athenaeum#1136). **Not UTC by default** — see the rationale below. An unresolvable/misspelled name WARNs and falls back to UTC rather than crashing the run. |
-| Weekly subscription token limit | `ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT` | `spend.weekly_token_limit` | — (off) | **Subscription path.** The operator-declared weekly quota; a denominator, not a ceiling by itself (issue athenaeum#785). |
-| Max percent per day | `ATHENAEUM_SPEND_MAX_PCT_PER_DAY` | `spend.max_pct_per_day` | — (off) | **Subscription path.** Paired with the weekly limit above: `weekly_token_limit / 7 * max_pct_per_day / 100` becomes a SECOND, derived per-day token ceiling (issue athenaeum#785). |
+| Weekly subscription token limit | `ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT` | `spend.weekly_token_limit` | — (off) | **Subscription path.** The operator-declared weekly quota, in **billable tokens**; a denominator, not a ceiling by itself (issue athenaeum#785). |
+| Max percent per day | `ATHENAEUM_SPEND_MAX_PCT_PER_DAY` | `spend.max_pct_per_day` | — (off) | **Subscription path.** Paired with the weekly limit above: `weekly_token_limit / 7 * max_pct_per_day / 100` becomes a SECOND, derived per-day **billable-token** ceiling (issue athenaeum#785). |
 | Headroom warning threshold | `ATHENAEUM_SPEND_WARNING_THRESHOLD_PCT` | `spend.warning_threshold_pct` | `75` | **API path.** Log a warning, naming which cap and by how much, once a run ends at/above this percent of EITHER the per-run or per-day dollar ceiling — before either one trips (issue athenaeum#926). Unlike the ceilings above this is not opt-in: it always resolves to a usable value, but it warns only when at least one dollar ceiling is actually configured. |
 
 The subscription path is bounded in **tokens**, the API path in **dollars** —
 each ceiling only gates its own path. `bool` / non-numeric / non-positive
 values fall through to "off" so a nonsensical value can never silently pin the
 pass to a no-op.
+
+**Cache-inclusive subscription ceilings (issue athenaeum#1137).** The three
+subscription token ceilings above (per-run, per-day, and the weekly-derived
+day cap) compare against `TokenUsage.billable_tokens` — input + output +
+cache-creation + cache-read — **not** `total_tokens`, which is input + output
+only. `total_tokens` stays cache-exclusive because it doubles as a cross-repo
+contract: `athenaeum spend`'s `tokens_by_model`/`tokens_by_knob` entries are a
+superset of hestia's `cost-ledger.ts` `CostLedgerTokens` shape (`{input,
+output, total}`), and hestia's reader expects `total` to exclude cache.
+Redefining `total_tokens` would silently change what hestia reads, so the
+cache-inclusive figure lives in a separate counter instead. This matters
+because the subscription path's real consumption lands overwhelmingly in
+prompt-cache traffic: a real recorded run measured 254 input + 59,916 output
+tokens against 1,169,154 cache-creation + 2,144,653 cache-read tokens — a
+ceiling gated on `total_tokens` alone (60,170) would have undercounted that
+run's real draw (3,373,977) by ~56x, making a configured ceiling read as
+armed while doing nothing. `athenaeum spend --json`'s `subscription` bucket
+reports the same cache-inclusive figure as `billable_tokens` (additive
+alongside the unchanged `total_tokens`), so the report and the guard always
+agree — see the `--json` contract below.
 
 **Headroom warning (issue athenaeum#926).** `ceiling_tripped()` reports only a
 breach — below either dollar ceiling it returns nothing, so a run at 99% of
@@ -1014,11 +1044,16 @@ to.
 ```yaml
 spend:
   # ledger_enabled: true          # on by default
-  max_tokens_per_run: 2000000     # cap the nightly subscription burn
+  max_tokens_per_run: 4000000     # cap the nightly subscription burn -- BILLABLE
+                                   # (cache-inclusive) tokens, issue athenaeum#1137;
+                                   # a real recorded run measured 3.37M billable
+                                   # tokens against a 60k total_tokens reading, so
+                                   # a total_tokens-scaled figure here would never
+                                   # actually gate anything
   max_usd_per_day: 5.00           # cap real API dollars per day
   # accounting_timezone: America/New_York  # default: system-local; see rationale above
-  weekly_token_limit: 700000      # declared weekly subscription quota
-  max_pct_per_day: 50             # -> 50,000 token/day derived ceiling
+  weekly_token_limit: 28000000    # declared weekly subscription quota, billable tokens
+  max_pct_per_day: 50             # -> 2,000,000 billable-token/day derived ceiling
   # warning_threshold_pct: 75     # warn at 75% of either dollar cap (default)
 ```
 
