@@ -116,8 +116,56 @@ name: Promote Main
 # no PR head to resolve, so unless a CI run stamped the SHA directly (path 1),
 # the gate errors and the promotion stops. That is deliberate — the remedy is to
 # land the change through a PR, or dispatch CI on that SHA so path 1 resolves.
-# The same applies when a candidate is found but its tree differs, and when more
-# than one merged PR claims the SHA (ambiguous, so no candidate is chosen).
+# The same applies when more than one merged PR claims the SHA (ambiguous, so
+# no candidate is chosen) — but a tree MISMATCH on a resolved candidate now has
+# a third path below, rather than failing closed outright.
+#
+# RUNG 3 — EVIDENCE PRODUCTION FOR A TREE-MISMATCHED CANDIDATE (cwc#2749). A
+# squash/rebase merge landed while develop was behind base (or any merge whose
+# tree provably differs from the resolved candidate's) leaves rungs 1-2 with no
+# usable evidence — the candidate's green CI ran on content that is NOT the
+# promoted tree, so path 2 correctly refuses it. Rung 3 does not weaken that
+# refusal or introduce a new evidence class: the acceptance predicate stays
+# rung 1's own SHA-keyed query. It fires ONLY on a tree mismatch, and:
+#
+#   1. requires `source_sha` to still equal the CURRENT `origin/${SOURCE_BRANCH}`
+#      tip (a develop that has advanced meanwhile makes any run we produce stamp
+#      a different SHA, so failing this precondition up front avoids a doomed
+#      30-minute poll);
+#   2. discovers the consumer's CI workflow id from the candidate's own
+#      `CI Required` check-run — never from per-repo config, because the fleet
+#      drift guard byte-compares this template across every consumer
+#      (check-runs -> `check_suite.id` -> `actions/runs?head_sha=<candidate>` ->
+#      `workflow_id`);
+#   3. ADOPTS an existing run at the promoted SHA if one already exists (any
+#      status, including a completed/red one — that IS the poisoned-SHA case
+#      below), or DISPATCHES that workflow on `ref = ${SOURCE_BRANCH}` (a
+#      branch, per the `workflow_dispatch` API — never a SHA) only when none
+#      exists. This is MANDATORY, not an optimization: a second concurrent
+#      dispatch on the same ref cancels the first under a consumer's
+#      `cancel-in-progress: true`, and a single cancelled/failed sibling
+#      `CI Required` check-run permanently poisons the promoted SHA (the
+#      all-success jq filter above never recovers once ANY check-run on that
+#      SHA is non-success);
+#   4. re-polls RUNG 1's existing check-runs query on the promoted SHA — never
+#      the dispatched run's own `conclusion` — until green or timeout.
+#
+# CONSUMER PREREQUISITE: the discovered workflow must declare `workflow_dispatch`
+# on the branch used here; a repo whose `ci.yml` only triggers on `pull_request`
+# gets an immediate 422 and the gate fails closed naming that gap, without
+# consuming a poll timeout.
+#
+# POLL DEFAULTS: `CI_EVIDENCE_POLL_TIMEOUT_S` (default 1800) and
+# `CI_EVIDENCE_POLL_INTERVAL_S` (default 15), both env-overridable.
+#
+# POISONED-SHA RECOVERY: a non-success `CI Required` check-run cannot be un-poisoned
+# — a new run ADDS a check-run, it never replaces one. The only remedy is to
+# land a new commit on `${SOURCE_BRANCH}` and promote that; do not re-run the
+# same promotion expecting a retry to help.
+#
+# Rung 3 deliberately does NOT fire when the tree MATCHES and the resolved
+# candidate is red — that would turn this gate into an auto-retry-until-green
+# loop instead of a promotion gate.
 #
 # The optional pinned `sha` input needs no special handling: whatever commit it
 # names becomes the promoted SHA and goes through the identical ladder above.
@@ -166,13 +214,24 @@ jobs:
   promote:
     name: Fast-forward Promote develop → main
     runs-on: ubuntu-latest
+    # cwc#2749: two concurrent promotions of the same target branch must never
+    # run the to_main gate in parallel — rung 3's adopt-or-dispatch protects
+    # against a second DISPATCH, but a second whole gate run racing the first
+    # is still a needless duplicate. `cancel-in-progress: false` because a
+    # promotion in flight must run to completion, never be cancelled mid-push.
+    concurrency:
+      group: promote-main-${{ github.repository }}-${{ github.event.inputs.target_branch }}
+      cancel-in-progress: false
     permissions:
       contents: write
-      actions: read
+      actions: write
       statuses: read
       checks: read
       # cwc#2627: the gate resolves the merged PR that produced the promoted
       # SHA when the SHA itself carries no `CI Required` check-run.
+      # cwc#2749: `write` (widened from `read`) — rung 3 dispatches the
+      # consumer's CI workflow via `POST .../dispatches` when the resolved PR
+      # head's tree differs from the promoted tree.
       pull-requests: read
     outputs:
       promoted_sha: ${{ steps.set_promoted_sha.outputs.promoted_sha }}
@@ -328,12 +387,96 @@ jobs:
             source_tree=$(git rev-parse "${source_sha}^{tree}")
             candidate_tree=$(git rev-parse "${candidate}^{tree}")
             if [ "$source_tree" != "$candidate_tree" ]; then
-              echo "::error::Refusing to reuse CI evidence from ${candidate}: its tree ${candidate_tree} differs from the promoted tree ${source_tree}. The required check must have run on the exact content being promoted."
-              exit 1
-            fi
+              echo "::warning::Refusing to reuse CI evidence from ${candidate}: its tree ${candidate_tree} differs from the promoted tree ${source_tree}. The required check must have run on the exact content being promoted. Attempting rung 3: producing fresh evidence for ${source_sha} itself."
 
-            verdict=$(ci_required_verdict "$candidate")
-            evidence_sha="$candidate"
+              # cwc#2749 — rung 3: this is evidence PRODUCTION, not a new evidence
+              # class. The acceptance predicate stays exactly rung 1's: a green
+              # 'CI Required' check-run on the promoted SHA itself, re-queried
+              # below via the SAME ci_required_verdict() used at the top of this
+              # step. Never trust a dispatched run's own conclusion.
+              #
+              # Precondition: source_sha must still be the current branch tip.
+              # If develop advanced, the run we produce would stamp a DIFFERENT
+              # sha than source_sha, rung 1 would never resolve, and we would
+              # time out fail-closed anyway — but failing the precondition up
+              # front gives a clear, distinct message instead of a 30-minute
+              # wait for an unwinnable poll.
+              if ! current_tip=$(git rev-parse -q --verify "origin/${SOURCE_BRANCH}" 2>/dev/null); then
+                echo "::error::Could not resolve origin/${SOURCE_BRANCH} to confirm it is still at ${source_sha}; refusing to attempt rung 3 without that precondition. This is distinct from 'no evidence available' above — ensure origin/${SOURCE_BRANCH} is fetched and re-run."
+                exit 1
+              fi
+              if [ "$source_sha" != "$current_tip" ]; then
+                echo "::error::${SOURCE_BRANCH} has advanced to ${current_tip} since ${source_sha} was resolved for this promotion; rung 3 only produces evidence for the CURRENT ${SOURCE_BRANCH} tip. Re-run the promotion against the current tip."
+                exit 1
+              fi
+
+              # Discover the consumer's CI workflow id from the candidate's own
+              # 'CI Required' check-run — never from per-repo config, because the
+              # drift guard byte-compares this template across every consumer.
+              # Join check-runs -> check_suite.id -> actions/runs -> workflow_id.
+              # Collect ALL suite ids carrying 'CI Required' (same-named
+              # check-runs are NOT deduped across distinct suites — verified
+              # empirically, cwc#2749) and require them to resolve to exactly
+              # ONE workflow id; more than one is a genuine ambiguity.
+              check_runs_json=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${candidate}/check-runs")
+              suite_ids_json=$(printf '%s' "$check_runs_json" | jq -c '[.check_runs[] | select(.name == "CI Required") | .check_suite.id // empty] | unique')
+              if [ "$(printf '%s' "$suite_ids_json" | jq 'length')" -eq 0 ]; then
+                echo "::error::No 'CI Required' check-run found on candidate ${candidate}; cannot discover the CI workflow to produce evidence for ${source_sha}. Ensure the consumer repo declares a 'CI Required' aggregate check."
+                exit 1
+              fi
+
+              candidate_runs_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${candidate}")
+              workflow_id=$(printf '%s' "$candidate_runs_json" | jq -r --argjson ids "$suite_ids_json" \
+                '[.workflow_runs[] | select(.check_suite_id as $s | $ids | index($s) != null) | .workflow_id] | unique | if length == 1 then .[0] else empty end')
+              if [ -z "${workflow_id:-}" ]; then
+                echo "::error::Could not resolve a single workflow id from candidate ${candidate}'s 'CI Required' check suite(s) ${suite_ids_json}; cannot produce evidence for ${source_sha}."
+                exit 1
+              fi
+
+              # Adopt-or-dispatch is MANDATORY, not a nicety (cwc#2749): two
+              # concurrent dispatches on the same ref cancel each other under a
+              # consumer's `cancel-in-progress: true`, and a cancelled sibling
+              # 'CI Required' check-run permanently poisons the sha (a single
+              # non-success check-run makes CI_REQUIRED_JQ's all(...=="success")
+              # false forever — a poisoned sha cannot be un-poisoned; the only
+              # remedy is a new commit on ${SOURCE_BRANCH}). So: adopt an
+              # existing run at source_sha if one exists (including a completed
+              # one — that IS the poisoned-sha case, and never dispatching a
+              # second run is the whole point); dispatch only when none exists.
+              source_runs_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}")
+              existing_count=$(printf '%s' "$source_runs_json" | jq --argjson wf "$workflow_id" \
+                '[.workflow_runs[] | select(.workflow_id == $wf and (.status == "queued" or .status == "in_progress" or .status == "completed"))] | length')
+              if [ "${existing_count:-0}" -gt 0 ]; then
+                echo "An evidence run for workflow ${workflow_id} already exists at ${source_sha}; adopting it (polling) instead of dispatching a second one (cwc#2749)."
+              else
+                if ! gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/dispatches" -X POST -f "ref=${SOURCE_BRANCH}" 2>/tmp/rung3_dispatch_err.txt; then
+                  echo "::error::Failed to dispatch workflow ${workflow_id} on ${SOURCE_BRANCH} to produce evidence for ${source_sha} — the consumer's ci.yml likely lacks a 'workflow_dispatch' trigger (cwc#2749 prerequisite): $(cat /tmp/rung3_dispatch_err.txt 2>/dev/null)"
+                  exit 1
+                fi
+                echo "Dispatched workflow ${workflow_id} on ${SOURCE_BRANCH} to produce fresh 'CI Required' evidence for ${source_sha}."
+              fi
+
+              # Poll rung 1's EXISTING sha-keyed query — never the dispatched
+              # run's own conclusion — until it resolves green or times out.
+              # Timeout/interval are env-overridable so the timeout path is
+              # testable without actually sleeping 30 minutes.
+              poll_timeout="${CI_EVIDENCE_POLL_TIMEOUT_S:-1800}"
+              poll_interval="${CI_EVIDENCE_POLL_INTERVAL_S:-15}"
+              poll_deadline=$(( $(date +%s) + poll_timeout ))
+              verdict=$(ci_required_verdict "$source_sha" || echo "blocked")
+              while [ "$verdict" != "success" ] && [ "$(date +%s)" -lt "$poll_deadline" ]; do
+                sleep "$poll_interval"
+                verdict=$(ci_required_verdict "$source_sha" || echo "blocked")
+              done
+              evidence_sha="$source_sha"
+              if [ "$verdict" != "success" ]; then
+                echo "::error::Evidence for ${source_sha} did not arrive within ${poll_timeout}s of adopting/dispatching workflow ${workflow_id} on ${SOURCE_BRANCH} (verdict='${verdict}'). No retry — a second dispatch would race the adopted run and poison this sha further. Land a new commit on ${SOURCE_BRANCH} and re-run the promotion against it."
+                exit 1
+              fi
+            else
+              verdict=$(ci_required_verdict "$candidate")
+              evidence_sha="$candidate"
+            fi
           fi
 
           if [ "$verdict" != "success" ]; then
