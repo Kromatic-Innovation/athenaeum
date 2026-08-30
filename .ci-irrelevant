@@ -1,0 +1,11 @@
+# Paths excluded from scripts/ci-key.sh's content-addressed CI key
+# (athenaeum#1160, adopting hestia#1940's pattern).
+#
+# Shell-glob patterns, one per line, matched against the full repo-relative
+# path (`*` also matches `/`). Blank lines and `#` comments are ignored. This
+# file is itself INSIDE the key (see ci-key.sh) so widening it re-keys the
+# tree and cannot retroactively reuse an attestation earned under older rules.
+#
+# Deliberately tiny: keep only paths that provably cannot change `test`,
+# `types`, or `public-safe-lint`'s outcome. When in doubt, leave a path out of
+# this file — a false miss costs one CI run, a false hit ships untested code.
