@@ -424,8 +424,22 @@ class TestClaimLoopFiltering:
     def test_claim_pass_drops_leased_files_and_keeps_the_rest(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Regression guard for athenaeum#1190: this test previously called
+        :func:`~athenaeum.librarian._apply_pending_batch_leases`, which reaches
+        :func:`~athenaeum.batch_state.leased_refs` with NO explicit ``now`` —
+        so it read the REAL wall clock while the lease was recorded against
+        the fixed ``NOW`` fixture. That is a time bomb, not a lease-filter
+        bug: once real time passed ``NOW + DEFAULT_BATCH_LEASE_SECONDS``
+        (2026-08-29T12:00:00Z), the lease read as already-expired and
+        ``leased_refs`` legitimately returned an empty set, so the claim loop
+        had nothing to filter — both files "survived" for a reason that had
+        nothing to do with the filtering logic under test. Freezing
+        ``batch_state._now`` to the same fixed instant used to record the
+        lease makes this test exercise the filter itself, indefinitely.
+        """
         cache_dir = tmp_path / "cache"
         monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.setattr(batch_state, "_now", lambda: NOW)
         leased = _raw(tmp_path, "s", "2026-01-01T00-00-00-aaaaaaaa.md")
         free = _raw(tmp_path, "s", "2026-01-02T00-00-00-bbbbbbbb.md")
         _record(cache_dir, {"c1": leased})
