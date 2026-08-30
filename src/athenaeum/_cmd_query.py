@@ -368,12 +368,17 @@ def cmd_recall(args: argparse.Namespace) -> int:
     # tool — an unrecognized `--type` value prints the deployment's actual
     # entity classes rather than leaving an empty hit list unexplained.
     if type_filter:
-        from athenaeum.entity_schema import resolve_entity_classes
+        from athenaeum.entity_schema import resolve_entity_classes_cached
         from athenaeum.search import normalize_type_filter
 
         normalized_types = normalize_type_filter(type_filter) or ()
+        # Issue athenaeum#1194: memoized. A one-shot CLI resolves once either
+        # way; this keeps the CLI and the MCP server on the SAME entry point.
         known_names = {
-            c.name for c in resolve_entity_classes(wiki_root, caller_audience=caller_audience)
+            c.name
+            for c in resolve_entity_classes_cached(
+                wiki_root, caller_audience=caller_audience
+            )
         }
         unrecognized = [t for t in normalized_types if t not in known_names]
         if unrecognized:

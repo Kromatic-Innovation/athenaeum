@@ -5,7 +5,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from athenaeum.entity_schema import QUERYABLE_FIELDS, resolve_entity_classes
+from athenaeum.entity_schema import (
+    QUERYABLE_FIELDS,
+    clear_entity_class_cache,
+    declared_entity_classes,
+    resolve_entity_classes,
+    resolve_entity_classes_cached,
+)
 from athenaeum.schemas import KNOWN_TYPES
 
 
@@ -185,3 +191,105 @@ class TestResolveEntityClasses:
         _write_page(wiki, "b.md", uid="u2", page_type="aaa-type", name="A")
         names = [c.name for c in resolve_entity_classes(wiki)]
         assert names == sorted(names)
+
+
+class TestResolveEntityClassesCached:
+    """The per-process memo added by issue athenaeum#1194."""
+
+    def _wiki(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        return wiki
+
+    def test_second_call_returns_the_memoized_object(self, tmp_path: Path) -> None:
+        clear_entity_class_cache()
+        wiki = self._wiki(tmp_path)
+        _write_page(wiki, "a.md", uid="u1", page_type="person", name="Alice")
+        assert resolve_entity_classes_cached(wiki) is resolve_entity_classes_cached(wiki)
+
+    def test_memo_is_keyed_by_caller_audience(self, tmp_path: Path) -> None:
+        # THE disclosure guard (issues athenaeum#312/#538). resolve_entity_classes
+        # filters through the fail-closed is_page_authorized predicate, so its
+        # result is audience-specific. A memo shared across audiences would hand
+        # a restricted caller the owner's counts -- letting it learn that pages
+        # it cannot read exist. The owner lookup goes FIRST, deliberately: that
+        # is the order that would poison a naive single-slot cache.
+        clear_entity_class_cache()
+        wiki = self._wiki(tmp_path)
+        _write_page(
+            wiki, "a.md", uid="u1", page_type="person", name="Alice", audience="ops"
+        )
+        _write_page(
+            wiki, "b.md", uid="u2", page_type="person", name="Bob", audience="finance"
+        )
+
+        def count(audience: set[str] | None) -> int:
+            classes = resolve_entity_classes_cached(wiki, caller_audience=audience)
+            return {c.name: c for c in classes}["person"].count
+
+        assert count(None) == 2
+        assert count({"ops"}) == 1
+        assert count({"finance"}) == 1
+        # Each audience holds its own slot -- re-reading in the reverse order
+        # returns the same audience-correct answers, never a shared one.
+        assert count({"ops"}) == 1
+        assert count(None) == 2
+
+    def test_memo_matches_the_uncached_resolver_exactly(self, tmp_path: Path) -> None:
+        clear_entity_class_cache()
+        wiki = self._wiki(tmp_path)
+        (wiki / "_schema").mkdir()
+        (wiki / "_schema" / "types.md").write_text("| Type |\n|---|\n| person |\n")
+        _write_page(wiki, "a.md", uid="u1", page_type="person", name="Alice")
+        _write_page(wiki, "b.md", uid="u2", page_type="auto-memory", name="Mem")
+        assert resolve_entity_classes_cached(wiki) == resolve_entity_classes(wiki)
+
+    def test_clear_drops_every_entry(self, tmp_path: Path) -> None:
+        clear_entity_class_cache()
+        wiki = self._wiki(tmp_path)
+        _write_page(wiki, "a.md", uid="u1", page_type="person", name="Alice")
+
+        def count() -> int:
+            return {
+                c.name: c for c in resolve_entity_classes_cached(wiki)
+            }["person"].count
+
+        assert count() == 1
+        _write_page(wiki, "b.md", uid="u2", page_type="person", name="Bob")
+        # Still memoized -- staleness is the documented contract (a serve
+        # process picks a corpus edit up on its NEXT start).
+        assert count() == 1
+        clear_entity_class_cache()
+        assert count() == 2
+
+    def test_uncached_resolver_stays_pure(self, tmp_path: Path) -> None:
+        # The memo lives in a SEPARATE entry point precisely so the plain
+        # resolver keeps read-your-writes semantics for the CLI and for tests.
+        wiki = self._wiki(tmp_path)
+        _write_page(wiki, "a.md", uid="u1", page_type="person", name="Alice")
+        assert {c.name: c for c in resolve_entity_classes(wiki)}["person"].count == 1
+        _write_page(wiki, "b.md", uid="u2", page_type="person", name="Bob")
+        assert {c.name: c for c in resolve_entity_classes(wiki)}["person"].count == 2
+
+
+class TestDeclaredEntityClasses:
+    """The cheap half athenaeum#1194 put on the MCP construction path."""
+
+    def test_reads_types_md_and_omits_observed_only_classes(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "_schema").mkdir()
+        (wiki / "_schema" / "types.md").write_text(
+            "| Type |\n|---|\n| person |\n| company |\n"
+        )
+        # The observed-undeclared page is deliberately NOT reported -- that is
+        # the whole point: this call must cost one file read, never a scan.
+        _write_page(wiki, "a.md", uid="u1", page_type="auto-memory", name="Mem")
+        assert declared_entity_classes(wiki) == frozenset({"person", "company"})
+
+    def test_falls_back_to_known_types(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        assert declared_entity_classes(wiki) >= KNOWN_TYPES

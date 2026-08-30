@@ -61,7 +61,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from athenaeum.config import resolve_cache_dir, resolve_push_token_budget
-from athenaeum.entity_schema import QUERYABLE_FIELDS, resolve_entity_classes
+from athenaeum.entity_schema import (
+    QUERYABLE_FIELDS,
+    declared_entity_classes,
+    resolve_entity_classes_cached,
+)
 from athenaeum.enumeration import DEFAULT_LIMIT as _ENUMERATE_DEFAULT_LIMIT
 from athenaeum.enumeration import enumerate_entities as _enumerate_entities
 from athenaeum.enumeration import predicate_from_dict as _predicate_from_dict
@@ -998,8 +1002,15 @@ def _recall_via_backend(
     unrecognized_note = ""
     normalized_types = normalize_type_filter(type_filter)
     if normalized_types is not None:
+        # Issue athenaeum#1194: the MEMOIZED resolver. This ran a full corpus
+        # scan on EVERY `recall(type=...)` call — ~28s per call against the
+        # real corpus. Under `serve` it is now computed at most once per
+        # process; a one-shot CLI is unaffected (it resolves once either way).
         known_names = {
-            c.name for c in resolve_entity_classes(wiki_root, caller_audience=caller_audience)
+            c.name
+            for c in resolve_entity_classes_cached(
+                wiki_root, caller_audience=caller_audience
+            )
         }
         unrecognized = [t for t in normalized_types if t not in known_names]
         if unrecognized:
@@ -1551,20 +1562,58 @@ def create_server(
             "Install it with: pip install athenaeum[mcp]"
         ) from exc
 
-    # Issue athenaeum#964: the entity-class registry is resolved ONCE here, at server
-    # construction — never per-call — and backs BOTH the ``recall`` tool's
-    # config-derived ``type`` parameter description AND the ``entity_schema``
-    # tool below, so the two never drift against each other. A ``types.md``
-    # edit takes effect on the NEXT server start (documented, not a
-    # limitation — see docs/recall-architecture.md; nothing here precludes
-    # wiring `notifications/tools/list_changed` later for a live refresh).
-    _entity_classes = resolve_entity_classes(wiki_root, caller_audience=caller_audience)
-    _entity_class_names = [c.name for c in _entity_classes]
-    _entity_classes_str = ", ".join(_entity_class_names) if _entity_class_names else "(none yet)"
-    # Issue athenaeum#965: same "computed once" rule as `_entity_classes` above —
-    # `enumerate_entities` reuses this set for its unrecognized-type check
-    # rather than re-scanning the wiki on every call.
-    _enumerate_known_classes = frozenset(_entity_class_names)
+    # Issue athenaeum#964 wired the entity-class registry here, resolved ONCE at
+    # construction, to back BOTH the ``recall``/``enumerate_entities`` tool
+    # descriptions AND the ``entity_schema`` tool, so the three never drift.
+    #
+    # Issue athenaeum#1194: that resolution is a full corpus scan, and NOTHING may
+    # run a corpus-proportional scan on this path. ``create_server`` is called
+    # before ``serve`` answers the MCP ``initialize`` handshake, and a client's
+    # ``tools/list`` follows immediately — so a scan here (28s against the real
+    # 23.1k-page corpus) blew the client's 30s connect budget and the athenaeum
+    # MCP server failed to connect in EVERY session. The split:
+    #
+    # - DECLARED classes (``wiki/_schema/types.md``) are read here. That is one
+    #   small file — O(1) in corpus size — and it is what the tool-schema
+    #   descriptions are built from.
+    # - OBSERVED classes, live page counts, and the per-class field-key union
+    #   all require the scan, so they are resolved LAZILY, on the first tool
+    #   call that actually needs them, and memoized for the process.
+    #
+    # The visible consequence, stated plainly because it walks back part of
+    # athenaeum#964: the ``type`` parameter descriptions now enumerate this
+    # deployment's DECLARED classes, not declared-plus-observed. An
+    # observed-undeclared class (athenaeum#964's own ``auto-memory`` case) is still
+    # fully usable as a ``type``/``entity_type`` value, and the ``entity_schema``
+    # tool remains authoritative for the complete live list — the descriptions
+    # say so. See docs/recall-architecture.md.
+    #
+    # A ``types.md`` or corpus edit still takes effect on the NEXT server start
+    # (unchanged from athenaeum#964; nothing here precludes wiring
+    # `notifications/tools/list_changed` later for a live refresh).
+    _declared_class_names = sorted(declared_entity_classes(wiki_root))
+    _entity_classes_str = (
+        ", ".join(_declared_class_names) if _declared_class_names else "(none yet)"
+    )
+
+    def _entity_classes():
+        """This deployment's resolved classes — the DEFERRED corpus scan.
+
+        Never called during ``create_server``; only from a tool body. Memoized
+        per (wiki_root, caller_audience) for the life of the process, so the
+        scan is paid at most once however many tools consult it.
+        """
+        return resolve_entity_classes_cached(wiki_root, caller_audience=caller_audience)
+
+    def _enumerate_known_classes():
+        """Issue athenaeum#965's precomputed class set, now computed on first use.
+
+        Still deliberately NOT left to ``enumerate_entities``' own
+        ``known_classes=None`` fallback: that would re-scan the corpus on every
+        single call. This shares the one process-wide memo instead.
+        """
+        return frozenset(c.name for c in _entity_classes())
+
     _enumerate_cache_dir = cache_dir or resolve_cache_dir(None)
 
     mcp = FastMCP(
@@ -1672,13 +1721,17 @@ def create_server(
             type: Narrow the search to one entity class (a page's ``type:``) —
                 issue athenaeum#964. Omitting this (the default, ``None``) searches
                 EVERY class, exactly as before this parameter existed. This
-                deployment's entity classes: {_entity_classes_str}. Call the
-                `entity_schema` tool for each class's live page count and
-                whether it is declared / observed / both. A value that is
-                NOT one of the classes above still runs — it returns no
-                matches together with this same class list in the response,
-                never a silent "nothing matched" and never an error, so a
-                typo is always diagnosable from the response alone.
+                deployment's DECLARED entity classes: {_entity_classes_str}.
+                That list is not exhaustive — a class observed live in the
+                corpus but not yet declared is equally valid here. Call the
+                `entity_schema` tool for the complete live list, each class's
+                page count, and whether it is declared / observed / both
+                (issue athenaeum#1194: only the declared half is cheap enough to
+                compute while the server is starting up). A value matching no
+                class at all still runs — it returns no matches together with
+                this deployment's full class list in the response, never a
+                silent "nothing matched" and never an error, so a typo is
+                always diagnosable from the response alone.
 
         Returns:
             Matching wiki pages with relevance scores and content snippets.
@@ -1695,10 +1748,16 @@ def create_server(
         Call this BEFORE narrowing a `recall` query with `type=...` when you
         don't already know this deployment's entity classes.
 
-        Computed once at server construction from the SAME resolver that
-        derives `recall`'s `type` parameter description, so the two can never
-        disagree. A `wiki/_schema/types.md` edit takes effect on the next
-        server start (this issue does not implement hot reload — see
+        Resolved on FIRST call and memoized for the life of the process
+        (issue athenaeum#1194) — never at server construction, where a
+        corpus-proportional scan would blow the MCP client's connect budget.
+        This tool is AUTHORITATIVE for the live class list: `recall`'s and
+        `enumerate_entities`' `type` descriptions enumerate only the DECLARED
+        classes, because those are built at construction time from
+        `wiki/_schema/types.md` alone. An observed-undeclared class appears
+        here and is usable as a `type` value, but is not named there.
+        A `wiki/_schema/types.md` edit takes effect on the next server start
+        (this issue does not implement hot reload — see
         docs/recall-architecture.md).
 
         Returns:
@@ -1724,7 +1783,7 @@ def create_server(
                     "observed": c.observed,
                     "fields": list(c.fields),
                 }
-                for c in _entity_classes
+                for c in _entity_classes()
             ],
             "queryable_fields": list(QUERYABLE_FIELDS),
         }
@@ -1755,7 +1814,7 @@ def create_server(
                 caller_audience=caller_audience,
                 extra_roots=extra_roots,
                 config=config,
-                known_classes=_enumerate_known_classes,
+                known_classes=_enumerate_known_classes(),
             )
         except ValueError as exc:
             return {
@@ -1789,8 +1848,10 @@ def create_server(
         tool takes no query text at all and never routes through
         BM25/vector ranking; it reads a plain type-indexed candidate set and
         applies your predicates directly. Call `entity_schema` first to
-        discover this deployment's entity classes and their fields — this
-        deployment's classes today: {_entity_classes_str}.
+        discover this deployment's entity classes and their fields — it is
+        authoritative for the live list. This deployment's DECLARED classes
+        today: {_entity_classes_str} (not exhaustive — an observed-undeclared
+        class is equally valid; see issue athenaeum#1194).
 
         `athenaeum people` (deprecated by athenaeum#966) has been REMOVED
         (athenaeum#1079) now that this generalized primitive covers every

@@ -328,20 +328,66 @@ implement today — `["type"]`. It must never advertise a field no filter
 actually honors.
 
 **Config-derived tool schema, computed once.** `recall`'s `type` parameter
-description — and `entity_schema`'s whole answer — are computed from the SAME
-resolver (`athenaeum.entity_schema.resolve_entity_classes`) at
-`create_server()` time, from THIS deployment's own `wiki/_schema/types.md`
-and corpus, not from a hardcoded literal in source. A deployment with no (or
-an empty) `types.md` degrades to the observed classes / the collapsed
-fallback set (`athenaeum.schemas.KNOWN_TYPES` — see below) rather than
-failing to register the tool at all.
+description — and `entity_schema`'s whole answer — are derived from THIS
+deployment's own `wiki/_schema/types.md` and corpus, not from a hardcoded
+literal in source. A deployment with no (or an empty) `types.md` degrades to
+the observed classes / the collapsed fallback set
+(`athenaeum.schemas.KNOWN_TYPES` — see below) rather than failing to register
+the tool at all.
 
-This is computed **once**, at server construction — not per call. A
-`types.md` edit takes effect on the **next server start**. This is a
-deliberate choice, not a limitation: the installed protocol
-(`mcp` at `2025-11-25`) supports `notifications/tools/list_changed` for live
-schema invalidation, and nothing in this implementation precludes wiring that
-up later — it is simply out of scope for this issue.
+Each is computed **once** — not per call. A `types.md` or corpus edit takes
+effect on the **next server start**. This is a deliberate choice, not a
+limitation: the installed protocol (`mcp` at `2025-11-25`) supports
+`notifications/tools/list_changed` for live schema invalidation, and nothing
+in this implementation precludes wiring that up later — it is simply out of
+scope.
+
+**Where each half is computed, and why they differ (athenaeum#1194).** The two
+are no longer computed at the same moment, because they do not cost the same:
+
+| Half | Source | Cost | When |
+|---|---|---|---|
+| **Declared** classes | `wiki/_schema/types.md` alone | one small file read, O(1) in corpus size | `create_server()` |
+| **Observed** classes, live page counts, per-class field-key union | a scan of every page (`resolve_entity_classes`) | O(pages) — one YAML parse each | first tool call that needs it, then memoized for the process |
+
+Nothing corpus-proportional may run at `create_server()` time. That function
+is called before `athenaeum serve` answers the MCP `initialize` handshake, and
+a client's `tools/list` follows immediately — so the full scan there (28.4s of
+user CPU against a real 23.5k-page corpus) blew every client's 30s connect
+budget and the athenaeum MCP server failed to connect in **every** session,
+silently taking `remember` and `recall` with it.
+
+The visible consequence, since it walks back part of athenaeum#964: the `type` /
+`entity_type` parameter descriptions on `recall` and `enumerate_entities`
+enumerate this deployment's **declared** classes only, not declared-plus-
+observed. An observed-undeclared class (athenaeum#964's own `auto-memory` case)
+remains fully usable as a `type` value and still appears in the response's
+class list when a filter value matches nothing — and the **`entity_schema`
+tool stays authoritative for the complete live list**, which is what those
+descriptions now tell the caller. Trading an exhaustive parameter description
+for a server that connects at all is not a close call.
+
+The memo is `athenaeum.entity_schema.resolve_entity_classes_cached`, keyed by
+`(wiki_root, caller_audience)`. The audience half of that key is
+load-bearing, not an optimization: `resolve_entity_classes` filters pages
+through the fail-closed `is_page_authorized` predicate (athenaeum#312/#538), so
+its result is audience-specific, and a memo shared across audiences would hand
+a restricted caller the owner's class list — the exact disclosure those issues
+exist to prevent. `resolve_entity_classes` itself stays uncached and pure, so
+the CLI (and every test) keeps read-your-writes semantics against a wiki it
+has just mutated.
+
+**Frontmatter parsing uses libyaml where available (athenaeum#1194).**
+`parse_frontmatter` is the hottest function in the codebase — every
+corpus-wide surface pays one YAML parse per page — and the pure-Python PyYAML
+scanner accounted for 25.8s of a 27.5s corpus scan. It now prefers
+`yaml.CSafeLoader` (8.5x; verified byte-identical across all 23,111 live
+frontmatter blocks in the real corpus) and falls back to the pure-Python
+loader both when PyYAML ships without the libyaml extension and whenever the
+C loader rejects a block the pure-Python one accepts. That fallback is a
+correctness requirement, not politeness: an unparseable block is treated as
+"no frontmatter at all", so a C-only implementation would make such a page
+vanish from every index.
 
 **One fallback source of truth.** Two independently-drifted "fallback entity
 types" lists used to exist — `athenaeum.librarian.FALLBACK_TYPES` (a list,
