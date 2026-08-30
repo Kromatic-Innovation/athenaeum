@@ -4,33 +4,34 @@ name: CI
 # Semver-tag comment after each pin records the release the SHA maps to at
 # pin time. Keep in sync with release.yml pins.
 #
-# CI runs on pull requests targeting develop only. The `push: [develop]`
-# trigger was dropped (athenaeum#1031, epic cwc#2251): every post-merge push
-# run was a full duplicate of the PR run that had just tested the identical
-# tree (strict required status checks keep the PR head up to date with
-# develop). The one thing that still depended on it was promote-main.yml's
-# `CI Required` gate, which read check-runs off the develop tip SHA — a merge
-# commit only a push run ever stamps. cwc#2627 changed the canonical gate to
-# fall back to the PR head that produced the tip, accepting it only when the
-# two trees are byte-identical, so the evidence is still about the code being
-# promoted. `main` never runs its own CI either: it is fast-forward-promoted
+# athenaeum#1160 restores `push: [develop]` alongside `pull_request`, reversing
+# athenaeum#1031 (epic cwc#2251), which had dropped it because every
+# post-merge push run was a full duplicate of the PR run that had just tested
+# the identical tree. That regression is why promote-main.yml's `CI Required`
+# gate had to grow a PR-head fallback (cwc#2627) instead of just reading the
+# develop tip's own check-run — no push run ever stamped one. Rather than
+# leave that workaround as the permanent shape, this restores the tip-level
+# check-run the direct way: `push` triggers a run, and a `check_duplicate` job
+# (below) short-circuits it to a cheap no-op whenever the tree was already
+# tested on the PR head, so the tip gets its own `CI Required` conclusion
+# without paying for a second full matrix. The short-circuit mechanism
+# (`scripts/ci-key.sh` + `ci-attestation-gate.sh`, falling back to
+# `ci-detect-merged-pr.sh`) is ported unmodified from hestia, which piloted it
+# as cwc#2755. `main` still never runs its own CI: it is fast-forward-promoted
 # from develop by promote-main.yml, which re-verifies the required check-runs
-# before pushing the ref update. Since `main`'s tip is always the same commit
-# SHA that develop already tested, an independent main-triggered run would be
-# a pure duplicate of the develop run (CI-bill audit).
+# before pushing the ref update, and `main`'s tip is always the same commit
+# SHA that develop already tested.
 
 # `workflow_dispatch` (athenaeum#1159) exists so a develop SHA can be stamped
-# with a `CI Required` check-run on demand. With `pull_request` as the only
-# trigger, no run ever attaches to a develop tip commit, and promote-main.yml's
-# gate (which reads check-runs off that tip, falling back to the PR head only
-# when the trees are byte-identical — cwc#2627) wedges until an unrelated push
-# lands. A manual dispatch on develop resolves it, and cwc#2749's terminal gate
-# rung dispatches this workflow programmatically for the same reason. Every job
-# below is unconditional (no `if:`, no `paths:` filter) and no step reads
-# `github.event.pull_request`, `github.head_ref` or `github.base_ref`, so the
-# `test`/`types`/`public-safe-lint` fan-in the aggregate reads behaves
-# identically on a dispatch event as on a pull_request event.
+# with a `CI Required` check-run on demand — kept as an independently useful
+# manual escape hatch even now that `push` normally does this automatically
+# (for example immediately after this workflow file itself changes, before any
+# push has landed under the new trigger). `check_duplicate`'s duplicate
+# detection only ever fires on a `push` event (see `ci-detect-merged-pr.sh`),
+# so a dispatch run always executes the full suite.
 on:
+  push:
+    branches: [develop]
   pull_request:
     branches: [develop]
   workflow_dispatch:
@@ -50,7 +51,88 @@ permissions:
   contents: read
 
 jobs:
+  # athenaeum#1160 — decide whether this push's tree was already tested green,
+  # so the jobs below can skip a redundant re-run. Two independent dedup
+  # paths, tried in order, sharing one `skip` output:
+  #
+  #   1. attestation (scripts/ci-attestation-gate.sh + ci-key.sh) — has THIS
+  #      TREE been tested green? Reaches squash and rebase merges, and
+  #      different commits with identical trees.
+  #   2. merge-commit detector (scripts/ci-detect-merged-pr.sh) — is this push
+  #      the merge commit of a PR that already passed? Fallback for a key
+  #      miss; needs no attestation to exist.
+  #
+  # `pull-requests: read` and `checks: read` are granted at JOB level (not
+  # file level) so every other job stays on `contents: read` alone — the
+  # file-level `permissions:` above sets every unnamed scope to `none`, and a
+  # 403 from a missing scope must never be read as "not merged"/"not
+  # attested" (see the scripts' headers for the measured failure mode this
+  # guards against).
+  check_duplicate:
+    name: Check for duplicate CI run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    outputs:
+      skip: ${{ steps.detect.outputs.skip }}
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # The content-addressed key for the tree actually checked out. On a
+      # `pull_request` event that is the merge preview, which is the tree a
+      # squash or rebase merge will produce on `develop`; that is what makes
+      # an attestation published from a PR run reusable by the push run that
+      # follows the merge.
+      - name: Compute CI key
+        id: key
+        run: |
+          CI_KEY="$(bash scripts/ci-key.sh HEAD)"
+          echo "CI key for $GITHUB_SHA: $CI_KEY"
+          echo "key=$CI_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Detect a redundant run
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # `head_commit` exists on push events, `pull_request.title` on PRs,
+          # so the `[ci force]` escape hatch works from either.
+          HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          CI_KEY: ${{ steps.key.outputs.key }}
+        run: |
+          set -uo pipefail
+          verdict="$(mktemp)"
+
+          FORCE_HAYSTACK="$HEAD_COMMIT_MSG
+          $PR_TITLE"
+
+          bash scripts/ci-attestation-gate.sh \
+            --repo "${{ github.repository }}" \
+            --key "$CI_KEY" \
+            --commit-message "$FORCE_HAYSTACK" \
+            --output "$verdict"
+
+          if grep -qx 'skip=true' "$verdict"; then
+            cat "$verdict" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "--- no usable attestation; falling back to the merge-commit detector."
+          : > "$verdict"
+          bash scripts/ci-detect-merged-pr.sh \
+            --event-name "${{ github.event_name }}" \
+            --repo "${{ github.repository }}" \
+            --commit-message "$HEAD_COMMIT_MSG" \
+            --output "$verdict"
+          cat "$verdict" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: [check_duplicate]
+    if: needs.check_duplicate.outputs.skip != 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -89,6 +171,8 @@ jobs:
   # here (`python_version = "3.13"` is pinned in `[tool.mypy]`).
   types:
     name: Types (mypy)
+    needs: [check_duplicate]
+    if: needs.check_duplicate.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -121,11 +205,50 @@ jobs:
   # only), never in the scanner.
   public-safe-lint:
     name: Public-safe lint (org-agnostic leak shapes)
+    needs: [check_duplicate]
+    if: needs.check_duplicate.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Run public-safe-lint scan
         run: bash public-safe-lint.sh .
+
+  # athenaeum#1160 — publish the green-CI attestation for the tree that was
+  # just tested, so the next commit carrying an identical tree (a squash
+  # merge, a rebase, a develop push whose tree a PR already tested) can reuse
+  # this evidence instead of paying for it again. The condition is spelled out
+  # rather than `if: success()`, because `success()` is also true when a
+  # needed job was SKIPPED — exactly the dedup-hit case, where there is
+  # nothing new to attest. Deliberately NOT in `ci-required`'s `needs` (that
+  # job is otherwise byte-unchanged by this): publishing is an optimisation, a
+  # failure here must cost a future CI saving, never a merge.
+  publish_attestation:
+    name: Publish CI attestation
+    needs: [check_duplicate, test, types, public-safe-lint]
+    if: >-
+      needs.check_duplicate.result == 'success' &&
+      needs.test.result == 'success' &&
+      needs.types.result == 'success' &&
+      needs.public-safe-lint.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # The ref must point at the commit GitHub stamped with the check-runs,
+      # because that stamp is what the gate's first verification reads. On a
+      # `pull_request` event that is the PR HEAD, not `$GITHUB_SHA` (the merge
+      # preview `refs/pull/N/merge`, which carries no check-runs at all).
+      - name: Publish attestation ref
+        env:
+          CI_KEY: ${{ needs.check_duplicate.outputs.key }}
+          PROVING_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          bash scripts/ci-attestation-publish.sh \
+            --key "$CI_KEY" \
+            --sha "$PROVING_SHA"
 
   # hestia#557 — a single, always-present aggregate status that is intended to
   # be the ONE required check on develop/main. It runs on every event
@@ -135,46 +258,55 @@ jobs:
   # on any run where a leg is absent, since a missing required check never
   # resolves. This synthesized gate is the single required check instead.
   #
-  # hestia#548 (M24): a *skipped* `test` is NO LONGER treated as green. The
-  # `test` job carries no `if:` and no `paths:` filter, so it cannot be
-  # legitimately skipped today — a skipped result therefore means zero tests
-  # ran, and `promote-main.yml` accepts `CI Required == success` as the sole
-  # promotion gate, so a skipped-is-green aggregate would promote `main` with
-  # no tests the day a path filter is added. The gate is green ONLY when the
-  # test matrix truly succeeded. If a future change adds a legitimate skip
-  # condition to `test`, whoever adds it must whitelist that exact condition
-  # here explicitly — not restore a blanket `skipped)` branch.
+  # athenaeum#1160 — `test`/`types`/`public-safe-lint` can now legitimately
+  # skip: `check_duplicate` sets `if: needs.check_duplicate.outputs.skip !=
+  # 'true'` on all three when the pushed tree was already tested green on the
+  # PR head (observed, not inferred: the attestation/merge-commit detector
+  # verifies GitHub's own check-run record before recommending a skip). A
+  # skip is treated as green ONLY alongside that; `check_duplicate` itself
+  # must have succeeded, or the gate fails closed — a crashed duplicate
+  # detector must never be silently read as "this run is a legitimate
+  # dedup-hit". `check_duplicate` runs on every event, so requiring its
+  # success does not change behaviour on `pull_request`/`workflow_dispatch`
+  # runs, where its own `skip` output is always `false` (the merge-commit
+  # detector only fires on `push`, and no attestation exists yet for a
+  # not-yet-tested PR head).
   ci-required:
     name: CI Required
-    needs: [test, types, public-safe-lint]
+    needs: [check_duplicate, test, types, public-safe-lint]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate CI result
         env:
+          DUP_RESULT: ${{ needs.check_duplicate.result }}
           TEST_RESULT: ${{ needs.test.result }}
           TYPES_RESULT: ${{ needs.types.result }}
           PUBLIC_SAFE_LINT_RESULT: ${{ needs.public-safe-lint.result }}
         run: |
-          echo "test=$TEST_RESULT types=$TYPES_RESULT public-safe-lint=$PUBLIC_SAFE_LINT_RESULT"
-          # `success` → the job ran and passed. Anything else
-          # (skipped/failure/cancelled) → fail the gate. None of `test`,
-          # `types`, or `public-safe-lint` may legitimately skip today (see the
-          # hestia#548 note above); `types` (mypy) became blocking in hestia#596
-          # and `public-safe-lint` (athenaeum#693) is blocking on adoption, so a
-          # type regression or a public-safety leak fails this aggregate exactly
-          # as a test failure does.
-          if [ "$TEST_RESULT" != "success" ]; then
-            echo "::error::test job result '$TEST_RESULT' is not green — failing the aggregate gate."
+          echo "check_duplicate=$DUP_RESULT test=$TEST_RESULT types=$TYPES_RESULT public-safe-lint=$PUBLIC_SAFE_LINT_RESULT"
+          # The duplicate detector must itself have succeeded; otherwise we
+          # cannot trust its skip decision and must fail closed.
+          if [ "$DUP_RESULT" != "success" ]; then
+            echo "::error::check_duplicate did not succeed (result='$DUP_RESULT') — failing the aggregate gate."
             exit 1
           fi
-          if [ "$TYPES_RESULT" != "success" ]; then
-            echo "::error::types (mypy) job result '$TYPES_RESULT' is not green — failing the aggregate gate."
-            exit 1
-          fi
-          if [ "$PUBLIC_SAFE_LINT_RESULT" != "success" ]; then
-            echo "::error::public-safe-lint job result '$PUBLIC_SAFE_LINT_RESULT' is not green — failing the aggregate gate."
-            exit 1
-          fi
-          echo "CI Required: green (test=$TEST_RESULT types=$TYPES_RESULT public-safe-lint=$PUBLIC_SAFE_LINT_RESULT)"
+          # `success`  → the job ran and passed.
+          # `skipped`  → check_duplicate verified this push's tree was already
+          #              tested green on the PR head; nothing new to prove.
+          # anything else (failure/cancelled) → fail the gate.
+          for pair in "test:$TEST_RESULT" "types:$TYPES_RESULT" "public-safe-lint:$PUBLIC_SAFE_LINT_RESULT"; do
+            name="${pair%%:*}"
+            result="${pair#*:}"
+            case "$result" in
+              success|skipped)
+                echo "CI Required: $name green ($result)"
+                ;;
+              *)
+                echo "::error::$name result '$result' is not green — failing the aggregate gate."
+                exit 1
+                ;;
+            esac
+          done
+          echo "CI Required: green overall"
           exit 0
