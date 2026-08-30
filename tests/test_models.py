@@ -250,15 +250,36 @@ class TestFrontmatterLoaderPreference:
     optimization can never quietly become a data-loss bug.
     """
 
-    def test_c_loader_is_used_when_available(self) -> None:
+    def test_c_loader_is_detected_correctly(self) -> None:
         import yaml
 
         from athenaeum.models import _C_SAFE_LOADER
 
         # Not an assertion that libyaml IS installed -- a pure-Python wheel is
         # a supported deployment. It pins that we detect it correctly, so the
-        # fast path is actually taken wherever it exists.
+        # fast path is taken wherever it exists.
         assert _C_SAFE_LOADER is getattr(yaml, "CSafeLoader", None)
+
+    def test_libyaml_fast_path_is_actually_taken(self) -> None:
+        # The test above is a tautology on any given machine -- it cannot tell
+        # you WHICH loader ran. This one can, and so reports in CI output
+        # whether the runner's PyYAML actually has the extension (every
+        # official PyYAML binary wheel does; a source build may not).
+        #
+        # A tab as the key/value separator is the discriminator: the C scanner
+        # accepts it, the pure-Python scanner raises ScannerError. So parsing
+        # it at all proves the libyaml path ran. It SKIPS rather than fails
+        # without the extension, because a pure-Python wheel is correct --
+        # just slower -- and none of this file's other guarantees depend on it.
+        import yaml
+
+        if not hasattr(yaml, "CSafeLoader"):
+            pytest.skip("PyYAML built without the libyaml extension")
+
+        meta, _ = parse_frontmatter(
+            "---\nuid:\tu1\ntype: person\nname: Alice\n---\n\nBody.\n"
+        )
+        assert meta == {"uid": "u1", "type": "person", "name": "Alice"}
 
     def test_falls_back_when_the_c_loader_rejects_a_block(self) -> None:
         # THE regression this guard exists for. A lone-surrogate escape is
