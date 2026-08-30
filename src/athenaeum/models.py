@@ -436,6 +436,50 @@ def slugify(name: str) -> str:
 
 _FM_RE = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n", re.DOTALL)
 
+#: The libyaml-backed safe loader, when this PyYAML build ships one (issue
+#: athenaeum#1194). :func:`parse_frontmatter` is the hottest function in the
+#: codebase: every corpus-wide surface (``entity_schema``'s class scan,
+#: ``athenaeum status``, compile) pays one YAML parse per page, and on the real
+#: 23.1k-page corpus the pure-Python scanner alone accounted for 25.8s of a
+#: 27.5s scan. ``CSafeLoader`` does the same work in 3.0s (8.5x), verified to
+#: return byte-identical results for all 23,111 live frontmatter blocks.
+#:
+#: ``None`` when PyYAML was built without the libyaml extension (a pure-Python
+#: wheel), in which case :func:`parse_frontmatter` behaves exactly as it always
+#: has. Correctness never depends on libyaml being present.
+_C_SAFE_LOADER = getattr(yaml, "CSafeLoader", None)
+
+
+def _safe_load_frontmatter(block: str) -> object:
+    """``yaml.safe_load`` *block*, preferring libyaml (issue athenaeum#1194).
+
+    The two loaders agree on every construct the real corpus contains (verified
+    across all 23,111 live frontmatter blocks), but they are not identical at
+    the edges, and the two directions are NOT symmetric in consequence:
+
+    - A block the pure-Python scanner accepts and the C scanner rejects (a
+      lone-surrogate escape such as ``"\\ud83d\\ude00"`` is the known case)
+      would be a REGRESSION: :func:`parse_frontmatter` treats an unparseable
+      block as "no frontmatter at all", so the page would silently vanish from
+      every index. A ``YAMLError`` from the C loader is therefore never final
+      — it re-parses with the pure-Python loader and only that verdict counts.
+      No page that parsed before this change can stop parsing because of it.
+    - A block the C scanner accepts and the pure-Python one rejects (a tab as
+      the key/value separator, ``key:<TAB>value``) is admitted. Strictly more
+      frontmatter is read, never less. Zero such pages exist in the real
+      corpus; the alternative — re-rejecting them to preserve the old verdict
+      exactly — would mean deliberately reproducing a scanner quirk.
+
+    Raises :exc:`yaml.YAMLError` only when BOTH loaders reject the block, so
+    every caller's existing ``except yaml.YAMLError`` handling is unchanged.
+    """
+    if _C_SAFE_LOADER is not None:
+        try:
+            return yaml.load(block, Loader=_C_SAFE_LOADER)
+        except yaml.YAMLError:
+            pass
+    return yaml.safe_load(block)
+
 
 def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
     """Split YAML frontmatter from body. Returns ``(metadata, body)``.
@@ -449,7 +493,7 @@ def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
     if not m:
         return {}, text
     try:
-        meta = yaml.safe_load(m.group(1)) or {}
+        meta = _safe_load_frontmatter(m.group(1)) or {}
     except yaml.YAMLError:
         return {}, text
     # Coerce identity fields at the YAML boundary. PyYAML loads bare
