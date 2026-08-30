@@ -130,7 +130,9 @@ def _seed_knowledge_root(tmp_path: Path, n_files: int = 0) -> Path:
     (wiki / "_schema" / "types.md").write_text(
         "# Types\n\n| Type |\n|------|\n| person |\n"
     )
-    (wiki / "_schema" / "tags.md").write_text("# Tags\n\n| Tag |\n|-----|\n| active |\n")
+    (wiki / "_schema" / "tags.md").write_text(
+        "# Tags\n\n| Tag |\n|-----|\n| active |\n"
+    )
     (wiki / "_schema" / "access-levels.md").write_text(
         "# Access\n\n| Level |\n|-------|\n| internal |\n"
     )
@@ -212,8 +214,7 @@ class TestRenderRunSummary:
         assert "out_tok_per_call=2750" in line
         # Renders in dict order — after files, before any degraded/truncated.
         assert (
-            "entity secs=4.200 calls=6 created=2 files=5 out_tok_per_call=2750"
-            in line
+            "entity secs=4.200 calls=6 created=2 files=5 out_tok_per_call=2750" in line
         )
 
 
@@ -361,6 +362,147 @@ class TestDurableRunSummaryLedger:
 
         records = read_run_summary_ledger(default_run_summary_ledger_path())
         assert len(records) == 2
+
+
+class TestEconomicsWiring:
+    """Issue athenaeum#1184: the economics/alerts computation actually runs and
+    lands in the durable ledger on a REAL ``run()`` call — not just against
+    the pure functions in ``run_summary_log.py`` (which never exercise the
+    ``RunContext``/``TokenUsage`` wiring, or the ``try/except`` this whole
+    block sits inside). A wiring bug (e.g. a property accessed as a method)
+    would raise inside that ``except Exception`` and silently degrade
+    ``economics`` to ``None`` on every real run while every pure-function
+    unit test stayed green — this test is what would catch that.
+    """
+
+    def test_real_run_writes_economics_block_with_expected_shape(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path, n_files=1)
+        import anthropic as anthropic_mod
+
+        classify_response = MagicMock()
+        classify_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    [
+                        {
+                            "name": "Alice Zhang",
+                            "entity_type": "person",
+                            "tags": ["active"],
+                            "access": "internal",
+                            "observations": "Product leader.",
+                        }
+                    ]
+                )
+            )
+        ]
+        create_response = MagicMock()
+        create_response.content = [MagicMock(text="# Alice Zhang\n\nProduct leader.")]
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = [classify_response, create_response]
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+        )
+
+        assert rc == 0
+        records = read_run_summary_ledger(default_run_summary_ledger_path())
+        assert len(records) == 1
+        econ = records[0]["economics"]
+        # One file processed, one file acted (it created an entity), zero
+        # Tier-1 matches (a brand-new entity, nothing to match against yet).
+        assert econ["files_processed"] == 1
+        assert econ["files_acted"] == 1
+        assert econ["matched"] == 0
+        assert econ["calls"] >= 2  # classify + create, at minimum
+        assert econ["cost_usd"] >= 0.0
+        assert econ["cost_per_file_acted"] == pytest.approx(econ["cost_usd"] / 1)
+        # No alert history yet -- an empty (not absent) alerts list, or the
+        # key omitted entirely (build_run_summary_ledger_record only writes
+        # it when non-empty).
+        assert records[0].get("alerts", []) == []
+
+    def test_alert_fires_and_is_recorded_when_fanout_regresses(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Seed the durable ledger with several stable-fanout baseline runs,
+        then run once with an inflated Tier-1 match count monkeypatched in
+        -- the alert must fire (WARNING, greppable prefix) AND be recorded
+        on the new ledger line."""
+        from athenaeum.run_summary_log import (
+            REGRESSION_ALERT_PREFIX,
+            REGRESSION_MIN_SAMPLES,
+            compute_run_economics,
+            default_run_summary_ledger_path,
+            write_run_summary_record,
+        )
+
+        ledger_path = default_run_summary_ledger_path()
+        baseline_econ = compute_run_economics(
+            files_processed=10,
+            files_acted=10,
+            matched=10,  # matches_per_file_acted == 1.0, the pre-drift figure
+            calls=20,
+            merge_calls=10,
+            merge_echoed_chars=10 * 15_000,
+            cost_usd=1.0,
+        )
+        for _ in range(REGRESSION_MIN_SAMPLES + 3):
+            write_run_summary_record(
+                [("entity", 1.0, {"calls": 20, "files": 10})],
+                ledger_path=ledger_path,
+                economics=baseline_econ,
+            )
+
+        root = _seed_knowledge_root(tmp_path, n_files=1)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        def fake_process_one(raw, index, wiki_root_arg, client, *args, **kwargs):
+            page = wiki_root_arg / "entity-alice.md"
+            page.write_text("# Alice\n", encoding="utf-8")
+            result = SimpleNamespace(
+                created=[page.name], updated=[], escalated=[], skipped=[]
+            )
+            # 10x the baseline's matches_per_file_acted (1.0 -> 10.0).
+            result.matched = 10
+            return result
+
+        monkeypatch.setattr("athenaeum.librarian.process_one", fake_process_one)
+        monkeypatch.setattr(
+            "athenaeum.librarian.discover_auto_memory_files", lambda *_a, **_k: []
+        )
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+        )
+
+        assert rc == 0
+        assert any(
+            REGRESSION_ALERT_PREFIX in rec.message
+            and "matches_per_file_acted" in rec.message
+            for rec in caplog.records
+        ), "expected an econ-regression WARNING naming matches_per_file_acted"
+
+        records = read_run_summary_ledger(ledger_path)
+        newest = records[-1]
+        assert newest["economics"]["matched"] == 10
+        assert any(
+            a["metric"] == "matches_per_file_acted" for a in newest.get("alerts", [])
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -768,9 +910,7 @@ class TestEntityOutputTokensPerCall:
 
     def _entity_field(self, line: str, key: str) -> int:
         # Parse `key=<int>` out of the entity segment of the summary line.
-        entity_seg = next(
-            seg for seg in line.split(" | ") if seg.startswith("entity ")
-        )
+        entity_seg = next(seg for seg in line.split(" | ") if seg.startswith("entity "))
         token = next(t for t in entity_seg.split() if t.startswith(f"{key}="))
         return int(token.split("=", 1)[1])
 
