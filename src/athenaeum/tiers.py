@@ -137,7 +137,9 @@ DEFAULT_WRITE_MODEL = "claude-sonnet-5"
 
 
 def _get_classify_model(config: dict[str, Any] | None = None) -> str:
-    return resolve_model("classify", "ATHENAEUM_CLASSIFY_MODEL", DEFAULT_CLASSIFY_MODEL, config)
+    return resolve_model(
+        "classify", "ATHENAEUM_CLASSIFY_MODEL", DEFAULT_CLASSIFY_MODEL, config
+    )
 
 
 def _get_write_model(config: dict[str, Any] | None = None) -> str:
@@ -160,8 +162,12 @@ def _record_usage(
     resolved the model with (``_get_classify_model`` / ``_get_write_model``).
     """
     if usage is not None and hasattr(response, "usage"):
-        input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
-        usage.add(input_toks, output_toks, cache_creation, cache_read, model=model, knob=knob)
+        input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(
+            response
+        )
+        usage.add(
+            input_toks, output_toks, cache_creation, cache_read, model=model, knob=knob
+        )
         if cache_creation or cache_read:
             log.debug(
                 "prompt cache: %d tokens written, %d tokens read",
@@ -560,15 +566,64 @@ def tier1_programmatic_match(
 # escape-hatch specific names via ``librarian.code_artifact_allowlist``.
 DEFAULT_CODE_ARTIFACT_EXTENSIONS: frozenset[str] = frozenset(
     {
-        "md", "markdown", "rst", "txt",
-        "py", "pyi", "ipynb",
-        "ts", "tsx", "js", "jsx", "mjs", "cjs",
-        "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "env",
-        "sh", "bash", "zsh", "fish", "ps1",
-        "go", "rs", "rb", "java", "kt", "swift", "php", "pl",
-        "c", "cc", "cpp", "cxx", "h", "hpp", "cs", "m", "mm",
-        "css", "scss", "sass", "less", "html", "htm", "xml", "svg",
-        "sql", "graphql", "proto", "lock", "mk", "dockerfile", "gradle",
+        "md",
+        "markdown",
+        "rst",
+        "txt",
+        "py",
+        "pyi",
+        "ipynb",
+        "ts",
+        "tsx",
+        "js",
+        "jsx",
+        "mjs",
+        "cjs",
+        "json",
+        "yaml",
+        "yml",
+        "toml",
+        "ini",
+        "cfg",
+        "conf",
+        "env",
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "ps1",
+        "go",
+        "rs",
+        "rb",
+        "java",
+        "kt",
+        "swift",
+        "php",
+        "pl",
+        "c",
+        "cc",
+        "cpp",
+        "cxx",
+        "h",
+        "hpp",
+        "cs",
+        "m",
+        "mm",
+        "css",
+        "scss",
+        "sass",
+        "less",
+        "html",
+        "htm",
+        "xml",
+        "svg",
+        "sql",
+        "graphql",
+        "proto",
+        "lock",
+        "mk",
+        "dockerfile",
+        "gradle",
     }
 )
 
@@ -607,7 +662,9 @@ def resolve_code_artifact_allowlist(config: dict[str, Any] | None = None) -> set
     A name here is never treated as a code artifact even if it is file-shaped —
     the escape hatch for a deployment that legitimately tracks a document by
     filename. The allowlist WINS (mirrors athenaeum#662's ``junk_match_allowlist``)."""
-    return {n.strip().lower() for n in _config_str_list(config, "code_artifact_allowlist")}
+    return {
+        n.strip().lower() for n in _config_str_list(config, "code_artifact_allowlist")
+    }
 
 
 def classify_code_artifact_name(
@@ -1017,7 +1074,9 @@ Rules:
   pipeline, not real names, unless the surrounding text independently
   corroborates a real named individual or thing.
 """
-    + _human_confirmed_clause("A raw observation", "classified", _HC_CONSEQUENCE_CLASSIFY)
+    + _human_confirmed_clause(
+        "A raw observation", "classified", _HC_CONSEQUENCE_CLASSIFY
+    )
     + """
 - For each entity, classify: name, type, tags, access level.
 - If the raw text is purely procedural (build logs, error traces, CI output)
@@ -1104,7 +1163,10 @@ def tier2_request_params(
     return {
         "model": _get_classify_model(config),
         "max_tokens": resolve_max_tokens(
-            "classify", "ATHENAEUM_CLASSIFY_MAX_TOKENS", _TIER2_CLASSIFY_MAX_TOKENS, config
+            "classify",
+            "ATHENAEUM_CLASSIFY_MAX_TOKENS",
+            _TIER2_CLASSIFY_MAX_TOKENS,
+            config,
         ),
         # Issue athenaeum#578: tier-2 classify stays on Haiku (fast, cheap, high-volume
         # entity extraction) — thinking would only add latency/cost with no
@@ -1276,7 +1338,9 @@ def tier2_classify(
             lambda: client.messages.create(**retry_params),
             f"tier2_classify-retry {raw.ref}",
         )
-        _record_usage(retry_response, usage, model=retry_params["model"], knob="classify")
+        _record_usage(
+            retry_response, usage, model=retry_params["model"], knob="classify"
+        )
         retry_stats = Tier2ParseStats()
         retry_entities = parse_tier2_entities(
             response_text(retry_response),
@@ -1611,7 +1675,9 @@ Write a clean, factual entity page in markdown. Follow these rules:
 - If there are open questions or uncertainties, add an `## Open Questions` section
   with checkbox items
 - Write in a neutral, encyclopedic tone
-""" + _human_confirmed_clause("A raw observation", "processed", _HC_CONSEQUENCE_CREATE)
+""" + _human_confirmed_clause(
+    "A raw observation", "processed", _HC_CONSEQUENCE_CREATE
+)
 
 CREATE_TEMPLATE = (
     """## Entity to create
@@ -1678,7 +1744,9 @@ Content rules (the page's editorial policy — unchanged):
   re-confirming source is never lost even when no new bullet is warranted.
   If the observation adds nothing at all, return {"ops": []}.
 """
-    + _human_confirmed_clause("A new observation", "merged", _hc_consequence_merge("below"))
+    + _human_confirmed_clause(
+        "A new observation", "merged", _hc_consequence_merge("below")
+    )
     + """
 - Never modify YAML frontmatter — emit edits to the body only.
 
@@ -1714,7 +1782,9 @@ Rules:
   - Contextual difference (opinions, preferences): capture both with context
   - Principled tension (values, axioms): flag for human review — return ESCALATE:
 """
-    + _human_confirmed_clause("A new observation", "merged", _hc_consequence_merge("see above"))
+    + _human_confirmed_clause(
+        "A new observation", "merged", _hc_consequence_merge("see above")
+    )
     + """
 - Do NOT modify YAML frontmatter — return body content only"""
 )
@@ -1723,11 +1793,58 @@ Rules:
 # against existing content it actually receives. This must be generous
 # enough to cover an already-bloated page (the athenaeum#297 incident page grew to
 # 5-10KB) — the OLD 4000-char cap silently went blind on exactly that
-# scenario, the one the athenaeum#297 dedup guard was meant to protect. This remains
-# the INPUT window in BOTH the patch and full-echo contracts (issue athenaeum#469):
-# the model still sees the whole existing body, so athenaeum#297 dedup semantics
-# (an empty ops list is a valid no-op) are preserved.
+# scenario, the one the athenaeum#297 dedup guard was meant to protect. This is
+# the INPUT window in BOTH the patch and full-echo contracts (issue athenaeum#469).
+#
+# CORRECTION (issue athenaeum#1180): the claim that used to sit here — "the model
+# still sees the whole existing body, so athenaeum#297 dedup semantics are
+# preserved" — is FALSE for any page over this many chars. ``fence_untrusted()``
+# hard-slices ``text[:max_chars]`` with NO truncation marker
+# (:mod:`athenaeum.prompt_safety`), so a page past this window is silently cut
+# before the model ever sees it. 84 of 23,534 non-underscore corpus pages
+# exceed this today. The two contracts degrade differently:
+#
+#   - patch mode: dedup blindness past the window only. Anchored ops apply
+#     against the REAL, full ``existing_body`` (see :func:`apply_merge_ops`),
+#     never the truncated prompt text, so no existing content is at risk —
+#     only athenaeum#297's "empty ops list is a valid no-op" guarantee is degraded
+#     for a re-confirmation that lands past char 20,000. See
+#     ``_existing_body_truncated`` / :func:`tier3_merge` for where this is
+#     now logged rather than silently accepted.
+#   - full-echo mode: content-LOSS risk. The model is told to "preserve all
+#     existing content" but only receives the truncated window, and its
+#     output REPLACES the whole file. :func:`tier3_merge_full` now REFUSES to
+#     run (escalates instead) when the body exceeds this window, rather than
+#     risk amputating everything past it.
+#
+# Do not "fix" the full-echo refusal by raising this cap again — it was
+# already raised once for this exact failure mode (4,000 -> 20,000, athenaeum#302),
+# and any fixed N is eventually outgrown by some corpus page (the largest
+# today is 261,267 chars). The real fix is section-scoped merging
+# (athenaeum#1181), not a bigger window.
 _MAX_EXISTING_BODY_CHARS = 20_000
+
+#: Stable, greppable log prefix for the patch-mode "existing body exceeds the
+#: merge window" notice (issue athenaeum#1180) — distinct from
+#: ``MERGE_FALLBACK_LOG_PREFIX`` because this is NOT a fallback: patch mode
+#: proceeds normally, just blind to dedup past the window. Kept separate so a
+#: nightly can grep dedup-blindness incidence without conflating it with the
+#: fallback-rate metric athenaeum#496 already tracks.
+MERGE_TRUNCATED_INPUT_LOG_PREFIX = "tier3-merge-truncated-input"
+
+
+def _existing_body_truncated(existing_body: str) -> bool:
+    """True when *existing_body* exceeds the merge input window (issue athenaeum#1180).
+
+    Both merge prompts embed ``existing_body`` via :func:`fence_untrusted`,
+    which hard-slices ``text[:_MAX_EXISTING_BODY_CHARS]`` with no truncation
+    marker. This is the one place that checks the UNTRUNCATED body against
+    that same window, so callers can tell truncation happened instead of it
+    passing silently. See :data:`_MAX_EXISTING_BODY_CHARS` for what each
+    merge contract does once truncation is detected.
+    """
+    return len(existing_body) > _MAX_EXISTING_BODY_CHARS
+
 
 # Fence tag wrapping the untrusted existing page body in the merge prompts
 # (issue athenaeum#562 / audit M20). The current wiki page is itself LLM output derived
@@ -1793,7 +1910,9 @@ If the observation adds nothing new, return {{"ops": []}}.
 If you detect a principled contradiction that needs human review, do NOT
 return JSON — start your response with exactly `ESCALATE:` followed by a
 description of the conflict.
-""" + data_only_clause("user_document", "existing_page")
+""" + data_only_clause(
+    "user_document", "existing_page"
+)
 
 MERGE_TEMPLATE_FULL = """## Existing page content
 {existing_body}
@@ -1806,7 +1925,9 @@ Return the updated body content (no frontmatter). Merge the new observation
 into the existing page. If you detect a principled contradiction that needs
 human review, start your response with exactly `ESCALATE:` followed by a
 description of the conflict, then provide the merged body below a `---` separator.
-""" + data_only_clause("user_document", "existing_page")
+""" + data_only_clause(
+    "user_document", "existing_page"
+)
 
 
 def tier3_create_params(
@@ -1824,7 +1945,9 @@ def tier3_create_params(
     if wiki_root:
         tmpl_text = _load_schema_text(wiki_root, "_entity-template.md")
         if tmpl_text:
-            tmpl_section = f"\n## Entity template (follow this structure)\n{tmpl_text}\n"
+            tmpl_section = (
+                f"\n## Entity template (follow this structure)\n{tmpl_text}\n"
+            )
 
     user_msg = CREATE_TEMPLATE.format(
         name=action.name,
@@ -1832,7 +1955,9 @@ def tier3_create_params(
         tags=", ".join(action.tags),
         access=action.access,
         source_ref=source_ref,
-        observations=fence_untrusted(action.observations, tag="user_document", max_chars=3000),
+        observations=fence_untrusted(
+            action.observations, tag="user_document", max_chars=3000
+        ),
         entity_template_section=tmpl_section,
     )
     return {
@@ -1943,8 +2068,28 @@ def tier3_merge_params(
     edit operations (see :data:`MERGE_SYSTEM`) rather than the full page, so
     the output budget is a small fixed constant independent of page size.
     Shared by the synchronous path (:func:`tier3_merge`) and the Batch API
-    assembly (issue athenaeum#236).
+    assembly (issue athenaeum#236) — this is the ONE place both transports
+    build a patch-mode request, so it is also the one place to record
+    truncated-input dedup blindness (issue athenaeum#1180) so it fires
+    identically whether the request is submitted synchronously or as a
+    batch item (batch assembly calls this directly, never through
+    :func:`tier3_merge`).
     """
+    if _existing_body_truncated(existing_body):
+        log.warning(
+            "%s page=%s source=%s existing_body_chars=%d window=%d — patch-mode "
+            "dedup (athenaeum#297) is blind past the window; anchored ops still "
+            "apply against the full body so no content is at risk, but a "
+            "re-confirming observation past char %d may land as a spurious "
+            "near-duplicate",
+            MERGE_TRUNCATED_INPUT_LOG_PREFIX,
+            action.name,
+            source_ref,
+            len(existing_body),
+            _MAX_EXISTING_BODY_CHARS,
+            _MAX_EXISTING_BODY_CHARS,
+        )
+
     user_msg = MERGE_TEMPLATE.format(
         # Anchor-safe fence (issue athenaeum#562 / audit M20): wrap-only (defang=False).
         # tier3_merge and the batch assembler route a body that would break the
@@ -1958,7 +2103,9 @@ def tier3_merge_params(
             defang=False,
         ),
         source_ref=source_ref,
-        observations=fence_untrusted(action.observations, tag="user_document", max_chars=3000),
+        observations=fence_untrusted(
+            action.observations, tag="user_document", max_chars=3000
+        ),
     )
     return {
         "model": _get_write_model(config),
@@ -2000,7 +2147,9 @@ def tier3_merge_full_params(
             existing_body, tag=_EXISTING_PAGE_TAG, max_chars=_MAX_EXISTING_BODY_CHARS
         ),
         source_ref=source_ref,
-        observations=fence_untrusted(action.observations, tag="user_document", max_chars=3000),
+        observations=fence_untrusted(
+            action.observations, tag="user_document", max_chars=3000
+        ),
     )
     return {
         "model": _get_write_model(config),
@@ -2275,7 +2424,9 @@ def parse_merge_ops_response(
     # zero parse-fails or name exactly what is left, then fall back to full-echo
     # (never a silent no-op — a "no changes needed" prose reply must still be
     # completed by the full-echo path, not dropped).
-    redacted_prefix, _findings = redact_outbound_text(stripped[:MERGE_RESP_PREFIX_CHARS])
+    redacted_prefix, _findings = redact_outbound_text(
+        stripped[:MERGE_RESP_PREFIX_CHARS]
+    )
     log.warning(
         "%s page=%s source=%s cause=%s — patch-mode response unparseable "
         "(no valid ops list); retrying via full-page echo (~10x output cost) "
@@ -2316,6 +2467,12 @@ def tier3_merge(
             action, existing_body, source_ref, client, usage=usage, config=config
         )
 
+    # Issue athenaeum#1180: patch mode is safe to continue on a truncated body — see
+    # _MAX_EXISTING_BODY_CHARS's docstring comment for why (anchored ops apply
+    # against the full, untruncated existing_body, so no content is at risk).
+    # The dedup-blindness warning is logged inside tier3_merge_params itself
+    # (the one place both this sync path AND the batch assembler build a
+    # patch-mode request), not here, so it fires on both transports.
     params = tier3_merge_params(action, existing_body, source_ref, config=config)
 
     response = _timed_llm_call(
@@ -2340,7 +2497,9 @@ def tier3_merge(
     if not needs_fallback:
         return body, escalation
 
-    return tier3_merge_full(action, existing_body, source_ref, client, usage=usage, config=config)
+    return tier3_merge_full(
+        action, existing_body, source_ref, client, usage=usage, config=config
+    )
 
 
 def tier3_merge_full(
@@ -2357,7 +2516,47 @@ def tier3_merge_full(
     patch-mode response is unparseable, truncated, or any op fails to apply,
     so merge quality can never be worse than the status quo. Also invoked
     directly by the batch transport at finalize time for the same fallback.
+
+    Issue athenaeum#1180: REFUSES to run at all when *existing_body* exceeds the
+    merge input window (:data:`_MAX_EXISTING_BODY_CHARS`) rather than making
+    the call. Full-echo tells the model to reproduce the ENTIRE existing body
+    and then REPLACES the whole file with its response — if the body was
+    truncated going in, the model never saw the tail it was told to preserve,
+    and applying its output would silently amputate everything past the
+    window (the exact defect this issue fixes). This mirrors the existing
+    ``stop_reason == "max_tokens"`` output-truncation refusal in
+    :func:`parse_tier3_merge` — same ``conflict_type="principled"`` escalation,
+    same "leave the existing page unchanged pending human review" posture —
+    so an input-side truncation and an output-side truncation fail the same
+    way instead of one being silent.
     """
+    if _existing_body_truncated(existing_body):
+        log.warning(
+            "%s page=%s source=%s cause=input-truncated existing_body_chars=%d "
+            "window=%d — full-echo would only see a truncated prefix of the "
+            "page yet its response replaces the WHOLE body; refusing to call "
+            "the model and escalating instead of risking silent content loss",
+            MERGE_FALLBACK_LOG_PREFIX,
+            action.name,
+            source_ref,
+            len(existing_body),
+            _MAX_EXISTING_BODY_CHARS,
+        )
+        return None, EscalationItem(
+            raw_ref=source_ref,
+            entity_name=action.name,
+            conflict_type="principled",
+            description=(
+                f"Tier 3 full-echo merge refused: existing page body is "
+                f"{len(existing_body)} chars, exceeding the "
+                f"{_MAX_EXISTING_BODY_CHARS}-char merge input window. The model "
+                "would only receive a truncated prefix of the page yet its "
+                "response replaces the WHOLE body — applying it would "
+                "silently discard everything past the window. Existing page "
+                "left unchanged pending human review (see athenaeum#1180)."
+            ),
+        )
+
     params = tier3_merge_full_params(action, existing_body, source_ref, config=config)
 
     response = _timed_llm_call(
@@ -2682,7 +2881,9 @@ def tier3_write(
 # ---------------------------------------------------------------------------
 
 
-def _question_from_description(description: str, entity_name: str, conflict_type: str) -> str:
+def _question_from_description(
+    description: str, entity_name: str, conflict_type: str
+) -> str:
     """Derive a one-line question for the checkbox row.
 
     Uses the first non-empty line of the description, trimmed to a single
@@ -2768,7 +2969,9 @@ def _pair_key_from_description(description: str) -> tuple[str, ...] | None:
         # with a stable separator so passage order does NOT change the key
         # — sort to make (P1,P2) and (P2,P1) collapse.
         norm = sorted(p.strip() for p in passages[:2])
-        h = hashlib.sha1((norm[0] + "\n---\n" + norm[1]).encode("utf-8")).hexdigest()[:16]
+        h = hashlib.sha1((norm[0] + "\n---\n" + norm[1]).encode("utf-8")).hexdigest()[
+            :16
+        ]
         return ("__passage_hash__", h)
     return None
 
@@ -2954,7 +3157,9 @@ def tier4_escalate(
         if isinstance(key, tuple) and key and key[0] != "__passage_hash__":
             mk = _member_key_str(key)
         norms2 = key_side_norms.get(key)
-        pt: str | None = _pair_text_from_passages(norms2[0], norms2[1]) if norms2 else None
+        pt: str | None = (
+            _pair_text_from_passages(norms2[0], norms2[1]) if norms2 else None
+        )
         record_resolution(
             knowledge_root,
             fingerprint=fp,
@@ -3033,7 +3238,9 @@ def tier4_escalate(
     # tuple, or sha1(passages) fallback). Default ON; escape hatch via the
     # ATHENAEUM_TIER4_DEDUP env var so a downstream user can force the
     # legacy always-append behavior.
-    dedup_enabled = os.environ.get("ATHENAEUM_TIER4_DEDUP", "true").strip().lower() not in (
+    dedup_enabled = os.environ.get(
+        "ATHENAEUM_TIER4_DEDUP", "true"
+    ).strip().lower() not in (
         "false",
         "0",
         "no",
@@ -3105,7 +3312,9 @@ def tier4_escalate(
         # adjudicated (human or auto). Computed from the two passages +
         # conflict_type — page-independent, so a settled pair never re-fires
         # regardless of which page surfaced it.
-        item_fingerprint = fingerprint_from_description(item.description, item.conflict_type)
+        item_fingerprint = fingerprint_from_description(
+            item.description, item.conflict_type
+        )
 
         # Issue athenaeum#211: per-item member_key and pair_text for fuzzy matching.
         # member_key is derived from _pair_key_from_description — only use it
@@ -3311,7 +3520,9 @@ def tier4_escalate(
         # Issue athenaeum#198: embed the claim-pair fingerprint so the resolution
         # path (human ingest / auto-apply) can recover it and persist the
         # adjudication to the cache.
-        fingerprint_line = f"**Fingerprint**: {item_fingerprint}\n" if item_fingerprint else ""
+        fingerprint_line = (
+            f"**Fingerprint**: {item_fingerprint}\n" if item_fingerprint else ""
+        )
         block = (
             f'## [{today}] Entity: "{escaped_entity}" (from {item.raw_ref})\n'
             f"- [ ] {question}\n\n"
@@ -3351,10 +3562,14 @@ def tier4_escalate(
     if auto_apply_enabled:
         for key, slot in batch_index.items():
             best: ResolutionProposal | None = best_proposal.get(key)
-            should_apply, gate_threshold = _should_auto_apply(best, best_members.get(key))
+            should_apply, gate_threshold = _should_auto_apply(
+                best, best_members.get(key)
+            )
             if not should_apply or best is None:
                 continue
-            updated = apply_auto_resolution(sections[slot], best, model=resolver_model_id)
+            updated = apply_auto_resolution(
+                sections[slot], best, model=resolver_model_id
+            )
             if updated != sections[slot]:
                 log.info(
                     "Auto-resolved batched escalation key=%s action=%s "
@@ -3393,13 +3608,23 @@ def tier4_escalate(
             # rewrite it as [x]. Cross-batch case.
             if auto_apply_enabled:
                 key_for_block = block_to_key.get(original_block)
-                best = best_proposal.get(key_for_block) if key_for_block is not None else None
-                best_block_members = (
-                    best_members.get(key_for_block) if key_for_block is not None else None
+                best = (
+                    best_proposal.get(key_for_block)
+                    if key_for_block is not None
+                    else None
                 )
-                should_apply, gate_threshold = _should_auto_apply(best, best_block_members)
+                best_block_members = (
+                    best_members.get(key_for_block)
+                    if key_for_block is not None
+                    else None
+                )
+                should_apply, gate_threshold = _should_auto_apply(
+                    best, best_block_members
+                )
                 if should_apply and best is not None:
-                    rewritten = apply_auto_resolution(updated_block, best, model=resolver_model_id)
+                    rewritten = apply_auto_resolution(
+                        updated_block, best, model=resolver_model_id
+                    )
                     if rewritten != updated_block:
                         log.info(
                             "Auto-resolved cross-batch escalation key=%s action=%s "
@@ -3414,7 +3639,9 @@ def tier4_escalate(
                             ),
                         )
                         if key_for_block is not None:
-                            _maybe_enact(best, best_members.get(key_for_block), key_for_block)
+                            _maybe_enact(
+                                best, best_members.get(key_for_block), key_for_block
+                            )
                         _record_auto(best, key_for_block)
                     updated_block = rewritten
             # Replace verbatim — raw_block came from parse, so it lives
@@ -3475,7 +3702,9 @@ def tier4_escalate(
 _PROPOSAL_MARKER = "**Proposed resolution**:"
 _AUTO_RESOLVED_MARKER_TEXT = "**Auto-resolved**: true"
 # ``**Member paths**: a, b`` — explicit source paths carried on a block.
-_MEMBER_PATHS_LINE_RE = re.compile(r"^\s*\*\*Member paths\*\*:\s*(?P<payload>.+)$", re.MULTILINE)
+_MEMBER_PATHS_LINE_RE = re.compile(
+    r"^\s*\*\*Member paths\*\*:\s*(?P<payload>.+)$", re.MULTILINE
+)
 
 
 def _block_has_proposal(raw_block: str) -> bool:
@@ -3621,7 +3850,11 @@ def reresolve_open_questions(
 
     questions = parse_pending_questions(pending_path)
     # Fast exit: nothing proposal-less and open → no work, no discovery cost.
-    targets = [pq for pq in questions if not pq.answered and not _block_has_proposal(pq.raw_block)]
+    targets = [
+        pq
+        for pq in questions
+        if not pq.answered and not _block_has_proposal(pq.raw_block)
+    ]
     if not targets:
         # Issue athenaeum#398: still emit start/done so a watchdog sees the phase ran
         # even when there was nothing to re-resolve.
@@ -3701,7 +3934,9 @@ def reresolve_open_questions(
     # zone — a hung ``claude -p`` resolver call previously produced zero
     # log output. Emit a heartbeat per pending question re-resolved.
     heartbeat_interval = resolve_heartbeat_interval(resolved_config)
-    heartbeat = PhaseHeartbeat("reresolve", total=len(targets), interval_s=heartbeat_interval)
+    heartbeat = PhaseHeartbeat(
+        "reresolve", total=len(targets), interval_s=heartbeat_interval
+    )
     heartbeat.start()
 
     for pq in targets:
@@ -3865,7 +4100,12 @@ def _append_dropped_to_archive(pending_path: Path, blocks: list[str]) -> None:
     if existing.strip():
         if existing.startswith("# Answered Questions"):
             _, _, rest = existing.partition("\n")
-            combined = "# Answered Questions\n" + new_section + "\n\n---\n\n" + rest.lstrip("\n")
+            combined = (
+                "# Answered Questions\n"
+                + new_section
+                + "\n\n---\n\n"
+                + rest.lstrip("\n")
+            )
         else:
             combined = new_section + "\n\n---\n\n" + existing.lstrip("\n")
     else:
