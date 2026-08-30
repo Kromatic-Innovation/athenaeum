@@ -236,6 +236,133 @@ class TestDelimitedIndexString:
 
 
 # ---------------------------------------------------------------------------
+# libyaml-backed frontmatter loading (issue athenaeum#1194)
+# ---------------------------------------------------------------------------
+
+
+class TestFrontmatterLoaderPreference:
+    """``parse_frontmatter`` prefers libyaml but must never lose a page for it.
+
+    Issue athenaeum#1194: the pure-Python PyYAML scanner was 25.8s of a 27.5s
+    corpus scan. ``CSafeLoader`` does the same work 8.5x faster and returned
+    byte-identical results for all 23,111 live frontmatter blocks in the real
+    corpus. These tests pin the two ways the loaders are NOT identical, so the
+    optimization can never quietly become a data-loss bug.
+    """
+
+    def test_c_loader_is_detected_correctly(self) -> None:
+        import yaml
+
+        from athenaeum.models import _C_SAFE_LOADER
+
+        # Not an assertion that libyaml IS installed -- a pure-Python wheel is
+        # a supported deployment. It pins that we detect it correctly, so the
+        # fast path is taken wherever it exists.
+        assert _C_SAFE_LOADER is getattr(yaml, "CSafeLoader", None)
+
+    def test_libyaml_fast_path_is_actually_taken(self) -> None:
+        # The test above is a tautology on any given machine -- it cannot tell
+        # you WHICH loader ran. This one can, and so reports in CI output
+        # whether the runner's PyYAML actually has the extension (every
+        # official PyYAML binary wheel does; a source build may not).
+        #
+        # A tab as the key/value separator is the discriminator: the C scanner
+        # accepts it, the pure-Python scanner raises ScannerError. So parsing
+        # it at all proves the libyaml path ran. It SKIPS rather than fails
+        # without the extension, because a pure-Python wheel is correct --
+        # just slower -- and none of this file's other guarantees depend on it.
+        import yaml
+
+        if not hasattr(yaml, "CSafeLoader"):
+            pytest.skip("PyYAML built without the libyaml extension")
+
+        meta, _ = parse_frontmatter(
+            "---\nuid:\tu1\ntype: person\nname: Alice\n---\n\nBody.\n"
+        )
+        assert meta == {"uid": "u1", "type": "person", "name": "Alice"}
+
+    def test_falls_back_when_the_c_loader_rejects_a_block(self) -> None:
+        # THE regression this guard exists for. A lone-surrogate escape is
+        # accepted by the pure-Python scanner and rejected by the C one. Since
+        # parse_frontmatter treats an unparseable block as "no frontmatter at
+        # all", a C-only implementation would make such a page vanish from
+        # every index. The fallback means no page that parsed before can stop
+        # parsing now.
+        text = '---\nuid: u1\ntype: person\nname: "\\ud83d\\ude00"\n---\n\nBody.\n'
+        meta, body = parse_frontmatter(text)
+        assert meta["uid"] == "u1"
+        assert meta["type"] == "person"
+        assert body == "Body.\n"
+
+    def test_fallback_is_exercised_even_with_no_c_loader(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Simulate a pure-Python PyYAML wheel: identical results, no fallback
+        # needed. Correctness must never depend on libyaml being present.
+        import athenaeum.models as models
+
+        monkeypatch.setattr(models, "_C_SAFE_LOADER", None)
+        meta, body = parse_frontmatter(
+            "---\nuid: u1\ntype: person\nname: Alice\n---\n\nBody.\n"
+        )
+        assert meta == {"uid": "u1", "type": "person", "name": "Alice"}
+        assert body == "Body.\n"
+
+    def test_genuinely_broken_yaml_still_reports_no_frontmatter(self) -> None:
+        # Both loaders reject it, so the YAMLError surfaces and the documented
+        # "unparseable frontmatter is no frontmatter" contract is unchanged.
+        text = "---\nuid: [1,\n---\n\nBody.\n"
+        meta, body = parse_frontmatter(text)
+        assert meta == {}
+        assert body == text
+
+    def test_ordinary_frontmatter_is_unchanged_by_the_loader_swap(self) -> None:
+        # A spot-check over the constructs the real corpus actually uses --
+        # nested maps, lists, dates, bools, unicode, block scalars -- all of
+        # which the two loaders were verified to agree on.
+        text = (
+            "---\n"
+            "uid: u1\n"
+            "type: person\n"
+            "name: Café ünïcode 日本語\n"
+            "tags: [warm, vip]\n"
+            "created: 2026-08-30\n"
+            "active: true\n"
+            "metadata:\n"
+            "  type: nested\n"
+            "  n: 3\n"
+            "note: |\n"
+            "  line one\n"
+            "  line two\n"
+            "---\n\nBody.\n"
+        )
+        meta, body = parse_frontmatter(text)
+        assert meta["name"] == "Café ünïcode 日本語"
+        assert meta["tags"] == ["warm", "vip"]
+        assert meta["active"] is True
+        assert meta["metadata"] == {"type": "nested", "n": 3}
+        assert meta["note"] == "line one\nline two"
+        assert str(meta["created"]) == "2026-08-30"
+        assert body == "Body.\n"
+
+    def test_duplicate_keys_still_take_the_last_value(self) -> None:
+        # Both loaders are last-wins; pinned because a divergence here would
+        # silently change which value a page reports.
+        meta, _ = parse_frontmatter(
+            "---\nuid: u1\ntype: person\nname: First\nname: Second\n---\n\nB.\n"
+        )
+        assert meta["name"] == "Second"
+
+    def test_int_coercion_of_identity_fields_survives(self) -> None:
+        # The uid/type/name int->str coercion runs AFTER the load, so it is
+        # loader-independent -- pinned so a future loader change cannot skip it.
+        meta, _ = parse_frontmatter("---\nuid: 19052\ntype: 5\nname: 7\n---\n\nB.\n")
+        assert meta["uid"] == "19052"
+        assert meta["type"] == "5"
+        assert meta["name"] == "7"
+
+
+# ---------------------------------------------------------------------------
 # render_frontmatter
 # ---------------------------------------------------------------------------
 

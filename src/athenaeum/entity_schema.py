@@ -72,8 +72,13 @@ class EntityClassInfo:
     fields: tuple[str, ...]
 
 
-def _load_declared_types(wiki_root: Path) -> frozenset[str]:
+def declared_entity_classes(wiki_root: Path) -> frozenset[str]:
     """Return the declared entity classes from ``<wiki_root>/_schema/types.md``.
+
+    Public because it is the CHEAP half of :func:`resolve_entity_classes`
+    (issue athenaeum#1194): it reads exactly one small file, where the full
+    resolver scans every page in the corpus. The MCP server builds its tool
+    schemas from this, so ``create_server`` stays O(1) in corpus size.
 
     Falls back to :data:`athenaeum.schemas.KNOWN_TYPES` — the SAME collapsed
     fallback :mod:`athenaeum.librarian` now uses (issue athenaeum#964 AC 9's "one
@@ -86,6 +91,10 @@ def _load_declared_types(wiki_root: Path) -> frozenset[str]:
     schema_dir = wiki_root / "_schema"
     declared = load_schema_list(schema_dir, "types.md")
     return frozenset(declared) if declared else frozenset(KNOWN_TYPES)
+
+
+#: Backwards-compatible alias for the pre-athenaeum#1194 private name.
+_load_declared_types = declared_entity_classes
 
 
 def resolve_entity_classes(
@@ -114,7 +123,7 @@ def resolve_entity_classes(
     shape (this backs both the ``recall`` tool schema and the schema-query
     tool — both want a stable order).
     """
-    declared = _load_declared_types(wiki_root)
+    declared = declared_entity_classes(wiki_root)
     counts: dict[str, int] = {}
     fields: dict[str, set[str]] = {}
 
@@ -151,3 +160,59 @@ def resolve_entity_classes(
         )
         for name in names
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-process memo (issue athenaeum#1194)
+# ---------------------------------------------------------------------------
+
+#: Keyed by ``(resolved wiki_root, audience key)``. The audience half is
+#: LOAD-BEARING and not an optimization: :func:`resolve_entity_classes` filters
+#: pages through the fail-closed :func:`~athenaeum.models.is_page_authorized`
+#: predicate (issues athenaeum#312/#538), so its result is audience-specific.
+#: A memo shared across audiences would hand a restricted caller the owner's
+#: class list — the exact disclosure those issues exist to prevent.
+_RESOLVED_CACHE: dict[tuple[str, frozenset[str] | None], tuple[EntityClassInfo, ...]] = {}
+
+
+def resolve_entity_classes_cached(
+    wiki_root: Path,
+    *,
+    caller_audience: set[str] | None = None,
+) -> tuple[EntityClassInfo, ...]:
+    """Memoized :func:`resolve_entity_classes`, for long-lived processes.
+
+    Issue athenaeum#1194. The corpus scan is O(pages) — ~4s on the real 23.1k-page
+    corpus even with libyaml. A one-shot CLI pays it at most once anyway, but
+    the MCP server is a long-lived process whose ``entity_schema`` tool and
+    ``recall(type=...)`` unrecognized-value note both want the same answer,
+    repeatedly. This wrapper computes it on FIRST use and reuses it for the
+    life of the process.
+
+    Deliberately a separate entry point rather than a cache installed inside
+    :func:`resolve_entity_classes`: that function stays pure, so every caller
+    that resolves a wiki it has just mutated (the CLI, and every test) keeps
+    its current read-your-writes semantics. Only callers that opt in — a
+    server process whose corpus is not changing under it — get the memo.
+
+    Staleness is the same contract ``create_server`` already documented for
+    the pre-athenaeum#1194 compute-once-at-construction behavior: a ``types.md``
+    or corpus edit takes effect on the NEXT server start.
+    """
+    key = (
+        str(wiki_root.resolve() if wiki_root.is_absolute() else wiki_root),
+        frozenset(caller_audience) if caller_audience is not None else None,
+    )
+    cached = _RESOLVED_CACHE.get(key)
+    if cached is None:
+        cached = resolve_entity_classes(wiki_root, caller_audience=caller_audience)
+        _RESOLVED_CACHE[key] = cached
+    return cached
+
+
+def clear_entity_class_cache() -> None:
+    """Drop every :func:`resolve_entity_classes_cached` entry (athenaeum#1194).
+
+    For tests, and for any caller that knows the corpus changed underneath it.
+    """
+    _RESOLVED_CACHE.clear()
