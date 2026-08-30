@@ -516,7 +516,7 @@ def tier1_programmatic_match(
                 # athenaeum.logconf.configure_logging) rather than DEBUG,
                 # with enough fields (key, file, occurrence count, and both
                 # union-gate thresholds) that a production false-negative
-                # audit is possible from logs alone, the way the #1168 PR's
+                # audit is possible from logs alone, the way the athenaeum#1168 PR's
                 # one-off sample measurement was done by hand.
                 min_occurrences = resolve_mention_density_min_occurrences(config)
                 specificity_chars = resolve_mention_density_specificity_chars(config)
