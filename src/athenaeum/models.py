@@ -1096,9 +1096,7 @@ def all_sources_authorized(
     sources = list(sources)
     if not sources:
         return False
-    return all(
-        is_page_authorized_at(s, caller_audience, base=base) for s in sources
-    )
+    return all(is_page_authorized_at(s, caller_audience, base=base) for s in sources)
 
 
 def delimited_index_string(values: Iterable[str]) -> str:
@@ -2030,6 +2028,27 @@ class TokenUsage:
     # tokens at list rates. Set once at run start by the caller that resolved
     # the provider; defaults False so the API backend is unchanged.
     subscription_covered: bool = False
+    # Tier-3 merge-call echo accounting (issue athenaeum#1184). ``merge_calls`` counts
+    # every ``tier3_merge`` / ``tier3_merge_full`` LLM call (patch attempt AND
+    # a subsequent full-echo fallback each count separately — they are two
+    # distinct calls with two distinct prompts); ``merge_echoed_chars`` sums,
+    # across those same calls, how many chars of the EXISTING page body each
+    # call's prompt embedded (capped the same way the merge prompt itself
+    # caps it — see ``tiers.record_merge_echo``'s call sites). Together these
+    # give ``echoed_chars_per_call`` — the ~84%-of-prompt-is-echo cost term
+    # athenaeum#1167 measured but nothing before this issue tracked per run.
+    merge_calls: int = 0
+    merge_echoed_chars: int = 0
+
+    def record_merge_echo(self, echoed_chars: int) -> None:
+        """Record one Tier-3 merge LLM call's echoed-existing-page char count.
+
+        Called once per ``tier3_merge``/``tier3_merge_full`` API call (issue
+        athenaeum#1184) — a patch attempt that falls back to full-echo records
+        TWICE, once per call, since each is its own prompt/response/cost.
+        """
+        self.merge_calls += 1
+        self.merge_echoed_chars += max(0, echoed_chars)
 
     def _tag_model(
         self,
@@ -2459,7 +2478,6 @@ def cost_for_token_bucket(model: str | None, bucket: dict[str, int]) -> float:
     )
 
 
-
 def cache_usage_counts(response: object) -> tuple[int, int, int, int]:
     """Extract token counts from an Anthropic API response (issue athenaeum#230).
 
@@ -2524,6 +2542,13 @@ class ProcessingResult:
     #: ``degraded`` — a truncation is fixed by a bigger budget, not escaping —
     #: and surfaced as ``truncated=N`` in the run summary.
     truncated: int = 0
+    #: Count of Tier-1 programmatic matches this file produced (issue athenaeum#1184)
+    #: — the fan-out driver: one match is one existing entity a raw file's
+    #: index-key hits dispatched a merge decision for. Set by the caller right
+    #: after ``tier1_programmatic_match`` runs; stays 0 on any early-return
+    #: path that never reaches Tier 1 (e.g. the Tier-0 do-not-email/handle
+    #: short-circuits), which is correct — those paths dispatch no matches.
+    matched: int = 0
 
 
 # --- Schema loading ---

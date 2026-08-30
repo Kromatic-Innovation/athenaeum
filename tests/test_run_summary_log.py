@@ -6,12 +6,19 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from athenaeum.librarian import RUN_SUMMARY_PREFIX
 from athenaeum.run_summary_log import (
+    REGRESSION_ALERT_RATIO,
+    REGRESSION_MIN_SAMPLES,
     RUN_SUMMARY_LEDGER_VERSION,
+    build_economics_and_alerts,
     build_run_summary_ledger_record,
+    compute_run_economics,
     default_run_summary_ledger_path,
     entity_phase_wall_clock_per_file,
+    evaluate_regression_alerts,
     parse_run_summary_line,
     parse_run_summary_log,
     parse_run_summary_text,
@@ -36,7 +43,13 @@ class TestParseRunSummaryLine:
         assert rec.total_secs == 12.3
         assert rec.head_fields["schema_fragments"] == "observation-filter:default"
         assert rec.head_fields["zero_yield"] == "0"
-        assert set(rec.phases) == {"wiki-dedup", "entity", "auto-memory", "retire", "reresolve"}
+        assert set(rec.phases) == {
+            "wiki-dedup",
+            "entity",
+            "auto-memory",
+            "retire",
+            "reresolve",
+        }
         assert rec.phase_float("entity", "secs") == 4.2
         assert rec.phase_int("entity", "files") == 3
         assert rec.phase_int("entity", "calls") == 6
@@ -48,10 +61,16 @@ class TestParseRunSummaryLine:
         assert RUN_SUMMARY_PREFIX in _SAMPLE_LINE
 
     def test_non_matching_line_returns_none(self) -> None:
-        assert parse_run_summary_line("2026-08-19T02:00:01Z INFO some other log line") is None
+        assert (
+            parse_run_summary_line("2026-08-19T02:00:01Z INFO some other log line")
+            is None
+        )
 
     def test_missing_total_secs_returns_none(self) -> None:
-        assert parse_run_summary_line("librarian-run-summary | entity secs=1.0 files=1") is None
+        assert (
+            parse_run_summary_line("librarian-run-summary | entity secs=1.0 files=1")
+            is None
+        )
 
     def test_phase_float_and_int_return_none_when_absent(self) -> None:
         rec = parse_run_summary_line(_SAMPLE_LINE)
@@ -99,7 +118,9 @@ class TestEntityPhaseWallClockPerFile:
             "\n".join(
                 [
                     _SAMPLE_LINE,  # entity secs=4.2 files=3
-                    _SAMPLE_LINE.replace("secs=4.2 calls=6", "secs=1.8 calls=2").replace(
+                    _SAMPLE_LINE.replace(
+                        "secs=4.2 calls=6", "secs=1.8 calls=2"
+                    ).replace(
                         "files=3", "files=1"
                     ),  # entity secs=1.8 files=1
                 ]
@@ -112,16 +133,16 @@ class TestEntityPhaseWallClockPerFile:
         assert seconds_per_file == (4.2 + 1.8) / 4
 
     def test_none_when_no_usable_entity_data(self) -> None:
-        records = parse_run_summary_text("librarian-run-summary total_secs=1.0 | retire secs=1.0")
+        records = parse_run_summary_text(
+            "librarian-run-summary total_secs=1.0 | retire secs=1.0"
+        )
         assert entity_phase_wall_clock_per_file(records) is None
 
     def test_none_for_empty_input(self) -> None:
         assert entity_phase_wall_clock_per_file([]) is None
 
     def test_skips_records_with_zero_files(self) -> None:
-        records = parse_run_summary_text(
-            _SAMPLE_LINE.replace("files=3", "files=0")
-        )
+        records = parse_run_summary_text(_SAMPLE_LINE.replace("files=3", "files=0"))
         assert entity_phase_wall_clock_per_file(records) is None
 
 
@@ -258,6 +279,265 @@ class TestWriteAndReadRunSummaryLedger:
         monkeypatch.setattr("athenaeum.run_summary_log.append_line_durable", _boom)
         wrote = write_run_summary_record(_PROFILE, ledger_path=tmp_path / "x.jsonl")
         assert wrote is False
+
+
+class TestComputeRunEconomics:
+    """Issue athenaeum#1184: cost/matches/calls-per-file + echoed-chars/call."""
+
+    def test_reports_both_attempted_and_acted_denominators(self) -> None:
+        econ = compute_run_economics(
+            files_processed=10,
+            files_acted=4,
+            matched=8,
+            calls=12,
+            merge_calls=6,
+            merge_echoed_chars=6 * 15_000,
+            cost_usd=2.0,
+        )
+        assert econ["files_processed"] == 10
+        assert econ["files_acted"] == 4
+        # The "measured trap" the issue names: attempted-denominator cost
+        # UNDERSTATES the true per-acting-file figure whenever some
+        # attempted files produced zero actions.
+        assert econ["cost_per_file_processed"] == 0.2
+        assert econ["cost_per_file_acted"] == 0.5
+        assert econ["cost_per_file_acted"] > econ["cost_per_file_processed"]
+        assert econ["matches_per_file_processed"] == 0.8
+        assert econ["matches_per_file_acted"] == 2.0
+        assert econ["calls_per_file_processed"] == 1.2
+        assert econ["echoed_chars_per_call"] == 15_000.0
+
+    def test_zero_denominator_is_none_not_zero_or_error(self) -> None:
+        econ = compute_run_economics(
+            files_processed=0,
+            files_acted=0,
+            matched=0,
+            calls=0,
+            merge_calls=0,
+            merge_echoed_chars=0,
+            cost_usd=0.0,
+        )
+        assert econ["cost_per_file_processed"] is None
+        assert econ["cost_per_file_acted"] is None
+        assert econ["matches_per_file_acted"] is None
+        assert econ["echoed_chars_per_call"] is None
+
+
+class TestEvaluateRegressionAlerts:
+    """Issue athenaeum#1184 AC4: a synthetic inflated-fan-out run trips the
+    ``matches_per_file`` alert — the regression test the whole issue is
+    justified by ("the instrument that would have made the entire cost
+    investigation unnecessary")."""
+
+    def _baseline_economics(self, *, matches_per_file: float = 1.02) -> dict:
+        files_processed = 100
+        files_acted = 40
+        matched = round(matches_per_file * files_acted)
+        return compute_run_economics(
+            files_processed=files_processed,
+            files_acted=files_acted,
+            matched=matched,
+            calls=files_processed + matched,
+            merge_calls=matched,
+            merge_echoed_chars=matched * 15_000,
+            cost_usd=0.05 * matched,
+        )
+
+    def test_inflated_fanout_trips_matches_per_file_alert(self) -> None:
+        history = [
+            self._baseline_economics() for _ in range(REGRESSION_MIN_SAMPLES + 5)
+        ]
+        # Fan-out drifted ~10x — exactly the athenaeum#1167 regression shape
+        # (1.02 -> ~10 matches/file) this issue exists to catch.
+        current = self._baseline_economics(matches_per_file=10.4)
+
+        alerts = evaluate_regression_alerts(current, history)
+
+        tripped = {a["metric"] for a in alerts}
+        assert "matches_per_file_acted" in tripped
+        matches_alert = next(
+            a for a in alerts if a["metric"] == "matches_per_file_acted"
+        )
+        assert matches_alert["ratio"] > REGRESSION_ALERT_RATIO
+        assert matches_alert["value"] == pytest.approx(
+            current["matches_per_file_acted"]
+        )
+
+    def test_stable_history_does_not_trip(self) -> None:
+        history = [
+            self._baseline_economics() for _ in range(REGRESSION_MIN_SAMPLES + 5)
+        ]
+        current = self._baseline_economics(matches_per_file=1.05)  # normal noise
+        assert evaluate_regression_alerts(current, history) == []
+
+    def test_insufficient_history_never_trips(self) -> None:
+        history = [
+            self._baseline_economics() for _ in range(REGRESSION_MIN_SAMPLES - 1)
+        ]
+        current = self._baseline_economics(matches_per_file=50.0)
+        assert evaluate_regression_alerts(current, history) == []
+
+    def test_no_history_never_trips(self) -> None:
+        current = self._baseline_economics(matches_per_file=50.0)
+        assert evaluate_regression_alerts(current, []) == []
+
+    def test_slow_ramp_still_trips_not_just_a_step(self) -> None:
+        # The REAL athenaeum#1167 regression was not a step -- it was a compounding
+        # ramp (1.02 -> 11.63 matches/file over ~90 nightly runs, near-linear
+        # with corpus size). A trailing-mean baseline would chase this ramp
+        # and never trip; the oldest-window-minimum baseline this function
+        # uses must not. Build ~2.6%/run compounding growth across 40 runs
+        # and confirm the LATEST run (compared to the OLDEST window) trips.
+        n_runs = 60
+        growth_per_run = 1.026
+        history = [
+            self._baseline_economics(matches_per_file=1.02 * (growth_per_run**i))
+            for i in range(n_runs)
+        ]
+        current = history[-1]
+        prior_history = history[:-1]
+
+        alerts = evaluate_regression_alerts(current, prior_history)
+
+        tripped = {a["metric"] for a in alerts}
+        assert "matches_per_file_acted" in tripped
+        assert "cost_per_file_acted" in tripped
+
+    def test_zero_sample_in_baseline_window_does_not_permanently_disable_ratchet(
+        self,
+    ) -> None:
+        # A MIN-based baseline is vulnerable to one legitimate 0.0 sample
+        # (e.g. a fresh-entity night with matched == 0) permanently flooring
+        # the baseline at 0 for the life of the ledger's genesis window --
+        # excluding non-positive samples from the pool is what prevents that.
+        history = [
+            self._baseline_economics() for _ in range(REGRESSION_MIN_SAMPLES + 5)
+        ]
+        # Inject a real 0.0 sample for the RATCHETED cost_per_file_acted
+        # metric specifically (e.g. a night that spent zero dollars while
+        # still acting on files -- legitimate, not an error).
+        zeroed_cost_run = dict(history[0])
+        zeroed_cost_run["cost_per_file_acted"] = 0.0
+        history_with_zero = [zeroed_cost_run] + history[1:]
+
+        current = self._baseline_economics(matches_per_file=10.4)
+
+        alerts = evaluate_regression_alerts(current, history_with_zero)
+
+        tripped = {a["metric"] for a in alerts}
+        assert "cost_per_file_acted" in tripped
+        assert "matches_per_file_acted" in tripped
+
+    def test_none_valued_metric_neither_trips_nor_pollutes_baseline(self) -> None:
+        history = [
+            compute_run_economics(
+                files_processed=10,
+                files_acted=0,  # -> matches_per_file_acted is None
+                matched=0,
+                calls=10,
+                merge_calls=0,
+                merge_echoed_chars=0,
+                cost_usd=0.0,
+            )
+            for _ in range(REGRESSION_MIN_SAMPLES + 2)
+        ]
+        current = self._baseline_economics(matches_per_file=50.0)
+        # No usable baseline samples for matches_per_file_acted (all None in
+        # history) -- must not trip, and must not crash on the None values.
+        alerts = evaluate_regression_alerts(current, history)
+        assert not any(a["metric"] == "matches_per_file_acted" for a in alerts)
+
+
+class TestBuildEconomicsAndAlerts:
+    def test_reads_history_before_the_current_run_is_appended(
+        self, tmp_path: Path
+    ) -> None:
+        ledger_path = tmp_path / "run_summary.jsonl"
+        baseline_econ = compute_run_economics(
+            files_processed=100,
+            files_acted=40,
+            matched=41,
+            calls=141,
+            merge_calls=41,
+            merge_echoed_chars=41 * 15_000,
+            cost_usd=2.0,
+        )
+        for _ in range(REGRESSION_MIN_SAMPLES + 3):
+            write_run_summary_record(
+                _PROFILE, ledger_path=ledger_path, economics=baseline_econ
+            )
+
+        economics, alerts = build_economics_and_alerts(
+            files_processed=100,
+            files_acted=40,
+            matched=410,  # ~10x drift
+            calls=510,
+            merge_calls=410,
+            merge_echoed_chars=410 * 15_000,
+            cost_usd=20.0,
+            ledger_path=ledger_path,
+        )
+        assert any(a["metric"] == "matches_per_file_acted" for a in alerts)
+        assert economics["matched"] == 410
+
+        # The current run's own record must not have been counted in its
+        # own baseline (it hadn't been written yet when history was read).
+        records = read_run_summary_ledger(ledger_path)
+        assert len(records) == REGRESSION_MIN_SAMPLES + 3
+
+    def test_corrupt_ledger_degrades_to_no_history_not_an_error(
+        self, tmp_path: Path
+    ) -> None:
+        ledger_path = tmp_path / "run_summary.jsonl"
+        ledger_path.write_text("not json at all\n")
+        economics, alerts = build_economics_and_alerts(
+            files_processed=5,
+            files_acted=2,
+            matched=3,
+            calls=5,
+            merge_calls=3,
+            merge_echoed_chars=3000,
+            cost_usd=0.5,
+            ledger_path=ledger_path,
+        )
+        assert alerts == []
+        assert economics["matched"] == 3
+
+
+class TestRunSummaryLedgerRecordEconomicsField:
+    def test_economics_and_alerts_round_trip_through_the_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        ledger_path = tmp_path / "run_summary.jsonl"
+        econ = compute_run_economics(
+            files_processed=10,
+            files_acted=4,
+            matched=8,
+            calls=12,
+            merge_calls=6,
+            merge_echoed_chars=90_000,
+            cost_usd=2.0,
+        )
+        alerts = [
+            {
+                "metric": "matches_per_file_acted",
+                "value": 2.0,
+                "baseline": 0.5,
+                "ratio": 4.0,
+            }
+        ]
+        write_run_summary_record(
+            _PROFILE, ledger_path=ledger_path, economics=econ, alerts=alerts
+        )
+        records = read_run_summary_ledger(ledger_path)
+        assert len(records) == 1
+        assert records[0]["economics"]["matched"] == 8
+        assert records[0]["alerts"][0]["metric"] == "matches_per_file_acted"
+
+    def test_omitted_when_not_given_keeps_pre_1184_shape(self) -> None:
+        record = build_run_summary_ledger_record(_PROFILE)
+        assert "economics" not in record
+        assert "alerts" not in record
 
 
 class TestDefaultRunSummaryLedgerPath:

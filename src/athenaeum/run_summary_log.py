@@ -146,7 +146,9 @@ def parse_run_summary_line(line: str) -> RunSummaryRecord | None:
         rest = parts[1] if len(parts) > 1 else ""
         phases[phase_name] = dict(_KV_RE.findall(rest))
 
-    return RunSummaryRecord(total_secs=total_secs, head_fields=head_fields, phases=phases)
+    return RunSummaryRecord(
+        total_secs=total_secs, head_fields=head_fields, phases=phases
+    )
 
 
 def parse_run_summary_text(text: str) -> list[RunSummaryRecord]:
@@ -204,7 +206,9 @@ def entity_phase_wall_clock_per_file(
 # ---------------------------------------------------------------------------
 
 #: Ledger schema version — bump additively if the record shape changes.
-RUN_SUMMARY_LEDGER_VERSION = 1
+#: v2 (issue athenaeum#1184) adds the optional ``economics`` and ``alerts`` keys;
+#: both are additive and a v1 reader that ignores unknown keys is unaffected.
+RUN_SUMMARY_LEDGER_VERSION = 2
 
 #: Ledger filename under the cache dir (mirrors ``athenaeum.spend.LEDGER_FILENAME``).
 RUN_SUMMARY_LEDGER_FILENAME = "run_summary.jsonl"
@@ -231,6 +235,8 @@ def build_run_summary_ledger_record(
     profile: "list[tuple[str, float, dict]]",
     *,
     ts: datetime | None = None,
+    economics: dict[str, Any] | None = None,
+    alerts: "list[dict[str, Any]] | None" = None,
 ) -> dict[str, Any]:
     """Build one durable ledger record from a ``run()`` profile.
 
@@ -245,6 +251,14 @@ def build_run_summary_ledger_record(
     including each phase's ``reason`` field (athenaeum#1102 AC1), so a later run can
     aggregate "completed" vs "entity-share"/"deadline"/"budget" yields across
     runs without re-parsing prose.
+
+    *economics* / *alerts* (issue athenaeum#1184, schema v2) are the optional
+    cost/matches-per-file regression fields — see
+    :func:`compute_run_economics` and :func:`evaluate_regression_alerts`.
+    Both are omitted (not written as ``null``) when not given, so a caller
+    that has nothing to report (e.g. a merge-only/cluster-only run that never
+    reaches the entity phase) writes a record identical in shape to a
+    pre-athenaeum#1184 one.
     """
     stamp = (ts if ts is not None else datetime.now(tz=timezone.utc)).astimezone(
         timezone.utc
@@ -253,12 +267,17 @@ def build_run_summary_ledger_record(
     phases: dict[str, dict[str, Any]] = {}
     for phase, secs, fields in profile:
         phases[phase] = {"secs": round(secs, 3), **fields}
-    return {
+    record: dict[str, Any] = {
         "v": RUN_SUMMARY_LEDGER_VERSION,
         "ts": stamp.isoformat().replace("+00:00", "Z"),
         "total_secs": round(total_secs, 3),
         "phases": phases,
     }
+    if economics is not None:
+        record["economics"] = economics
+    if alerts:
+        record["alerts"] = alerts
+    return record
 
 
 def write_run_summary_record(
@@ -267,6 +286,8 @@ def write_run_summary_record(
     cache_dir: Path | None = None,
     ledger_path: Path | None = None,
     ts: datetime | None = None,
+    economics: dict[str, Any] | None = None,
+    alerts: "list[dict[str, Any]] | None" = None,
 ) -> bool:
     """Append one durable run-summary record. Best-effort (issue athenaeum#1102 AC2).
 
@@ -278,11 +299,16 @@ def write_run_summary_record(
     prose ``librarian-run-summary`` line is unconditional even then, so this
     is a deliberate, narrower gate (an empty record carries no aggregable
     information). Returns ``True`` when a record was written.
+
+    *economics* / *alerts* (issue athenaeum#1184) pass straight through to
+    :func:`build_run_summary_ledger_record` — see its docstring.
     """
     if not profile:
         return False
     try:
-        record = build_run_summary_ledger_record(profile, ts=ts)
+        record = build_run_summary_ledger_record(
+            profile, ts=ts, economics=economics, alerts=alerts
+        )
         target = (
             ledger_path
             if ledger_path is not None
@@ -293,10 +319,297 @@ def write_run_summary_record(
         )
         return True
     except Exception as exc:  # noqa: BLE001 — a ledger write must never break a run
-        log.debug(
-            "run-summary ledger write skipped (%s): %s", type(exc).__name__, exc
-        )
+        log.debug("run-summary ledger write skipped (%s): %s", type(exc).__name__, exc)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Cost/matches-per-file regression metrics (issue athenaeum#1184)
+# ---------------------------------------------------------------------------
+#
+# The gap this closes: athenaeum#1177 catches ZERO yield (a run that produced
+# nothing); nothing before this caught "yield at 3x the price" (a run that
+# produced the right output while paying an order of magnitude more for it).
+# Fan-out grew from 1.02 to ~10 matches/file over months with no metric and
+# no test — discovered only when the operator ran out of API credits. This
+# is the instrument that would have made that whole investigation
+# unnecessary.
+#
+# Two denominators, on purpose (the "measured trap" the issue names): a raw
+# file the entity loop DRAINED this run (``RunContext.files_processed_count``
+# — completed to a terminal outcome, i.e. NOT deferred by a budget/deadline
+# trip and NOT a hard processing failure; the same figure
+# :mod:`athenaeum.spend`'s ledger row and the athenaeum#899 zero-yield alarm both
+# already call "files processed") is not the same population as one that
+# actually PRODUCED an action (created/updated an entity) — many drained
+# files produce zero actions (a pure Tier-1 dedup skip, an escalate-only
+# file), so cost-or-matches ÷ files-processed UNDERSTATES the true
+# per-acting-file figure. Both denominators are recorded on every run;
+# :data:`_RATCHETED_METRICS` below picks the ACTED denominator for
+# cost/matches specifically, since that is the "real" economic unit the
+# fan-out regression is about — processed-file counts are kept for context
+# and for ``calls_per_file`` (an LLM call is spent per file PROCESSED,
+# regardless of whether it acts, so that is its natural denominator).
+#
+# Scope caveat, stated once here rather than repeated on every field: `matched`
+# sums post-junk-filter Tier-1 matches on the SYNCHRONOUS entity-loop path
+# only (see ``RunContext.total_matched``'s docstring in librarian.py) — it
+# includes old-format matches that land in ``result.skipped`` (they still
+# dispatched a Tier-1 hit, even though Tier-3 never runs for them) and
+# excludes the batch-API transport (off by default) and the rare per-file
+# over-budget exception path. `cost_usd` is the WHOLE RUN's notional cost
+# (entity phase + auto-memory/C2-C4 + retire + reresolve), not entity-phase-
+# scoped, while `files_acted` IS entity-phase-scoped — an auto-memory spend
+# swing with zero fan-out change will still move `cost_per_file_acted`. Both
+# are documented limitations of reusing whole-run counters rather than
+# knob-scoping the dollar figure (which would mean repricing outside the
+# spend ledger's own arithmetic — exactly what the issue says not to do).
+
+#: Baseline window: how many of the OLDEST prior runs in the ledger a
+#: ratchet's baseline is computed over — deliberately the OLDEST slice of
+#: history, not the most recent ("trailing") one. A trailing-window mean
+#: chases exactly the slow drift this instrument exists to catch: athenaeum#1167's
+#: own regression (1.02 -> ~10 matches/file, a ~2.6%/run compounding ramp
+#: over ~90 nightly runs) moves a same-sized trailing mean by roughly the
+#: same ~2.6%/run it is supposed to be measuring against, so the RATIO
+#: between "now" and "an hour ago" never approaches the alert threshold even
+#: as the absolute figure grows 10x. Anchoring to the earliest ``window``
+#: runs instead gives a baseline that does not itself drift with the
+#: regression, so the ratio grows with the regression and eventually trips.
+#: An operator who deliberately re-baselines (e.g. after a real corpus-size
+#: step change is accepted as the new normal) does so by trimming the
+#: ledger's older lines, the same lever :mod:`athenaeum.spend` already
+#: expects for its own ledger.
+REGRESSION_BASELINE_WINDOW = 20
+
+#: A run's ratcheted metric may exceed its rolling baseline by this
+#: multiplier before an alert fires. A RATIO against a rolling baseline —
+#: not a fixed absolute constant — is the point (issue athenaeum#1184's own
+#: framing): the regression this instrument exists to catch is SLOW drift,
+#: which a fixed threshold set generously enough not to false-positive on
+#: day one would never trip either. Each successive small step looks fine
+#: against a fixed number; ratcheting against the run's OWN recent history
+#: is what makes accumulation visible.
+REGRESSION_ALERT_RATIO = 3.0
+
+#: Minimum prior samples required before a ratchet evaluates at all — a
+#: baseline of 1-2 runs is noise, not a trend worth alerting on.
+REGRESSION_MIN_SAMPLES = 5
+
+#: Stable, greppable WARNING prefix — mirrors ``ZERO_YIELD_PREFIX`` /
+#: ``STUCK_FILE_PREFIX`` / ``QUARANTINE_FILE_PREFIX`` in ``librarian.py``
+#: (the existing convention this instrument surfaces through, per the
+#: issue's "look at how existing warnings surface" instruction) so an
+#: operator's nightly log sweep can grep this alongside the other run-state
+#: alarms without parsing prose.
+REGRESSION_ALERT_PREFIX = "librarian-econ-regression"
+
+
+def _safe_ratio(numerator: float, denominator: int) -> float | None:
+    """``numerator / denominator``, or ``None`` when *denominator* is 0.
+
+    ``None`` (never 0.0 or an exception) is the honest value for "this ratio
+    has no meaningful denominator this run" — e.g. ``matches_per_file_acted``
+    when zero files acted. A silently-substituted 0.0 would read as "matches
+    collapsed to zero", the opposite of "not computable".
+    """
+    return (numerator / denominator) if denominator > 0 else None
+
+
+def compute_run_economics(
+    *,
+    files_processed: int,
+    files_acted: int,
+    matched: int,
+    calls: int,
+    merge_calls: int,
+    merge_echoed_chars: int,
+    cost_usd: float,
+) -> dict[str, Any]:
+    """Derive the athenaeum#1184 per-file economics from one run's raw counters.
+
+    *cost_usd* should be the run's ``TokenUsage.notional_cost_usd`` — the
+    SAME per-model pricing :mod:`athenaeum.spend` already uses for its own
+    ledger rows (:func:`athenaeum.spend.build_record`'s ``notional_usd``),
+    reused here rather than recomputed, per the issue's instruction to treat
+    the spend ledger as the system of record. ``notional_cost_usd`` (not
+    ``estimated_cost_usd``) is deliberate: ``estimated_cost_usd`` reads as
+    literal $0 on the subscription (``claude-cli``) provider, which would
+    make this instrument go blind on exactly the fleet that runs the
+    nightly — ``notional_cost_usd`` is the same real token cost regardless
+    of who is billed for it.
+
+    Returns a flat dict (JSON-native, safe to embed directly in the
+    ``run_summary.jsonl`` record) with BOTH denominators recorded — see the
+    module-level comment above for why — plus the four ratios the issue's
+    acceptance criteria name: ``cost_per_file``, ``matches_per_file``,
+    ``calls_per_file`` (processed-denominator), ``echoed_chars_per_call``
+    (denominated on merge calls, not files — see field docstring below).
+    """
+    return {
+        "files_processed": files_processed,
+        "files_acted": files_acted,
+        "matched": matched,
+        "calls": calls,
+        "merge_calls": merge_calls,
+        "echoed_chars": merge_echoed_chars,
+        "cost_usd": round(cost_usd, 6),
+        # "processed" variants: context, and calls_per_file's natural home
+        # (an LLM call is spent per file PROCESSED regardless of outcome).
+        "cost_per_file_processed": _safe_ratio(cost_usd, files_processed),
+        "matches_per_file_processed": _safe_ratio(matched, files_processed),
+        "calls_per_file_processed": _safe_ratio(calls, files_processed),
+        # "acted" variants: the real per-acting-file figure the issue's
+        # "measured trap" section calls out — the one a naive
+        # cost/files_processed would understate.
+        "cost_per_file_acted": _safe_ratio(cost_usd, files_acted),
+        "matches_per_file_acted": _safe_ratio(matched, files_acted),
+        # Denominated on MERGE CALLS, not files: each patch-attempt or
+        # full-echo-fallback call has its own echoed-chars figure, and one
+        # file can produce more than one merge call (a fallback is a SECOND
+        # call, issue athenaeum#490's ~10x-output-cost path) — files-per-call
+        # would blur exactly the "more retries, not more matches" distinction
+        # calls_per_file exists to separate.
+        "echoed_chars_per_call": _safe_ratio(merge_echoed_chars, merge_calls),
+    }
+
+
+#: Which economics keys are ratcheted against a rolling baseline, and in
+#: what order alerts are reported. cost/matches ratchet on the ACTED
+#: denominator (the real per-acting-file figure); calls ratchets on
+#: PROCESSED (its natural denominator, see ``compute_run_economics``);
+#: echoed-chars-per-call needs no processed/acted choice (denominated on
+#: calls). Together these are exactly the issue's four named metrics.
+_RATCHETED_METRICS: tuple[str, ...] = (
+    "cost_per_file_acted",
+    "matches_per_file_acted",
+    "calls_per_file_processed",
+    "echoed_chars_per_call",
+)
+
+
+def evaluate_regression_alerts(
+    current: dict[str, Any],
+    history: "list[dict[str, Any]]",
+    *,
+    window: int = REGRESSION_BASELINE_WINDOW,
+    ratio: float = REGRESSION_ALERT_RATIO,
+    min_samples: int = REGRESSION_MIN_SAMPLES,
+) -> "list[dict[str, Any]]":
+    """Ratchet *current* run's economics against an EARLY baseline of *history*.
+
+    *current* is one :func:`compute_run_economics` result. *history* is a
+    list of PRIOR runs' economics dicts, oldest-first (the same order
+    :func:`read_run_summary_ledger` returns) — only the OLDEST *window*
+    entries are used (see :data:`REGRESSION_BASELINE_WINDOW`'s docstring for
+    why oldest, not trailing: a trailing baseline chases slow drift instead
+    of catching it). Returns one alert dict per :data:`_RATCHETED_METRICS`
+    key whose current value exceeds ``baseline * ratio``; empty when nothing
+    tripped, including the "no history yet" and "fewer than *min_samples*
+    prior runs" cases — an undersized baseline is not evidence of a
+    regression, it is evidence there is no baseline yet.
+
+    The baseline itself is the MINIMUM (not the mean) of the oldest-window
+    samples: a mean over that window is still vulnerable if the regression
+    had already started accumulating within it; the minimum is the most
+    conservative "most normal this metric has ever looked" anchor, so a
+    monotonically worsening metric is compared against its best-ever period,
+    not an average that itself includes some of the drift.
+
+    A ``None`` value (an unratioable metric this run — see
+    :func:`_safe_ratio`) is skipped for both the current value and any
+    history sample: it neither trips nor contributes to the baseline. A
+    ``0.0`` sample (a real, legitimate value -- e.g. a fresh-entity file with
+    ``matched == 0``, or ANY sample on the batch-API path where
+    ``files_acted`` stays 0 by design) is ALSO excluded from the baseline,
+    for a different reason: with a MIN-based baseline, one zero sample in the
+    genesis window would floor ``baseline`` at 0 forever (the ``window`` is a
+    fixed oldest-slice, never ages out), permanently disabling the ratchet
+    for that metric's whole ledger lifetime via the ``baseline <= 0: continue``
+    guard below. Excluding zeros from the SAMPLE POOL (not from *min_samples*
+    accounting -- a window with real signal among the zeros still ratchets)
+    is safer than keeping a zero-tolerant baseline: it costs at most a
+    slightly later ratchet start, never a permanently-disabled one.
+    """
+    alerts: list[dict[str, Any]] = []
+    window_records = history[:window] if window > 0 else history
+    for metric in _RATCHETED_METRICS:
+        samples = [
+            r[metric]
+            for r in window_records
+            if isinstance(r.get(metric), (int, float))
+            and not isinstance(r.get(metric), bool)
+            and r[metric] > 0
+        ]
+        if len(samples) < min_samples:
+            continue
+        baseline = min(samples)
+        if baseline <= 0:
+            continue
+        value = current.get(metric)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if value > baseline * ratio:
+            alerts.append(
+                {
+                    "metric": metric,
+                    "value": round(float(value), 6),
+                    "baseline": round(baseline, 6),
+                    "ratio": round(value / baseline, 3),
+                    "threshold_ratio": ratio,
+                    "samples": len(samples),
+                }
+            )
+    return alerts
+
+
+def build_economics_and_alerts(
+    *,
+    files_processed: int,
+    files_acted: int,
+    matched: int,
+    calls: int,
+    merge_calls: int,
+    merge_echoed_chars: int,
+    cost_usd: float,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> "tuple[dict[str, Any], list[dict[str, Any]]]":
+    """One-call orchestration: compute this run's economics, then ratchet
+    them against the durable ledger's own history (issue athenaeum#1184).
+
+    Reads the SAME ledger this run is about to append to
+    (:func:`read_run_summary_ledger`) BEFORE the append happens, so the
+    current run is never compared against itself. Read failures degrade to
+    "no history" (empty list) rather than raising — mirrors every other
+    read in this module's fail-open contract; a missing/corrupt ledger must
+    never block computing or reporting this run's own economics.
+    """
+    economics = compute_run_economics(
+        files_processed=files_processed,
+        files_acted=files_acted,
+        matched=matched,
+        calls=calls,
+        merge_calls=merge_calls,
+        merge_echoed_chars=merge_echoed_chars,
+        cost_usd=cost_usd,
+    )
+    try:
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        history = [
+            rec["economics"]
+            for rec in read_run_summary_ledger(target)
+            if isinstance(rec.get("economics"), dict)
+        ]
+    except Exception as exc:  # noqa: BLE001 — observability must never raise
+        log.debug("run-summary: economics history read skipped: %s", exc)
+        history = []
+    alerts = evaluate_regression_alerts(economics, history)
+    return economics, alerts
 
 
 def read_run_summary_ledger(
