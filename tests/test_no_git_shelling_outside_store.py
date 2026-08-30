@@ -91,6 +91,11 @@ KNOWN_GIT_ARGV_MODULES: dict[str, int] = {
     # resolve a retro filename by timestamp key — read-only history lookups,
     # not a snapshot/commit, so there is no FilesystemStore primitive this
     # maps onto.
+    "reconcile": 1,  # athenaeum#1143: `git show <commit>:<path>` byte-identity
+    # checks (pii_restore's read-only-history shape) PLUS a scoped `git rm`
+    # + commit retirement of reconciled raw files (retire.py's shape) — both
+    # go through the SAME single `_git` helper, so this is one AST literal
+    # site, not two.
     "retire": 1,
     "rules": 1,
     "status": 1,
