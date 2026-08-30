@@ -508,11 +508,30 @@ def tier1_programmatic_match(
                 continue
             # Issue athenaeum#1168: mention-density union gate.
             if not _passes_mention_density_gate(name_key, occurrences, config):
-                log.debug(
-                    "  T1 mention-density match skipped (issue athenaeum#1168): "
-                    "%s (%d occurrence(s))",
+                # Raw files are unlinked after processing (librarian.py's
+                # post-run cleanup), so a dropped match that WAS substantive
+                # is lost silently and permanently -- there is no durable
+                # record to re-derive a false-negative rate from later. Log
+                # at INFO (the default level -- see
+                # athenaeum.logconf.configure_logging) rather than DEBUG,
+                # with enough fields (key, file, occurrence count, and both
+                # union-gate thresholds) that a production false-negative
+                # audit is possible from logs alone, the way the #1168 PR's
+                # one-off sample measurement was done by hand.
+                min_occurrences = resolve_mention_density_min_occurrences(config)
+                specificity_chars = resolve_mention_density_specificity_chars(config)
+                is_multi_token = any(ch.isspace() for ch in name_key)
+                log.info(
+                    "T1 mention-density match dropped (issue athenaeum#1168): "
+                    "key=%r file=%s occurrences=%d (min_occurrences=%d) "
+                    "key_len=%d (specificity_chars=%d) multi_token=%s",
                     name_key,
+                    raw.ref,
                     occurrences,
+                    min_occurrences,
+                    len(name_key),
+                    specificity_chars,
+                    is_multi_token,
                 )
                 continue
             matched.append((name_key, uid_or_name, fpath))

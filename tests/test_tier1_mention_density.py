@@ -20,7 +20,10 @@ No LLM, no network.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+import pytest
 
 from athenaeum.models import EntityIndex, RawFile
 from athenaeum.tiers import (
@@ -125,6 +128,52 @@ def test_no_key_stops_firing_entirely(tmp_path: Path) -> None:
     double = _make_raw("Orca shipped the feature. Orca is the codename.")
     assert "orca" not in {n for n, _, _ in tier1_programmatic_match(single, index)}
     assert "orca" in {n for n, _, _ in tier1_programmatic_match(double, index)}
+
+
+def test_dropped_match_is_logged_at_info_with_auditable_fields(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A gate drop must be auditable from production logs alone, since the
+    raw file that would have carried it is unlinked after processing
+    (librarian.py's post-run cleanup) -- there is no other durable record.
+
+    INFO (not DEBUG) because INFO is the default level
+    (athenaeum.logconf.configure_logging); a DEBUG-only line is invisible in
+    a normal run. The line must carry the key, the file ref, the occurrence
+    count, and both union-gate thresholds so a false-negative rate can be
+    reconstructed later without re-running a one-off sample by hand.
+    """
+    index = _index_with_names(tmp_path, ["orca"])
+    raw = _make_raw("Orca shipped the feature.")
+    with caplog.at_level(logging.INFO, logger="athenaeum.tiers"):
+        names = {n for n, _, _ in tier1_programmatic_match(raw, index)}
+    assert "orca" not in names
+
+    matches = [
+        r for r in caplog.records if "mention-density match dropped" in r.message
+    ]
+    assert len(matches) == 1
+    msg = matches[0].message
+    assert "key='orca'" in msg
+    assert raw.ref in msg
+    assert "occurrences=1" in msg
+    assert f"min_occurrences={DEFAULT_MENTION_DENSITY_MIN_OCCURRENCES}" in msg
+    assert f"specificity_chars={DEFAULT_MENTION_DENSITY_SPECIFICITY_CHARS}" in msg
+    assert matches[0].levelno == logging.INFO
+
+
+def test_surviving_match_is_not_logged_as_dropped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No false alarm: a match that clears the gate emits no drop log line."""
+    index = _index_with_names(tmp_path, ["jane doe"])
+    raw = _make_raw("Jane Doe signed the contract today.")
+    with caplog.at_level(logging.INFO, logger="athenaeum.tiers"):
+        names = {n for n, _, _ in tier1_programmatic_match(raw, index)}
+    assert "jane doe" in names
+    assert not [
+        r for r in caplog.records if "mention-density match dropped" in r.message
+    ]
 
 
 # ---------------------------------------------------------------------------
