@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum reconcile` retires pending raw-intake files a source dual-wrote
+  into the wiki (athenaeum#1143 / athenaeum-adapters#154).** A one-off
+  producer (`streak-to-wiki`) wrote both a `raw/drive/` intake file and the
+  compiled wiki page directly for a large share of the entities it exported,
+  leaving the raw copies pending forever — every nightly `athenaeum run`
+  re-offers them to the tier ladder, at real LLM cost, and at least one
+  wiki-side cleanup (athenaeum#279) has already deliberately removed content
+  the raw copies still carry, so compiling one can reinstate deleted
+  content. `athenaeum reconcile --source drive --import-commit <sha>`
+  removes a raw file only when a pure git-history predicate proves it: the
+  file's uid/name resolves, via the live `EntityIndex` (never a
+  filename-prefix guess), to an existing wiki page; the raw file's current
+  bytes are unchanged since `--import-commit`; that wiki page existed at
+  `--import-commit`; and the raw and wiki bytes were byte-identical AT that
+  commit. Zero LLM calls. Dry-run by default; `--apply` required to act, via
+  a scoped `git rm` + commit (recoverable from git history, same as
+  `athenaeum.retire`). New `athenaeum.reconcile` library module +
+  `athenaeum._cmd_reconcile` CLI wiring.
+
 - **`athenaeum run --run-type` / `ATHENAEUM_RUN_TYPE` declares which kind of
   caller a run is, for spend-ledger attribution (athenaeum#1136).** Previously
   every `record_spend` call site hardcoded a bare `run_type` string literal
