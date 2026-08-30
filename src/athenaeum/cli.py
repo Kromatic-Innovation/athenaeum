@@ -19,7 +19,8 @@ subcommands' argparse setup plus their handler(s):
 registry/ingest/session-end), ``_cmd_query`` (recall/query-topics/
 stopwords/test-mcp), ``_cmd_pending`` (ingest-answers/ingest-merges/
 reresolve-questions), ``_cmd_curate`` (dedupe/claims/auto-memory),
-``_cmd_decay`` (decay-sweep, issue athenaeum#904), ``_cmd_repair`` (repair),
+``_cmd_decay`` (decay-sweep, issue athenaeum#904),
+``_cmd_reconcile`` (reconcile, issue athenaeum#1143), ``_cmd_repair`` (repair),
 ``_cmd_questions``, ``_cmd_merges``,
 ``_cmd_decisions``, ``_cmd_authority``, ``_cmd_axiom``, ``_cmd_calibration``,
 ``_cmd_outbound``, ``_cmd_drain``, ``_cmd_storage``, ``_cmd_push_metrics``
@@ -78,7 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_decay import add_decay_subparser
     from athenaeum._cmd_decisions import add_decisions_subparser
     from athenaeum._cmd_dimensions import add_dimensions_subparser
-    from athenaeum._cmd_do_not_email_divergence import add_do_not_email_divergence_subparser
+    from athenaeum._cmd_do_not_email_divergence import (
+        add_do_not_email_divergence_subparser,
+    )
     from athenaeum._cmd_drain import add_drain_subparser
     from athenaeum._cmd_enumerate import add_enumerate_subparser
     from athenaeum._cmd_index import add_index_subparsers
@@ -92,6 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_push_metrics import add_push_metrics_subparser
     from athenaeum._cmd_query import add_query_subparsers
     from athenaeum._cmd_questions import add_questions_subparser
+    from athenaeum._cmd_reconcile import add_reconcile_subparser
     from athenaeum._cmd_repair import add_repair_subparser
     from athenaeum._cmd_run import add_run_subparser
     from athenaeum._cmd_serve import add_serve_subparser
@@ -104,9 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="athenaeum",
         description="Knowledge management pipeline — append-only intake, tiered compilation",
     )
-    parser.add_argument(
-        "--version", action="version", version=f"%(prog)s {_get_version()}"
-    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
     subparsers = parser.add_subparsers(dest="command")
 
     # Issue athenaeum#553: each add_*_subparser both builds its subparser(s) AND calls
@@ -114,15 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_lifecycle_subparsers(subparsers)  # init, status, disable, enable, spend
     add_serve_subparser(subparsers)  # serve
     add_run_subparser(subparsers)  # run
-    add_query_subparsers(
-        subparsers
-    )  # test-mcp, query-topics, stopwords, recall
+    add_query_subparsers(subparsers)  # test-mcp, query-topics, stopwords, recall
     add_enumerate_subparser(subparsers)  # enumerate (issue athenaeum#965)
-    add_pending_subparsers(
-        subparsers
-    )  # ingest-answers, ingest-merges, reresolve-questions
+    add_pending_subparsers(subparsers)  # ingest-answers, ingest-merges, reresolve-questions
     add_curate_subparsers(subparsers)  # dedupe, claims, auto-memory
     add_decay_subparser(subparsers)  # decay-sweep
+    add_reconcile_subparser(subparsers)  # reconcile (issue athenaeum#1143)
     add_repair_subparser(subparsers)  # repair
     add_pii_restore_subparser(subparsers)  # pii-restore (issue athenaeum#1037)
     add_questions_subparser(subparsers)  # questions
