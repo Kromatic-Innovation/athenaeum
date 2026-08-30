@@ -2480,6 +2480,13 @@ def tier3_merge(
         f"tier3_merge {source_ref}",
     )
     _record_usage(response, usage, model=params["model"], knob="write")
+    # Issue athenaeum#1184: this patch-mode call's prompt embeds up to
+    # _MAX_EXISTING_BODY_CHARS of the existing page (tier3_merge_params fences
+    # it with that exact cap) — record it so the run-summary economics can
+    # report echoed_chars_per_call, the ~84%-of-prompt-is-echo term athenaeum#1167
+    # measured but nothing before this tracked per run.
+    if usage is not None:
+        usage.record_merge_echo(min(len(existing_body), _MAX_EXISTING_BODY_CHARS))
 
     body, escalation, needs_fallback = parse_merge_ops_response(
         # Issue athenaeum#578: patch merge enables adaptive thinking — skip any leading
@@ -2564,6 +2571,14 @@ def tier3_merge_full(
         f"tier3_merge_full {source_ref}",
     )
     _record_usage(response, usage, model=params["model"], knob="write")
+    # Issue athenaeum#1184: same echo accounting as tier3_merge's patch attempt
+    # above — this full-echo call embeds its own up-to-_MAX_EXISTING_BODY_CHARS
+    # copy of the existing page (tier3_merge_full_params fences it with the
+    # same cap), and a patch-then-fallback sequence is TWO calls with TWO
+    # separate echoed prompts, so this is a second, additive record, not a
+    # duplicate of the patch attempt's.
+    if usage is not None:
+        usage.record_merge_echo(min(len(existing_body), _MAX_EXISTING_BODY_CHARS))
 
     return parse_tier3_merge(
         # Issue athenaeum#578: full-echo merge enables adaptive thinking — skip any

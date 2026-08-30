@@ -208,7 +208,9 @@ from athenaeum.registry import collect_handles
 from athenaeum.rule_proposals import DEFAULT_RULE_PROPOSALS_MODEL, run_rule_proposal_detection
 from athenaeum.rules import run_shape_rule_phase
 from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home now
+    REGRESSION_ALERT_PREFIX,
     RUN_SUMMARY_PREFIX,
+    build_economics_and_alerts,
     write_run_summary_record,
 )
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
@@ -1482,6 +1484,11 @@ def process_one(
     # and operator-tuned stopwords) are filtered before they cost a tier-3 call.
     matched = tier1_programmatic_match(raw, index, config=config)
     matched_names = [name for name, _, _ in matched]
+    # Issue athenaeum#1184: the fan-out driver — how many existing entities this
+    # ONE file's index-key hits dispatched a merge decision for. Recorded on
+    # the result (not a separate return value) so every existing caller of
+    # ``process_one`` keeps working unchanged.
+    result.matched = len(matched)
 
     for name, uid_or_name, fpath in matched:
         if index.has_entity_format(fpath):
@@ -3407,6 +3414,22 @@ class RunContext:
     zero_yield_tripped: bool | None = None
     zero_yield_consecutive: int | None = None
 
+    # Issue athenaeum#1184: cost/matches-per-file regression instrumentation.
+    # ``total_matched`` sums ``ProcessingResult.matched`` (Tier-1 fan-out) across
+    # every file the SYNCHRONOUS entity loop processed to completion.
+    # ``total_files_acted`` counts files that produced at least one create OR
+    # update — the "files that produced actions" denominator the issue calls
+    # out by name, a STRICT SUBSET of ``files_processed_count`` (files the
+    # loop DRAINED to a terminal outcome this run, whether or not they acted
+    # — see ``files_processed_count``'s own comment above).
+    # Both are best-effort over the synchronous path only: the batch-API
+    # transport (``ctx.batch_mode``, off by default) reports only aggregate
+    # created/updated counts with no per-file granularity, so a batch run
+    # leaves both at 0 — documented, not silently wrong, in
+    # ``run_summary_log.compute_run_economics``.
+    total_matched: int = 0
+    total_files_acted: int = 0
+
     def deadline_exceeded(self) -> bool:
         return self.run_deadline is not None and time.monotonic() >= self.run_deadline
 
@@ -3459,6 +3482,11 @@ class RunContext:
             # or dry-run) is exported as-is rather than coerced to ``False``,
             # so a consumer can tell "not zero-yield" from "not evaluated".
             self.out_run_stats["zero_yield"] = self.zero_yield_tripped
+            # Issue athenaeum#1184: machine-detectable alongside the other run-state
+            # flags above, rather than requiring a consumer to parse the
+            # run-summary line for the fan-out/acted-files counts.
+            self.out_run_stats["matched"] = self.total_matched
+            self.out_run_stats["files_acted"] = self.total_files_acted
 
     def emit_run_summary(self) -> None:
         if self.summary_emitted:
@@ -3492,6 +3520,43 @@ class RunContext:
                 zero_yield_consecutive=self.zero_yield_consecutive,
             ),
         )
+        # Issue athenaeum#1184: cost/matches-per-file regression economics,
+        # computed from this run's counters and ratcheted against the
+        # ledger's own trailing history BEFORE this run's record is
+        # appended (see `build_economics_and_alerts`'s docstring). Wrapped
+        # exactly like the two blocks above -- pure observability, must
+        # never affect a run's outcome.
+        economics = None
+        econ_alerts: list = []
+        try:
+            economics, econ_alerts = build_economics_and_alerts(
+                files_processed=self.files_processed_count,
+                files_acted=self.total_files_acted,
+                matched=self.total_matched,
+                calls=self.usage.api_calls,
+                merge_calls=self.usage.merge_calls,
+                merge_echoed_chars=self.usage.merge_echoed_chars,
+                cost_usd=self.usage.notional_cost_usd,
+            )
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: economics computation skipped: %s", exc)
+        # Surfaced via the SAME log.warning channel the zero-yield / stuck-
+        # file / quarantine alarms already use (ZERO_YIELD_PREFIX et al
+        # above) — an operator's existing nightly log sweep catches this
+        # without a new channel to watch.
+        for alert in econ_alerts:
+            log.warning(
+                "%s metric=%s value=%.4f baseline=%.4f ratio=%.2fx "
+                "(threshold %.1fx over %d prior run(s)) — issue athenaeum#1184",
+                REGRESSION_ALERT_PREFIX,
+                alert["metric"],
+                alert["value"],
+                alert["baseline"],
+                alert["ratio"],
+                alert["threshold_ratio"],
+                alert["samples"],
+            )
+
         # Issue athenaeum#1102 (AC2): a durable, machine-readable SIBLING of the
         # prose line above — one JSONL record per run, appended under the
         # cache dir (see `run_summary_log.default_run_summary_ledger_path`'s
@@ -3501,7 +3566,9 @@ class RunContext:
         # blocks above: this is pure observability and must never affect a
         # run's outcome.
         try:
-            write_run_summary_record(self.run_profile)
+            write_run_summary_record(
+                self.run_profile, economics=economics, alerts=econ_alerts
+            )
         except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
             log.debug("run-summary: durable ledger write skipped: %s", exc)
 
@@ -5135,6 +5202,16 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             _partial_made_change = bool(
                                 exc.new_entities or exc.updated_uids
                             )
+                            # Issue athenaeum#1184: this file's partial progress landed
+                            # (see the comment above on RawFileOverBudgetError)
+                            # and counts toward "files acted on" the same as a
+                            # normal completion. Its Tier-1 match count is NOT
+                            # recoverable here (the exception carries only the
+                            # actions already applied, not the match list) —
+                            # a documented, best-effort gap in ``total_matched``
+                            # for this rare over-budget path.
+                            if _partial_made_change:
+                                ctx.total_files_acted += 1
                             entity_heartbeat.tick(
                                 raw.ref,
                                 compiled=1 if _partial_made_change else 0,
@@ -5251,6 +5328,14 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # (the real ProcessingResult always carries it, default 0).
                         ctx.total_degraded += getattr(result, "degraded", 0)
                         ctx.total_truncated += getattr(result, "truncated", 0)  # athenaeum#476
+                        # Issue athenaeum#1184: fan-out (matches) and the "produced
+                        # actions" denominator — ``getattr`` for the same
+                        # stubbed-test-seam reason as ``degraded``/``truncated``
+                        # above (a double predating this issue has no ``matched``
+                        # attribute).
+                        ctx.total_matched += getattr(result, "matched", 0)
+                        if result.created or result.updated:
+                            ctx.total_files_acted += 1
 
                         # Issue athenaeum#800: tick the entity heartbeat for this file —
                         # `compiled` when it produced a create/update, `unchanged`
@@ -5415,6 +5500,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     "updated": ctx.total_updated,
                     "escalated": ctx.total_escalated,
                     "files": ctx.processed_count,
+                    # Issue athenaeum#1184: fan-out — see RunContext.total_matched's
+                    # docstring for scope (synchronous path only).
+                    "matched": ctx.total_matched,
                     "reason": _entity_exit_reason,
                     "out_tok_per_call": _entity_out_tok_per_call,
                     # athenaeum#472: only render when non-zero so a clean run's summary

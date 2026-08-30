@@ -173,6 +173,11 @@ class TestRunContext:
             # predicate is only evaluated by ``_run_finalize_phase``, which
             # this unit test never calls.
             "zero_yield": None,
+            # Issue athenaeum#1184: fan-out (matches) and "produced actions"
+            # (files_acted) exported the same way — both 0 here since this
+            # unit test never runs the entity loop that would populate them.
+            "matched": 0,
+            "files_acted": 0,
         }
 
     def test_mutation_through_context_is_visible_to_next_phase(
