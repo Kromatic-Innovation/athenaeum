@@ -52,6 +52,15 @@ _REPRESENTATIVE_CONTENT = (
 _JUNK_NAMES = ["here", "get", "main", "reach", "lane a"]
 _LEGIT_NAMES = ["ada", "acme corp", "ibm"]
 
+# Issue athenaeum#1168 added a mention-density union gate downstream of this
+# junk filter: a single-token key (like "ibm" or "ada") mentioned only once
+# in a file is now suppressed unless it clears the density threshold. That
+# gate is orthogonal to the junk-name filter this suite pins, so tests below
+# that are specifically about junk-name filtering (not density) disable the
+# density gate via ``mention_density_min_occurrences: 1`` -- any single
+# occurrence then clears it, isolating the behavior under test.
+_DENSITY_GATE_OFF = {"mention_density_min_occurrences": 1}
+
 
 # ---------------------------------------------------------------------------
 # The filter
@@ -74,7 +83,11 @@ def test_legitimate_short_name_entity_is_not_filtered(tmp_path: Path) -> None:
     min-length floor that swallows short real names)."""
     index = _index_with_names(tmp_path, _JUNK_NAMES + _LEGIT_NAMES)
     raw = _make_raw(_REPRESENTATIVE_CONTENT)
-    names = {n for n, _, _ in tier1_programmatic_match(raw, index)}
+    # Density gate off (athenaeum#1168): this test is about the junk filter,
+    # not mention density, and "ibm"/"ada" are single-token, single-mention
+    # in the fixture content.
+    cfg = {"librarian": _DENSITY_GATE_OFF}
+    names = {n for n, _, _ in tier1_programmatic_match(raw, index, config=cfg)}
     assert "ibm" in names
     assert "ada" in names
     assert "acme corp" in names
@@ -90,12 +103,20 @@ def test_before_after_call_count_on_representative_file(tmp_path: Path) -> None:
     index = _index_with_names(tmp_path, _JUNK_NAMES + _LEGIT_NAMES)
     raw = _make_raw(_REPRESENTATIVE_CONTENT)
 
-    # Filter OFF: allow-list every name so the junk filter is a no-op.
-    disable = {"librarian": {"junk_match_allowlist": _JUNK_NAMES + _LEGIT_NAMES}}
+    # Filter OFF: allow-list every name so the junk filter is a no-op. Density
+    # gate also off (athenaeum#1168) -- this AC is about the junk filter.
+    disable = {
+        "librarian": {
+            "junk_match_allowlist": _JUNK_NAMES + _LEGIT_NAMES,
+            **_DENSITY_GATE_OFF,
+        }
+    }
     before = {n for n, _, _ in tier1_programmatic_match(raw, index, config=disable)}
 
-    # Filter ON: built-in defaults.
-    after = {n for n, _, _ in tier1_programmatic_match(raw, index)}
+    # Filter ON: built-in junk-name defaults, density gate off (this AC is
+    # about the junk filter, not mention density).
+    after_cfg = {"librarian": _DENSITY_GATE_OFF}
+    after = {n for n, _, _ in tier1_programmatic_match(raw, index, config=after_cfg)}
 
     assert len(before) == 8  # 5 junk + 3 legit would each cost a Tier-3 call
     assert after == set(_LEGIT_NAMES)  # only the legit 3 survive
@@ -115,7 +136,10 @@ def test_allowlist_unfilters_a_real_entity_named_like_junk(tmp_path: Path) -> No
     default = {n for n, _, _ in tier1_programmatic_match(raw, index)}
     assert "reach" not in default  # filtered by default
 
-    cfg = {"librarian": {"junk_match_allowlist": ["Reach"]}}
+    # Density gate off (athenaeum#1168): "reach" occurs once here and is
+    # single-token, so the density gate would also suppress it -- this AC is
+    # about the junk allow-list escape hatch, not mention density.
+    cfg = {"librarian": {"junk_match_allowlist": ["Reach"], **_DENSITY_GATE_OFF}}
     kept = {n for n, _, _ in tier1_programmatic_match(raw, index, config=cfg)}
     assert "reach" in kept  # allow-listed back in (case-insensitively)
 
@@ -156,8 +180,13 @@ class TestResolveJunkMatchNames:
 
     def test_malformed_config_falls_back_to_default(self) -> None:
         # Non-dict, wrong types, non-string members — never raises, ignores junk.
-        for bad in (None, {}, {"librarian": "nope"}, {"librarian": {"junk_match_stopwords": "x"}},
-                    {"librarian": {"junk_match_stopwords": [1, 2, None]}}):
+        for bad in (
+            None,
+            {},
+            {"librarian": "nope"},
+            {"librarian": {"junk_match_stopwords": "x"}},
+            {"librarian": {"junk_match_stopwords": [1, 2, None]}},
+        ):
             assert resolve_junk_match_names(bad) == {
                 s.lower() for s in DEFAULT_JUNK_MATCH_STOPWORDS
             }

@@ -377,6 +377,98 @@ def resolve_junk_match_names(config: dict[str, Any] | None = None) -> set[str]:
     return effective
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1168: mention-density gate
+# ---------------------------------------------------------------------------
+#
+# A single incidental mention of an entity was enough to dispatch a full-page
+# tier-3 merge LLM call (librarian.py:1622-1631), with no relevance gate at
+# all. Measured on a stratified n=104 sample: a raw "require >= 2
+# word-boundary occurrences" gate cuts matches/file 51.2%, but its
+# false-negative profile (substantive single-mention merges it would drop)
+# was never measured, so it does not ship. The shipped gate is the UNION of
+# that occurrence-count gate with a specificity exemption -- "key is >= N
+# chars OR multi-token (contains whitespace)" -- measured at -20.1%. A match
+# is DROPPED only when BOTH the key is low-specificity AND the mention is a
+# singleton; that conjunction is what makes the union gate safe where the raw
+# gate is not. Full personal names are multi-token and therefore already
+# exempt via the specificity clause -- the residual risk is short
+# single-token entities mentioned exactly once (see the issue's "Residual
+# risk" section for the full accounting).
+#
+# Both thresholds are operator-tunable via ``librarian.mention_density_*``
+# (see :func:`resolve_mention_density_min_occurrences` and
+# :func:`resolve_mention_density_specificity_chars`), mirroring the
+# ``librarian.junk_match_*`` config idiom above (issue athenaeum#662).
+
+DEFAULT_MENTION_DENSITY_MIN_OCCURRENCES = 2
+"""A key needs at least this many word-boundary occurrences to pass the
+density clause of the union gate, unless it is exempted by specificity."""
+
+DEFAULT_MENTION_DENSITY_SPECIFICITY_CHARS = 8
+"""A key at least this many characters (or containing whitespace, i.e.
+multi-token) is high-specificity and bypasses the density requirement
+entirely -- it qualifies on a single mention."""
+
+
+def resolve_mention_density_min_occurrences(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.mention_density_min_occurrences`` (issue athenaeum#1168).
+
+    Mirrors :func:`athenaeum.librarian.librarian_stuck_file_threshold`'s
+    validation contract: must be ``>= 1`` (a threshold below 1 would gate
+    nothing); non-numeric, non-positive, or bool values fall back to
+    :data:`DEFAULT_MENTION_DENSITY_MIN_OCCURRENCES`. ``bool`` is rejected
+    explicitly because it is an ``int`` subclass in Python, so
+    ``mention_density_min_occurrences: yes`` in yaml must not silently
+    become a threshold of 1.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("mention_density_min_occurrences")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+                return raw
+    return DEFAULT_MENTION_DENSITY_MIN_OCCURRENCES
+
+
+def resolve_mention_density_specificity_chars(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.mention_density_specificity_chars`` (issue athenaeum#1168).
+
+    Same validation contract as :func:`resolve_mention_density_min_occurrences`:
+    must be ``>= 1`` (bool rejected as an int subclass); otherwise falls back
+    to :data:`DEFAULT_MENTION_DENSITY_SPECIFICITY_CHARS`.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("mention_density_specificity_chars")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+                return raw
+    return DEFAULT_MENTION_DENSITY_SPECIFICITY_CHARS
+
+
+def _passes_mention_density_gate(
+    name_key: str,
+    occurrences: int,
+    config: dict[str, Any] | None,
+) -> bool:
+    """Union gate (issue athenaeum#1168): density OR specificity.
+
+    A match is dropped only when the key is low-specificity (shorter than
+    the specificity threshold AND single-token) AND it occurs fewer than
+    the density threshold's number of times. Either condition alone is
+    enough to qualify.
+    """
+    min_occurrences = resolve_mention_density_min_occurrences(config)
+    if occurrences >= min_occurrences:
+        return True
+    specificity_chars = resolve_mention_density_specificity_chars(config)
+    is_multi_token = any(ch.isspace() for ch in name_key)
+    if is_multi_token or len(name_key) >= specificity_chars:
+        return True
+    return False
+
+
 def tier1_programmatic_match(
     raw: RawFile,
     index: EntityIndex,
@@ -393,6 +485,14 @@ def tier1_programmatic_match(
     calls per file. ``config`` threads the operator's tuning
     (``librarian.junk_match_stopwords`` / ``junk_match_allowlist``); ``None``
     still applies the conservative built-in defaults.
+
+    Issue athenaeum#1168: a match that clears the junk filter is then run
+    through the mention-density UNION gate
+    (:func:`_passes_mention_density_gate`) before it is allowed to become a
+    match at all -- a single incidental mention of a low-specificity key no
+    longer costs a tier-3 merge call. The gate does not touch which KEYS can
+    match (no key stops firing entirely) -- it only suppresses individual
+    low-density matches for low-specificity keys, per the issue's AC.
     """
     matched: list[tuple[str, str, Path]] = []
     content_lower = raw.content.lower()
@@ -409,8 +509,38 @@ def tier1_programmatic_match(
         if name_key in content_lower:
             # Verify it's a word boundary match (not a substring)
             pattern = re.compile(r"\b" + re.escape(name_key) + r"\b", re.IGNORECASE)
-            if pattern.search(raw.content):
-                matched.append((name_key, uid_or_name, fpath))
+            occurrences = len(pattern.findall(raw.content))
+            if occurrences < 1:
+                continue
+            # Issue athenaeum#1168: mention-density union gate.
+            if not _passes_mention_density_gate(name_key, occurrences, config):
+                # Raw files are unlinked after processing (librarian.py's
+                # post-run cleanup), so a dropped match that WAS substantive
+                # is lost silently and permanently -- there is no durable
+                # record to re-derive a false-negative rate from later. Log
+                # at INFO (the default level -- see
+                # athenaeum.logconf.configure_logging) rather than DEBUG,
+                # with enough fields (key, file, occurrence count, and both
+                # union-gate thresholds) that a production false-negative
+                # audit is possible from logs alone, the way the athenaeum#1168 PR's
+                # one-off sample measurement was done by hand.
+                min_occurrences = resolve_mention_density_min_occurrences(config)
+                specificity_chars = resolve_mention_density_specificity_chars(config)
+                is_multi_token = any(ch.isspace() for ch in name_key)
+                log.info(
+                    "T1 mention-density match dropped (issue athenaeum#1168): "
+                    "key=%r file=%s occurrences=%d (min_occurrences=%d) "
+                    "key_len=%d (specificity_chars=%d) multi_token=%s",
+                    name_key,
+                    raw.ref,
+                    occurrences,
+                    min_occurrences,
+                    len(name_key),
+                    specificity_chars,
+                    is_multi_token,
+                )
+                continue
+            matched.append((name_key, uid_or_name, fpath))
 
     return matched
 
