@@ -1592,7 +1592,9 @@ def create_server(
     # (unchanged from athenaeum#964; nothing here precludes wiring
     # `notifications/tools/list_changed` later for a live refresh).
     _declared_class_names = sorted(declared_entity_classes(wiki_root))
-    _entity_classes_str = ", ".join(_declared_class_names) if _declared_class_names else "(none yet)"
+    _entity_classes_str = (
+        ", ".join(_declared_class_names) if _declared_class_names else "(none yet)"
+    )
 
     def _entity_classes():
         """This deployment's resolved classes — the DEFERRED corpus scan.

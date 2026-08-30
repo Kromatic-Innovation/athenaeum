@@ -450,7 +450,7 @@ _FM_RE = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n", re.DOTALL)
 _C_SAFE_LOADER = getattr(yaml, "CSafeLoader", None)
 
 
-def _safe_load_frontmatter(block: str) -> object:
+def _safe_load_frontmatter(block: str) -> Any:
     """``yaml.safe_load`` *block*, preferring libyaml (issue athenaeum#1194).
 
     The two loaders agree on every construct the real corpus contains (verified

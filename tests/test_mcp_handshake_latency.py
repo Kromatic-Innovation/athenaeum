@@ -25,8 +25,10 @@ Two independent guards, deliberately:
    through a proxy.
 2. :class:`TestHandshakeLatencyAtProductionScale` — the issue's literal AC, in
    wall-clock, against ~20k pages. Post-fix construction is O(1) in corpus size
-   — it reads one small ``types.md`` — so the threshold has ~50x headroom and
-   does not depend on the CI runner's PyYAML having the libyaml extension.
+   — it reads one small ``types.md`` — so it does not depend on the CI runner's
+   PyYAML having the libyaml extension, and the threshold sits far from BOTH
+   sides: measured here at 0.02s post-fix and 17.04s pre-fix, against a 3s
+   budget.
 """
 
 from __future__ import annotations
@@ -42,13 +44,18 @@ import pytest
 PRODUCTION_SCALE_PAGES = 20_000
 
 #: Wall-clock ceiling for ``create_server`` against that corpus. The MCP client
-#: budget is 30s for the WHOLE connect; this is deliberately far tighter, and
-#: still ~50x the post-fix measurement (~0.1s), because the fix makes
-#: construction O(1) in corpus size rather than merely faster. A regression that
-#: reintroduces per-page work at construction costs seconds-to-minutes here, not
-#: milliseconds — so a generous threshold loses no sensitivity while making the
-#: test immune to a slow or loaded CI runner.
-CONSTRUCTION_BUDGET_SECONDS = 5.0
+#: budget is 30s for the WHOLE connect; this is deliberately far tighter.
+#:
+#: Chosen from measurements on both sides of the fix against this exact
+#: fixture: post-fix construction is 0.02s (it is O(1) in corpus size — one
+#: ``types.md`` read — not merely faster), pre-fix it was 17.04s. So the
+#: threshold sits ~150x above the passing case and ~5.7x below the failing one,
+#: which is what makes it both sensitive and immune to a slow or loaded runner.
+#:
+#: Note this is the SECONDARY guard. Sensitivity does not rest on a stopwatch:
+#: :class:`TestConstructionDoesNotScanTheCorpus` catches the same regression
+#: structurally, on any machine, at any speed.
+CONSTRUCTION_BUDGET_SECONDS = 3.0
 
 
 @pytest.fixture(scope="module")
@@ -63,9 +70,28 @@ def production_scale_wiki(tmp_path_factory: pytest.TempPathFactory) -> Path:
     )
     types = ("person", "company", "project", "auto-memory")
     for i in range(PRODUCTION_SCALE_PAGES):
+        # Frontmatter shaped like the real corpus rather than minimally: live
+        # pages carry 11-60 keys including nested maps and lists, and the cost
+        # this test guards is per-KEY YAML parsing, not per-file. A three-key
+        # stub would understate the pre-fix cost and blunt the test.
         (wiki / f"page-{i:05d}.md").write_text(
-            f"---\nuid: u{i:05d}\ntype: {types[i % len(types)]}\n"
-            f"name: Page {i}\ntags: [alpha, beta]\n---\n\nBody of page {i}.\n",
+            f"---\n"
+            f"uid: u{i:05d}\n"
+            f"type: {types[i % len(types)]}\n"
+            f"name: Page {i}\n"
+            f"created: 2026-08-30\n"
+            f"updated: 2026-08-30\n"
+            f"recorded_at: 2026-08-30\n"
+            f"memory_class: durable\n"
+            f"source: fixture\n"
+            f"access: internal\n"
+            f"tags: [alpha, beta, gamma]\n"
+            f"aliases: [Page{i}, P{i}]\n"
+            f"related: [u{(i + 1) % PRODUCTION_SCALE_PAGES:05d}]\n"
+            f"field_sources:\n"
+            f"  name: fixture\n"
+            f"  tags: fixture\n"
+            f"---\n\nBody of page {i}.\n",
             encoding="utf-8",
         )
     return root
