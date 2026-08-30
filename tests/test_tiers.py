@@ -798,6 +798,11 @@ class TestTier3Merge:
         already-bloated pages (the athenaeum#297 incident page grew to 5-10KB), so the
         athenaeum#297 dedup guard could never see content past the cap. The cap must
         be generous enough to cover realistic bloated pages.
+
+        NOTE (issue athenaeum#1180): this only proves the body survives past the OLD
+        4000-char cap, not that it is never truncated — the CURRENT 20,000-char
+        cap (``_MAX_EXISTING_BODY_CHARS``) still hard-truncates any page above
+        it; see ``TestTier3MergeTruncationGuard`` for that behavior.
         """
         from athenaeum.tiers import tier3_merge_params
 
@@ -934,7 +939,10 @@ class TestTier3Merge:
         client.messages.create.return_value.stop_reason = "max_tokens"
 
         body, esc = tier3_merge(
-            action, "# Acme Corp\n\nFintech startup, Series B.", "sessions/raw.md", client
+            action,
+            "# Acme Corp\n\nFintech startup, Series B.",
+            "sessions/raw.md",
+            client,
         )
         assert body is None
         assert esc is not None
@@ -958,10 +966,297 @@ class TestTier3Merge:
         client.messages.create.return_value.stop_reason = "end_turn"
 
         body, esc = tier3_merge(
-            action, "# Acme Corp\n\nFintech startup, Series B.", "sessions/raw.md", client
+            action,
+            "# Acme Corp\n\nFintech startup, Series B.",
+            "sessions/raw.md",
+            client,
         )
         assert body is not None
         assert esc is None
+
+
+class TestTier3MergeTruncationGuard:
+    """Issue athenaeum#1180: ``fence_untrusted`` hard-slices ``existing_body`` to
+    ``_MAX_EXISTING_BODY_CHARS`` with no truncation marker. A page past that
+    window must not be silently amputated:
+
+    - full-echo (the model's response REPLACES the whole file) must REFUSE
+      to run at all and escalate instead of risking content loss.
+    - patch mode (anchored ops apply against the real, untruncated body) may
+      safely continue, but must record the resulting dedup blindness rather
+      than pretend athenaeum#297's "empty ops = no-op" guarantee still holds
+      past the window.
+    """
+
+    def _big_body(self, prefix: str, filler_lines: int = 2000) -> str:
+        """A body whose *prefix* sits well inside the merge window, padded
+        past ``_MAX_EXISTING_BODY_CHARS`` with repeated filler."""
+        return prefix + ("Filler filler filler filler.\n" * filler_lines)
+
+    def test_full_echo_refuses_on_truncated_existing_body(self) -> None:
+        from athenaeum.tiers import _MAX_EXISTING_BODY_CHARS, tier3_merge_full
+
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Acme raised Series C in Q1 2024.",
+        )
+        existing_body = self._big_body("# Acme Corp\n\nFintech startup, Series B.\n\n")
+        assert len(existing_body) > _MAX_EXISTING_BODY_CHARS
+
+        client = MagicMock()
+
+        body, esc = tier3_merge_full(action, existing_body, "sessions/raw.md", client)
+
+        # No LLM call at all — the refusal happens before the request is built,
+        # so an oversized page never pays for a doomed full-echo call.
+        client.messages.create.assert_not_called()
+        assert body is None
+        assert esc is not None
+        assert esc.conflict_type == "principled"
+        desc = esc.description.lower()
+        assert "truncat" in desc or "window" in desc
+        assert "1180" in esc.description
+
+    def test_full_echo_runs_normally_when_body_within_window(self) -> None:
+        """Sanity check the guard is scoped to oversized bodies — a normal-sized
+        page must still go through full-echo as before."""
+        from athenaeum.tiers import tier3_merge_full
+
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Acme raised Series C in Q1 2024.",
+        )
+        client = _mock_client("# Acme Corp\n\nFintech startup, Series C.")
+
+        body, esc = tier3_merge_full(
+            action, "# Acme Corp\n\nFintech startup.", "sessions/raw.md", client
+        )
+        client.messages.create.assert_called_once()
+        assert body is not None
+        assert esc is None
+
+    def test_patch_mode_continues_and_logs_dedup_blindness_on_truncated_body(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from athenaeum.tiers import (
+            _MAX_EXISTING_BODY_CHARS,
+            MERGE_TRUNCATED_INPUT_LOG_PREFIX,
+        )
+
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Acme raised Series C in Q1 2024.",
+        )
+        # Anchor lives well inside the window; the body is padded past it with
+        # filler so the FULL body (which apply_merge_ops searches) exceeds
+        # _MAX_EXISTING_BODY_CHARS.
+        existing_body = self._big_body("# Acme Corp\n\nFintech startup, Series B.\n\n")
+        assert len(existing_body) > _MAX_EXISTING_BODY_CHARS
+
+        ops_response = json.dumps(
+            {
+                "ops": [
+                    {
+                        "op": "insert_after",
+                        "anchor": "Fintech startup, Series B.",
+                        "text": "Raised Series C in Q1 2024.[^1]",
+                    }
+                ]
+            }
+        )
+        client = _mock_client(ops_response)
+
+        with caplog.at_level("WARNING"):
+            body, esc = tier3_merge(action, existing_body, "sessions/raw.md", client)
+
+        # Patch mode is safe to continue — anchored ops apply against the
+        # real, full body, so no existing content is at risk.
+        assert body is not None
+        assert "Series C" in body
+        assert esc is None
+        # But the model never saw the tail, so the resulting dedup blindness
+        # must be recorded, not silently accepted.
+        assert any(
+            MERGE_TRUNCATED_INPUT_LOG_PREFIX in rec.message for rec in caplog.records
+        )
+
+    def test_patch_mode_no_warning_when_body_within_window(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from athenaeum.tiers import MERGE_TRUNCATED_INPUT_LOG_PREFIX
+
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Acme raised Series C in Q1 2024.",
+        )
+        ops_response = json.dumps(
+            {
+                "ops": [
+                    {
+                        "op": "insert_after",
+                        "anchor": "Fintech startup, Series B.",
+                        "text": "Raised Series C in Q1 2024.[^1]",
+                    }
+                ]
+            }
+        )
+        client = _mock_client(ops_response)
+
+        with caplog.at_level("WARNING"):
+            body, esc = tier3_merge(
+                action,
+                "# Acme Corp\n\nFintech startup, Series B.",
+                "sessions/raw.md",
+                client,
+            )
+
+        assert body is not None
+        assert esc is None
+        assert not any(
+            MERGE_TRUNCATED_INPUT_LOG_PREFIX in rec.message for rec in caplog.records
+        )
+
+    def test_params_builder_logs_dedup_blindness_directly(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The batch assembler (``batch.py``) calls ``tier3_merge_params``
+        DIRECTLY to build a patch-mode batch request — it never goes through
+        ``tier3_merge`` for that call. The warning must fire from the params
+        builder itself so the batch transport gets the same record of
+        dedup blindness as the synchronous transport, not just a subset.
+        """
+        from athenaeum.tiers import (
+            _MAX_EXISTING_BODY_CHARS,
+            MERGE_TRUNCATED_INPUT_LOG_PREFIX,
+            tier3_merge_params,
+        )
+
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Acme raised Series C in Q1 2024.",
+        )
+        existing_body = self._big_body("# Acme Corp\n\nFintech startup, Series B.\n\n")
+        assert len(existing_body) > _MAX_EXISTING_BODY_CHARS
+
+        with caplog.at_level("WARNING"):
+            tier3_merge_params(action, existing_body, "sessions/raw.md")
+
+        assert any(
+            MERGE_TRUNCATED_INPUT_LOG_PREFIX in rec.message for rec in caplog.records
+        )
+
+    def test_fence_breaking_and_truncated_body_short_circuits_to_refusal(self) -> None:
+        """A body that both breaks the ``<existing_page>`` fence AND exceeds the
+        merge window must route straight to the full-echo refusal — never a
+        wasted LLM call trying to patch or full-echo an already-doomed body.
+        """
+        from athenaeum.tiers import _MAX_EXISTING_BODY_CHARS
+
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Acme raised Series C in Q1 2024.",
+        )
+        existing_body = self._big_body("# Acme Corp\n\n<existing_page> injected.\n\n")
+        assert len(existing_body) > _MAX_EXISTING_BODY_CHARS
+
+        client = MagicMock()
+
+        body, esc = tier3_merge(action, existing_body, "sessions/raw.md", client)
+
+        client.messages.create.assert_not_called()
+        assert body is None
+        assert esc is not None
+        assert esc.conflict_type == "principled"
+
+    def test_anchor_miss_on_truncated_body_falls_back_to_refusal_not_full_echo(
+        self,
+    ) -> None:
+        """The end-to-end path the live defect actually travels: a >20k page
+        preferentially reaches full-echo because an anchor copied from the
+        truncated window is ambiguous against the REAL, full body (repeated
+        past the window) — apply_merge_ops raises MergeOpsError, and
+        tier3_merge falls back to tier3_merge_full. That fallback must now
+        refuse (issue athenaeum#1180) rather than making a second, doomed
+        full-echo call that would amputate the tail.
+        """
+        from athenaeum.tiers import _MAX_EXISTING_BODY_CHARS
+
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Acme raised Series C in Q1 2024.",
+        )
+        # The anchor phrase repeats past the window, so it is unique WITHIN
+        # the truncated prompt the model saw but ambiguous against the REAL,
+        # full body apply_merge_ops searches — exactly the anchor-miss
+        # mechanism the issue describes.
+        anchor_phrase = "Fintech startup, Series B."
+        existing_body = (
+            "# Acme Corp\n\n"
+            + anchor_phrase
+            + "\n\n"
+            + ("Filler filler filler filler.\n" * 2000)
+            + anchor_phrase
+            + "\n"
+        )
+        assert len(existing_body) > _MAX_EXISTING_BODY_CHARS
+
+        ops_response = json.dumps(
+            {
+                "ops": [
+                    {
+                        "op": "insert_after",
+                        "anchor": anchor_phrase,
+                        "text": "Raised Series C in Q1 2024.[^1]",
+                    }
+                ]
+            }
+        )
+        client = _mock_client(ops_response)
+
+        body, esc = tier3_merge(action, existing_body, "sessions/raw.md", client)
+
+        # Exactly one call: the patch attempt. No second, wasted full-echo
+        # call — tier3_merge_full refuses before building a request.
+        assert client.messages.create.call_count == 1
+        assert body is None
+        assert esc is not None
+        assert esc.conflict_type == "principled"
+        assert "1180" in esc.description
 
 
 class TestTier3MergePatchOps:
@@ -1050,9 +1345,7 @@ class TestTier3MergePatchOps:
 
     def test_ambiguous_anchor_raises(self) -> None:
         with pytest.raises(MergeOpsError):
-            apply_merge_ops(
-                "aa aa", [{"op": "replace", "anchor": "aa", "text": "x"}]
-            )
+            apply_merge_ops("aa aa", [{"op": "replace", "anchor": "aa", "text": "x"}])
 
     def test_overlapping_replaces_raise(self) -> None:
         with pytest.raises(MergeOpsError):
@@ -1066,9 +1359,7 @@ class TestTier3MergePatchOps:
 
     def test_unknown_op_kind_raises(self) -> None:
         with pytest.raises(MergeOpsError):
-            apply_merge_ops(
-                "body", [{"op": "delete", "anchor": "body", "text": ""}]
-            )
+            apply_merge_ops("body", [{"op": "delete", "anchor": "body", "text": ""}])
 
     def test_missing_anchor_field_raises(self) -> None:
         with pytest.raises(MergeOpsError):
@@ -1088,8 +1379,13 @@ class TestTier3MergePatchOps:
         # application — extra="allow" is the decided (unchanged) posture for
         # tiers.tier3-merge.
         existing = "# Acme\n\nFintech."
-        ops = [{"op": "append_section", "text": "Raised Series C.[^2]", "text2": "unused"}]
-        assert apply_merge_ops(existing, ops) == "# Acme\n\nFintech.\n\nRaised Series C.[^2]"
+        ops = [
+            {"op": "append_section", "text": "Raised Series C.[^2]", "text2": "unused"}
+        ]
+        assert (
+            apply_merge_ops(existing, ops)
+            == "# Acme\n\nFintech.\n\nRaised Series C.[^2]"
+        )
 
     # --- parse_merge_ops_response: the fallback-signalling contract ----------
 
@@ -1138,7 +1434,11 @@ class TestTier3MergePatchOps:
         # actually observed — must still apply cleanly (extra="allow").
         body, esc, needs_fallback = parse_merge_ops_response(
             json.dumps(
-                {"ops": [{"op": "append_section", "text": "New.[^2]", "text2": "unused"}]}
+                {
+                    "ops": [
+                        {"op": "append_section", "text": "New.[^2]", "text2": "unused"}
+                    ]
+                }
             ),
             self._action(),
             "ref",
@@ -1150,9 +1450,7 @@ class TestTier3MergePatchOps:
 
     # --- athenaeum#490 (slice A): each fallback names the page + a distinct cause ------
 
-    def _fallback_warnings(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> list[str]:
+    def _fallback_warnings(self, caplog: pytest.LogCaptureFixture) -> list[str]:
         return [
             rec.message
             for rec in caplog.records
@@ -1165,7 +1463,10 @@ class TestTier3MergePatchOps:
     ) -> None:
         caplog.set_level(logging.WARNING, logger="athenaeum")
         parse_merge_ops_response(
-            '{"ops": [', self._action(), "sess-ref", "existing",
+            '{"ops": [',
+            self._action(),
+            "sess-ref",
+            "existing",
             stop_reason="max_tokens",
         )
         warnings = self._fallback_warnings(caplog)
@@ -1259,9 +1560,7 @@ class TestTier3MergePatchOps:
 
     def test_fix_b_accepts_operations_alternate_key(self) -> None:
         body, esc, needs_fallback = parse_merge_ops_response(
-            json.dumps(
-                {"operations": [{"op": "append_section", "text": "New.[^2]"}]}
-            ),
+            json.dumps({"operations": [{"op": "append_section", "text": "New.[^2]"}]}),
             self._action(),
             "ref",
             "# Acme\n\nOld.",
@@ -1588,7 +1887,10 @@ class TestTier3Write:
                 text=json.dumps(
                     {
                         "ops": [
-                            {"op": "append_section", "text": "New partnership announced."}
+                            {
+                                "op": "append_section",
+                                "text": "New partnership announced.",
+                            }
                         ]
                     }
                 )
@@ -1817,7 +2119,9 @@ class TestTier3DeriveActionsBudget:
             # proving "Person 1" is never attempted.
             _calls_made["n"] += 1
             if _calls_made["n"] > 1:
-                raise AssertionError("a 2nd LLM call means the bound did not stop the loop")
+                raise AssertionError(
+                    "a 2nd LLM call means the bound did not stop the loop"
+                )
             clock["n"] += 20.0
             return response
 
@@ -1876,7 +2180,10 @@ class TestTier3DeriveActionsBudget:
                 text=json.dumps(
                     {
                         "ops": [
-                            {"op": "append_section", "text": "New partnership announced."}
+                            {
+                                "op": "append_section",
+                                "text": "New partnership announced.",
+                            }
                         ]
                     }
                 )
@@ -1913,7 +2220,9 @@ class TestTier3DeriveActionsBudget:
         acme_content = (wiki_dir / "a1b2c3d4-acme-corp.md").read_text()
         assert "New partnership announced" not in acme_content
 
-    def test_no_bound_configured_behaves_exactly_as_before(self, wiki_dir: Path) -> None:
+    def test_no_bound_configured_behaves_exactly_as_before(
+        self, wiki_dir: Path
+    ) -> None:
         """The default (``max_api_calls_for_file=None``) is unbounded —
         every other caller of tier3_derive_actions (tier3_write, and every
         pre-athenaeum#994 test) must see byte-identical behaviour."""
@@ -2328,7 +2637,9 @@ class TestTier2RequestBudget:
 
     def test_classify_max_tokens_raised_above_1024(self) -> None:
         raw = _make_raw("Some rich source text with entities.")
-        params = tier2_request_params(raw, [], ["person", "reference"], [], ["internal"])
+        params = tier2_request_params(
+            raw, [], ["person", "reference"], [], ["internal"]
+        )
         # The original 1024 truncated entity-dense files; the fix raises it.
         assert params["max_tokens"] > 1024
 
@@ -2403,13 +2714,25 @@ class TestTier2TruncationParse:
         # A response that happened to finish exactly at the budget still yields
         # its entities — truncation is only inferred on a PARSE failure.
         payload = json.dumps(
-            [{"name": "Fits", "entity_type": "reference", "access": "internal",
-              "tags": [], "observations": "ok"}]
+            [
+                {
+                    "name": "Fits",
+                    "entity_type": "reference",
+                    "access": "internal",
+                    "tags": [],
+                    "observations": "ok",
+                }
+            ]
         )
         stats = Tier2ParseStats()
         results = parse_tier2_entities(
-            payload, "sessions/x.md", self._TYPES, [], ["internal"],
-            stats=stats, stop_reason="max_tokens",
+            payload,
+            "sessions/x.md",
+            self._TYPES,
+            [],
+            ["internal"],
+            stats=stats,
+            stop_reason="max_tokens",
         )
         assert [r.name for r in results] == ["Fits"]
         assert stats.truncated == 0
@@ -2424,8 +2747,15 @@ class TestTier2ClassifyTruncationRetry:
 
     def _valid_payload(self) -> str:
         return json.dumps(
-            [{"name": "Recovered", "entity_type": "reference",
-              "access": "internal", "tags": [], "observations": "second try"}]
+            [
+                {
+                    "name": "Recovered",
+                    "entity_type": "reference",
+                    "access": "internal",
+                    "tags": [],
+                    "observations": "second try",
+                }
+            ]
         )
 
     def test_truncation_retry_uses_larger_budget_and_recovers(self) -> None:
@@ -2505,8 +2835,15 @@ class TestTier2ReclassifyLargerBudget:
 
     def _valid_payload(self) -> str:
         return json.dumps(
-            [{"name": "Bigger", "entity_type": "reference",
-              "access": "internal", "tags": [], "observations": "fit now"}]
+            [
+                {
+                    "name": "Bigger",
+                    "entity_type": "reference",
+                    "access": "internal",
+                    "tags": [],
+                    "observations": "fit now",
+                }
+            ]
         )
 
     def test_uses_retry_budget_and_returns_stats(self) -> None:
@@ -2550,7 +2887,12 @@ class TestClaudeCliParamDropGating:
         raw = _make_raw("Entity-dense source text worth classifying.")
         with caplog.at_level("WARNING"):
             entities, retry_stats = tier2_reclassify_larger_budget(
-                raw, [], self._TYPES, [], ["internal"], client,
+                raw,
+                [],
+                self._TYPES,
+                [],
+                ["internal"],
+                client,
                 config=self._CLI_CONFIG,
             )
         # The retry's ONLY change is raising max_tokens, which claude-cli drops:
@@ -2569,13 +2911,25 @@ class TestClaudeCliParamDropGating:
     ) -> None:
         monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
         payload = json.dumps(
-            [{"name": "Bigger", "entity_type": "reference",
-              "access": "internal", "tags": [], "observations": "fit"}]
+            [
+                {
+                    "name": "Bigger",
+                    "entity_type": "reference",
+                    "access": "internal",
+                    "tags": [],
+                    "observations": "fit",
+                }
+            ]
         )
         client = _sequenced_client([payload], stop_reasons=["end_turn"])
         raw = _make_raw("Entity-dense source text worth classifying.")
         entities, retry_stats = tier2_reclassify_larger_budget(
-            raw, [], self._TYPES, [], ["internal"], client,
+            raw,
+            [],
+            self._TYPES,
+            [],
+            ["internal"],
+            client,
             config={"llm": {"provider": "api"}},
         )
         # api honors max_tokens -> the retry proceeds with the larger budget.
@@ -2601,8 +2955,14 @@ class TestClaudeCliParamDropGating:
         raw = _make_raw("Entity-dense source text worth classifying.")
         stats = Tier2ParseStats()
         tier2_classify(
-            raw, [], self._TYPES, [], ["internal"], client,
-            config=self._CLI_CONFIG, stats=stats,
+            raw,
+            [],
+            self._TYPES,
+            [],
+            ["internal"],
+            client,
+            config=self._CLI_CONFIG,
+            stats=stats,
         )
         retry_budget_calls = [
             c
@@ -2622,8 +2982,15 @@ class TestClaudeCliParamDropGating:
         # provider-specific, not a blanket disable.
         monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
         recovered = json.dumps(
-            [{"name": "Alpha", "entity_type": "reference",
-              "access": "internal", "tags": [], "observations": "ok"}]
+            [
+                {
+                    "name": "Alpha",
+                    "entity_type": "reference",
+                    "access": "internal",
+                    "tags": [],
+                    "observations": "ok",
+                }
+            ]
         )
         client = _sequenced_client(
             [_TRUNCATED_PAYLOAD, recovered],
@@ -2632,8 +2999,14 @@ class TestClaudeCliParamDropGating:
         raw = _make_raw("Entity-dense source text worth classifying.")
         stats = Tier2ParseStats()
         tier2_classify(
-            raw, [], self._TYPES, [], ["internal"], client,
-            config={"llm": {"provider": "api"}}, stats=stats,
+            raw,
+            [],
+            self._TYPES,
+            [],
+            ["internal"],
+            client,
+            config={"llm": {"provider": "api"}},
+            stats=stats,
         )
         retry_budget_calls = [
             c
@@ -2653,7 +3026,9 @@ class TestPerStageMaxTokensThroughSeam:
     def _raw(self):
         return _make_raw("Some rich source text with entities.")
 
-    def test_classify_default_is_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_classify_default_is_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.delenv("ATHENAEUM_CLASSIFY_MAX_TOKENS", raising=False)
         params = tier2_request_params(self._raw(), [], self._TYPES, [], ["internal"])
         assert params["max_tokens"] == _TIER2_CLASSIFY_MAX_TOKENS
@@ -2670,7 +3045,11 @@ class TestPerStageMaxTokensThroughSeam:
     ) -> None:
         monkeypatch.delenv("ATHENAEUM_CLASSIFY_MAX_TOKENS", raising=False)
         params = tier2_request_params(
-            self._raw(), [], self._TYPES, [], ["internal"],
+            self._raw(),
+            [],
+            self._TYPES,
+            [],
+            ["internal"],
             config={"max_tokens": {"classify": 3210}},
         )
         assert params["max_tokens"] == 3210
@@ -2753,8 +3132,12 @@ class TestEntityLLMCallTiming:
         caplog.set_level(logging.INFO, logger="athenaeum")
         client = _mock_client("[]")
 
-        tier2_classify(_make_raw("First file."), [], ["person"], [], ["internal"], client)
-        tier2_classify(_make_raw("Second file."), [], ["person"], [], ["internal"], client)
+        tier2_classify(
+            _make_raw("First file."), [], ["person"], [], ["internal"], client
+        )
+        tier2_classify(
+            _make_raw("Second file."), [], ["person"], [], ["internal"], client
+        )
 
         lines = self._call_timing_lines(caplog)
         assert len(lines) == 2
