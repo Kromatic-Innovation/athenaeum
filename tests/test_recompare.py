@@ -238,6 +238,50 @@ class TestApplyWritesTheLedger:
         assert second.compared == 0
 
 
+class TestApplyHeartbeatsTheLock:
+    """Issue athenaeum#1230: an --apply recompare over a backlog is an
+    unbounded, per-pair LLM classify loop that already receives the caller's
+    RunLock (for the verdict-ledger single-appender contract) but never
+    refreshed it — the same latent gap as the ingest path. It must tick the
+    lock's heartbeat as it advances through the unresolved-proposal loop.
+    """
+
+    def test_apply_calls_lock_heartbeat(
+        self, wiki_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _write_page(wiki_root, "a")
+        b = _write_page(wiki_root, "b")
+        _write_queue(wiki_root, [_block("clean", [a, b])])
+        lock = RunLock(wiki_root)
+        with lock:
+            calls = {"n": 0}
+            real_heartbeat = lock.heartbeat
+
+            def counting_heartbeat() -> None:
+                calls["n"] += 1
+                real_heartbeat()
+
+            monkeypatch.setattr(lock, "heartbeat", counting_heartbeat)
+            recompare_pending_merges(
+                wiki_root,
+                client=_fake_client(_content_payload("equivalent")),
+                apply=True,
+                lock=lock,
+            )
+        assert calls["n"] >= 1
+
+    def test_dry_run_does_not_require_or_touch_a_lock(self, wiki_root: Path) -> None:
+        # apply=False never took a lock before athenaeum#1230 and must not start
+        # requiring one now -- the heartbeat tick is gated on `apply`.
+        a = _write_page(wiki_root, "a")
+        b = _write_page(wiki_root, "b")
+        _write_queue(wiki_root, [_block("clean", [a, b])])
+        result = recompare_pending_merges(
+            wiki_root, client=_fake_client(_content_payload("equivalent"))
+        )
+        assert result.applied is False
+
+
 class TestAggregateVerdict:
     """The documented, deterministic cluster reduction."""
 
