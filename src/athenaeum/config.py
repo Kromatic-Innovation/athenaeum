@@ -2602,6 +2602,20 @@ search_backend: fts5
 #   most batches finish within an hour, 24h worst case — intended for the
 #   nightly run. Precedence: --batch-mode CLI flag, then
 #   ATHENAEUM_BATCH_MODE env, then this key, then off.
+# batch: PER-KNOB batch selection (issue athenaeum#1175), under this
+#   `librarian:` parent — deliberately NOT a new `llm.batch`, because batch
+#   is a property of how the librarian RUN is executed, not of the LLM
+#   routing layer, and it must fall back to `librarian.batch_mode`.
+#     librarian:
+#       batch:
+#         classify: false
+#         write: true
+#   Only `classify` and `write` are ever batched. An absent knob key falls
+#   back to the resolved `batch_mode`, so a config that sets only
+#   `batch_mode` is unchanged. A knob set here turns the run into a batch run
+#   even when `batch_mode` is off — but `--no-batch-mode` remains a hard off
+#   that no yaml key can defeat. Setting a NON-batchable knob to true is a
+#   config error (the run refuses), not a silent no-op.
 # retire: move-then-retire of raw auto-memory (issue athenaeum#261). DEFAULT ON.
 #   When on, `athenaeum run` MOVES non-contradictory raw/auto-memory facts
 #   into their wiki entry and `git rm`s the raw (recovery is git-only).
@@ -2676,6 +2690,9 @@ search_backend: fts5
 #   rotation_retention: 30
 #   max_files: 50
 #   batch_mode: false
+#   batch:
+#     classify: false
+#     write: false
 #   retire: true
 #   ephemeral_scopes:
 #     - "*hestia-routine*"
