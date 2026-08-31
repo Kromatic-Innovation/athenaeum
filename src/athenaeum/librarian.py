@@ -89,7 +89,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from athenaeum import batch_state, detection_state, spend, zero_yield
+from athenaeum import batch_state, detection_state, push_state, spend, zero_yield
 from athenaeum._retry import TransientAPIError
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.authority import AuthorityManifest, load_authority_manifest
@@ -504,6 +504,33 @@ DEFAULT_ZERO_YIELD_ALERT_THRESHOLD = 3
 # yaml override).
 ZERO_YIELD_ALERT_PREFIX = "librarian-zero-yield-alert"
 
+# Issue athenaeum#1229 part 4: a push rejected for the SAME reason on repeated
+# runs must surface, not retry silently forever -- the exact gap a real
+# deployment hit (GH001, an oversized blob) for four days / 1,527 commits
+# before anyone noticed, because `git_push`'s existing per-attempt WARNING
+# (below) looks identical to an ordinary one-off transient failure. Mirrors
+# ZERO_YIELD_PREFIX/ZERO_YIELD_ALERT_PREFIX's two-tier shape exactly: the
+# per-attempt WARNING already exists (`athenaeum-push-failed:`, unchanged)
+# and fires every failed push regardless of streak length; this is the
+# escalation, a separately-greppable ERROR line once the SAME reason has
+# recurred `DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD`-many (or the env-tuned)
+# consecutive times. Persisted cross-run state lives in
+# :mod:`athenaeum.push_state` (see that module's docstring for why the
+# cache dir, not `wiki_root`).
+PUSH_FAILURE_ALERT_PREFIX = "librarian-push-failure-alert"
+
+# Consecutive-same-reason push failures at which the ALERT fires. 3 mirrors
+# DEFAULT_STUCK_FILE_THRESHOLD / DEFAULT_ZERO_YIELD_ALERT_THRESHOLD's own
+# default exactly: `push_after_run` is opt-in and typically runs once per
+# nightly librarian invocation, so 3 consecutive same-reason failures means
+# an operator is alerted within ~3 nightly cycles of a persistent problem
+# (a real misconfiguration or a hard limit like GH001) rather than after the
+# four-day / ~120-run silence the motivating incident actually ran to.
+# Resolved via :func:`librarian_push_failure_alert_threshold` (env override
+# only -- see that function's docstring for why `config` is not threaded
+# through `git_push`).
+DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD = 3
+
 # Fallback valid values if schema files are missing.
 #
 # Issue athenaeum#964: a ``FALLBACK_TYPES`` used to be defined here AND, separately,
@@ -688,6 +715,22 @@ def git_push(
     When *branch* is ``None``, ``git push`` defaults to the configured
     upstream for the current branch (the conventional nightly setup).
     Passing an explicit branch makes the refspec deterministic.
+
+    Issue athenaeum#1229 part 4: every attempt updates a small cross-run streak
+    in :mod:`athenaeum.push_state` — how many CONSECUTIVE attempts have
+    failed for the exact same reason text. A success resets it to zero,
+    unconditionally. A failure for the SAME reason as last time extends it;
+    a failure for a DIFFERENT reason starts a fresh streak of 1 (a new kind
+    of failure is not evidence the old one is still happening). Once the
+    streak reaches :func:`librarian_push_failure_alert_threshold`, a
+    SEPARATE, louder ``PUSH_FAILURE_ALERT_PREFIX`` ERROR line fires in
+    addition to (not instead of) the existing per-attempt WARNING below —
+    mirrors :data:`ZERO_YIELD_PREFIX`/:data:`ZERO_YIELD_ALERT_PREFIX`'s
+    two-tier shape exactly. This never changes the return value or makes a
+    push failure fatal: the non-fatal-retry behaviour is correct for a
+    one-off transient failure; the defect this closes is that repeating it
+    forever for the SAME reason was previously invisible, not that a single
+    failure needs to become an error.
     """
     if not (knowledge_root / ".git").exists():
         log.warning("No .git in %s — skipping git push", knowledge_root)
@@ -702,7 +745,9 @@ def git_push(
         capture_output=True,
         text=True,
     )
+    _push_cache_dir = _resolve_cache_dir(None)
     if result.returncode != 0:
+        reason = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
         # Non-fatal: surface the failure with a distinct log line so an
         # operator (or the routine watching the run) can see exactly which
         # remote rejected the push and why. Commits remain intact locally.
@@ -712,9 +757,32 @@ def git_push(
             remote,
             f" {branch}" if branch else "",
             result.returncode,
-            (result.stderr or result.stdout or "").strip(),
+            reason,
         )
+        _previous_push_state = push_state.load_state(_push_cache_dir)
+        _consecutive = (
+            _previous_push_state["consecutive"] + 1
+            if _previous_push_state["last_reason"] == reason[: push_state.MAX_REASON_LENGTH]
+            else 1
+        )
+        push_state.write_state(_push_cache_dir, consecutive=_consecutive, last_reason=reason)
+        _push_alert_threshold = librarian_push_failure_alert_threshold()
+        if _consecutive >= _push_alert_threshold:
+            log.error(
+                "%s: git push %s%s has failed for the SAME reason on %d "
+                "consecutive attempt(s) — at or past the alert threshold of "
+                "%d (ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD, issue athenaeum#1229); "
+                "commits remain local and keep being retried automatically, "
+                "but this is no longer a silent retry: %s",
+                PUSH_FAILURE_ALERT_PREFIX,
+                remote,
+                f" {branch}" if branch else "",
+                _consecutive,
+                _push_alert_threshold,
+                reason,
+            )
         return False
+    push_state.write_state(_push_cache_dir, consecutive=0, last_reason="")
     log.info(
         "Pushed knowledge commits to %s%s",
         remote,
@@ -2812,6 +2880,38 @@ def librarian_zero_yield_alert_threshold(config: dict[str, object] | None = None
             if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
                 return raw
     return DEFAULT_ZERO_YIELD_ALERT_THRESHOLD
+
+
+def librarian_push_failure_alert_threshold() -> int:
+    """Resolve the consecutive-same-reason push-failure count at which the
+    ALERT fires (issue athenaeum#1229 part 4).
+
+    Env-override only (``ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD`` >
+    :data:`DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD`) -- deliberately NOT
+    threaded through ``config`` like :func:`librarian_zero_yield_alert_threshold`
+    is. ``git_push`` (unlike the zero-yield predicate, which only ever runs
+    from inside ``_run_finalize_phase`` with a ``RunContext`` on hand) is a
+    small leaf helper called from several independent sites across a run
+    (the phase-boundary deadline trip, the finalize-phase push, a future
+    call site) and is also directly unit-tested with a bare bool-returning
+    fake standing in for it
+    (``tests/test_librarian_push.py::_patch_git_push``,
+    ``tests/test_librarian_deadline.py::_spy_git_push``) -- threading
+    ``config`` through it would widen its signature, and every one of those
+    test doubles, for a value an operator can already tune per-host via env
+    var without any of that churn. Non-numeric, non-positive, or bool
+    values fall back to :data:`DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD`,
+    mirroring :func:`librarian_zero_yield_alert_threshold`'s own validation.
+    """
+    env = os.environ.get("ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD")
+    if env is not None:
+        try:
+            value = int(env)
+            if value >= 1:
+                return value
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD
 
 
 def _stuck_content_hash(raw: Any) -> str:

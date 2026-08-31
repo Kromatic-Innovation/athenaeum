@@ -54,7 +54,12 @@ Design (see PR body for the full rationale):
   not have to duplicate the cosine/complete-linkage code to route around
   that mismatch. When chromadb is unavailable, falls back to the same
   hashing-trick embedder ``clusters.py`` already uses for its own
-  no-deps degradation path (imported, not duplicated).
+  no-deps degradation path (imported, not duplicated). Issue athenaeum#1140:
+  each page body is chunked (:func:`_chunk_page_text`) and its chunks'
+  vectors mean-pooled (:func:`athenaeum.vecmath.mean_pool`) before
+  reaching the clusterer -- see :func:`_resolve_wiki_embeddings` -- so
+  chromadb's default embedder's 256-token truncation window no longer
+  discards everything past a page's lede.
 - Draft synthesis reuses :func:`athenaeum.merge.synthesize_body` (C3's
   deterministic concatenate-with-paragraph-dedupe strategy) and
   :func:`athenaeum.merge.derive_topic_slug` (C3's topic-slug heuristic) —
@@ -119,6 +124,7 @@ from athenaeum.pii import is_pii_flagged
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.search import embed_texts
 from athenaeum.storage import is_merge_eligible
+from athenaeum.vecmath import mean_pool
 
 log = logging.getLogger(__name__)
 
@@ -152,6 +158,72 @@ _WIKI_FALLBACK_WARNED = False
 # read. Lives alongside ``_pending_merges.md`` under ``wiki/`` — the natural
 # home for a wiki-dedupe-pass artifact, per the issue's own suggestion.
 DEFAULT_WIKI_SUPPRESSIONS_FILENAME = "_wiki_dedupe_suppressions.jsonl"
+# Issue athenaeum#1140 (AC1): chromadb's default ONNX MiniLM embedding function
+# hard-codes ``tokenizer.enable_truncation(max_length=256)`` — content past
+# that window is invisible to the embedder, and the corpus writes
+# structurally uniform ledes, so truncation-exposed pages collapse into
+# dense, unrelated cliques (full measurement trail in the issue). Chunking
+# each page body into pieces no larger than ``_CHUNK_CHARS`` characters
+# before embedding — then mean-pooling the per-chunk vectors
+# (:func:`athenaeum.vecmath.mean_pool`) — lets body content past the first
+# chunk reach the final vector instead of being silently discarded.
+#
+# ``_CHUNK_CHARS`` is a CHARACTER budget, deliberately NOT derived from the
+# installed chromadb package's token-truncation constant (the issue's own
+# "Not verified" section warns that constant was read from the installed
+# package, not confirmed stable across chromadb versions, and this
+# module's remedy should not assume it is). Measured against the live
+# ``/knowledge`` corpus (issue athenaeum#1140 PR): the empirical char-length at
+# which ~57% of eligible pages are exceeded (matching the issue's own 57%
+# figure) is ~1,200 characters. 900 is chosen with a ~300-character margin
+# below that measured boundary so a chunk is never truncated by the real
+# tokenizer even if the exact 256-token constant drifts modestly across a
+# chromadb upgrade — the fix degrades gracefully (a slightly-tighter
+# tokenizer would still cut chunks well before their content is
+# meaningfully lost) rather than silently reintroducing the defect. Not
+# exposed as a config knob (issue athenaeum#1140's own guidance: "do not add a
+# knob you cannot test") — this constant is a technical implementation
+# detail of the chunking strategy, not a tunable policy like
+# ``cluster_threshold``.
+_CHUNK_CHARS = 900
+
+
+def _chunk_page_text(text: str, *, chunk_chars: int = _CHUNK_CHARS) -> list[str]:
+    """Split *text* into whitespace-joined chunks of at most *chunk_chars*.
+
+    Word-based accumulation (never splits inside a word): words are packed
+    into a chunk until the next word would push it over ``chunk_chars``,
+    then a new chunk starts. Internal whitespace (including newlines) is
+    normalized to single spaces — irrelevant for an embedding call, which
+    only reads the token stream, not the page's original formatting.
+
+    Always returns at least one chunk (``[""]`` for empty/whitespace-only
+    input) so a caller can zip chunks 1:1 back to the file that produced
+    them without a length mismatch. A page whose content already fits in
+    one chunk returns a single-element list containing exactly that page's
+    normalized full text — i.e. this is a no-op for any page short enough
+    that the pre-athenaeum#1140 whole-page embedding never truncated it, which is
+    exactly what keeps every existing (short-body) test fixture's stub
+    embedding-provider call unaffected by this change.
+    """
+    words = text.split()
+    if not words:
+        return [""]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for word in words:
+        added_len = len(word) + (1 if current else 0)
+        if current and current_len + added_len > chunk_chars:
+            chunks.append(" ".join(current))
+            current = [word]
+            current_len = len(word)
+        else:
+            current.append(word)
+            current_len += added_len
+    if current:
+        chunks.append(" ".join(current))
+    return chunks or [""]
 
 
 def discover_wiki_dedupe_candidates(
@@ -269,13 +341,40 @@ def _resolve_wiki_embeddings(
     or every candidate falls back together), so
     :func:`athenaeum.clusters.cluster_auto_memory_files` can record which
     embedder produced each formed cluster's vectors.
+
+    Issue athenaeum#1140 (AC1): each candidate's body is split into
+    :data:`_CHUNK_CHARS`-sized chunks (:func:`_chunk_page_text`) BEFORE
+    calling ``provider`` — a single batched call embeds every chunk from
+    every candidate — and each candidate's final vector is the
+    mean-pooled, re-normalized combination of its own chunks'
+    vectors (:func:`athenaeum.vecmath.mean_pool`). This is scoped to the
+    wiki-dedupe path only: :func:`athenaeum.search.embed_texts` itself is
+    NOT modified, so every other caller of that shared function
+    (:mod:`athenaeum.fingerprint`, :mod:`athenaeum.tiers`,
+    :mod:`athenaeum.clusters`'s own raw-intake embedding resolution,
+    :mod:`athenaeum._cmd_curate`) is byte-for-byte unaffected — see the PR
+    body for the blast-radius survey. A page short enough to fit in one
+    chunk is embedded exactly as before (one call, one vector,
+    mean-pool-of-one is a re-normalize no-op), so this is a pure ADDITION
+    of body content for the long-page case, not a behavior change for the
+    short-page case.
+
+    The fallback path (:func:`athenaeum.clusters._fallback_embeddings`,
+    engaged when ``provider`` returns ``None``/a mismatched-length result)
+    is deliberately NOT chunked — it is a hashing-trick bag-of-words
+    embedder with no token window to truncate against (dead end #3 in the
+    issue: 16,083/16,083 production wiki suppressions were already
+    ``chromadb-default``, never ``fallback-hashing``), so chunking it would
+    add cost with no defect to fix.
     """
     if not files:
         return {}, {}
     provider = embedding_provider or embed_texts
-    texts = [am.content for am in files]
-    vectors = provider(texts)
-    if vectors is None or len(vectors) != len(files):
+
+    chunk_lists = [_chunk_page_text(am.content) for am in files]
+    flat_chunks = [chunk for chunks in chunk_lists for chunk in chunks]
+    vectors = provider(flat_chunks)
+    if vectors is None or len(vectors) != len(flat_chunks):
         # Issue athenaeum#1032: one-time WARNING — this fallback used to engage with
         # no log call at all, so athenaeum#1005's over-cluster diagnosis had no way to
         # tell from run artifacts whether the hashing-trick embedder (rather
@@ -284,7 +383,16 @@ def _resolve_wiki_embeddings(
         fallback = _fallback_embeddings(files)
         sources = {str(am.path): EMBEDDER_FALLBACK_HASHING for am in files}
         return fallback, sources
-    embeddings = {str(am.path): list(map(float, vec)) for am, vec in zip(files, vectors)}
+
+    embeddings: dict[str, list[float]] = {}
+    offset = 0
+    for am, chunks in zip(files, chunk_lists):
+        n_chunks = len(chunks)
+        chunk_vectors = [
+            list(map(float, vec)) for vec in vectors[offset : offset + n_chunks]
+        ]
+        offset += n_chunks
+        embeddings[str(am.path)] = mean_pool(chunk_vectors)
     sources = {str(am.path): EMBEDDER_CHROMADB_DEFAULT for am in files}
     return embeddings, sources
 

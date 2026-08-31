@@ -851,6 +851,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Wiki-page dedup no longer collapses unrelated pages that merely share a
+  lede (athenaeum#1140).** chromadb's default ONNX MiniLM embedding function
+  hard-codes a 256-token truncation window, and the wiki-dedupe pass
+  (`wiki_dedupe.py`) embedded whole page bodies through it — for the
+  majority of eligible pages (measured: 57% of a 2,513-page corpus exceed
+  the window at the corpus's ~1,200-character equivalent), the stored
+  vector represented only the page's lede, and this corpus's pages write a
+  structurally uniform lede, so unrelated pages with divergent bodies
+  collapsed into dense cliques (the persistent `wiki-c0a81d69`-class
+  degenerate clusters tracked on athenaeum#1005). `_resolve_wiki_embeddings`
+  now chunks each candidate page's body into `_CHUNK_CHARS` (900)
+  character pieces before embedding and mean-pools (new
+  `athenaeum.vecmath.mean_pool`) the resulting per-chunk vectors into one
+  representation per page, so content past the first chunk reaches the
+  final vector instead of being silently discarded. Scoped to the
+  wiki-dedupe embedding-resolution path only — `athenaeum.search.embed_texts`
+  itself is unchanged, so `fingerprint.py`, `tiers.py`, `_cmd_curate.py`,
+  and the raw-intake `clusters.py` embedding path are unaffected.
+  `librarian.cluster_threshold` is unchanged (a permissive threshold was
+  independently ruled out as the cause). See the PR body for the full
+  before/after corpus measurement and re-embedding cost estimate.
 - **Shape-rule evaluation now reaches one level below a configured
   `recall.extra_intake_roots` entry, so a `preserve` rule targeting
   hestia's lane logs can finally match (athenaeum#1096, closes the second
