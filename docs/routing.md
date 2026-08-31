@@ -22,11 +22,11 @@ resolvers return (issue athenaeum#1176).
 
 Every LLM-serving call site resolves one of the **model knobs** —
 `prompt_registry.KNOBS`, currently `classify`, `reasoning_t1`,
-`reasoning_t2`, `resolve`, `topic`, `write` (sorted; the source of truth is
-`prompt_registry._META_ROWS`, so this list grows automatically as new call
-sites are registered there — see athenaeum#781). Several *functions* share one
-knob by design; overriding that knob's provider or model affects every
-function that shares it.
+`reasoning_t2`, `resolve`, `rule_proposals`, `topic`, `write` (sorted; the
+source of truth is `prompt_registry._META_ROWS`, so this list grows
+automatically as new call sites are registered there — see athenaeum#781 /
+athenaeum#1174). Several *functions* share one knob by design; overriding
+that knob's provider or model affects every function that shares it.
 
 | Function | Knob | Batch-eligible? |
 |---|---|---|
@@ -38,6 +38,7 @@ function that shares it.
 | Recall query-topic extraction (`athenaeum query-topics`, the recall hot path) | `topic` | no |
 | Reasoning-tier T1 screen (`merge.t1_screen_rejects_merge_proposal`) | `reasoning_t1` | no |
 | Reasoning-tier T2 auto-apply gate (`merge.t2_screen_merge_proposal`) | `reasoning_t2` | no |
+| Rule-proposal drafting (`rule_proposals.build_rule_proposal_request_params`, athenaeum#1174) | `rule_proposals` | no |
 
 Only `classify` and `write` are ever batched — `batch.py`'s `execute_batch`
 has exactly two call sites (`BATCHABLE_KNOBS` in `librarian.py`). Setting
