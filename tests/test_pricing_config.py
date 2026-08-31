@@ -256,7 +256,7 @@ class TestPreflightModelRates:
 class TestResolveRunModelsMatchesKnobRegistry:
     def test_knob_set_matches_prompt_registry(self) -> None:
         """Drift guard: the athenaeum#783 preflight's knob coverage must match
-        exactly the six knobs athenaeum.prompt_registry.KNOBS defines (issue
+        exactly the knob set athenaeum.prompt_registry.KNOBS defines (issue
         athenaeum#781's single source of truth for the knob set) -- a new knob
         registered there without a matching getter in _resolve_run_models
         would silently escape the preflight."""
@@ -276,6 +276,58 @@ class TestResolveRunModelsMatchesKnobRegistry:
 
         for knob, model in _resolve_run_models(None):
             assert model_has_price(model), f"{knob} default {model!r} is unpriced"
+
+
+# ---------------------------------------------------------------------------
+# librarian._LIBRARIAN_ROUTED_KNOBS -- drift guard for the athenaeum#1174 derivation
+# ---------------------------------------------------------------------------
+
+
+class TestLibrarianRoutedKnobsDerivation:
+    """athenaeum#1174: ``_LIBRARIAN_ROUTED_KNOBS`` is derived from
+    ``prompt_registry.KNOBS`` minus an EXPLICIT, NAMED exclusion set
+    (``_LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS``), not hand-maintained. These
+    tests pin the three-way relationship the issue's AC asks for: routed +
+    excluded == the full registered knob set, with no overlap and no gap --
+    so an eighth knob added to ``_META_ROWS`` without an explicit routing
+    decision fails a test instead of silently landing (or not landing) in
+    the client-cache pipeline.
+    """
+
+    def test_routed_plus_excluded_equals_registry_knobs(self) -> None:
+        from athenaeum.librarian import (
+            _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS,
+            _LIBRARIAN_ROUTED_KNOBS,
+        )
+        from athenaeum.prompt_registry import KNOBS
+
+        assert set(_LIBRARIAN_ROUTED_KNOBS) | _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS == set(
+            KNOBS
+        )
+
+    def test_routed_and_excluded_are_disjoint(self) -> None:
+        from athenaeum.librarian import (
+            _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS,
+            _LIBRARIAN_ROUTED_KNOBS,
+        )
+
+        assert not (set(_LIBRARIAN_ROUTED_KNOBS) & _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS)
+
+    def test_no_knob_listed_twice_in_routed(self) -> None:
+        from athenaeum.librarian import _LIBRARIAN_ROUTED_KNOBS
+
+        assert len(_LIBRARIAN_ROUTED_KNOBS) == len(set(_LIBRARIAN_ROUTED_KNOBS))
+
+    def test_topic_and_rule_proposals_are_the_excluded_knobs(self) -> None:
+        """Pins the CURRENT exclusion set by name (not just its size) --
+        the trap the issue's Occam pre-flight warned about was a naive
+        ``_LIBRARIAN_ROUTED_KNOBS = prompt_registry.KNOBS`` silently
+        folding ``topic`` (already deliberately excluded, issue athenaeum#786)
+        and ``rule_proposals`` (default-off phase, issue athenaeum#1063) into
+        the entity/merge pipeline's per-knob client cache."""
+        from athenaeum.librarian import _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS
+
+        assert _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS == frozenset({"topic", "rule_proposals"})
 
 
 # ---------------------------------------------------------------------------

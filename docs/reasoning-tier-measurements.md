@@ -8,6 +8,21 @@ Figures here are **measured**, never estimated. Every section records the exact
 commands that produced it so a later agent with no session memory can reproduce a
 comparable number.
 
+**Attributability note (issue athenaeum#1200).** Through athenaeum#787's own
+2026-08-23 arming and the eight-day window that followed, T1 and T2 shared
+ONE flag (`reasoning_tier_auditing_enabled`) — "armed" was unambiguous.
+athenaeum#1200 split the gate: T1 (`reasoning_tier_auditing_enabled`) and
+T2's unreviewed auto-apply (`reasoning_tier_t2_auto_apply_enabled`) are now
+independently armable, T2 defaulting off. **Every window recorded here from
+athenaeum#1200 onward must state which tier(s) were armed** — `T1 only`,
+`T2 only`, `both`, or `neither` — as a named field in that window's
+Provenance table, not folded into a single "enabled: yes/no". A readout
+that only says "the flag was on" is no longer attributable: it cannot tell
+a T1-only window (proposal-screening measurement) from a both-armed window
+(the one that also exercises T2's auto-apply blast radius) after this
+split. Baseline 0 below predates the split and is retroactively `neither`
+(the single then-existing flag was unset for its entire window).
+
 See [`merge-inflow-restoration.md`](merge-inflow-restoration.md) (athenaeum#1030) for
 the follow-on analysis of the `max_merge_sources` suppression this doc
 measures below — what the recorded suppression counts do and do not support,
@@ -32,6 +47,7 @@ written.
 | Interpreter | `~/local-deploys/athenaeum/.venv/bin/python` — the pinned deploy checkout the nightly librarian runs from (`librarian-run.sh` resolves this same path) |
 | Deploy checkout git SHA | `ca038f5bfa5856bf12a0a3f9eb58990cdf403a3a` (committed 2026-08-16) |
 | Provider at measurement time | `llm.provider: api` (flipped from `claude-cli` on 2026-08-14, athenaeum#774) |
+| Tiers armed | **neither** (retroactive, issue athenaeum#1200: the single then-existing `reasoning_tier_auditing_enabled` flag was unset for this entire window — predates the T1/T2 split) |
 
 Interpreter choice is load-bearing: this host carries three athenaeum installs and
 the bare `athenaeum` on `PATH` is a stale pyenv 0.15.0. Reproduce with the deploy

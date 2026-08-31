@@ -406,6 +406,21 @@ DEFAULT_RULE_PROPOSALS_MODEL = "claude-opus-4-8"
 
 _RULE_PROPOSALS_MAX_TOKENS = 4096
 
+
+def _get_rule_proposals_model(config: dict[str, Any] | None = None) -> str:
+    """The ``rule_proposals`` knob's resolved model (env > yaml > default).
+
+    Mirrors ``tiers._get_classify_model`` / ``tiers._get_write_model`` --
+    a single-purpose getter so callers outside this module (issue
+    athenaeum#1174: ``librarian._resolve_run_models``, the athenaeum#783 preflight
+    input) resolve the SAME model this module's own drafting call
+    (:func:`build_rule_proposal_request_params`) will actually use, without
+    hand-rolling a second resolution path.
+    """
+    return resolve_model(
+        "rule_proposals", "ATHENAEUM_RULE_PROPOSALS_MODEL", DEFAULT_RULE_PROPOSALS_MODEL, config
+    )
+
 #: The disposition vocabulary a DRAFTED proposal may choose from -- every
 #: `ShapeRule.disposition` value EXCEPT `rollup`. `rollup` aggregates many
 #: records into one correction via a `group_by`/`aggregate` spec
@@ -507,12 +522,7 @@ def build_rule_proposal_request_params(
         "per the system prompt. Return ONLY the JSON object."
     )
     return {
-        "model": resolve_model(
-            "rule_proposals",
-            "ATHENAEUM_RULE_PROPOSALS_MODEL",
-            DEFAULT_RULE_PROPOSALS_MODEL,
-            config,
-        ),
+        "model": _get_rule_proposals_model(config),
         "max_tokens": resolve_max_tokens(
             "rule_proposals",
             "ATHENAEUM_RULE_PROPOSALS_MAX_TOKENS",

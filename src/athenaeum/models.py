@@ -2097,6 +2097,54 @@ class TokenUsage:
     # above; rendered in ``librarian-run-summary`` only when non-zero.
     preamble_stripped: int = 0
     preamble_rejected: int = 0
+    # Issue athenaeum#1177: ATTEMPT vs SUCCESS, tracked independently of
+    # ``api_calls`` (whose own increment convention already differs by call
+    # site — see ``add()`` vs ``add_tokens()``'s docstrings — and which this
+    # issue does not change, to avoid disturbing its existing cost-estimation/
+    # spend-ledger/test surface). A four-day incident (credits exhausted,
+    # every entity-phase Tier-2/3 call raising ``BadRequestError``) showed
+    # ``api_calls`` alone cannot answer "did this run actually try anything":
+    # the entity-phase call sites only ever bumped ``api_calls`` via
+    # ``add()``, which is reached ONLY after a successful response, so an
+    # all-failing run reported ``api_calls == 0`` -- indistinguishable from a
+    # genuinely idle run with nothing to do, which is exactly what let the
+    # ``athenaeum.zero_yield`` alarm's ``consecutive`` counter stay at 0
+    # through the whole incident (see ``librarian._zero_yield_tripped``).
+    #
+    # ``attempted_calls`` is bumped by :meth:`record_attempt`, called by a
+    # call site immediately BEFORE it dispatches a request -- mirrors the
+    # pre-existing manual ``usage.api_calls += 1`` pattern the C4
+    # detector/resolver loop (``merge.py``) already used for its OWN
+    # attempt-before-call counting, now also wired into the entity phase's
+    # shared ``tiers._timed_llm_call`` choke point (issue athenaeum#1177) so
+    # EVERY LLM-serving phase's attempts are visible here, not just C4's.
+    #
+    # ``succeeded_calls`` is bumped inside :meth:`add_tokens` itself (called
+    # ONLY when a real response's token/cache counts are being recorded) so
+    # it is accurate for every current ``add_tokens``/``add`` call site with
+    # no per-site changes beyond the two above. A call that attempted but
+    # never landed a response (retries exhausted, a non-transient error
+    # degrading the caller to a fallback) bumps ``attempted_calls`` but NOT
+    # ``succeeded_calls`` -- the disagreement AC athenaeum#1177 asks for: a
+    # counter must not be able to claim results a zero-token ledger
+    # contradicts.
+    attempted_calls: int = 0
+    succeeded_calls: int = 0
+
+    def record_attempt(self) -> None:
+        """Record ONE call about to be dispatched, before its outcome is known.
+
+        Call this immediately before the request goes out (issue
+        athenaeum#1177) -- both from the entity phase's shared
+        ``tiers._timed_llm_call`` choke point AND from merge.py's C4
+        detector/resolver loop, which ALREADY pre-increments its own
+        ``usage.api_calls``/local ``haiku_calls``/``resolve_calls`` counters
+        for its own per-phase summary line; this method's counter is
+        additive and separate -- a single RUN-LEVEL "was anything actually
+        attempted" signal spanning every phase, which nothing before this
+        issue aggregated in one place.
+        """
+        self.attempted_calls += 1
 
     def record_merge_echo(self, echoed_chars: int) -> None:
         """Record one Tier-3 merge LLM call's echoed-existing-page char count.
@@ -2236,11 +2284,20 @@ class TokenUsage:
         model-knob for per-knob attribution (:attr:`per_knob`) — independent
         of *model*, exactly mirroring how the two kwargs already coexist at
         every real call site (both sourced from the same config resolution).
+
+        Also bumps :attr:`succeeded_calls` (issue athenaeum#1177) — this
+        method is called ONLY when a real response's counts are known
+        (every current call site: ``add()``, ``add_batch_tokens()``, the C4
+        detector/resolver's own successful responses, the athenaeum#188
+        reresolve pass), so it is the single accurate place to count
+        genuine successes, independent of whatever attempt-counting
+        convention (or lack of one) the call site otherwise uses.
         """
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
         self.cache_creation_input_tokens += cache_creation_input_tokens
         self.cache_read_input_tokens += cache_read_input_tokens
+        self.succeeded_calls += 1
         if model:
             self._tag_model(
                 model,
