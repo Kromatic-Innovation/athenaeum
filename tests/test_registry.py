@@ -285,6 +285,197 @@ def test_seed_updates_a_changed_handle_value(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
+# athenaeum#1109 AC5 — hand-applied handle frontmatter survives a recompile.
+#
+# The real regression this guards (an operator commit hand-applying
+# source-handle frontmatter to 6 private-store pages after the pipeline
+# folded them into prose) lives in a private wiki repo and is not readable
+# from this container. This fixture reconstructs the SHAPE of that
+# situation with synthetic entities — a representative mix of list-valued
+# and scalar handle keys across company and person pages, each carrying
+# handle frontmatter that was never seeded through THIS run's raw intake
+# (standing in for a hand-applied edit) — and proves two things a recompile
+# must not do: drop the handles, or perturb them when an unrelated re-intake
+# for the same entity runs.
+# --------------------------------------------------------------------------
+
+
+def _hand_applied_fixture_pages(wiki: Path) -> dict[str, Path]:
+    """Six synthetic pages carrying hand-applied handle frontmatter,
+    mirroring the shape (mixed list + scalar keys, company + person, some
+    handles verified) of the real private-store correction this issue names."""
+    wiki.mkdir(parents=True, exist_ok=True)
+    pages = {
+        "company-northwind": (
+            "company-northwind-gadgets.md",
+            "---\nuid: company-northwind\ntype: company\nname: Northwind Gadgets\n"
+            "access: internal\ndomains:\n  - northwindgadgets.example\n"
+            "slack_channels:\n  - northwind-team\n"
+            "linkedin_url: https://www.linkedin.com/company/northwind-gadgets\n"
+            "handles_verified: '2026-07-27'\n"
+            "---\n\n# Northwind Gadgets\n\nA vendor account.\n",
+        ),
+        "company-example-holdings": (
+            "company-example-holdings.md",
+            "---\nuid: company-example-holdings\ntype: company\nname: Example Holdings\n"
+            "access: internal\ndomains:\n  - exampleholdings.example\n"
+            "  - example-holdings.example\n"
+            "partner_domains:\n  - partner.example\n"
+            "apollo_organization_id: '998877'\n"
+            "---\n\n# Example Holdings\n\nA partner account.\n",
+        ),
+        "company-testcorp": (
+            "company-testcorp.md",
+            "---\nuid: company-testcorp\ntype: company\nname: Testcorp\n"
+            "access: internal\ndrive_folder_ids:\n  - drivefolder-testcorp\n"
+            "mural_board_ids:\n  - muralboard-testcorp\n"
+            "---\n\n# Testcorp\n\nA client account.\n",
+        ),
+        "person-jamie-rivera": (
+            "person-jamie-rivera.md",
+            "---\nuid: person-jamie-rivera\ntype: person\nname: Jamie Rivera\n"
+            "access: internal\nalt_emails:\n  - jamie.rivera@example.com\n"
+            "slack_user_ids:\n  - U0000EXAMPLE\n"
+            "linkedin_url: https://www.linkedin.com/in/jamie-rivera-example\n"
+            "---\n\n# Jamie Rivera\n\nA contact.\n",
+        ),
+        "person-morgan-lee": (
+            "person-morgan-lee.md",
+            "---\nuid: person-morgan-lee\ntype: person\nname: Morgan Lee\n"
+            "access: internal\ngoogle_resource_name: people/c1234567890EXAMPLE\n"
+            "---\n\n# Morgan Lee\n\nA contact.\n",
+        ),
+        "company-sample-co": (
+            "company-sample-co.md",
+            "---\nuid: company-sample-co\ntype: company\nname: Sample Co\n"
+            "access: internal\nhandles_verified: '2026-07-27'\n"
+            "domains:\n  - sampleco.example\n"
+            "---\n\n# Sample Co\n\nA client account.\n",
+        ),
+    }
+    written: dict[str, Path] = {}
+    for uid, (filename, content) in pages.items():
+        path = wiki / filename
+        path.write_text(content, encoding="utf-8")
+        written[uid] = path
+    return written
+
+
+def test_ac5_hand_applied_handles_survive_a_recompile(tmp_path: Path) -> None:
+    """AC5 (athenaeum#1109, discharged by fixture — see module comment above):
+    hand-applied handle frontmatter, across a representative mix of
+    list-valued and scalar keys and both entity types, still resolves in
+    ``registry.json`` after a recompile, and recompiling twice is stable."""
+    wiki = tmp_path / "wiki"
+    pages = _hand_applied_fixture_pages(wiki)
+
+    registry_first = build_registry(wiki)
+    expected = {
+        "company-northwind": {
+            "domains": ["northwindgadgets.example"],
+            "slack_channels": ["northwind-team"],
+            "linkedin_url": "https://www.linkedin.com/company/northwind-gadgets",
+            "handles_verified": "2026-07-27",
+        },
+        "company-example-holdings": {
+            "domains": ["exampleholdings.example", "example-holdings.example"],
+            "partner_domains": ["partner.example"],
+            "apollo_organization_id": "998877",
+        },
+        "company-testcorp": {
+            "drive_folder_ids": ["drivefolder-testcorp"],
+            "mural_board_ids": ["muralboard-testcorp"],
+        },
+        "person-jamie-rivera": {
+            "alt_emails": ["jamie.rivera@example.com"],
+            "slack_user_ids": ["U0000EXAMPLE"],
+            "linkedin_url": "https://www.linkedin.com/in/jamie-rivera-example",
+        },
+        "person-morgan-lee": {
+            "google_resource_name": "people/c1234567890EXAMPLE",
+        },
+        "company-sample-co": {
+            "handles_verified": "2026-07-27",
+            "domains": ["sampleco.example"],
+        },
+    }
+    for uid, handles in expected.items():
+        assert registry_first["entities"][uid]["handles"] == handles, uid
+
+    # Recompile: rebuilding from the SAME wiki tree a second time (nothing
+    # else changed) must be byte-for-byte/value-for-value identical — a
+    # recompile must not silently erode hand-applied data over successive
+    # runs.
+    registry_second = build_registry(wiki)
+    assert registry_second == registry_first
+
+    # And the pages on disk are untouched by the compile itself (build_registry
+    # only reads).
+    for uid, path in pages.items():
+        assert path.exists()
+
+
+def test_ac5_unrelated_reintake_does_not_disturb_hand_applied_handles(
+    tmp_path: Path,
+) -> None:
+    """A routine, UNRELATED re-intake naming one of these entities (no new
+    handle data of its own) must not strip or alter the hand-applied handles
+    already on its page — the deterministic Tier-0 upsert path only touches
+    keys the incoming raw actually populates (see ``tier0_handle_upsert``),
+    and this is the concrete round-trip proof for the hand-applied fixture."""
+    from athenaeum.models import RawFile
+
+    wiki = tmp_path / "wiki"
+    pages = _hand_applied_fixture_pages(wiki)
+    before = pages["company-northwind"].read_text(encoding="utf-8")
+
+    # An unrelated re-seed for the SAME entity that adds ONE new handle and
+    # says nothing about the others — the routine shape a recompile-driving
+    # re-intake takes in production.
+    raw_dir = tmp_path / "raw" / "contact-wiki"
+    raw_dir.mkdir(parents=True)
+    raw_path = raw_dir / "reseed-northwind.md"
+    raw_path.write_text(
+        "---\nuid: company-northwind\ntype: company\nname: Northwind Gadgets\n"
+        "mural_board_ids:\n  - northwind-board\n---\n\n# Northwind Gadgets\n\nseed\n",
+        encoding="utf-8",
+    )
+    result = _run_seed(
+        wiki, RawFile(path=raw_path, source="contact-wiki", timestamp="", uuid8="")
+    )
+    assert result.updated == ["company-northwind"]
+
+    after = pages["company-northwind"].read_text(encoding="utf-8")
+    assert after != before  # the new key was added...
+    for needle in (
+        "northwindgadgets.example",
+        "northwind-team",
+        "linkedin.com/company/northwind-gadgets",
+        "handles_verified:",
+        "northwind-board",  # ...and so was the new one
+    ):
+        assert needle in after, f"recompile lost/never-added {needle!r}"
+
+    registry = build_registry(wiki)
+    assert registry["entities"]["company-northwind"]["handles"] == {
+        "domains": ["northwindgadgets.example"],
+        "slack_channels": ["northwind-team"],
+        "linkedin_url": "https://www.linkedin.com/company/northwind-gadgets",
+        "handles_verified": "2026-07-27",
+        "mural_board_ids": ["northwind-board"],
+    }
+    # The other five fixture pages are completely untouched.
+    for uid in (
+        "company-example-holdings",
+        "company-testcorp",
+        "person-jamie-rivera",
+        "person-morgan-lee",
+        "company-sample-co",
+    ):
+        assert pages[uid].exists()
+
+
+# --------------------------------------------------------------------------
 # collect_handles unit behaviour
 # --------------------------------------------------------------------------
 

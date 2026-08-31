@@ -1214,6 +1214,125 @@ class TestTier0HandleUpsert:
 
 
 # ---------------------------------------------------------------------------
+# athenaeum#1109: a populated source-handle seed that tier0 cannot place (no
+# uid, names no existing entity) must not be allowed to fall all the way
+# through Tier 2/3 and compile with its handles silently folded into prose —
+# it must fail loudly instead.
+# ---------------------------------------------------------------------------
+
+
+class TestUnplaceableSourceHandleFailsLoudly:
+    @staticmethod
+    def _resp(text: str) -> MagicMock:
+        r = MagicMock()
+        r.content = [MagicMock(text=text)]
+        return r
+
+    def test_new_entity_seed_with_handles_and_no_uid_raises_instead_of_compiling(
+        self, tmp_path: Path
+    ) -> None:
+        """A raw carrying populated source handles for a genuinely NEW entity
+        (no ``uid``, and no existing page for its name) is ineligible for
+        ``tier0_passthrough`` (requires a uid) AND for ``tier0_handle_upsert``
+        (only upserts onto an EXISTING page) — see athenaeum#692's decline branch.
+        Before this fix it fell through to Tier 2/3, which has no schema
+        awareness of the handle keys and would compile a page for it with the
+        handles nowhere in the frontmatter (folded into prose, if anywhere at
+        all): the exact defect athenaeum#1109 describes. It must now raise
+        ``UnplaceableSourceHandleError`` and write NOTHING for this raw.
+        """
+        import json
+
+        from athenaeum.librarian import process_one
+        from athenaeum.registry import UnplaceableSourceHandleError
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        raw_path = tmp_path / "raw" / "seed-new-co.md"
+        raw_path.parent.mkdir(parents=True)
+        raw_path.write_text(
+            "---\n"
+            "type: company\n"
+            "name: Widgetsmith\n"
+            "domains:\n  - widgetsmith.example\n"
+            "linkedin_url: https://www.linkedin.com/company/widgetsmith\n"
+            "---\n\n"
+            "New vendor, seeded with source handles, no internal uid known.\n",
+            encoding="utf-8",
+        )
+        raw = RawFile(path=raw_path, source="contact-wiki", timestamp="", uuid8="")
+
+        classify_client = MagicMock()
+        classify_client.messages.create.return_value = self._resp(
+            json.dumps(
+                [
+                    {
+                        "name": "Widgetsmith",
+                        "entity_type": "company",
+                        "tags": [],
+                        "access": "internal",
+                        "observations": "New vendor.",
+                    }
+                ]
+            )
+        )
+        write_client = MagicMock()
+        write_client.messages.create.return_value = self._resp(
+            "# Widgetsmith\n\nNew vendor.\n"
+        )
+
+        with pytest.raises(UnplaceableSourceHandleError) as excinfo:
+            process_one(
+                raw,
+                EntityIndex(wiki_root),
+                wiki_root,
+                classify_client,
+                valid_types=["company"],
+                valid_tags=[],
+                valid_access=["open", "internal", "confidential", "personal"],
+                write_client=write_client,
+            )
+
+        assert "domains" in str(excinfo.value)
+        assert "linkedin_url" in str(excinfo.value)
+        # Nothing was written for this raw — no partial, prose-only page.
+        assert list(wiki_root.glob("*.md")) == []
+
+    def test_handles_that_do_reach_frontmatter_do_not_raise(self, tmp_path: Path) -> None:
+        """Control: a populated-handle seed that resolves normally through
+        tier0 (existing entity, matched by name) is unaffected — the check
+        only fires when NOTHING written for the raw carries the handle."""
+        from athenaeum.librarian import process_one
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        (wiki_root / "company-acme-acme.md").write_text(
+            "---\nuid: company-acme\ntype: company\nname: Acme\naccess: internal\n"
+            "---\n\n# Acme\n\nBody.\n",
+            encoding="utf-8",
+        )
+        raw_path = tmp_path / "raw" / "seed-acme.md"
+        raw_path.parent.mkdir(parents=True)
+        raw_path.write_text(
+            "---\ntype: company\nname: Acme\ndomains:\n  - acme.example\n---\n\nseed\n",
+            encoding="utf-8",
+        )
+        raw = RawFile(path=raw_path, source="contact-wiki", timestamp="", uuid8="")
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki_root),
+            wiki_root,
+            client=MagicMock(),  # never called — tier0_handle_upsert handles it
+            valid_types=["company"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+        )
+        assert result.updated == ["company-acme"]
+        assert "acme.example" in (wiki_root / "company-acme-acme.md").read_text()
+
+
+# ---------------------------------------------------------------------------
 # rebuild_index
 # ---------------------------------------------------------------------------
 

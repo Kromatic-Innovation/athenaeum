@@ -203,7 +203,7 @@ from athenaeum.provider import (
     resolve_provider,
 )
 from athenaeum.quarantine import quarantine_file as _quarantine_file
-from athenaeum.registry import collect_handles
+from athenaeum.registry import assert_handles_placed, collect_handles
 from athenaeum.rule_proposals import _get_rule_proposals_model, run_rule_proposal_detection
 from athenaeum.rules import run_shape_rule_phase
 from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home now
@@ -1296,6 +1296,7 @@ def _apply_tier3_results(
     wiki_root: Path,
     index: EntityIndex,
     config: dict[str, object] | None,
+    incoming_handles: dict[str, object] | None = None,
 ) -> None:
     """Write a Tier-3 result set to disk and fold it into *result* in place.
 
@@ -1307,7 +1308,36 @@ def _apply_tier3_results(
     or the partial payload carried on a caught
     :class:`~athenaeum.models.RawFileOverBudgetError` (bound tripped
     mid-file); this function does not know or care which.
+
+    ``incoming_handles`` (issue athenaeum#1109) is :func:`athenaeum.registry.collect_handles`
+    applied to the source raw file's OWN frontmatter, or ``None``/``{}`` when
+    it carried none. When non-empty, every key it names must appear on at
+    least one of *new_entities* / *pending_updates* — Tier 2/3 has no schema
+    awareness of the athenaeum#453 source-handle keys and would otherwise fold them
+    into page-body prose, the exact defect athenaeum#1109 exists to close.
+    Checked BEFORE any write below, so a miss refuses the whole batch rather
+    than partially writing it: :func:`athenaeum.registry.assert_handles_placed`
+    raises :class:`~athenaeum.registry.UnplaceableSourceHandleError`, which
+    propagates out of this function (and out of :func:`process_one`)
+    uncaught — the same "raw stays on disk, run continues, failure is
+    ledgered" contract every other Tier-2/3 processing failure already gets
+    from the entity-sweep loop's generic exception handler. The over-budget
+    partial-progress call site deliberately passes ``None`` here — see its
+    call site's comment — to preserve issue athenaeum#994's guarantee that
+    already-computed partial progress always lands durably.
     """
+    if incoming_handles:
+        _written_metas: list[dict[str, object]] = []
+        for _, _pending_content in pending_updates:
+            _pending_meta, _ = parse_frontmatter(_pending_content)
+            if _pending_meta:
+                _written_metas.append(_pending_meta)
+        for _entity in new_entities:
+            _entity_meta, _ = parse_frontmatter(_entity.render())
+            if _entity_meta:
+                _written_metas.append(_entity_meta)
+        assert_handles_placed(incoming_handles, _written_metas)
+
     for _update_path, _update_content in pending_updates:
         atomic_write_text(_update_path, _update_content)
 
@@ -1463,6 +1493,12 @@ def process_one(
     # and `dry_run`'s own early return before Tier 2/3 (below) means no LLM
     # call is at risk from skipping this either way.
     raw_meta, raw_body = parse_frontmatter(raw.content)
+    # Issue athenaeum#1109: snapshot the raw's OWN populated source handles (if any)
+    # before anything downstream touches raw_meta/raw_body, so the Tier 2/3
+    # write path below can verify they actually reach frontmatter and not
+    # just page-body prose. `{}` for the overwhelming majority of raws that
+    # carry no source handle at all.
+    incoming_handles = collect_handles(raw_meta)
     if not dry_run:
         preamble = raw.content[: len(raw.content) - len(raw_body)]
         redacted_body = route_sensitive_values(
@@ -1771,13 +1807,20 @@ def process_one(
 
     if not actions:
         log.info("  No actions needed for %s", raw.ref)
-        if address_escalations:
+        if address_escalations or incoming_handles:
             # Issue athenaeum#1126: the raw file is unlinked after this run
             # regardless of outcome (below, on the write path) — if the ONLY
             # classification for this file was a declined address, the
             # early return above would otherwise destroy the fact silently.
             # Flush the escalation(s) through the same write/escalate seam
             # the normal completion path uses.
+            #
+            # Issue athenaeum#1109: also reached (with `address_escalations` possibly
+            # empty) when this raw carries populated source handles but Tier
+            # 1/2 found NO action to take for it at all — the most direct
+            # form of "these handles are about to be silently dropped".
+            # `_apply_tier3_results` raises before this would otherwise be a
+            # silent no-op return.
             _apply_tier3_results(
                 result,
                 new_entities=[],
@@ -1787,6 +1830,7 @@ def process_one(
                 wiki_root=wiki_root,
                 index=index,
                 config=config,
+                incoming_handles=incoming_handles,
             )
         return result
 
@@ -1821,6 +1865,14 @@ def process_one(
         # instead of discarding it. Mirrors the full-completion write path
         # below exactly, applied to the exception's partial payload instead
         # of a clean return.
+        #
+        # Issue athenaeum#1109: `incoming_handles` is deliberately NOT passed here
+        # (left at its default, `None`). This is athenaeum#994's partial-progress
+        # path — the whole point is that already-computed work lands durably
+        # no matter what. Refusing this write over a handle-placement miss
+        # would risk losing legitimate partial progress the budget trip cut
+        # short before it got there. The over-budget/quarantine-ledger path
+        # (unchanged) still flags this file, so it is retried next run.
         _apply_tier3_results(
             result,
             new_entities=exc.new_entities,
@@ -1843,6 +1895,7 @@ def process_one(
         wiki_root=wiki_root,
         index=index,
         config=config,
+        incoming_handles=incoming_handles,
     )
     return result
 

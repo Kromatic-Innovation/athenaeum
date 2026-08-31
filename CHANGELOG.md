@@ -100,6 +100,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/test_surface_divergence.py::TestCli::test_json_diverged_do_not_email_wiki_only_mark_matches_exit_code`
   and `::test_json_diverged_bounced_wiki_only_entry_matches_exit_code`.
 
+- **A populated athenaeum#453 source-handle key that the deterministic Tier-0 path
+  cannot place could still fall through to Tier 2/3 and compile with the
+  handle silently folded into page-body prose instead of frontmatter, so
+  `registry.json` was left silently missing it and nothing reported a
+  failure (athenaeum#1109).** athenaeum#486/#491/#692 already taught the deterministic
+  `tier0_handle_upsert`/`tier0_passthrough` paths to place a populated handle
+  as frontmatter without ever reaching the LLM tiers, and athenaeum#845 pinned the
+  gate's existing "decline cleanly, warn, fall through" contract for every
+  case those paths cannot place a handle onto (no uid and no existing entity
+  by that name; a name that resolves to a non-entity or cross-type page).
+  The residual gap: a fallthrough still proceeds to Tier 2/3, which has no
+  schema awareness of the handle keys (`athenaeum.registry.SOURCE_HANDLE_KEYS`) —
+  so the raw still compiled, just with the WARNING as the only trace. Fixed
+  by a new backstop, `athenaeum.registry.assert_handles_placed`, called from
+  `athenaeum.librarian._apply_tier3_results` immediately before any write:
+  it collects the raw's own populated source handles and refuses the ENTIRE
+  write batch (no partial write) with a new
+  `athenaeum.registry.UnplaceableSourceHandleError` if none of the
+  pages about to be written carry them as frontmatter. The error propagates
+  uncaught out of `process_one`, so the raw file is left on disk untouched
+  and picked up by the sweep loop's existing per-file failure/stuck-file
+  ledger — the same "fails loudly, retried next run" contract every other
+  Tier-2/3 processing failure already gets — rather than a warning-only
+  fallback that still let the defect through. The over-budget partial-progress
+  write path (athenaeum#994) deliberately does not apply this check, to preserve
+  its guarantee that already-computed partial progress always lands
+  durably. No hardcoded second copy of the handle-key set was added — the
+  check reads `registry.py`'s existing `SOURCE_HANDLE_KEYS`/`collect_handles`,
+  the single source of truth the deterministic Tier-0 paths already use.
+  Regression tests: `tests/test_librarian.py::TestUnplaceableSourceHandleFailsLoudly`
+  (the new-entity-with-no-uid case that previously compiled silently, plus a
+  control proving a normally-placed handle does not raise);
+  `tests/test_registry.py::test_ac5_hand_applied_handles_survive_a_recompile`
+  and `::test_ac5_unrelated_reintake_does_not_disturb_hand_applied_handles`
+  (fixture standing in for the operator's private-store hand-correction this
+  issue names, since that store is not reachable from this repo or its CI).
+
 ### Added
 
 - **Wiki-dedupe proposals and suppressions now carry durable embedder +
