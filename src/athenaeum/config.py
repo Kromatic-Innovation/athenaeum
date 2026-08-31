@@ -2756,6 +2756,23 @@ search_backend: fts5
 #   (the athenaeum#378 spend ledger) and emits a WARNING naming the `athenaeum drain`
 #   remedy only when the projection EXCEEDS this many days; below it stays
 #   silent. Precedence: this key, then 3. bool/non-positive fall through.
+# name_collision_scan: nightly deterministic name-collision detector opt-out
+#   (issue athenaeum#1170). DEFAULT TRUE -- the scan is a glob + a dict grouping
+#   (no LLM, no vectors, no network), so there is no cost reason to ship it
+#   off. See resolve_name_collision_scan_enabled. bool values only; anything
+#   else falls through to true.
+# name_collision_automerge: auto-merge the UNAMBIGUOUS subset of collisions
+#   the scan above finds (issue athenaeum#1170). DEFAULT FALSE, deliberately --
+#   issue athenaeum#1170 was split from the one-time destructive repair sweep
+#   over collisions ALREADY PRESENT in the operator's live corpus (issue
+#   athenaeum#1246, ~operator-gated and blocked by this issue); shipping
+#   auto-merge on by default would make the very next nightly run perform
+#   that unattended sweep, defeating the split. An operator who sets this
+#   true gets auto-merge of the unambiguous subset only -- an ambiguous
+#   collision always queues for human review regardless -- and every
+#   auto-merge is reversible via git by construction. See
+#   resolve_name_collision_automerge_enabled. bool values only; anything
+#   else falls through to false.
 # librarian:
 #   cluster_threshold: 0.55
 #   cluster_output: raw/_librarian-clusters.jsonl
@@ -2780,6 +2797,8 @@ search_backend: fts5
 #   page_warn_bytes: 8192
 #   page_flag_bytes: 16384
 #   drain_warn_days: 3
+#   name_collision_scan: true
+#   name_collision_automerge: false
 
 # LLM provider selection (issue athenaeum#330). Chooses the backend the librarian
 # compile path (tiers, contradiction detector, resolver) talks to.
