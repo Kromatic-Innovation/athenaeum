@@ -27,19 +27,26 @@ import logging
 import re
 import subprocess
 import textwrap
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
 import anthropic as anthropic_mod
+import httpx
 import pytest
 
 import athenaeum.models as models_mod
+from athenaeum import batch_state, spend
 from athenaeum.batch import (
+    BATCH_MAX_REQUESTS,
     BATCH_POLL_INTERVAL_SECONDS,
+    BATCH_RETENTION_DAYS,
     BatchExecutionError,
     BatchRequest,
+    BatchRunResult,
+    collect_pending_batches,
     execute_batch,
     process_batch_run,
 )
@@ -54,7 +61,11 @@ from athenaeum.librarian import (
 )
 from athenaeum.models import EntityIndex, TokenUsage
 from athenaeum.schemas import KNOWN_TYPES
-from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
+from athenaeum.tiers import (
+    DEFAULT_CLASSIFY_MODEL,
+    DEFAULT_PAGE_SIZE_THRESHOLD_CHARS,
+    tier1_programmatic_match,
+)
 
 # Issue athenaeum#964: ``librarian.FALLBACK_TYPES`` was consolidated into the
 # one ``schemas.KNOWN_TYPES`` definition (drift fix -- see librarian.py's
@@ -98,6 +109,7 @@ class _FakeBatches:
         polls_until_end: int = 1,
         never_end: bool = False,
         fail_marker: str | None = None,
+        expire_marker: str | None = None,
         create_error: Exception | None = None,
         truncate_marker: str | None = None,
     ) -> None:
@@ -105,6 +117,11 @@ class _FakeBatches:
         self._polls_until_end = polls_until_end
         self._never_end = never_end
         self._fail_marker = fail_marker
+        # athenaeum#1146: a request whose content carries this marker comes back
+        # ``expired`` — the per-request terminal that is NOT billed and must
+        # take the ordinary per-file failure path, never the keep-the-handle
+        # path a batch-level "still in flight" takes.
+        self._expire_marker = expire_marker
         self._create_error = create_error
         # Issue athenaeum#476: a request whose content contains this marker is returned
         # from the batch TRUNCATED (unterminated array + stop_reason
@@ -158,6 +175,11 @@ class _FakeBatches:
                         type="errored",
                         error=SimpleNamespace(type="invalid_request"),
                     ),
+                )
+            elif self._expire_marker and self._expire_marker in user_msg:
+                yield SimpleNamespace(
+                    custom_id=req["custom_id"],
+                    result=SimpleNamespace(type="expired"),
                 )
             elif self._truncate_marker and self._truncate_marker in user_msg:
                 # athenaeum#476: an unterminated array cut off at the output budget.
@@ -669,6 +691,91 @@ class TestBatchSyncEquivalence:
         msgs = _all_batch_messages(batch_client)
         assert any("## Entity to create" in m for m in msgs)
         assert any("## Existing page content" in m for m in msgs)
+
+    def test_preamble_only_sibling_create_is_skipped_not_file_aborted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#1171 gate-review must-fix.
+
+        One raw file's tier-2 classify yields TWO new-entity creates.
+        WidgetPreambleOnly's tier-3 create response is ENTIRELY planning
+        preamble (see ``strip_planning_preamble``); WidgetGood's is a normal
+        page. The rejection must be scoped to WidgetPreambleOnly alone: the
+        raw file is still fully processed (rc == 0, the file is consumed,
+        NOT retried/stuck), and WidgetGood still lands as a wiki page — the
+        sync and batch transports must agree on this.
+        """
+
+        def responder(params: dict[str, Any]) -> str:
+            user_msg = params["messages"][0]["content"]
+            if params["model"] == DEFAULT_CLASSIFY_MODEL:
+                return json.dumps(
+                    [
+                        {
+                            "name": "WidgetGood",
+                            "entity_type": "concept",
+                            "tags": [],
+                            "access": "internal",
+                            "observations": "Facts about WidgetGood.",
+                        },
+                        {
+                            "name": "WidgetPreambleOnly",
+                            "entity_type": "concept",
+                            "tags": [],
+                            "access": "internal",
+                            "observations": "Facts about WidgetPreambleOnly.",
+                        },
+                    ]
+                )
+            if "## Entity to create" in user_msg:
+                name = re.search(r"^Name: (.+)$", user_msg, re.MULTILINE).group(1)
+                if name == "WidgetPreambleOnly":
+                    return (
+                        "Looking at the new observation, I need to think "
+                        "about how best to phrase this."
+                    )
+                return f"# {name}\n\nFacts about {name}.\n\n[^1]: src"
+            raise AssertionError(f"unrecognized request: {user_msg[:120]}")
+
+        contents = ["One session mentions both WidgetGood and WidgetPreambleOnly.\n"]
+        root_sync = _seed_root(tmp_path, "sync", contents)
+        root_batch = _seed_root(tmp_path, "batch", contents)
+        _clean_env(monkeypatch)
+        _freeze_recorded_at(monkeypatch)
+
+        sync_client = _FakeClient(responder)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: sync_client)
+        _patch_uids(monkeypatch)
+        rc_sync = run(
+            raw_root=root_sync / "raw",
+            wiki_root=root_sync / "wiki",
+            knowledge_root=root_sync,
+        )
+
+        batch_client = _FakeClient(responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: batch_client)
+        _patch_uids(monkeypatch)
+        rc_batch = run(
+            raw_root=root_batch / "raw",
+            wiki_root=root_batch / "wiki",
+            knowledge_root=root_batch,
+            batch_mode=True,
+        )
+
+        # Both transports agree: clean run, not a failure.
+        assert rc_sync == 0
+        assert rc_batch == 0
+
+        for root in (root_sync, root_batch):
+            names = " ".join(_wiki_snapshot(root))
+            assert "widgetgood" in names
+            assert "widgetpreambleonly" not in names
+            # The raw file was fully consumed -- NOT preserved for retry
+            # (the old, wrong behavior aborted the whole file and left it
+            # on disk).
+            assert not list((root / "raw" / "sessions").glob("*.md"))
+
+        assert _wiki_snapshot(root_batch) == _wiki_snapshot(root_sync)
 
     def test_escalate_protocol_through_batch_transport(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1322,6 +1429,97 @@ class TestMidAssemblyFailure:
         assert remaining == ["20240411T120000Z-aabbccd1.md"]
 
 
+class TestSectionScopedMergeBothTransports:
+    """Issue athenaeum#1181, priority #2: ``batch.py`` calls
+    ``tier3_merge_params`` DIRECTLY to build a batched patch-mode request —
+    it never goes through ``tier3_merge``. A change made only in the
+    synchronous path silently would not apply to batch mode; that exact
+    divergence was a real defect in a sibling issue that landed the same
+    day as this one. Proves the batch-assembled request is section-scoped
+    identically to the synchronous transport, AND that batch assembly now
+    records ``merge_echoed_chars`` (issue athenaeum#1184) — it never called
+    ``record_merge_echo`` for its own patch-mode request before this issue.
+    """
+
+    def test_batch_assembled_merge_is_section_scoped_and_echo_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _seed_root(
+            tmp_path,
+            "bt1",
+            ["Acme Corp support line moved to a toll-free number.\n"],
+            with_acme=True,
+        )
+        # Overwrite the seeded single-heading Acme page with a realistic
+        # multi-section one -- nothing to scope by otherwise.
+        (root / "wiki" / "acme1234-acme-corp.md").write_text(
+            textwrap.dedent(
+                """\
+                ---
+                uid: acme1234
+                type: company
+                name: Acme Corp
+                access: internal
+                created: '2024-01-01'
+                updated: '2024-01-01'
+                ---
+
+                # Acme Corp
+
+                ## Engineering
+
+                - Uses Kubernetes for deployment.[^1]
+                - Ships weekly.[^1]
+
+                ## Contacts
+
+                - Reach support at help@acme.example.[^1]
+                - Front desk: 555-0100.[^1]
+                """
+            ),
+            encoding="utf-8",
+        )
+        _clean_env(monkeypatch)
+        client = _FakeClient(_scripted_responder)  # sync allowed; merge batches here
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        _patch_uids(monkeypatch)
+
+        import athenaeum.batch as batch_mod
+
+        real_merge_params = batch_mod.tier3_merge_params
+        captured: list[dict[str, Any]] = []
+
+        def spy(action: Any, existing_body: str, source_ref: str, **kw: Any) -> Any:
+            params = real_merge_params(action, existing_body, source_ref, **kw)
+            captured.append({"kwargs": kw, "params": params})
+            return params
+
+        monkeypatch.setattr(batch_mod, "tier3_merge_params", spy)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+        )
+        assert rc == 0
+        assert len(captured) == 1, "expected exactly one batched merge request"
+
+        sent = captured[0]["params"]["messages"][0]["content"]
+        # Section-scoped: Contacts' own content is present, Engineering's
+        # is not -- the SAME scoping tier3_merge_params gives the
+        # synchronous transport also reaches batch assembly.
+        assert "Front desk: 555-0100" in sent
+        assert "Uses Kubernetes" not in sent
+
+        # Issue athenaeum#1184: batch assembly must now thread usage through
+        # and record the echo, matching the synchronous transport.
+        usage_obj = captured[0]["kwargs"].get("usage")
+        assert usage_obj is not None
+        assert usage_obj.merge_calls >= 1
+        assert usage_obj.merge_echoed_chars > 0
+
+
 # ---------------------------------------------------------------------------
 # Usage accounting + 50% batch discount
 # ---------------------------------------------------------------------------
@@ -1379,7 +1577,7 @@ class TestBatchUsageAccounting:
             usage=usage,
             sleep=lambda s: None,
         )
-        assert out["a"].content[0].text == "ok"
+        assert out.results["a"].content[0].text == "ok"
         assert usage.input_tokens == 100
         assert usage.output_tokens == 50
         assert usage.batch_input_tokens == 100
@@ -1441,7 +1639,11 @@ class TestBatchPolling:
             client, _one_request(), description="test", sleep=sleeps.append
         )
         assert sleeps == [BATCH_POLL_INTERVAL_SECONDS] * 3
-        assert out["a"].content[0].text == "ok"
+        assert out.results["a"].content[0].text == "ok"
+        # athenaeum#1144: a batch that ENDED is not in flight, and the outcome
+        # carries the batch id either way.
+        assert out.in_flight is False
+        assert out.batch_id == "msgbatch_1"
 
     def test_timeout_cancels_and_raises(self) -> None:
         client = _FakeClient(lambda params: "ok", allow_sync=False, never_end=True)
@@ -1457,7 +1659,10 @@ class TestBatchPolling:
 
     def test_empty_request_list_submits_nothing(self) -> None:
         client = _FakeClient(lambda params: "ok", allow_sync=False)
-        assert execute_batch(client, [], description="test") == {}
+        empty = execute_batch(client, [], description="test")
+        assert empty.results == {}
+        assert empty.in_flight is False
+        assert empty.batch_id == ""
         assert client.batches.submitted == []
 
 
@@ -1533,3 +1738,2140 @@ class TestBatchTruncationRetry:
         # And the file RECOVERED: the WidgetTrunc page was written, not dropped.
         pages = list((root / "wiki").glob("*.md"))
         assert any("WidgetTrunc" in p.read_text(encoding="utf-8") for p in pages)
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1144 — the run deadline threaded into the batch poll: a BOUNDED
+# WAIT that spills to a handle instead of cancelling.
+#
+# The failure this closes: ``execute_batch`` polled against the module's 24h
+# ``BATCH_POLL_TIMEOUT_SECONDS`` inside a bounded nightly window, and on
+# timeout it CANCELLED the batch -- destroying work that is already paid for
+# server-side. With a deadline the poll stops at the earlier of batch-end or
+# the remaining run budget; if the deadline wins, the batch is left running,
+# an athenaeum#1143 handle is recorded over its raw files, and those refs come back
+# as ``in_flight`` -- neither ``failed`` (which would re-bill them) nor
+# ``deferred`` (which would claim nothing was submitted).
+#
+# AC6: every test here drives the poll through the injectable ``sleep``. None
+# waits on real time.
+# ---------------------------------------------------------------------------
+
+
+class TestBatchDeadlineSpill:
+    def test_deadline_spill_leaves_batch_running_and_reports_in_flight(self) -> None:
+        """AC2 + AC3: the poll stops at the deadline; no cancel, no raise."""
+        client = _FakeClient(_scripted_responder, allow_sync=False, never_end=True)
+        sleeps: list[float] = []
+
+        out = execute_batch(
+            client,
+            _one_request(),
+            description="test",
+            sleep=sleeps.append,
+            # Budget of ~70s against a 30s poll cadence: waited walks
+            # 0 -> 30 -> 60 -> 90 and spills on the 90 pass. Driven entirely
+            # by the injected sleep -- no real time passes.
+            deadline=time.monotonic() + 70.0,
+        )
+
+        assert out.in_flight is True
+        assert out.batch_id == "msgbatch_1"
+        assert out.results == {}
+        # AC3, the whole point: the batch is committed server-side and is the
+        # artifact the handle exists to preserve.
+        assert client.batches.cancelled == []
+        assert sleeps == [BATCH_POLL_INTERVAL_SECONDS] * 3
+
+    def test_already_expired_deadline_spills_without_polling(self) -> None:
+        """A deadline already in the past spills on the first pass."""
+        client = _FakeClient(_scripted_responder, allow_sync=False, never_end=True)
+        sleeps: list[float] = []
+
+        out = execute_batch(
+            client,
+            _one_request(),
+            description="test",
+            sleep=sleeps.append,
+            deadline=time.monotonic() - 5.0,
+        )
+
+        assert out.in_flight is True
+        assert sleeps == []
+        assert client.batches.cancelled == []
+
+    def test_batch_ending_inside_the_window_is_collected_unchanged(self) -> None:
+        """AC2: a batch that ends in time continues synchronously, as today."""
+        client = _FakeClient(lambda params: "ok", allow_sync=False, polls_until_end=3)
+        sleeps: list[float] = []
+
+        out = execute_batch(
+            client,
+            _one_request(),
+            description="test",
+            sleep=sleeps.append,
+            deadline=time.monotonic() + 10_000.0,
+        )
+
+        assert out.in_flight is False
+        assert out.results["a"].content[0].text == "ok"
+        assert sleeps == [BATCH_POLL_INTERVAL_SECONDS] * 3
+
+    def test_no_deadline_preserves_the_timeout_cancel_path(self) -> None:
+        """AC2: ``timeout`` semantics are untouched when no deadline is given.
+
+        The complement of the spill: with no deadline, a batch that never ends
+        still hits the module timeout, is cancelled best-effort, and raises --
+        exactly the pre-athenaeum#1144 behaviour.
+        """
+        client = _FakeClient(lambda params: "ok", allow_sync=False, never_end=True)
+
+        with pytest.raises(BatchExecutionError):
+            execute_batch(
+                client,
+                _one_request(),
+                description="test",
+                sleep=lambda s: None,
+                timeout=BATCH_POLL_INTERVAL_SECONDS * 2.5,
+                deadline=None,
+            )
+
+        assert client.batches.cancelled == ["msgbatch_1"]
+
+    def test_deadline_beats_a_later_timeout(self) -> None:
+        """Both bounds armed: the EARLIER one wins, and it is the deadline."""
+        client = _FakeClient(lambda params: "ok", allow_sync=False, never_end=True)
+
+        out = execute_batch(
+            client,
+            _one_request(),
+            description="test",
+            sleep=lambda s: None,
+            timeout=10_000.0,
+            deadline=time.monotonic() + 40.0,
+        )
+
+        assert out.in_flight is True
+        assert client.batches.cancelled == []
+
+
+class TestBatchAssemblyLimits:
+    """AC7: a batch past the documented API limits is refused locally."""
+
+    def test_request_count_over_the_limit_is_refused_before_submit(self) -> None:
+        client = _FakeClient(lambda params: "ok", allow_sync=False)
+        requests = [
+            BatchRequest(
+                custom_id=f"c{i}",
+                params={
+                    "model": "m",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "x"}],
+                },
+            )
+            for i in range(BATCH_MAX_REQUESTS + 1)
+        ]
+
+        with pytest.raises(BatchExecutionError) as exc:
+            execute_batch(client, requests, description="huge", sleep=lambda s: None)
+
+        assert str(BATCH_MAX_REQUESTS) in str(exc.value)
+        # Refused at ASSEMBLY: nothing reached the API, so there is no 400 to
+        # interpret and no server-side cost.
+        assert client.batches.submitted == []
+
+    def test_payload_bytes_over_the_limit_are_refused_before_submit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Shrink the byte cap rather than building a 256 MB payload in a unit
+        # test -- the predicate under test is the comparison, not the constant.
+        monkeypatch.setattr("athenaeum.batch.BATCH_MAX_PAYLOAD_BYTES", 512)
+        client = _FakeClient(lambda params: "ok", allow_sync=False)
+        requests = [
+            BatchRequest(
+                custom_id="big",
+                params={
+                    "model": "m",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "x" * 2048}],
+                },
+            )
+        ]
+
+        with pytest.raises(BatchExecutionError) as exc:
+            execute_batch(client, requests, description="fat", sleep=lambda s: None)
+
+        assert "exceeding the Batch API limit" in str(exc.value)
+        assert client.batches.submitted == []
+
+    def test_a_batch_inside_the_limits_submits_normally(self) -> None:
+        client = _FakeClient(lambda params: "ok", allow_sync=False)
+        out = execute_batch(client, _one_request(), description="fine", sleep=lambda s: None)
+        assert out.in_flight is False
+        assert len(client.batches.submitted) == 1
+
+
+class TestProcessBatchRunDeadlineSpill:
+    """AC4 + AC5: the spill persists a handle and books in-flight refs."""
+
+    def test_tier2_spill_records_a_classify_handle_and_keeps_raw_on_disk(
+        self, tmp_path: Path
+    ) -> None:
+        contents = ["Standalone fact about WidgetSpill gadget.\n"]
+        root = _seed_root(tmp_path, "k", contents)
+        raw_files = discover_raw_files(root / "raw")
+        index = EntityIndex(root / "wiki")
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        client = _FakeClient(_scripted_responder, allow_sync=False, never_end=True)
+
+        result = process_batch_run(
+            raw_files,
+            index,
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            deadline=time.monotonic() - 1.0,
+            cache_dir=cache_dir,
+        )
+
+        ref = raw_files[0].ref
+        # AC5: in-flight is its OWN bucket. Not failed (that would re-bill the
+        # same classify call next run), not deferred (that would claim nothing
+        # was submitted).
+        assert result.in_flight_refs == [ref]
+        assert result.failed_refs == []
+        assert result.deferred_refs == []
+        assert result.created == 0
+        assert result.in_flight_batch_ids == ["msgbatch_1"]
+
+        # AC4: the athenaeum#1143 handle is on disk with the batch id, the knob, and
+        # the ref map -- everything a later run needs to collect it.
+        handles = batch_state.load(cache_dir)
+        assert list(handles) == ["msgbatch_1"]
+        handle = handles["msgbatch_1"]
+        assert handle.knob == "classify"
+        assert [rec.ref for rec in handle.refs.values()] == [ref]
+
+        # Nothing was written and the raw file is untouched -- it is what the
+        # later collect applies the result TO.
+        assert raw_files[0].path.exists()
+        assert not list((root / "wiki").glob("*widget*"))
+        # And the second phase never ran: only the tier-2 batch was submitted.
+        assert len(client.batches.submitted) == 1
+
+    def test_tier3_spill_records_a_write_handle(self, tmp_path: Path) -> None:
+        """The tier-3 batch spills on its own: classify landed, write did not."""
+        contents = ["Standalone fact about WidgetWrite gadget.\n"]
+        root = _seed_root(tmp_path, "k", contents)
+        raw_files = discover_raw_files(root / "raw")
+        index = EntityIndex(root / "wiki")
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        # Two clients so the phases can end differently: classify ends at
+        # create, write never does.
+        classify_client = _FakeClient(_scripted_responder, allow_sync=False)
+        write_client = _FakeClient(_scripted_responder, allow_sync=False, never_end=True)
+
+        result = process_batch_run(
+            raw_files,
+            index,
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            deadline=time.monotonic() - 1.0,
+            cache_dir=cache_dir,
+        )
+
+        assert result.in_flight_refs == [raw_files[0].ref]
+        assert result.created == 0
+        assert raw_files[0].path.exists()
+
+        handles = batch_state.load(cache_dir)
+        assert [h.knob for h in handles.values()] == ["write"]
+        # The tier-2 batch DID complete and was collected -- only the write
+        # batch spilled.
+        assert len(classify_client.batches.submitted) == 1
+        assert len(write_client.batches.submitted) == 1
+
+    def test_no_deadline_preserves_todays_behaviour_exactly(self, tmp_path: Path) -> None:
+        """AC1: ``deadline=None`` records no handle and books no in-flight refs."""
+        contents = ["Standalone fact about WidgetPlain gadget.\n"]
+        root = _seed_root(tmp_path, "k", contents)
+        raw_files = discover_raw_files(root / "raw")
+        index = EntityIndex(root / "wiki")
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+
+        result = process_batch_run(
+            raw_files,
+            index,
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            cache_dir=cache_dir,
+        )
+
+        assert result.created == 1
+        assert result.in_flight_refs == []
+        assert result.in_flight_batch_ids == []
+        assert batch_state.load(cache_dir) == {}
+        assert not raw_files[0].path.exists()
+
+
+class TestLibrarianDeadlineThreading:
+    """AC1, AC5, AC8 at the ``run()`` seam."""
+
+    def _spilling_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[dict[str, Any], dict[str, Any], Path, int]:
+        contents = ["Standalone fact about WidgetThread gadget.\n"]
+        root = _seed_root(tmp_path, "k", contents)
+        _clean_env(monkeypatch)
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        _patch_uids(monkeypatch)
+
+        captured: dict[str, Any] = {}
+        raw_path = next((root / "raw" / "sessions").glob("*.md"))
+
+        def fake_process_batch_run(*args: Any, **kwargs: Any) -> BatchRunResult:
+            captured.update(kwargs)
+            captured["raw_files"] = list(args[0])
+            return BatchRunResult(in_flight_refs=[args[0][0].ref])
+
+        monkeypatch.setattr("athenaeum.batch.process_batch_run", fake_process_batch_run)
+
+        stats: dict[str, Any] = {}
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+            out_run_stats=stats,
+        )
+        return captured, stats, raw_path, rc
+
+    def test_batch_branch_passes_a_deadline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1: the librarian's batch branch threads its wall-clock deadline."""
+        captured, _stats, _raw, _rc = self._spilling_run(tmp_path, monkeypatch)
+
+        assert "deadline" in captured
+        # A real run always arms an internal deadline (athenaeum#396's default), so
+        # the batch poll is bounded rather than falling through to the 24h
+        # module constant.
+        assert isinstance(captured["deadline"], float)
+        assert captured["deadline"] > time.monotonic()
+
+    def test_in_flight_refs_are_reported_and_the_raw_file_survives(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC5: in-flight refs reach the run stats; AC8: nothing is consumed."""
+        _captured, stats, raw_path, _rc = self._spilling_run(tmp_path, monkeypatch)
+
+        assert stats["in_flight_refs"], "expected the spilled refs on the run stats"
+        assert stats["deferred_refs"] == []
+        assert stats["failed_files"] == []
+        assert raw_path.exists()
+
+    def test_spilled_run_reports_a_distinguishable_reason(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """AC8: a spill is not a healthy zero-compile run, and says so.
+
+        A run that compiled nothing because its batch is still in flight
+        renders ``reason=batch-in-flight`` with an ``in_flight=`` count --
+        distinct from the ``reason=completed`` a genuinely idle run renders,
+        and distinct from the ``budget``/``deadline`` early-stop vocabulary
+        the athenaeum#1135 zero-progress refusal keys on.
+        """
+        caplog.set_level(logging.INFO, logger="athenaeum")
+        _captured, _stats, _raw, rc = self._spilling_run(tmp_path, monkeypatch)
+
+        summary = [
+            rec.getMessage()
+            for rec in caplog.records
+            if rec.getMessage().startswith("librarian-run-summary")
+        ]
+        assert summary, "expected a run-summary line"
+        assert "reason=batch-in-flight" in summary[-1]
+        assert "in_flight=1" in summary[-1]
+        # Deliberately OUTSIDE the early-stop vocabulary: work in flight is
+        # progress, so the zero-progress refusal must not fire.
+        assert rc != EXIT_LIBRARIAN_REFUSAL
+
+    def test_zero_yield_alarm_does_not_fire_on_a_spilled_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC8: spent calls whose results are still coming are not wasted."""
+        _captured, stats, _raw, _rc = self._spilling_run(tmp_path, monkeypatch)
+
+        assert stats.get("zero_yield") is not True
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1145 — the collect-only adoption path.
+#
+# A run whose only work is collecting a PRIOR run's batch is a valid and
+# useful run. Every test here seeds the handle store the way production does:
+# by actually spilling a batch through athenaeum#1144's deadline path, then
+# flipping the fake batch to `ended` and collecting it. That round trip is the
+# point — a handle written by the submit side has to be readable by the
+# collect side, and a test that hand-writes the store would not prove it.
+# ---------------------------------------------------------------------------
+
+
+def _index_names(index: EntityIndex) -> list[str]:
+    """Every name/alias key the index currently holds."""
+    return [key for key, _value in index.items()]
+
+
+def _write_extra_raw(root: Path, content: str) -> Path:
+    """Drop one more raw intake file into an already-seeded root."""
+    sessions = root / "raw" / "sessions"
+    existing = sorted(sessions.glob("*.md"))
+    n = len(existing)
+    path = sessions / f"2026-01-0{n + 2}T00-00-00Z-extra{n:03d}.md"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _spill_a_classify_batch(
+    tmp_path: Path,
+    name: str,
+    contents: list[str],
+    *,
+    with_acme: bool = False,
+) -> tuple[Path, Path, _FakeClient, TokenUsage, list[Any]]:
+    """Submit a tier-2 batch and spill it at the deadline. Returns the pieces."""
+    root = _seed_root(tmp_path, name, contents, with_acme=with_acme)
+    cache_dir = tmp_path / f"{name}-cache"
+    cache_dir.mkdir()
+    client = _FakeClient(_scripted_responder, allow_sync=False, never_end=True)
+    raw_files = discover_raw_files(root / "raw")
+    usage = TokenUsage()
+
+    spilled = process_batch_run(
+        raw_files,
+        EntityIndex(root / "wiki"),
+        root / "wiki",
+        client,
+        FALLBACK_TYPES,
+        FALLBACK_TAGS,
+        FALLBACK_ACCESS,
+        usage=usage,
+        config=None,
+        max_api_calls=100,
+        sleep=lambda s: None,
+        deadline=time.monotonic() - 1.0,
+        cache_dir=cache_dir,
+    )
+    assert spilled.in_flight_refs, "expected the submit to spill to a handle"
+    # The batch is "still running" as far as the store is concerned; flip the
+    # fake so the next retrieve reports it ended.
+    client.batches._never_end = False
+    return root, cache_dir, client, usage, raw_files
+
+
+def _collect(
+    root: Path,
+    cache_dir: Path,
+    client: _FakeClient,
+    usage: TokenUsage,
+    *,
+    write_client: _FakeClient | None = None,
+    now: datetime | None = None,
+) -> Any:
+    """Run one collect pass over *cache_dir*'s handles against *root*."""
+    return collect_pending_batches(
+        EntityIndex(root / "wiki"),
+        root / "wiki",
+        client,
+        FALLBACK_TYPES,
+        FALLBACK_TAGS,
+        FALLBACK_ACCESS,
+        usage=usage,
+        config=None,
+        max_api_calls=100,
+        write_client=write_client,
+        sleep=lambda s: None,
+        cache_dir=cache_dir,
+        now=now,
+    )
+
+
+class TestCollectPendingBatches:
+    def test_collect_applies_a_classify_handle_end_to_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2 + AC3 + AC7: results land through finalize; handle retires."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "c1", ["Standalone fact about WidgetCollect gadget.\n"]
+        )
+        index = EntityIndex(root / "wiki")
+
+        out = collect_pending_batches(
+            index,
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        # AC7: the collected tier-2 handle pipelined straight into a NEW tier-3
+        # batch in this same run, and that batch was collected too.
+        assert out.created == 1
+        assert out.collected_refs == [raw_files[0].ref]
+        assert out.failed_refs == []
+        # AC2: applied through the normal finalize path — the page exists and
+        # the raw file was consumed, exactly as a within-run batch would.
+        assert list((root / "wiki").glob("*widgetcollect*"))
+        assert not raw_files[0].path.exists()
+        # AC3: the handle is retired and its lease with it, in one store write.
+        assert batch_state.load(cache_dir) == {}
+        assert out.retired_handles and out.kept_handles == []
+
+    def test_collect_books_usage_with_the_handles_knob_and_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC5: token usage lands via add_batch_tokens, per knob AND per model.
+
+        The submitting run's request payloads are gone by collect time, so the
+        athenaeum#247 per-model attribution can only come from the handle — which
+        is why athenaeum#1145 records each request's model on its ref record.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, _submit_usage, _raws = _spill_a_classify_batch(
+            tmp_path, "c2", ["Standalone fact about WidgetUsage gadget.\n"]
+        )
+        handle = next(iter(batch_state.load(cache_dir).values()))
+        assert handle.knob == "classify"
+        assert [r.model for r in handle.refs.values()] == [DEFAULT_CLASSIFY_MODEL]
+
+        usage = TokenUsage()
+        collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        # Booked at the batch (50%-discounted) counters, not the sync ones.
+        assert usage.batch_input_tokens > 0
+        assert usage.per_knob["classify"]["batch_input_tokens"] > 0
+        assert usage.per_model[DEFAULT_CLASSIFY_MODEL]["batch_input_tokens"] > 0
+
+    def test_collect_applies_a_write_handle_from_its_stored_context(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A tier-3 spill collects too — its application context rides the handle.
+
+        The per-request context for a tier-3 batch (which entity to create,
+        which page to merge into, the body the merge ops were anchored
+        against) exists nowhere but the handle once the submitting run exits.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "c3", ["Standalone fact about WidgetWriteCollect gadget.\n"]
+        )
+        cache_dir = tmp_path / "c3-cache"
+        cache_dir.mkdir()
+        classify_client = _FakeClient(_scripted_responder, allow_sync=False)
+        write_client = _FakeClient(
+            _scripted_responder, allow_sync=False, never_end=True
+        )
+        raw_files = discover_raw_files(root / "raw")
+        usage = TokenUsage()
+
+        spilled = process_batch_run(
+            raw_files,
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            deadline=time.monotonic() - 1.0,
+            cache_dir=cache_dir,
+        )
+        assert spilled.in_flight_refs == [raw_files[0].ref]
+        handle = next(iter(batch_state.load(cache_dir).values()))
+        assert handle.knob == "write"
+        assert handle.work is not None and handle.work["files"]
+
+        write_client.batches._never_end = False
+        out = collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        assert out.created == 1
+        assert out.collected_refs == [raw_files[0].ref]
+        assert list((root / "wiki").glob("*widgetwritecollect*"))
+        assert not raw_files[0].path.exists()
+        assert batch_state.load(cache_dir) == {}
+
+    def test_collected_merge_updates_the_existing_page(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A spilled tier-3 MERGE applies its anchored ops on collect."""
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path,
+            "c4",
+            ["Acme Corp shipped a thing.\n"],
+            with_acme=True,
+        )
+        cache_dir = tmp_path / "c4-cache"
+        cache_dir.mkdir()
+        classify_client = _FakeClient(_scripted_responder, allow_sync=False)
+        write_client = _FakeClient(
+            _scripted_responder, allow_sync=False, never_end=True
+        )
+        raw_files = discover_raw_files(root / "raw")
+        usage = TokenUsage()
+        page = root / "wiki" / "acme1234-acme-corp.md"
+
+        process_batch_run(
+            raw_files,
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            deadline=time.monotonic() - 1.0,
+            cache_dir=cache_dir,
+        )
+        handle = next(iter(batch_state.load(cache_dir).values()))
+        merges = next(iter(handle.work["files"].values()))["merges"]
+        assert merges, "expected a batched merge in the spilled handle"
+        assert "Original body line." in next(iter(merges.values()))["existing_body"]
+
+        write_client.batches._never_end = False
+        out = collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        assert out.updated == 1
+        body = page.read_text(encoding="utf-8")
+        assert "Original body line." in body
+        assert "Merged note from" in body
+        assert batch_state.load(cache_dir) == {}
+
+    def test_a_batch_that_has_not_ended_keeps_its_handle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Still in flight: keep the handle, keep the lease, do NOT resubmit."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "c5", ["Standalone fact about WidgetPending gadget.\n"]
+        )
+        client.batches._never_end = True  # still running at collect time
+        submitted_before = len(client.batches.submitted)
+
+        out = collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        assert out.kept_handles and out.retired_handles == []
+        assert out.in_flight_refs == [raw_files[0].ref]
+        assert out.created == 0
+        # Nothing was resubmitted — the work is already paid for.
+        assert len(client.batches.submitted) == submitted_before
+        assert list(batch_state.load(cache_dir)) == out.kept_handles
+        assert raw_files[0].path.exists()
+
+    def test_a_leased_raw_file_that_vanished_is_dropped_not_applied(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A result whose raw file is gone cannot finalize, so it is dropped."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "c6", ["Standalone fact about WidgetGone gadget.\n"]
+        )
+        raw_files[0].path.unlink()
+
+        out = collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        assert out.created == 0
+        assert out.failed_refs == [raw_files[0].ref]
+        # The handle still retires — nothing is left holding a lease over a
+        # file that no longer exists.
+        assert batch_state.load(cache_dir) == {}
+
+    def test_no_handles_is_a_no_op(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "empty-cache"
+        cache_dir.mkdir()
+        root = _seed_root(tmp_path, "c7", [])
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+
+        out = collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            cache_dir=cache_dir,
+        )
+
+        assert out.collected_refs == []
+        assert client.batches.submitted == []
+
+
+class TestCollectOrderingAndIndexFreshness:
+    def test_collected_creations_are_tier1_matchable_by_the_next_claim(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC6: a collected tier-2 handle's creations are in the index first.
+
+        Collect runs before the claim loop, so a fresh ``EntityIndex`` built
+        for the new cohort reads the pages the collect just wrote — which is
+        what lets this run's ``tier1_programmatic_match`` match an entity this
+        run created, rather than deferring it a further run.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, _raws = _spill_a_classify_batch(
+            tmp_path, "o1", ["Standalone fact about WidgetFresh gadget.\n"]
+        )
+        collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        # The index the claim loop would build next sees the created page...
+        fresh_index = EntityIndex(root / "wiki")
+        assert "widgetfresh" in _index_names(fresh_index)
+        # ...and a newly-claimed file naming it tier-1 matches, rather than
+        # paying for a tier-2 classify to rediscover it.
+        later = _seed_root(tmp_path, "o1-later", ["More on WidgetFresh gadget.\n"])
+        later_raw = discover_raw_files(later / "raw")[0]
+        matched = tier1_programmatic_match(later_raw, fresh_index, config=None)
+        assert [name for name, _uid, _path in matched] == ["widgetfresh"]
+
+    def test_collect_precedes_the_claim_loop_and_any_new_submit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1: asserted by CALL SEQUENCE, not by reading the code.
+
+        The three events must occur in this order: the collect's ``retrieve``
+        of the outstanding batch, the claim loop's ``discover_raw_files``, and
+        the new cohort's ``batches.create``.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, _usage, _raws = _spill_a_classify_batch(
+            tmp_path, "o2", ["Standalone fact about WidgetOrder gadget.\n"]
+        )
+        # A second, unleased file for this run to claim and submit.
+        _write_extra_raw(root, "Standalone fact about WidgetSecond gadget.\n")
+
+        sequence: list[str] = []
+        real_retrieve = client.batches.retrieve
+        real_create = client.batches.create
+
+        def traced_retrieve(batch_id: str) -> Any:
+            sequence.append("collect-retrieve")
+            return real_retrieve(batch_id)
+
+        def traced_create(*, requests: list[dict[str, Any]]) -> Any:
+            # Distinguish the NEW COHORT's classify submit from the collect's
+            # own pipelined tier-3 submit: both are submissions, but only the
+            # first is the "new submit" the ordering has to come before. The
+            # collect's tier-3 submit happening BEFORE the claim is athenaeum#1145
+            # AC7 working, not a violation of AC1.
+            model = requests[0]["params"]["model"]
+            sequence.append(
+                "submit-classify"
+                if model == DEFAULT_CLASSIFY_MODEL
+                else "submit-write"
+            )
+            return real_create(requests=requests)
+
+        client.batches.retrieve = traced_retrieve  # type: ignore[method-assign]
+        client.batches.create = traced_create  # type: ignore[method-assign]
+
+        import athenaeum.librarian as lib_mod
+
+        real_discover = lib_mod.discover_raw_files
+
+        def traced_discover(*args: Any, **kwargs: Any) -> Any:
+            sequence.append("claim")
+            return real_discover(*args, **kwargs)
+
+        monkeypatch.setattr(lib_mod, "discover_raw_files", traced_discover)
+        monkeypatch.setattr(
+            batch_state, "resolve_cache_dir", lambda: cache_dir
+        )
+        _clean_env(monkeypatch)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+
+        run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+        )
+
+        # Collect first, then claim, then the new cohort's classify submit.
+        assert sequence.index("collect-retrieve") < sequence.index("claim")
+        assert sequence.index("claim") < sequence.index("submit-classify")
+        # AC7: the collected classify handle pipelined into its tier-3 submit
+        # within this same run — before the claim, since the collect owns the
+        # whole phase.
+        assert sequence.index("submit-write") < sequence.index("claim")
+
+    def test_a_collect_only_run_succeeds_and_reports_progress(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4: collecting a prior batch is the whole of a valid run."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, _usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "o3", ["Standalone fact about WidgetOnly gadget.\n"]
+        )
+        monkeypatch.setattr(batch_state, "resolve_cache_dir", lambda: cache_dir)
+        _clean_env(monkeypatch)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+
+        stats: dict[str, Any] = {}
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+            out_run_stats=stats,
+        )
+
+        assert rc == 0
+        assert stats["collected_refs"] == [raw_files[0].ref]
+        assert list((root / "wiki").glob("*widgetonly*"))
+        # Collected work is progress: the zero-yield alarm must not fire on a
+        # run that drained a file, even though it claimed none.
+        assert stats.get("zero_yield") is not True
+
+    def test_dry_run_collects_nothing_and_retires_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC8."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, _usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "o4", ["Standalone fact about WidgetDry gadget.\n"]
+        )
+        before = batch_state.load(cache_dir)
+        monkeypatch.setattr(batch_state, "resolve_cache_dir", lambda: cache_dir)
+        _clean_env(monkeypatch)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+
+        run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+            dry_run=True,
+        )
+
+        assert batch_state.load(cache_dir) == before
+        assert raw_files[0].path.exists()
+        assert not list((root / "wiki").glob("*widgetdry*"))
+
+    def test_a_collected_file_with_a_failed_request_writes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2: the all-or-nothing guarantee survives the across-run split.
+
+        The collect path does not get its own write path, so the per-file
+        "every call succeeded before anything is written" rule is the SAME
+        code — a file with one errored request writes nothing, keeps its raw,
+        and is retried next run.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "c8", ["Standalone fact about WidgetBad gadget.\n"]
+        )
+        cache_dir = tmp_path / "c8-cache"
+        cache_dir.mkdir()
+        classify_client = _FakeClient(_scripted_responder, allow_sync=False)
+        # The tier-3 create for WidgetBad comes back errored on collect.
+        write_client = _FakeClient(
+            _scripted_responder,
+            allow_sync=False,
+            never_end=True,
+            fail_marker="WidgetBad",
+        )
+        raw_files = discover_raw_files(root / "raw")
+
+        process_batch_run(
+            raw_files,
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            deadline=time.monotonic() - 1.0,
+            cache_dir=cache_dir,
+        )
+        write_client.batches._never_end = False
+
+        out = collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        assert out.created == 0
+        assert out.failed_refs == [raw_files[0].ref]
+        assert out.collected_refs == []
+        # Nothing written, raw preserved for a fresh claim next run.
+        assert not list((root / "wiki").glob("*widgetbad*"))
+        assert raw_files[0].path.exists()
+        # The handle still retires: its results are consumed, and leaving the
+        # lease on would strand the file it just declined to write.
+        assert batch_state.load(cache_dir) == {}
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1146 — reconciling every way a pending handle can become
+# un-collectible.
+#
+# The distinction the whole issue turns on, routinely conflated and with
+# OPPOSITE correct responses:
+#
+#   batch processing_status != "ended"   -> in flight, PAID FOR. Keep the
+#                                          handle, extend the lease, do not
+#                                          resubmit.
+#   per-request result.type == "expired" -> that request never reached the
+#                                          model and is NOT billed. Ordinary
+#                                          per-file failure path; raw stays.
+#
+# Treating the first as the second resubmits work already paid for and
+# running. Treating the second as the first strands files forever.
+# ---------------------------------------------------------------------------
+
+
+class TestHandleReconciliation:
+    def test_in_flight_batch_keeps_the_handle_and_extends_the_lease(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1. Keeping WITHOUT extending is a resubmit decision in disguise."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r1", ["Standalone fact about WidgetInflight gadget.\n"]
+        )
+        client.batches._never_end = True
+        before = next(iter(batch_state.load(cache_dir).values())).leased_until
+        submitted_before = len(client.batches.submitted)
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation == {"in-flight": 1}
+        assert out.kept_handles and out.retired_handles == []
+        # Nothing resubmitted: the work is in flight and already billed.
+        assert len(client.batches.submitted) == submitted_before
+        after = next(iter(batch_state.load(cache_dir).values())).leased_until
+        assert after is not None and before is not None
+        assert after >= before
+        assert raw_files[0].path.exists()
+
+    def test_a_per_request_expired_result_takes_the_per_file_failure_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2: NOT billed, NOT in flight — raw stays, ref fails, lease freed.
+
+        The opposite case from a batch that has not ended, and the one most
+        easily conflated with it.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "r2", ["Standalone fact about WidgetExpired gadget.\n"]
+        )
+        cache_dir = tmp_path / "r2-cache"
+        cache_dir.mkdir()
+        client = _FakeClient(
+            _scripted_responder,
+            allow_sync=False,
+            never_end=True,
+            expire_marker="WidgetExpired",
+        )
+        raw_files = discover_raw_files(root / "raw")
+
+        process_batch_run(
+            raw_files,
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            deadline=time.monotonic() - 1.0,
+            cache_dir=cache_dir,
+        )
+        client.batches._never_end = False
+
+        out = _collect(root, cache_dir, client, TokenUsage())
+
+        assert out.reconciliation.get("request-expired") == 1
+        # Handle-level: NOT kept. The batch ended; only the request expired.
+        assert out.kept_handles == []
+        assert out.retired_handles
+        assert out.failed_refs == [raw_files[0].ref]
+        assert raw_files[0].path.exists()
+        assert batch_state.load(cache_dir) == {}
+
+    def test_a_404_on_retrieve_retires_the_handle_and_records_the_waste(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3 + AC8: unretrievable → retired, refs released, waste recorded."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r3", ["Standalone fact about WidgetGone404 gadget.\n"]
+        )
+
+        def gone(batch_id: str) -> Any:
+            raise anthropic_mod.NotFoundError(
+                "no such batch",
+                response=httpx.Response(
+                    404, request=httpx.Request("GET", "https://api.anthropic.com")
+                ),
+                body=None,
+            )
+
+        client.batches.retrieve = gone  # type: ignore[method-assign]
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation == {"unretrievable": 1}
+        assert out.retired_handles and out.kept_handles == []
+        assert batch_state.load(cache_dir) == {}
+        # The raw file survives and becomes claimable again.
+        assert raw_files[0].path.exists()
+        # AC8: the wasted spend is visible after the fact.
+        ledger = batch_state.read_reconcile_ledger(root / "wiki", cache_dir=cache_dir)
+        assert [r["reason"] for r in ledger] == ["unretrievable"]
+        assert ledger[0]["refs"] == [raw_files[0].ref]
+        assert ledger[0]["knob"] == "classify"
+
+    def test_a_transient_retrieve_failure_never_retires_a_live_batch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3's guard: only an authoritative 404 retires. Everything else waits.
+
+        Retiring on a timeout would discard a batch that is running and paid
+        for, and the SDK does not distinguish the two for us — so the test is
+        narrow and the default is to keep.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r4", ["Standalone fact about WidgetFlaky gadget.\n"]
+        )
+
+        def flaky(batch_id: str) -> Any:
+            raise anthropic_mod.APIConnectionError(
+                request=httpx.Request("GET", "https://api.anthropic.com")
+            )
+
+        client.batches.retrieve = flaky  # type: ignore[method-assign]
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation == {"retrieve-error": 1}
+        assert out.kept_handles and out.retired_handles == []
+        assert list(batch_state.load(cache_dir)) == out.kept_handles
+        assert batch_state.read_reconcile_ledger(
+            root / "wiki", cache_dir=cache_dir
+        ) == []
+
+    def test_a_handle_past_the_retention_window_retires_without_a_retrieve(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3: past retention is decidable locally, so it decides locally."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r5", ["Standalone fact about WidgetOld gadget.\n"]
+        )
+        retrieves: list[str] = []
+        real_retrieve = client.batches.retrieve
+
+        def traced(batch_id: str) -> Any:
+            retrieves.append(batch_id)
+            return real_retrieve(batch_id)
+
+        client.batches.retrieve = traced  # type: ignore[method-assign]
+
+        out = _collect(
+            root,
+            cache_dir,
+            client,
+            usage,
+            now=datetime.now(timezone.utc)
+            + timedelta(days=BATCH_RETENTION_DAYS + 1),
+        )
+
+        assert out.reconciliation == {"retention-expired": 1}
+        assert retrieves == [], "an expired handle must not need the network"
+        assert batch_state.load(cache_dir) == {}
+        assert raw_files[0].path.exists()
+        ledger = batch_state.read_reconcile_ledger(root / "wiki", cache_dir=cache_dir)
+        assert [r["reason"] for r in ledger] == ["retention-expired"]
+
+    def test_a_mutated_raw_file_never_has_a_stale_result_applied(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC5, the case most likely to be missed.
+
+        The handle still looks completely valid: the batch ended, the results
+        are there, the file is on disk. But the file's BYTES changed, so the
+        classification describes content that no longer exists — applying it
+        would write a classification of the old text onto the new.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r6", ["Standalone fact about WidgetMutant gadget.\n"]
+        )
+        raw_files[0].path.write_text(
+            "Something else entirely about WidgetOther.\n", encoding="utf-8"
+        )
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation.get("raw-mutated") == 1
+        assert out.created == 0
+        assert out.collected_refs == []
+        assert out.failed_refs == [raw_files[0].ref]
+        # Nothing written from the stale classification...
+        assert not list((root / "wiki").glob("*widgetmutant*"))
+        # ...and the file is re-claimed from scratch next run.
+        assert raw_files[0].path.exists()
+        assert batch_state.load(cache_dir) == {}
+
+    def test_a_missing_raw_file_is_dropped_and_the_handle_still_retires(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r7", ["Standalone fact about WidgetVanish gadget.\n"]
+        )
+        raw_files[0].path.unlink()
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation.get("raw-missing") == 1
+        assert out.created == 0
+        assert batch_state.load(cache_dir) == {}
+
+    def test_an_expired_lease_does_not_stop_a_retrievable_batch_collecting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC6: retention beats lease expiry when both apply.
+
+        The lease exists to stop a RECLAIM, not to gate a collect. A batch
+        whose results are still retrievable is still worth collecting however
+        long its lease has been dead.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r8", ["Standalone fact about WidgetStale gadget.\n"]
+        )
+        # Expire the lease the way the claim loop's own sweep does.
+        released = batch_state.release_expired_leases(
+            cache_dir, now=datetime.now(timezone.utc) + timedelta(days=365)
+        )
+        assert released
+        assert next(iter(batch_state.load(cache_dir).values())).leased_until is None
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.created == 1
+        assert out.collected_refs == [raw_files[0].ref]
+        assert out.reconciliation.get("collected") == 1
+        assert batch_state.load(cache_dir) == {}
+
+    def test_a_write_handle_with_no_usable_context_retires_and_is_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC7 + AC8: a handle that cannot be applied is never silent."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r9", ["Standalone fact about WidgetNoCtx gadget.\n"]
+        )
+        # A pre-athenaeum#1145 shaped handle: a write knob with no work document.
+        stored = batch_state.load(cache_dir)
+        old = next(iter(stored.values()))
+        batch_state.record_handle(
+            cache_dir,
+            batch_id=old.batch_id,
+            knob="write",
+            refs=old.refs,
+            config=None,
+        )
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation == {"no-context": 1}
+        assert batch_state.load(cache_dir) == {}
+        assert raw_files[0].path.exists()
+        ledger = batch_state.read_reconcile_ledger(root / "wiki", cache_dir=cache_dir)
+        assert [r["reason"] for r in ledger] == ["no-context"]
+
+    def test_reconciliation_reaches_the_run_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """AC7: no outcome is silent — the tally rides the run-summary line."""
+        _patch_uids(monkeypatch)
+        caplog.set_level(logging.INFO, logger="athenaeum")
+        root, cache_dir, client, _usage, _raws = _spill_a_classify_batch(
+            tmp_path, "r10", ["Standalone fact about WidgetSummary gadget.\n"]
+        )
+        client.batches._never_end = True
+        monkeypatch.setattr(batch_state, "resolve_cache_dir", lambda: cache_dir)
+        _clean_env(monkeypatch)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+
+        stats: dict[str, Any] = {}
+        run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+            out_run_stats=stats,
+        )
+
+        assert stats["batch_reconciliation"] == {"in-flight": 1}
+        summary = [
+            rec.getMessage()
+            for rec in caplog.records
+            if rec.getMessage().startswith("librarian-run-summary")
+        ]
+        assert summary and "reconciled=in-flight:1" in summary[-1]
+
+    def test_one_vanished_ref_does_not_stop_its_siblings_collecting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4: the handle retires cleanly FOR THE REMAINING REFS.
+
+        A single un-applicable ref must not cost the rest of its cohort the
+        work they already paid for.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path,
+            "r11",
+            [
+                "Standalone fact about WidgetKeeps gadget.\n",
+                "Standalone fact about WidgetLoses gadget.\n",
+            ],
+        )
+        assert len(raw_files) == 2
+        loser = next(
+            r for r in raw_files if "WidgetLoses" in r.path.read_text(encoding="utf-8")
+        )
+        keeper = next(r for r in raw_files if r is not loser)
+        loser.path.unlink()
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation.get("raw-missing") == 1
+        assert out.reconciliation.get("collected") == 1
+        assert out.collected_refs == [keeper.ref]
+        assert out.failed_refs == [loser.ref]
+        assert out.created == 1
+        assert list((root / "wiki").glob("*widgetkeeps*"))
+        assert batch_state.load(cache_dir) == {}
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1175 — per-knob batch selection, at the TRANSPORT.
+#
+# Accepting a config the transport then cannot honour would be worse than
+# refusing it, so the guard-narrowing AC is only meaningful if a mixed run
+# actually works. These pin that: an unbatched knob takes the SYNCHRONOUS path
+# inside the same function, so the two can genuinely be mixed.
+# ---------------------------------------------------------------------------
+
+
+class TestPerKnobBatchTransport:
+    def _run_mixed(
+        self,
+        tmp_path: Path,
+        name: str,
+        content: str,
+        *,
+        batch_classify: bool,
+        batch_write: bool,
+    ) -> tuple[Path, _FakeClient, Any]:
+        root = _seed_root(tmp_path, name, [content])
+        client = _FakeClient(_scripted_responder, allow_sync=True)
+        result = process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=batch_classify,
+            batch_write=batch_write,
+        )
+        return root, client, result
+
+    def _batched_knobs(self, client: _FakeClient) -> set[str]:
+        """Which knobs actually reached the Batch API on *client*."""
+        return {
+            "classify"
+            if req["params"]["model"] == DEFAULT_CLASSIFY_MODEL
+            else "write"
+            for batch in client.batches.submitted
+            for req in batch
+        }
+
+    def test_write_batched_classify_synchronous(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The motivating combination: discount the expensive knob only."""
+        _patch_uids(monkeypatch)
+        root, client, result = self._run_mixed(
+            tmp_path,
+            "p1",
+            "Standalone fact about WidgetMixedA gadget.\n",
+            batch_classify=False,
+            batch_write=True,
+        )
+
+        assert result.created == 1
+        assert list((root / "wiki").glob("*widgetmixeda*"))
+        # tier-2 went through the SYNCHRONOUS messages.create...
+        assert [c["model"] for c in client.sync_calls] == [DEFAULT_CLASSIFY_MODEL]
+        # ...and only the tier-3 write batch reached the Batch API.
+        assert self._batched_knobs(client) == {"write"}
+
+    def test_classify_batched_write_synchronous(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The mirror image, so an accepted config is never a broken one."""
+        _patch_uids(monkeypatch)
+        root, client, result = self._run_mixed(
+            tmp_path,
+            "p2",
+            "Standalone fact about WidgetMixedB gadget.\n",
+            batch_classify=True,
+            batch_write=False,
+        )
+
+        assert result.created == 1
+        assert list((root / "wiki").glob("*widgetmixedb*"))
+        assert self._batched_knobs(client) == {"classify"}
+        # The tier-3 create ran live, on the write knob's model.
+        assert [c["model"] for c in client.sync_calls] != []
+        assert DEFAULT_CLASSIFY_MODEL not in [c["model"] for c in client.sync_calls]
+
+    def test_both_knobs_batched_is_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pre-athenaeum#1175 default: two batches, no synchronous calls."""
+        _patch_uids(monkeypatch)
+        root, client, result = self._run_mixed(
+            tmp_path,
+            "p3",
+            "Standalone fact about WidgetBoth gadget.\n",
+            batch_classify=True,
+            batch_write=True,
+        )
+
+        assert result.created == 1
+        assert client.sync_calls == []
+        assert self._batched_knobs(client) == {"classify", "write"}
+        assert len(client.batches.submitted) == 2
+
+    def test_an_unbatched_write_merge_updates_the_page_synchronously(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unbatched merge routes down the path same-page groups already take.
+
+        One synchronous merge implementation, not two.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "p4", ["Acme Corp shipped a thing.\n"], with_acme=True
+        )
+        client = _FakeClient(_scripted_responder, allow_sync=True)
+
+        result = process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=True,
+            batch_write=False,
+        )
+
+        assert result.updated == 1
+        body = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+        assert "Original body line." in body
+        assert "Merged note from" in body
+        assert self._batched_knobs(client) == {"classify"}
+
+    def test_a_synchronous_classify_still_counts_one_api_call_per_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The athenaeum#220 budget must not be charged twice for one call.
+
+        The batch path bumps ``api_calls`` by hand at assembly because
+        ``add_batch_tokens`` does not; the synchronous path's ``add_tokens``
+        already does. Doing both would eat the budget at double rate on a
+        mixed run.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "p5", ["Standalone fact about WidgetBudget gadget.\n"]
+        )
+        client = _FakeClient(_scripted_responder, allow_sync=True)
+        usage = TokenUsage()
+
+        process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=False,
+            batch_write=True,
+        )
+
+        # One synchronous classify + one batched tier-3 create = 2 attempts.
+        assert usage.api_calls == 2
+
+    def test_a_run_defaults_to_batching_both_knobs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC: a caller that passes neither flag is byte-identical to before."""
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "p6", ["Standalone fact about WidgetDefault gadget.\n"]
+        )
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+
+        process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+        )
+
+        assert len(client.batches.submitted) == 2
+
+    def test_run_level_write_only_batching_reaches_the_transport(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end: ``librarian.batch.write: true`` alone is a batch run."""
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "p7", ["Standalone fact about WidgetE2E gadget.\n"]
+        )
+        (root / "athenaeum.yaml").write_text(
+            "librarian:\n  batch:\n    write: true\n", encoding="utf-8"
+        )
+        _clean_env(monkeypatch)
+        client = _FakeClient(_scripted_responder, allow_sync=True)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+        )
+
+        assert rc == 0
+        assert list((root / "wiki").glob("*widgete2e*"))
+        # Batch mode was never set globally, yet the write knob batched.
+        assert self._batched_knobs(client) == {"write"}
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1147 — batch spend reservation and settlement.
+#
+# ``TokenUsage.add_batch_tokens`` fires at COLLECT. Under the athenaeum#1138
+# submit/collect split the SUBMITTING run's ``usage`` therefore never sees the
+# cost of the batch it just submitted -- and that cost is committed
+# server-side and cannot be halted, so ``ceiling_tripped`` is structurally
+# blind to it.
+#
+# Three moments, which must not be collapsed: reserve at submit, settle at
+# collect, count outstanding reservations at ceiling-check time.
+#
+# Note what this does NOT change: athenaeum#483's pre-submit checks at the
+# tier-2 and tier-3 phase boundaries are preserved, not replaced. They simply
+# now see in-flight commitments as well as this run's own accrual.
+# ---------------------------------------------------------------------------
+
+
+class TestBatchSpendReservation:
+    def test_a_submit_reserves_and_a_collect_settles_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2 + AC3: reserved at submit, superseded by a settlement at collect."""
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "s1", ["Standalone fact about WidgetReserve gadget.\n"]
+        )
+        cache_dir = tmp_path / "s1-cache"
+        cache_dir.mkdir()
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+
+        process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        ledger = spend.read_reservation_ledger(root / "wiki", cache_dir=cache_dir)
+        states = [r["state"] for r in ledger]
+        # Both phases reserved, and both settled within the run.
+        assert states.count("reserved") == 2
+        assert states.count("settled") == 2
+        # Nothing left outstanding: the batches were collected.
+        assert spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir) == []
+
+        reserved = [r for r in ledger if r["state"] == "reserved"]
+        assert {r["knob"] for r in reserved} == {"classify", "write"}
+        for record in reserved:
+            assert record["est_input_tokens"] > 0
+            assert record["est_output_tokens"] > 0
+            assert record["est_usd"] > 0
+            assert record["day"]  # the submit run's ACCOUNTING day
+
+        settled = [r for r in ledger if r["state"] == "settled"]
+        for record in settled:
+            assert record["actual_source"] == "measured"
+            assert record["actual_input_tokens"] > 0
+            # AC3: the estimate-vs-actual delta rides the settlement.
+            assert "delta_usd" in record
+
+    def test_a_spilled_batch_leaves_an_outstanding_reservation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gap this closes: a submit run exits, its cost unbilled."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, _usage, _raws = _spill_a_classify_batch(
+            tmp_path, "s2", ["Standalone fact about WidgetOutstanding gadget.\n"]
+        )
+
+        outstanding = spend.outstanding_reservations(
+            root / "wiki", cache_dir=cache_dir
+        )
+        assert [r["batch_id"] for r in outstanding] == ["msgbatch_1"]
+        assert outstanding[0]["knob"] == "classify"
+        assert spend.outstanding_reservation_usd(
+            root / "wiki", cache_dir=cache_dir
+        ) == pytest.approx(outstanding[0]["est_usd"])
+
+    def test_the_collect_settles_a_reservation_from_an_earlier_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3: the settlement carries the COLLECT run's day, not the submit's."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, _raws = _spill_a_classify_batch(
+            tmp_path, "s3", ["Standalone fact about WidgetSettle gadget.\n"]
+        )
+        assert spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir)
+
+        _collect(root, cache_dir, client, usage)
+
+        assert spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir) == []
+        settled = [
+            r
+            for r in spend.read_reservation_ledger(root / "wiki", cache_dir=cache_dir)
+            if r["state"] == "settled" and r["batch_id"] == "msgbatch_1"
+        ]
+        assert len(settled) == 1
+        assert settled[0]["actual_source"] == "measured"
+        assert settled[0]["actual_input_tokens"] > 0
+
+    def test_reservations_are_priced_at_the_batch_discount(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC5. Pricing at the synchronous rate trips the ceiling ~2x too early.
+
+        Asserted against the ONE pricing site rather than a second hardcoded
+        multiplication: the same tokens booked as synchronous cost exactly
+        twice what they cost booked as batch.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, _client, _usage, _raws = _spill_a_classify_batch(
+            tmp_path, "s4", ["Standalone fact about WidgetPrice gadget.\n"]
+        )
+        record = spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir)[0]
+
+        batched = TokenUsage()
+        batched.add_batch_tokens(
+            record["est_input_tokens"],
+            record["est_output_tokens"],
+            model=record["model"],
+            knob=record["knob"],
+        )
+        synchronous = TokenUsage()
+        synchronous.add_tokens(
+            record["est_input_tokens"],
+            record["est_output_tokens"],
+            model=record["model"],
+            knob=record["knob"],
+        )
+
+        assert record["est_usd"] == pytest.approx(batched.estimated_cost_usd)
+        assert batched.estimated_cost_usd == pytest.approx(
+            synchronous.estimated_cost_usd / 2
+        )
+
+    def test_a_large_outstanding_reservation_refuses_a_new_submit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4, the whole point: the ceiling stops being blind to in-flight cost.
+
+        The same run, the same ledger, the same ceiling — the ONLY difference
+        is whether a committed-but-unbilled batch is counted.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "s5", ["Standalone fact about WidgetCeiling gadget.\n"]
+        )
+        cache_dir = tmp_path / "s5-cache"
+        cache_dir.mkdir()
+        config: dict[str, Any] = {"spend": {"max_usd_per_run": 0.10}}
+
+        # No reservation on the ledger: a fresh run is under the ceiling.
+        assert (
+            spend.ceiling_tripped(
+                TokenUsage(),
+                provider="api",
+                config=config,
+                wiki_root=root / "wiki",
+                cache_dir=cache_dir,
+            )
+            is None
+        )
+
+        spend.record_reservation(
+            root / "wiki",
+            batch_id="msgbatch_big",
+            knob="write",
+            est_input_tokens=1_000_000,
+            est_output_tokens=200_000,
+            est_usd=5.00,
+            model=DEFAULT_CLASSIFY_MODEL,
+            requests=300,
+            config=None,
+            cache_dir=cache_dir,
+        )
+
+        tripped = spend.ceiling_tripped(
+            TokenUsage(),
+            provider="api",
+            config=config,
+            wiki_root=root / "wiki",
+            cache_dir=cache_dir,
+        )
+        assert tripped is not None
+        assert "committed in flight" in tripped
+
+        # And the batch transport actually refuses to submit: the athenaeum#483
+        # pre-submit gate is unchanged, it just sees more.
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        result = process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=config,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+        assert client.batches.submitted == []
+        assert result.created == 0
+        assert result.deferred_refs
+
+    def test_ceiling_without_a_wiki_root_is_unchanged(self, tmp_path: Path) -> None:
+        """AC7: every pre-athenaeum#1147 caller resolves byte-identically.
+
+        ``wiki_root`` omitted means no reservation ledger is consulted at all,
+        so the athenaeum#483 regression tests — which never pass one — keep
+        their exact behaviour.
+        """
+        root = _seed_root(tmp_path, "s6", [])
+        cache_dir = tmp_path / "s6-cache"
+        cache_dir.mkdir()
+        spend.record_reservation(
+            root / "wiki",
+            batch_id="msgbatch_ignored",
+            knob="write",
+            est_input_tokens=1_000_000,
+            est_output_tokens=200_000,
+            est_usd=99.00,
+            config=None,
+            cache_dir=cache_dir,
+        )
+        assert (
+            spend.ceiling_tripped(
+                TokenUsage(),
+                provider="api",
+                config={"spend": {"max_usd_per_run": 0.10}},
+                cache_dir=cache_dir,
+            )
+            is None
+        )
+
+    def test_an_all_expired_batch_settles_to_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC6: the API documents an expired request as NOT billed."""
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "s7", ["Standalone fact about WidgetZero gadget.\n"]
+        )
+        cache_dir = tmp_path / "s7-cache"
+        cache_dir.mkdir()
+        client = _FakeClient(
+            _scripted_responder, allow_sync=False, expire_marker="WidgetZero"
+        )
+
+        process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        settled = [
+            r
+            for r in spend.read_reservation_ledger(root / "wiki", cache_dir=cache_dir)
+            if r["state"] == "settled"
+        ]
+        assert settled
+        assert settled[0]["actual_source"] == "expired"
+        assert settled[0]["actual_usd"] == 0.0
+        assert spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir) == []
+
+    def test_a_handle_retired_uncollected_settles_at_the_estimate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC6: never a permanent phantom charge, and never a false zero.
+
+        The batch RAN and WAS billed; its results are simply gone. Settling at
+        zero would under-report real spend, and leaving it open would count
+        against every future ceiling check forever.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, _raws = _spill_a_classify_batch(
+            tmp_path, "s8", ["Standalone fact about WidgetPhantom gadget.\n"]
+        )
+        reserved = spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir)[0]
+
+        out = _collect(
+            root,
+            cache_dir,
+            client,
+            usage,
+            now=datetime.now(timezone.utc)
+            + timedelta(days=BATCH_RETENTION_DAYS + 1),
+        )
+        assert out.reconciliation == {"retention-expired": 1}
+
+        assert spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir) == []
+        settled = [
+            r
+            for r in spend.read_reservation_ledger(root / "wiki", cache_dir=cache_dir)
+            if r["state"] == "settled"
+        ]
+        assert len(settled) == 1
+        assert settled[0]["actual_source"] == "estimate"
+        assert settled[0]["reason"] == "retention-expired"
+        assert settled[0]["actual_usd"] == pytest.approx(reserved["est_usd"])
+        assert settled[0]["actual_usd"] > 0
+
+    def test_the_ledger_tolerates_a_torn_trailing_line(self, tmp_path: Path) -> None:
+        """AC1: mirrors spend.read_ledger — one torn record is not a broken check."""
+        root = _seed_root(tmp_path, "s9", [])
+        cache_dir = tmp_path / "s9-cache"
+        cache_dir.mkdir()
+        spend.record_reservation(
+            root / "wiki",
+            batch_id="msgbatch_ok",
+            knob="write",
+            est_input_tokens=10,
+            est_output_tokens=5,
+            est_usd=0.01,
+            config=None,
+            cache_dir=cache_dir,
+        )
+        path = spend.reservation_ledger_path(root / "wiki", cache_dir=cache_dir)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write('{"v": 1, "state": "reser')
+
+        records = spend.read_reservation_ledger(root / "wiki", cache_dir=cache_dir)
+        assert [r["batch_id"] for r in records] == ["msgbatch_ok"]
+
+    def test_the_ledger_path_follows_the_spend_ledger_convention(
+        self, tmp_path: Path
+    ) -> None:
+        """AC1: ``<wiki_root>/…`` with the legacy ``<cache_dir>`` fallback."""
+        root = _seed_root(tmp_path, "s10", [])
+        cache_dir = tmp_path / "s10-cache"
+        cache_dir.mkdir()
+        # Fresh store: behind the seam.
+        assert spend.reservation_ledger_path(
+            root / "wiki", cache_dir=cache_dir
+        ) == root / "wiki" / spend.RESERVATION_LEDGER_FILENAME
+        # Legacy store with records and nothing migrated: stays put.
+        (cache_dir / spend.RESERVATION_LEDGER_FILENAME).write_text("", encoding="utf-8")
+        assert spend.reservation_ledger_path(
+            root / "wiki", cache_dir=cache_dir
+        ) == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1182 — page-size invariant on the BATCH transport
+# ---------------------------------------------------------------------------
+#
+# check_page_size_gate (athenaeum.tiers) is applied at BOTH of this
+# transport's merge-dispatch sites: the batch-submission assembly loop
+# (``batch_write=True``, an over-threshold page never becomes a batch
+# request) and the finalize-time ``sync_merges`` fallback (``batch_write=
+# False``, or a same-page multi-merge group — the same synchronous
+# ``tier3_merge`` call ``tier3_derive_actions`` makes on the process_one
+# transport). Both sites reuse check_page_size_gate UNCHANGED.
+
+
+def _seed_oversized_acme_root(
+    tmp_path: Path, name: str, raw_contents: list[str]
+) -> Path:
+    """Like ``_seed_root(..., with_acme=True)`` but Acme Corp's existing body
+    is over the page-size threshold, so a merge into it must be suppressed."""
+    root = _seed_root(tmp_path, name, raw_contents, with_acme=True)
+    oversized_body = "Original body line. " * 600
+    assert len(oversized_body) > DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
+    (root / "wiki" / "acme1234-acme-corp.md").write_text(
+        textwrap.dedent(
+            f"""\
+            ---
+            uid: acme1234
+            type: company
+            name: Acme Corp
+            access: internal
+            created: '2024-01-01'
+            updated: '2024-01-01'
+            ---
+
+            # Acme Corp
+
+            {oversized_body}
+        """
+        ),
+        encoding="utf-8",
+    )
+    return root
+
+
+class TestPageSizeGateBatchTransport:
+    def test_oversized_page_produces_no_batch_merge_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """batch_write=True: the gate fires at ASSEMBLY — an over-threshold
+        page never becomes a batch request, so the tier-3 write batch's
+        only candidate item is suppressed before ``t3_requests`` ever gets
+        an entry for it, and no write batch is submitted at all."""
+        _patch_uids(monkeypatch)
+        root = _seed_oversized_acme_root(
+            tmp_path, "p-batch-oversize", ["Acme Corp shipped a thing.\n"]
+        )
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        before = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+
+        result = process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=True,
+            batch_write=True,
+        )
+
+        assert result.updated == 0
+        assert result.oversize_suppressed == 1
+        assert result.escalated == 1
+        # Only the tier-2 classify batch was submitted — the tier-3 write
+        # batch's only candidate item was suppressed before assembly, so
+        # t3_requests stayed empty and that batch was never submitted.
+        assert len(client.batches.submitted) == 1
+        after = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+        assert after == before
+
+    def test_oversized_page_never_reaches_sync_merges_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """batch_write=False routes the merge to the finalize-time
+        sync_merges fallback. ``allow_sync=False`` means ANY
+        ``messages.create`` call (the merge this gate must suppress) raises
+        immediately — the strongest possible proof no model call was made."""
+        _patch_uids(monkeypatch)
+        root = _seed_oversized_acme_root(
+            tmp_path, "p-sync-oversize", ["Acme Corp shipped a thing.\n"]
+        )
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        before = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+
+        result = process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=True,
+            batch_write=False,
+        )
+
+        assert result.updated == 0
+        assert result.oversize_suppressed == 1
+        assert result.escalated == 1
+        assert client.sync_calls == []
+        after = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+        assert after == before
+
+    def test_under_threshold_page_still_merges_on_both_sub_transports(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: the small (pre-existing fixture) Acme page must
+        merge exactly as before on BOTH the batched-write assembly path and
+        the unbatched-write sync_merges fallback."""
+        _patch_uids(monkeypatch)
+
+        root_batched = _seed_root(
+            tmp_path, "p-batched-ok", ["Acme Corp shipped a thing.\n"], with_acme=True
+        )
+        client_batched = _FakeClient(_scripted_responder, allow_sync=False)
+        result_batched = process_batch_run(
+            discover_raw_files(root_batched / "raw"),
+            EntityIndex(root_batched / "wiki"),
+            root_batched / "wiki",
+            client_batched,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=True,
+            batch_write=True,
+        )
+        assert result_batched.updated == 1
+        assert result_batched.oversize_suppressed == 0
+        body_batched = (root_batched / "wiki" / "acme1234-acme-corp.md").read_text(
+            encoding="utf-8"
+        )
+        assert "Merged note from" in body_batched
+
+        root_sync = _seed_root(
+            tmp_path, "p-sync-ok", ["Acme Corp shipped a thing.\n"], with_acme=True
+        )
+        client_sync = _FakeClient(_scripted_responder, allow_sync=True)
+        result_sync = process_batch_run(
+            discover_raw_files(root_sync / "raw"),
+            EntityIndex(root_sync / "wiki"),
+            root_sync / "wiki",
+            client_sync,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=True,
+            batch_write=False,
+        )
+        assert result_sync.updated == 1
+        assert result_sync.oversize_suppressed == 0
+        body_sync = (root_sync / "wiki" / "acme1234-acme-corp.md").read_text(
+            encoding="utf-8"
+        )
+        assert "Merged note from" in body_sync

@@ -14,8 +14,10 @@ issue athenaeum#602) consults a T1 pass-up and AUTO-FINALIZES a safe-class
 :func:`athenaeum.pending_merges.resolve_merge`'s existing approve-time
 fold, marked ``auto_applied`` in provenance. See each function's own
 docstring and :mod:`athenaeum.reasoning_tiers` for the gated/default-OFF
-wiring detail (both tiers share ONE opt-in flag,
-``reasoning_tier_auditing_enabled``, default OFF).
+wiring detail. **Independently gated as of issue athenaeum#1200:** T1 by
+``reasoning_tier_auditing_enabled`` (default OFF), T2's auto-apply by its
+own ``reasoning_tier_t2_auto_apply_enabled`` (default OFF, independent of
+T1's value) — before athenaeum#1200 one flag armed both together.
 
 SCC membership (L4 domain/pipeline). ``merge.py`` is imported at TOP level by
 ``librarian.py``, ``retire.py``, and ``wiki_dedupe.py`` (normal downward
@@ -98,6 +100,7 @@ from athenaeum.config import (
     resolve_min_cluster_cohesion_scopes,
     resolve_operational_markers,
     resolve_reasoning_tier_auditing_enabled,
+    resolve_reasoning_tier_t2_auto_apply_enabled,
 )
 from athenaeum.contradictions import ContradictionResult, detect_contradictions
 from athenaeum.cross_scope import (
@@ -1715,8 +1718,14 @@ def merge_clusters_to_wiki(
             ``resolve_calls``, ``chunks_run``, ``pairs_added_via_similarity``,
             ``entries_merged`` (``len(entries)``), and ``escalations_written``
             (``len(escalations)``) — so the run-level profile summary (athenaeum#464)
-            can thread these counters up without recomputing them. Purely
-            additive; ``None`` (every pre-athenaeum#464 caller) is byte-identical.
+            can thread these counters up without recomputing them. Issue
+            athenaeum#1177 (AC4) additionally sets ``haiku_calls_succeeded`` and
+            ``resolve_calls_succeeded`` — the SUBSET of ``haiku_calls`` /
+            ``resolve_calls`` (attempted) whose response actually landed
+            (tokens recorded), so a run where every attempt errored reports
+            that disagreement explicitly rather than only ever exposing the
+            attempted count under a name a reader could mistake for results.
+            Purely additive; ``None`` (every pre-athenaeum#464 caller) is byte-identical.
             Issue athenaeum#909 additionally sets ``c4_swept_full`` (``bool``) — whether
             this call's EFFECTIVE ``only_cluster_ids`` (after ``c4_since``
             scoping below, if it engaged) ended up ``None``, i.e. a true
@@ -1768,16 +1777,26 @@ def merge_clusters_to_wiki(
     # for the subscription path, dollars for the metered API path — is keyed on
     # it). Mirrors ``librarian.run``'s single ``resolve_provider(config)`` read.
     resolved_provider = resolve_provider(resolved_config)
-    # Issue athenaeum#518: the reasoning-tier screen, resolved once. DEFAULT OFF —
+    # Issue athenaeum#518 / athenaeum#1200: the two reasoning-tier screens, resolved
+    # ONCE EACH, from their OWN independent flags — before athenaeum#1200 both were
+    # fed by a single combined boolean, which meant arming the harmless T1
+    # screen also armed T2's unreviewed auto-apply. Both still default OFF —
     # production merge behavior is byte-identical to today until an operator
-    # opts in. When on, T1 screens each merge proposal before it reaches the
-    # human queue (a confident reject drops it; a pass-up flows through
-    # unchanged). The authority manifest (loaded once, only when enabled) feeds
-    # T1's live-source-duplicate check; a missing manifest is an inert empty one.
-    reasoning_tier_enabled = resolve_reasoning_tier_auditing_enabled(resolved_config)
+    # opts in to EACH. When T1 is on, it screens each merge proposal before
+    # it reaches the human queue (a confident reject drops it; a pass-up
+    # flows through unchanged). When T2 is on, a T1 pass-up may be
+    # auto-finalized within the safe class (see `t2_screen_merge_proposal`'s
+    # own docstring) with NO human review. The authority manifest (loaded
+    # once, only when EITHER screen is enabled) feeds T1's
+    # live-source-duplicate check and T2's own tier call; a missing manifest
+    # is an inert empty one.
+    reasoning_t1_enabled = resolve_reasoning_tier_auditing_enabled(resolved_config)
+    reasoning_t2_auto_apply_enabled = resolve_reasoning_tier_t2_auto_apply_enabled(
+        resolved_config
+    )
     reasoning_authority_manifest = (
         load_authority_manifest_for_pipeline(knowledge_root)
-        if reasoning_tier_enabled
+        if (reasoning_t1_enabled or reasoning_t2_auto_apply_enabled)
         else None
     )
     # Issue athenaeum#398: resolved once and threaded into every dark-zone
@@ -1923,6 +1942,17 @@ def merge_clusters_to_wiki(
     similarity_threshold = resolve_similarity_threshold(resolved_config)
 
     haiku_calls = 0
+    # Issue athenaeum#1177 (AC4): ATTEMPTED (``haiku_calls`` above, unchanged)
+    # vs SUCCEEDED, tracked separately so a run where the detector's calls
+    # all errored (e.g. credits exhausted) cannot report ``detector_haiku``
+    # as if it reflected real detections when the token ledger recorded
+    # zero tokens for every one of them. Incremented via
+    # ``usage.succeeded_calls`` (bumped only when a REAL response's tokens
+    # were recorded, see ``TokenUsage.add_tokens``) diffed immediately
+    # around each ``detect_contradictions`` call, rather than threading a
+    # new return value through it — keeps that function's contract
+    # unchanged.
+    haiku_calls_succeeded = 0
     pairs_added_via_similarity = 0
     chunks_run = 0
 
@@ -2071,7 +2101,7 @@ def merge_clusters_to_wiki(
                 config=resolved_config,
                 provider=resolved_provider,
                 authority_manifest=reasoning_authority_manifest,
-                enabled=reasoning_tier_enabled,
+                enabled=reasoning_t1_enabled,
                 dry_run=dry_run,
             ):
                 return
@@ -2086,16 +2116,19 @@ def merge_clusters_to_wiki(
             # Issue athenaeum#602: T2 reasoning-tier screen — a second, more expensive
             # tier consulted ONLY on a T1 pass-up (a T1 reject already
             # returned above, so an already-rejected proposal never reaches
-            # this Opus call). Gated behind the SAME
-            # ``reasoning_tier_auditing_enabled`` flag as T1 — there is no
-            # separate opt-in for T2. A safe-class ``approve`` auto-applies
-            # the merge (bypassing the human queue) via the exact same
-            # write_pending_merge + resolve_merge mechanics used below,
-            # marked auto_applied in provenance. Every other outcome —
-            # disabled, dry-run, no client, ceiling tripped, escalate/amend/
-            # draft, or an approve that fails safe_class_violation — returns
-            # False and falls through to the unscreened write below
-            # unchanged, matching T1's own degrade-to-human-queue contract.
+            # this Opus call). **Independently gated as of issue athenaeum#1200** by
+            # its OWN ``reasoning_tier_t2_auto_apply_enabled`` flag — NOT the
+            # same flag as T1 (that was the athenaeum#1200 defect: one key armed
+            # both a harmless screen and unreviewed auto-apply together).
+            # T2's flag defaults OFF independent of T1's value. A safe-class
+            # ``approve`` auto-applies the merge (bypassing the human queue)
+            # via the exact same write_pending_merge + resolve_merge
+            # mechanics used below, marked auto_applied in provenance. Every
+            # other outcome — disabled, dry-run, no client, ceiling tripped,
+            # escalate/amend/draft, or an approve that fails
+            # safe_class_violation — returns False and falls through to the
+            # unscreened write below unchanged, matching T1's own
+            # degrade-to-human-queue contract.
             if t2_screen_merge_proposal(
                 member_paths=member_paths,
                 merge_target_name=proposal.merge_target_name,
@@ -2111,7 +2144,7 @@ def merge_clusters_to_wiki(
                 config=resolved_config,
                 provider=resolved_provider,
                 authority_manifest=reasoning_authority_manifest,
-                enabled=reasoning_tier_enabled,
+                enabled=reasoning_t2_auto_apply_enabled,
                 dry_run=dry_run,
             ):
                 return
@@ -2297,13 +2330,19 @@ def merge_clusters_to_wiki(
     # block stays byte-identical to the pre-athenaeum#126 format.
     resolve_budget = resolve_max_per_run(resolved_config)
     resolve_calls = 0
+    # Issue athenaeum#1177 (AC4): attempted (``resolve_calls`` above) vs
+    # succeeded, mirroring ``haiku_calls_succeeded`` below -- see its
+    # comment for why this is a before/after diff on
+    # ``usage.succeeded_calls`` rather than a new ``propose_resolution``
+    # return value.
+    resolve_calls_succeeded = 0
     resolve_budget_exhausted_logged = False
 
     def _maybe_propose(
         result: ContradictionResult,
         members: list[AutoMemoryFile],
     ) -> ResolutionProposal | MergeProposal | None:
-        nonlocal resolve_calls, resolve_budget_exhausted_logged
+        nonlocal resolve_calls, resolve_calls_succeeded, resolve_budget_exhausted_logged
         if not result.detected:
             return None
         # Issue athenaeum#249: a pair already settled as not_a_conflict (auto or human)
@@ -2343,9 +2382,18 @@ def merge_clusters_to_wiki(
         # can now differ.
         if usage is not None and resolve_client is not None:
             usage.api_calls += 1
-        return propose_resolution(
+            # Issue athenaeum#1177: also record it on the run-level attempted-vs-
+            # succeeded counter (see TokenUsage.record_attempt's docstring) —
+            # additive to, not a replacement for, this call site's own
+            # ``api_calls``/``resolve_calls`` accounting above.
+            usage.record_attempt()
+        _succeeded_before = usage.succeeded_calls if usage is not None else 0
+        proposal = propose_resolution(
             result, members, resolve_client, usage=usage, wiki_root=wiki_root
         )
+        if usage is not None and usage.succeeded_calls > _succeeded_before:
+            resolve_calls_succeeded += 1
+        return proposal
 
     # Issue athenaeum#462: FIRST WRITE — persist the deterministic C3 merge output to
     # disk BEFORE C4 detection runs. Until this change the page write loop sat
@@ -2544,9 +2592,15 @@ def merge_clusters_to_wiki(
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
+                # Issue athenaeum#1177: run-level attempted counter, additive to
+                # the api_calls/haiku_calls accounting above.
+                usage.record_attempt()
+            _succeeded_before = usage.succeeded_calls if usage is not None else 0
             result = detect_contradictions(
                 filtered, client, config=resolved_config, usage=usage, wiki_root=wiki_root
             )
+            if usage is not None and usage.succeeded_calls > _succeeded_before:
+                haiku_calls_succeeded += 1
             # Issue athenaeum#569 (H6): capture the detector's transient give-up BEFORE
             # any downgrade reassigns `result`, so a cluster whose detection was
             # cut short by an overload window is re-queued next run.
@@ -2717,9 +2771,15 @@ def merge_clusters_to_wiki(
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
+                # Issue athenaeum#1177: run-level attempted counter, additive to
+                # the api_calls/haiku_calls accounting above.
+                usage.record_attempt()
+            _succeeded_before = usage.succeeded_calls if usage is not None else 0
             result = detect_contradictions(
                 pair, client, config=resolved_config, usage=usage, wiki_root=wiki_root
             )
+            if usage is not None and usage.succeeded_calls > _succeeded_before:
+                haiku_calls_succeeded += 1
             if result.detected:
                 pairs_added_via_similarity += 1
                 # Synthesize a thin escalation entry; we don't have a
@@ -2758,7 +2818,13 @@ def merge_clusters_to_wiki(
             out_stats.update(
                 {
                     "haiku_calls": haiku_calls,
+                    # Issue athenaeum#1177 (AC4): attempted-vs-succeeded split, so a
+                    # run where the detector's calls all errored cannot
+                    # report "20 detections" that the token ledger shows
+                    # zero tokens for.
+                    "haiku_calls_succeeded": haiku_calls_succeeded,
                     "resolve_calls": resolve_calls,
+                    "resolve_calls_succeeded": resolve_calls_succeeded,
                     "chunks_run": chunks_run,
                     "pairs_added_via_similarity": pairs_added_via_similarity,
                     "entries_merged": len(entries),
@@ -2791,7 +2857,10 @@ def merge_clusters_to_wiki(
         out_stats.update(
             {
                 "haiku_calls": haiku_calls,
+                # Issue athenaeum#1177 (AC4): see the dry-run branch above's comment.
+                "haiku_calls_succeeded": haiku_calls_succeeded,
                 "resolve_calls": resolve_calls,
+                "resolve_calls_succeeded": resolve_calls_succeeded,
                 "chunks_run": chunks_run,
                 "pairs_added_via_similarity": pairs_added_via_similarity,
                 "entries_merged": len(entries),

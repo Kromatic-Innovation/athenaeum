@@ -18,6 +18,18 @@ and the productive-run negative case — using an in-repo synthetic fixture
 observed 2026-08 SessionEnd shape. No host log archive is read by any test
 here. All state is written under ``tmp_path``; no test touches the
 operator's live ledger/knowledge store.
+
+Issue athenaeum#1177 adds ``TestAllCallsFailedRegression`` below: the mandatory
+regression test for the four-day incident where credits were exhausted and
+every entity-phase LLM call raised ``BadRequestError`` — the predicate
+above stayed untripped (``api_calls`` only ever incremented on SUCCESS, so
+an all-failing run read as "0 calls", indistinguishable from idle) and the
+entity phase's ``reason`` read ``"completed"``. That test drives a REAL
+``athenaeum run()`` end to end with a fake Anthropic client that raises on
+every call, rather than stubbing ``process_one`` out (the pattern most
+other suites use) — the fix lives inside the real call path
+(``tiers._timed_llm_call``), so a test that bypasses it would not exercise
+what changed.
 """
 
 from __future__ import annotations
@@ -26,18 +38,26 @@ import json
 import logging
 from pathlib import Path
 
+import anthropic
+import httpx
 import pytest
 
 from athenaeum import zero_yield
 from athenaeum.config import resolve_cache_dir
 from athenaeum.librarian import (
+    DEFAULT_ZERO_YIELD_ALERT_THRESHOLD,
     EXIT_GRACEFUL_PARTIAL,
+    ZERO_YIELD_ALERT_PREFIX,
     ZERO_YIELD_PREFIX,
     RunContext,
+    _auto_memory_reason,
     _run_finalize_phase,
     _zero_yield_tripped,
+    librarian_zero_yield_alert_threshold,
+    run,
 )
 from athenaeum.models import TokenUsage
+from tests.conftest import FakeLLMClient
 from tests.test_librarian_run_phases import _make_ctx
 
 FIXTURE_PATH = (
@@ -75,6 +95,67 @@ def _finalize_ctx(tmp_path: Path, **overrides) -> RunContext:
     for key, value in overrides.items():
         setattr(ctx, key, value)
     return ctx
+
+
+# ---------------------------------------------------------------------------
+# librarian_zero_yield_alert_threshold — env > yaml > default (issue athenaeum#1177, AC2)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveZeroYieldAlertThreshold:
+    def test_default_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD", raising=False)
+        assert (
+            librarian_zero_yield_alert_threshold(None) == DEFAULT_ZERO_YIELD_ALERT_THRESHOLD
+        )
+        assert (
+            librarian_zero_yield_alert_threshold({})
+            == DEFAULT_ZERO_YIELD_ALERT_THRESHOLD
+        )
+
+    def test_yaml_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD", raising=False)
+        assert (
+            librarian_zero_yield_alert_threshold(
+                {"librarian": {"zero_yield_alert_threshold": 5}}
+            )
+            == 5
+        )
+
+    def test_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD", "7")
+        assert (
+            librarian_zero_yield_alert_threshold(
+                {"librarian": {"zero_yield_alert_threshold": 5}}
+            )
+            == 7
+        )
+
+    def test_below_one_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD", raising=False)
+        assert (
+            librarian_zero_yield_alert_threshold(
+                {"librarian": {"zero_yield_alert_threshold": 0}}
+            )
+            == DEFAULT_ZERO_YIELD_ALERT_THRESHOLD
+        )
+
+    def test_bool_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # `zero_yield_alert_threshold: yes` parses as True (int subclass) --
+        # must NOT become a threshold of 1.
+        monkeypatch.delenv("ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD", raising=False)
+        assert (
+            librarian_zero_yield_alert_threshold(
+                {"librarian": {"zero_yield_alert_threshold": True}}
+            )
+            == DEFAULT_ZERO_YIELD_ALERT_THRESHOLD
+        )
+
+    def test_non_numeric_env_falls_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD", "not-a-number")
+        assert (
+            librarian_zero_yield_alert_threshold(None) == DEFAULT_ZERO_YIELD_ALERT_THRESHOLD
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +208,32 @@ class TestZeroYieldPredicate:
         ctx.files_processed_count = 0
         ctx.deferred_refs = ["a.md", "b.md"]
         assert _zero_yield_tripped(ctx, ["a.md"]) is True
+
+    def test_true_when_every_call_attempted_but_none_succeeded(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#1177: the shape a credits-exhausted run actually produces --
+        ``api_calls`` stays 0 (only ever incremented on a SUCCESSFUL
+        response) but ``attempted_calls`` is nonzero (bumped before
+        dispatch, regardless of outcome). Before this fix, condition 1
+        checked ``api_calls`` alone and this run read as idle, not
+        wasteful -- the root cause of the four-day silent incident."""
+        ctx = _finalize_ctx(tmp_path)
+        ctx.usage = TokenUsage(api_calls=0, attempted_calls=6)
+        ctx.files_processed_count = 0
+        ctx.deferred_refs = []
+        assert _zero_yield_tripped(ctx, []) is True
+
+    def test_false_when_neither_api_calls_nor_attempted_calls_set(
+        self, tmp_path: Path
+    ) -> None:
+        """Companion negative case: a genuinely idle run (nothing attempted
+        at all) must still read as idle, not wasteful."""
+        ctx = _finalize_ctx(tmp_path)
+        ctx.usage = TokenUsage(api_calls=0, attempted_calls=0)
+        ctx.files_processed_count = 0
+        ctx.deferred_refs = []
+        assert _zero_yield_tripped(ctx, []) is False
 
 
 # ---------------------------------------------------------------------------
@@ -264,3 +371,166 @@ class TestZeroYieldFinalizeIntegration:
         assert ctx.zero_yield_tripped is None
         assert ctx.zero_yield_consecutive is None
         assert not (_cache_dir() / zero_yield.STATE_NAME).exists()
+
+
+# ---------------------------------------------------------------------------
+# _auto_memory_reason (issue athenaeum#1177, AC3, auto-memory phase)
+# ---------------------------------------------------------------------------
+
+
+class TestAutoMemoryReason:
+    def test_completed_when_nothing_attempted(self) -> None:
+        """A genuinely idle auto-memory pass (nothing to detect/resolve this
+        run) is a real completion, not a failure."""
+        assert _auto_memory_reason({"haiku_calls": 0, "resolve_calls": 0}) == "completed"
+
+    def test_completed_when_attempts_succeeded(self) -> None:
+        assert (
+            _auto_memory_reason(
+                {
+                    "haiku_calls": 4,
+                    "haiku_calls_succeeded": 4,
+                    "resolve_calls": 1,
+                    "resolve_calls_succeeded": 1,
+                }
+            )
+            == "completed"
+        )
+
+    def test_all_calls_failed_when_every_attempt_errored(self) -> None:
+        """The shape a credits-exhausted run produces: attempts made,
+        zero landed a response -- the ledger would show 0 tokens for all
+        of them."""
+        assert (
+            _auto_memory_reason(
+                {
+                    "haiku_calls": 20,
+                    "haiku_calls_succeeded": 0,
+                    "resolve_calls": 0,
+                    "resolve_calls_succeeded": 0,
+                }
+            )
+            == "all-calls-failed"
+        )
+
+    def test_completed_when_some_but_not_all_attempts_succeeded(self) -> None:
+        """A partial failure (some detections landed, some errored) is a
+        genuine partial completion, not the all-failed case AC3 targets."""
+        assert (
+            _auto_memory_reason(
+                {
+                    "haiku_calls": 5,
+                    "haiku_calls_succeeded": 2,
+                    "resolve_calls": 0,
+                    "resolve_calls_succeeded": 0,
+                }
+            )
+            == "completed"
+        )
+
+    def test_missing_keys_default_to_zero(self) -> None:
+        """A caller (e.g. the merge_only variant's out_stats dict) that has
+        not populated the succeeded keys must not crash -- ``.get`` with a
+        default, not a KeyError."""
+        assert _auto_memory_reason({}) == "completed"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end regression test (issue athenaeum#1177's mandatory AC): a run
+# where EVERY entity-phase LLM call errors.
+# ---------------------------------------------------------------------------
+
+
+def _bad_request_error() -> anthropic.BadRequestError:
+    """A real anthropic BadRequestError (HTTP 400) -- NON-transient, so
+    ``with_retry`` raises it straight through with no retry (mirrors
+    ``tests/test_retry.py``'s helper of the same shape)."""
+    req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    resp = httpx.Response(400, request=req)
+    return anthropic.BadRequestError("Bad request", response=resp, body=None)
+
+
+class TestAllCallsFailedRegression:
+    """The issue's mandatory AC: simulate a run where every call errors;
+    assert the summary is not labelled completed AND the zero-yield
+    counter advances. Drives a REAL ``run()`` (not a stubbed-out
+    ``process_one``) with a fake Anthropic client that raises on every
+    ``messages.create`` -- see the module docstring for why."""
+
+    def test_all_entity_calls_failing_trips_zero_yield_and_avoids_completed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from tests.test_librarian_deadline import _seed_knowledge_root
+
+        root = _seed_knowledge_root(tmp_path, n_files=2)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        fake_client = FakeLLMClient(raises=_bad_request_error())
+        monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: fake_client)
+
+        # Seed a prior 2-consecutive-zero-yield streak (real predecessor
+        # state, not the default fresh one) so this run's increment -- and
+        # the AC2 alert threshold crossing at 3 -- are both observable.
+        cache_dir = resolve_cache_dir()
+        zero_yield.write_state(cache_dir, consecutive=2, deferred_refs=[])
+
+        caplog.clear()
+        caplog.set_level(logging.INFO, logger="athenaeum")
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+            max_runtime=1000,
+        )
+
+        # The existing "Failed files" exit-1 contract is unaffected by this
+        # fix -- both raw files errored and are retried next run.
+        assert rc == 1
+
+        summary_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("librarian-run-summary")
+        ]
+        assert len(summary_lines) == 1
+        summary = summary_lines[0]
+        # Isolate the entity phase's own segment -- wiki-dedup (a separate,
+        # unrelated, genuinely-completed phase that never makes an LLM
+        # call) legitimately still reads "reason=completed" on the SAME
+        # line, so asserting against the whole line would false-positive.
+        entity_segment = summary.split("| entity ")[1].split(" | ")[0]
+
+        # AC3: the entity phase segment must NOT read as completed, and
+        # must name the error class.
+        assert "reason=completed" not in entity_segment
+        assert "reason=all-calls-failed:BadRequestError" in entity_segment
+        assert "calls=0" in entity_segment  # api_calls (successes) genuinely 0
+
+        # AC1: the zero-yield counter actually advanced across the run
+        # boundary -- 2 (seeded) + 1 = 3.
+        assert "zero_yield=3" in summary
+        persisted = zero_yield.load_state(cache_dir)
+        assert persisted["consecutive"] == 3
+
+        # AC2: the alert fires once the streak reaches the (default) N=3
+        # threshold, as a SEPARATE, distinctly-prefixed ERROR line from the
+        # per-trip WARNING.
+        alert_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.ERROR and ZERO_YIELD_ALERT_PREFIX in r.getMessage()
+        ]
+        assert len(alert_lines) == 1
+        assert "3" in alert_lines[0]
+
+        warning_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING and ZERO_YIELD_PREFIX in r.getMessage()
+        ]
+        assert len(warning_lines) == 1

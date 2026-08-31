@@ -66,10 +66,13 @@ corrected a prior overclaim in the docs, this restates it against the
 code): :data:`DEFAULT_TIER_CHAIN` is genuinely the empty tuple — nothing
 calls :func:`run_reasoning_pipeline` with tiers configured by default.
 BUT this module IS reached in production, through exactly TWO callers in
-``merge.py``, both gated behind the SAME
-``resolve_reasoning_tier_auditing_enabled`` (:mod:`athenaeum.config`) flag,
-which defaults OFF, so an unconfigured install still sees every proposal
-pass straight to the human queue exactly as if this module did not exist:
+``merge.py``, gated behind two INDEPENDENT flags (issue athenaeum#1200 — before
+it, one shared ``resolve_reasoning_tier_auditing_enabled`` flag armed both):
+T1 by ``resolve_reasoning_tier_auditing_enabled``, T2's auto-apply by its
+own ``resolve_reasoning_tier_t2_auto_apply_enabled`` (both in
+:mod:`athenaeum.config`). Both default OFF, so an unconfigured install still
+sees every proposal pass straight to the human queue exactly as if this
+module did not exist:
 
 - ``t1_screen_rejects_merge_proposal`` (athenaeum#518) builds an explicit
   ``tier_chain=(functools.partial(run_t1_tier, ...),)`` and calls
@@ -86,9 +89,9 @@ pass straight to the human queue exactly as if this module did not exist:
   safe-class-violation downgrade — falls through to the human queue.
 
 Do not describe this module as having "no production caller" (stale as of
-athenaeum#518) and do not describe T2 as "unwired" (stale as of athenaeum#602) — both tiers
-are wired, both opt-in behind the one flag, both defaulting to the
-identical unscreened behavior when it is off.
+athenaeum#518) and do not describe T2 as "unwired" (stale as of athenaeum#602) — both
+tiers are wired, each opt-in behind its OWN flag (athenaeum#1200), each
+defaulting to the identical unscreened behavior when it is off.
 """
 
 from __future__ import annotations
@@ -112,6 +115,7 @@ from athenaeum.config import (
     DEFAULT_CLASSIFY_MODEL,
     resolve_model,
     resolve_reasoning_tier_auditing_enabled,
+    resolve_reasoning_tier_t2_auto_apply_enabled,
 )
 from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import PendingMerge
@@ -145,23 +149,33 @@ DEFAULT_T1_MODEL = DEFAULT_CLASSIFY_MODEL
 
 
 def _warn_if_tier_model_knob_inert(
-    knob: str, env_var: str, config: dict[str, Any] | None
+    knob: str,
+    env_var: str,
+    config: dict[str, Any] | None,
+    *,
+    enabled: bool,
+    enabling_hint: str,
 ) -> None:
     """Warn when a reasoning-tier model knob is set but has no effect (athenaeum#780).
 
     ``ATHENAEUM_REASONING_T1_MODEL`` / ``T2_MODEL`` (and their ``models.<knob>``
-    yaml equivalents) are read regardless of
-    ``ATHENAEUM_REASONING_TIER_AUDITING_ENABLED``, but only matter once that
-    flag turns the T1/T2 screen on — see ``docs/configuration.md``'s
-    "Reasoning-tier screening" section. With the flag off (the default),
-    setting the model knob silently does nothing. This is NOT a claim that
-    the tiers are dead: both have real production callers in ``merge.py``
-    (``t1_screen_rejects_merge_proposal``, athenaeum#518;
+    yaml equivalents) are read regardless of whether that tier's own screen
+    is armed, but only matter once it is — see ``docs/configuration.md``'s
+    "Reasoning-tier screening" section. With the tier's screen off (the
+    default), setting its model knob silently does nothing. This is NOT a
+    claim that the tiers are dead: both have real production callers in
+    ``merge.py`` (``t1_screen_rejects_merge_proposal``, athenaeum#518;
     ``t2_screen_merge_proposal``, athenaeum#602) that run whenever an operator
     opts in — see this module's "Production status" note above. The knob is
     opt-in-only, not inert-by-design.
+
+    *enabled* is the CALLER's own tier-specific resolved flag (issue
+    athenaeum#1200: T1 and T2 are independently armed, so this function no
+    longer resolves a single shared flag itself — a T2 config with T1 off
+    and T2 on must not warn about the T2 model knob being inert). *enabling_hint*
+    names the env var / yaml key that arms THIS tier, for the warning text.
     """
-    if resolve_reasoning_tier_auditing_enabled(config):
+    if enabled:
         return
     explicit = os.environ.get(env_var) is not None
     if not explicit and isinstance(config, dict):
@@ -171,12 +185,11 @@ def _warn_if_tier_model_knob_inert(
             explicit = isinstance(raw, str) and bool(raw.strip())
     if explicit:
         log.warning(
-            "%s is set but has no effect: reasoning-tier auditing is "
-            "disabled, so the %s tier never runs. Set "
-            "ATHENAEUM_REASONING_TIER_AUDITING_ENABLED=1 (or yaml "
-            "librarian.reasoning_tier_auditing_enabled: true) to enable it.",
+            "%s is set but has no effect: %s tier is disabled, so it never "
+            "runs. %s",
             env_var,
             knob,
+            enabling_hint,
         )
 
 
@@ -185,7 +198,16 @@ def get_t1_model(config: dict[str, Any] | None = None) -> str:
     model = resolve_model(
         "reasoning_t1", "ATHENAEUM_REASONING_T1_MODEL", DEFAULT_T1_MODEL, config
     )
-    _warn_if_tier_model_knob_inert("reasoning_t1", "ATHENAEUM_REASONING_T1_MODEL", config)
+    _warn_if_tier_model_knob_inert(
+        "reasoning_t1",
+        "ATHENAEUM_REASONING_T1_MODEL",
+        config,
+        enabled=resolve_reasoning_tier_auditing_enabled(config),
+        enabling_hint=(
+            "Set ATHENAEUM_REASONING_TIER_AUDITING_ENABLED=1 (or yaml "
+            "librarian.reasoning_tier_auditing_enabled: true) to enable it."
+        ),
+    )
     return model
 
 
@@ -811,7 +833,18 @@ def get_t2_model(config: dict[str, Any] | None = None) -> str:
     model = resolve_model(
         "reasoning_t2", "ATHENAEUM_REASONING_T2_MODEL", DEFAULT_T2_MODEL, config
     )
-    _warn_if_tier_model_knob_inert("reasoning_t2", "ATHENAEUM_REASONING_T2_MODEL", config)
+    _warn_if_tier_model_knob_inert(
+        "reasoning_t2",
+        "ATHENAEUM_REASONING_T2_MODEL",
+        config,
+        enabled=resolve_reasoning_tier_t2_auto_apply_enabled(config),
+        enabling_hint=(
+            "Set ATHENAEUM_REASONING_TIER_T2_AUTO_APPLY_ENABLED=1 (or yaml "
+            "librarian.reasoning_tier_t2_auto_apply_enabled: true) to enable "
+            "it (issue athenaeum#1200 — T2 auto-apply is a separate opt-in "
+            "from T1's reasoning_tier_auditing_enabled)."
+        ),
+    )
     return model
 
 

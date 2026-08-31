@@ -26,7 +26,8 @@ reresolve-questions), ``_cmd_curate`` (dedupe/claims/auto-memory),
 ``_cmd_outbound``, ``_cmd_drain``, ``_cmd_storage``, ``_cmd_push_metrics``
 (push-metrics baseline/coverage-audit, issue athenaeum#711),
 ``_cmd_memory_class`` (memory-class backfill, issue athenaeum#996),
-``_cmd_verdicts`` (verdict ledger inspection, issue athenaeum#712).
+``_cmd_verdicts`` (verdict ledger inspection, issue athenaeum#712),
+``_cmd_explain_routing`` (explain-routing, issue athenaeum#1176).
 
 FACTORING RULE: **every subcommand lives in its own ``_cmd_<name>.py`` module
 (or a small same-domain group module) with an ``add_<name>_subparser(subparsers)``
@@ -80,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_dimensions import add_dimensions_subparser
     from athenaeum._cmd_drain import add_drain_subparser
     from athenaeum._cmd_enumerate import add_enumerate_subparser
+    from athenaeum._cmd_explain_routing import add_explain_routing_subparser
     from athenaeum._cmd_index import add_index_subparsers
     from athenaeum._cmd_lifecycle import add_lifecycle_subparsers
     from athenaeum._cmd_measure import add_measure_subparser
@@ -114,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_run_subparser(subparsers)  # run
     add_query_subparsers(subparsers)  # test-mcp, query-topics, stopwords, recall
     add_enumerate_subparser(subparsers)  # enumerate (issue athenaeum#965)
+    add_explain_routing_subparser(subparsers)  # explain-routing (issue athenaeum#1176)
     add_pending_subparsers(subparsers)  # ingest-answers, ingest-merges, reresolve-questions
     add_curate_subparsers(subparsers)  # dedupe, claims, auto-memory
     add_decay_subparser(subparsers)  # decay-sweep

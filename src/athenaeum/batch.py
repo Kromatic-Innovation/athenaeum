@@ -68,6 +68,7 @@ now a one-way edge (no cycle).
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -76,7 +77,7 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 
 import anthropic
 
-from athenaeum import spend
+from athenaeum import batch_state, spend
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.intake import tier0_passthrough
@@ -97,16 +98,21 @@ from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
     TIER2_ADDRESS_RESOLVED_MARKER,
     TIER2_ADDRESS_UNRESOLVED_MARKER,
+    PreambleOnlyResponseError,
     Tier2ParseStats,
+    check_page_size_gate,
     existing_body_needs_full_echo,
+    gate_create_name_classifications,
     parse_merge_ops_response,
     parse_tier2_entities,
     partition_code_artifact_classifications,
     resolve_address_named_classifications,
     stamp_merge_provenance,
     tier1_programmatic_match,
+    tier2_classify,
     tier2_reclassify_larger_budget,
     tier2_request_params,
+    tier3_create,
     tier3_create_params,
     tier3_entity_from_text,
     tier3_merge,
@@ -114,8 +120,11 @@ from athenaeum.tiers import (
     tier3_merge_params,
     tier4_escalate,
 )
+from athenaeum.wiki_write_guard import guard_entity_write_type
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from anthropic.types.messages.batch_create_params import Request
 
 log = logging.getLogger(__name__)
@@ -125,6 +134,15 @@ log = logging.getLogger(__name__)
 # the timeout matches the Batch API's documented 24h processing ceiling.
 BATCH_POLL_INTERVAL_SECONDS: float = 30.0
 BATCH_POLL_TIMEOUT_SECONDS: float = 24 * 60 * 60.0
+
+# Documented Messages Batch API submission limits (issue athenaeum#1144 AC7).
+# A batch that breaches either is refused at ASSEMBLY with a clear, local
+# error rather than being submitted and coming back as an opaque 400 — the
+# refusal maps onto the same per-file failure path an unsubmittable batch
+# already takes, so the raw files stay on disk and the next run retries them
+# in smaller cohorts.
+BATCH_MAX_REQUESTS: int = 100_000
+BATCH_MAX_PAYLOAD_BYTES: int = 256 * 1024 * 1024
 
 
 class BatchExecutionError(Exception):
@@ -144,6 +162,286 @@ class BatchRequest:
     params: dict[str, Any]
 
 
+#: Characters per token for the submit-time input estimate. A reservation is
+#: an ESTIMATE by construction — the exact figure only exists once the batch
+#: returns — so this deliberately uses the standard ~4-chars-per-token
+#: approximation over the assembled payloads rather than pulling in a
+#: tokenizer. The settlement record carries the estimate-vs-actual delta, so
+#: the accuracy of this constant is measurable from the ledger rather than
+#: being an article of faith.
+_CHARS_PER_TOKEN = 4.0
+
+
+@dataclass
+class _SpendReservation:
+    """Records a batch's committed-but-unbilled cost (issue athenaeum#1147).
+
+    ``TokenUsage.add_batch_tokens`` fires at COLLECT. Under the athenaeum#1138
+    submit/collect split the submitting run's ``usage`` therefore never sees
+    the cost of the batch it just submitted — and that cost is committed
+    server-side and cannot be halted, so ``spend.ceiling_tripped`` is
+    structurally blind to it.
+
+    The three moments must not be collapsed: reserve at submit, settle at
+    collect, and count outstanding reservations at ceiling-check time. This
+    object owns the first two; :func:`athenaeum.spend.ceiling_tripped` owns
+    the third.
+    """
+
+    wiki_root: Path
+    config: dict[str, object] | None
+    cache_dir: Path | None = None
+
+    def reserve(
+        self, *, batch_id: str, knob: str, requests: list[BatchRequest]
+    ) -> None:
+        if not batch_id:
+            return
+        est_in, est_out, model = _estimate_batch_tokens(
+            requests,
+            config=self.config,
+            wiki_root=self.wiki_root,
+            cache_dir=self.cache_dir,
+        )
+        # AC5: priced at the 50%-DISCOUNTED batch rate. Pricing a batch
+        # reservation at the synchronous rate trips the ceiling roughly 2x too
+        # early and defeats the entire purpose of the epic. Routed through
+        # ``TokenUsage`` rather than a local multiplication so there is exactly
+        # one pricing site in the codebase, and the discount, the cache
+        # multipliers, and the per-model rate table all compose the same way
+        # they do for real spend.
+        priced = TokenUsage()
+        priced.add_batch_tokens(est_in, est_out, model=model, knob=knob)
+        spend.record_reservation(
+            self.wiki_root,
+            batch_id=batch_id,
+            knob=knob,
+            est_input_tokens=est_in,
+            est_output_tokens=est_out,
+            est_usd=priced.estimated_cost_usd,
+            model=model,
+            requests=len(requests),
+            config=cast("dict[str, Any] | None", self.config),
+            cache_dir=self.cache_dir,
+        )
+
+    def settle_measured(
+        self,
+        *,
+        batch_id: str,
+        knob: str,
+        before: "_UsageSnapshot",
+        after: "_UsageSnapshot",
+        result_types: dict[str, int] | None = None,
+    ) -> None:
+        """Close the reservation with what ``add_batch_tokens`` actually booked.
+
+        A batch whose every request came back ``expired`` books nothing, so
+        the measured delta is genuinely ZERO — which is correct: the API
+        documents an expired request as not billed (AC6). The record says so
+        explicitly rather than leaving a reader to infer it from a zero.
+        """
+        types = result_types or {}
+        source = (
+            "expired"
+            if after.usd == before.usd and set(types) == {"expired"}
+            else "measured"
+        )
+        self._settle(
+            batch_id=batch_id,
+            knob=knob,
+            actual_in=after.batch_input - before.batch_input,
+            actual_out=after.batch_output - before.batch_output,
+            actual_usd=after.usd - before.usd,
+            reason="collected",
+            actual_source=source,
+        )
+
+    def settle_at_estimate(self, *, batch_id: str, knob: str, reason: str) -> None:
+        """Close a reservation whose actual is unknowable (AC6).
+
+        A handle retired uncollected (athenaeum#1146: past retention,
+        unretrievable, or with no applicable context) never yields a real
+        figure — but the batch DID run and WAS billed. Settling at zero would
+        under-report real spend; leaving it open would leak a permanent
+        phantom charge against every future ceiling check. Settling at the
+        estimate is the honest close, and ``actual_source="estimate"`` makes
+        it distinguishable from a measured one.
+        """
+        record = self._outstanding(batch_id)
+        est_usd = float(record.get("est_usd") or 0.0) if record else 0.0
+        est_in = int(record.get("est_input_tokens") or 0) if record else 0
+        est_out = int(record.get("est_output_tokens") or 0) if record else 0
+        if record is None:
+            return
+        self._settle(
+            batch_id=batch_id,
+            knob=knob,
+            actual_in=est_in,
+            actual_out=est_out,
+            actual_usd=est_usd,
+            reason=reason,
+            actual_source="estimate",
+        )
+
+    def _outstanding(self, batch_id: str) -> dict[str, Any] | None:
+        for record in spend.outstanding_reservations(
+            self.wiki_root, cache_dir=self.cache_dir
+        ):
+            if record.get("batch_id") == batch_id:
+                return record
+        return None
+
+    def _settle(
+        self,
+        *,
+        batch_id: str,
+        knob: str,
+        actual_in: int,
+        actual_out: int,
+        actual_usd: float,
+        reason: str,
+        actual_source: str,
+    ) -> None:
+        record = self._outstanding(batch_id)
+        if record is None:
+            # Nothing outstanding: either this batch was never reserved (a
+            # caller with no reservation context) or it already settled.
+            # Writing a second settlement would double-count in any future
+            # reader, so this is a deliberate no-op.
+            return
+        spend.record_settlement(
+            self.wiki_root,
+            batch_id=batch_id,
+            knob=knob,
+            actual_input_tokens=max(0, actual_in),
+            actual_output_tokens=max(0, actual_out),
+            actual_usd=max(0.0, actual_usd),
+            est_usd=float(record.get("est_usd") or 0.0),
+            reason=reason,
+            actual_source=actual_source,
+            config=cast("dict[str, Any] | None", self.config),
+            cache_dir=self.cache_dir,
+        )
+
+
+@dataclass(frozen=True)
+class _UsageSnapshot:
+    """The batch-attributed counters, sampled either side of a collect."""
+
+    batch_input: int
+    batch_output: int
+    usd: float
+
+
+def _usage_snapshot(usage: TokenUsage | None) -> _UsageSnapshot:
+    if usage is None:
+        return _UsageSnapshot(0, 0, 0.0)
+    return _UsageSnapshot(
+        batch_input=usage.batch_input_tokens,
+        batch_output=usage.batch_output_tokens,
+        usd=usage.estimated_cost_usd,
+    )
+
+
+def _estimate_batch_tokens(
+    requests: list[BatchRequest],
+    *,
+    config: dict[str, object] | None,
+    wiki_root: Path,
+    cache_dir: Path | None = None,
+) -> tuple[int, int, str | None]:
+    """Estimate ``(input, output, model)`` for an assembled batch (AC2).
+
+    INPUT comes from the assembled request payloads — the prompts are in hand
+    at submit time, so this is the closest thing to a measurement available
+    before the batch returns.
+
+    OUTPUT follows the :func:`athenaeum.drain_advisor.observed_tokens_per_file`
+    precedent: the recent spend ledger's observed output-tokens-per-file,
+    falling back to that module's documented default when there is no usable
+    history. Capped per request by its own ``max_tokens``, which the model
+    cannot exceed — so a batch of small-budget requests is not estimated as if
+    every one ran to the corpus-wide average.
+    """
+    if not requests:
+        return 0, 0, None
+    from athenaeum import drain_advisor
+
+    est_input = 0
+    for request in requests:
+        params = request.params
+        text_len = 0
+        system = params.get("system")
+        if isinstance(system, str):
+            text_len += len(system)
+        elif isinstance(system, list):
+            text_len += sum(
+                len(block.get("text", "")) for block in system if isinstance(block, dict)
+            )
+        for message in params.get("messages", []) or []:
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, str):
+                text_len += len(content)
+            elif isinstance(content, list):
+                text_len += sum(
+                    len(block.get("text", ""))
+                    for block in content
+                    if isinstance(block, dict)
+                )
+        est_input += int(text_len / _CHARS_PER_TOKEN)
+
+    observed_output = drain_advisor.DEFAULT_AVG_OUTPUT_TOKENS_PER_FILE
+    try:
+        ledger_path = spend.resolve_ledger_path(
+            cast("dict[str, Any] | None", config),
+            cache_dir=cache_dir,
+            wiki_root=wiki_root,
+        )
+        observed = drain_advisor.observed_tokens_per_file(spend.read_ledger(ledger_path))
+        if observed is not None:
+            observed_output = observed[1]
+    except Exception as exc:  # noqa: BLE001 — an estimate must never break a submit
+        log.debug(
+            "batch output estimate fell back to the default (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+
+    est_output = 0
+    for request in requests:
+        budget = request.params.get("max_tokens")
+        cap = budget if isinstance(budget, int) and budget > 0 else None
+        per_request = observed_output if cap is None else min(observed_output, cap)
+        est_output += int(per_request)
+
+    model = requests[0].params.get("model")
+    return est_input, est_output, model if isinstance(model, str) else None
+
+
+@dataclass
+class BatchOutcome:
+    """What one :func:`execute_batch` call produced (issue athenaeum#1144 AC3).
+
+    Three distinguishable shapes, and the caller MUST tell them apart:
+
+    - **collected** — ``in_flight`` is ``False`` and ``results`` maps every
+      ``custom_id`` to its ``Message`` (or ``None`` for a per-request
+      ``errored`` / ``canceled`` / ``expired`` result). This is today's
+      behaviour, byte-for-byte.
+    - **in flight** — ``in_flight`` is ``True``: the run's wall-clock
+      deadline arrived before the batch ended. ``results`` is empty and
+      ``batch_id`` names the batch, which is still running server-side and
+      already paid for. The batch is deliberately NOT cancelled.
+    - **nothing submitted** — no requests were passed; ``batch_id`` is ``""``
+      and ``results`` is empty.
+    """
+
+    batch_id: str = ""
+    results: dict[str, Any] = field(default_factory=dict)
+    in_flight: bool = False
+
+
 def execute_batch(
     client: anthropic.Anthropic,
     requests: list[BatchRequest],
@@ -154,10 +452,13 @@ def execute_batch(
     sleep: Callable[[float], None] = time.sleep,
     poll_interval: float = BATCH_POLL_INTERVAL_SECONDS,
     timeout: float = BATCH_POLL_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    """Submit *requests*, poll to completion, return ``{custom_id: Message}``.
+    deadline: float | None = None,
+    reservation: "_SpendReservation | None" = None,
+) -> BatchOutcome:
+    """Submit *requests*, poll to completion, return a :class:`BatchOutcome`.
 
-    A ``None`` value marks a per-request ``errored`` / ``canceled`` /
+    ``outcome.results`` maps ``{custom_id: Message}``. A ``None`` value marks
+    a per-request ``errored`` / ``canceled`` /
     ``expired`` result — callers map those onto the existing per-file
     failure path. Token usage from succeeded results lands in *usage* via
     :meth:`TokenUsage.add_batch_tokens` (``api_calls`` attempts are counted
@@ -176,11 +477,30 @@ def execute_batch(
     path instead of escaping as a run-fatal traceback — or when the batch
     does not end within *timeout* (best-effort cancel on timeout).
     ``sleep`` is injectable so tests don't wait.
+
+    *deadline* (issue athenaeum#1144) is the run's wall-clock deadline as an
+    absolute :func:`time.monotonic` instant — ``RunContext.entity_deadline``
+    when the athenaeum#440 entity share is armed, else ``RunContext.run_deadline``.
+    When supplied, the poll loop stops at the EARLIER of batch-end or that
+    deadline, and a deadline arriving first SPILLS: the batch is left running
+    (**never** cancelled — it is already paid for server-side and is the whole
+    point of the athenaeum#1138 handle) and an ``in_flight`` outcome carrying the
+    batch id comes back instead of a raised
+    :class:`BatchExecutionError`. ``None`` (every pre-athenaeum#1144 caller)
+    preserves today's *timeout*-only semantics exactly.
+
+    The deadline is converted ONCE at entry into a remaining-seconds budget
+    and then measured against the same ``waited`` accumulator the *timeout*
+    check already uses, rather than re-reading ``time.monotonic()`` each pass.
+    That keeps both bounds on one clock — the injectable ``sleep`` — so a test
+    can drive either path deterministically without waiting on real time
+    (AC6).
     """
     if not requests:
-        return {}
+        return BatchOutcome()
 
     payload = [{"custom_id": r.custom_id, "params": r.params} for r in requests]
+    _refuse_oversized_batch(payload, description=description)
     try:
         batch = with_retry(
             lambda: client.messages.batches.create(
@@ -198,10 +518,35 @@ def execute_batch(
         len(requests),
         description,
     )
+    # Issue athenaeum#1147: the submit is the moment the cost becomes committed
+    # and unstoppable, so the reservation is written HERE — before the poll,
+    # before any deadline spill, and before the tier-3 ceiling check that runs
+    # after this call returns. Reserving after the poll would leave the very
+    # window this ledger exists to cover uncovered.
+    if reservation is not None:
+        reservation.reserve(batch_id=batch.id, knob=knob or "", requests=requests)
 
     waited = 0.0
+    # Remaining wall-clock budget for THIS poll, snapshotted at entry (see the
+    # docstring). ``None`` when no deadline was supplied; clamped at 0 so an
+    # already-expired deadline spills on the first pass instead of polling once.
+    deadline_budget = (
+        max(0.0, deadline - time.monotonic()) if deadline is not None else None
+    )
     status = getattr(batch, "processing_status", "in_progress")
     while status != "ended":
+        if deadline_budget is not None and waited >= deadline_budget:
+            # Issue athenaeum#1144 AC3: do NOT cancel and do NOT raise. The batch is
+            # committed server-side; cancelling would destroy work the caller
+            # is about to persist a handle for.
+            log.warning(
+                "batch %s still in flight at the run deadline after %.0fs "
+                "(%s) — leaving it running and spilling to a handle",
+                batch.id,
+                waited,
+                description,
+            )
+            return BatchOutcome(batch_id=batch.id, in_flight=True)
         if waited >= timeout:
             try:
                 client.messages.batches.cancel(batch.id)
@@ -226,16 +571,65 @@ def execute_batch(
 
     log.info("Batch %s ended after %.0fs (%s)", batch.id, waited, description)
 
-    results: dict[str, Any] = {r.custom_id: None for r in requests}
     # Map each request's custom_id to its serving model-id so batch token
     # usage attributes per model (issue athenaeum#247). The model lives in each
     # request's params (``messages.create`` payload).
     model_by_cid: dict[str, str | None] = {
         r.custom_id: r.params.get("model") for r in requests
     }
+    result_types: dict[str, int] = {}
+    before = _usage_snapshot(usage)
+    results = collect_batch_results(
+        client,
+        batch.id,
+        model_by_cid,
+        description=description,
+        usage=usage,
+        knob=knob,
+        out_result_types=result_types,
+    )
+    # Issue athenaeum#1147: ``add_batch_tokens`` has just booked the actual, so
+    # this is the settlement moment. The delta between the two snapshots IS
+    # the batch's real cost — no second pricing path.
+    if reservation is not None:
+        reservation.settle_measured(
+            batch_id=batch.id,
+            knob=knob or "",
+            before=before,
+            after=_usage_snapshot(usage),
+            result_types=result_types,
+        )
+    return BatchOutcome(batch_id=batch.id, results=results)
+
+
+def collect_batch_results(
+    client: anthropic.Anthropic,
+    batch_id: str,
+    model_by_cid: dict[str, str | None],
+    *,
+    description: str,
+    usage: TokenUsage | None = None,
+    knob: str | None = None,
+    out_result_types: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Read an ENDED batch's results and book their token usage.
+
+    Split out of :func:`execute_batch` (issue athenaeum#1145) so the
+    across-run collect path books usage through the SAME code as the
+    within-run one — including the athenaeum#247 per-model attribution, which is
+    the reason *model_by_cid* is a parameter rather than being re-derived from
+    the request payloads: a collecting run no longer has those payloads, only
+    the models the athenaeum#1143 handle recorded at claim time.
+
+    Returns ``{custom_id: Message}``, with ``None`` for a per-request
+    ``errored`` / ``canceled`` / ``expired`` result — the caller's existing
+    per-file failure path. Raises :class:`BatchExecutionError` if the results
+    cannot be read at all.
+    """
+    results: dict[str, Any] = {cid: None for cid in model_by_cid}
     try:
         entries = with_retry(
-            lambda: client.messages.batches.results(batch.id),
+            lambda: client.messages.batches.results(batch_id),
             description=f"batch results ({description})",
         )
         for entry in entries:
@@ -255,6 +649,15 @@ def execute_batch(
                     )
                 results[entry.custom_id] = message
             else:
+                # Issue athenaeum#1146: a per-request ``expired`` is the OPPOSITE
+                # case from a batch-level "still in flight" — that request
+                # never reached the model and is NOT billed, so it belongs on
+                # the ordinary per-file failure path (raw stays, retried next
+                # run), never on the keep-the-handle path. Counted by type so
+                # the two can be told apart in the run summary rather than
+                # only in log text.
+                if out_result_types is not None and isinstance(rtype, str):
+                    out_result_types[rtype] = out_result_types.get(rtype, 0) + 1
                 log.warning(
                     "batch request %s ended %s (%s)",
                     entry.custom_id,
@@ -266,6 +669,39 @@ def execute_batch(
             f"batch results failed ({description}): {exc}"
         ) from exc
     return results
+
+
+def _refuse_oversized_batch(
+    payload: list[dict[str, Any]], *, description: str
+) -> None:
+    """Refuse a batch that breaches the documented API limits (AC7).
+
+    The Batch API caps a submission at :data:`BATCH_MAX_REQUESTS` requests and
+    :data:`BATCH_MAX_PAYLOAD_BYTES` of serialized payload. Breaching either
+    returns a 400 whose text is about the wire format rather than about the
+    cohort that produced it. Checking locally names the actual numbers, and
+    raises the same :class:`BatchExecutionError` an unsubmittable batch
+    already raises — so the caller's existing per-file failure path applies
+    unchanged (raw files stay on disk, the next run retries them).
+    """
+    count = len(payload)
+    if count > BATCH_MAX_REQUESTS:
+        raise BatchExecutionError(
+            f"batch refused before submit ({description}): {count} requests "
+            f"exceeds the Batch API limit of {BATCH_MAX_REQUESTS}"
+        )
+    try:
+        size = len(json.dumps(payload, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        # A payload that cannot be serialized locally is not a size problem;
+        # let the SDK produce its own error rather than inventing one here.
+        return
+    if size > BATCH_MAX_PAYLOAD_BYTES:
+        raise BatchExecutionError(
+            f"batch refused before submit ({description}): payload is "
+            f"{size} bytes, exceeding the Batch API limit of "
+            f"{BATCH_MAX_PAYLOAD_BYTES}"
+        )
 
 
 class _BatchItemError(Exception):
@@ -289,11 +725,30 @@ class _FileState:
         default_factory=list
     )
     sync_merges: list[EntityAction] = field(default_factory=list)
+    # Issue athenaeum#1175: tier-3 CREATES that take the synchronous path because
+    # the ``write`` knob is not batched this run. The merge counterpart
+    # (``sync_merges``) already existed for same-page groups; this is its
+    # create-side twin, and both run through the same finalize-time budget
+    # gate.
+    sync_creates: list[EntityAction] = field(default_factory=list)
+    # Issue athenaeum#1175: classifications produced SYNCHRONOUSLY because the
+    # ``classify`` knob is not batched this run. ``None`` means "this file's
+    # classifications come from the tier-2 batch response"; a list means they
+    # are already parsed and the batch-response path is skipped entirely
+    # (including its athenaeum#476 truncation retry, which ``tier2_classify``
+    # performs for itself).
+    classified: list[Any] | None = None
     created: list[WikiEntity] = field(default_factory=list)
     # Issue athenaeum#1126: Tier-4 escalations for declined address-shaped
     # classifications, built at classification time and flushed at finalize
     # (in BOTH branches that unlink the raw file) so the fact survives even
-    # when the declined address was this file's only classification.
+    # when the declined address was this file's only classification. Issue
+    # athenaeum#1182 reuses this SAME carrier (not a parallel channel) for
+    # page-size-gate suppressions found at batch-assembly time (before a
+    # merge item is ever built) -- despite the field name, this is the
+    # general "escalation raised before finalize, for this file" list; both
+    # kinds are flushed identically and both count toward
+    # BatchRunResult.escalated.
     address_escalations: list[EscalationItem] = field(default_factory=list)
     failed: bool = False
     done: bool = False
@@ -301,6 +756,13 @@ class _FileState:
     # finalize-time sync merges defers this file (athenaeum#220): raw stays on
     # disk, ref goes to the deferred manifest, nothing is written.
     deferred: bool = False
+    # Issue athenaeum#1144: this file's batch was still running at the run's
+    # wall-clock deadline. Distinct from ``deferred`` (never submitted, no
+    # spend) and from ``failed`` (submitted and lost): the work is submitted,
+    # PAID FOR, and recoverable from the athenaeum#1143 handle by a later run's
+    # collect pass. Raw stays on disk, nothing is written, and a lease keeps
+    # the next run from resubmitting it.
+    in_flight: bool = False
 
 
 @dataclass
@@ -324,8 +786,235 @@ class BatchRunResult:
     #: file is preserved and retried on the next run — but the raised default
     #: ``max_tokens`` (athenaeum#476) makes a truncation far rarer to begin with.
     truncated: int = 0
+    #: Issue athenaeum#1182: Tier-3 merges suppressed by the page-size
+    #: invariant across BOTH of this transport's merge-dispatch sites — the
+    #: batch-submission assembly loop (an over-threshold page never becomes
+    #: a batch request) and the finalize-time ``sync_merges`` fallback
+    #: (mirrors the synchronous transport's ``tier3_derive_actions`` exactly).
+    #: Derived from the same per-file escalations flushed via
+    #: ``tier4_escalate`` (by ``conflict_type == "oversize_page"``), the same
+    #: way ``athenaeum.models.ProcessingResult.oversize_suppressed`` is.
+    oversize_suppressed: int = 0
+    #: Issue athenaeum#1196: NEW entity writes this run's finalize loop refused
+    #: because their ``type`` was outside declared ∪ ``KNOWN_TYPES`` (the
+    #: write-boundary guard — see ``athenaeum.wiki_write_guard``). Not
+    #: counted in ``created``.
+    type_rejected: int = 0
     failed_refs: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
+    #: Issue athenaeum#1144: files whose batch was still in flight when the run's
+    #: wall-clock deadline arrived. Kept SEPARATE from ``failed_refs`` (which
+    #: means "retry from scratch next run") and from ``deferred_refs`` (which
+    #: means "never submitted, no spend"): this cohort is submitted and billed,
+    #: and a later run collects it from the recorded handle rather than
+    #: redoing it. Conflating the three would either double-bill the cohort or
+    #: report committed spend as wasted.
+    in_flight_refs: list[str] = field(default_factory=list)
+    #: Batch ids left running at the deadline, in submit order — the handles
+    #: recorded for them.
+    in_flight_batch_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _ResumedWork:
+    """A previously-submitted batch's results, re-entering :func:`process_batch_run`.
+
+    Issue athenaeum#1145. The collect path does NOT get its own write path: it
+    hands the pipeline a set of already-built :class:`_FileState` objects plus
+    the results the batch produced, and the SAME body runs from there —
+    classification parsing, tier-3 assembly, the spend ceiling, and finalize,
+    with its per-file "all calls succeeded before anything is written"
+    guarantee and its raw-unlink-on-success. AC2 is structural, not a
+    convention someone has to remember.
+
+    Two entry points, one per knob:
+
+    - a ``classify`` handle supplies *t2_results* and leaves *t3_results*
+      ``None``, so the run parses the classifications, assembles a NEW tier-3
+      batch, and submits it — the pipelining case (AC7), still subject to the
+      spend ceiling and to athenaeum#1144's deadline;
+    - a ``write`` handle supplies *t3_results* over states whose
+      ``create_ids`` / ``merge_ids`` were restored from the handle, so the run
+      goes straight to finalize.
+    """
+
+    states: list["_FileState"]
+    t2_results: dict[str, Any] = field(default_factory=dict)
+    #: ``None`` means "assemble and submit tier-3 normally".
+    t3_results: dict[str, Any] | None = None
+
+
+#: Version of the opaque ``work`` document :func:`_spill_to_handle` writes onto
+#: an athenaeum#1143 handle. Bumped only for a shape change an older reader could
+#: misread; an unknown version is ignored (the handle then retires uncollected
+#: and its refs are re-claimed from scratch, which is safe — never silent).
+WORK_DOC_VERSION = 1
+
+
+def _action_to_json(action: EntityAction) -> dict[str, Any]:
+    return {
+        "kind": action.kind,
+        "name": action.name,
+        "entity_type": action.entity_type,
+        "tags": list(action.tags),
+        "access": action.access,
+        "existing_uid": action.existing_uid,
+        "observations": action.observations,
+    }
+
+
+def _action_from_json(raw: Any) -> EntityAction | None:
+    if not isinstance(raw, dict):
+        return None
+    kind = raw.get("kind")
+    name = raw.get("name")
+    if kind not in ("create", "update") or not isinstance(name, str) or not name:
+        return None
+    tags = raw.get("tags")
+    uid = raw.get("existing_uid")
+    return EntityAction(
+        kind=kind,
+        name=name,
+        entity_type=str(raw.get("entity_type") or ""),
+        tags=[str(t) for t in tags] if isinstance(tags, list) else [],
+        access=str(raw.get("access") or ""),
+        existing_uid=uid if isinstance(uid, str) else None,
+        observations=str(raw.get("observations") or ""),
+    )
+
+
+def _escalation_to_json(item: EscalationItem) -> dict[str, Any]:
+    return {
+        "raw_ref": item.raw_ref,
+        "entity_name": item.entity_name,
+        "conflict_type": item.conflict_type,
+        "description": item.description,
+    }
+
+
+def _escalation_from_json(raw: Any) -> EscalationItem | None:
+    if not isinstance(raw, dict):
+        return None
+    ref = raw.get("raw_ref")
+    if not isinstance(ref, str) or not ref:
+        return None
+    return EscalationItem(
+        raw_ref=ref,
+        entity_name=str(raw.get("entity_name") or ""),
+        conflict_type=str(raw.get("conflict_type") or ""),
+        description=str(raw.get("description") or ""),
+    )
+
+
+def _tier3_work_document(states: list["_FileState"]) -> dict[str, Any]:
+    """Everything a later run needs to finalize a spilled tier-3 batch.
+
+    A ``classify`` handle needs none of this — its refs are enough, because
+    the collecting run re-runs the (programmatic, free) tier-0/1 pass and
+    re-parses the classifications from the batch response. A ``write`` handle
+    is the opposite: the parse already happened in the submitting run, and the
+    per-request application context (which entity to create, which page to
+    merge into, and the body the merge ops were generated against) exists
+    nowhere else once that run exits.
+
+    ``meta`` is deliberately NOT stored. It is re-parsed from the target page
+    at collect time, so no YAML scalar (a date, most commonly) has to survive
+    a JSON round-trip and come back as a string that ``render_frontmatter``
+    would then write back differently. The body the ops apply to IS stored,
+    because the ops were anchored against it. (Detecting a page that CHANGED
+    under a pending handle is athenaeum#1146's job, not this one's.)
+    """
+    files: dict[str, Any] = {}
+    for st in states:
+        if not (st.create_ids or st.merge_ids):
+            continue
+        files[st.raw.ref] = {
+            "path": str(st.raw.path),
+            "skipped": list(st.skipped),
+            "escalations": [
+                _escalation_to_json(e) for e in st.address_escalations
+            ],
+            "sync_merges": [_action_to_json(a) for a in st.sync_merges],
+            "creates": {cid: _action_to_json(a) for cid, a in st.create_ids},
+            "merges": {
+                cid: {
+                    "action": _action_to_json(action),
+                    "page_path": str(page_path),
+                    "existing_body": existing_body,
+                }
+                for cid, action, page_path, _meta, existing_body in st.merge_ids
+            },
+        }
+    return {"version": WORK_DOC_VERSION, "files": files}
+
+
+def _ref_records(
+    raw_by_cid: dict[str, RawFile], model_by_cid: dict[str, str | None]
+) -> dict[str, batch_state.RefRecord]:
+    """Build the handle's ``custom_id -> RefRecord`` map, models included.
+
+    Hashing here rather than letting :func:`athenaeum.batch_state.record_handle`
+    duck-type the ``RawFile`` is what lets the per-request MODEL ride along
+    (athenaeum#1145 AC5) — ``record_handle`` accepts a ``RefRecord`` verbatim.
+    """
+    records: dict[str, batch_state.RefRecord] = {}
+    for custom_id, raw in raw_by_cid.items():
+        absolute = Path(raw.path).resolve()
+        records[custom_id] = batch_state.RefRecord(
+            ref=raw.ref,
+            path=str(absolute),
+            content_hash=batch_state.content_hash(absolute),
+            model=model_by_cid.get(custom_id),
+        )
+    return records
+
+
+def _spill_to_handle(
+    outcome: BatchOutcome,
+    raw_by_cid: dict[str, RawFile],
+    *,
+    knob: str,
+    cache_dir: Path,
+    config: dict[str, object] | None,
+    result: BatchRunResult,
+    model_by_cid: dict[str, str | None] | None = None,
+    work: dict[str, Any] | None = None,
+) -> None:
+    """Persist an athenaeum#1143 handle for a batch left running at the deadline.
+
+    Records the handle (which also takes the lease over the raw files, so the
+    next run's claim loop does not resubmit them) and books the affected refs
+    onto ``result.in_flight_refs``. Recording is best-effort in the same sense
+    the rest of :mod:`athenaeum.batch_state` is fail-open: a store that cannot
+    be written must not turn a successfully-submitted batch into a crashed
+    run. It IS logged loudly, because the consequence — the next run
+    rediscovering and resubmitting the same cohort at full price — is exactly
+    the silent double-bill athenaeum#1143 exists to prevent.
+    """
+    result.in_flight_batch_ids.append(outcome.batch_id)
+    try:
+        batch_state.record_handle(
+            cache_dir,
+            batch_id=outcome.batch_id,
+            knob=knob,
+            refs=_ref_records(raw_by_cid, model_by_cid or {}),
+            config=cast("dict[str, Any] | None", config),
+            work=work,
+        )
+    except Exception:  # a marker store must never wedge a run
+        log.exception(
+            "could not record the pending-batch handle for %s (%s) — the next "
+            "run may rediscover and RESUBMIT this cohort at full price",
+            outcome.batch_id,
+            knob,
+        )
+    log.warning(
+        "batch %s (%s) left in flight at the run deadline: %d file(s) "
+        "leased for collection by a later run",
+        outcome.batch_id,
+        knob,
+        len({raw.ref for raw in raw_by_cid.values()}),
+    )
 
 
 def process_batch_run(
@@ -343,6 +1032,11 @@ def process_batch_run(
     provider: str = "api",
     sleep: Callable[[float], None] = time.sleep,
     write_client: "anthropic.Anthropic | None" = None,
+    deadline: float | None = None,
+    cache_dir: Path | None = None,
+    resume: _ResumedWork | None = None,
+    batch_classify: bool = True,
+    batch_write: bool = True,
 ) -> BatchRunResult:
     """Process the intake window through the Batch API phases (issue athenaeum#236).
 
@@ -374,17 +1068,71 @@ def process_batch_run(
     instead of the whole run. *provider* selects the ceiling UNIT (dollars
     for the metered ``api`` path — always the case in batch mode, which is
     Anthropic-endpoint-only; tokens for ``claude-cli``).
+
+    Issue athenaeum#1144: *deadline* is the run's wall-clock deadline as an
+    absolute :func:`time.monotonic` instant, threaded down into
+    :func:`execute_batch`. This is a BOUNDED WAIT, not submit-and-exit: when
+    the batch ends inside the window the run continues synchronously into the
+    next phase exactly as before, byte-for-byte. Only when the window runs out
+    does the run persist an athenaeum#1143 handle for the still-running batch, mark
+    that batch's files ``in_flight`` (NOT ``failed``, NOT ``deferred``), and
+    return — so a later run collects work that is already paid for instead of
+    resubmitting or discarding it. ``None`` preserves today's behaviour
+    exactly: no deadline, no handle, no in-flight refs.
+
+    *cache_dir* is where the handle store lives; ``None`` resolves it via
+    :func:`athenaeum.batch_state.resolve_cache_dir`, which is what production
+    wants and what keeps the submit side and a later run's collect side
+    pointing at the same file.
+
+    Issue athenaeum#1175: *batch_classify* / *batch_write* select which knobs
+    this run actually batches. A knob resolved OFF takes the SYNCHRONOUS path
+    inside this same function — ``tier2_classify`` per file at assembly, or
+    ``tier3_create`` / ``tier3_merge`` per action at finalize — so the two can
+    be mixed. The combination that matters is ``write`` batched with
+    ``classify`` synchronous: ``write`` is nearly all the spend and is where a
+    50% discount pays, while ``classify`` is the knob whose latency an
+    operator most wants to keep interactive. Both ``True`` (every
+    pre-athenaeum#1175 caller) is today's behaviour, byte-for-byte.
+
+    Issue athenaeum#1145: *resume* re-enters this pipeline mid-way with a
+    previously-submitted batch's results (see :class:`_ResumedWork`). It is
+    what :func:`collect_pending_batches` uses, so a collected batch is applied
+    by THIS function rather than by a second write path. When *resume* is
+    supplied, *raw_files* is not read: the states come from the handle.
     """
     effective_write_client = write_client if write_client is not None else client
+    effective_cache_dir = (
+        cache_dir if cache_dir is not None else batch_state.resolve_cache_dir()
+    )
+    # Issue athenaeum#1147: one reservation recorder for the whole run, shared by
+    # both phase submits and by the collect path.
+    reservation = _SpendReservation(
+        wiki_root=wiki_root, config=config, cache_dir=effective_cache_dir
+    )
     from athenaeum.config import load_config, resolve_owner
 
     owner = resolve_owner(config)
     result = BatchRunResult()
-    states: list[_FileState] = []
+    # Issue athenaeum#1145: a resumed run enters with its states already built from
+    # the handle, so the tier-0/1 + phase-1 assembly loop below iterates
+    # nothing (its cohort was claimed and submitted by an earlier run).
+    states: list[_FileState] = list(resume.states) if resume is not None else []
+    # A resumed ``write`` handle arrives with its tier-3 results already in
+    # hand: its classifications were parsed by the SUBMITTING run, so it must
+    # skip the tier-2 parse below entirely. Not merely a wasted pass — that
+    # loop sets ``st.done`` on a state it finds no actions for, and a ``done``
+    # state finalizes by unlinking the raw file and writing nothing, silently
+    # destroying the very work this collect exists to apply.
+    _t3_seeded = resume is not None and resume.t3_results is not None
     t2_requests: list[BatchRequest] = []
+    # ``custom_id -> RawFile`` for each phase, so a deadline spill can record
+    # the athenaeum#1143 handle's ref map without re-deriving it from the request ids.
+    t2_raw_by_cid: dict[str, RawFile] = {}
+    t3_raw_by_cid: dict[str, RawFile] = {}
 
     # --- Tier 0/1 + phase-1 assembly (budget gate per file, athenaeum#220) ---
-    for i, raw in enumerate(raw_files):
+    for i, raw in enumerate([] if resume is not None else raw_files):
         if usage.api_calls >= max_api_calls:
             log.warning(
                 "API call budget exhausted (%d/%d) at batch assembly — "
@@ -429,25 +1177,51 @@ def process_batch_run(
             # Empty content short-circuits without an API call, exactly
             # like tier2_classify's early return on the sync path.
             if raw.content.strip():
-                st.t2_id = f"t2-{i}"
-                # Each batched request counts as one api_call attempt,
-                # recorded at assembly time (athenaeum#220 budget semantics).
-                usage.api_calls += 1
                 matched_names = [name for name, _, _ in st.matched]
-                t2_requests.append(
-                    BatchRequest(
-                        custom_id=st.t2_id,
-                        params=tier2_request_params(
-                            raw,
-                            matched_names,
-                            valid_types,
-                            valid_tags,
-                            valid_access,
-                            wiki_root=wiki_root,
-                            config=config,
-                        ),
+                if not batch_classify:
+                    # Issue athenaeum#1175: the ``classify`` knob is not batched
+                    # this run. Call the SAME synchronous classifier the
+                    # non-batch loop uses — including its own athenaeum#472
+                    # repair and athenaeum#476 bigger-budget retries — rather
+                    # than reimplementing tier-2 semantics here. ``api_calls``
+                    # is NOT bumped by hand: ``tier2_classify`` records its
+                    # own attempt through ``add_tokens``, and double-counting
+                    # would eat the athenaeum#220 budget twice per file.
+                    sync_stats = Tier2ParseStats()
+                    st.classified = tier2_classify(
+                        raw,
+                        matched_names,
+                        valid_types,
+                        valid_tags,
+                        valid_access,
+                        AnthropicBatchClientBackend(client),
+                        wiki_root=wiki_root,
+                        usage=usage,
+                        config=config,
+                        stats=sync_stats,
                     )
-                )
+                    result.degraded += sync_stats.degraded
+                    result.truncated += sync_stats.truncated
+                else:
+                    st.t2_id = f"t2-{i}"
+                    # Each batched request counts as one api_call attempt,
+                    # recorded at assembly time (athenaeum#220 budget semantics).
+                    usage.api_calls += 1
+                    t2_raw_by_cid[st.t2_id] = raw
+                    t2_requests.append(
+                        BatchRequest(
+                            custom_id=st.t2_id,
+                            params=tier2_request_params(
+                                raw,
+                                matched_names,
+                                valid_types,
+                                valid_tags,
+                                valid_access,
+                                wiki_root=wiki_root,
+                                config=config,
+                            ),
+                        )
+                    )
         except Exception:
             log.exception("Failed to process %s", raw.ref)
             st.failed = True
@@ -459,8 +1233,28 @@ def process_batch_run(
     # has breached the ceiling we must not submit another batch that would run
     # to completion server-side. Defer every not-yet-resolved file and fall
     # through to finalize (which still writes the zero-cost T0 passthroughs).
-    t2_results: dict[str, Any] = {}
-    t2_ceiling = spend.ceiling_tripped(usage, provider=provider, config=config)
+    t2_results: dict[str, Any] = dict(resume.t2_results) if resume is not None else {}
+    # A resumed run submits no tier-2 batch, so there is no pre-submit ceiling
+    # decision to make here — the athenaeum#483 gate exists to refuse a SUBMIT, and
+    # refusing one that is not happening would defer every collected file
+    # instead of applying results already paid for. The tier-3 gate below is
+    # NOT skipped: a resumed classify handle can still submit a new tier-3
+    # batch, and that submit must face the ceiling with the collected cost
+    # already booked into ``usage`` (athenaeum#1145 AC1, reason 1).
+    t2_ceiling = (
+        None
+        if resume is not None
+        else spend.ceiling_tripped(
+            usage,
+            provider=provider,
+            config=config,
+            # Issue athenaeum#1147 AC4/AC7: the athenaeum#483 pre-submit check is
+            # PRESERVED, not replaced — it simply now counts committed
+            # in-flight cost as well as this run's own accrual.
+            wiki_root=wiki_root,
+            cache_dir=effective_cache_dir,
+        )
+    )
     if t2_ceiling is not None:
         pending = [st for st in states if not st.done and not st.failed]
         log.error(
@@ -473,24 +1267,54 @@ def process_batch_run(
             st.deferred = True
     elif t2_requests:
         try:
-            t2_results = execute_batch(
+            t2_outcome = execute_batch(
                 client,
                 t2_requests,
                 description="tier2_classify",
                 usage=usage,
                 knob="classify",
                 sleep=sleep,
+                deadline=deadline,
+                reservation=reservation,
             )
         except BatchExecutionError as exc:
             log.error("Tier-2 batch failed (%s) — affected files retried next run", exc)
+        else:
+            if t2_outcome.in_flight:
+                # Issue athenaeum#1144: the classify batch is still running and paid
+                # for. Every file with a request in it goes in-flight — not
+                # failed (which would retry, and re-bill, the same work) and
+                # not deferred (which would claim nothing was submitted).
+                _spill_to_handle(
+                    t2_outcome,
+                    t2_raw_by_cid,
+                    knob="classify",
+                    cache_dir=effective_cache_dir,
+                    config=config,
+                    result=result,
+                    model_by_cid={
+                        r.custom_id: r.params.get("model") for r in t2_requests
+                    },
+                )
+                for st in states:
+                    if st.t2_id is not None and not st.failed and not st.done:
+                        st.in_flight = True
+            else:
+                t2_results = t2_outcome.results
 
     # Parse classifications and build per-file actions (same shape as
     # process_one: creates from tier-2, updates from tier-1 matches).
-    for st in states:
-        if st.failed or st.done or st.deferred:
+    for st in [] if _t3_seeded else states:
+        if st.failed or st.done or st.deferred or st.in_flight:
             continue
         classified = []
-        if st.t2_id is not None:
+        if st.classified is not None:
+            # Issue athenaeum#1175: produced synchronously at assembly, already
+            # parsed and already through tier2_classify's own repair/retry
+            # ladder. The batch-response path below (and its athenaeum#476
+            # truncation retry) does not apply.
+            classified = st.classified
+        elif st.t2_id is not None:
             msg = t2_results.get(st.t2_id)
             if msg is None:
                 log.error(
@@ -621,6 +1445,16 @@ def process_batch_run(
                     ),
                 )
             )
+        # Issue athenaeum#1173: create-path name gate, same call as the sync
+        # transport (librarian.process_one) — sits immediately after the
+        # athenaeum#1126 address gate above and BEFORE actions are built, so a
+        # rejected/escalated name never reaches a tier-3 create action (batch
+        # request or sync-create) on this transport either.
+        name_gate_outcome = gate_create_name_classifications(
+            classified, st.raw.ref, st.raw.content, config
+        )
+        classified = name_gate_outcome.kept
+        st.address_escalations.extend(name_gate_outcome.escalations)
         for c in classified:
             st.actions.append(
                 EntityAction(
@@ -657,7 +1491,7 @@ def process_batch_run(
     # in intake order during finalization below.
     merge_uid_counts: dict[str, int] = {}
     for st in states:
-        if st.failed or st.done or st.deferred:
+        if st.failed or st.done or st.deferred or st.in_flight:
             continue
         for action in st.actions:
             if action.kind == "update" and action.existing_uid:
@@ -678,7 +1512,7 @@ def process_batch_run(
     # re-classifies it.
     phase2_spent = False
     for i, st in enumerate(states):
-        if st.failed or st.done or st.deferred:
+        if st.failed or st.done or st.deferred or st.in_flight:
             continue
         if phase2_spent and usage.api_calls >= max_api_calls:
             log.warning(
@@ -699,7 +1533,15 @@ def process_batch_run(
         try:
             for j, action in enumerate(st.actions):
                 if action.kind == "create":
+                    if not batch_write:
+                        # Issue athenaeum#1175: the ``write`` knob is not batched
+                        # this run — this create runs live at finalize,
+                        # through the same finalize-time budget gate the
+                        # same-page synchronous merges already use.
+                        st.sync_creates.append(action)
+                        continue
                     cid = f"t3-{i}-c{j}"
+                    t3_raw_by_cid[cid] = st.raw
                     usage.api_calls += 1
                     t3_requests.append(
                         BatchRequest(
@@ -721,7 +1563,13 @@ def process_batch_run(
                             action.existing_uid,
                         )
                         continue
-                    if merge_uid_counts.get(action.existing_uid, 0) > 1:
+                    if not batch_write or merge_uid_counts.get(
+                        action.existing_uid, 0
+                    ) > 1:
+                        # Issue athenaeum#1175: an unbatched ``write`` knob routes
+                        # EVERY merge down the path same-page groups already
+                        # take, so there is one synchronous merge
+                        # implementation, not two.
                         st.sync_merges.append(action)
                         continue
                     text = existing_path.read_text(encoding="utf-8")
@@ -733,26 +1581,57 @@ def process_batch_run(
                     if existing_body_needs_full_echo(existing_body):
                         st.sync_merges.append(action)
                         continue
+                    # Issue athenaeum#1182: page-size invariant, enforced BEFORE a
+                    # batch merge item is ASSEMBLED — no request is ever
+                    # submitted for an over-threshold page, so it costs no
+                    # spend and receives no merge. Reuses check_page_size_gate
+                    # unchanged (same function tier3_derive_actions's
+                    # synchronous "update" branch calls); the escalation is
+                    # carried on st.address_escalations, which finalize
+                    # already flushes through the SAME tier4_escalate() call
+                    # every other per-file escalation on this transport uses
+                    # (see that field's docstring for the "flushed in BOTH
+                    # branches that unlink the raw file" contract).
+                    oversize_escalation = check_page_size_gate(
+                        action, existing_body, st.raw.ref, config
+                    )
+                    if oversize_escalation is not None:
+                        st.address_escalations.append(oversize_escalation)
+                        continue
                     cid = f"t3-{i}-m{j}"
+                    t3_raw_by_cid[cid] = st.raw
                     usage.api_calls += 1
                     t3_requests.append(
                         BatchRequest(
                             custom_id=cid,
                             params=tier3_merge_params(
-                                action, existing_body, st.raw.ref, config=config
+                                action,
+                                existing_body,
+                                st.raw.ref,
+                                config=config,
+                                # Issue athenaeum#1181/#1184: this IS the one call
+                                # site that builds the batched patch-mode
+                                # request, so it is also the only place that
+                                # can record its (now section-scoped) echoed
+                                # chars — batch mode had never called
+                                # record_merge_echo for this request at all
+                                # before, unlike the sync transport.
+                                usage=usage,
                             ),
                         )
                     )
                     st.merge_ids.append(
                         (cid, action, existing_path, meta, existing_body)
                     )
-            if len(t3_requests) > requests_mark or st.sync_merges:
+            if len(t3_requests) > requests_mark or st.sync_merges or st.sync_creates:
                 phase2_spent = True
         except Exception:
             log.exception("Failed to process %s", st.raw.ref)
             # Drop this file's already-appended requests and restore their
             # attempt counts — they are never submitted, so they must not
             # consume budget or batch spend.
+            for dropped in t3_requests[requests_mark:]:
+                t3_raw_by_cid.pop(dropped.custom_id, None)
             del t3_requests[requests_mark:]
             usage.api_calls = calls_mark
             st.failed = True
@@ -766,15 +1645,31 @@ def process_batch_run(
     # merges — is deferred rather than half-written. Finalize checks
     # ``st.deferred`` first, so a deferred file never tries to read a result
     # from the (unsubmitted) batch.
-    t3_results: dict[str, Any] = {}
-    t3_ceiling = spend.ceiling_tripped(usage, provider=provider, config=config)
+    # A resumed ``write`` handle goes straight to finalize; a resumed
+    # ``classify`` handle leaves ``t3_results`` unseeded and assembles/submits
+    # a new tier-3 batch below, exactly like a fresh cohort.
+    t3_results: dict[str, Any] = (
+        dict(resume.t3_results or {}) if resume is not None and _t3_seeded else {}
+    )
+    t3_ceiling = (
+        None
+        if _t3_seeded
+        else spend.ceiling_tripped(
+            usage,
+            provider=provider,
+            config=config,
+            wiki_root=wiki_root,
+            cache_dir=effective_cache_dir,
+        )
+    )
     t3_pending = [
         st
         for st in states
         if not st.failed
         and not st.done
         and not st.deferred
-        and (st.create_ids or st.merge_ids or st.sync_merges)
+        and not st.in_flight
+        and (st.create_ids or st.merge_ids or st.sync_merges or st.sync_creates)
     ]
     if t3_ceiling is not None and t3_pending:
         log.error(
@@ -787,16 +1682,45 @@ def process_batch_run(
             st.deferred = True
     elif t3_requests:
         try:
-            t3_results = execute_batch(
+            t3_outcome = execute_batch(
                 effective_write_client,
                 t3_requests,
                 description="tier3_write",
                 usage=usage,
                 knob="write",
                 sleep=sleep,
+                deadline=deadline,
+                reservation=reservation,
             )
         except BatchExecutionError as exc:
             log.error("Tier-3 batch failed (%s) — affected files retried next run", exc)
+        else:
+            if t3_outcome.in_flight:
+                # Issue athenaeum#1144: same spill as tier-2. A file whose tier-3
+                # requests are in this batch cannot finalize — its
+                # write-only-when-all-calls-succeeded guarantee is unmet — so
+                # it goes in-flight rather than being half-written.
+                _spill_to_handle(
+                    t3_outcome,
+                    t3_raw_by_cid,
+                    knob="write",
+                    cache_dir=effective_cache_dir,
+                    config=config,
+                    result=result,
+                    model_by_cid={
+                        r.custom_id: r.params.get("model") for r in t3_requests
+                    },
+                    # Issue athenaeum#1145: a tier-3 spill's application context —
+                    # which entity to create, which page to merge into, the
+                    # body the ops were anchored against — exists nowhere else
+                    # once this run exits.
+                    work=_tier3_work_document(states),
+                )
+                for st in states:
+                    if st.create_ids or st.merge_ids:
+                        st.in_flight = True
+            else:
+                t3_results = t3_outcome.results
 
     # --- Finalize per file, in intake order ---
     # All of a file's calls must have succeeded before anything is written
@@ -810,6 +1734,12 @@ def process_batch_run(
         if st.failed:
             result.failed_refs.append(st.raw.ref)
             continue
+        if st.in_flight:
+            # Issue athenaeum#1144: submitted, billed, and recoverable from the
+            # recorded handle. Write nothing and unlink nothing — the raw file
+            # is what a later run's collect pass applies the result TO.
+            result.in_flight_refs.append(st.raw.ref)
+            continue
         if st.deferred:
             deferred_now.append(st.raw.ref)
             continue
@@ -819,7 +1749,8 @@ def process_batch_run(
         # run redoes them). As at phase-2 assembly, the first file to run
         # sync merges proceeds even at the cap (guaranteed progress,
         # one-file overshoot — mirroring the sync loop).
-        if st.sync_merges and sync_merges_started and usage.api_calls >= max_api_calls:
+        _sync_work = st.sync_merges or st.sync_creates
+        if _sync_work and sync_merges_started and usage.api_calls >= max_api_calls:
             log.warning(
                 "API call budget exhausted (%d/%d) before synchronous "
                 "merges — deferring %s",
@@ -844,6 +1775,14 @@ def process_batch_run(
                     config=resolved_config,
                 )
                 result.escalated += len(st.address_escalations)
+                # Issue athenaeum#1182: same derived-from-conflict_type counting
+                # as the main finalize branch below and the synchronous
+                # transport's _apply_tier3_results.
+                result.oversize_suppressed += sum(
+                    1
+                    for _e in st.address_escalations
+                    if _e.conflict_type == "oversize_page"
+                )
             st.raw.path.unlink()
             log.info("  Deleted: %s", st.raw.path)
             continue
@@ -857,11 +1796,26 @@ def process_batch_run(
                 msg = t3_results.get(cid)
                 if msg is None:
                     raise _BatchItemError(cid)
-                new_entities.append(
+                # Issue athenaeum#1171: PreambleOnlyResponseError is caught HERE,
+                # scoped to just this one create action, so a preamble-only
+                # response does not abort the whole raw file's batch result
+                # (mirrors tiers.tier3_derive_actions' sync-path handling —
+                # the two transports must agree on this behaviour).
+                try:
                     # Issue athenaeum#578: tier-3 create enables adaptive thinking —
                     # response_text skips any leading thinking block.
-                    tier3_entity_from_text(action, response_text(msg), config=config)
-                )
+                    new_entity = tier3_entity_from_text(
+                        action, response_text(msg), usage=usage, config=config
+                    )
+                except PreambleOnlyResponseError:
+                    log.warning(
+                        "tier3-create-preamble-rejected-skipped ref=%s name=%s: "
+                        "action skipped, NOT treated as a raw-file failure",
+                        st.raw.ref,
+                        action.name,
+                    )
+                    continue
+                new_entities.append(new_entity)
 
             for cid, action, page_path, meta, existing_body in st.merge_ids:
                 msg = t3_results.get(cid)
@@ -898,8 +1852,32 @@ def process_batch_run(
                     )
                     updated_uids.append(action.existing_uid or "")
 
-            if st.sync_merges:
+            if st.sync_merges or st.sync_creates:
                 sync_merges_started = True
+            # Issue athenaeum#1175: unbatched tier-3 creates, live at finalize.
+            # Ordered before the merges so a file's creates and merges execute
+            # in the same relative order the batched path applies them in.
+            for action in st.sync_creates:
+                # Issue athenaeum#1171: same per-action rejection handling as the
+                # batched create loop above — see that block's comment.
+                try:
+                    new_entity = tier3_create(
+                        action,
+                        st.raw.ref,
+                        AnthropicBatchClientBackend(effective_write_client),
+                        wiki_root=wiki_root,
+                        usage=usage,
+                        config=config,
+                    )
+                except PreambleOnlyResponseError:
+                    log.warning(
+                        "tier3-create-preamble-rejected-skipped ref=%s name=%s: "
+                        "action skipped, NOT treated as a raw-file failure",
+                        st.raw.ref,
+                        action.name,
+                    )
+                    continue
+                new_entities.append(new_entity)
             for action in st.sync_merges:
                 existing_path = index.get_by_uid(action.existing_uid or "")
                 if not existing_path or not existing_path.exists():
@@ -910,6 +1888,20 @@ def process_batch_run(
                     continue
                 text = existing_path.read_text(encoding="utf-8")
                 meta, existing_body = parse_frontmatter(text)
+
+                # Issue athenaeum#1182: page-size invariant, enforced BEFORE the
+                # merge prompt is built or any model call is made — mirrors
+                # tier3_derive_actions's synchronous "update" branch exactly
+                # (same check_page_size_gate call), since this loop is that
+                # same synchronous merge, just reached from the batch
+                # transport's finalize step instead of process_one.
+                oversize_escalation = check_page_size_gate(
+                    action, existing_body, st.raw.ref, config
+                )
+                if oversize_escalation is not None:
+                    escalations.append(oversize_escalation)
+                    continue
+
                 updated_body, esc = tier3_merge(
                     action,
                     existing_body,
@@ -935,14 +1927,29 @@ def process_batch_run(
             # first, then creates, matching the synchronous order).
             for path, content in pending_updates:
                 atomic_write_text(path, content)
+            written_entities: list[WikiEntity] = []
             for entity in new_entities:
                 rendered = entity.render()
                 # Same schema gate as process_one: re-parse the rendered
                 # frontmatter so the validator sees the on-disk bytes.
                 rendered_meta, _ = parse_frontmatter(rendered)
                 validate_wiki_meta(rendered_meta)
+                # Write-boundary type guard (issue athenaeum#1196): same
+                # backstop as process_one/_apply_tier3_results — refuse a
+                # type outside declared ∪ KNOWN_TYPES regardless of whether
+                # an upstream clamp already should have caught it.
+                if not guard_entity_write_type(
+                    wiki_root,
+                    entity.filename,
+                    rendered,
+                    rendered_meta,
+                    source="batch",
+                ):
+                    result.type_rejected += 1
+                    continue
                 atomic_write_text(wiki_root / entity.filename, rendered)
                 index.register(entity)
+                written_entities.append(entity)
                 log.info("  Created: %s → %s", entity.name, entity.filename)
 
             if escalations:
@@ -952,9 +1959,17 @@ def process_batch_run(
                     config=resolved_config,
                 )
 
-            result.created += len(new_entities)
+            result.created += len(written_entities)
             result.updated += len(updated_uids)
             result.escalated += len(escalations)
+            # Issue athenaeum#1182: derived from `escalations` by conflict_type,
+            # mirroring athenaeum.librarian._apply_tier3_results on the
+            # synchronous transport — covers BOTH this file's batched merge_ids
+            # escalations and its finalize-time sync_merges escalations, since
+            # both were folded into the same `escalations` list above.
+            result.oversize_suppressed += sum(
+                1 for _e in escalations if _e.conflict_type == "oversize_page"
+            )
             result.skipped += len(st.skipped)
             st.raw.path.unlink()
             log.info("  Deleted: %s", st.raw.path)
@@ -981,3 +1996,667 @@ def process_batch_run(
     # deferred at phase-1 assembly (raw_files[i:]).
     result.deferred_refs = deferred_now + result.deferred_refs
     return result
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1145 — the collect-only adoption path.
+#
+# A run whose only work is collecting a PRIOR run's batch is a valid and
+# useful run. This phase executes at the START of the entity phase, before
+# the claim loop and before any new submission, for three independent
+# reasons — any one of which alone forces the ordering:
+#
+#   1. Ceiling correctness. Collected batch cost enters ``usage`` via
+#      ``add_batch_tokens``. Submitting first evaluates the pre-submit
+#      ceiling check against a ``usage`` missing the cost the run is about to
+#      book.
+#   2. Index freshness. Collected tier-3 creates mutate the corpus that a new
+#      cohort's ``tier1_programmatic_match`` reads. Submitting first means the
+#      new cohort cannot tier-1-match entities this very run created.
+#   3. Lease release. Leased refs must be released before the claim loop
+#      computes the new submit set, or that set is computed against a stale
+#      exclusion and either double-claims or starves.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BatchCollectResult:
+    """Aggregate outcome of :func:`collect_pending_batches`."""
+
+    created: int = 0
+    updated: int = 0
+    escalated: int = 0
+    skipped: int = 0
+    degraded: int = 0
+    truncated: int = 0
+    #: Issue athenaeum#1182: summed from each inner process_batch_run() call's
+    #: BatchRunResult.oversize_suppressed — see that field's docstring.
+    oversize_suppressed: int = 0
+    #: Issue athenaeum#1196: same write-boundary-guard counter as
+    #: :attr:`BatchRunResult.type_rejected`, folded up from the underlying
+    #: :func:`process_batch_run` call this collect delegates to.
+    type_rejected: int = 0
+    #: Refs whose results were applied and whose raw file was consumed. These
+    #: ARE files drained this run, even though they were never in this run's
+    #: claim — the athenaeum#470 backlog-drain advisor must see them.
+    collected_refs: list[str] = field(default_factory=list)
+    #: Refs whose application failed; raw stays on disk, re-claimed next run.
+    failed_refs: list[str] = field(default_factory=list)
+    #: Refs still held by a batch that had not ended at collect time, plus any
+    #: whose collect pipelined into a NEW batch that then spilled (athenaeum#1144).
+    in_flight_refs: list[str] = field(default_factory=list)
+    #: Batch ids retired (results consumed) and kept (still in flight).
+    retired_handles: list[str] = field(default_factory=list)
+    kept_handles: list[str] = field(default_factory=list)
+    #: Issue athenaeum#1146 AC7: every reconciliation outcome, counted by reason.
+    #: Keys are drawn from :data:`RECONCILE_REASONS`. None of these is silent —
+    #: the run summary renders the whole map, so an operator sees "3 handles
+    #: kept in flight, 1 retired past retention, 2 refs discarded as mutated"
+    #: without reading the log.
+    reconciliation: dict[str, int] = field(default_factory=dict)
+
+    def _count(self, reason: str, n: int = 1) -> None:
+        if n:
+            self.reconciliation[reason] = self.reconciliation.get(reason, 0) + n
+
+
+#: Days the Batch API retains a batch's results. A handle older than this
+#: cannot be collected however well-formed it is, so it is retired without a
+#: retrieve attempt (issue athenaeum#1146 AC3).
+BATCH_RETENTION_DAYS: float = 29.0
+
+#: The reconciliation vocabulary (issue athenaeum#1146 AC7). Every terminal a
+#: handle or one of its refs can reach has a name here, and every one is
+#: counted — the point of the enumeration is that no outcome is silent.
+RECONCILE_REASONS = (
+    # Handle-level
+    "collected",  # results applied, handle retired
+    "in-flight",  # batch had not ended; handle kept, lease extended
+    "unretrievable",  # retrieve 404'd; handle retired, refs released
+    "retention-expired",  # older than BATCH_RETENTION_DAYS; retired
+    "retrieve-error",  # transient failure; handle KEPT, nothing decided
+    "results-unreadable",  # batch ended but results failed to read; kept
+    "no-context",  # nothing applicable on the handle; retired uncollected
+    "unknown-knob",  # handle knob is not classify/write; retired
+    # Ref-level
+    "raw-missing",  # leased raw file gone from disk; result discarded
+    "raw-mutated",  # leased raw file changed under us; result discarded
+    "request-expired",  # per-request expired — NOT billed, ordinary retry
+    "request-errored",
+    "request-canceled",
+)
+
+
+def _raw_file_from_record(
+    record: batch_state.RefRecord,
+) -> tuple[RawFile | None, str | None]:
+    """Rebuild the :class:`RawFile` a ref record points at, or say why not.
+
+    Returns ``(raw, None)`` when the file is present AND unchanged since claim
+    time, else ``(None, reason)`` with a :data:`RECONCILE_REASONS` member.
+
+    Two distinct discards, with the same remedy and different causes
+    (athenaeum#1146 AC4/AC5):
+
+    - **missing** — the file is gone. It cannot be finalized (finalize unlinks
+      it on success) and there is nothing left to apply a result to.
+    - **mutated** — the file is there but its bytes differ from the hash taken
+      at claim time. The result describes CONTENT THAT NO LONGER EXISTS;
+      applying it would write a classification of the old text onto the new.
+      This is the case most likely to be missed, because everything about the
+      handle still looks valid.
+
+    An empty stored hash means the file was unreadable at claim time
+    (athenaeum#1143's fail-open), so unchanged-ness cannot be PROVEN either way.
+    That is treated as "not disproven" and the result is applied — the same
+    direction athenaeum#1143 already chose, rather than discarding paid-for work
+    on the absence of evidence.
+    """
+    path = Path(record.path)
+    if not path.is_file():
+        return None, "raw-missing"
+    if record.content_hash and batch_state.content_hash(path) != record.content_hash:
+        return None, "raw-mutated"
+    from athenaeum.intake import RAW_FILE_RE
+
+    source = record.ref.split("/", 1)[0] if "/" in record.ref else path.parent.name
+    m = RAW_FILE_RE.match(path.name)
+    return (
+        RawFile(
+            path=path,
+            source=source,
+            timestamp=m.group(1) if m else "",
+            uuid8=m.group(2) if m else "",
+        ),
+        None,
+    )
+
+
+def _log_discard(reason: str, ref: str, batch_id: str) -> None:
+    log.warning(
+        "collect: %s — discarding the result for %s (batch %s); its raw file "
+        "is re-claimed from scratch",
+        "leased raw file is gone"
+        if reason == "raw-missing"
+        else "leased raw file CHANGED since claim time",
+        ref,
+        batch_id,
+    )
+
+
+def _states_for_classify_handle(
+    handle: batch_state.PendingBatch,
+    index: EntityIndex,
+    *,
+    config: dict[str, object] | None,
+    out: "BatchCollectResult",
+) -> tuple[list[_FileState], list[str]]:
+    """Rebuild the per-file states a collected ``classify`` batch applies to.
+
+    The tier-0/1 pass is re-run rather than restored: it is programmatic and
+    free, and re-running it against the CURRENT index is strictly better than
+    replaying a stale match set — a page created since the submit is now
+    tier-1-matchable. ``tier0_passthrough`` is deliberately not re-run: a
+    passthrough file never gets a tier-2 request, so no ref in a classify
+    handle can be one.
+    """
+    states: list[_FileState] = []
+    dropped: list[str] = []
+    for custom_id, record in sorted(handle.refs.items()):
+        raw, reason = _raw_file_from_record(record)
+        if raw is None:
+            _log_discard(reason or "raw-missing", record.ref, handle.batch_id)
+            out._count(reason or "raw-missing")
+            dropped.append(record.ref)
+            continue
+        st = _FileState(raw=raw)
+        # Same in-memory guard the submitting run applied before assembling
+        # the request, so the observations this file contributes are the same
+        # bytes either transport would have produced.
+        raw._content = flag_self_resolving_claims(raw.content)
+        st.matched = tier1_programmatic_match(raw, index, config=config)
+        for name, _uid, fpath in st.matched:
+            if not index.has_entity_format(fpath):
+                st.skipped.append(name)
+        st.t2_id = custom_id
+        states.append(st)
+    return states, dropped
+
+
+def _states_for_write_handle(
+    handle: batch_state.PendingBatch, *, out: "BatchCollectResult"
+) -> tuple[list[_FileState], list[str]]:
+    """Rebuild the per-file states a collected ``write`` batch applies to.
+
+    Everything comes from the handle's ``work`` document — see
+    :func:`_tier3_work_document`. A handle with no usable document (recorded
+    before athenaeum#1145, or written by a newer version this reader does not
+    understand) yields no states: it retires uncollected and its refs are
+    re-claimed from scratch. Wasteful, but never silent and never wrong.
+    """
+    work = handle.work
+    if not isinstance(work, dict) or work.get("version") != WORK_DOC_VERSION:
+        return [], sorted({r.ref for r in handle.refs.values()})
+    files = work.get("files")
+    if not isinstance(files, dict):
+        return [], sorted({r.ref for r in handle.refs.values()})
+
+    record_by_ref = {r.ref: r for r in handle.refs.values()}
+    states: list[_FileState] = []
+    dropped: list[str] = []
+    for ref in sorted(files):
+        entry = files[ref]
+        record = record_by_ref.get(ref)
+        if not isinstance(entry, dict) or record is None:
+            dropped.append(ref)
+            continue
+        raw, reason = _raw_file_from_record(record)
+        if raw is None:
+            _log_discard(reason or "raw-missing", ref, handle.batch_id)
+            out._count(reason or "raw-missing")
+            dropped.append(ref)
+            continue
+        st = _FileState(raw=raw)
+        skipped = entry.get("skipped")
+        st.skipped = [str(x) for x in skipped] if isinstance(skipped, list) else []
+        escalations = entry.get("escalations")
+        if isinstance(escalations, list):
+            st.address_escalations = [
+                e
+                for e in (_escalation_from_json(x) for x in escalations)
+                if e is not None
+            ]
+        sync_merges = entry.get("sync_merges")
+        if isinstance(sync_merges, list):
+            st.sync_merges = [
+                a for a in (_action_from_json(x) for x in sync_merges) if a is not None
+            ]
+        creates = entry.get("creates")
+        if isinstance(creates, dict):
+            for cid in sorted(creates):
+                action = _action_from_json(creates[cid])
+                if action is not None:
+                    st.create_ids.append((cid, action))
+        merges = entry.get("merges")
+        if isinstance(merges, dict):
+            for cid in sorted(merges):
+                spec = merges[cid]
+                if not isinstance(spec, dict):
+                    continue
+                action = _action_from_json(spec.get("action"))
+                page_path = spec.get("page_path")
+                existing_body = spec.get("existing_body")
+                if action is None or not isinstance(page_path, str):
+                    continue
+                page = Path(page_path)
+                if not page.is_file():
+                    log.warning(
+                        "collect: merge target %s is gone, dropping its result "
+                        "(%s, batch %s)",
+                        page_path,
+                        ref,
+                        handle.batch_id,
+                    )
+                    continue
+                # ``meta`` is re-parsed from the page rather than restored from
+                # the handle, so no YAML scalar has to survive a JSON round
+                # trip. The BODY is the stored one: the merge ops were anchored
+                # against it.
+                meta, _current_body = parse_frontmatter(
+                    page.read_text(encoding="utf-8")
+                )
+                st.merge_ids.append(
+                    (
+                        cid,
+                        action,
+                        page,
+                        meta,
+                        existing_body if isinstance(existing_body, str) else "",
+                    )
+                )
+        states.append(st)
+    return states, dropped
+
+
+def _is_not_found(exc: BaseException) -> bool:
+    """Whether *exc* is an authoritative "this batch does not exist" (AC3).
+
+    The distinction matters more than it looks: retiring a handle on a
+    TRANSIENT failure strands a live, paid-for batch forever, while keeping
+    one for a batch that is genuinely gone strands its raw files behind a
+    lease that will never be released. So the test is deliberately narrow —
+    the SDK's own ``NotFoundError``, or an explicit HTTP 404 — and everything
+    else (timeouts, connection errors, 5xx, anything unrecognised) is treated
+    as transient and KEPT. ``with_retry`` has already exhausted its retries by
+    the time this is consulted, so a persistent transient failure costs one
+    more run's wait, not a lost batch.
+    """
+    if isinstance(exc, anthropic.NotFoundError):
+        return True
+    return getattr(exc, "status_code", None) == 404
+
+
+def _retire_uncollected(
+    cache_dir: Path,
+    wiki_root: Path,
+    handle: batch_state.PendingBatch,
+    *,
+    reason: str,
+    out: "BatchCollectResult",
+    reservation: "_SpendReservation | None" = None,
+) -> None:
+    """Retire a handle whose results were never applied, and RECORD it (AC8).
+
+    Retiring releases the lease with the handle in one atomic store write, so
+    the refs are claimable again on the next pass — nothing is stranded. What
+    is lost is the batch's spend, which is an accepted failure mode but not an
+    invisible one: a ledger record makes it recoverable after the fact.
+    """
+    refs = sorted({r.ref for r in handle.refs.values()})
+    log.warning(
+        "collect: retiring batch %s (%s) UNCOLLECTED — reason=%s; its %d raw "
+        "file(s) are re-claimed from scratch and its batch spend is wasted "
+        "(issue athenaeum#1146)",
+        handle.batch_id,
+        handle.knob,
+        reason,
+        len(refs),
+    )
+    batch_state.record_reconciliation(
+        wiki_root,
+        batch_id=handle.batch_id,
+        knob=handle.knob,
+        reason=reason,
+        refs=refs,
+        submitted_at=handle.submitted_at,
+        cache_dir=cache_dir,
+    )
+    # Issue athenaeum#1147 AC6: close the reservation. This batch's real cost is
+    # unknowable — it ran, it was billed, and its results are gone — so it
+    # settles at the ESTIMATE. Leaving it open would leak a permanent phantom
+    # charge against every future ceiling check, which is precisely the
+    # failure the reservation ledger exists to prevent.
+    if reservation is not None:
+        reservation.settle_at_estimate(
+            batch_id=handle.batch_id, knob=handle.knob, reason=reason
+        )
+    batch_state.retire_handle(cache_dir, handle.batch_id)
+    out.retired_handles.append(handle.batch_id)
+    out._count(reason)
+
+
+def _keep_handle(
+    cache_dir: Path,
+    handle: batch_state.PendingBatch,
+    *,
+    reason: str,
+    config: dict[str, object] | None,
+    out: "BatchCollectResult",
+    extend: bool,
+) -> None:
+    """Keep a handle (and, when *extend*, push its lease out) — AC1.
+
+    Keeping without extending is a resubmit decision in disguise: the lease
+    runs out, the claim loop hands the refs back, and the next run submits
+    work that is still in flight and already paid for.
+    """
+    if extend:
+        batch_state.extend_lease(
+            cache_dir,
+            handle.batch_id,
+            config=cast("dict[str, Any] | None", config),
+        )
+    out.kept_handles.append(handle.batch_id)
+    out.in_flight_refs.extend(sorted({r.ref for r in handle.refs.values()}))
+    out._count(reason)
+
+
+def collect_pending_batches(
+    index: EntityIndex,
+    wiki_root: Path,
+    client: anthropic.Anthropic,
+    valid_types: list[str],
+    valid_tags: list[str],
+    valid_access: list[str],
+    *,
+    usage: TokenUsage,
+    config: dict[str, object] | None,
+    max_api_calls: int,
+    provider: str = "api",
+    sleep: Callable[[float], None] = time.sleep,
+    write_client: "anthropic.Anthropic | None" = None,
+    deadline: float | None = None,
+    cache_dir: Path | None = None,
+    now: "datetime | None" = None,
+    batch_classify: bool = True,
+    batch_write: bool = True,
+) -> BatchCollectResult:
+    """Collect every outstanding athenaeum#1143 handle, oldest first.
+
+    For each handle: retrieve the batch by id; if it has ENDED, read its
+    results, apply them through :func:`process_batch_run` (via
+    :class:`_ResumedWork` — the same finalize path, never a parallel one), and
+    retire the handle, which releases its lease in the same atomic store write.
+
+    Every other way a handle can fail to be collectable is enumerated and
+    reconciled (issue athenaeum#1146). The distinction that governs the whole
+    function, and that is routinely conflated with OPPOSITE correct responses:
+
+    ==========================================  =================================
+    Batch ``processing_status != "ended"``      Keep the handle, EXTEND the
+                                                lease, do not resubmit — the
+                                                work is in flight and paid for.
+    Per-request ``result.type == "expired"``    That request never reached the
+                                                model and is NOT billed —
+                                                ordinary per-file failure path,
+                                                raw stays, retried next run.
+    ==========================================  =================================
+
+    Treating the first as the second resubmits work that is already paid for
+    and running. Treating the second as the first strands files forever.
+
+    Collecting a ``classify`` handle and submitting the resulting tier-3 batch
+    within the same run is supported and is the point: the resumed run reaches
+    the normal tier-3 assembly, spend ceiling, and submit.
+    """
+    effective_cache_dir = (
+        cache_dir if cache_dir is not None else batch_state.resolve_cache_dir()
+    )
+    reservation = _SpendReservation(
+        wiki_root=wiki_root, config=config, cache_dir=effective_cache_dir
+    )
+    out = BatchCollectResult()
+    handles = batch_state.load(effective_cache_dir)
+    if not handles:
+        return out
+
+    for batch_id, handle in sorted(
+        handles.items(), key=lambda kv: (kv[1].submitted_at, kv[0])
+    ):
+        knob = handle.knob
+        reader = (
+            write_client if knob == "write" and write_client is not None else client
+        )
+
+        # AC3, first half: a batch past the API's retention window cannot be
+        # collected however well-formed its handle is. Checked BEFORE the
+        # retrieve — it is the one un-collectable case that can be decided
+        # without a network call, and deciding it locally means an expired
+        # handle still reconciles when the API is unreachable.
+        age = batch_state.submitted_age_days(handle, now=now)
+        if age is not None and age > BATCH_RETENTION_DAYS:
+            _retire_uncollected(
+                effective_cache_dir,
+                wiki_root,
+                handle,
+                reason="retention-expired",
+                out=out,
+                reservation=reservation,
+            )
+            continue
+
+        try:
+            batch = with_retry(
+                lambda: reader.messages.batches.retrieve(batch_id),
+                description=f"batch poll (collect {batch_id})",
+            )
+        except Exception as exc:  # noqa: BLE001 — narrowed by _is_not_found below
+            # AC3, second half. ``with_retry`` has already exhausted its
+            # retries; what is left is a decision about WHICH failure this is,
+            # and it is made conservatively — see :func:`_is_not_found`.
+            if _is_not_found(exc):
+                _retire_uncollected(
+                    effective_cache_dir,
+                    wiki_root,
+                    handle,
+                    reason="unretrievable",
+                    out=out,
+                    reservation=reservation,
+                )
+            else:
+                log.warning(
+                    "collect: could not retrieve batch %s (%s: %s) — keeping "
+                    "the handle; a transient failure must never retire a live "
+                    "batch",
+                    batch_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                _keep_handle(
+                    effective_cache_dir,
+                    handle,
+                    reason="retrieve-error",
+                    config=config,
+                    out=out,
+                    extend=True,
+                )
+            continue
+
+        if getattr(batch, "processing_status", None) != "ended":
+            # AC1. INFO, not an error: most batches finish inside an hour, and
+            # a run that arrives early is the expected case, not a fault.
+            log.info(
+                "collect: batch %s (%s) is still in flight — keeping the "
+                "handle and extending its lease, not resubmitting its %d ref(s)",
+                batch_id,
+                knob,
+                len({r.ref for r in handle.refs.values()}),
+            )
+            _keep_handle(
+                effective_cache_dir,
+                handle,
+                reason="in-flight",
+                config=config,
+                out=out,
+                extend=True,
+            )
+            continue
+
+        if knob == "classify":
+            states, dropped = _states_for_classify_handle(
+                handle, index, config=config, out=out
+            )
+        elif knob == "write":
+            states, dropped = _states_for_write_handle(handle, out=out)
+        else:
+            log.warning(
+                "collect: handle %s has an unknown knob %r", batch_id, knob
+            )
+            _retire_uncollected(
+                effective_cache_dir,
+                wiki_root,
+                handle,
+                reason="unknown-knob",
+                out=out,
+                reservation=reservation,
+            )
+            continue
+
+        out.failed_refs.extend(dropped)
+        if not states:
+            _retire_uncollected(
+                effective_cache_dir,
+                wiki_root,
+                handle,
+                reason="no-context",
+                out=out,
+                reservation=reservation,
+            )
+            continue
+
+        model_by_cid = {cid: rec.model for cid, rec in handle.refs.items()}
+        result_types: dict[str, int] = {}
+        before = _usage_snapshot(usage)
+        try:
+            results = collect_batch_results(
+                reader,
+                batch_id,
+                model_by_cid,
+                description=f"collect {knob}",
+                usage=usage,
+                knob=knob,
+                out_result_types=result_types,
+            )
+        except BatchExecutionError as exc:
+            log.warning(
+                "collect: could not read results for batch %s (%s) — keeping "
+                "the handle for a later run",
+                batch_id,
+                exc,
+            )
+            _keep_handle(
+                effective_cache_dir,
+                handle,
+                reason="results-unreadable",
+                config=config,
+                out=out,
+                extend=True,
+            )
+            continue
+
+        # Issue athenaeum#1147: the actual is booked, so the reservation this
+        # batch's SUBMITTING run wrote (possibly on an earlier accounting day)
+        # settles here — with the collect run's day and the estimate-vs-actual
+        # delta. A batch whose every request expired settles at ZERO, which is
+        # correct: the API documents an expired request as not billed.
+        reservation.settle_measured(
+            batch_id=batch_id,
+            knob=knob,
+            before=before,
+            after=_usage_snapshot(usage),
+            result_types=result_types,
+        )
+
+        # AC2 + AC7: per-request terminals, counted by type. These map onto the
+        # EXISTING per-file failure path below (a ``None`` result raises
+        # ``_BatchItemError`` at finalize, the raw stays on disk, the ref lands
+        # in ``failed_refs``) — deliberately NOT onto the keep-the-handle path.
+        for rtype, count in sorted(result_types.items()):
+            out._count(f"request-{rtype}", count)
+
+        resumed = (
+            _ResumedWork(states=states, t2_results=results)
+            if knob == "classify"
+            else _ResumedWork(states=states, t3_results=results)
+        )
+        applied = process_batch_run(
+            [],
+            index,
+            wiki_root,
+            client,
+            valid_types,
+            valid_tags,
+            valid_access,
+            usage=usage,
+            config=config,
+            max_api_calls=max_api_calls,
+            provider=provider,
+            sleep=sleep,
+            write_client=write_client,
+            deadline=deadline,
+            cache_dir=effective_cache_dir,
+            resume=resumed,
+            # Issue athenaeum#1175: a collected classify handle that pipelines
+            # into tier-3 must honour THIS run's per-knob selection, not the
+            # selection the submitting run happened to have.
+            batch_classify=batch_classify,
+            batch_write=batch_write,
+        )
+
+        out.created += applied.created
+        out.updated += applied.updated
+        out.escalated += applied.escalated
+        out.skipped += applied.skipped
+        out.degraded += applied.degraded
+        out.truncated += applied.truncated
+        out.oversize_suppressed += applied.oversize_suppressed
+        out.type_rejected += applied.type_rejected  # issue athenaeum#1196
+        out.failed_refs.extend(applied.failed_refs)
+        out.in_flight_refs.extend(applied.in_flight_refs)
+        unresolved = (
+            set(applied.failed_refs)
+            | set(applied.deferred_refs)
+            | set(applied.in_flight_refs)
+        )
+        collected = sorted({st.raw.ref for st in states} - unresolved)
+        out.collected_refs.extend(collected)
+        out._count("collected", len(collected))
+        # The handle's results have been consumed, whatever became of the
+        # files downstream — a file whose collect pipelined into a NEW batch is
+        # now held by that batch's OWN handle, and one that failed keeps its
+        # raw on disk for a fresh claim. Retiring drops the handle and its
+        # lease in one atomic store write.
+        batch_state.retire_handle(effective_cache_dir, batch_id)
+        out.retired_handles.append(batch_id)
+        log.info(
+            "collect: applied batch %s (%s) — created=%d updated=%d "
+            "escalated=%d failed=%d",
+            batch_id,
+            knob,
+            applied.created,
+            applied.updated,
+            applied.escalated,
+            len(applied.failed_refs),
+        )
+
+    return out

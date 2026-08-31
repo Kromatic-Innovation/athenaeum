@@ -2704,3 +2704,121 @@ class TestDurableLedgerPath:
         # which is a different bug than split-brain but worth pinning too.
         stale_read = spend.read_ledger(spend.resolve_ledger_path(cache_dir=cache_dir))
         assert stale_read == []
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1147 AC9 — `athenaeum spend` surfaces committed-but-unbilled
+# batch spend.
+#
+# A batch is paid for the moment it is submitted, but `add_batch_tokens` only
+# books it at COLLECT. Between a submit run and its collect run there is real
+# money the spend ledger cannot see, and an operator should not have to
+# hand-trace the reservation ledger to find it.
+# ---------------------------------------------------------------------------
+
+
+class TestSpendReportsOutstandingReservations:
+    def _report(self, target: Path, cache_dir: Path, *, as_json: bool) -> str:
+        import contextlib
+        import io
+
+        args = ["spend", "--path", str(target), "--cache-dir", str(cache_dir)]
+        if as_json:
+            args.append("--json")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(args)
+        assert rc == 0
+        return buf.getvalue()
+
+    def _seed(self, tmp_path: Path) -> tuple[Path, Path]:
+        target = tmp_path / "knowledge"
+        (target / "wiki").mkdir(parents=True)
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        return target, cache_dir
+
+    def test_json_reports_outstanding_reservations(self, tmp_path: Path) -> None:
+        import json as _json
+
+        target, cache_dir = self._seed(tmp_path)
+        spend.record_reservation(
+            target / "wiki",
+            batch_id="msgbatch_inflight",
+            knob="write",
+            est_input_tokens=500_000,
+            est_output_tokens=50_000,
+            est_usd=2.25,
+            config=None,
+            cache_dir=cache_dir,
+        )
+
+        payload = _json.loads(self._report(target, cache_dir, as_json=True))
+
+        assert payload["outstanding_reservations"]["count"] == 1
+        assert payload["outstanding_reservations"]["est_usd"] == pytest.approx(2.25)
+        assert [
+            b["batch_id"] for b in payload["outstanding_reservations"]["batches"]
+        ] == ["msgbatch_inflight"]
+
+    def test_text_report_names_the_in_flight_batch(self, tmp_path: Path) -> None:
+        target, cache_dir = self._seed(tmp_path)
+        spend.record_reservation(
+            target / "wiki",
+            batch_id="msgbatch_inflight",
+            knob="write",
+            est_input_tokens=500_000,
+            est_output_tokens=50_000,
+            est_usd=2.25,
+            config=None,
+            cache_dir=cache_dir,
+        )
+
+        out = self._report(target, cache_dir, as_json=False)
+
+        assert "committed but not yet billed" in out
+        assert "msgbatch_inflight" in out
+        assert "$2.25" in out
+
+    def test_a_settled_reservation_drops_out_of_the_report(
+        self, tmp_path: Path
+    ) -> None:
+        """A settlement supersedes its reservation; both stay on the ledger."""
+        import json as _json
+
+        target, cache_dir = self._seed(tmp_path)
+        spend.record_reservation(
+            target / "wiki",
+            batch_id="msgbatch_done",
+            knob="classify",
+            est_input_tokens=10,
+            est_output_tokens=5,
+            est_usd=0.01,
+            config=None,
+            cache_dir=cache_dir,
+        )
+        spend.record_settlement(
+            target / "wiki",
+            batch_id="msgbatch_done",
+            knob="classify",
+            actual_input_tokens=12,
+            actual_output_tokens=4,
+            actual_usd=0.011,
+            est_usd=0.01,
+            config=None,
+            cache_dir=cache_dir,
+        )
+
+        payload = _json.loads(self._report(target, cache_dir, as_json=True))
+        assert payload["outstanding_reservations"]["count"] == 0
+        # Both records are still there — the delta is the point of a ledger.
+        records = spend.read_reservation_ledger(target / "wiki", cache_dir=cache_dir)
+        assert [r["state"] for r in records] == ["reserved", "settled"]
+        assert records[1]["delta_usd"] == pytest.approx(0.001)
+
+    def test_a_clean_report_is_unchanged_when_nothing_is_in_flight(
+        self, tmp_path: Path
+    ) -> None:
+        target, cache_dir = self._seed(tmp_path)
+        out = self._report(target, cache_dir, as_json=False)
+        assert "committed but not yet billed" not in out

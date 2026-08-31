@@ -21,7 +21,9 @@ from athenaeum.config import (
     resolve_push_after_run,
     resolve_push_branch,
     resolve_push_remote,
+    resolve_reasoning_tier_any_screen_enabled,
     resolve_reasoning_tier_auditing_enabled,
+    resolve_reasoning_tier_t2_auto_apply_enabled,
     resolve_reindex_full_rehash_max_age_days,
     resolve_retire,
     write_default_config,
@@ -491,9 +493,12 @@ class TestResolvePushAfterRun:
 
 
 class TestResolveReasoningTierAuditingEnabled:
-    """Issue athenaeum#779: the reasoning-tier screen (T1/T2) ships OFF by
-    default — enabling it lets T2 auto-apply a merge with no human review, so
-    an unconfigured install must never opt into that silently."""
+    """Issue athenaeum#779: the reasoning-tier T1 screen ships OFF by default.
+
+    **Re-read as T1-ONLY as of issue athenaeum#1200** — this key used to also
+    arm T2's unreviewed auto-apply; it no longer does (see
+    ``TestResolveReasoningTierT2AutoApplyEnabled`` below for T2's own,
+    separate, still-off-by-default opt-in)."""
 
     def test_default_off(self) -> None:
         assert resolve_reasoning_tier_auditing_enabled(None) is False
@@ -530,6 +535,95 @@ class TestResolveReasoningTierAuditingEnabled:
         from athenaeum.config import _DEFAULTS
 
         assert "librarian" not in _DEFAULTS
+
+
+class TestResolveReasoningTierT2AutoApplyEnabled:
+    """Issue athenaeum#1200: T2's unreviewed-auto-apply opt-in, split out of
+    the combined T1/T2 flag. Defaults OFF, and — critically — OFF regardless
+    of the T1 key's value (AC3): T1 being on must never imply T2 auto-apply
+    authority."""
+
+    def test_default_off(self) -> None:
+        assert resolve_reasoning_tier_t2_auto_apply_enabled(None) is False
+        assert resolve_reasoning_tier_t2_auto_apply_enabled({}) is False
+        assert resolve_reasoning_tier_t2_auto_apply_enabled({"librarian": {}}) is False
+
+    def test_off_even_when_t1_key_is_on(self) -> None:
+        """AC3, the load-bearing assertion for the whole split: an existing
+        config's ``reasoning_tier_auditing_enabled: true`` must NOT also
+        arm T2 — T2 needs its own, separate, explicit key."""
+        cfg = {"librarian": {"reasoning_tier_auditing_enabled": True}}
+        assert resolve_reasoning_tier_t2_auto_apply_enabled(cfg) is False
+
+    def test_env_true_enables(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_REASONING_TIER_T2_AUTO_APPLY_ENABLED", "true")
+        assert resolve_reasoning_tier_t2_auto_apply_enabled(None) is True
+
+    def test_env_false_explicit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_REASONING_TIER_T2_AUTO_APPLY_ENABLED", "false")
+        cfg = {"librarian": {"reasoning_tier_t2_auto_apply_enabled": True}}
+        assert resolve_reasoning_tier_t2_auto_apply_enabled(cfg) is False
+
+    def test_yaml_true_enables(self) -> None:
+        assert (
+            resolve_reasoning_tier_t2_auto_apply_enabled(
+                {"librarian": {"reasoning_tier_t2_auto_apply_enabled": True}}
+            )
+            is True
+        )
+
+    def test_non_bool_yaml_falls_through_to_off(self) -> None:
+        assert (
+            resolve_reasoning_tier_t2_auto_apply_enabled(
+                {"librarian": {"reasoning_tier_t2_auto_apply_enabled": "yes"}}
+            )
+            is False
+        )
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "librarian" not in _DEFAULTS
+
+    def test_one_line_revert_restores_pre_1200_combined_behavior(self) -> None:
+        """AC5: revert to the exact pre-athenaeum#1200 combined behavior is a
+        single documented config edit — setting BOTH keys true, on top of
+        the existing key an operator's live config already has."""
+        cfg = {
+            "librarian": {
+                "reasoning_tier_auditing_enabled": True,
+                "reasoning_tier_t2_auto_apply_enabled": True,
+            }
+        }
+        assert resolve_reasoning_tier_auditing_enabled(cfg) is True
+        assert resolve_reasoning_tier_t2_auto_apply_enabled(cfg) is True
+
+
+class TestResolveReasoningTierAnyScreenEnabled:
+    """Issue athenaeum#1200: the calibration display surface must not read
+    "not enabled" while a screen is actively producing decisions — it checks
+    EITHER flag, not just T1's."""
+
+    def test_both_off(self) -> None:
+        assert resolve_reasoning_tier_any_screen_enabled(None) is False
+        assert resolve_reasoning_tier_any_screen_enabled({}) is False
+
+    def test_t1_only(self) -> None:
+        cfg = {"librarian": {"reasoning_tier_auditing_enabled": True}}
+        assert resolve_reasoning_tier_any_screen_enabled(cfg) is True
+
+    def test_t2_only(self) -> None:
+        cfg = {"librarian": {"reasoning_tier_t2_auto_apply_enabled": True}}
+        assert resolve_reasoning_tier_any_screen_enabled(cfg) is True
+
+    def test_both_on(self) -> None:
+        cfg = {
+            "librarian": {
+                "reasoning_tier_auditing_enabled": True,
+                "reasoning_tier_t2_auto_apply_enabled": True,
+            }
+        }
+        assert resolve_reasoning_tier_any_screen_enabled(cfg) is True
 
 
 class TestResolvePushRemote:

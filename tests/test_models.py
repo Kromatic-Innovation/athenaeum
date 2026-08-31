@@ -515,15 +515,17 @@ class TestEntityIndex:
         index = EntityIndex(wiki_dir)
         result = index.lookup("Acme Corp")
         assert result is not None
-        uid, path = result
+        # Still a plain (uid, path) unpack via positional access -- IndexEntry
+        # is a tuple subclass (issue athenaeum#1169), so this keeps working.
+        uid, path = result[0], result[1]
         assert uid == "a1b2c3d4"
+        assert path.name == "a1b2c3d4-acme-corp.md"
 
     def test_lookup_by_alias(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
         result = index.lookup("Acme")
         assert result is not None
-        uid, _ = result
-        assert uid == "a1b2c3d4"
+        assert result.uid == "a1b2c3d4"
 
     def test_lookup_case_insensitive(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
@@ -534,13 +536,32 @@ class TestEntityIndex:
         index = EntityIndex(wiki_dir)
         result = index.lookup("Auth tokens must use system keychain")
         assert result is not None
-        uid_or_name, _ = result
         # Old format has no uid, so it returns the name
-        assert uid_or_name == "Auth tokens must use system keychain"
+        assert result.uid == "Auth tokens must use system keychain"
 
     def test_lookup_missing(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
         assert index.lookup("Nonexistent Entity") is None
+
+    def test_lookup_carries_type(self, wiki_dir: Path) -> None:
+        """Issue athenaeum#1169: EntityIndex._load carries `type:` into IndexEntry."""
+        index = EntityIndex(wiki_dir)
+        result = index.lookup("Acme Corp")
+        assert result is not None
+        assert result.type == "company"
+
+    def test_lookup_untyped_page_is_kept_with_none_type(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1169: a page with no `type:` is indexed and KEPT,
+        with an explicit `type=None` rather than a silently-defaulted value."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "untyped-note.md").write_text(
+            "---\nname: Untyped Note\n---\n\nNo type field here.\n"
+        )
+        index = EntityIndex(wiki)
+        result = index.lookup("Untyped Note")
+        assert result is not None
+        assert result.type is None
 
     def test_has_entity_format(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
@@ -692,6 +713,55 @@ class TestTokenUsage:
         assert usage.cache_creation_input_tokens == 10
         assert usage.cache_read_input_tokens == 20
         assert usage.api_calls == 0
+
+    def test_record_attempt_is_independent_of_api_calls(self) -> None:
+        """athenaeum#1177: ``record_attempt`` is a SEPARATE counter from
+        ``api_calls`` -- calling it does not touch ``api_calls``/tokens at
+        all, and a subsequent successful ``add()`` does not touch
+        ``attempted_calls`` either. The two compose additively, tracked by
+        whichever call sites choose to call each."""
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.record_attempt()
+        usage.record_attempt()
+        assert usage.attempted_calls == 2
+        assert usage.api_calls == 0
+        assert usage.succeeded_calls == 0
+        usage.add(100, 50)
+        assert usage.attempted_calls == 2  # unchanged by add()
+        assert usage.api_calls == 1
+        assert usage.succeeded_calls == 1
+
+    def test_add_tokens_bumps_succeeded_calls(self) -> None:
+        """athenaeum#1177 AC4: ``succeeded_calls`` is bumped inside
+        ``add_tokens`` itself -- called ONLY when a real response's counts
+        are known -- so it is accurate for the merge-phase detector/
+        resolver call sites too (which call ``add_tokens`` directly, not
+        ``add()``, and count their OWN attempts via ``api_calls``
+        manually)."""
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add_tokens(100, 50)
+        usage.add_tokens(200, 75)
+        assert usage.succeeded_calls == 2
+        assert usage.api_calls == 0  # add_tokens deliberately does not bump this
+
+    def test_attempted_can_exceed_succeeded_the_all_failing_shape(self) -> None:
+        """The exact shape a credits-exhausted run produces: every call
+        attempted, none succeeded -- a count that must not be able to
+        agree with a zero-token ledger by construction."""
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.record_attempt()
+        usage.record_attempt()
+        usage.record_attempt()
+        assert usage.attempted_calls == 3
+        assert usage.succeeded_calls == 0
+        assert usage.api_calls == 0
+        assert usage.total_tokens == 0
 
     def test_estimated_cost_includes_cache_terms(self) -> None:
         """athenaeum#239: input_tokens excludes cached tokens, so the estimate must

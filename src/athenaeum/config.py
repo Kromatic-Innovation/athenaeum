@@ -953,19 +953,38 @@ def resolve_audit_sample_rate_t1_rejects(config: dict[str, Any] | None) -> float
 
 
 def resolve_reasoning_tier_auditing_enabled(config: dict[str, Any] | None) -> bool:
-    """Resolve the reasoning-tier opt-in (issue athenaeum#518). DEFAULT OFF.
+    """Resolve the T1 reasoning-tier screen's opt-in (issue athenaeum#518). DEFAULT OFF.
 
-    Gates BOTH halves of the tiered-reasoning subsystem behind one explicit
-    switch:
+    **Re-read as T1-ONLY as of issue athenaeum#1200.** Before athenaeum#1200 this single
+    key gated BOTH the harmless T1 screen (reject-or-pass-up, no write
+    authority) and T2's UNREVIEWED AUTO-APPLY (safe-class merges written to
+    the wiki with no human review) together — one key arming two very
+    different blast radii. athenaeum#1200 split them: this key now gates ONLY
 
     - the T1 reasoning screen in the merge path
       (:func:`athenaeum.merge.merge_clusters_to_wiki`) — a confident T1 reject
-      drops a merge proposal before it reaches the human queue; and
-    - the calibration display surface (``athenaeum calibration summary`` and
-      the ``calibration_summary`` MCP tool), which reports an explicit "tier
-      auditing not enabled" state when this is OFF instead of a permanent
-      0-sampled / 0-overturned all-clear that reads as "well calibrated" when
-      the tiers never actually ran.
+      drops a merge proposal before it reaches the human queue.
+
+    T2's auto-apply authority now requires its OWN, separate, explicit
+    opt-in — see :func:`resolve_reasoning_tier_t2_auto_apply_enabled`, which
+    defaults OFF independent of this key's value (issue athenaeum#1200 AC3). The
+    calibration display surface (``athenaeum calibration summary`` / the
+    ``calibration_summary`` MCP tool) checks BOTH keys via
+    :func:`resolve_reasoning_tier_any_screen_enabled`, not this function
+    alone, so it stays accurate for a (T1 off, T2 on) config too.
+
+    **Migration note for an existing config (issue athenaeum#1200 AC4/AC5):** a
+    config that already sets ``librarian.reasoning_tier_auditing_enabled:
+    true`` keeps its T1 screen exactly as before, but as of this change no
+    longer also arms T2's auto-apply — T2 now requires the new key below to
+    be set as well. This is a change in what the EXISTING key's value means,
+    and it changes it in the safe direction only: it can only ever REMOVE
+    auto-apply authority an old config previously had, never grant new
+    authority a config didn't already have. To restore the exact
+    pre-athenaeum#1200 combined behavior, add ONE line:
+    ``librarian.reasoning_tier_t2_auto_apply_enabled: true``. See
+    ``docs/configuration.md``'s "Reasoning-tier screening" section for the
+    full migration story.
 
     Env ``ATHENAEUM_REASONING_TIER_AUDITING_ENABLED`` (``1``/``true``/``yes``/``on``,
     case-insensitive) > yaml ``librarian.reasoning_tier_auditing_enabled`` >
@@ -985,6 +1004,59 @@ def resolve_reasoning_tier_auditing_enabled(config: dict[str, Any] | None) -> bo
             if isinstance(raw, bool):
                 return raw
     return False
+
+
+def resolve_reasoning_tier_t2_auto_apply_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve T2's unreviewed-auto-apply opt-in (issue athenaeum#1200). DEFAULT OFF.
+
+    Split out of :func:`resolve_reasoning_tier_auditing_enabled` (issue
+    athenaeum#1200): T1 (a harmless reject-or-pass-up screen with no write
+    authority) and T2 (which can auto-apply a safe-class merge into the wiki
+    with NO human review, via ``pending_merges.resolve_merge(...,
+    auto_applied=True)``) used to share one flag. This key is T2's OWN,
+    independent opt-in — resolved separately from, and NOT implied by,
+    :func:`resolve_reasoning_tier_auditing_enabled` (T1's key). A config can
+    set either key alone, both, or neither; T1 being on does not turn T2 on,
+    and T2 being on does not require T1 (see
+    :func:`athenaeum.merge.merge_clusters_to_wiki` — T2's screen call is
+    gated by this value directly, exactly as T1's is gated by its own).
+
+    Env ``ATHENAEUM_REASONING_TIER_T2_AUTO_APPLY_ENABLED``
+    (``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+    ``librarian.reasoning_tier_t2_auto_apply_enabled`` > default ``False``.
+    No seed in ``_DEFAULTS`` (issue athenaeum#231). **Default OFF regardless of
+    the T1 key's value (issue athenaeum#1200 AC3)** — an operator who already
+    has ``reasoning_tier_auditing_enabled: true`` in a live config does NOT
+    get T2 auto-apply for free; it must be armed explicitly. Non-bool yaml
+    values and unrecognized env strings fall through to off.
+    """
+    env = os.environ.get("ATHENAEUM_REASONING_TIER_T2_AUTO_APPLY_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("reasoning_tier_t2_auto_apply_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
+def resolve_reasoning_tier_any_screen_enabled(config: dict[str, Any] | None) -> bool:
+    """Whether EITHER reasoning-tier screen is armed (issue athenaeum#1200).
+
+    ``resolve_reasoning_tier_auditing_enabled(config) or
+    resolve_reasoning_tier_t2_auto_apply_enabled(config)`` — the calibration
+    display surface (``athenaeum calibration summary``, the
+    ``calibration_summary`` / ``review_audit_item`` MCP tools) uses this
+    rather than the T1 key alone, so a (T1 off, T2 on) config — unusual, but
+    not forbidden — still shows T2's sampled audit items instead of a
+    misleading "tier auditing not enabled" that would hide an ACTIVELY
+    auto-applying tier from the one loop meant to catch it being wrong.
+    """
+    return resolve_reasoning_tier_auditing_enabled(
+        config
+    ) or resolve_reasoning_tier_t2_auto_apply_enabled(config)
 
 
 def resolve_min_merge_mean_similarity(config: dict[str, Any] | None) -> float:
@@ -2602,6 +2674,20 @@ search_backend: fts5
 #   most batches finish within an hour, 24h worst case — intended for the
 #   nightly run. Precedence: --batch-mode CLI flag, then
 #   ATHENAEUM_BATCH_MODE env, then this key, then off.
+# batch: PER-KNOB batch selection (issue athenaeum#1175), under this
+#   `librarian:` parent — deliberately NOT a new `llm.batch`, because batch
+#   is a property of how the librarian RUN is executed, not of the LLM
+#   routing layer, and it must fall back to `librarian.batch_mode`.
+#     librarian:
+#       batch:
+#         classify: false
+#         write: true
+#   Only `classify` and `write` are ever batched. An absent knob key falls
+#   back to the resolved `batch_mode`, so a config that sets only
+#   `batch_mode` is unchanged. A knob set here turns the run into a batch run
+#   even when `batch_mode` is off — but `--no-batch-mode` remains a hard off
+#   that no yaml key can defeat. Setting a NON-batchable knob to true is a
+#   config error (the run refuses), not a silent no-op.
 # retire: move-then-retire of raw auto-memory (issue athenaeum#261). DEFAULT ON.
 #   When on, `athenaeum run` MOVES non-contradictory raw/auto-memory facts
 #   into their wiki entry and `git rm`s the raw (recovery is git-only).
@@ -2676,6 +2762,9 @@ search_backend: fts5
 #   rotation_retention: 30
 #   max_files: 50
 #   batch_mode: false
+#   batch:
+#     classify: false
+#     write: false
 #   retire: true
 #   ephemeral_scopes:
 #     - "*hestia-routine*"

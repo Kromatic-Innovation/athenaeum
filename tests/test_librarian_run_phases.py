@@ -30,6 +30,7 @@ import pytest
 
 from athenaeum.decisions import list_pending_decisions
 from athenaeum.librarian import (
+    BATCHABLE_KNOBS,
     DEFAULT_MAX_API_CALLS,
     DEFAULT_MAX_FILES,
     DEFAULT_MAX_RUNTIME,
@@ -43,6 +44,8 @@ from athenaeum.librarian import (
     _run_preconditions,
     _run_rule_proposal_phase,
     _run_wiki_dedup_phase,
+    librarian_batch_knob,
+    unbatchable_knobs_enabled,
 )
 from athenaeum.provider import ProviderConfigError
 from tests.conftest import FakeLLMClient, make_llm_response, make_llm_usage
@@ -163,6 +166,20 @@ class TestRunContext:
             # Issue athenaeum#898: quarantined files exported as machine-detectable
             # run state, mirroring stuck_files above (empty here — none set).
             "quarantined_files": [],
+            # Issue athenaeum#1185: refs skipped this run because they are still
+            # within their exponential-backoff window, mirroring stuck_files/
+            # quarantined_files above (empty here — none set).
+            "backoff_skipped_files": [],
+            # Issue athenaeum#1144: batch refs left running at the run deadline,
+            # exported the same way (empty here — the batch transport is not
+            # exercised by this unit test).
+            "in_flight_refs": [],
+            # Issue athenaeum#1145: refs collected from a PRIOR run's batch
+            # (empty here — same reason).
+            "collected_refs": [],
+            # Issue athenaeum#1146: the pending-batch reconciliation tally
+            # (empty here — no handles were reconciled).
+            "batch_reconciliation": {},
             # Issue athenaeum#669: the entity-share yield (athenaeum#440) as
             # machine-detectable state.
             "entity_budget_tripped": True,
@@ -211,6 +228,22 @@ class TestRunPreconditions:
             side_effect=ProviderConfigError("bad provider"),
         ):
             assert _run_preconditions(ctx) == 1
+
+    def test_bad_rule_proposals_provider_config_returns_1_not_traceback(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#1174: ``rule_proposals`` is excluded from
+        ``_LIBRARIAN_ROUTED_KNOBS`` (it is independently routed, mirroring
+        ``topic``) but, unlike every routed knob, previously had NO preflight
+        validation at all -- a bad ``llm.providers.rule_proposals`` value
+        raised an uncaught ``ProviderConfigError`` the first time
+        ``_run_rule_proposal_phase`` actually resolved it, instead of
+        failing cleanly here. Uses the REAL ``resolve_provider`` (not
+        mocked) so this exercises the actual validation path, not just the
+        ``except`` clause's plumbing."""
+        ctx = _make_ctx(tmp_path)
+        ctx.config = {"llm": {"providers": {"rule_proposals": "not-a-real-provider"}}}
+        assert _run_preconditions(ctx) == 1
 
     def test_preflight_failure_returns_1(self, tmp_path: Path) -> None:
         ctx = _make_ctx(tmp_path)
@@ -1037,3 +1070,149 @@ class TestRunMemoryTierSweepPhase:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1175 — per-knob batch selection (``librarian.batch.<knob>``).
+#
+# Batch mode used to be GLOBAL: one flag for the whole run. But only two knobs
+# are ever batched, and they shared it — so an operator could not batch the
+# expensive ``write`` knob while keeping ``classify`` synchronous. ``write`` is
+# ~99% of spend and is exactly where a 50% Batch API discount pays; ``classify``
+# is cheap and is the knob whose latency the operator most wants interactive.
+# It was both or neither.
+# ---------------------------------------------------------------------------
+
+
+class TestPerKnobBatchSelection:
+    def test_an_explicit_knob_key_wins_over_the_run_level_default(self) -> None:
+        config = {"librarian": {"batch": {"classify": False, "write": True}}}
+        assert librarian_batch_knob(config, "classify", default=True) is False
+        assert librarian_batch_knob(config, "write", default=False) is True
+
+    def test_an_absent_knob_key_falls_back_to_batch_mode(self) -> None:
+        """The compatibility contract: only ``batch_mode`` set == old behaviour."""
+        assert librarian_batch_knob({}, "write", default=True) is True
+        assert librarian_batch_knob({}, "write", default=False) is False
+        # A ``librarian.batch`` section that names only ONE knob leaves the
+        # other on the fallback rather than defaulting it off.
+        config = {"librarian": {"batch": {"write": True}}}
+        assert librarian_batch_knob(config, "classify", default=False) is False
+        assert librarian_batch_knob(config, "classify", default=True) is True
+
+    def test_a_non_bool_knob_value_falls_through_to_the_default(self) -> None:
+        config = {"librarian": {"batch": {"write": "yes"}}}
+        assert librarian_batch_knob(config, "write", default=False) is False
+
+    def test_there_is_no_llm_batch_parent(self) -> None:
+        """The key lives under ``librarian:``, deliberately not under ``llm:``.
+
+        Batch is a property of how the librarian RUN is executed, not of the
+        LLM routing layer — and putting it under ``llm.`` would separate it
+        from ``librarian.batch_mode``, which it must fall back to. A config
+        that guesses ``llm.batch`` is therefore inert, not a second spelling.
+        """
+        config = {"llm": {"batch": {"write": True}}}
+        assert librarian_batch_knob(config, "write", default=False) is False
+
+    def test_only_classify_and_write_are_batchable(self) -> None:
+        assert BATCHABLE_KNOBS == ("classify", "write")
+        assert unbatchable_knobs_enabled(
+            {"librarian": {"batch": {"classify": True, "write": True}}}
+        ) == []
+        assert unbatchable_knobs_enabled(
+            {"librarian": {"batch": {"topic": True, "resolve": True}}}
+        ) == ["resolve", "topic"]
+
+    def test_a_non_batchable_knob_set_false_is_not_an_error(self) -> None:
+        """It states an accurate fact; refusing it would break a status-quo config."""
+        assert unbatchable_knobs_enabled(
+            {"librarian": {"batch": {"topic": False}}}
+        ) == []
+
+
+class TestPerKnobBatchSelectionResolution:
+    def test_batch_mode_only_config_resolves_both_knobs_on(
+        self, tmp_path: Path
+    ) -> None:
+        """AC: existing configs setting only ``batch_mode`` behave identically."""
+        ctx = _make_ctx(tmp_path, batch_mode=True)
+        ctx.provider = "api"
+        assert _resolve_run_config(ctx) is None
+        assert (ctx.batch_classify, ctx.batch_write) == (True, True)
+        assert ctx.batch_mode is True
+
+    def test_enabling_only_the_write_knob_makes_it_a_batch_run(
+        self, tmp_path: Path
+    ) -> None:
+        """The motivating case: batch the expensive knob, nothing else.
+
+        Without this, ``librarian.batch.write: true`` alone would resolve
+        ``batch_mode`` off and the run would never reach the batch transport
+        at all — the key would be silently inert.
+        """
+        ctx = _make_ctx(tmp_path)
+        ctx.provider = "api"
+        ctx.config = {"librarian": {"batch": {"write": True}}}
+        assert _resolve_run_config(ctx) is None
+        assert (ctx.batch_classify, ctx.batch_write) == (False, True)
+        assert ctx.batch_mode is True
+
+    def test_no_batch_mode_is_a_hard_off_that_yaml_cannot_defeat(
+        self, tmp_path: Path
+    ) -> None:
+        """``--no-batch-mode`` documents itself as forcing the synchronous path."""
+        ctx = _make_ctx(tmp_path, batch_mode=False)
+        ctx.provider = "api"
+        ctx.config = {"librarian": {"batch": {"write": True, "classify": True}}}
+        assert _resolve_run_config(ctx) is None
+        assert (ctx.batch_classify, ctx.batch_write) == (False, False)
+        assert ctx.batch_mode is False
+
+    def test_a_non_batchable_knob_enabled_refuses_the_run(
+        self, tmp_path: Path
+    ) -> None:
+        """A config error, not a silent no-op."""
+        ctx = _make_ctx(tmp_path)
+        ctx.provider = "api"
+        ctx.config = {"librarian": {"batch": {"topic": True}}}
+        assert _resolve_run_config(ctx) == 1
+
+    def test_claude_cli_on_an_UNBATCHED_knob_is_now_accepted(
+        self, tmp_path: Path
+    ) -> None:
+        """The guard narrows from batch-CAPABLE knobs to batch-ENABLED ones.
+
+        Subscription-path classification alongside a discounted batched write
+        is a genuinely useful install shape that the global flag made
+        unreachable — the old guard rejected the run outright.
+        """
+        ctx = _make_ctx(tmp_path)
+        ctx.provider = "api"
+        ctx.config = {
+            "llm": {"providers": {"classify": "claude-cli"}},
+            "librarian": {"batch": {"write": True}},
+        }
+        assert _resolve_run_config(ctx) is None
+        assert (ctx.batch_classify, ctx.batch_write) == (False, True)
+
+    def test_claude_cli_on_a_BATCHED_knob_is_still_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """The failure the guard exists to catch is untouched."""
+        ctx = _make_ctx(tmp_path)
+        ctx.provider = "api"
+        ctx.config = {
+            "llm": {"providers": {"classify": "claude-cli"}},
+            "librarian": {"batch": {"classify": True, "write": True}},
+        }
+        assert _resolve_run_config(ctx) == 1
+
+    def test_global_batch_mode_with_claude_cli_classify_is_still_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """No per-knob keys: both knobs batch, so the old rejection stands."""
+        ctx = _make_ctx(tmp_path, batch_mode=True)
+        ctx.provider = "api"
+        ctx.config = {"llm": {"providers": {"classify": "claude-cli"}}}
+        assert _resolve_run_config(ctx) == 1

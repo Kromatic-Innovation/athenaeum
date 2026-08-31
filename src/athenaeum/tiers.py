@@ -184,14 +184,31 @@ def _record_usage(
 ENTITY_LLM_CALL_MARKER = "librarian-entity-llm-call"
 
 
-def _timed_llm_call(call: Callable[[], Any], description: str) -> Any:
+def _timed_llm_call(
+    call: Callable[[], Any], description: str, usage: TokenUsage | None = None
+) -> Any:
     """Wrap :func:`with_retry` with entity-phase LLM call wall-clock logging.
 
     Every tier2/tier3 call site below already passes ``call``/*description*
     straight to :func:`with_retry` unchanged — this only times that same call
     and logs the duration; it does not alter what is sent, retried, or
     returned (issue athenaeum#800: observability only, no compile-logic change).
+
+    *usage* (issue athenaeum#1177), when given, records ONE attempt via
+    :meth:`TokenUsage.record_attempt` BEFORE ``with_retry`` runs — this is
+    the single choke point every tier2/tier3 entity-phase LLM call site
+    passes through, so it is where a persistently-failing call (retries
+    exhausted, or a non-transient error `with_retry` does not retry at all)
+    still counts as an ATTEMPT even though the caller never reaches
+    ``_record_usage`` (which only bumps ``usage.api_calls`` on a successful
+    response). Before this, a run where every entity-phase call errored
+    reported ``api_calls == 0`` — indistinguishable from an idle run with
+    nothing to do — which is exactly what let the athenaeum#899 zero-yield
+    alarm's ``consecutive`` counter stay at 0 through a four-day
+    all-failing incident (see ``librarian._zero_yield_tripped``).
     """
+    if usage is not None:
+        usage.record_attempt()
     _start = time.monotonic()
     result = with_retry(call, description=description)
     log.info(
@@ -469,10 +486,111 @@ def _passes_mention_density_gate(
     return False
 
 
+def resolve_type_gate_allowed_types(config: dict[str, Any] | None = None) -> set[str] | None:
+    """Resolve ``librarian.type_gate_allowed_types`` (issue athenaeum#1169).
+
+    ``None`` (unset/malformed config, or an empty list) means "no type gate
+    configured" -- :func:`tier1_programmatic_match` matches every type
+    exactly as it always has. This is the DEFAULT for every existing caller,
+    and is deliberate: the issue's binding CORRECTION found the originally
+    proposed default gate (allow ``person``/``company``/``project``/``tool``)
+    backwards -- it would have killed matching for the highest-recall page
+    types (``concept``/``principle``) while keeping the mostly-inert
+    ``person`` bulk. So no default allow-list ships here; a real policy is
+    something an operator configures only after measuring it, via this knob.
+
+    A non-empty configured list narrows matching to those types, PLUS every
+    untyped key -- see :func:`_passes_type_gate` for why untyped keys are
+    always kept regardless of this set.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("type_gate_allowed_types")
+            if isinstance(raw, list):
+                allowed = {v.strip() for v in raw if isinstance(v, str) and v.strip()}
+                if allowed:
+                    return allowed
+    return None
+
+
+def resolve_type_gate_excluded_keys(config: dict[str, Any] | None = None) -> set[str] | None:
+    """Resolve ``librarian.type_gate_excluded_keys`` (issue athenaeum#1169).
+
+    An explicit set of index keys (matched case-insensitively, same
+    lower-casing :class:`athenaeum.models.EntityIndex` indexes by) to always
+    drop from Tier-1 matching, independent of type. This is how the issue's
+    corrected policy -- exclude specific INERT (never-touched) keys, e.g.
+    the ~17.5k mostly-dead ``person`` keys the original type-only gate would
+    have kept -- gets expressed: "never-touched" is a commit-history
+    property this module has no access to, so it is never computed here;
+    the caller (a host-side sweep over corpus history) supplies the list.
+    ``None``/unset/empty means no keys are excluded -- the default, a no-op.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("type_gate_excluded_keys")
+            if isinstance(raw, list):
+                excluded = {v.strip().lower() for v in raw if isinstance(v, str) and v.strip()}
+                if excluded:
+                    return excluded
+    return None
+
+
+#: Sentinel documenting the issue athenaeum#1169 policy decision: a page with no
+#: ``type:`` frontmatter is always KEPT/matchable by the type gate below,
+#: never silently dropped. Referenced from :func:`_passes_type_gate`'s
+#: docstring rather than compared against directly -- the branch itself
+#: tests ``entry_type is None`` explicitly (see that function).
+UNTYPED_PAGES_ARE_KEPT = True
+
+
+def _passes_type_gate(
+    name_key: str,
+    entry_type: str | None,
+    allowed_types: set[str] | None,
+    excluded_keys: set[str] | None,
+) -> bool:
+    """Type + excluded-key gate for Tier-1 matching (issue athenaeum#1169).
+
+    Two independent checks, either of which can drop a match:
+
+    1. *excluded_keys* -- an explicit key-level exclusion, checked first,
+       regardless of type (e.g. one specific inert ``person`` key).
+    2. *allowed_types* -- when configured, keeps only keys whose type is in
+       the set -- with ONE explicit exception, below.
+
+    UNTYPED KEYS ARE ALWAYS KEPT (:data:`UNTYPED_PAGES_ARE_KEPT`): when
+    *entry_type* is ``None`` (the page carries no ``type:`` frontmatter),
+    this always returns ``True`` for the allowed_types check, even with an
+    allow-list configured -- an absent ``type:`` must never silently remove
+    a real entity from matching. This is an EXPLICIT branch on
+    ``entry_type is None``, never an implicit falsy check on the type
+    string, per the issue's binding decision.
+
+    With both *allowed_types* and *excluded_keys* ``None`` (the default in
+    every existing caller), this always returns ``True`` -- the whole gate
+    is a no-op and matching is byte-identical to before this issue.
+    """
+    if excluded_keys is not None and name_key in excluded_keys:
+        return False
+    if allowed_types is None:
+        return True
+    if entry_type is None:
+        # Explicit KEPT decision for untyped pages -- see docstring above.
+        return True
+    return entry_type in allowed_types
+
+
 def tier1_programmatic_match(
     raw: RawFile,
     index: EntityIndex,
     config: dict[str, Any] | None = None,
+    *,
+    allowed_types: set[str] | None = None,
+    excluded_keys: set[str] | None = None,
+    suppressed: dict[str, int] | None = None,
 ) -> list[tuple[str, str, Path]]:
     """Match entity names in raw content against the wiki index.
 
@@ -493,12 +611,37 @@ def tier1_programmatic_match(
     longer costs a tier-3 merge call. The gate does not touch which KEYS can
     match (no key stops firing entirely) -- it only suppresses individual
     low-density matches for low-specificity keys, per the issue's AC.
+
+    Issue athenaeum#1169: an optional type gate runs last, via
+    :func:`_passes_type_gate`. *allowed_types* / *excluded_keys* passed
+    explicitly here take precedence over config; otherwise each is resolved
+    from ``librarian.type_gate_allowed_types`` / ``librarian.type_gate_excluded_keys``
+    in *config* (:func:`resolve_type_gate_allowed_types` /
+    :func:`resolve_type_gate_excluded_keys`). Both default to ``None``,
+    meaning NO gate -- with nothing configured (every existing caller today),
+    this function matches EXACTLY what it matched before this issue; that is
+    a deliberate, reversible default (see the issue's binding correction
+    against shipping a hardcoded default gate). Untyped keys are always kept
+    even when a type gate IS configured.
+
+    Pass a plain ``dict`` as *suppressed* to have this call increment
+    ``suppressed["type"]`` / ``suppressed["excluded_key"]`` with the count of
+    candidate matches (word-boundary hits that cleared the junk filter) each
+    half of the gate removed -- this is what a host-side run over the live
+    corpus (issue athenaeum#1169 AC4, which needs corpus data this container does
+    not have) would read to compute a reduction percentage.
     """
     matched: list[tuple[str, str, Path]] = []
     content_lower = raw.content.lower()
     junk_names = resolve_junk_match_names(config)
+    effective_allowed_types = (
+        allowed_types if allowed_types is not None else resolve_type_gate_allowed_types(config)
+    )
+    effective_excluded_keys = (
+        excluded_keys if excluded_keys is not None else resolve_type_gate_excluded_keys(config)
+    )
 
-    for name_key, (uid_or_name, fpath) in index.items():
+    for name_key, entry in index.items():
         # Only match names that are at least 3 chars to avoid false positives
         if len(name_key) < 3:
             continue
@@ -506,11 +649,39 @@ def tier1_programmatic_match(
         if name_key.strip().lower() in junk_names:
             log.debug("  T1 junk match skipped (issue athenaeum#662): %s", name_key)
             continue
+        # entry is an IndexEntry(uid, path, type) NamedTuple in every
+        # production index, but read positionally (not by name-count
+        # unpacking) so a plain (uid, path) 2-tuple poked directly into
+        # _by_name by tests that predate issue athenaeum#1169 keeps working too.
+        uid_or_name = entry[0]
+        fpath = entry[1]
+        entry_type = getattr(entry, "type", None)
         if name_key in content_lower:
             # Verify it's a word boundary match (not a substring)
             pattern = re.compile(r"\b" + re.escape(name_key) + r"\b", re.IGNORECASE)
             occurrences = len(pattern.findall(raw.content))
             if occurrences < 1:
+                continue
+            # Issue athenaeum#1169: type / excluded-key gate.
+            if not _passes_type_gate(
+                name_key, entry_type, effective_allowed_types, effective_excluded_keys
+            ):
+                if suppressed is not None:
+                    reason = (
+                        "excluded_key"
+                        if effective_excluded_keys is not None
+                        and name_key in effective_excluded_keys
+                        else "type"
+                    )
+                    suppressed[reason] = suppressed.get(reason, 0) + 1
+                log.debug(
+                    "T1 type-gate match dropped (issue athenaeum#1169): "
+                    "key=%r type=%r allowed_types=%s excluded=%s",
+                    name_key,
+                    entry_type,
+                    effective_allowed_types,
+                    effective_excluded_keys is not None and name_key in effective_excluded_keys,
+                )
                 continue
             # Issue athenaeum#1168: mention-density union gate.
             if not _passes_mention_density_gate(name_key, occurrences, config):
@@ -927,6 +1098,263 @@ def resolve_address_named_classifications(
 
 
 # ---------------------------------------------------------------------------
+# Issue athenaeum#1173: create-path name gate
+# ---------------------------------------------------------------------------
+#
+# tier3_create / tier3_entity_from_text applied no minimum specificity, no
+# common-word check, and no uniqueness check — the create path minted entity
+# names that can never be useful as index keys (measured: "develop", "ready",
+# "claim", "cwc", "yml", plus bare issue refs shaped "#NNN" — e.g. issue
+# numbers 453, 454, 486 in the issue's own report — minted as reference-typed
+# pages). Every existing gate (athenaeum#680 code artifacts,
+# athenaeum#1126 bare emails, athenaeum#662 read-side stopwords) runs AFTER a
+# bad name already exists, or is a read-side match filter — NONE of them run
+# on the create path itself. This closes that gap with two checks, sequenced
+# in validate_create_name below, following the SAME "shared-by-both-
+# transports, applied before any EntityAction is built" contract that
+# partition_code_artifact_classifications (athenaeum#680) and
+# resolve_address_named_classifications (athenaeum#1126) already established
+# immediately above.
+#
+# AC5 (issue athenaeum#1173) is a load-bearing NEGATIVE constraint recorded
+# here so it is not proposed again: NO dictionary-word ban. Only 183 of
+# 23,224 measured index keys are dictionary words, and most of those are
+# legitimate (Amazon, Ford, Gap, Box, Docker, Oracle, ~50 person first
+# names) — a dictionary ban would delete roughly three real entities per
+# junk one. Neither check below consults a word list of any kind: AC1
+# matches a NAME SHAPE (bare "#<digits>"), and AC2 matches NAME SHAPE + CASE
+# (a short, single, ALL-LOWERCASE token) — "Ford"/"Gap"/"Box"/"Docker"/
+# "Oracle" all carry a capital letter and are therefore never touched by AC2,
+# regardless of length or how common the underlying word is.
+
+_BARE_ISSUE_REF_RE = re.compile(r"^#\d+$")
+"""AC1: a name that IS a bare issue-number reference (``#NNN``), and nothing
+else. Anchored both ends so a name that merely CONTAINS an issue ref (e.g.
+``"Fix #NNN crash"``) is untouched — only a name whose entire text is the
+citation is unambiguous junk."""
+
+
+DEFAULT_CREATE_NAME_ESCALATE_MAX_CHARS = 7
+"""AC2: a single, all-lowercase, whitespace-free token at or under this many
+characters escalates instead of minting. The issue's own boundary ("under
+~7 chars") is approximate; the concrete value is picked directly against its
+five named examples — ``develop`` (7), ``ready`` (5), ``claim`` (5), ``cwc``
+(3), ``yml`` (3). ``develop`` is the longest at exactly 7 characters, so the
+boundary must be INCLUSIVE of 7 (a strict "< 7" would let the issue's own
+headline example, "develop", straight through) — picked 7, not 6, for that
+reason."""
+
+
+def resolve_create_name_escalate_max_chars(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.create_name_escalate_max_chars`` (issue athenaeum#1173).
+
+    Same validation contract as :func:`resolve_mention_density_min_occurrences`
+    (the ``librarian.*`` config idiom this mirrors, issue athenaeum#1168): must
+    be ``>= 1`` (``bool`` rejected explicitly — an ``int`` subclass in Python,
+    so ``create_name_escalate_max_chars: yes`` in yaml cannot silently become
+    a threshold of 1); non-numeric, non-positive, missing, or bool values
+    fall back to :data:`DEFAULT_CREATE_NAME_ESCALATE_MAX_CHARS`.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("create_name_escalate_max_chars")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+                return raw
+    return DEFAULT_CREATE_NAME_ESCALATE_MAX_CHARS
+
+
+def _is_short_lowercase_token(name: str, config: dict[str, Any] | None) -> bool:
+    """AC2 name-shape test: single, whitespace-free, ALL-lowercase token at or
+    under :func:`resolve_create_name_escalate_max_chars`.
+
+    Deliberately shape-only (length + case + token-count), never a word-list
+    lookup — see the AC5 module comment above for why. A name carrying any
+    uppercase letter (``Ford``, ``Docker``, ``CWC``) or any whitespace (a
+    genuine multi-word name) is exempt outright, regardless of length.
+    """
+    stripped = name.strip()
+    if not stripped or any(ch.isspace() for ch in stripped):
+        return False
+    if stripped != stripped.lower():
+        return False
+    if not any(ch.isalpha() for ch in stripped):
+        return False
+    return len(stripped) <= resolve_create_name_escalate_max_chars(config)
+
+
+class CreateNameRejectedError(Exception):
+    """AC1: *name* is unambiguous junk and must never mint a page (issue athenaeum#1173).
+
+    Raised by :func:`validate_create_name` for a bare issue-number-shaped
+    name (``#NNN``) — a citation, not a candidate entity. There is nothing to
+    route for human review (contrast :class:`CreateNameEscalatedError`), so
+    the caller drops the classification/action outright — mirroring
+    :class:`PreambleOnlyResponseError`'s (issue athenaeum#1171) reject-and-
+    skip-this-one-action contract rather than aborting the whole raw file.
+    """
+
+    def __init__(self, name: str, reason: str) -> None:
+        self.name = name
+        self.reason = reason
+        super().__init__(f"tier3 create name {name!r} rejected: {reason}")
+
+
+class CreateNameEscalatedError(Exception):
+    """AC2: *name* must be escalated rather than minted (issue athenaeum#1173).
+
+    Raised by :func:`validate_create_name` for a short, single, all-lowercase
+    token (``develop``, ``ready``, ``claim``, ``cwc``, ``yml`` — exactly the
+    shape of the measured junk mints). Unlike a bare issue ref, this is not
+    UNAMBIGUOUS junk, so the caller must route it to :func:`tier4_escalate` /
+    ``_pending_questions.md`` for a second look (see
+    :class:`~athenaeum.models.EscalationItem`) rather than silently dropping
+    it OR silently minting it.
+    """
+
+    def __init__(self, name: str, reason: str) -> None:
+        self.name = name
+        self.reason = reason
+        super().__init__(f"tier3 create name {name!r} escalated: {reason}")
+
+
+def validate_create_name(name: str, config: dict[str, Any] | None = None) -> None:
+    """Single validation point for a Tier-3 CREATE name (issue athenaeum#1173 AC3).
+
+    Runs each name-quality check in a fixed sequence; the first check that
+    fails determines the outcome, raised as an exception (never a bool/enum
+    return, so a caller cannot forget to check a return value) — same
+    contract as :class:`PreambleOnlyResponseError`.
+
+    1. :data:`_BARE_ISSUE_REF_RE` — AC1, raises :class:`CreateNameRejectedError`.
+    2. :func:`_is_short_lowercase_token` — AC2, raises
+       :class:`CreateNameEscalatedError`.
+
+    Returns ``None`` (no exception) when *name* passes both checks — the
+    caller proceeds with the create exactly as before this issue.
+
+    EXTENSION POINT — issue athenaeum#1170 (open, ``~operator``, unstarted):
+    that issue owns enforcing name UNIQUENESS on this same create path
+    (nightly duplicate detection + collision repair). It is deliberately NOT
+    implemented here — issue athenaeum#1173 AC3 explicitly separates "build
+    the seam" from "build the check": a partial uniqueness implementation
+    shipped from this lane would collide with athenaeum#1170's own design
+    instead of complementing it. When athenaeum#1170 lands, its check is ONE
+    more call inserted into this same sequence (after the two above,
+    following the same raise-on-failure contract) — not a restructuring of
+    this function or its callers.
+    """
+    if _BARE_ISSUE_REF_RE.match(name.strip()):
+        raise CreateNameRejectedError(name, "bare issue-number-shaped name")
+    if _is_short_lowercase_token(name, config):
+        max_chars = resolve_create_name_escalate_max_chars(config)
+        raise CreateNameEscalatedError(
+            name, f"short single lowercase token (<= {max_chars} chars)"
+        )
+    # --- athenaeum#1170 extension point: uniqueness check inserts here, as one
+    # more `raise` guarded by one more `if`, once that issue ships it. ---
+
+
+@dataclass(frozen=True)
+class CreateNameGateOutcome:
+    """Result of :func:`gate_create_name_classifications` (issue athenaeum#1173)."""
+
+    kept: list[ClassifiedEntity]
+    rejected: tuple[str, ...]
+    escalations: tuple[EscalationItem, ...]
+
+
+def gate_create_name_classifications(
+    classified: list[ClassifiedEntity],
+    raw_ref: str,
+    raw_content: str = "",
+    config: dict[str, Any] | None = None,
+) -> CreateNameGateOutcome:
+    """Stop tier-2 from minting unusable entity NAMES at create (issue athenaeum#1173).
+
+    Sits immediately after :func:`resolve_address_named_classifications` at
+    both transports (``librarian.process_one`` and
+    ``batch.process_batch_run``) — same "shared by both transports, applied
+    BEFORE any EntityAction is built" contract that function and
+    :func:`partition_code_artifact_classifications` already established.
+
+    Scope: only ``c.is_new`` (create-bound) classifications are checked. A
+    classification with ``is_new=False`` names an EXISTING page this raw
+    file is about to update/merge into — that page was already named and
+    already exists, so gating it here would be gating MATCHING, not
+    creation, which issue athenaeum#1173 puts explicitly out of scope
+    ("gating what gets created, not what gets matched"). Every
+    ``is_new=False`` classification passes through completely unchanged, in
+    original order.
+
+    For each ``is_new=True`` classification, runs :func:`validate_create_name`:
+
+    - :class:`CreateNameRejectedError` (AC1): the name is dropped from
+      ``kept`` and recorded in ``rejected`` — logged, never escalated (it is
+      unambiguous junk, nothing for a human to review).
+    - :class:`CreateNameEscalatedError` (AC2): the name is dropped from
+      ``kept`` and an :class:`~athenaeum.models.EscalationItem` is appended
+      to ``escalations`` — mirrors :func:`resolve_address_named_classifications`'s
+      ``declined`` contract: a decline ALONE would destroy the fact (the raw
+      file is unlinked after processing regardless of outcome), so the
+      caller MUST flush ``escalations`` through :func:`tier4_escalate` /
+      ``_pending_questions.md`` rather than just dropping the classification.
+    - Neither raised: kept unchanged.
+
+    ``raw_content`` (truncated to 2000 chars, matching every other
+    escalation description built at this call site) is embedded in an AC2
+    escalation's description so the observation is not lost if the raw file
+    is deleted before a human resolves the escalation.
+    """
+    kept: list[ClassifiedEntity] = []
+    rejected: list[str] = []
+    escalations: list[EscalationItem] = []
+    for c in classified:
+        if not c.is_new:
+            kept.append(c)
+            continue
+        try:
+            validate_create_name(c.name, config)
+        except CreateNameRejectedError as exc:
+            log.warning(
+                "tier3-create-name-rejected ref=%s name=%r reason=%s",
+                raw_ref,
+                exc.name,
+                exc.reason,
+            )
+            rejected.append(c.name)
+            continue
+        except CreateNameEscalatedError as exc:
+            log.warning(
+                "tier3-create-name-escalated ref=%s name=%r reason=%s",
+                raw_ref,
+                exc.name,
+                exc.reason,
+            )
+            escalations.append(
+                EscalationItem(
+                    raw_ref=raw_ref,
+                    entity_name=c.name,
+                    conflict_type="short_name_escalated",
+                    description=(
+                        f"Tier-3 create for {c.name!r} was suppressed (issue "
+                        f"athenaeum#1173): {exc.reason}. A short, generic "
+                        "single-word name like this is exactly the shape of "
+                        "prior junk mints (\"develop\", \"ready\", \"claim\", "
+                        "\"cwc\", \"yml\") that were never useful as index "
+                        "keys. No page was created; the observation follows "
+                        f"so the fact is not lost:\n\n{raw_content[:2000]}"
+                    ),
+                )
+            )
+            continue
+        kept.append(c)
+    return CreateNameGateOutcome(
+        kept=kept, rejected=tuple(rejected), escalations=tuple(escalations)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tier 2 — Classification (fast LLM)
 # ---------------------------------------------------------------------------
 
@@ -1246,6 +1674,7 @@ def tier2_classify(
     response = _timed_llm_call(
         lambda: client.messages.create(**params),
         f"tier2_classify {raw.ref}",
+        usage=usage,
     )
     _record_usage(response, usage, model=params["model"], knob="classify")
 
@@ -1337,6 +1766,7 @@ def tier2_classify(
         retry_response = _timed_llm_call(
             lambda: client.messages.create(**retry_params),
             f"tier2_classify-retry {raw.ref}",
+            usage=usage,
         )
         _record_usage(
             retry_response, usage, model=retry_params["model"], knob="classify"
@@ -1642,6 +2072,7 @@ def tier2_reclassify_larger_budget(
     response = _timed_llm_call(
         lambda: client.messages.create(**params),
         f"tier2_classify-truncation-retry {raw.ref}",
+        usage=usage,
     )
     _record_usage(response, usage, model=params["model"], knob="classify")
     retry_stats = Tier2ParseStats()
@@ -1832,6 +2263,15 @@ _MAX_EXISTING_BODY_CHARS = 20_000
 #: fallback-rate metric athenaeum#496 already tracks.
 MERGE_TRUNCATED_INPUT_LOG_PREFIX = "tier3-merge-truncated-input"
 
+#: Issue athenaeum#1181: section-scoping trades the old window blindness for a
+#: NEW one — the model cannot see the sections it was not sent, so a
+#: re-confirming observation about an unselected section will not be
+#: recognised as a duplicate. That is a different failure class from the
+#: window truncation above, and the change ships enabled, so it needs its own
+#: greppable incidence signal rather than being inferred from the ABSENCE of
+#: the truncation warning. Kept separate for the same reason that one is.
+MERGE_SECTION_SCOPED_LOG_PREFIX = "tier3-merge-section-scoped"
+
 
 def _existing_body_truncated(existing_body: str) -> bool:
     """True when *existing_body* exceeds the merge input window (issue athenaeum#1180).
@@ -1901,7 +2341,7 @@ MERGE_TEMPLATE = """## Existing page content
 {observations}
 
 ## Instructions
-Return a JSON object of anchored edit operations that fold the new
+{scoping_note}Return a JSON object of anchored edit operations that fold the new
 observation into the existing page body, per the system instructions, e.g.:
 {{"ops": [{{"op": "insert_after", "anchor": "<verbatim snippet>", "text": "..."}}]}}
 Copy every anchor VERBATIM from the existing body above; each anchor must
@@ -1981,6 +2421,137 @@ def tier3_create_params(
     }
 
 
+class PreambleOnlyResponseError(Exception):
+    """Raised when a Tier-3 create response is ENTIRELY planning preamble.
+
+    Issue athenaeum#1171: :func:`strip_planning_preamble` removes a leading
+    first-person planning paragraph and returns whatever substantive content
+    survives underneath it. When nothing survives, the model never actually
+    produced page content — there is nothing to persist. Rejecting here (vs.
+    silently writing an empty/near-empty page) mirrors :class:`MergeOpsError`'s
+    all-or-nothing contract for a malformed merge response: the caller's
+    existing per-action exception handling (see
+    :func:`tier3_derive_actions`) discards this action's result and lets the
+    raw file's next run retry it from scratch, rather than durably persisting
+    a junk page under this entity's name.
+    """
+
+
+# Issue athenaeum#1171: a leading first-person planning/meta-commentary clause,
+# the model narrating its own reasoning about the task instead of writing the
+# entity page it was asked for. Anchored at the very START of the string
+# (``re.match``, never ``re.search``) so only a LEADING occurrence can ever
+# match — text.py never touches the middle or end of a body.
+#
+# Shapes matched (see the athenaeum#1171 filing's three examples, all of this form):
+#   - "Looking at the new observation, I need to ..."
+#   - "Based on the new observation, I need to ..."
+#   - "Given ..., I'll ..." / "Reviewing ..., I should ..." / "Considering ..., I will ..."
+#   - A bare first-person opener with no lead-in clause: "I'll ...",
+#     "I need to ...", "I should ...", "I will ...", "I want to ...",
+#     "Let me ..."
+#
+# Deliberately conservative: matched verbs are restricted to planning/meta
+# modals ("need to", "should", "will", "'ll", "want to") plus "Let me" — NOT
+# every "I ..." sentence, which would false-positive on legitimate first-
+# person content the source observation itself contains (e.g. a quoted "I
+# love this product").
+_PREAMBLE_LEAD_INS = r"(?:Looking at|Based on|Given|Reviewing|Considering)"
+_PREAMBLE_FIRST_PERSON = r"(?:I(?:'ll| need to| should| will| want to)|Let me)\b"
+_PREAMBLE_RE = re.compile(
+    rf"^(?:{_PREAMBLE_LEAD_INS}[^\n]{{0,200}}?,\s*)?{_PREAMBLE_FIRST_PERSON}"
+)
+
+# Boundaries that mark the end of the leading preamble block and the start of
+# real content, in order of preference (issue athenaeum#1171):
+#   1. A markdown heading line (``CREATE_SYSTEM`` instructs the model to
+#      "Start with `# Entity Name`", so a heading is the strongest signal
+#      that real page content has begun).
+#   2. A blank line (an ordinary paragraph break).
+# Whichever boundary occurs FIRST after the preamble match wins, so the cut
+# is as tight as possible around the preamble paragraph alone.
+_PREAMBLE_HEADING_RE = re.compile(r"\n(#{1,6}\s)")
+_PREAMBLE_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
+
+
+def strip_planning_preamble(body: str) -> tuple[str, bool]:
+    """Detect and remove a leading first-person planning-preamble block.
+
+    Issue athenaeum#1171: the tier-3 create path occasionally has the model narrate
+    its own reasoning about the task ("Looking at the new observation, I need
+    to...") instead of only writing the entity page body it was asked for.
+    That reasoning must never reach a persisted wiki page — anything that
+    later reads the page (recall, merge echo, the dedupe vectorizer) would
+    read the model's scratch thinking as if it were a fact about the entity.
+
+    Detection is intentionally conservative (a false positive here silently
+    deletes real content, on EVERY create):
+
+    - Matched ONLY at the very start of *body* (see :data:`_PREAMBLE_RE`) —
+      a first-person sentence anywhere else in the body is left untouched.
+    - Only a closed set of planning/meta-commentary shapes match: an
+      optional lead-in clause ("Looking at ...", "Based on ...", "Given
+      ...", "Reviewing ...", "Considering ...") followed by a comma and a
+      first-person planning verb ("I'll" / "I need to" / "I should" /
+      "I will" / "I want to"), OR a bare "Let me ..." / first-person
+      planning opener with no lead-in clause.
+    - The removed span is bounded to the leading paragraph/sentence block,
+      via a THREE-step fallback, tightest boundary first:
+
+      1. The first markdown heading after the match (see
+         :data:`_PREAMBLE_HEADING_RE`) — the strongest signal, since
+         ``CREATE_SYSTEM`` instructs the model to "Start with `# Entity
+         Name`".
+      2. Else the first blank line after the match (see
+         :data:`_PREAMBLE_BLANK_LINE_RE`) — an ordinary paragraph break.
+      3. Else the first NEWLINE after the match, if any — a body with no
+         heading and no blank-line separator can still be a genuine
+         run-on paragraph the model wrote with no structural break from
+         its preamble opener (e.g. the pattern matches the OPENING of "I'll
+         Be Back is a 1984 film catchphrase..."); everything past that
+         first line is substantive content and must survive, so only the
+         first line is ever risked, never the whole body.
+
+      Only when *body* has no newline at ALL — a genuinely single-line
+      response whose entirety is the preamble-shaped opener, with nothing
+      else in the response — does none of the three boundaries exist, and
+      the returned cleaned body is empty. See
+      :class:`PreambleOnlyResponseError`, which the create path raises for
+      exactly that case rather than guess where content might begin inside
+      an unstructured blob.
+
+    Returns ``(cleaned_body, stripped)``. When no leading preamble is
+    detected, returns ``(body, False)`` with *body* returned UNCHANGED
+    (same string, not even re-stripped) — this is the common case and must
+    be a no-op byte for byte. When a preamble IS detected and removed,
+    returns ``(remainder, True)`` where *remainder* is stripped of
+    surrounding whitespace (possibly empty, only in the single-line case
+    described above).
+    """
+    match = _PREAMBLE_RE.match(body)
+    if not match:
+        return body, False
+
+    cut_points: list[int] = []
+    heading_m = _PREAMBLE_HEADING_RE.search(body, match.end())
+    if heading_m:
+        cut_points.append(heading_m.start(1))
+    blank_m = _PREAMBLE_BLANK_LINE_RE.search(body, match.end())
+    if blank_m:
+        cut_points.append(blank_m.end())
+
+    if cut_points:
+        remainder = body[min(cut_points):].strip()
+    else:
+        # Should-fix (issue athenaeum#1171 gate review): no heading and no
+        # blank line found — fall back to the first newline after the
+        # match rather than treating the WHOLE body as preamble. Only a
+        # body with no newline at all has nothing to fall back to.
+        newline_idx = body.find("\n", match.end())
+        remainder = body[newline_idx + 1 :].strip() if newline_idx != -1 else ""
+    return remainder, True
+
+
 def tier3_create(
     action: EntityAction,
     source_ref: str,
@@ -1995,25 +2566,55 @@ def tier3_create(
     response = _timed_llm_call(
         lambda: client.messages.create(**params),
         f"tier3_create {source_ref}",
+        usage=usage,
     )
     _record_usage(response, usage, model=params["model"], knob="write")
 
     # Issue athenaeum#578: tier3_create enables adaptive thinking — response_text skips
     # any leading thinking block and returns the created page body.
-    return tier3_entity_from_text(action, response_text(response), config=config)
+    return tier3_entity_from_text(action, response_text(response), usage=usage, config=config)
 
 
 def tier3_entity_from_text(
     action: EntityAction,
     text: str,
+    usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
 ) -> WikiEntity:
     """Construct the :class:`WikiEntity` from a Tier-3 create response body.
 
     Shared by the synchronous and batch transports so provenance stamping
     and entity construction are identical.
+
+    Issue athenaeum#1171: before construction, the response body is run through
+    :func:`strip_planning_preamble`. A leading planning preamble with
+    substantive content surviving underneath is stripped (the common case,
+    counted in ``usage.preamble_stripped`` when *usage* is supplied); a
+    response that is ENTIRELY preamble raises :class:`PreambleOnlyResponseError`
+    (counted in ``usage.preamble_rejected``) instead of persisting an empty
+    page — see that exception's docstring for why reject, not silently drop.
     """
-    body = text.strip()
+    body, stripped = strip_planning_preamble(text.strip())
+    if stripped:
+        if not body:
+            if usage is not None:
+                usage.preamble_rejected += 1
+            log.warning(
+                "tier3-create-preamble-rejected name=%s: response was entirely "
+                "planning preamble with no substantive content underneath",
+                action.name,
+            )
+            raise PreambleOnlyResponseError(
+                f"tier3 create for {action.name!r} produced only planning "
+                "preamble, no substantive page content"
+            )
+        if usage is not None:
+            usage.preamble_stripped += 1
+        log.warning(
+            "tier3-create-preamble-stripped name=%s: leading planning "
+            "preamble removed before persisting the page body",
+            action.name,
+        )
     today = date.today().isoformat()
 
     # Issue athenaeum#95: stamp authoritative provenance at construction time.
@@ -2056,11 +2657,314 @@ def existing_body_needs_full_echo(existing_body: str) -> bool:
     return contains_tag(existing_body[:_MAX_EXISTING_BODY_CHARS], _EXISTING_PAGE_TAG)
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1181: section-scoped merging
+# ---------------------------------------------------------------------------
+#
+# The OUTPUT side of the ~84%-echo problem was already solved by athenaeum#469:
+# the primary merge contract returns a small list of anchored edit ops
+# applied to the real file, not a whole rewritten page. This is the INPUT
+# side — what :func:`tier3_merge_params` fences into ``<existing_page>`` in
+# the first place. Whole-page echo made every patch-mode prompt's dominant
+# term the entire existing body, regardless of how small the actual edit
+# was; this retrieves only the section(s) a merge is actually about.
+#
+# Ship enabled, config-gated with a kill switch (see
+# :func:`resolve_section_scoped_merge_enabled`) — a behavioral change to a
+# durable-data path must be revertible without a code change, mirroring the
+# ``librarian.mention_density_*`` / ``librarian.delta.enabled`` idiom.
+
+DEFAULT_SECTION_SCOPED_MERGE_ENABLED = True
+
+
+def resolve_section_scoped_merge_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Resolve ``librarian.section_scoped_merge_enabled`` (issue athenaeum#1181).
+
+    Defaults to ``True`` — section-scoped merging ships on. Set
+    ``librarian.section_scoped_merge_enabled: false`` in ``athenaeum.yaml`` to
+    restore the exact pre-athenaeum#1181 behavior of fencing the whole
+    (``_MAX_EXISTING_BODY_CHARS``-capped) existing body into every patch-mode
+    merge prompt, with no code change — a kill switch for a behavioral
+    change to a durable-data path. ``bool`` yaml values are honored;
+    anything else (missing key, non-bool) falls through to the ``True``
+    default.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("section_scoped_merge_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return DEFAULT_SECTION_SCOPED_MERGE_ENABLED
+
+
+# A markdown heading line at any level (``#`` through ``######``) — the
+# section boundary this issue scopes merges by (see
+# ``schema/_entity-template.md``'s "## Section (as appropriate for entity
+# type)" convention, which is how real entity pages accumulate structure as
+# they grow toward the oversized end of the corpus).
+_SECTION_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*)$", re.MULTILINE)
+
+
+def _split_into_sections(body: str) -> list[tuple[str, str]]:
+    """Split *body* into ``(heading_text, section_text)`` pairs at markdown headings.
+
+    Each *section_text* runs from its own heading line up to (not including)
+    the next heading line, or the end of *body* — verbatim substrings of
+    *body*, byte for byte. Content before the first heading (if any) is
+    returned as a leading ``("", preamble_text)`` pair. A body with no
+    heading at all returns ``[]`` — nothing to scope by.
+    """
+    matches = list(_SECTION_HEADING_RE.finditer(body))
+    if not matches:
+        return []
+    sections: list[tuple[str, str]] = []
+    if matches[0].start() > 0:
+        sections.append(("", body[: matches[0].start()]))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        sections.append((m.group(2).strip(), body[m.start() : end]))
+    return sections
+
+
+_SECTION_MATCH_WORD_RE = re.compile(r"[A-Za-z0-9']{3,}")
+
+
+def _match_tokens(text: str) -> set[str]:
+    """Lower-cased, length>=3 word tokens for scoring a section's relevance.
+
+    Deliberately a simple bag-of-words overlap, not a ranking model — the
+    downstream anchor-uniqueness check (see :func:`_select_merge_section`'s
+    docstring) is what actually protects correctness if this picks the
+    wrong section, so the selection heuristic itself can stay cheap.
+    """
+    return {w.lower() for w in _SECTION_MATCH_WORD_RE.findall(text)}
+
+
+# Rendered into MERGE_TEMPLATE's Instructions section (never into the
+# fenced page content) only when section-scoping actually narrowed what was
+# sent — see ``was_scoped`` in :func:`_select_merge_section`. Explains the
+# outline, and steers the model toward ``append_section`` (anchor-free, see
+# ``MERGE_SYSTEM``) instead of guessing at content it cannot see, rather
+# than assuming the fenced excerpt is the whole page the way it used to be.
+_MERGE_SCOPING_NOTE = (
+    "Note: the page content above is not the whole page — it is the "
+    "section most relevant to the new observation below, plus an outline "
+    "of the page's other section headings. Content that is not relevant "
+    "may have been omitted, marked \u2018[\u2026 omitted \u2026]\u2019. Only dedupe "
+    "against content you can actually see above, and never copy an anchor "
+    "that spans an omission marker. If the observation belongs under a "
+    "heading not shown, or nothing shown needs to change, use "
+    '"append_section" (no anchor needed) instead of guessing at unseen '
+    "content.\n\n"
+)
+
+
+# The heading OUTLINE needs its own budget. On the real corpus it is not
+# always "lightweight": the largest oversized entity page carries 876
+# headings, and its outline alone is ~41,000 chars — twice the whole
+# _MAX_EXISTING_BODY_CHARS window. Left unbounded, the outline truncates away
+# the very section it exists to contextualise, so such a merge would see a
+# wall of headings and no page content at all. Cap it, and say when it was cut.
+_MERGE_OUTLINE_MAX_CHARS = 2_000
+_MERGE_OUTLINE_ELIDED = "- [\u2026 further headings omitted \u2026]"
+
+# Marker for content dropped from WITHIN a selected section that is itself
+# larger than the send window. This is not a rare shape: 28 of the 82 real
+# oversized (>20,000-char) entity pages in the corpus have a single dominant
+# section bigger than the window, so selecting that section alone would leave
+# acceptance criterion 3 (a merge on an oversized page does not lose what the
+# model needed to the window) unmet for a third of the cohort.
+#
+# Anchor safety is unaffected, for the same reason section selection is: an
+# anchor the model copies across an elision boundary simply will not match the
+# real, full body, and :func:`apply_merge_ops` rejects it into the full-echo
+# fallback like any other unappliable op. Elision changes what the model SEES,
+# never what code is willing to APPLY.
+_MERGE_SECTION_ELISION = "\n\n[\u2026 omitted \u2026]\n\n"
+
+
+def _build_section_outline(sections: list[tuple[str, str]]) -> str:
+    """Heading-only outline of *sections*, capped at _MERGE_OUTLINE_MAX_CHARS."""
+    lines: list[str] = []
+    used = 0
+    for heading, _text in sections:
+        if not heading:
+            continue
+        line = f"- {heading}"
+        if used + len(line) + 1 > _MERGE_OUTLINE_MAX_CHARS:
+            lines.append(_MERGE_OUTLINE_ELIDED)
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
+
+
+def _narrow_section(section_text: str, obs_tokens: set[str], budget: int) -> str:
+    """Trim *section_text* to *budget* chars, keeping what the observation matches.
+
+    Only used when a single selected section is itself larger than the send
+    window. Keeps the section's own heading line (so the model still knows
+    where it is), then the contiguous run of paragraphs around the
+    best-matching one that fits, with :data:`_MERGE_SECTION_ELISION` marking
+    each cut. Contiguity is deliberate: a contiguous run keeps whole anchors
+    intact, where a scatter of high-scoring paragraphs would maximise the
+    number of anchors that straddle a cut and get rejected downstream.
+    """
+    if len(section_text) <= budget:
+        return section_text
+    nl = section_text.find("\n")
+    if nl == -1:
+        return section_text[:budget]
+    heading_line, rest_text = section_text[:nl], section_text[nl + 1 :]
+    paras = rest_text.split("\n\n")
+
+    # Highest-overlap paragraph anchors the window; with nothing to match on,
+    # the LAST paragraph does, mirroring the section-level fallback (the most
+    # recently accumulated content is the likeliest attach point).
+    if obs_tokens:
+        best = max(range(len(paras)), key=lambda i: len(obs_tokens & _match_tokens(paras[i])))
+    else:
+        best = len(paras) - 1
+
+    sep = len(_MERGE_SECTION_ELISION)
+    total = len(heading_line) + 1 + len(paras[best]) + 2 * sep
+    if total > budget:
+        head = f"{heading_line}{_MERGE_SECTION_ELISION}{paras[best]}"
+        return head[:budget]
+
+    lo = hi = best
+    while True:
+        grew = False
+        if lo > 0 and total + len(paras[lo - 1]) + 2 <= budget:
+            lo -= 1
+            total += len(paras[lo]) + 2
+            grew = True
+        if hi < len(paras) - 1 and total + len(paras[hi + 1]) + 2 <= budget:
+            hi += 1
+            total += len(paras[hi]) + 2
+            grew = True
+        if not grew:
+            break
+
+    lead = _MERGE_SECTION_ELISION if lo > 0 else "\n"
+    tail = _MERGE_SECTION_ELISION.rstrip("\n") if hi < len(paras) - 1 else ""
+    return f"{heading_line}{lead}" + "\n\n".join(paras[lo : hi + 1]) + tail
+
+
+def _select_merge_section(
+    existing_body: str,
+    action: EntityAction,
+    config: dict[str, Any] | None = None,
+) -> tuple[str, bool]:
+    """Return ``(body_text_to_fence, was_scoped)`` for a patch-mode merge prompt.
+
+    Issue athenaeum#1181. Returns ``(existing_body, False)`` — a pure no-op,
+    byte-identical to pre-athenaeum#1181 behavior — when:
+
+    - section-scoping is disabled (:func:`resolve_section_scoped_merge_enabled`);
+    - *existing_body* has fewer than two markdown-heading sections
+      (:func:`_split_into_sections`) — nothing to scope by. This also covers
+      every typical freshly-created entity page (the schema's "3-10 lines,
+      one ``# Entity Name`` heading" shape), which only develops the
+      multi-``##``-section structure section-scoping targets once a page
+      has accumulated enough merges to reach the oversized end of the
+      corpus.
+
+    Otherwise, selection is driven by *action.observations* — the incoming
+    content the merge is actually about — never by position: each section
+    is scored by :func:`_match_tokens` overlap against the observation
+    text, and the single highest-scoring section is returned (ties keep the
+    earliest section — stable iteration order — for determinism). When no
+    section scores above zero (the observation shares no tokens with any
+    section — a genuinely new topic, or too short/generic to match), the
+    LAST section is used instead, so a merge that has nothing existing to
+    attach to still has real content to ``insert_after`` rather than
+    nothing at all.
+
+    A lightweight OUTLINE (heading lines only, not their bodies) of every
+    section on the page is prepended ahead of the selected section — the
+    "small amount of surrounding context" that keeps the merge well-formed
+    without materially adding to what gets echoed: it lets the model avoid
+    proposing a near-duplicate section under a different heading, and
+    combined with ``append_section`` (which needs no anchor at all — see
+    ``MERGE_SYSTEM`` / :func:`apply_merge_ops`) it is enough for a merge
+    that has nothing existing to attach to.
+
+    Anchor safety does NOT depend on this function's choice and is not this
+    function's job: :func:`apply_merge_ops` independently requires every
+    anchor the model returns to match EXACTLY ONCE against the real, full,
+    UNTRUNCATED ``existing_body`` the caller already holds — never against
+    what this function selected. An anchor that is unique within the
+    selected section but ambiguous or absent in the full page fails that
+    check and falls back to the full-echo path (see :func:`tier3_merge`),
+    exactly like any other unappliable patch response — this function only
+    decides what the model SEES, never what code is willing to APPLY.
+    """
+    if not resolve_section_scoped_merge_enabled(config):
+        return existing_body, False
+    sections = _split_into_sections(existing_body)
+    if len(sections) < 2:
+        return existing_body, False
+
+    # Exclude the entity's OWN name tokens from the match: the whole page is
+    # about this entity, so its name recurs in nearly every section (and in
+    # the bare page title, which would otherwise tie-break to a
+    # near-empty "section") without discriminating WHICH section a given
+    # observation is actually about. A merge observation naming its target
+    # entity (the common case) must still be scored on the rest of its
+    # content, not swamped by a match every section shares equally.
+    obs_tokens = _match_tokens(action.observations) - _match_tokens(action.name)
+    outline = _build_section_outline(sections)
+
+    best_idx = -1
+    best_score = 0
+    if obs_tokens:
+        for i, (_heading, text) in enumerate(sections):
+            score = len(obs_tokens & _match_tokens(text))
+            if score > best_score:
+                best_score = score
+                best_idx = i
+
+    target_text = sections[best_idx][1] if best_idx >= 0 else sections[-1][1]
+
+    if outline:
+        preamble = f"[Page section outline — headings on this page, for context]\n{outline}\n\n"
+    else:
+        preamble = ""
+
+    # Budget the selected section against what the prompt will actually send,
+    # so neither the outline nor an oversized section can push the other out
+    # of the window (see _build_section_outline / _narrow_section).
+    target_text = _narrow_section(
+        target_text, obs_tokens, max(0, _MAX_EXISTING_BODY_CHARS - len(preamble))
+    )
+    candidate = f"{preamble}{target_text}"
+
+    # Restore the invariant existing_body_needs_full_echo documents ("the check
+    # is over the same truncated window the prompt actually sends"), which
+    # section-scoping would otherwise break. That guard only scans the FIRST
+    # _MAX_EXISTING_BODY_CHARS of the body for a literal fence marker, because
+    # before this issue only that prefix was ever fenced. Selection can now
+    # reach a section from anywhere in the body, so a fence-forging marker
+    # sitting past the window could reach the prompt unchecked — and this text
+    # is fenced with defang=False (anchor-safety requires it), so nothing
+    # downstream would neutralise it. Re-check what we actually assembled; if
+    # it carries the marker, decline to scope and hand back the full body,
+    # which the caller's guard has already cleared for its sent prefix.
+    if contains_tag(candidate, _EXISTING_PAGE_TAG):
+        return existing_body, False
+
+    return candidate, True
+
+
 def tier3_merge_params(
     action: EntityAction,
     existing_body: str,
     source_ref: str,
     config: dict[str, Any] | None = None,
+    *,
+    usage: TokenUsage | None = None,
 ) -> dict[str, Any]:
     """Build the Messages API kwargs for one patch-mode Tier-3 merge call.
 
@@ -2069,13 +2973,20 @@ def tier3_merge_params(
     the output budget is a small fixed constant independent of page size.
     Shared by the synchronous path (:func:`tier3_merge`) and the Batch API
     assembly (issue athenaeum#236) — this is the ONE place both transports
-    build a patch-mode request, so it is also the one place to record
-    truncated-input dedup blindness (issue athenaeum#1180) so it fires
-    identically whether the request is submitted synchronously or as a
-    batch item (batch assembly calls this directly, never through
-    :func:`tier3_merge`).
+    build a patch-mode request, so it is also the one place to:
+
+    - retrieve the section(s) the merge actually targets instead of fencing
+      the whole page (issue athenaeum#1181 — see :func:`_select_merge_section`
+      for the selection and its anchor-safety argument);
+    - record truncated-input dedup blindness (issue athenaeum#1180) and,
+      when *usage* is supplied, the echoed-chars-per-call figure (issue
+      athenaeum#1184) — so both fire identically whether the request is
+      submitted synchronously or as a batch item (batch assembly calls this
+      directly, never through :func:`tier3_merge`).
     """
-    if _existing_body_truncated(existing_body):
+    scoped_body, was_scoped = _select_merge_section(existing_body, action, config=config)
+
+    if _existing_body_truncated(scoped_body):
         log.warning(
             "%s page=%s source=%s existing_body_chars=%d window=%d — patch-mode "
             "dedup (athenaeum#297) is blind past the window; anchored ops still "
@@ -2085,10 +2996,33 @@ def tier3_merge_params(
             MERGE_TRUNCATED_INPUT_LOG_PREFIX,
             action.name,
             source_ref,
-            len(existing_body),
+            len(scoped_body),
             _MAX_EXISTING_BODY_CHARS,
             _MAX_EXISTING_BODY_CHARS,
         )
+
+    if was_scoped:
+        log.info(
+            "%s page=%s source=%s sent_chars=%d full_body_chars=%d sections=%d — "
+            "patch-mode dedup sees only the selected section; an observation "
+            "re-confirming content in an unsent section may land as a spurious "
+            "near-duplicate (athenaeum#1181). Anchored ops still apply against "
+            "the full body, so no content is at risk.",
+            MERGE_SECTION_SCOPED_LOG_PREFIX,
+            action.name,
+            source_ref,
+            len(scoped_body),
+            len(existing_body),
+            len(_split_into_sections(existing_body)),
+        )
+
+    if usage is not None:
+        # Issue athenaeum#1184: how many chars of the existing page THIS call's
+        # prompt actually embeds — post-selection, capped the same way
+        # fence_untrusted caps it below. Recorded here (not at the caller)
+        # so both transports get an equally accurate figure now that the
+        # embedded text is a selected section, not always the whole body.
+        usage.record_merge_echo(min(len(scoped_body), _MAX_EXISTING_BODY_CHARS))
 
     user_msg = MERGE_TEMPLATE.format(
         # Anchor-safe fence (issue athenaeum#562 / audit M20): wrap-only (defang=False).
@@ -2097,11 +3031,12 @@ def tier3_merge_params(
         # existing_body_needs_full_echo), so no byte the model copies an anchor
         # from is ever rewritten here.
         existing_body=fence_untrusted(
-            existing_body,
+            scoped_body,
             tag=_EXISTING_PAGE_TAG,
             max_chars=_MAX_EXISTING_BODY_CHARS,
             defang=False,
         ),
+        scoping_note=_MERGE_SCOPING_NOTE if was_scoped else "",
         source_ref=source_ref,
         observations=fence_untrusted(
             action.observations, tag="user_document", max_chars=3000
@@ -2473,20 +3408,20 @@ def tier3_merge(
     # The dedup-blindness warning is logged inside tier3_merge_params itself
     # (the one place both this sync path AND the batch assembler build a
     # patch-mode request), not here, so it fires on both transports.
-    params = tier3_merge_params(action, existing_body, source_ref, config=config)
+    #
+    # Issue athenaeum#1184/#1181: echo accounting also happens inside
+    # tier3_merge_params (usage=usage) rather than here — the char count now
+    # depends on section selection (athenaeum#1181), which only
+    # tier3_merge_params computes, so it is also the only place that can
+    # record it accurately for both transports.
+    params = tier3_merge_params(action, existing_body, source_ref, config=config, usage=usage)
 
     response = _timed_llm_call(
         lambda: client.messages.create(**params),
         f"tier3_merge {source_ref}",
+        usage=usage,
     )
     _record_usage(response, usage, model=params["model"], knob="write")
-    # Issue athenaeum#1184: this patch-mode call's prompt embeds up to
-    # _MAX_EXISTING_BODY_CHARS of the existing page (tier3_merge_params fences
-    # it with that exact cap) — record it so the run-summary economics can
-    # report echoed_chars_per_call, the ~84%-of-prompt-is-echo term athenaeum#1167
-    # measured but nothing before this tracked per run.
-    if usage is not None:
-        usage.record_merge_echo(min(len(existing_body), _MAX_EXISTING_BODY_CHARS))
 
     body, escalation, needs_fallback = parse_merge_ops_response(
         # Issue athenaeum#578: patch merge enables adaptive thinking — skip any leading
@@ -2569,6 +3504,7 @@ def tier3_merge_full(
     response = _timed_llm_call(
         lambda: client.messages.create(**params),
         f"tier3_merge_full {source_ref}",
+        usage=usage,
     )
     _record_usage(response, usage, model=params["model"], knob="write")
     # Issue athenaeum#1184: same echo accounting as tier3_merge's patch attempt
@@ -2673,6 +3609,220 @@ def stamp_merge_provenance(
     meta["field_sources"] = fs
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1182: page-size invariant
+# ---------------------------------------------------------------------------
+#
+# Atomic pages must not be merged into indefinitely. Corpus shape (23,534
+# pages, non-`_`-prefixed *.md, re-measured 2026-08-30): median 1,544 bytes,
+# p75 1,751, p90 2,061, p99 8,468 -- only 84 pages (0.36%) exceed the
+# 20,000-char merge-input window (:data:`_MAX_EXISTING_BODY_CHARS`, above).
+# That shape is an atomic-page corpus with 84 anomalies, not a corpus with a
+# legitimate large-document tail, so the threshold below is picked from the
+# DISTRIBUTION, not from the model's context window: well under 20,000 AND
+# comfortably above p99, so it catches genuine unbounded-accretion anomalies
+# without false-positiving on the ordinary corpus. 10,000 sits ~18% above
+# p99 (8,468 -> some headroom for ordinary variance in the top percentile)
+# and at exactly half of the 20,000 merge-input window, so a future change
+# to the window does not have to chase this threshold, or vice versa.
+DEFAULT_PAGE_SIZE_THRESHOLD_CHARS = 10_000
+
+# The action an over-threshold page routes to instead of another merge.
+# Only "review" ships implemented (orchestrator decision, issue athenaeum#1182):
+# split and log-demotion are destructive restructurings of durable operator
+# data and must not run unattended on a first landing. Both are RESERVED
+# here -- a recognized config value that resolves cleanly and then raises
+# NotImplementedError at dispatch time (see check_page_size_gate) rather
+# than either silently falling back to "review" (hiding the operator's
+# explicit choice) or a KeyError one yaml typo away from indistinguishable
+# from a real "review" -- so enabling them later is a follow-up, not a
+# rebuild of the gate itself.
+VALID_OVERSIZE_PAGE_ACTIONS = ("review", "split", "log_demote")
+DEFAULT_OVERSIZE_PAGE_ACTION = "review"
+
+
+def resolve_page_size_threshold_chars(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.page_size_threshold_chars`` (issue athenaeum#1182).
+
+    Mirrors :func:`resolve_mention_density_min_occurrences`'s validation
+    contract exactly: must be ``>= 1`` (bool rejected as an int subclass, so
+    ``page_size_threshold_chars: yes`` in yaml cannot silently become a
+    threshold of 1); non-numeric, non-positive, missing, or bool values fall
+    back to :data:`DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("page_size_threshold_chars")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+                return raw
+    return DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
+
+
+def resolve_oversize_page_action(config: dict[str, Any] | None = None) -> str:
+    """Resolve ``librarian.oversize_page_action`` (issue athenaeum#1182).
+
+    One of :data:`VALID_OVERSIZE_PAGE_ACTIONS`. Any other value (unknown
+    string, wrong type, missing key/section) falls back to
+    :data:`DEFAULT_OVERSIZE_PAGE_ACTION` (``"review"``) -- the only action
+    that is safe to run unattended; see :func:`check_page_size_gate`.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("oversize_page_action")
+            if isinstance(raw, str) and raw in VALID_OVERSIZE_PAGE_ACTIONS:
+                return raw
+    return DEFAULT_OVERSIZE_PAGE_ACTION
+
+
+def check_page_size_gate(
+    action: EntityAction,
+    existing_body: str,
+    source_ref: str,
+    config: dict[str, Any] | None,
+) -> EscalationItem | None:
+    """Enforce the page-size invariant BEFORE a merge is dispatched (issue athenaeum#1182).
+
+    Called by every tier-3 merge-dispatch site with the target page's
+    CURRENT on-disk body, before the merge prompt is built or any model call
+    is made -- so an over-threshold page never pays for (or risks) a merge
+    call at all. ``existing_body`` is the frontmatter-stripped body, exactly
+    what :func:`tier3_merge` / :func:`tier3_merge_params` would echo into the
+    merge prompt.
+
+    Returns ``None`` when the page is at or under
+    :func:`resolve_page_size_threshold_chars` -- the caller proceeds with the
+    merge exactly as before, byte-for-byte unchanged from pre-athenaeum#1182
+    behaviour.
+
+    Returns an :class:`~athenaeum.models.EscalationItem`
+    (``conflict_type="oversize_page"``) when the page is over threshold and
+    the configured action is ``"review"`` (the shipped default). The caller
+    MUST NOT dispatch the merge and MUST NOT modify the page; instead it
+    appends the returned item to its escalations so
+    :func:`tier4_escalate` surfaces the page (and the observation that would
+    have been merged) in ``_pending_questions.md`` rather than losing it.
+
+    Raises :class:`NotImplementedError` when ``librarian.oversize_page_action``
+    is explicitly set to ``"split"`` or ``"log_demote"`` (both currently
+    RESERVED, not implemented) -- naming the page and the requested action,
+    rather than silently substituting ``"review"`` for an operator's
+    explicit-but-not-yet-buildable choice.
+    """
+    threshold = resolve_page_size_threshold_chars(config)
+    if len(existing_body) <= threshold:
+        return None
+
+    configured_action = resolve_oversize_page_action(config)
+    if configured_action == "review":
+        log.info(
+            "T3 merge suppressed by page-size gate (issue athenaeum#1182): "
+            "page=%s source=%s existing_body_chars=%d threshold=%d action=review",
+            action.name,
+            source_ref,
+            len(existing_body),
+            threshold,
+        )
+        return EscalationItem(
+            raw_ref=source_ref,
+            entity_name=action.name,
+            conflict_type="oversize_page",
+            description=(
+                f"Page {action.name!r} is {len(existing_body)} chars, over "
+                f"the {threshold}-char page-size threshold (issue "
+                "athenaeum#1182). Merging another observation into it was "
+                "suppressed and the page was left unmodified. This page has "
+                "likely outgrown the atomic-page form and should be split "
+                "or demoted to a log (~/knowledge/logs/) by an operator -- "
+                "automatic split/log-demotion are reserved, not yet "
+                f"implemented. The new observation from {source_ref} "
+                f"follows so it is not lost:\n\n{action.observations[:2000]}"
+            ),
+        )
+
+    raise NotImplementedError(
+        f"librarian.oversize_page_action={configured_action!r} is reserved "
+        "but not yet implemented (issue athenaeum#1182) -- page="
+        f"{action.name!r} source={source_ref!r} is over the page-size "
+        "threshold and would route here. Set librarian.oversize_page_action "
+        'to "review" (the default) until split/log-demotion ship.'
+    )
+
+
+@dataclass
+class OversizePage:
+    """One wiki page over the page-size threshold (issue athenaeum#1182 AC3)."""
+
+    path: Path
+    chars: int
+    entity_type: str
+
+
+def enumerate_oversize_pages(
+    wiki_root: Path,
+    config: dict[str, Any] | None = None,
+    threshold: int | None = None,
+) -> list[OversizePage]:
+    """Read-only enumeration of pages over the page-size threshold (issue athenaeum#1182 AC3).
+
+    A non-mutating, dry-run-shaped listing for whoever runs it against the
+    live ``~/knowledge`` corpus this lane has no access to (see the issue's
+    own "criterion you cannot discharge" note -- the 84 pages it names
+    cannot be enumerated or dispositioned from inside a dev container with
+    no corpus, so this ships the ONE-COMMAND job instead of a fabricated
+    list). No wiki write, no reindex, no LLM call -- pure read.
+
+    Walk mirrors :meth:`~athenaeum.models.EntityIndex._load` exactly
+    (``wiki_root.glob("*.md")``, ``_``-prefixed files skipped -- issue
+    athenaeum#1182 explicitly keeps that exclusion unchanged, since the
+    genuinely huge ``_``-prefixed files are already correctly excluded from
+    the entity index and never merged into) and the filing lane's own
+    corpus methodology (non-underscore ``*.md`` only). A file that fails to
+    read/decode is skipped, matching ``EntityIndex._load``'s fail-open
+    behaviour, rather than raising and aborting the whole enumeration.
+
+    Measures a page's BODY (frontmatter stripped via
+    :func:`~athenaeum.models.parse_frontmatter`), not the raw file's byte
+    count, so a page's size here is exactly what
+    :func:`check_page_size_gate` would measure for that same page.
+    ``entity_type`` is the page's ``type:`` frontmatter field, or ``""``
+    when absent (the issue's own table records 9 of the 84 oversized pages
+    carrying no ``type:`` at all).
+
+    ``threshold`` defaults to :func:`resolve_page_size_threshold_chars`
+    (``config``'s ``librarian.page_size_threshold_chars``, or the built-in
+    default) so this reports the SAME threshold the live gate enforces
+    unless the caller deliberately asks for a different cut. Results are
+    sorted by ``chars`` descending -- the largest anomalies first.
+    """
+    resolved_threshold = (
+        threshold
+        if threshold is not None
+        else resolve_page_size_threshold_chars(config)
+    )
+    results: list[OversizePage] = []
+    for fpath in sorted(wiki_root.glob("*.md")):
+        if fpath.name.startswith("_"):
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, body = parse_frontmatter(text)
+        if len(body) > resolved_threshold:
+            raw_type = meta.get("type") if meta else None
+            results.append(
+                OversizePage(
+                    path=fpath,
+                    chars=len(body),
+                    entity_type=str(raw_type) if raw_type else "",
+                )
+            )
+    results.sort(key=lambda p: p.chars, reverse=True)
+    return results
+
+
 def tier3_derive_actions(
     raw: RawFile,
     actions: list[EntityAction],
@@ -2757,8 +3907,19 @@ def tier3_derive_actions(
         # distinctly) survives.
         try:
             if action.kind == "create":
-                new_entities.append(
-                    tier3_create(
+                # Issue athenaeum#1171: PreambleOnlyResponseError is caught HERE,
+                # scoped to just this one create call, NOT by the generic
+                # ``except Exception`` below. "Reject" per athenaeum#1171 means "do
+                # not persist THIS page" — it must not abort the whole raw
+                # file (discarding every other action already computed) or
+                # wedge the file into a permanent stuck-file retry loop if
+                # the model deterministically re-produces preamble-only
+                # output for this entity. usage.preamble_rejected is already
+                # incremented inside tier3_entity_from_text; there is
+                # nothing else to record before moving on to the next
+                # action.
+                try:
+                    new_entity = tier3_create(
                         action,
                         raw.ref,
                         client,
@@ -2766,7 +3927,15 @@ def tier3_derive_actions(
                         usage=usage,
                         config=config,
                     )
-                )
+                except PreambleOnlyResponseError:
+                    log.warning(
+                        "tier3-create-preamble-rejected-skipped ref=%s name=%s: "
+                        "action skipped, NOT treated as a raw-file failure",
+                        raw.ref,
+                        action.name,
+                    )
+                else:
+                    new_entities.append(new_entity)
 
             elif action.kind == "update" and action.existing_uid:
                 existing_path = index.get_by_uid(action.existing_uid)
@@ -2779,6 +3948,20 @@ def tier3_derive_actions(
 
                 text = existing_path.read_text(encoding="utf-8")
                 meta, existing_body = parse_frontmatter(text)
+
+                # Issue athenaeum#1182: page-size invariant, enforced BEFORE the
+                # merge prompt is built or any model call is made — see
+                # check_page_size_gate's docstring for the full contract. An
+                # over-threshold page is never merged into; the escalation
+                # (when the shipped "review" action fires) carries the
+                # would-be observation so it is not lost, and the page is
+                # left byte-for-byte unmodified.
+                oversize_escalation = check_page_size_gate(
+                    action, existing_body, raw.ref, config
+                )
+                if oversize_escalation is not None:
+                    escalations.append(oversize_escalation)
+                    continue
 
                 updated_body, esc = tier3_merge(
                     action,

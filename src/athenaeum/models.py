@@ -35,7 +35,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import ItemsView, Iterator, Mapping
@@ -2083,6 +2083,68 @@ class TokenUsage:
     # athenaeum#1167 measured but nothing before this issue tracked per run.
     merge_calls: int = 0
     merge_echoed_chars: int = 0
+    # Tier-3 create-path preamble guard (issue athenaeum#1171). A create
+    # response can open with first-person planning/meta-commentary (e.g.
+    # "Looking at the new observation, I need to...") that must never reach
+    # a persisted page body — see ``athenaeum.tiers.strip_planning_preamble``.
+    # ``preamble_stripped`` counts creates where such a leading preamble was
+    # detected and removed, WITH substantive content surviving underneath
+    # (the common case). ``preamble_rejected`` counts creates where the
+    # preamble was the entire response — stripping it left nothing
+    # substantive, so the create was rejected outright (see
+    # ``athenaeum.tiers.PreambleOnlyResponseError``) rather than persist an
+    # empty page. Additive across a run, same convention as ``merge_calls``
+    # above; rendered in ``librarian-run-summary`` only when non-zero.
+    preamble_stripped: int = 0
+    preamble_rejected: int = 0
+    # Issue athenaeum#1177: ATTEMPT vs SUCCESS, tracked independently of
+    # ``api_calls`` (whose own increment convention already differs by call
+    # site — see ``add()`` vs ``add_tokens()``'s docstrings — and which this
+    # issue does not change, to avoid disturbing its existing cost-estimation/
+    # spend-ledger/test surface). A four-day incident (credits exhausted,
+    # every entity-phase Tier-2/3 call raising ``BadRequestError``) showed
+    # ``api_calls`` alone cannot answer "did this run actually try anything":
+    # the entity-phase call sites only ever bumped ``api_calls`` via
+    # ``add()``, which is reached ONLY after a successful response, so an
+    # all-failing run reported ``api_calls == 0`` -- indistinguishable from a
+    # genuinely idle run with nothing to do, which is exactly what let the
+    # ``athenaeum.zero_yield`` alarm's ``consecutive`` counter stay at 0
+    # through the whole incident (see ``librarian._zero_yield_tripped``).
+    #
+    # ``attempted_calls`` is bumped by :meth:`record_attempt`, called by a
+    # call site immediately BEFORE it dispatches a request -- mirrors the
+    # pre-existing manual ``usage.api_calls += 1`` pattern the C4
+    # detector/resolver loop (``merge.py``) already used for its OWN
+    # attempt-before-call counting, now also wired into the entity phase's
+    # shared ``tiers._timed_llm_call`` choke point (issue athenaeum#1177) so
+    # EVERY LLM-serving phase's attempts are visible here, not just C4's.
+    #
+    # ``succeeded_calls`` is bumped inside :meth:`add_tokens` itself (called
+    # ONLY when a real response's token/cache counts are being recorded) so
+    # it is accurate for every current ``add_tokens``/``add`` call site with
+    # no per-site changes beyond the two above. A call that attempted but
+    # never landed a response (retries exhausted, a non-transient error
+    # degrading the caller to a fallback) bumps ``attempted_calls`` but NOT
+    # ``succeeded_calls`` -- the disagreement AC athenaeum#1177 asks for: a
+    # counter must not be able to claim results a zero-token ledger
+    # contradicts.
+    attempted_calls: int = 0
+    succeeded_calls: int = 0
+
+    def record_attempt(self) -> None:
+        """Record ONE call about to be dispatched, before its outcome is known.
+
+        Call this immediately before the request goes out (issue
+        athenaeum#1177) -- both from the entity phase's shared
+        ``tiers._timed_llm_call`` choke point AND from merge.py's C4
+        detector/resolver loop, which ALREADY pre-increments its own
+        ``usage.api_calls``/local ``haiku_calls``/``resolve_calls`` counters
+        for its own per-phase summary line; this method's counter is
+        additive and separate -- a single RUN-LEVEL "was anything actually
+        attempted" signal spanning every phase, which nothing before this
+        issue aggregated in one place.
+        """
+        self.attempted_calls += 1
 
     def record_merge_echo(self, echoed_chars: int) -> None:
         """Record one Tier-3 merge LLM call's echoed-existing-page char count.
@@ -2222,11 +2284,20 @@ class TokenUsage:
         model-knob for per-knob attribution (:attr:`per_knob`) — independent
         of *model*, exactly mirroring how the two kwargs already coexist at
         every real call site (both sourced from the same config resolution).
+
+        Also bumps :attr:`succeeded_calls` (issue athenaeum#1177) — this
+        method is called ONLY when a real response's counts are known
+        (every current call site: ``add()``, ``add_batch_tokens()``, the C4
+        detector/resolver's own successful responses, the athenaeum#188
+        reresolve pass), so it is the single accurate place to count
+        genuine successes, independent of whatever attempt-counting
+        convention (or lack of one) the call site otherwise uses.
         """
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
         self.cache_creation_input_tokens += cache_creation_input_tokens
         self.cache_read_input_tokens += cache_read_input_tokens
+        self.succeeded_calls += 1
         if model:
             self._tag_model(
                 model,
@@ -2593,6 +2664,24 @@ class ProcessingResult:
     #: path that never reaches Tier 1 (e.g. the Tier-0 do-not-email/handle
     #: short-circuits), which is correct — those paths dispatch no matches.
     matched: int = 0
+    #: Count of Tier-3 merges suppressed by the page-size invariant (issue
+    #: athenaeum#1182): a page over ``librarian.page_size_threshold_chars``
+    #: routes to escalation (``EscalationItem.conflict_type=
+    #: "oversize_page"``) instead of another merge, and is left unmodified.
+    #: Derived from ``escalated`` by conflict_type — see
+    #: ``athenaeum.librarian._apply_tier3_results`` — rather than tracked as
+    #: an independent counter, so it can never drift out of sync with what
+    #: was actually escalated. Surfaced as ``oversize_suppressed=N`` in the
+    #: run summary, mirroring the degraded/truncated convention above.
+    oversize_suppressed: int = 0
+    #: Count of NEW entity writes this file's Tier-3 create phase produced
+    #: whose ``type`` was outside declared ∪ ``KNOWN_TYPES`` and was
+    #: therefore REFUSED by the write-boundary guard (issue athenaeum#1196,
+    #: :func:`athenaeum.wiki_write_guard.guard_entity_write_type`) rather
+    #: than written to ``wiki/``. Not counted in ``created`` — a refused
+    #: entity was never applied. Surfaced as ``type_rejected=N`` in the run
+    #: summary, mirroring the ``degraded``/``truncated`` convention above.
+    type_rejected: int = 0
 
 
 # --- Schema loading ---
@@ -2638,12 +2727,40 @@ def load_schema_list(schema_path: Path, filename: str) -> list[str]:
 # --- Entity Index ---
 
 
+class IndexEntry(NamedTuple):
+    """One ``EntityIndex._by_name`` value: identity + type of an indexed key.
+
+    ``uid`` and ``path`` are the original ``(uid_or_name, path)`` pair this
+    index has always carried. ``type`` is new (issue athenaeum#1169): the page's
+    ``type:`` frontmatter value (resolved via :func:`resolve_page_type`), so a
+    matcher can gate on it without re-reading the page from disk.
+
+    ``type`` is ``None`` when the page carries no ``type:`` frontmatter at
+    all — an EXPLICIT sentinel, not an empty string, so a gate can branch on
+    ``is None`` rather than an implicit falsy check. See
+    :func:`athenaeum.tiers._passes_type_gate` for the KEPT-by-default policy
+    this represents.
+
+    Because ``NamedTuple`` subclasses ``tuple``, existing code that reads a
+    ``_by_name`` value POSITIONALLY (``entry[0]`` for uid, ``entry[1]`` for
+    path — e.g. :func:`athenaeum.reconcile`'s ``looked[1]``) keeps working
+    unchanged, including against a plain ``(uid, path)`` 2-tuple poked
+    directly into ``_by_name`` by tests that predate this issue — reading
+    ``.type`` off one of those via ``getattr(entry, "type", None)`` degrades
+    to "no type known" rather than raising.
+    """
+
+    uid: str
+    path: Path
+    type: str | None = None
+
+
 class EntityIndex:
     """In-memory index of all wiki entities for name/alias lookup."""
 
     def __init__(self, wiki_root: Path) -> None:
         self.wiki_root = wiki_root
-        self._by_name: dict[str, tuple[str, Path]] = {}
+        self._by_name: dict[str, IndexEntry] = {}
         self._entities: dict[str, dict] = {}
         self._by_uid: dict[str, Path] = {}
         self._entity_format_paths: set[Path] = set()
@@ -2673,8 +2790,18 @@ class EntityIndex:
             uid = uid_raw
             name = name_raw
 
+            # Issue athenaeum#1169: carry the page's type through the index.
+            # resolve_page_type is the single canonical precedence resolver
+            # (top-level `type:` first, `metadata.type` fallback, else "") —
+            # reused here rather than reading meta["type"] directly so this
+            # index agrees with athenaeum.search / athenaeum.entity_schema on what a
+            # page's type IS. "" (no type: found) is normalized to the
+            # explicit IndexEntry.type=None sentinel below.
+            page_type = resolve_page_type(meta)
+            entry_type = page_type if page_type else None
+
             key = name.lower()
-            self._by_name[key] = (uid or name, fpath)
+            self._by_name[key] = IndexEntry(uid or name, fpath, entry_type)
             if uid:
                 self._entities[uid] = meta
                 self._by_uid[uid] = fpath
@@ -2689,10 +2816,15 @@ class EntityIndex:
             for alias in aliases_raw:
                 if alias:
                     assert isinstance(alias, str)
-                    self._by_name[alias.lower()] = (uid or name, fpath)
+                    self._by_name[alias.lower()] = IndexEntry(uid or name, fpath, entry_type)
 
-    def lookup(self, name: str) -> tuple[str, Path] | None:
-        """Look up by name or alias (case-insensitive). Returns (uid_or_name, path) or None."""
+    def lookup(self, name: str) -> IndexEntry | None:
+        """Look up by name or alias (case-insensitive).
+
+        Returns an :class:`IndexEntry` (``.uid``/``.path``/``.type``, and
+        still positionally ``(uid_or_name, path, type)`` since it is a
+        tuple) or ``None``.
+        """
         return self._by_name.get(name.lower())
 
     def get_by_uid(self, uid: str) -> Path | None:
@@ -2707,7 +2839,7 @@ class EntityIndex:
         """Add a newly created entity to the index."""
         key = entity.name.lower()
         path = self.wiki_root / entity.filename
-        self._by_name[key] = (entity.uid, path)
+        self._by_name[key] = IndexEntry(entity.uid, path, entity.type or None)
         self._entities[entity.uid] = {
             "uid": entity.uid,
             "type": entity.type,
@@ -2717,14 +2849,14 @@ class EntityIndex:
         self._entity_format_paths.add(path)
         for alias in entity.aliases:
             if alias:
-                self._by_name[alias.lower()] = (entity.uid, path)
+                self._by_name[alias.lower()] = IndexEntry(entity.uid, path, entity.type or None)
 
     def __len__(self) -> int:
         """Number of unique name/alias keys indexed."""
         return len(self._by_name)
 
-    def items(self) -> "ItemsView[str, tuple[str, Path]]":
-        """Iterate over ``(name_or_alias_key, (uid_or_name, path))`` pairs.
+    def items(self) -> "ItemsView[str, IndexEntry]":
+        """Iterate over ``(name_or_alias_key, IndexEntry(uid, path, type))`` pairs.
 
         Replaces direct access to ``_by_name`` from callers that need to
         walk the index (e.g. tier-based scans). Returns a live view — do

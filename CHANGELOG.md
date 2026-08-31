@@ -53,6 +53,134 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Batch spend reservation and settlement — `ceiling_tripped` is no longer
+  blind to committed in-flight cost (athenaeum#1147).**
+  `TokenUsage.add_batch_tokens` fires at COLLECT, so under the async
+  submit/collect split the submitting run's `usage` never saw the cost of the
+  batch it had just submitted — cost that is already committed server-side and
+  cannot be halted. A new append-only `batch_reservations.jsonl` (same seam,
+  versioning and torn-trailing-line tolerance as `spend.jsonl`) records the
+  three moments that must not be collapsed: a `reserved` record at SUBMIT
+  (batch id, knob, estimated tokens, estimated USD, and the submit run's
+  accounting day); a `settled` record at COLLECT that supersedes it with the
+  actuals, the collect run's day, and the estimate-vs-actual delta; and, at
+  CHECK time, `spend.ceiling_tripped` counting outstanding
+  reserved-but-unsettled commitments toward both the per-run and the per-day
+  dollar figures. Reservations are priced at the **50%-discounted batch rate**
+  through the one existing pricing site — pricing them synchronously would
+  trip the ceiling roughly 2x too early and defeat the point of batching. A
+  reservation is ALWAYS closed: a batch whose every request came back
+  `expired` settles to **zero** (the API documents an expired request as not
+  billed), and a handle retired uncollected (athenaeum#1146: past retention,
+  unretrievable, no applicable context) settles at its **estimate** — the
+  batch ran and was billed, so zero would under-report and leaving it open
+  would leak a permanent phantom charge. `athenaeum spend` now reports
+  committed-but-unbilled batches in both its text and `--json` output. The
+  athenaeum#483 pre-submit ceiling checks at the tier-2 and tier-3 phase
+  boundaries are preserved, not replaced — they simply now see in-flight
+  commitments as well as the run's own accrual.
+
+- **Per-knob batch selection: `librarian.batch.<knob>` (athenaeum#1175).**
+  Batch mode was GLOBAL — one flag for the whole run — but only two knobs are
+  ever batched (`classify` and `write`) and they shared it, so an operator
+  could not batch the expensive `write` knob while keeping `classify`
+  synchronous. `write` is ~99% of spend and is exactly where the 50% Batch API
+  discount pays; `classify` is cheap and is the knob whose latency an operator
+  most wants interactive. It was both or neither. Now:
+
+  ```yaml
+  librarian:
+    batch:
+      classify: false
+      write: true
+  ```
+
+  Under the existing `librarian:` parent, deliberately not a new `llm.batch` —
+  batch is a property of how the librarian run is executed, not of the LLM
+  routing layer, and it has to fall back to `librarian.batch_mode`. An absent
+  knob key resolves from `batch_mode`, so a config setting only `batch_mode`
+  behaves identically. A knob enabled here makes the run a batch run even with
+  `batch_mode` off; `--no-batch-mode` remains a hard off no yaml key can
+  defeat. Setting a NON-batchable knob to `true` refuses the run with a clear
+  error rather than being silently ignored. A knob resolved OFF takes the
+  SYNCHRONOUS path inside the batch transport (`tier2_classify` at assembly,
+  `tier3_create` / `tier3_merge` at finalize), so the two genuinely mix.
+
+  Consequently the claude-cli batch guard narrows from batch-CAPABLE knobs to
+  batch-ENABLED ones, which makes `llm.providers.classify: claude-cli` +
+  `librarian.batch.write: true` — subscription-path classification alongside a
+  discounted batched write — a legal install shape for the first time. A
+  claude-cli-routed knob that IS batched is still rejected loudly.
+
+- **Every way a pending batch handle can become un-collectible is now
+  reconciled, and none of it is silent (athenaeum#1146).** The distinction the
+  work turns on is routinely conflated and has OPPOSITE correct responses: a
+  batch whose `processing_status` is not `ended` is in flight and already paid
+  for — its handle is kept, its **lease extended**, and its refs are not
+  resubmitted; a per-request `result.type == "expired"` means that request
+  never reached the model and is not billed — it takes the ordinary per-file
+  failure path, raw stays on disk, retried next run. Treating the first as the
+  second resubmits work already running; treating the second as the first
+  strands files forever. Also covered: a handle past the Batch API's 29-day
+  retention window retires without needing the network; a `retrieve` that
+  404s retires, while any other failure (timeout, connection error, 5xx)
+  KEEPS the handle, because retiring on a transient failure would discard a
+  live batch; a leased raw file that is missing, or whose content hash
+  differs from the one recorded at claim time, has its result discarded
+  rather than applied to content that no longer exists — while its siblings
+  in the same handle still collect; and a handle whose lease has expired but
+  whose batch is still retrievable is COLLECTED, since the lease exists to
+  stop a re-claim, not to gate a collect. Every outcome is counted and
+  rendered in the run summary as `reconciled=<reason>:<count>,…` and exported
+  as `batch_reconciliation` run state. A handle retired UNCOLLECTED appends a
+  record to a new append-only `batch_reconcile.jsonl` ledger (same seam and
+  torn-trailing-line tolerance as `spend.jsonl`), so wasted batch spend is
+  visible after the fact rather than merely accepted.
+
+- **Collect-only adoption path: a run can apply a PRIOR run's batch, before
+  it claims anything of its own (athenaeum#1145).** `athenaeum.batch`
+  gains `collect_pending_batches`, run at the start of the entity phase —
+  before `discover_raw_files` and before any new submission. It loads each
+  outstanding athenaeum#1143 handle, retrieves its batch, applies the results
+  through the *existing* finalize path (by re-entering `process_batch_run`
+  itself, so the per-file "all calls succeeded before anything is written"
+  guarantee and the raw-unlink-on-success are the same code, not a parallel
+  write path), and retires the handle — releasing its lease in the same atomic
+  store write. The ordering is load-bearing for three independent reasons:
+  collected cost must be in `usage` before the next spend-ceiling check;
+  collected creations must be in the corpus before the new cohort's tier-1
+  pass reads it; and leases must be released before the claim set is computed.
+  Collecting a `classify` handle and submitting the resulting tier-3 batch
+  within the same run is supported. A run whose only work is a collect is a
+  valid, successful run: its collected refs count toward
+  `files_processed_count` and render as `collected=N` in the run summary, so
+  it neither reads as idle nor trips the athenaeum#899 zero-yield alarm.
+  `--dry-run` collects nothing and retires nothing. A handle now also records
+  each request's serving model (so the athenaeum#247 per-model attribution
+  survives the run boundary) and, for a tier-3 batch, the per-request
+  application context a later run needs in order to finalize it.
+
+- **The batch poll is bounded by the run's wall-clock deadline and spills to
+  a handle instead of cancelling (athenaeum#1144).** `execute_batch` polled
+  against a 24h module constant inside a bounded nightly window, and on
+  timeout it CANCELLED the batch — destroying work already paid for
+  server-side. `process_batch_run` and `execute_batch` now accept a
+  `deadline`, threaded from the librarian's existing wall-clock budget
+  (athenaeum#396). The poll stops at the earlier of batch-end or that
+  deadline. A batch that ends inside the window continues synchronously into
+  the next phase exactly as before; a deadline arriving first leaves the
+  batch running, records an athenaeum#1143 pending-batch handle over its raw
+  files, and returns those refs as `in_flight_refs` — a bucket distinct from
+  `failed_refs` (retry from scratch, re-billing the same work) and
+  `deferred_refs` (never submitted). Such a run reports
+  `reason=batch-in-flight` with an `in_flight=` count in the run summary, so
+  it is distinguishable from a healthy zero-compile run, and neither the
+  athenaeum#899 zero-yield alarm nor the athenaeum#1135 zero-progress refusal
+  fires on it. A batch breaching the documented Batch API limits (100,000
+  requests or 256 MB) is now refused at assembly with a local error naming
+  the actual figures rather than an opaque 400. `deadline=None` preserves the
+  previous behaviour exactly.
+
 - **`athenaeum reconcile` retires pending raw-intake files a source dual-wrote
   into the wiki (athenaeum#1143 / athenaeum-adapters#154).** A one-off
   producer (`streak-to-wiki`) wrote both a `raw/drive/` intake file and the

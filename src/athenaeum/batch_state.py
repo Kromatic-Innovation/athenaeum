@@ -142,6 +142,13 @@ class RefRecord:
     ref: str
     path: str
     content_hash: str
+    #: Issue athenaeum#1145: the serving model id this request was submitted
+    #: with, read from its ``params["model"]`` at claim time. A later run's
+    #: collect books the batch's token usage against THIS model, preserving the
+    #: athenaeum#247 per-model attribution ``execute_batch`` performs within a run via
+    #: ``model_by_cid`` — which is otherwise unrecoverable once the submitting
+    #: run has exited. ``None`` on a handle recorded before athenaeum#1145.
+    model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -158,6 +165,16 @@ class PendingBatch:
     leased_until: str | None = None
     #: ``custom_id -> RefRecord``.
     refs: dict[str, RefRecord] = field(default_factory=dict)
+    #: Issue athenaeum#1145: an OPAQUE, JSON-serializable document carrying whatever
+    #: the collecting run needs to apply this batch's results through the
+    #: normal finalize path. This module round-trips it and never interprets
+    #: it: the schema belongs to :mod:`athenaeum.batch`, which is the only
+    #: module that knows what a tier-3 merge needs in order to be applied.
+    #: Putting it here rather than inventing a second sidecar keeps ONE
+    #: atomically-written document per batch, so a handle and the work it
+    #: describes can never disagree. ``None`` on a handle recorded before
+    #: athenaeum#1145, and on any handle whose knob needs no extra context.
+    work: dict[str, Any] | None = None
 
     def lease_active(self, now: datetime | None = None) -> bool:
         """Whether this handle's lease is still holding its refs."""
@@ -211,10 +228,12 @@ def _ref_from_json(raw: Any) -> RefRecord | None:
         return None
     path = raw.get("path")
     chash = raw.get("content_hash")
+    model = raw.get("model")
     return RefRecord(
         ref=ref,
         path=path if isinstance(path, str) else "",
         content_hash=chash if isinstance(chash, str) else "",
+        model=model if isinstance(model, str) else None,
     )
 
 
@@ -232,6 +251,7 @@ def _handle_from_json(batch_id: str, raw: Any) -> PendingBatch | None:
     leased_until = raw.get("leased_until")
     submitted_at = raw.get("submitted_at")
     phase = raw.get("phase")
+    work = raw.get("work")
     return PendingBatch(
         batch_id=batch_id,
         knob=knob if isinstance(knob, str) else "",
@@ -239,11 +259,15 @@ def _handle_from_json(batch_id: str, raw: Any) -> PendingBatch | None:
         phase=phase if isinstance(phase, str) else DEFAULT_PHASE,
         leased_until=leased_until if isinstance(leased_until, str) else None,
         refs=refs,
+        # Fail-open on shape, like every other field here: a ``work`` document
+        # that is not an object reads as absent, which degrades the collect to
+        # "retire and re-claim" rather than raising.
+        work=work if isinstance(work, dict) else None,
     )
 
 
 def _handle_to_json(handle: PendingBatch) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "knob": handle.knob,
         "submitted_at": handle.submitted_at,
         "phase": handle.phase,
@@ -253,10 +277,14 @@ def _handle_to_json(handle: PendingBatch) -> dict[str, Any]:
                 "ref": record.ref,
                 "path": record.path,
                 "content_hash": record.content_hash,
+                "model": record.model,
             }
             for custom_id, record in sorted(handle.refs.items())
         },
     }
+    if handle.work is not None:
+        out["work"] = handle.work
+    return out
 
 
 def load(cache_dir: Path) -> dict[str, PendingBatch]:
@@ -350,6 +378,7 @@ def record_handle(
     refs: Mapping[str, Any],
     config: dict[str, Any] | None = None,
     phase: str = DEFAULT_PHASE,
+    work: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> PendingBatch | None:
     """Record a submitted batch and take a lease over its raw files.
@@ -366,6 +395,10 @@ def record_handle(
     (the operator set the knob ``<= 0``) records the handle with NO lease —
     the explicit opt-out, not a silent default. Returns the stored handle, or
     ``None`` when *batch_id* is empty (nothing to key on).
+
+    *work* (issue athenaeum#1145) is an opaque JSON document stored verbatim on the
+    handle — see :attr:`PendingBatch.work`. This module neither reads nor
+    validates it.
 
     Idempotent: re-recording the same *batch_id* replaces its handle and
     re-takes the lease from *now*.
@@ -404,6 +437,7 @@ def record_handle(
         phase=phase,
         leased_until=leased_until,
         refs=records,
+        work=work,
     )
     handles = load(cache_dir)
     handles[batch_id] = handle
@@ -508,3 +542,185 @@ def resolve_lease_seconds(config_data: dict[str, Any] | None) -> float | None:
     functions above.
     """
     return config.resolve_batch_lease_seconds(config_data)
+
+
+def extend_lease(
+    cache_dir: Path,
+    batch_id: str,
+    *,
+    config: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> PendingBatch | None:
+    """Re-take *batch_id*'s lease from *now* (issue athenaeum#1146 AC1).
+
+    A batch that has NOT ended at collect time is the one case where the right
+    answer is to do nothing except wait longer: it is in flight, already paid
+    for, and resubmitting its refs would double-bill work that is coming. But
+    a lease that simply runs out mid-flight hands those refs back to the claim
+    loop, which then resubmits them — so a keep-the-handle decision has to
+    push the lease out too, or it silently becomes a resubmit decision one run
+    later.
+
+    A resolved lease length of ``None`` (the operator disabled leasing) clears
+    the lease rather than inventing one, matching
+    :func:`record_handle`. Returns the updated handle, or ``None`` if there is
+    no such handle.
+    """
+    if not batch_id:
+        return None
+    handles = load(cache_dir)
+    handle = handles.get(batch_id)
+    if handle is None:
+        return None
+    lease_seconds = resolve_lease_seconds(config)
+    stamp = _as_utc(now or _now())
+    leased_until = (
+        _fmt(stamp + timedelta(seconds=lease_seconds))
+        if lease_seconds is not None
+        else None
+    )
+    updated = PendingBatch(
+        batch_id=handle.batch_id,
+        knob=handle.knob,
+        submitted_at=handle.submitted_at,
+        phase=handle.phase,
+        leased_until=leased_until,
+        refs=handle.refs,
+        work=handle.work,
+    )
+    handles[batch_id] = updated
+    _save(cache_dir, handles)
+    return updated
+
+
+def submitted_age_days(
+    handle: PendingBatch, *, now: datetime | None = None
+) -> float | None:
+    """Days since *handle* was submitted, or ``None`` if its stamp is unusable.
+
+    ``None`` is deliberately NOT "old": an unparseable stamp must not be read
+    as past the retention window, because that would retire a live, paid-for
+    batch on a formatting bug.
+    """
+    submitted = _parse(handle.submitted_at)
+    if submitted is None:
+        return None
+    return ((_as_utc(now or _now()) - submitted).total_seconds()) / 86400.0
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1146 AC8 — the reconciliation ledger.
+#
+# A handle retired WITHOUT being collected is spend that bought nothing. It is
+# an accepted failure mode (athenaeum#220's note at ``batch.py``: "their tier-2
+# spend is wasted — acceptable, the next run redoes them"), but "accepted" is
+# not "invisible": an operator has to be able to see, after the fact, that a
+# machine left off for a week cost a cohort's batch spend.
+#
+# This is the STUB athenaeum#1146 AC8 calls for. athenaeum#1147 owns the full
+# reservation/settlement ledger — including pricing the waste — and will
+# supersede or absorb this. What is here now is deliberately the minimum that
+# makes the fact recoverable: one append-only record per retired-uncollected
+# handle, in the same shape and at the same seam as ``spend.jsonl``.
+# ---------------------------------------------------------------------------
+
+#: On-disk record version for the reconciliation ledger.
+RECONCILE_LEDGER_VERSION = 1
+
+#: Ledger filename, mirroring ``spend.LEDGER_FILENAME``'s convention.
+RECONCILE_LEDGER_FILENAME = "batch_reconcile.jsonl"
+
+
+def reconcile_ledger_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
+    """``<wiki_root>/batch_reconcile.jsonl``, with the legacy cache-dir fallback.
+
+    Mirrors :func:`athenaeum.spend.durable_ledger_path` exactly, including its
+    migration rule: an installation that already has records at the legacy
+    ``<cache_dir>`` path keeps using it until something copies the file
+    forward; a fresh or already-migrated store resolves behind the seam.
+    """
+    new_path = Path(wiki_root) / RECONCILE_LEDGER_FILENAME
+    legacy_path = Path(
+        cache_dir if cache_dir is not None else resolve_cache_dir()
+    ) / RECONCILE_LEDGER_FILENAME
+    if new_path.exists() or not legacy_path.exists():
+        return new_path
+    return legacy_path
+
+
+def record_reconciliation(
+    wiki_root: Path,
+    *,
+    batch_id: str,
+    knob: str,
+    reason: str,
+    refs: list[str],
+    submitted_at: str,
+    cache_dir: Path | None = None,
+    now: datetime | None = None,
+) -> bool:
+    """Append one retired-uncollected record. ``True`` if it was written.
+
+    Fail-open, like every other write in this module: a ledger that cannot be
+    appended to logs at WARNING and returns ``False`` rather than raising. The
+    run it is recording has already happened; losing the record is bad, losing
+    the run would be worse.
+    """
+    record = {
+        "v": RECONCILE_LEDGER_VERSION,
+        "ts": _fmt(now or _now()),
+        "batch_id": batch_id,
+        "knob": knob,
+        "reason": reason,
+        "submitted_at": submitted_at,
+        "refs": sorted(refs),
+        "ref_count": len(set(refs)),
+    }
+    path = reconcile_ledger_path(wiki_root, cache_dir=cache_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError as exc:
+        log.warning(
+            "could not append the batch-reconciliation record for %s (%s: %s) "
+            "— wasted batch spend for %d ref(s) will not be visible after the "
+            "fact (issue athenaeum#1146)",
+            batch_id,
+            type(exc).__name__,
+            exc,
+            len(set(refs)),
+        )
+        return False
+    return True
+
+
+def read_reconcile_ledger(
+    wiki_root: Path, *, cache_dir: Path | None = None
+) -> list[dict[str, Any]]:
+    """Read the reconciliation ledger, tolerating a torn trailing line.
+
+    Mirrors :func:`athenaeum.spend.read_ledger`: a partially-written final
+    record (the process died mid-append) is skipped, not raised on — the rest
+    of the ledger is still good data.
+    """
+    path = reconcile_ledger_path(wiki_root, cache_dir=cache_dir)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        log.warning("batch-reconciliation ledger unreadable (%s) — reading empty", exc)
+        return []
+    out: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            out.append(record)
+    return out
