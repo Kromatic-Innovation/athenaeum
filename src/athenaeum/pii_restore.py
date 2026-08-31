@@ -383,10 +383,17 @@ def _find_preimage_token(
 # Retro-filename class
 # --------------------------------------------------------------------------- #
 
-#: A corrupted retro-filename citation: ``retros/<timestamp>--MARKER.md``.
-#: The timestamp is the recoverable key; everything after ``--`` was eaten.
+#: A corrupted retro-filename citation: ``retros/<timestamp>--...MARKER....md``.
+#: The timestamp is the recoverable key. MARKER need not span the WHOLE
+#: ``--``...``.md`` region -- most live citations keep surrounding filename
+#: text (an issue-number prefix, a slug suffix, or both) around the marker,
+#: e.g. ``retros/<ts>--athenaeum-1091-MARKER-236config.md``. The optional
+#: filler on either side is bounded to non-whitespace, non-``/`` characters
+#: (never crossing a path separator or a token boundary) so a `.search()`
+#: over a line with two DIFFERENT retro citations still anchors each match
+#: to its own citation instead of spanning across both.
 _RETRO_FRAGMENT_RE = re.compile(
-    r"retros/(?P<ts>\d{8}T\d{6}Z)--" + re.escape(MARKER) + r"\.md"
+    r"retros/(?P<ts>\d{8}T\d{6}Z)--[^\s/]*?" + re.escape(MARKER) + r"[^\s/]*?\.md"
 )
 
 
