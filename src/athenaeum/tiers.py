@@ -2263,6 +2263,15 @@ _MAX_EXISTING_BODY_CHARS = 20_000
 #: fallback-rate metric athenaeum#496 already tracks.
 MERGE_TRUNCATED_INPUT_LOG_PREFIX = "tier3-merge-truncated-input"
 
+#: Issue athenaeum#1181: section-scoping trades the old window blindness for a
+#: NEW one — the model cannot see the sections it was not sent, so a
+#: re-confirming observation about an unselected section will not be
+#: recognised as a duplicate. That is a different failure class from the
+#: window truncation above, and the change ships enabled, so it needs its own
+#: greppable incidence signal rather than being inferred from the ABSENCE of
+#: the truncation warning. Kept separate for the same reason that one is.
+MERGE_SECTION_SCOPED_LOG_PREFIX = "tier3-merge-section-scoped"
+
 
 def _existing_body_truncated(existing_body: str) -> bool:
     """True when *existing_body* exceeds the merge input window (issue athenaeum#1180).
@@ -2741,12 +2750,106 @@ def _match_tokens(text: str) -> set[str]:
 _MERGE_SCOPING_NOTE = (
     "Note: the page content above is not the whole page — it is the "
     "section most relevant to the new observation below, plus an outline "
-    "of every other section heading on the page. Only dedupe against "
-    "content you can actually see above. If the observation belongs under "
-    'a heading not shown, or nothing shown needs to change, use '
+    "of the page's other section headings. Content that is not relevant "
+    "may have been omitted, marked \u2018[\u2026 omitted \u2026]\u2019. Only dedupe "
+    "against content you can actually see above, and never copy an anchor "
+    "that spans an omission marker. If the observation belongs under a "
+    "heading not shown, or nothing shown needs to change, use "
     '"append_section" (no anchor needed) instead of guessing at unseen '
     "content.\n\n"
 )
+
+
+# The heading OUTLINE needs its own budget. On the real corpus it is not
+# always "lightweight": the largest oversized entity page carries 876
+# headings, and its outline alone is ~41,000 chars — twice the whole
+# _MAX_EXISTING_BODY_CHARS window. Left unbounded, the outline truncates away
+# the very section it exists to contextualise, so such a merge would see a
+# wall of headings and no page content at all. Cap it, and say when it was cut.
+_MERGE_OUTLINE_MAX_CHARS = 2_000
+_MERGE_OUTLINE_ELIDED = "- [\u2026 further headings omitted \u2026]"
+
+# Marker for content dropped from WITHIN a selected section that is itself
+# larger than the send window. This is not a rare shape: 28 of the 82 real
+# oversized (>20,000-char) entity pages in the corpus have a single dominant
+# section bigger than the window, so selecting that section alone would leave
+# acceptance criterion 3 (a merge on an oversized page does not lose what the
+# model needed to the window) unmet for a third of the cohort.
+#
+# Anchor safety is unaffected, for the same reason section selection is: an
+# anchor the model copies across an elision boundary simply will not match the
+# real, full body, and :func:`apply_merge_ops` rejects it into the full-echo
+# fallback like any other unappliable op. Elision changes what the model SEES,
+# never what code is willing to APPLY.
+_MERGE_SECTION_ELISION = "\n\n[\u2026 omitted \u2026]\n\n"
+
+
+def _build_section_outline(sections: list[tuple[str, str]]) -> str:
+    """Heading-only outline of *sections*, capped at _MERGE_OUTLINE_MAX_CHARS."""
+    lines: list[str] = []
+    used = 0
+    for heading, _text in sections:
+        if not heading:
+            continue
+        line = f"- {heading}"
+        if used + len(line) + 1 > _MERGE_OUTLINE_MAX_CHARS:
+            lines.append(_MERGE_OUTLINE_ELIDED)
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
+
+
+def _narrow_section(section_text: str, obs_tokens: set[str], budget: int) -> str:
+    """Trim *section_text* to *budget* chars, keeping what the observation matches.
+
+    Only used when a single selected section is itself larger than the send
+    window. Keeps the section's own heading line (so the model still knows
+    where it is), then the contiguous run of paragraphs around the
+    best-matching one that fits, with :data:`_MERGE_SECTION_ELISION` marking
+    each cut. Contiguity is deliberate: a contiguous run keeps whole anchors
+    intact, where a scatter of high-scoring paragraphs would maximise the
+    number of anchors that straddle a cut and get rejected downstream.
+    """
+    if len(section_text) <= budget:
+        return section_text
+    nl = section_text.find("\n")
+    if nl == -1:
+        return section_text[:budget]
+    heading_line, rest_text = section_text[:nl], section_text[nl + 1 :]
+    paras = rest_text.split("\n\n")
+
+    # Highest-overlap paragraph anchors the window; with nothing to match on,
+    # the LAST paragraph does, mirroring the section-level fallback (the most
+    # recently accumulated content is the likeliest attach point).
+    if obs_tokens:
+        best = max(range(len(paras)), key=lambda i: len(obs_tokens & _match_tokens(paras[i])))
+    else:
+        best = len(paras) - 1
+
+    sep = len(_MERGE_SECTION_ELISION)
+    total = len(heading_line) + 1 + len(paras[best]) + 2 * sep
+    if total > budget:
+        head = f"{heading_line}{_MERGE_SECTION_ELISION}{paras[best]}"
+        return head[:budget]
+
+    lo = hi = best
+    while True:
+        grew = False
+        if lo > 0 and total + len(paras[lo - 1]) + 2 <= budget:
+            lo -= 1
+            total += len(paras[lo]) + 2
+            grew = True
+        if hi < len(paras) - 1 and total + len(paras[hi + 1]) + 2 <= budget:
+            hi += 1
+            total += len(paras[hi]) + 2
+            grew = True
+        if not grew:
+            break
+
+    lead = _MERGE_SECTION_ELISION if lo > 0 else "\n"
+    tail = _MERGE_SECTION_ELISION.rstrip("\n") if hi < len(paras) - 1 else ""
+    return f"{heading_line}{lead}" + "\n\n".join(paras[lo : hi + 1]) + tail
 
 
 def _select_merge_section(
@@ -2812,7 +2915,7 @@ def _select_merge_section(
     # entity (the common case) must still be scored on the rest of its
     # content, not swamped by a match every section shares equally.
     obs_tokens = _match_tokens(action.observations) - _match_tokens(action.name)
-    outline = "\n".join(f"- {heading}" for heading, _ in sections if heading)
+    outline = _build_section_outline(sections)
 
     best_idx = -1
     best_score = 0
@@ -2825,13 +2928,34 @@ def _select_merge_section(
 
     target_text = sections[best_idx][1] if best_idx >= 0 else sections[-1][1]
 
-    if not outline:
-        return target_text, True
-    return (
-        f"[Page section outline — all headings on this page, for context]\n"
-        f"{outline}\n\n"
-        f"{target_text}"
-    ), True
+    if outline:
+        preamble = f"[Page section outline — headings on this page, for context]\n{outline}\n\n"
+    else:
+        preamble = ""
+
+    # Budget the selected section against what the prompt will actually send,
+    # so neither the outline nor an oversized section can push the other out
+    # of the window (see _build_section_outline / _narrow_section).
+    target_text = _narrow_section(
+        target_text, obs_tokens, max(0, _MAX_EXISTING_BODY_CHARS - len(preamble))
+    )
+    candidate = f"{preamble}{target_text}"
+
+    # Restore the invariant existing_body_needs_full_echo documents ("the check
+    # is over the same truncated window the prompt actually sends"), which
+    # section-scoping would otherwise break. That guard only scans the FIRST
+    # _MAX_EXISTING_BODY_CHARS of the body for a literal fence marker, because
+    # before this issue only that prefix was ever fenced. Selection can now
+    # reach a section from anywhere in the body, so a fence-forging marker
+    # sitting past the window could reach the prompt unchecked — and this text
+    # is fenced with defang=False (anchor-safety requires it), so nothing
+    # downstream would neutralise it. Re-check what we actually assembled; if
+    # it carries the marker, decline to scope and hand back the full body,
+    # which the caller's guard has already cleared for its sent prefix.
+    if contains_tag(candidate, _EXISTING_PAGE_TAG):
+        return existing_body, False
+
+    return candidate, True
 
 
 def tier3_merge_params(
@@ -2875,6 +2999,21 @@ def tier3_merge_params(
             len(scoped_body),
             _MAX_EXISTING_BODY_CHARS,
             _MAX_EXISTING_BODY_CHARS,
+        )
+
+    if was_scoped:
+        log.info(
+            "%s page=%s source=%s sent_chars=%d full_body_chars=%d sections=%d — "
+            "patch-mode dedup sees only the selected section; an observation "
+            "re-confirming content in an unsent section may land as a spurious "
+            "near-duplicate (athenaeum#1181). Anchored ops still apply against "
+            "the full body, so no content is at risk.",
+            MERGE_SECTION_SCOPED_LOG_PREFIX,
+            action.name,
+            source_ref,
+            len(scoped_body),
+            len(existing_body),
+            len(_split_into_sections(existing_body)),
         )
 
     if usage is not None:
