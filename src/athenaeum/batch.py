@@ -1605,7 +1605,18 @@ def process_batch_run(
                         BatchRequest(
                             custom_id=cid,
                             params=tier3_merge_params(
-                                action, existing_body, st.raw.ref, config=config
+                                action,
+                                existing_body,
+                                st.raw.ref,
+                                config=config,
+                                # Issue athenaeum#1181/#1184: this IS the one call
+                                # site that builds the batched patch-mode
+                                # request, so it is also the only place that
+                                # can record its (now section-scoped) echoed
+                                # chars — batch mode had never called
+                                # record_merge_echo for this request at all
+                                # before, unlike the sync transport.
+                                usage=usage,
                             ),
                         )
                     )
