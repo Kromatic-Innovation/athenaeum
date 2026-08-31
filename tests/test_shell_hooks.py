@@ -156,6 +156,59 @@ class TestSessionStartRecall:
         index_db = tmp_path / ".cache" / "athenaeum" / "wiki-index.db"
         assert index_db.is_file()
 
+    def test_config_env_and_cache_dir_are_owner_only(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#1179: the cache dir and config.env (which can hold
+        ANTHROPIC_API_KEY) must never be group/world-accessible."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        config_env = cache_dir / "config.env"
+        assert oct(cache_dir.stat().st_mode & 0o777) == oct(0o700)
+        assert oct(config_env.stat().st_mode & 0o777) == oct(0o600)
+
+    def test_preexisting_loose_permissions_are_hardened(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#1179: `umask 077` in the hook only governs newly
+        *created* files. Both writers in the hook open config.env with
+        truncate-write ('w' / shell '>'), which does NOT reset the mode of
+        a file that already exists — so a stale config.env left over with
+        a loose mode (a manual `touch`, a pre-hardening install, an odd
+        platform default) must still be brought back to 0600 on the very
+        next run, not left as-is."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        cache_dir.chmod(0o755)
+        config_env = cache_dir / "config.env"
+        config_env.write_text("AUTO_RECALL=true\nSEARCH_BACKEND=fts5\n")
+        config_env.chmod(0o644)
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        assert oct(cache_dir.stat().st_mode & 0o777) == oct(0o700)
+        assert oct(config_env.stat().st_mode & 0o777) == oct(0o600)
+
     def test_exits_clean_when_wiki_missing(self, tmp_path: Path) -> None:
         _require("bash")
         env = {

@@ -116,6 +116,16 @@ if [ "$_read_config_ok" = false ]; then
   } > "$CONFIG_ENV"
 fi
 
+# Re-assert the file mode explicitly (athenaeum#1179): `umask 077` above only
+# governs permissions at file *creation*. Both writers above use `open(...,
+# 'w')` / shell `>` redirection, which TRUNCATE rather than recreate an
+# existing file — so if config.env already exists with a looser mode (a
+# stale copy from before this hardening, a manual `touch`, or a platform
+# where umask doesn't apply as expected), the umask never fixes it. This
+# `chmod` makes the 0600 guarantee unconditional on every run, independent
+# of the file's prior state.
+chmod 600 "$CONFIG_ENV"
+
 # shellcheck disable=SC1090
 source "$CONFIG_ENV"
 
@@ -133,6 +143,10 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ] && command -v op >/dev/null 2>&1; then
     # `${CONFIG_ENV}.tmp` could have been pre-created as a symlink or
     # read in the gap between open() and chmod().
     tmp_env=$(mktemp "${CACHE_DIR}/config.env.XXXXXX")
+    # Belt-and-suspenders: mktemp's mkstemp() already creates the file at
+    # 0600, but assert it explicitly rather than relying on that being true
+    # on every mktemp implementation this hook might run under.
+    chmod 600 "$tmp_env"
     grep -v '^ANTHROPIC_API_KEY=' "$CONFIG_ENV" > "$tmp_env" 2>/dev/null || true
     printf 'ANTHROPIC_API_KEY=%s\n' "$_fetched_key" >> "$tmp_env"
     mv "$tmp_env" "$CONFIG_ENV"
