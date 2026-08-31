@@ -9,6 +9,189 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum.erasure` (athenaeum#985) wired into the production write and
+  recall paths (athenaeum#1116) — S3 of the athenaeum#985 slice, mirroring
+  `athenaeum.sensitivity`'s S1a/S1b -> S3 migration (athenaeum#992).**
+  `athenaeum.erasure` shipped fully implemented and fully tested with zero
+  production callers; this closes that gap with three wirings, each proven
+  by a round-trip test through the real write/read path (see
+  `tests/test_erasure_wiring.py`):
+  - `athenaeum.merge`'s C3 compile write loop now calls
+    `classify_inference_taint` on every compiled page and routes a page
+    whose `## Inference` block basis cites erasure-class content to the
+    off-corpus surface (athenaeum#984) instead of the ordinary corpus.
+  - `athenaeum.answers`'s `ingest_answers` re-ingestion path now calls
+    `classify_by_provenance` on a ratified answer's source and, when it
+    traces to an off-corpus recall, applies `off_corpus_recall_source`'s
+    convention and routes the re-ingested answer off-corpus — never
+    re-guessing the taint from content.
+  - `athenaeum.decay_sweep` now consults the active retention pack
+    (`reconcile_bucket_daily_with_pack`) for a page's `(memory_class,
+    data_class)` before falling back to its independent `bucket: daily` /
+    `valid_until` logic (`docs/provenance-shape.md` §8.8), gated on an
+    explicit `data_class` frontmatter field — no shipped write path stamps
+    one yet, so this is a no-op on any corpus produced by shipped code
+    today.
+  - **Reversible default:** when no off-corpus surface is configured, all
+    three wirings keep their pre-athenaeum#1116 destination (the ordinary
+    corpus) rather than failing closed, but emit a structured, greppable
+    `erasure-taint-not-routed` warning naming the taint and the page.
+
+### Removed
+
+- **`athenaeum bounce-divergence` and `athenaeum do-not-email-divergence` CLI
+  subcommands (athenaeum#1111).** Both were fully superseded by `athenaeum
+  surface-divergence --field {bounced,do_not_email}` (athenaeum#963): running
+  either superseded command and the generalized equivalent against the live
+  store produced byte-identical JSON, and per architectural guidance
+  (`docs/north-star.md` §2.2, "no per-writer entry points") the per-field
+  duplicates should not have kept existing once the generalization landed.
+  `bounce-divergence` had zero remaining callers; `do-not-email-divergence`
+  had exactly one — a redundant third invocation in cron-fleet's nightly
+  `pre-dawn-sweep.sh` Step 3b that duplicated the sweep's own
+  `surface-divergence --field do_not_email` invocation and was removed in
+  the same change. The parser registrations and the `_cmd_bounce_divergence.py`
+  / `_cmd_do_not_email_divergence.py` CLI-wiring modules are removed from
+  `src/athenaeum/cli.py`; the underlying `athenaeum.bounce_divergence` and
+  `athenaeum.do_not_email_divergence` library modules are UNCHANGED and stay
+  in place — `athenaeum.surface_divergence` still wraps their
+  compute/report/render/dict implementations verbatim. The CLI-level tests
+  for the removed commands (`tests/test_bounce_divergence.py::TestCli`,
+  `tests/test_do_not_email_divergence.py::TestCli`) are removed; their
+  coverage already existed, or was added, at the surviving command's own
+  `tests/test_surface_divergence.py::TestCli` / `TestAllowance`.
+
+### Fixed
+
+- **`athenaeum ingest` held the run lock without heartbeating, so
+  `break_stale_after` could break a healthy long run (athenaeum#1230).** Only
+  `librarian.py` refreshed the lock's heartbeat; the ingest path did not, so
+  `heartbeat_age_seconds` equalled its total wall time — a long-running,
+  correctly-progressing ingest looked progressively more "wedged" the longer
+  it ran, and a contending `acquire` could auto-break it under
+  `break_stale_after` (default 6h). Fixed by threading `lock.heartbeat` into
+  `ingest()`/`session_end()` exactly like `athenaeum run`'s athenaeum#526
+  (H10) precedent — both already forward `**run_kwargs` into `run()`, which
+  ticks the heartbeat at phase/per-file boundaries. A full sweep of every
+  `RunLock` acquisition site in `src/athenaeum/` (recorded in
+  `athenaeum.runlock`'s module docstring) found two more holders with the
+  same latent gap and fixed both: `athenaeum drain` (an explicitly unbounded,
+  batch-mode drain that block-polls the Anthropic Batch API for potentially
+  hours, with one lock held across the whole multi-window loop) and
+  `athenaeum merges recompare --apply` (an unbounded-proposal-count,
+  per-pair LLM classify loop that already received the caller's lock but
+  never refreshed it). Every other acquisition site was audited and found
+  correctly bounded (deterministic, or capped well under the 6h default) —
+  see the docstring table for the full per-site reasoning. Regression tests:
+  `tests/test_runlock.py::TestIngestPathHeartbeatWiring`,
+  `tests/test_runlock.py::TestIngestPathLongRunSurvivesContendedBreak`,
+  `tests/test_recompare.py::TestApplyHeartbeatsTheLock`, and
+  `tests/test_drain.py::TestRunDrainLoop::test_heartbeat_is_threaded_into_every_window`.
+
+- **`athenaeum pii-restore` silently reported a false `TOTAL RESTORABLE = 0`
+  when the knowledge root's git history was unreachable (athenaeum#1228).**
+  `_history_with_paths()` returned an empty list on ANY non-zero `git log`
+  exit -- including "there is no repository here" -- indistinguishable from
+  a page genuinely having no pre-migration history, so
+  `_plan_anchored_restore()` forced every marker into
+  `no-pre-image:page-created-after-migration` and the dry-run report showed
+  a clean, plausible-looking `TOTAL RESTORABLE = 0` regardless of what was
+  actually recoverable. This produced a wrong published conclusion on
+  athenaeum#691 when run against an environment whose knowledge root had no
+  `.git`. Fixed by having `_history_with_paths()` raise the new
+  `GitHistoryUnavailableError` on a non-zero git exit (never conflating it
+  with a real empty-but-successful history), routing every marker that hits
+  it into a new, distinctly-named `git-history-unavailable` residue reason,
+  and having `athenaeum pii-restore` refuse to print a dry-run/apply report
+  at all when `RestorePlan.git_history_unavailable_count()` is non-zero --
+  exiting `1` with a loud stderr explanation instead. The legitimate
+  `no-pre-image:page-created-after-migration` bucket is unchanged for a page
+  that genuinely has no pre-image in a healthy repository. Regression
+  tests: `tests/test_pii_restore_tool.py::test_history_with_paths_raises_when_git_itself_fails`,
+  `::test_build_restore_plan_reports_git_history_unavailable_not_false_residue`,
+  `::test_reshaped_page_still_lands_in_legit_bucket_with_real_git_history`,
+  and `tests/test_cmd_pii_restore.py::test_missing_git_repository_fails_loudly_instead_of_reporting_false_zero`.
+
+- **`athenaeum surface-divergence --json`'s `diverged` field could contradict
+  its own exit code (athenaeum#1111).** The wrapped library modules'
+  `report_as_dict` reports `diverged` as true whenever EITHER direction of
+  the two-surface comparison is non-empty, but the command's exit code only
+  fails on the field's declared NOT-tolerated direction
+  (`exceeds_allowance`) — so a wiki-only `do_not_email` mark (the design's
+  own only legal steady state, athenaeum#1039) exited `0` while the JSON
+  body read `"diverged": true`, and the same shape affected `bounced`'s
+  tolerated wiki-only-entry case. A consumer reading `diverged` instead of
+  the exit code got the wrong answer on the design's own legal state. Fixed
+  by having `athenaeum._cmd_surface_divergence` override `diverged` in its
+  JSON output to track `exceeds_allowance` — the same predicate driving the
+  exit code — so the two can never disagree; a direct caller of the wrapped
+  modules' own `report_as_dict` (unchanged) still sees their original,
+  broader both-directions semantics. Regression tests:
+  `tests/test_surface_divergence.py::TestCli::test_json_diverged_do_not_email_wiki_only_mark_matches_exit_code`
+  and `::test_json_diverged_bounced_wiki_only_entry_matches_exit_code`.
+
+- **A populated athenaeum#453 source-handle key that the deterministic Tier-0 path
+  cannot place could still fall through to Tier 2/3 and compile with the
+  handle silently folded into page-body prose instead of frontmatter, so
+  `registry.json` was left silently missing it and nothing reported a
+  failure (athenaeum#1109).** athenaeum#486/#491/#692 already taught the deterministic
+  `tier0_handle_upsert`/`tier0_passthrough` paths to place a populated handle
+  as frontmatter without ever reaching the LLM tiers, and athenaeum#845 pinned the
+  gate's existing "decline cleanly, warn, fall through" contract for every
+  case those paths cannot place a handle onto (no uid and no existing entity
+  by that name; a name that resolves to a non-entity or cross-type page).
+  The residual gap: a fallthrough still proceeds to Tier 2/3, which has no
+  schema awareness of the handle keys (`athenaeum.registry.SOURCE_HANDLE_KEYS`) —
+  so the raw still compiled, just with the WARNING as the only trace. Fixed
+  by a new backstop, `athenaeum.registry.assert_handles_placed`, called from
+  `athenaeum.librarian._apply_tier3_results` immediately before any write:
+  it collects the raw's own populated source handles and refuses the ENTIRE
+  write batch (no partial write) with a new
+  `athenaeum.registry.UnplaceableSourceHandleError` if none of the
+  pages about to be written carry them as frontmatter. The error propagates
+  uncaught out of `process_one`, so the raw file is left on disk untouched
+  and picked up by the sweep loop's existing per-file failure/stuck-file
+  ledger — the same "fails loudly, retried next run" contract every other
+  Tier-2/3 processing failure already gets — rather than a warning-only
+  fallback that still let the defect through. The over-budget partial-progress
+  write path (athenaeum#994) deliberately does not apply this check, to preserve
+  its guarantee that already-computed partial progress always lands
+  durably. No hardcoded second copy of the handle-key set was added — the
+  check reads `registry.py`'s existing `SOURCE_HANDLE_KEYS`/`collect_handles`,
+  the single source of truth the deterministic Tier-0 paths already use.
+  Regression tests: `tests/test_librarian.py::TestUnplaceableSourceHandleFailsLoudly`
+  (the new-entity-with-no-uid case that previously compiled silently, plus a
+  control proving a normally-placed handle does not raise);
+  `tests/test_registry.py::test_ac5_hand_applied_handles_survive_a_recompile`
+  and `::test_ac5_unrelated_reintake_does_not_disturb_hand_applied_handles`
+  (fixture standing in for the operator's private-store hand-correction this
+  issue names, since that store is not reachable from this repo or its CI).
+
+### Added
+
+- **Wiki-dedupe proposals and suppressions now carry durable embedder +
+  reason attribution (athenaeum#1142).** athenaeum#1032 stamped `embedder=` onto
+  suppression log lines and the raw-intake clusters JSONL, but never
+  reached `wiki/_pending_merges.md` or any durable record of a SUPPRESSED
+  wiki-dedupe cluster — a suppressed cluster never becomes a proposal, and
+  suppression was a one-shot log line, so a question as simple as "which
+  embedder produced this cluster, and why was it suppressed?" needed a live
+  operator host-read (the exact cost that produced two independently wrong
+  diagnostic conclusions on athenaeum#1005). `write_pending_merge` (and
+  `render_block` / `_parse_block` / `PendingMerge`) gained an optional
+  `embedder` field, rendered as a `**Embedder**:` block line only when
+  supplied — `wiki_dedupe.py`'s write path now passes the cluster's
+  recorded embedder; `merge.py`'s two raw-intake call sites are untouched
+  and render byte-identical blocks (confirmed: no consumer of
+  `_pending_merges.md` parses it positionally — every reader goes through
+  `parse_pending_merges`'s labeled-block parser). A new sidecar,
+  `wiki/_wiki_dedupe_suppressions.jsonl`, durably records every cluster the
+  athenaeum#400/#421 over-cluster gate suppresses this run (cluster id,
+  reason, embedder, similarity shape, sources, timestamp) — following the
+  SAME convention `raw/_librarian-clusters.jsonl` already uses (canonical
+  file replaced each run + one timestamped rotation, pruned to the
+  existing `librarian.rotation_retention` window) rather than an unbounded
+  append-only ledger.
 - **Batch spend reservation and settlement — `ceiling_tripped` is no longer
   blind to committed in-flight cost (athenaeum#1147).**
   `TokenUsage.add_batch_tokens` fires at COLLECT, so under the async
@@ -784,6 +967,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Wiki-page dedup no longer collapses unrelated pages that merely share a
+  lede (athenaeum#1140).** chromadb's default ONNX MiniLM embedding function
+  hard-codes a 256-token truncation window, and the wiki-dedupe pass
+  (`wiki_dedupe.py`) embedded whole page bodies through it — for the
+  majority of eligible pages (measured: 57% of a 2,513-page corpus exceed
+  the window at the corpus's ~1,200-character equivalent), the stored
+  vector represented only the page's lede, and this corpus's pages write a
+  structurally uniform lede, so unrelated pages with divergent bodies
+  collapsed into dense cliques (the persistent `wiki-c0a81d69`-class
+  degenerate clusters tracked on athenaeum#1005). `_resolve_wiki_embeddings`
+  now chunks each candidate page's body into `_CHUNK_CHARS` (900)
+  character pieces before embedding and mean-pools (new
+  `athenaeum.vecmath.mean_pool`) the resulting per-chunk vectors into one
+  representation per page, so content past the first chunk reaches the
+  final vector instead of being silently discarded. Scoped to the
+  wiki-dedupe embedding-resolution path only — `athenaeum.search.embed_texts`
+  itself is unchanged, so `fingerprint.py`, `tiers.py`, `_cmd_curate.py`,
+  and the raw-intake `clusters.py` embedding path are unaffected.
+  `librarian.cluster_threshold` is unchanged (a permissive threshold was
+  independently ruled out as the cause). See the PR body for the full
+  before/after corpus measurement and re-embedding cost estimate.
 - **Shape-rule evaluation now reaches one level below a configured
   `recall.extra_intake_roots` entry, so a `preserve` rule targeting
   hestia's lane logs can finally match (athenaeum#1096, closes the second

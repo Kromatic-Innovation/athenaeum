@@ -175,6 +175,7 @@ def run_drain(
     run_fn: Callable[..., int] | None = None,
     backlog_fn: Callable[[Path], int] | None = None,
     now: datetime | None = None,
+    heartbeat: Callable[[], None] | None = None,
 ) -> int:
     """Loop intake windows through the API+batch path until the backlog drains.
 
@@ -188,6 +189,17 @@ def run_drain(
 
     *run_fn* / *backlog_fn* are injectable seams for testing; they default to
     :func:`athenaeum.librarian.run` and a live ``discover_raw_files`` count.
+
+    *heartbeat* (issue athenaeum#1230) is the caller's already-acquired run
+    lock's :meth:`~athenaeum.runlock.RunLock.heartbeat`, forwarded straight
+    into each window's ``run_fn`` call exactly like ``cmd_run``'s athenaeum#526
+    (H10) fix does for the nightly path. This loop deliberately forces
+    ``max_runtime=0`` (batch mode block-polls the Anthropic Batch API, which
+    can itself take hours) and the CLI wrapper holds ONE run lock across the
+    ENTIRE multi-window drain — of every acquisition site in this codebase,
+    an unbounded batch drain is the one most likely to actually exceed
+    ``break_stale_after``'s 6h default, so it must heartbeat even though the
+    original athenaeum#1230 report was about ``ingest``, not ``drain``.
     """
     from athenaeum.librarian import EXIT_GRACEFUL_PARTIAL, discover_raw_files
     from athenaeum.librarian import run as librarian_run
@@ -257,6 +269,11 @@ def run_drain(
             max_runtime=0,
             batch_mode=True,
             install_signal_handlers=False,
+            # Issue athenaeum#1230: see this function's docstring — thread the
+            # run lock's heartbeat into every window so a multi-hour batch
+            # drain's heartbeat age tracks progress, not the drain's total
+            # wall time.
+            heartbeat=heartbeat,
         )
         window += 1
 

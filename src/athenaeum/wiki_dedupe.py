@@ -54,7 +54,12 @@ Design (see PR body for the full rationale):
   not have to duplicate the cosine/complete-linkage code to route around
   that mismatch. When chromadb is unavailable, falls back to the same
   hashing-trick embedder ``clusters.py`` already uses for its own
-  no-deps degradation path (imported, not duplicated).
+  no-deps degradation path (imported, not duplicated). Issue athenaeum#1140:
+  each page body is chunked (:func:`_chunk_page_text`) and its chunks'
+  vectors mean-pooled (:func:`athenaeum.vecmath.mean_pool`) before
+  reaching the clusterer -- see :func:`_resolve_wiki_embeddings` -- so
+  chromadb's default embedder's 256-token truncation window no longer
+  discards everything past a page's lede.
 - Draft synthesis reuses :func:`athenaeum.merge.synthesize_body` (C3's
   deterministic concatenate-with-paragraph-dedupe strategy) and
   :func:`athenaeum.merge.derive_topic_slug` (C3's topic-slug heuristic) —
@@ -84,11 +89,14 @@ above); it is a plain in-function convenience import.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.authority import is_pointer_stub
 from athenaeum.clusters import (
     EMBEDDER_CHROMADB_DEFAULT,
@@ -96,7 +104,9 @@ from athenaeum.clusters import (
     Cluster,
     _fallback_embeddings,
     cluster_auto_memory_files,
+    prune_cluster_rotations,
     resolve_cluster_threshold,
+    resolve_rotation_retention,
 )
 from athenaeum.config import load_config, resolve_heartbeat_interval
 from athenaeum.merge import (
@@ -114,6 +124,7 @@ from athenaeum.pii import is_pii_flagged
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.search import embed_texts
 from athenaeum.storage import is_merge_eligible
+from athenaeum.vecmath import mean_pool
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +147,83 @@ EmbeddingProvider = Callable[[list[str]], "list[list[float]] | None"]
 # ``run_shadow_linkage`` call); fires at most once per process so a run that
 # repeatedly hits the no-chromadb path doesn't spam the log.
 _WIKI_FALLBACK_WARNED = False
+
+# Issue athenaeum#1142 (AC2): durable sidecar ledger for wiki-dedupe clusters
+# SUPPRESSED by the athenaeum#400/#421 degenerate-over-cluster gate
+# (``_merge_proposal_suppression_reason``) — today the ONLY trace of a
+# suppression is a one-shot log.info line (see ``propose_wiki_page_merges``
+# below), and a suppressed cluster never becomes a ``_pending_merges.md``
+# proposal, so nothing durable in the store can answer "which embedder
+# produced cluster X, and why was it suppressed?" without a live host log
+# read. Lives alongside ``_pending_merges.md`` under ``wiki/`` — the natural
+# home for a wiki-dedupe-pass artifact, per the issue's own suggestion.
+DEFAULT_WIKI_SUPPRESSIONS_FILENAME = "_wiki_dedupe_suppressions.jsonl"
+# Issue athenaeum#1140 (AC1): chromadb's default ONNX MiniLM embedding function
+# hard-codes ``tokenizer.enable_truncation(max_length=256)`` — content past
+# that window is invisible to the embedder, and the corpus writes
+# structurally uniform ledes, so truncation-exposed pages collapse into
+# dense, unrelated cliques (full measurement trail in the issue). Chunking
+# each page body into pieces no larger than ``_CHUNK_CHARS`` characters
+# before embedding — then mean-pooling the per-chunk vectors
+# (:func:`athenaeum.vecmath.mean_pool`) — lets body content past the first
+# chunk reach the final vector instead of being silently discarded.
+#
+# ``_CHUNK_CHARS`` is a CHARACTER budget, deliberately NOT derived from the
+# installed chromadb package's token-truncation constant (the issue's own
+# "Not verified" section warns that constant was read from the installed
+# package, not confirmed stable across chromadb versions, and this
+# module's remedy should not assume it is). Measured against the live
+# ``/knowledge`` corpus (issue athenaeum#1140 PR): the empirical char-length at
+# which ~57% of eligible pages are exceeded (matching the issue's own 57%
+# figure) is ~1,200 characters. 900 is chosen with a ~300-character margin
+# below that measured boundary so a chunk is never truncated by the real
+# tokenizer even if the exact 256-token constant drifts modestly across a
+# chromadb upgrade — the fix degrades gracefully (a slightly-tighter
+# tokenizer would still cut chunks well before their content is
+# meaningfully lost) rather than silently reintroducing the defect. Not
+# exposed as a config knob (issue athenaeum#1140's own guidance: "do not add a
+# knob you cannot test") — this constant is a technical implementation
+# detail of the chunking strategy, not a tunable policy like
+# ``cluster_threshold``.
+_CHUNK_CHARS = 900
+
+
+def _chunk_page_text(text: str, *, chunk_chars: int = _CHUNK_CHARS) -> list[str]:
+    """Split *text* into whitespace-joined chunks of at most *chunk_chars*.
+
+    Word-based accumulation (never splits inside a word): words are packed
+    into a chunk until the next word would push it over ``chunk_chars``,
+    then a new chunk starts. Internal whitespace (including newlines) is
+    normalized to single spaces — irrelevant for an embedding call, which
+    only reads the token stream, not the page's original formatting.
+
+    Always returns at least one chunk (``[""]`` for empty/whitespace-only
+    input) so a caller can zip chunks 1:1 back to the file that produced
+    them without a length mismatch. A page whose content already fits in
+    one chunk returns a single-element list containing exactly that page's
+    normalized full text — i.e. this is a no-op for any page short enough
+    that the pre-athenaeum#1140 whole-page embedding never truncated it, which is
+    exactly what keeps every existing (short-body) test fixture's stub
+    embedding-provider call unaffected by this change.
+    """
+    words = text.split()
+    if not words:
+        return [""]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for word in words:
+        added_len = len(word) + (1 if current else 0)
+        if current and current_len + added_len > chunk_chars:
+            chunks.append(" ".join(current))
+            current = [word]
+            current_len = len(word)
+        else:
+            current.append(word)
+            current_len += added_len
+    if current:
+        chunks.append(" ".join(current))
+    return chunks or [""]
 
 
 def discover_wiki_dedupe_candidates(
@@ -253,13 +341,40 @@ def _resolve_wiki_embeddings(
     or every candidate falls back together), so
     :func:`athenaeum.clusters.cluster_auto_memory_files` can record which
     embedder produced each formed cluster's vectors.
+
+    Issue athenaeum#1140 (AC1): each candidate's body is split into
+    :data:`_CHUNK_CHARS`-sized chunks (:func:`_chunk_page_text`) BEFORE
+    calling ``provider`` — a single batched call embeds every chunk from
+    every candidate — and each candidate's final vector is the
+    mean-pooled, re-normalized combination of its own chunks'
+    vectors (:func:`athenaeum.vecmath.mean_pool`). This is scoped to the
+    wiki-dedupe path only: :func:`athenaeum.search.embed_texts` itself is
+    NOT modified, so every other caller of that shared function
+    (:mod:`athenaeum.fingerprint`, :mod:`athenaeum.tiers`,
+    :mod:`athenaeum.clusters`'s own raw-intake embedding resolution,
+    :mod:`athenaeum._cmd_curate`) is byte-for-byte unaffected — see the PR
+    body for the blast-radius survey. A page short enough to fit in one
+    chunk is embedded exactly as before (one call, one vector,
+    mean-pool-of-one is a re-normalize no-op), so this is a pure ADDITION
+    of body content for the long-page case, not a behavior change for the
+    short-page case.
+
+    The fallback path (:func:`athenaeum.clusters._fallback_embeddings`,
+    engaged when ``provider`` returns ``None``/a mismatched-length result)
+    is deliberately NOT chunked — it is a hashing-trick bag-of-words
+    embedder with no token window to truncate against (dead end #3 in the
+    issue: 16,083/16,083 production wiki suppressions were already
+    ``chromadb-default``, never ``fallback-hashing``), so chunking it would
+    add cost with no defect to fix.
     """
     if not files:
         return {}, {}
     provider = embedding_provider or embed_texts
-    texts = [am.content for am in files]
-    vectors = provider(texts)
-    if vectors is None or len(vectors) != len(files):
+
+    chunk_lists = [_chunk_page_text(am.content) for am in files]
+    flat_chunks = [chunk for chunks in chunk_lists for chunk in chunks]
+    vectors = provider(flat_chunks)
+    if vectors is None or len(vectors) != len(flat_chunks):
         # Issue athenaeum#1032: one-time WARNING — this fallback used to engage with
         # no log call at all, so athenaeum#1005's over-cluster diagnosis had no way to
         # tell from run artifacts whether the hashing-trick embedder (rather
@@ -268,7 +383,16 @@ def _resolve_wiki_embeddings(
         fallback = _fallback_embeddings(files)
         sources = {str(am.path): EMBEDDER_FALLBACK_HASHING for am in files}
         return fallback, sources
-    embeddings = {str(am.path): list(map(float, vec)) for am, vec in zip(files, vectors)}
+
+    embeddings: dict[str, list[float]] = {}
+    offset = 0
+    for am, chunks in zip(files, chunk_lists):
+        n_chunks = len(chunks)
+        chunk_vectors = [
+            list(map(float, vec)) for vec in vectors[offset : offset + n_chunks]
+        ]
+        offset += n_chunks
+        embeddings[str(am.path)] = mean_pool(chunk_vectors)
     sources = {str(am.path): EMBEDDER_CHROMADB_DEFAULT for am in files}
     return embeddings, sources
 
@@ -335,6 +459,55 @@ def _member_bodies_for_cluster(
             continue
         triples.append((WIKI_ORIGIN_SCOPE, am.path.name, am.content))
     return triples
+
+
+def _write_wiki_suppressions_report(
+    rows: list[dict[str, Any]],
+    wiki_root: Path,
+    *,
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    rotate: bool = True,
+) -> Path:
+    """Persist THIS RUN's suppressed wiki-dedupe clusters durably (athenaeum#1142 AC2).
+
+    Mirrors :func:`athenaeum.clusters.write_cluster_report`'s convention
+    deliberately, rather than inventing a new one (issue athenaeum#1142's own
+    guidance: follow how the existing operational ledgers in this repo
+    handle retention) — the CANONICAL file
+    (``wiki/_wiki_dedupe_suppressions.jsonl``) is fully REPLACED on every
+    call (current-run state, not an accumulating log), and one timestamped
+    ``<stem>-<UTC-iso>.jsonl`` rotation sibling is written alongside it so
+    history isn't lost between runs. Rotations are pruned to the SAME
+    ``librarian.rotation_retention`` window (env ``ATHENAEUM_ROTATION_RETENTION``
+    > yaml > default 30) that already governs
+    ``raw/_librarian-clusters.jsonl``'s rotations — one retention policy for
+    every JSONL cluster/suppression report in the store, not a second knob.
+    This is the AC4 retention answer stated in code: bounded, self-pruning,
+    never unbounded-append (contrast the sibling athenaeum#1229 item, fixing
+    exactly the failure mode — a 1.4M-row unbounded ledger — an
+    unbounded design here would eventually reproduce).
+
+    Called even when *rows* is empty, so the canonical file always reflects
+    "this run suppressed nothing" rather than going stale from the last run
+    that did.
+    """
+    output_path = wiki_root / DEFAULT_WIKI_SUPPRESSIONS_FILENAME
+    payload_lines = [json.dumps(row, sort_keys=True) for row in rows]
+    text = "\n".join(payload_lines) + ("\n" if payload_lines else "")
+
+    if rotate:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        timestamped = output_path.with_name(
+            f"{output_path.stem}-{ts}{output_path.suffix}"
+        )
+        atomic_write_text(timestamped, text)
+
+    atomic_write_text(output_path, text)
+
+    retention = resolve_rotation_retention(knowledge_root, config)
+    prune_cluster_rotations(output_path, keep=retention)
+    return output_path
 
 
 def propose_wiki_page_merges(
@@ -412,10 +585,19 @@ def propose_wiki_page_merges(
     heartbeat.start()
     if not clusters:
         heartbeat.done()
+        # Issue athenaeum#1142 AC2/AC4: the suppressions ledger reflects THIS
+        # run's state even when there was nothing to cluster at all — a
+        # dry_run preview still touches no durable state, matching every
+        # other write in this function.
+        if not dry_run:
+            _write_wiki_suppressions_report(
+                [], wiki_root, knowledge_root=knowledge_root, config=resolved_config
+            )
         return []
 
     merges_path = wiki_root / "_pending_merges.md"
     proposals: list[dict[str, Any]] = []
+    suppressed_rows: list[dict[str, Any]] = []
 
     for cluster in clusters:
         heartbeat.tick(cluster.cluster_id)
@@ -494,6 +676,25 @@ def propose_wiki_page_merges(
                 cluster.embedder,
                 len(sources),
             )
+            # Issue athenaeum#1142 AC2: durably record what the log line above
+            # only states once, in a rotating log an operator may never see
+            # again — reason, embedder, and the shape numbers that produced
+            # the suppression, keyed by cluster id.
+            suppressed_rows.append(
+                {
+                    "cluster_id": cluster.cluster_id,
+                    "n_sources": len(sources),
+                    "reason": suppression,
+                    "embedder": cluster.embedder,
+                    "mean_similarity": float(cluster.centroid_score),
+                    "min_pairwise_score": float(cluster.min_pairwise_score),
+                    "cluster_threshold": float(resolved_threshold),
+                    "sources": list(sources),
+                    "suppressed_at": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                }
+            )
             continue
 
         # Issue athenaeum#433: type-compatibility precheck. A cluster spanning >1
@@ -563,6 +764,10 @@ def propose_wiki_page_merges(
             rationale=rationale,
             draft_merged_body=draft_body,
             confidence=cluster.centroid_score,
+            # Issue athenaeum#1142 AC1: carries the same embedder identity athenaeum#1032
+            # already stamps on the log line into the durable proposal
+            # itself.
+            embedder=cluster.embedder,
         )
         proposals.append(proposal)
         log.info(
@@ -572,4 +777,12 @@ def propose_wiki_page_merges(
         )
 
     heartbeat.done()
+    # Issue athenaeum#1142 AC2/AC4: one snapshot of THIS run's suppressions,
+    # replacing the canonical file every real run (never touched on
+    # dry_run) — see _write_wiki_suppressions_report's docstring for the
+    # retention story.
+    if not dry_run:
+        _write_wiki_suppressions_report(
+            suppressed_rows, wiki_root, knowledge_root=knowledge_root, config=resolved_config
+        )
     return proposals

@@ -212,25 +212,17 @@ def parse_golden(content: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _source_file(meta: PromptMeta) -> Path:
-    module = importlib.import_module(meta.module)
-    if not module.__file__:  # pragma: no cover - namespace package guard
-        raise LookupError(f"{meta.module} has no __file__")
-    return Path(module.__file__)
-
-
-def _source_line(meta: PromptMeta) -> int:
-    """1-based line of the constant's module-level assignment (computed, so it can't rot)."""
-    text = _source_file(meta).read_text(encoding="utf-8")
-    pattern = re.compile(rf"^{re.escape(meta.constant)}\s*[:=]", re.MULTILINE)
-    match = pattern.search(text)
-    if match is None:
-        raise LookupError(f"could not locate {meta.constant} in {meta.module}")
-    return text.count("\n", 0, match.start()) + 1
-
-
 def _display_path(meta: PromptMeta) -> str:
-    """Canonical repo-relative path, derived from the module name (install-location independent)."""
+    """Canonical repo-relative path, derived from the module name (install-location independent).
+
+    Deliberately has no line number (issue athenaeum#1174 -> athenaeum#1193): a line number
+    shifts whenever any line above the constant is added or removed, so it goes
+    stale on edits that touch no prompt text, and it is the one part of this
+    file that reliably conflicts between two branches editing the same module
+    in different places. The constant name plus the ``sha256:`` line already
+    identify a prompt uniquely and stay stable under any such edit; this path
+    is for navigation only.
+    """
     return "src/" + meta.module.replace(".", "/") + ".py"
 
 
@@ -261,7 +253,7 @@ def render_docs() -> str:
     ]
     for name in PROMPTS:
         meta = PROMPT_META[name]
-        loc = f"{_display_path(meta)}:{_source_line(meta)}"
+        loc = _display_path(meta)
         fence = _fence_for(PROMPTS[name])
         lines += [
             f"## `{name}`",
