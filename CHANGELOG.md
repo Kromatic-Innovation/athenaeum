@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The batch poll is bounded by the run's wall-clock deadline and spills to
+  a handle instead of cancelling (athenaeum#1144).** `execute_batch` polled
+  against a 24h module constant inside a bounded nightly window, and on
+  timeout it CANCELLED the batch — destroying work already paid for
+  server-side. `process_batch_run` and `execute_batch` now accept a
+  `deadline`, threaded from the librarian's existing wall-clock budget
+  (athenaeum#396). The poll stops at the earlier of batch-end or that
+  deadline. A batch that ends inside the window continues synchronously into
+  the next phase exactly as before; a deadline arriving first leaves the
+  batch running, records an athenaeum#1143 pending-batch handle over its raw
+  files, and returns those refs as `in_flight_refs` — a bucket distinct from
+  `failed_refs` (retry from scratch, re-billing the same work) and
+  `deferred_refs` (never submitted). Such a run reports
+  `reason=batch-in-flight` with an `in_flight=` count in the run summary, so
+  it is distinguishable from a healthy zero-compile run, and neither the
+  athenaeum#899 zero-yield alarm nor the athenaeum#1135 zero-progress refusal
+  fires on it. A batch breaching the documented Batch API limits (100,000
+  requests or 256 MB) is now refused at assembly with a local error naming
+  the actual figures rather than an opaque 400. `deadline=None` preserves the
+  previous behaviour exactly.
+
 - **`athenaeum reconcile` retires pending raw-intake files a source dual-wrote
   into the wiki (athenaeum#1143 / athenaeum-adapters#154).** A one-off
   producer (`streak-to-wiki`) wrote both a `raw/drive/` intake file and the
