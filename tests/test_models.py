@@ -714,6 +714,55 @@ class TestTokenUsage:
         assert usage.cache_read_input_tokens == 20
         assert usage.api_calls == 0
 
+    def test_record_attempt_is_independent_of_api_calls(self) -> None:
+        """athenaeum#1177: ``record_attempt`` is a SEPARATE counter from
+        ``api_calls`` -- calling it does not touch ``api_calls``/tokens at
+        all, and a subsequent successful ``add()`` does not touch
+        ``attempted_calls`` either. The two compose additively, tracked by
+        whichever call sites choose to call each."""
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.record_attempt()
+        usage.record_attempt()
+        assert usage.attempted_calls == 2
+        assert usage.api_calls == 0
+        assert usage.succeeded_calls == 0
+        usage.add(100, 50)
+        assert usage.attempted_calls == 2  # unchanged by add()
+        assert usage.api_calls == 1
+        assert usage.succeeded_calls == 1
+
+    def test_add_tokens_bumps_succeeded_calls(self) -> None:
+        """athenaeum#1177 AC4: ``succeeded_calls`` is bumped inside
+        ``add_tokens`` itself -- called ONLY when a real response's counts
+        are known -- so it is accurate for the merge-phase detector/
+        resolver call sites too (which call ``add_tokens`` directly, not
+        ``add()``, and count their OWN attempts via ``api_calls``
+        manually)."""
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add_tokens(100, 50)
+        usage.add_tokens(200, 75)
+        assert usage.succeeded_calls == 2
+        assert usage.api_calls == 0  # add_tokens deliberately does not bump this
+
+    def test_attempted_can_exceed_succeeded_the_all_failing_shape(self) -> None:
+        """The exact shape a credits-exhausted run produces: every call
+        attempted, none succeeded -- a count that must not be able to
+        agree with a zero-token ledger by construction."""
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.record_attempt()
+        usage.record_attempt()
+        usage.record_attempt()
+        assert usage.attempted_calls == 3
+        assert usage.succeeded_calls == 0
+        assert usage.api_calls == 0
+        assert usage.total_tokens == 0
+
     def test_estimated_cost_includes_cache_terms(self) -> None:
         """athenaeum#239: input_tokens excludes cached tokens, so the estimate must
         fold in cache writes at 1.25x and cache reads at 0.1x input rate."""
