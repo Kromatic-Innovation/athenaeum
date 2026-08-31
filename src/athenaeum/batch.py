@@ -98,6 +98,7 @@ from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
     TIER2_ADDRESS_RESOLVED_MARKER,
     TIER2_ADDRESS_UNRESOLVED_MARKER,
+    PreambleOnlyResponseError,
     Tier2ParseStats,
     check_page_size_gate,
     existing_body_needs_full_echo,
@@ -118,6 +119,7 @@ from athenaeum.tiers import (
     tier3_merge_params,
     tier4_escalate,
 )
+from athenaeum.wiki_write_guard import guard_entity_write_type
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -792,6 +794,11 @@ class BatchRunResult:
     #: ``tier4_escalate`` (by ``conflict_type == "oversize_page"``), the same
     #: way ``athenaeum.models.ProcessingResult.oversize_suppressed`` is.
     oversize_suppressed: int = 0
+    #: Issue athenaeum#1196: NEW entity writes this run's finalize loop refused
+    #: because their ``type`` was outside declared ∪ ``KNOWN_TYPES`` (the
+    #: write-boundary guard — see ``athenaeum.wiki_write_guard``). Not
+    #: counted in ``created``.
+    type_rejected: int = 0
     failed_refs: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
     #: Issue athenaeum#1144: files whose batch was still in flight when the run's
@@ -1767,11 +1774,26 @@ def process_batch_run(
                 msg = t3_results.get(cid)
                 if msg is None:
                     raise _BatchItemError(cid)
-                new_entities.append(
+                # Issue athenaeum#1171: PreambleOnlyResponseError is caught HERE,
+                # scoped to just this one create action, so a preamble-only
+                # response does not abort the whole raw file's batch result
+                # (mirrors tiers.tier3_derive_actions' sync-path handling —
+                # the two transports must agree on this behaviour).
+                try:
                     # Issue athenaeum#578: tier-3 create enables adaptive thinking —
                     # response_text skips any leading thinking block.
-                    tier3_entity_from_text(action, response_text(msg), config=config)
-                )
+                    new_entity = tier3_entity_from_text(
+                        action, response_text(msg), usage=usage, config=config
+                    )
+                except PreambleOnlyResponseError:
+                    log.warning(
+                        "tier3-create-preamble-rejected-skipped ref=%s name=%s: "
+                        "action skipped, NOT treated as a raw-file failure",
+                        st.raw.ref,
+                        action.name,
+                    )
+                    continue
+                new_entities.append(new_entity)
 
             for cid, action, page_path, meta, existing_body in st.merge_ids:
                 msg = t3_results.get(cid)
@@ -1814,8 +1836,10 @@ def process_batch_run(
             # Ordered before the merges so a file's creates and merges execute
             # in the same relative order the batched path applies them in.
             for action in st.sync_creates:
-                new_entities.append(
-                    tier3_create(
+                # Issue athenaeum#1171: same per-action rejection handling as the
+                # batched create loop above — see that block's comment.
+                try:
+                    new_entity = tier3_create(
                         action,
                         st.raw.ref,
                         AnthropicBatchClientBackend(effective_write_client),
@@ -1823,7 +1847,15 @@ def process_batch_run(
                         usage=usage,
                         config=config,
                     )
-                )
+                except PreambleOnlyResponseError:
+                    log.warning(
+                        "tier3-create-preamble-rejected-skipped ref=%s name=%s: "
+                        "action skipped, NOT treated as a raw-file failure",
+                        st.raw.ref,
+                        action.name,
+                    )
+                    continue
+                new_entities.append(new_entity)
             for action in st.sync_merges:
                 existing_path = index.get_by_uid(action.existing_uid or "")
                 if not existing_path or not existing_path.exists():
@@ -1873,14 +1905,29 @@ def process_batch_run(
             # first, then creates, matching the synchronous order).
             for path, content in pending_updates:
                 atomic_write_text(path, content)
+            written_entities: list[WikiEntity] = []
             for entity in new_entities:
                 rendered = entity.render()
                 # Same schema gate as process_one: re-parse the rendered
                 # frontmatter so the validator sees the on-disk bytes.
                 rendered_meta, _ = parse_frontmatter(rendered)
                 validate_wiki_meta(rendered_meta)
+                # Write-boundary type guard (issue athenaeum#1196): same
+                # backstop as process_one/_apply_tier3_results — refuse a
+                # type outside declared ∪ KNOWN_TYPES regardless of whether
+                # an upstream clamp already should have caught it.
+                if not guard_entity_write_type(
+                    wiki_root,
+                    entity.filename,
+                    rendered,
+                    rendered_meta,
+                    source="batch",
+                ):
+                    result.type_rejected += 1
+                    continue
                 atomic_write_text(wiki_root / entity.filename, rendered)
                 index.register(entity)
+                written_entities.append(entity)
                 log.info("  Created: %s → %s", entity.name, entity.filename)
 
             if escalations:
@@ -1890,7 +1937,7 @@ def process_batch_run(
                     config=resolved_config,
                 )
 
-            result.created += len(new_entities)
+            result.created += len(written_entities)
             result.updated += len(updated_uids)
             result.escalated += len(escalations)
             # Issue athenaeum#1182: derived from `escalations` by conflict_type,
@@ -1963,6 +2010,10 @@ class BatchCollectResult:
     #: Issue athenaeum#1182: summed from each inner process_batch_run() call's
     #: BatchRunResult.oversize_suppressed — see that field's docstring.
     oversize_suppressed: int = 0
+    #: Issue athenaeum#1196: same write-boundary-guard counter as
+    #: :attr:`BatchRunResult.type_rejected`, folded up from the underlying
+    #: :func:`process_batch_run` call this collect delegates to.
+    type_rejected: int = 0
     #: Refs whose results were applied and whose raw file was consumed. These
     #: ARE files drained this run, even though they were never in this run's
     #: claim — the athenaeum#470 backlog-drain advisor must see them.
@@ -2557,6 +2608,7 @@ def collect_pending_batches(
         out.degraded += applied.degraded
         out.truncated += applied.truncated
         out.oversize_suppressed += applied.oversize_suppressed
+        out.type_rejected += applied.type_rejected  # issue athenaeum#1196
         out.failed_refs.extend(applied.failed_refs)
         out.in_flight_refs.extend(applied.in_flight_refs)
         unresolved = (
