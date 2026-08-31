@@ -46,6 +46,7 @@ def cmd_dimensions(args: argparse.Namespace) -> int:
         return 2
 
     from athenaeum.dimensions import coordinate_value
+    from athenaeum.pii import json_date_default
 
     knowledge_root = (args.path or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     config = load_config(knowledge_root)
@@ -57,7 +58,12 @@ def cmd_dimensions(args: argparse.Namespace) -> int:
             return 1
         coords = {d.name: coordinate_value(d, meta) for d in registry}
         if args.json:
-            sys.stdout.write(json.dumps(coords) + "\n")
+            # Issue athenaeum#1110: `coordinate_value` returns the RAW (unparsed)
+            # frontmatter value (dimensions.py's own docstring) for kernel
+            # dimensions like recorded-time/observed-time/valid-time, which can
+            # be a bare YAML date/datetime — same defect class as `entity`'s
+            # raw-frontmatter passthrough, same fix.
+            sys.stdout.write(json.dumps(coords, default=json_date_default) + "\n")
             return 0
         print(f"coordinates for {args.file}:")
         for name, value in coords.items():

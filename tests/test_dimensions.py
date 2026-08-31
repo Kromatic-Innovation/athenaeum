@@ -1022,6 +1022,31 @@ class TestDimensionsCLI:
         payload = json.loads(capsys.readouterr().out)
         assert payload["subject"] == "person-uid-1"
 
+    def test_show_json_round_trips_a_bare_date_and_datetime_coordinate(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``coordinate_value`` returns the RAW (unparsed) frontmatter value
+        for a kernel dimension like recorded-time/valid-time (its own
+        docstring) — a bare YAML date/datetime there crashed
+        ``dimensions show --json`` with the same
+        ``TypeError: Object of type date is not JSON serializable`` as
+        athenaeum#1110's ``entity`` report, just on a different read/query
+        surface. Covers both a bare date (``valid_from``) and a datetime
+        (``recorded_at``), and pins the ISO-8601 form."""
+        page = tmp_path / "page.md"
+        self._write_page(
+            page,
+            recorded_at="2026-03-01T10:30:00",
+            valid_from="1990-01-01",
+        )
+        rc = main(["dimensions", "show", str(page), "--path", str(tmp_path), "--json"])
+        assert rc == 0
+        import json
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["recorded-time"] == "2026-03-01T10:30:00"
+        assert payload["valid-time"]["valid_from"] == "1990-01-01"
+
     def test_compare_axis_by_axis(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
