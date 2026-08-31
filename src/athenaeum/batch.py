@@ -98,6 +98,7 @@ from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
     TIER2_ADDRESS_RESOLVED_MARKER,
     TIER2_ADDRESS_UNRESOLVED_MARKER,
+    PreambleOnlyResponseError,
     Tier2ParseStats,
     existing_body_needs_full_echo,
     parse_merge_ops_response,
@@ -1726,11 +1727,26 @@ def process_batch_run(
                 msg = t3_results.get(cid)
                 if msg is None:
                     raise _BatchItemError(cid)
-                new_entities.append(
+                # Issue athenaeum#1171: PreambleOnlyResponseError is caught HERE,
+                # scoped to just this one create action, so a preamble-only
+                # response does not abort the whole raw file's batch result
+                # (mirrors tiers.tier3_derive_actions' sync-path handling —
+                # the two transports must agree on this behaviour).
+                try:
                     # Issue athenaeum#578: tier-3 create enables adaptive thinking —
                     # response_text skips any leading thinking block.
-                    tier3_entity_from_text(action, response_text(msg), config=config)
-                )
+                    new_entity = tier3_entity_from_text(
+                        action, response_text(msg), usage=usage, config=config
+                    )
+                except PreambleOnlyResponseError:
+                    log.warning(
+                        "tier3-create-preamble-rejected-skipped ref=%s name=%s: "
+                        "action skipped, NOT treated as a raw-file failure",
+                        st.raw.ref,
+                        action.name,
+                    )
+                    continue
+                new_entities.append(new_entity)
 
             for cid, action, page_path, meta, existing_body in st.merge_ids:
                 msg = t3_results.get(cid)
@@ -1773,8 +1789,10 @@ def process_batch_run(
             # Ordered before the merges so a file's creates and merges execute
             # in the same relative order the batched path applies them in.
             for action in st.sync_creates:
-                new_entities.append(
-                    tier3_create(
+                # Issue athenaeum#1171: same per-action rejection handling as the
+                # batched create loop above — see that block's comment.
+                try:
+                    new_entity = tier3_create(
                         action,
                         st.raw.ref,
                         AnthropicBatchClientBackend(effective_write_client),
@@ -1782,7 +1800,15 @@ def process_batch_run(
                         usage=usage,
                         config=config,
                     )
-                )
+                except PreambleOnlyResponseError:
+                    log.warning(
+                        "tier3-create-preamble-rejected-skipped ref=%s name=%s: "
+                        "action skipped, NOT treated as a raw-file failure",
+                        st.raw.ref,
+                        action.name,
+                    )
+                    continue
+                new_entities.append(new_entity)
             for action in st.sync_merges:
                 existing_path = index.get_by_uid(action.existing_uid or "")
                 if not existing_path or not existing_path.exists():

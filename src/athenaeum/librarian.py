@@ -5857,6 +5857,25 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # separately from a parse ``degraded`` so the two are
                     # never conflated in the summary either.
                     **({"truncated": ctx.total_truncated} if ctx.total_truncated else {}),
+                    # athenaeum#1171: tier-3 create responses whose leading
+                    # first-person planning preamble was stripped (substantive
+                    # content survived) or rejected (the response was ENTIRELY
+                    # preamble). Read directly off ``ctx.usage`` — the same
+                    # shared TokenUsage instance accumulates these across both
+                    # the synchronous and Batch API create paths (see
+                    # ``tiers.tier3_entity_from_text``), so no separate
+                    # ``ctx.total_*`` accumulator is needed. Rendered only when
+                    # non-zero, matching the degraded/truncated convention.
+                    **(
+                        {"preamble_stripped": ctx.usage.preamble_stripped}
+                        if ctx.usage.preamble_stripped
+                        else {}
+                    ),
+                    **(
+                        {"preamble_rejected": ctx.usage.preamble_rejected}
+                        if ctx.usage.preamble_rejected
+                        else {}
+                    ),
                     # athenaeum#663: files skipped/surfaced as stuck this run. Only
                     # rendered when non-zero, so a clean run's summary line is
                     # unchanged, but a permanent no-progress loop shows "stuck=N".
