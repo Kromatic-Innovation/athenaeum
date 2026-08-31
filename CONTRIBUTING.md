@@ -6,8 +6,9 @@ Thank you for your interest in contributing to Athenaeum!
 
 1. Fork and clone the repository
 2. Install in development mode: `pip install -e ".[dev,vector]"`
-3. Run the test suite: `pytest tests/ -v`, or `scripts/run-tests.sh` (see below)
-4. Run the linter: `ruff check src/ tests/`
+3. Install the repo's git hooks: `bash scripts/install-git-hooks.sh`
+4. Run the test suite: `pytest tests/ -v`, or `scripts/run-tests.sh` (see below)
+5. Run the linter: `ruff check src/ tests/`
 
 The `[dev,vector]` install matches what CI installs
 (`.github/workflows/ci.yml`), so a fresh clone following these steps runs the
@@ -16,6 +17,46 @@ in `chromadb`, which the vector-search and clustering tests need. If you don't
 intend to touch search or clustering, `[dev]` alone works and those tests skip
 automatically; MCP server tests need `fastmcp` (already included in `[dev]`).
 
+## Git hooks: public-safe-lint at the push boundary
+
+Cloning does not install hooks by itself, which is why step 3 above is a
+separate, explicit command (safe to re-run). It sets `core.hooksPath` to
+the tracked `.githooks/` directory, which wires in `.githooks/pre-push`
+(athenaeum#1104).
+
+That hook runs `public-safe-lint.sh` (the same org-agnostic leak scanner
+`.github/workflows/public-safe-lint.yml` runs in CI) against a **clean
+`git archive` export** of each commit you're about to push — never your
+working tree, so gitignored clutter (`.venv`, `.zenodotus`, ...) can't hide
+a real hit or, conversely, can't produce a false one CI would never see
+either. It also fails if any rule's suppressions
+(`.public-safe-lintignore`) aren't already reviewed and named in
+`.public-safe-lint-suppression-allowlist` at the repo root — a rule that
+starts being suppressed for the first time is a signal worth a human
+noticing before it reaches a public remote, not something CI-after-the-fact
+should be the first to catch.
+
+**Bypass**, for a repo that is genuinely private, or a push that carries no
+doc/prose change at all:
+
+```bash
+SKIP_PUBLIC_LINT=1 SKIP_PUBLIC_LINT_REASON=private-repo   git push ...
+SKIP_PUBLIC_LINT=1 SKIP_PUBLIC_LINT_REASON=no-doc-change  git push ...
+```
+
+`SKIP_PUBLIC_LINT_REASON` must be one of those two values — an unset or
+unrecognized reason is refused rather than silently allowed. Every bypass
+is appended (never silently) to the untracked `.git/public-safe-lint-bypass.log`
+with a timestamp, branch, remote and reason, and printed to the push
+transcript.
+
+**If you're pushing from a container or CI-like environment that forces
+`core.hooksPath` to something else** (some sandboxed dev environments do
+this workspace-wide, for their own unrelated hook needs — environment-based
+git config outranks a repo's own `.git/config` setting, so the hook above
+can be silently skipped there), use `scripts/git-push-safe.sh` instead of
+`git push`; it forces the correct hooks path via `git -c`, which outranks
+even that kind of override.
 ## Making "the tests passed" a checkable claim
 
 Plain `pytest tests/ -v` is fine for a quick check or a single test
