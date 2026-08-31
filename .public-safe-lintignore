@@ -31,3 +31,11 @@ tilde-rooted-path **
 plus-alias-email tests/test_pii_off_corpus.py
 plus-alias-email tests/test_storage_migrate_pii.py
 bare-issue-ref tests/fixtures/street_address_fixtures.py
+
+# athenaeum#1173: this suite tests validate_create_name's AC1 bare-issue-ref
+# detector, so it deliberately contains "#NNN"-shaped strings (real issue
+# numbers from the issue's own report) as real, executed test input (and in
+# the surrounding prose describing that input) — same "leak-detector test
+# fixture" case as street_address_fixtures.py above, not a genuine
+# private-issue-tracker citation.
+bare-issue-ref tests/test_create_name_gate_1173.py

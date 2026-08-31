@@ -102,6 +102,7 @@ from athenaeum.tiers import (
     Tier2ParseStats,
     check_page_size_gate,
     existing_body_needs_full_echo,
+    gate_create_name_classifications,
     parse_merge_ops_response,
     parse_tier2_entities,
     partition_code_artifact_classifications,
@@ -1444,6 +1445,16 @@ def process_batch_run(
                     ),
                 )
             )
+        # Issue athenaeum#1173: create-path name gate, same call as the sync
+        # transport (librarian.process_one) — sits immediately after the
+        # athenaeum#1126 address gate above and BEFORE actions are built, so a
+        # rejected/escalated name never reaches a tier-3 create action (batch
+        # request or sync-create) on this transport either.
+        name_gate_outcome = gate_create_name_classifications(
+            classified, st.raw.ref, st.raw.content, config
+        )
+        classified = name_gate_outcome.kept
+        st.address_escalations.extend(name_gate_outcome.escalations)
         for c in classified:
             st.actions.append(
                 EntityAction(
