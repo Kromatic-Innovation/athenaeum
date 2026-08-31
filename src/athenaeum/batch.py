@@ -117,6 +117,8 @@ from athenaeum.tiers import (
 )
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from anthropic.types.messages.batch_create_params import Request
 
 log = logging.getLogger(__name__)
@@ -323,6 +325,7 @@ def collect_batch_results(
     description: str,
     usage: TokenUsage | None = None,
     knob: str | None = None,
+    out_result_types: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Read an ENDED batch's results and book their token usage.
 
@@ -361,6 +364,15 @@ def collect_batch_results(
                     )
                 results[entry.custom_id] = message
             else:
+                # Issue athenaeum#1146: a per-request ``expired`` is the OPPOSITE
+                # case from a batch-level "still in flight" — that request
+                # never reached the model and is NOT billed, so it belongs on
+                # the ordinary per-file failure path (raw stays, retried next
+                # run), never on the keep-the-handle path. Counted by type so
+                # the two can be told apart in the run summary rather than
+                # only in log text.
+                if out_result_types is not None and isinstance(rtype, str):
+                    out_result_types[rtype] = out_result_types.get(rtype, 0) + 1
                 log.warning(
                     "batch request %s ended %s (%s)",
                     entry.custom_id,
@@ -1510,28 +1522,99 @@ class BatchCollectResult:
     #: Batch ids retired (results consumed) and kept (still in flight).
     retired_handles: list[str] = field(default_factory=list)
     kept_handles: list[str] = field(default_factory=list)
+    #: Issue athenaeum#1146 AC7: every reconciliation outcome, counted by reason.
+    #: Keys are drawn from :data:`RECONCILE_REASONS`. None of these is silent —
+    #: the run summary renders the whole map, so an operator sees "3 handles
+    #: kept in flight, 1 retired past retention, 2 refs discarded as mutated"
+    #: without reading the log.
+    reconciliation: dict[str, int] = field(default_factory=dict)
+
+    def _count(self, reason: str, n: int = 1) -> None:
+        if n:
+            self.reconciliation[reason] = self.reconciliation.get(reason, 0) + n
 
 
-def _raw_file_from_record(record: batch_state.RefRecord) -> RawFile | None:
-    """Rebuild the :class:`RawFile` a handle's ref record points at.
+#: Days the Batch API retains a batch's results. A handle older than this
+#: cannot be collected however well-formed it is, so it is retired without a
+#: retrieve attempt (issue athenaeum#1146 AC3).
+BATCH_RETENTION_DAYS: float = 29.0
 
-    ``None`` when the file is gone from disk. A leased raw file that vanished
-    cannot be finalized (finalize unlinks it on success), so its result is
-    dropped rather than half-applied — athenaeum#1146 formalizes that case and
-    the mutated-content one alongside it.
+#: The reconciliation vocabulary (issue athenaeum#1146 AC7). Every terminal a
+#: handle or one of its refs can reach has a name here, and every one is
+#: counted — the point of the enumeration is that no outcome is silent.
+RECONCILE_REASONS = (
+    # Handle-level
+    "collected",  # results applied, handle retired
+    "in-flight",  # batch had not ended; handle kept, lease extended
+    "unretrievable",  # retrieve 404'd; handle retired, refs released
+    "retention-expired",  # older than BATCH_RETENTION_DAYS; retired
+    "retrieve-error",  # transient failure; handle KEPT, nothing decided
+    "results-unreadable",  # batch ended but results failed to read; kept
+    "no-context",  # nothing applicable on the handle; retired uncollected
+    "unknown-knob",  # handle knob is not classify/write; retired
+    # Ref-level
+    "raw-missing",  # leased raw file gone from disk; result discarded
+    "raw-mutated",  # leased raw file changed under us; result discarded
+    "request-expired",  # per-request expired — NOT billed, ordinary retry
+    "request-errored",
+    "request-canceled",
+)
+
+
+def _raw_file_from_record(
+    record: batch_state.RefRecord,
+) -> tuple[RawFile | None, str | None]:
+    """Rebuild the :class:`RawFile` a ref record points at, or say why not.
+
+    Returns ``(raw, None)`` when the file is present AND unchanged since claim
+    time, else ``(None, reason)`` with a :data:`RECONCILE_REASONS` member.
+
+    Two distinct discards, with the same remedy and different causes
+    (athenaeum#1146 AC4/AC5):
+
+    - **missing** — the file is gone. It cannot be finalized (finalize unlinks
+      it on success) and there is nothing left to apply a result to.
+    - **mutated** — the file is there but its bytes differ from the hash taken
+      at claim time. The result describes CONTENT THAT NO LONGER EXISTS;
+      applying it would write a classification of the old text onto the new.
+      This is the case most likely to be missed, because everything about the
+      handle still looks valid.
+
+    An empty stored hash means the file was unreadable at claim time
+    (athenaeum#1143's fail-open), so unchanged-ness cannot be PROVEN either way.
+    That is treated as "not disproven" and the result is applied — the same
+    direction athenaeum#1143 already chose, rather than discarding paid-for work
+    on the absence of evidence.
     """
-    from athenaeum.intake import RAW_FILE_RE
-
     path = Path(record.path)
     if not path.is_file():
-        return None
+        return None, "raw-missing"
+    if record.content_hash and batch_state.content_hash(path) != record.content_hash:
+        return None, "raw-mutated"
+    from athenaeum.intake import RAW_FILE_RE
+
     source = record.ref.split("/", 1)[0] if "/" in record.ref else path.parent.name
     m = RAW_FILE_RE.match(path.name)
-    return RawFile(
-        path=path,
-        source=source,
-        timestamp=m.group(1) if m else "",
-        uuid8=m.group(2) if m else "",
+    return (
+        RawFile(
+            path=path,
+            source=source,
+            timestamp=m.group(1) if m else "",
+            uuid8=m.group(2) if m else "",
+        ),
+        None,
+    )
+
+
+def _log_discard(reason: str, ref: str, batch_id: str) -> None:
+    log.warning(
+        "collect: %s — discarding the result for %s (batch %s); its raw file "
+        "is re-claimed from scratch",
+        "leased raw file is gone"
+        if reason == "raw-missing"
+        else "leased raw file CHANGED since claim time",
+        ref,
+        batch_id,
     )
 
 
@@ -1540,6 +1623,7 @@ def _states_for_classify_handle(
     index: EntityIndex,
     *,
     config: dict[str, object] | None,
+    out: "BatchCollectResult",
 ) -> tuple[list[_FileState], list[str]]:
     """Rebuild the per-file states a collected ``classify`` batch applies to.
 
@@ -1553,13 +1637,10 @@ def _states_for_classify_handle(
     states: list[_FileState] = []
     dropped: list[str] = []
     for custom_id, record in sorted(handle.refs.items()):
-        raw = _raw_file_from_record(record)
+        raw, reason = _raw_file_from_record(record)
         if raw is None:
-            log.warning(
-                "collect: leased raw file is gone, dropping its result (%s, batch %s)",
-                record.ref,
-                handle.batch_id,
-            )
+            _log_discard(reason or "raw-missing", record.ref, handle.batch_id)
+            out._count(reason or "raw-missing")
             dropped.append(record.ref)
             continue
         st = _FileState(raw=raw)
@@ -1577,7 +1658,7 @@ def _states_for_classify_handle(
 
 
 def _states_for_write_handle(
-    handle: batch_state.PendingBatch,
+    handle: batch_state.PendingBatch, *, out: "BatchCollectResult"
 ) -> tuple[list[_FileState], list[str]]:
     """Rebuild the per-file states a collected ``write`` batch applies to.
 
@@ -1603,13 +1684,10 @@ def _states_for_write_handle(
         if not isinstance(entry, dict) or record is None:
             dropped.append(ref)
             continue
-        raw = _raw_file_from_record(record)
+        raw, reason = _raw_file_from_record(record)
         if raw is None:
-            log.warning(
-                "collect: leased raw file is gone, dropping its result (%s, batch %s)",
-                ref,
-                handle.batch_id,
-            )
+            _log_discard(reason or "raw-missing", ref, handle.batch_id)
+            out._count(reason or "raw-missing")
             dropped.append(ref)
             continue
         st = _FileState(raw=raw)
@@ -1658,7 +1736,9 @@ def _states_for_write_handle(
                 # the handle, so no YAML scalar has to survive a JSON round
                 # trip. The BODY is the stored one: the merge ops were anchored
                 # against it.
-                meta, _current_body = parse_frontmatter(page.read_text(encoding="utf-8"))
+                meta, _current_body = parse_frontmatter(
+                    page.read_text(encoding="utf-8")
+                )
                 st.merge_ids.append(
                     (
                         cid,
@@ -1670,6 +1750,89 @@ def _states_for_write_handle(
                 )
         states.append(st)
     return states, dropped
+
+
+def _is_not_found(exc: BaseException) -> bool:
+    """Whether *exc* is an authoritative "this batch does not exist" (AC3).
+
+    The distinction matters more than it looks: retiring a handle on a
+    TRANSIENT failure strands a live, paid-for batch forever, while keeping
+    one for a batch that is genuinely gone strands its raw files behind a
+    lease that will never be released. So the test is deliberately narrow —
+    the SDK's own ``NotFoundError``, or an explicit HTTP 404 — and everything
+    else (timeouts, connection errors, 5xx, anything unrecognised) is treated
+    as transient and KEPT. ``with_retry`` has already exhausted its retries by
+    the time this is consulted, so a persistent transient failure costs one
+    more run's wait, not a lost batch.
+    """
+    if isinstance(exc, anthropic.NotFoundError):
+        return True
+    return getattr(exc, "status_code", None) == 404
+
+
+def _retire_uncollected(
+    cache_dir: Path,
+    wiki_root: Path,
+    handle: batch_state.PendingBatch,
+    *,
+    reason: str,
+    out: "BatchCollectResult",
+) -> None:
+    """Retire a handle whose results were never applied, and RECORD it (AC8).
+
+    Retiring releases the lease with the handle in one atomic store write, so
+    the refs are claimable again on the next pass — nothing is stranded. What
+    is lost is the batch's spend, which is an accepted failure mode but not an
+    invisible one: a ledger record makes it recoverable after the fact.
+    """
+    refs = sorted({r.ref for r in handle.refs.values()})
+    log.warning(
+        "collect: retiring batch %s (%s) UNCOLLECTED — reason=%s; its %d raw "
+        "file(s) are re-claimed from scratch and its batch spend is wasted "
+        "(issue athenaeum#1146)",
+        handle.batch_id,
+        handle.knob,
+        reason,
+        len(refs),
+    )
+    batch_state.record_reconciliation(
+        wiki_root,
+        batch_id=handle.batch_id,
+        knob=handle.knob,
+        reason=reason,
+        refs=refs,
+        submitted_at=handle.submitted_at,
+        cache_dir=cache_dir,
+    )
+    batch_state.retire_handle(cache_dir, handle.batch_id)
+    out.retired_handles.append(handle.batch_id)
+    out._count(reason)
+
+
+def _keep_handle(
+    cache_dir: Path,
+    handle: batch_state.PendingBatch,
+    *,
+    reason: str,
+    config: dict[str, object] | None,
+    out: "BatchCollectResult",
+    extend: bool,
+) -> None:
+    """Keep a handle (and, when *extend*, push its lease out) — AC1.
+
+    Keeping without extending is a resubmit decision in disguise: the lease
+    runs out, the claim loop hands the refs back, and the next run submits
+    work that is still in flight and already paid for.
+    """
+    if extend:
+        batch_state.extend_lease(
+            cache_dir,
+            handle.batch_id,
+            config=cast("dict[str, Any] | None", config),
+        )
+    out.kept_handles.append(handle.batch_id)
+    out.in_flight_refs.extend(sorted({r.ref for r in handle.refs.values()}))
+    out._count(reason)
 
 
 def collect_pending_batches(
@@ -1688,20 +1851,35 @@ def collect_pending_batches(
     write_client: "anthropic.Anthropic | None" = None,
     deadline: float | None = None,
     cache_dir: Path | None = None,
+    now: "datetime | None" = None,
 ) -> BatchCollectResult:
     """Collect every outstanding athenaeum#1143 handle, oldest first.
 
     For each handle: retrieve the batch by id; if it has ENDED, read its
     results, apply them through :func:`process_batch_run` (via
     :class:`_ResumedWork` — the same finalize path, never a parallel one), and
-    retire the handle, which releases its lease in the same atomic store write
-    (AC3). A batch that has not ended keeps its handle and its lease
-    untouched; athenaeum#1146 hardens the rest of the un-collectible cases
-    (retention expiry, 404s, mutated raw files).
+    retire the handle, which releases its lease in the same atomic store write.
+
+    Every other way a handle can fail to be collectable is enumerated and
+    reconciled (issue athenaeum#1146). The distinction that governs the whole
+    function, and that is routinely conflated with OPPOSITE correct responses:
+
+    ==========================================  =================================
+    Batch ``processing_status != "ended"``      Keep the handle, EXTEND the
+                                                lease, do not resubmit — the
+                                                work is in flight and paid for.
+    Per-request ``result.type == "expired"``    That request never reached the
+                                                model and is NOT billed —
+                                                ordinary per-file failure path,
+                                                raw stays, retried next run.
+    ==========================================  =================================
+
+    Treating the first as the second resubmits work that is already paid for
+    and running. Treating the second as the first strands files forever.
 
     Collecting a ``classify`` handle and submitting the resulting tier-3 batch
-    within the same run is supported and is the point (AC7): the resumed run
-    reaches the normal tier-3 assembly, spend ceiling, and submit.
+    within the same run is supported and is the point: the resumed run reaches
+    the normal tier-3 assembly, spend ceiling, and submit.
     """
     effective_cache_dir = (
         cache_dir if cache_dir is not None else batch_state.resolve_cache_dir()
@@ -1716,70 +1894,113 @@ def collect_pending_batches(
     ):
         knob = handle.knob
         reader = (
-            write_client
-            if knob == "write" and write_client is not None
-            else client
+            write_client if knob == "write" and write_client is not None else client
         )
+
+        # AC3, first half: a batch past the API's retention window cannot be
+        # collected however well-formed its handle is. Checked BEFORE the
+        # retrieve — it is the one un-collectable case that can be decided
+        # without a network call, and deciding it locally means an expired
+        # handle still reconciles when the API is unreachable.
+        age = batch_state.submitted_age_days(handle, now=now)
+        if age is not None and age > BATCH_RETENTION_DAYS:
+            _retire_uncollected(
+                effective_cache_dir,
+                wiki_root,
+                handle,
+                reason="retention-expired",
+                out=out,
+            )
+            continue
+
         try:
             batch = with_retry(
                 lambda: reader.messages.batches.retrieve(batch_id),
                 description=f"batch poll (collect {batch_id})",
             )
-        except Exception as exc:  # noqa: BLE001 — see below
-            # Deliberately broad, and deliberately NOT a retire. The SDK does
-            # not distinguish a 404 (the batch is genuinely gone) from a
-            # transient network failure, and retiring on the latter would
-            # strand a live, paid-for batch forever. Keeping the handle costs
-            # at worst one more run's retry; athenaeum#1146 owns the retention /
-            # 404 discrimination this defers.
-            log.warning(
-                "collect: could not retrieve batch %s (%s) — keeping the handle",
-                batch_id,
-                exc,
-            )
-            out.kept_handles.append(batch_id)
-            out.in_flight_refs.extend(sorted({r.ref for r in handle.refs.values()}))
+        except Exception as exc:  # noqa: BLE001 — narrowed by _is_not_found below
+            # AC3, second half. ``with_retry`` has already exhausted its
+            # retries; what is left is a decision about WHICH failure this is,
+            # and it is made conservatively — see :func:`_is_not_found`.
+            if _is_not_found(exc):
+                _retire_uncollected(
+                    effective_cache_dir,
+                    wiki_root,
+                    handle,
+                    reason="unretrievable",
+                    out=out,
+                )
+            else:
+                log.warning(
+                    "collect: could not retrieve batch %s (%s: %s) — keeping "
+                    "the handle; a transient failure must never retire a live "
+                    "batch",
+                    batch_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                _keep_handle(
+                    effective_cache_dir,
+                    handle,
+                    reason="retrieve-error",
+                    config=config,
+                    out=out,
+                    extend=True,
+                )
             continue
 
         if getattr(batch, "processing_status", None) != "ended":
+            # AC1. INFO, not an error: most batches finish inside an hour, and
+            # a run that arrives early is the expected case, not a fault.
             log.info(
-                "collect: batch %s (%s) is still in flight — keeping the handle, "
-                "not resubmitting its %d ref(s)",
+                "collect: batch %s (%s) is still in flight — keeping the "
+                "handle and extending its lease, not resubmitting its %d ref(s)",
                 batch_id,
                 knob,
                 len({r.ref for r in handle.refs.values()}),
             )
-            out.kept_handles.append(batch_id)
-            out.in_flight_refs.extend(sorted({r.ref for r in handle.refs.values()}))
+            _keep_handle(
+                effective_cache_dir,
+                handle,
+                reason="in-flight",
+                config=config,
+                out=out,
+                extend=True,
+            )
             continue
 
         if knob == "classify":
-            states, dropped = _states_for_classify_handle(handle, index, config=config)
+            states, dropped = _states_for_classify_handle(
+                handle, index, config=config, out=out
+            )
         elif knob == "write":
-            states, dropped = _states_for_write_handle(handle)
+            states, dropped = _states_for_write_handle(handle, out=out)
         else:
             log.warning(
-                "collect: handle %s has an unknown knob %r — retiring it, its "
-                "refs are re-claimed from scratch",
-                batch_id,
-                knob,
+                "collect: handle %s has an unknown knob %r", batch_id, knob
             )
-            batch_state.retire_handle(effective_cache_dir, batch_id)
-            out.retired_handles.append(batch_id)
+            _retire_uncollected(
+                effective_cache_dir,
+                wiki_root,
+                handle,
+                reason="unknown-knob",
+                out=out,
+            )
             continue
 
         out.failed_refs.extend(dropped)
         if not states:
-            log.warning(
-                "collect: nothing applicable in batch %s (%s) — retiring it",
-                batch_id,
-                knob,
+            _retire_uncollected(
+                effective_cache_dir,
+                wiki_root,
+                handle,
+                reason="no-context",
+                out=out,
             )
-            batch_state.retire_handle(effective_cache_dir, batch_id)
-            out.retired_handles.append(batch_id)
             continue
 
         model_by_cid = {cid: rec.model for cid, rec in handle.refs.items()}
+        result_types: dict[str, int] = {}
         try:
             results = collect_batch_results(
                 reader,
@@ -1788,6 +2009,7 @@ def collect_pending_batches(
                 description=f"collect {knob}",
                 usage=usage,
                 knob=knob,
+                out_result_types=result_types,
             )
         except BatchExecutionError as exc:
             log.warning(
@@ -1796,9 +2018,22 @@ def collect_pending_batches(
                 batch_id,
                 exc,
             )
-            out.kept_handles.append(batch_id)
-            out.in_flight_refs.extend(sorted({r.ref for r in handle.refs.values()}))
+            _keep_handle(
+                effective_cache_dir,
+                handle,
+                reason="results-unreadable",
+                config=config,
+                out=out,
+                extend=True,
+            )
             continue
+
+        # AC2 + AC7: per-request terminals, counted by type. These map onto the
+        # EXISTING per-file failure path below (a ``None`` result raises
+        # ``_BatchItemError`` at finalize, the raw stays on disk, the ref lands
+        # in ``failed_refs``) — deliberately NOT onto the keep-the-handle path.
+        for rtype, count in sorted(result_types.items()):
+            out._count(f"request-{rtype}", count)
 
         resumed = (
             _ResumedWork(states=states, t2_results=results)
@@ -1837,14 +2072,14 @@ def collect_pending_batches(
             | set(applied.deferred_refs)
             | set(applied.in_flight_refs)
         )
-        out.collected_refs.extend(
-            sorted({st.raw.ref for st in states} - unresolved)
-        )
+        collected = sorted({st.raw.ref for st in states} - unresolved)
+        out.collected_refs.extend(collected)
+        out._count("collected", len(collected))
         # The handle's results have been consumed, whatever became of the
         # files downstream — a file whose collect pipelined into a NEW batch is
         # now held by that batch's OWN handle, and one that failed keeps its
         # raw on disk for a fresh claim. Retiring drops the handle and its
-        # lease in one atomic store write (AC3).
+        # lease in one atomic store write.
         batch_state.retire_handle(effective_cache_dir, batch_id)
         out.retired_handles.append(batch_id)
         log.info(
