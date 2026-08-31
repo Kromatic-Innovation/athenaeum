@@ -9,7 +9,6 @@ the suite is deterministic and dependency-free.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -129,176 +128,188 @@ class TestDiscoverCandidates:
         assert names == {"real.md"}
 
 
+_COMPARATOR_CONFIG = {"librarian": {"comparator_enabled": True}}
+
+
+def _fake_llm_client(payload_json: str):
+    """A MagicMock mirroring the Anthropic SDK's ``messages.create`` response
+    shape — the same convention ``tests/test_comparator.py`` uses."""
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    response = MagicMock()
+    response.content = [MagicMock(text=payload_json)]
+    client.messages.create.return_value = response
+    return client
+
+
+def _content_payload(relation: str, *, passages: list[str] | None = None) -> str:
+    import json
+
+    return json.dumps(
+        {
+            "content_relation": relation,
+            "conflicting_passages": passages or [],
+            "predicate_a": "a-predicate",
+            "predicate_b": "b-predicate",
+            "rationale": "test rationale",
+        }
+    )
+
+
 class TestProposeWikiPageMerges:
-    def test_duplicate_cluster_produces_one_proposal(
+    """Issue athenaeum#715 cut-over: candidate PAIRS from the same clustering as
+    before, but each pair is now decided by the five-verdict comparator
+    (:mod:`athenaeum.comparator`) and enacted via
+    :mod:`athenaeum.verdict_effects`, instead of the retired
+    confidence/suppression-gate/``write_pending_merge`` algorithm.
+    """
+
+    def test_flag_off_is_a_noop(self, duplicate_topic_wiki: Path) -> None:
+        """Dark by default: with ``comparator_enabled`` unset (the default),
+        NOTHING is compared, ledgered, or written — old or new."""
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        def _boom(texts: list[str]):  # must not be called — short-circuits first
+            raise AssertionError("embedder should not run while the flag is off")
+
+        results = propose_wiki_page_merges(
+            duplicate_topic_wiki,
+            config={},
+            threshold=0.8,
+            embedding_provider=_boom,
+        )
+        assert results == []
+        assert not (duplicate_topic_wiki / "wiki" / "_verdicts").exists()
+
+    def test_duplicate_cluster_writes_fold_evidence_not_a_merge_proposal(
         self, duplicate_topic_wiki: Path
     ) -> None:
+        """The retired path wrote an LLM-adjacent draft straight to
+        ``_pending_merges.md``. The comparator's ``duplicate`` verdict must
+        instead write EVIDENCE (athenaeum#658 D2) — never a merged body, never
+        ``_pending_merges.md``."""
+        from athenaeum.runlock import RunLock
+        from athenaeum.verdict_effects import FOLD_EVIDENCE_DIRNAME
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
-        proposals = propose_wiki_page_merges(
-            duplicate_topic_wiki,
-            config={},
-            threshold=0.8,
-            embedding_provider=_fake_embed,
-        )
+        client = _fake_llm_client(_content_payload("equivalent"))
+        wiki_root = duplicate_topic_wiki / "wiki"
+        lock = RunLock(duplicate_topic_wiki)
+        with lock:
+            results = propose_wiki_page_merges(
+                duplicate_topic_wiki,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                lock=lock,
+            )
 
-        assert len(proposals) == 1
-        assert len(proposals[0]["sources"]) == 3
-        source_names = {Path(s).name for s in proposals[0]["sources"]}
-        assert source_names == {"venture-a.md", "venture-b.md", "venture-c.md"}
+        assert results, "the venture-a/b/c cluster must yield decided pairs"
+        assert all(r["verdict"] == "duplicate" for r in results)
+        assert all(r["action"] != "noop" for r in results)
+        merges_path = wiki_root / "_pending_merges.md"
+        assert not merges_path.exists(), "duplicate verdicts must never write _pending_merges.md"
+        assert (wiki_root / FOLD_EVIDENCE_DIRNAME).is_dir()
 
-        merges_path = duplicate_topic_wiki / "wiki" / "_pending_merges.md"
-        assert merges_path.is_file()
-        text = merges_path.read_text(encoding="utf-8")
-        assert text.count("## [") == 1
-        assert "venture-a.md" in text
-        assert "venture-b.md" in text
-        assert "venture-c.md" in text
-        assert "hobby.md" not in text
-
-    def test_second_run_is_idempotent(self, duplicate_topic_wiki: Path) -> None:
-        """Load-bearing acceptance criterion: rerun produces zero NEW proposals."""
+    def test_second_run_is_memoized_not_reenacted(self, duplicate_topic_wiki: Path) -> None:
+        """Load-bearing: a pair whose verdict is already fresh in the ledger
+        is skipped, not re-decided or re-enacted (issue athenaeum#715 AC5)."""
+        from athenaeum.runlock import RunLock
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
-        first = propose_wiki_page_merges(
-            duplicate_topic_wiki,
-            config={},
-            threshold=0.8,
-            embedding_provider=_fake_embed,
-        )
-        assert len(first) == 1
+        client = _fake_llm_client(_content_payload("equivalent"))
+        lock = RunLock(duplicate_topic_wiki)
+        with lock:
+            first = propose_wiki_page_merges(
+                duplicate_topic_wiki,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                lock=lock,
+            )
+            assert first
+            call_count_after_first = client.messages.create.call_count
 
-        merges_path = duplicate_topic_wiki / "wiki" / "_pending_merges.md"
-        text_after_first = merges_path.read_text(encoding="utf-8")
+            second = propose_wiki_page_merges(
+                duplicate_topic_wiki,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                lock=lock,
+            )
+        assert second == []  # every pair was already fresh
+        assert client.messages.create.call_count == call_count_after_first
 
-        second = propose_wiki_page_merges(
-            duplicate_topic_wiki,
-            config={},
-            threshold=0.8,
-            embedding_provider=_fake_embed,
-        )
-        assert second == []  # no NEW proposals
-
-        text_after_second = merges_path.read_text(encoding="utf-8")
-        assert text_after_second == text_after_first
-        assert text_after_second.count("## [") == 1
-
-    def test_dry_run_previews_without_writing(self, duplicate_topic_wiki: Path) -> None:
+    def test_dry_run_previews_without_ledgering_or_enacting(
+        self, duplicate_topic_wiki: Path
+    ) -> None:
+        from athenaeum.verdict_effects import FOLD_EVIDENCE_DIRNAME
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
-        proposals = propose_wiki_page_merges(
+        client = _fake_llm_client(_content_payload("equivalent"))
+        results = propose_wiki_page_merges(
             duplicate_topic_wiki,
-            config={},
+            config=_COMPARATOR_CONFIG,
             threshold=0.8,
             embedding_provider=_fake_embed,
+            client=client,
             dry_run=True,
         )
-        assert len(proposals) == 1
-        merges_path = duplicate_topic_wiki / "wiki" / "_pending_merges.md"
-        assert not merges_path.exists()
+        assert results
+        assert all("action" not in r for r in results)  # nothing enacted
+        wiki_root = duplicate_topic_wiki / "wiki"
+        assert not (wiki_root / "_verdicts").exists()
+        assert not (wiki_root / FOLD_EVIDENCE_DIRNAME).exists()
 
-    def test_dry_run_reflects_already_proposed_state(
+    def test_no_lock_and_not_dry_run_skips_pass_entirely(
         self, duplicate_topic_wiki: Path
     ) -> None:
-        """A dry-run preview after a real run must report 0, not re-propose
-        what a real run would silently skip as already-present (Quine
-        review of athenaeum#293) — otherwise the preview lies about what a real
-        run would actually do.
-        """
+        """A real (non-dry-run) comparison requires the caller's lock — see
+        ``athenaeum.verdicts``' single-appender contract. Without one this
+        pass logs and skips rather than comparing unsafely."""
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
-        first = propose_wiki_page_merges(
+        client = _fake_llm_client(_content_payload("equivalent"))
+        results = propose_wiki_page_merges(
             duplicate_topic_wiki,
-            config={},
+            config=_COMPARATOR_CONFIG,
             threshold=0.8,
             embedding_provider=_fake_embed,
+            client=client,
+            lock=None,
         )
-        assert len(first) == 1
-
-        preview = propose_wiki_page_merges(
-            duplicate_topic_wiki,
-            config={},
-            threshold=0.8,
-            embedding_provider=_fake_embed,
-            dry_run=True,
-        )
-        assert preview == []
-
-    def test_resolved_merge_round_trips_full_draft_body(
-        self, duplicate_topic_wiki: Path
-    ) -> None:
-        """The reader/approval path must see the SAME draft a real reviewer
-        would approve — not just that a block got appended (Quine review
-        of athenaeum#293, which found the multi-source draft's ``## From ...``
-        headers were silently truncating the block before the athenaeum#291 fence
-        fix). Exercises ``parse_pending_merges``/``list_pending_merges``/
-        ``resolve_merge`` end to end against a real wiki_dedupe proposal.
-        """
-        from athenaeum.models import slugify
-        from athenaeum.pending_merges import (
-            list_pending_merges,
-            parse_pending_merges,
-            resolve_merge,
-        )
-        from athenaeum.wiki_dedupe import propose_wiki_page_merges
-
-        proposals = propose_wiki_page_merges(
-            duplicate_topic_wiki,
-            config={},
-            threshold=0.8,
-            embedding_provider=_fake_embed,
-        )
-        assert len(proposals) == 1
-
-        merges_path = duplicate_topic_wiki / "wiki" / "_pending_merges.md"
-        pms = parse_pending_merges(merges_path)
-        assert len(pms) == 1
-        draft = pms[0].draft_merged_body
-        assert _BODY_A in draft
-        assert _BODY_B in draft
-        assert _BODY_C in draft
-
-        listed = list_pending_merges(merges_path)
-        assert len(listed) == 1
-        assert listed[0]["draft_merged_body"] == draft
-
-        result = resolve_merge(
-            merges_path,
-            pms[0].id,
-            "approve",
-            wiki_root=duplicate_topic_wiki / "wiki",
-        )
-        assert result["ok"] is True
-
-        target_path = (
-            duplicate_topic_wiki
-            / "wiki"
-            / f"{slugify(pms[0].merge_target_name)}.md"
-        )
-        assert target_path.is_file()
-        written = target_path.read_text(encoding="utf-8")
-        assert written  # not silently emptied
-        assert _BODY_A in written
-        assert _BODY_B in written
-        assert _BODY_C in written
+        assert results == []
+        assert client.messages.create.call_count == 0
 
     def test_unrelated_page_not_included(self, duplicate_topic_wiki: Path) -> None:
+        from athenaeum.runlock import RunLock
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
-        proposals = propose_wiki_page_merges(
-            duplicate_topic_wiki,
-            config={},
-            threshold=0.8,
-            embedding_provider=_fake_embed,
-        )
-        all_sources = {Path(s).name for p in proposals for s in p["sources"]}
+        client = _fake_llm_client(_content_payload("equivalent"))
+        lock = RunLock(duplicate_topic_wiki)
+        with lock:
+            results = propose_wiki_page_merges(
+                duplicate_topic_wiki,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                lock=lock,
+            )
+        all_sources = {Path(s).name for r in results for s in r["sources"]}
         assert "hobby.md" not in all_sources
 
     def test_no_wiki_root_returns_empty(self, tmp_path: Path) -> None:
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
-        proposals = propose_wiki_page_merges(tmp_path, config={}, threshold=0.8)
-        assert proposals == []
+        results = propose_wiki_page_merges(
+            tmp_path, config=_COMPARATOR_CONFIG, threshold=0.8
+        )
+        assert results == []
 
     def test_fewer_than_two_candidates_short_circuits_before_embedding(
         self, tmp_path: Path
@@ -311,190 +322,57 @@ class TestProposeWikiPageMerges:
         def _boom(texts: list[str]):  # must not be called
             raise AssertionError("embedder should not be invoked for <2 candidates")
 
-        proposals = propose_wiki_page_merges(
-            tmp_path, config={}, threshold=0.8, embedding_provider=_boom
-        )
-        assert proposals == []
-
-
-# --- Issue athenaeum#478: degenerate-over-cluster suppression on the wiki-dedupe path ---
-#
-# The athenaeum#400/#421 gates (``max_merge_sources`` default 5, ``min_merge_mean_similarity``
-# default 0.6 — both active out of the box) were only wired into ``merge.py``'s
-# resolver write path, NOT ``propose_wiki_page_merges``. Because this pass uses the
-# SAME single-linkage clusterer, one weak bridging edge could chain hundreds/
-# thousands of pages into a giant component (the live 1,711-/1,746-source
-# ``merge-workflow-pattern`` proposals) that was written straight to
-# ``_pending_merges.md``, bypassing the gates entirely. These tests exercise the
-# suppression gate through the REAL wiki-dedupe call path — the gap
-# ``test_merge_proposal_gates.py`` (which calls the gate function in isolation)
-# could not catch.
-
-
-def _identical_embed(texts: list[str]) -> list[list[float]]:
-    """Every page embeds to the same unit vector → one cohesive cluster of all pages.
-
-    Mean/min pairwise cosine are both 1.0, so the ONLY gate arm that can fire is
-    the ``max_merge_sources`` size cap — isolating it from the cohesion arms.
-    """
-    return [[1.0, 0.0] for _ in texts]
-
-
-class TestSuppressionGates:
-    """Issue athenaeum#478: the athenaeum#400/#421 suppression gates apply on wiki-dedupe."""
-
-    def _seed_cohesive_cluster(self, tmp_path: Path, n: int) -> Path:
-        wiki_root = tmp_path / "knowledge" / "wiki"
-        for i in range(n):
-            _write_page(
-                wiki_root,
-                f"dup-{i}.md",
-                body=f"Cohesive duplicate-topic wiki page number {i}.",
-            )
-        return wiki_root.parent  # knowledge_root
-
-    def test_over_cluster_suppressed_not_written(self, tmp_path: Path) -> None:
-        """n_sources (6) > max_merge_sources (5, default) → nothing written.
-
-        The exact regression the issue asks for: a cluster over the default size
-        cap, fed through the path that produced the live degenerate entries,
-        must reach ``_pending_merges.md`` as ZERO blocks.
-        """
-        from athenaeum.wiki_dedupe import propose_wiki_page_merges
-
-        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
-        proposals = propose_wiki_page_merges(
-            knowledge_root,
-            config={},  # defaults: max_merge_sources=5, min_merge_mean_similarity=0.6
+        results = propose_wiki_page_merges(
+            tmp_path,
+            config=_COMPARATOR_CONFIG,
             threshold=0.8,
-            embedding_provider=_identical_embed,
+            embedding_provider=_boom,
         )
-        assert proposals == []
-        merges_path = knowledge_root / "wiki" / "_pending_merges.md"
-        # Either the sidecar was never created, or it exists with no merge block.
-        if merges_path.is_file():
-            assert "## [" not in merges_path.read_text(encoding="utf-8")
+        assert results == []
 
-    def test_over_cluster_suppressed_states_chromadb_default_embedder(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    def test_cross_class_pair_skipped_before_any_llm_call(
+        self, tmp_path: Path
     ) -> None:
-        """Issue athenaeum#1032: the SUPPRESSED log line names which embedder
-        produced the suppressed cluster's vectors — chromadb-default when
-        real (stub) vectors were used."""
-        import logging
-
-        from athenaeum.wiki_dedupe import propose_wiki_page_merges
-
-        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
-        caplog.set_level(logging.INFO, logger="athenaeum.wiki_dedupe")
-        proposals = propose_wiki_page_merges(
-            knowledge_root,
-            config={},  # defaults: max_merge_sources=5
-            threshold=0.8,
-            embedding_provider=_identical_embed,
-        )
-        assert proposals == []
-        suppressed = [r for r in caplog.records if "SUPPRESSED" in r.getMessage()]
-        assert suppressed
-        assert all("embedder=chromadb-default" in r.getMessage() for r in suppressed)
-
-    def test_over_cluster_suppressed_states_fallback_hashing_embedder(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Issue athenaeum#1032: same gate, but the embedding provider returns
-        ``None`` (chromadb absent / embedding call failed), so the pass
-        falls back to the hashing-trick embedder. The SUPPRESSED line must
-        name THAT embedder, not chromadb-default, since it produced the
-        vectors that actually drove the suppression decision.
-
-        Bodies are near-identical (differing only in the filename-derived
-        ``name``/stem token — file paths must be distinct) so the
-        hashing-trick vectors land at a uniform ~0.667 (2/3) pairwise
-        cosine across all 15 pairs — a lower ``threshold`` (0.6, vs. 0.8
-        for the real-vector variant of this test) reliably clusters all 6
-        into one clique without depending on the real embedder this test
-        deliberately disables. Issue athenaeum#1050: ``_fallback_embeddings`` now
-        hashes tokens with ``hashlib.sha256`` instead of the
-        PYTHONHASHSEED-salted builtin ``hash()``, so this 0.667 figure is a
-        fixed, measured constant (verified stable across
-        ``PYTHONHASHSEED`` in this repo's CI) rather than a per-process
-        range — pre-athenaeum#1050 this same fixture landed anywhere in
-        ~0.62-0.67 depending on the run's random hash seed, which is
-        exactly what made this test flaky (CI run 32379062624).
-        """
-        import logging
-
+        """Issue athenaeum#715: the comparator's own MEMORY_CLASS dimension is not
+        yet ENFORCED, so ``cross_class_precheck`` survives as a pre-comparator
+        filter (see module docstring) — a cross-class pair must never reach
+        Gate 2."""
+        from athenaeum.runlock import RunLock
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
         wiki_root = tmp_path / "knowledge" / "wiki"
-        for i in range(6):
-            _write_page(
-                wiki_root,
-                f"dup-{i}.md",
-                body="Identical cohesive duplicate content for the fallback-hashing test.",
-            )
+        _write_page(
+            wiki_root, "policy-a.md", page_type="concept", body=_BODY_A,
+        )
+        # A second page in the same near-duplicate embedding neighborhood
+        # but a DIFFERENT declared memory_class.
+        path_b = _write_page(wiki_root, "policy-b.md", page_type="concept", body=_BODY_B)
+        text = path_b.read_text(encoding="utf-8")
+        path_b.write_text(
+            text.replace("type: concept", "type: concept\nmemory_class: fact"),
+            encoding="utf-8",
+        )
+        path_a = wiki_root / "policy-a.md"
+        text_a = path_a.read_text(encoding="utf-8")
+        path_a.write_text(
+            text_a.replace("type: concept", "type: concept\nmemory_class: guideline"),
+            encoding="utf-8",
+        )
+
         knowledge_root = wiki_root.parent
-
-        def _no_vectors(texts: list[str]) -> list[list[float]] | None:
-            return None
-
-        caplog.set_level(logging.INFO, logger="athenaeum.wiki_dedupe")
-        proposals = propose_wiki_page_merges(
-            knowledge_root,
-            config={},  # defaults: max_merge_sources=5
-            threshold=0.6,
-            embedding_provider=_no_vectors,
-        )
-        assert proposals == []
-        suppressed = [r for r in caplog.records if "SUPPRESSED" in r.getMessage()]
-        assert suppressed
-        assert all("embedder=fallback-hashing" in r.getMessage() for r in suppressed)
-
-    def test_over_cluster_suppressed_in_dry_run(self, tmp_path: Path) -> None:
-        """dry-run reflects the gated real run — the over-cluster is not previewed."""
-        from athenaeum.wiki_dedupe import propose_wiki_page_merges
-
-        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
-        proposals = propose_wiki_page_merges(
-            knowledge_root,
-            config={},
-            threshold=0.8,
-            embedding_provider=_identical_embed,
-            dry_run=True,
-        )
-        assert proposals == []
-
-    def test_raising_max_merge_sources_admits_the_cluster(self, tmp_path: Path) -> None:
-        """The gate is config-driven: a higher cap admits the same 6-page cluster,
-        proving the suppression is the size cap firing (not clustering collapsing
-        the group) and that the wiki-dedupe path honors ``librarian`` config."""
-        from athenaeum.wiki_dedupe import propose_wiki_page_merges
-
-        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
-        proposals = propose_wiki_page_merges(
-            knowledge_root,
-            config={"librarian": {"max_merge_sources": 10}},
-            threshold=0.8,
-            embedding_provider=_identical_embed,
-        )
-        assert len(proposals) == 1
-        assert len(proposals[0]["sources"]) == 6
-
-    def test_low_mean_cohesion_suppressed_via_config(
-        self, duplicate_topic_wiki: Path
-    ) -> None:
-        """The mean-cohesion arm is wired too: a floor above the cluster's mean
-        pairwise cohesion (~0.97 for the 3 venture pages) suppresses an
-        otherwise size-legal 3-page cluster on the wiki-dedupe path."""
-        from athenaeum.wiki_dedupe import propose_wiki_page_merges
-
-        proposals = propose_wiki_page_merges(
-            duplicate_topic_wiki,
-            config={"librarian": {"min_merge_mean_similarity": 0.99}},
-            threshold=0.8,
-            embedding_provider=_fake_embed,
-        )
-        assert proposals == []
+        client = _fake_llm_client(_content_payload("equivalent"))
+        lock = RunLock(knowledge_root)
+        with lock:
+            results = propose_wiki_page_merges(
+                knowledge_root,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                lock=lock,
+            )
+        assert results == []
+        assert client.messages.create.call_count == 0
 
 
 def _chain_bodies(n: int) -> list[str]:
@@ -650,20 +528,19 @@ class TestWikiClusterFormationIsCompleteLinkage:
         for c in multi:
             assert c.min_pairwise_score >= 0.9
 
-    def test_no_legitimate_pair_lost_and_no_over_cluster_suppression(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    def test_no_legitimate_pair_lost_once_comparator_decides_each_one(
+        self, tmp_path: Path
     ) -> None:
         """A 7-page chain that WOULD have been one 7-source single-linkage
-        component (over the default ``max_merge_sources=5``, and thus
-        wholesale suppressed with no record of the legitimate pairs inside
-        it — the loss mode issue athenaeum#681's AC3 was written to detect on
-        the raw-source clusterer) must instead reach ``_pending_merges.md``
-        as legitimate small proposals. The over-cluster gate never fires,
-        because formation now guarantees the property it used to enforce
-        after the fact.
+        component (the loss mode issue athenaeum#681's AC3 was written to
+        detect on the raw-source clusterer) forms multiple small cliques
+        (never one giant component), and — since issue athenaeum#715's
+        cut-over — every pair inside each clique is independently decided by
+        the comparator rather than gated by a size/confidence suppression
+        gate (which no longer exists on this path). No legitimate pair is
+        dropped; no proposal ever touches ``_pending_merges.md``.
         """
-        import logging
-
+        from athenaeum.runlock import RunLock
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
         wiki_root = tmp_path / "knowledge" / "wiki"
@@ -672,104 +549,45 @@ class TestWikiClusterFormationIsCompleteLinkage:
             _write_page(wiki_root, f"chain-{i}.md", body=body)
         knowledge_root = wiki_root.parent
 
-        caplog.set_level(logging.INFO, logger="athenaeum.wiki_dedupe")
-        proposals = propose_wiki_page_merges(
-            knowledge_root,
-            config={},  # defaults: max_merge_sources=5, min_merge_mean_similarity=0.6
-            threshold=0.9,
-            embedding_provider=_circle_provider(bodies),
-        )
+        client = _fake_llm_client(_content_payload("equivalent"))
+        lock = RunLock(knowledge_root)
+        with lock:
+            results = propose_wiki_page_merges(
+                knowledge_root,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.9,
+                embedding_provider=_circle_provider(bodies),
+                client=client,
+                lock=lock,
+            )
 
-        assert proposals, "legitimate near-duplicate pairs must not be dropped"
-        for proposal in proposals:
-            assert len(proposal["sources"]) <= 5
-
-        suppressed = [r for r in caplog.records if "SUPPRESSED" in r.getMessage()]
-        assert not suppressed, (
-            "over-cluster suppression should not fire once formation is "
-            f"complete-linkage: {[r.getMessage() for r in suppressed]}"
-        )
-
+        assert results, "legitimate near-duplicate pairs must not be dropped"
         merges_path = wiki_root / "_pending_merges.md"
-        assert merges_path.is_file()
-        assert "## [" in merges_path.read_text(encoding="utf-8")
+        assert not merges_path.exists()
 
-        # No member of a legitimate small cluster is dropped: every proposed
-        # source is one of the original chain pages, and no proposal folds
-        # in an out-of-chain source.
-        all_sources = {Path(s).name for p in proposals for s in p["sources"]}
+        # No member of a legitimate small cluster is dropped: every compared
+        # source is one of the original chain pages, and no pair folds in an
+        # out-of-chain source.
+        all_sources = {Path(s).name for r in results for s in r["sources"]}
         assert all_sources <= {f"chain-{i}.md" for i in range(7)}
 
 
 # --- Issue athenaeum#1142: durable embedder + suppression attribution ---
 #
-# athenaeum#1032 stamped the embedder onto suppression LOG LINES and the raw-intake
-# clusters JSONL. It never reached ``wiki/_pending_merges.md`` (a written
-# proposal carried no embedder field) or any durable record of a SUPPRESSED
-# wiki-dedupe cluster (suppression was a log.info call only) -- so a
-# suppressed cluster could never answer "which embedder, and why?" without
-# a live host log read. These tests exercise the two surfaces this issue
-# closes: the proposal block itself (AC1), and a new sidecar ledger for
-# suppressions (AC2), plus the AC3 non-constant-field guard and the AC4
-# bounded-retention behavior.
+# athenaeum#715's comparator cut-over removed both surfaces athenaeum#1142's
+# coverage asserted on: the wiki-dedupe pass no longer writes
+# ``wiki/_pending_merges.md`` proposal blocks, and the suppression sidecar
+# ledger has no producer under the comparator path. Those tests
+# (``TestSuppressionLedger``, and the two proposal-attribution / run-
+# comparison cases) are recovered verbatim from ref ``b79efc0`` in issue
+# athenaeum#1243, which re-sites athenaeum#1142's requirement onto the
+# comparator's verdict ledger. Only the blast-radius guard below survives
+# here: it exercises ``pending_merges.write_pending_merge`` directly and
+# guards ``merge.py``'s raw-intake path, which athenaeum#715 does not touch.
 
 
 class TestEmbedderAttributionOnProposals:
-    """AC1: a written proposal carries the embedder that produced its cluster."""
-
-    def test_proposal_block_carries_chromadb_default_embedder(
-        self, duplicate_topic_wiki: Path
-    ) -> None:
-        from athenaeum.pending_merges import parse_pending_merges
-        from athenaeum.wiki_dedupe import propose_wiki_page_merges
-
-        propose_wiki_page_merges(
-            duplicate_topic_wiki,
-            config={},
-            threshold=0.8,
-            embedding_provider=_fake_embed,
-        )
-        merges_path = duplicate_topic_wiki / "wiki" / "_pending_merges.md"
-        pm = parse_pending_merges(merges_path)[0]
-        assert pm.embedder == "chromadb-default"
-        assert "**Embedder**: chromadb-default" in merges_path.read_text(
-            encoding="utf-8"
-        )
-
-    def test_proposal_block_carries_fallback_hashing_embedder(
-        self, tmp_path: Path
-    ) -> None:
-        from athenaeum.pending_merges import parse_pending_merges
-        from athenaeum.wiki_dedupe import propose_wiki_page_merges
-
-        wiki_root = tmp_path / "knowledge" / "wiki"
-        for i in range(3):
-            _write_page(
-                wiki_root,
-                f"dup-{i}.md",
-                body=(
-                    "Identical cohesive duplicate content for the "
-                    "fallback-hashing embedder-attribution test."
-                ),
-            )
-        knowledge_root = wiki_root.parent
-
-        def _no_vectors(texts: list[str]) -> list[list[float]] | None:
-            return None
-
-        proposals = propose_wiki_page_merges(
-            knowledge_root,
-            config={},  # 3 sources, well under max_merge_sources=5 -- not suppressed
-            threshold=0.6,
-            embedding_provider=_no_vectors,
-        )
-        assert len(proposals) == 1
-        merges_path = wiki_root / "_pending_merges.md"
-        pm = parse_pending_merges(merges_path)[0]
-        assert pm.embedder == "fallback-hashing"
-        assert "**Embedder**: fallback-hashing" in merges_path.read_text(
-            encoding="utf-8"
-        )
+    """Blast-radius guard for the raw-intake proposal write path."""
 
     def test_raw_intake_write_path_unaffected_no_embedder_line(
         self, tmp_path: Path
@@ -795,240 +613,6 @@ class TestEmbedderAttributionOnProposals:
         assert pm.embedder == ""
 
 
-class TestSuppressionLedger:
-    """AC2/AC4: suppressed clusters are recorded durably, with reason and
-    embedder, in a bounded (never unbounded-append) sidecar ledger."""
-
-    def _seed_cohesive_cluster(self, tmp_path: Path, n: int) -> Path:
-        wiki_root = tmp_path / "knowledge" / "wiki"
-        for i in range(n):
-            _write_page(
-                wiki_root,
-                f"dup-{i}.md",
-                body=f"Cohesive duplicate-topic wiki page number {i}.",
-            )
-        return wiki_root.parent
-
-    def test_suppressed_cluster_recorded_with_reason_and_embedder(
-        self, tmp_path: Path
-    ) -> None:
-        from athenaeum.wiki_dedupe import (
-            DEFAULT_WIKI_SUPPRESSIONS_FILENAME,
-            propose_wiki_page_merges,
-        )
-
-        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
-        proposals = propose_wiki_page_merges(
-            knowledge_root,
-            config={},  # default max_merge_sources=5 < 6 sources -> suppressed
-            threshold=0.8,
-            embedding_provider=_identical_embed,
-        )
-        assert proposals == []
-
-        ledger_path = knowledge_root / "wiki" / DEFAULT_WIKI_SUPPRESSIONS_FILENAME
-        assert ledger_path.is_file()
-        rows = [
-            json.loads(line)
-            for line in ledger_path.read_text(encoding="utf-8").splitlines()
-        ]
-        assert len(rows) == 1
-        row = rows[0]
-        # AC5: this one row answers both "which embedder" and "why
-        # suppressed" with no live host read.
-        assert row["n_sources"] == 6
-        assert "over-cluster" in row["reason"]
-        assert row["embedder"] == "chromadb-default"
-        assert row["cluster_threshold"] == 0.8
-        assert len(row["sources"]) == 6
-        assert row["suppressed_at"]  # non-empty ISO timestamp
-
-    def test_ledger_written_even_with_zero_suppressions(
-        self, duplicate_topic_wiki: Path
-    ) -> None:
-        """Written every real run, even to empty -- so the canonical file
-        always reflects THIS run's state, never a stale prior one."""
-        from athenaeum.wiki_dedupe import (
-            DEFAULT_WIKI_SUPPRESSIONS_FILENAME,
-            propose_wiki_page_merges,
-        )
-
-        propose_wiki_page_merges(
-            duplicate_topic_wiki,
-            config={},
-            threshold=0.8,
-            embedding_provider=_fake_embed,
-        )
-        ledger_path = duplicate_topic_wiki / "wiki" / DEFAULT_WIKI_SUPPRESSIONS_FILENAME
-        assert ledger_path.is_file()
-        assert ledger_path.read_text(encoding="utf-8") == ""
-
-    def test_dry_run_never_writes_the_ledger(self, tmp_path: Path) -> None:
-        from athenaeum.wiki_dedupe import (
-            DEFAULT_WIKI_SUPPRESSIONS_FILENAME,
-            propose_wiki_page_merges,
-        )
-
-        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
-        propose_wiki_page_merges(
-            knowledge_root,
-            config={},
-            threshold=0.8,
-            embedding_provider=_identical_embed,
-            dry_run=True,
-        )
-        ledger_path = knowledge_root / "wiki" / DEFAULT_WIKI_SUPPRESSIONS_FILENAME
-        assert not ledger_path.exists()
-
-    def test_canonical_file_is_replaced_not_appended_across_runs(
-        self, tmp_path: Path
-    ) -> None:
-        """AC4: a current-run SNAPSHOT, not an accumulating append-only
-        ledger -- the exact asymmetry a sibling item (athenaeum#1229) is
-        separately fixing for a DIFFERENT ledger that grew unbounded."""
-        from athenaeum.wiki_dedupe import (
-            DEFAULT_WIKI_SUPPRESSIONS_FILENAME,
-            propose_wiki_page_merges,
-        )
-
-        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
-        propose_wiki_page_merges(
-            knowledge_root,
-            config={},
-            threshold=0.8,
-            embedding_provider=_identical_embed,
-        )
-        ledger_path = knowledge_root / "wiki" / DEFAULT_WIKI_SUPPRESSIONS_FILENAME
-        first_rows = ledger_path.read_text(encoding="utf-8").splitlines()
-        assert len(first_rows) == 1
-
-        # Same corpus, cap raised so THIS run suppresses nothing.
-        propose_wiki_page_merges(
-            knowledge_root,
-            config={"librarian": {"max_merge_sources": 10}},
-            threshold=0.8,
-            embedding_provider=_identical_embed,
-        )
-        second_text = ledger_path.read_text(encoding="utf-8")
-        assert second_text == ""  # replaced, not appended to the prior row
-
-    def test_rotation_pruned_to_configured_retention(self, tmp_path: Path) -> None:
-        """AC4: rotations follow the SAME ``librarian.rotation_retention``
-        policy ``_librarian-clusters.jsonl`` already uses -- reused, not a
-        second retention knob. Mirrors
-        ``tests/test_librarian_clusters.py::TestPruneClusterRotations``'s
-        hand-seeded-timestamp technique rather than depending on real
-        wall-clock separation between calls."""
-        from athenaeum.wiki_dedupe import (
-            DEFAULT_WIKI_SUPPRESSIONS_FILENAME,
-            _write_wiki_suppressions_report,
-        )
-
-        knowledge_root = tmp_path / "knowledge"
-        wiki_root = knowledge_root / "wiki"
-        wiki_root.mkdir(parents=True)
-        canonical = wiki_root / DEFAULT_WIKI_SUPPRESSIONS_FILENAME
-        stem = canonical.stem
-        for stamp in ["20260101T000000Z", "20260102T000000Z", "20260103T000000Z"]:
-            (wiki_root / f"{stem}-{stamp}.jsonl").write_text("{}\n", encoding="utf-8")
-
-        _write_wiki_suppressions_report(
-            [],
-            wiki_root,
-            knowledge_root=knowledge_root,
-            config={"librarian": {"rotation_retention": 2}},
-        )
-        remaining = sorted(p.name for p in wiki_root.glob(f"{stem}-*.jsonl"))
-        # The 3 hand-seeded rotations + the 1 just written = 4 candidates;
-        # keep=2 prunes down to the 2 newest (the just-written one is
-        # newest by construction -- today's real UTC timestamp).
-        assert len(remaining) == 2
-        assert canonical.is_file()  # canonical itself never matches the glob
-
-
-class TestEmbedderAttributionDiffersByRun:
-    """AC3: a run using a non-default embedder produces artifacts whose
-    attribution DIFFERS from a default-embedder run, on BOTH surfaces this
-    issue touches -- so the field cannot silently go constant."""
-
-    @staticmethod
-    def _make_identical_pages(root: Path, n: int = 3) -> Path:
-        wiki_root = root / "knowledge" / "wiki"
-        for i in range(n):
-            _write_page(
-                wiki_root,
-                f"dup-{i}.md",
-                body="Shared identical body text for the run-comparison fixture.",
-            )
-        return wiki_root.parent
-
-    def test_proposal_embedder_field_differs_between_runs(
-        self, tmp_path: Path
-    ) -> None:
-        from athenaeum.pending_merges import parse_pending_merges
-        from athenaeum.wiki_dedupe import propose_wiki_page_merges
-
-        real_root = self._make_identical_pages(tmp_path / "real")
-        propose_wiki_page_merges(
-            real_root, config={}, threshold=0.8, embedding_provider=_identical_embed
-        )
-        real_pm = parse_pending_merges(real_root / "wiki" / "_pending_merges.md")[0]
-
-        fallback_root = self._make_identical_pages(tmp_path / "fallback")
-        propose_wiki_page_merges(
-            fallback_root,
-            config={},
-            threshold=0.6,
-            embedding_provider=lambda texts: None,
-        )
-        fallback_pm = parse_pending_merges(
-            fallback_root / "wiki" / "_pending_merges.md"
-        )[0]
-
-        assert real_pm.embedder == "chromadb-default"
-        assert fallback_pm.embedder == "fallback-hashing"
-        assert real_pm.embedder != fallback_pm.embedder
-
-    def test_suppression_ledger_embedder_field_differs_between_runs(
-        self, tmp_path: Path
-    ) -> None:
-        from athenaeum.wiki_dedupe import (
-            DEFAULT_WIKI_SUPPRESSIONS_FILENAME,
-            propose_wiki_page_merges,
-        )
-
-        real_root = self._make_identical_pages(tmp_path / "real", n=6)
-        propose_wiki_page_merges(
-            real_root, config={}, threshold=0.8, embedding_provider=_identical_embed
-        )
-        real_rows = [
-            json.loads(line)
-            for line in (real_root / "wiki" / DEFAULT_WIKI_SUPPRESSIONS_FILENAME)
-            .read_text(encoding="utf-8")
-            .splitlines()
-        ]
-
-        fallback_root = self._make_identical_pages(tmp_path / "fallback", n=6)
-        propose_wiki_page_merges(
-            fallback_root,
-            config={},
-            # 0.6, not 0.8: the fallback-hashing embedder folds in each
-            # page's distinct filename token, so even byte-identical bodies
-            # land at ~0.667 pairwise (see TestSuppressionGates's docstring
-            # in this file) -- 0.8 would form no cluster at all here.
-            threshold=0.6,
-            embedding_provider=lambda texts: None,
-        )
-        fallback_rows = [
-            json.loads(line)
-            for line in (fallback_root / "wiki" / DEFAULT_WIKI_SUPPRESSIONS_FILENAME)
-            .read_text(encoding="utf-8")
-            .splitlines()
-        ]
-
-        assert real_rows[0]["embedder"] == "chromadb-default"
-        assert fallback_rows[0]["embedder"] == "fallback-hashing"
-        assert real_rows[0]["embedder"] != fallback_rows[0]["embedder"]
 # --- Issue athenaeum#1140: chunk-and-mean-pool fixes the truncation collapse ---
 #
 # Root cause (full measurement trail in the issue): chromadb's default ONNX

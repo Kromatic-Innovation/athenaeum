@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Wiki-page dedup cut over to the five-verdict comparator; its own old
+  duplicate-detection algorithm is retired, not run alongside it
+  (athenaeum#715).** `athenaeum.wiki_dedupe.propose_wiki_page_merges` used to
+  cluster candidate wiki pages (unchanged) and then run its OWN
+  confidence-scored suppression-gate pipeline
+  (`merge_type_gate._merge_proposal_suppression_reason`, deterministic draft
+  synthesis, a direct `write_pending_merge` append) — a second,
+  independent duplicate-detection implementation running in parallel with
+  the five-verdict comparator (`athenaeum.comparator`, landed dark in
+  athenaeum#1128/#1131). That old algorithm is deleted outright: clustering
+  still only proposes candidate PAIRS (never a verdict), and every pair is
+  now decided by the comparator and enacted via `athenaeum.verdict_effects`
+  — a `duplicate` verdict writes fold EVIDENCE (never a merged body,
+  never `_pending_merges.md`), `specialization` writes `refines:`,
+  `contradiction` routes to supersession-or-queue, `distinct`/
+  `underdetermined` are ledger-only. `merge_type_gate.cross_class_precheck`
+  is kept as a pre-comparator filter (the comparator's own `MEMORY_CLASS`
+  dimension is not yet `enforced`). Gated on the SAME pre-existing
+  `librarian.comparator_enabled` / `ATHENAEUM_COMPARATOR_ENABLED` knob
+  (still default OFF) — not a new flag; with it off, this pass is now a
+  complete no-op (old or new), which is the intended shape of a real
+  cut-over rather than a second parallel path. `athenaeum.comparator.record_comparison`
+  now also returns the decided `CompareOutcome` (`"outcome"` key, `None`
+  except on a freshly-ledgered pair) so a caller can enact its effect
+  without a second, redundant Gate 2 call.
+
+  **This is a partial cut-over, not the full one athenaeum#715 ultimately
+  requires.** The separate C1-C4 auto-memory compile pipeline
+  (`athenaeum.merge`'s `merge_clusters_to_wiki`, the ~940-line intra-cluster
+  LLM contradiction detector + Opus resolver + T1/T2 reasoning-tier screens
+  + cross-scope similarity sweep) is UNCHANGED and still runs
+  unconditionally — it is deeply interleaved with run-level deadline
+  checkpointing, the detection-incomplete retry queue
+  (`athenaeum.detection_state`), and the shared API-call/spend-ceiling
+  budget across multiple `librarian.py` call sites, none of which this PR
+  touches. Retiring it safely needs its own dedicated pass; see the PR
+  description and the athenaeum#715 issue comment for the precise scope
+  handed to a follow-up lane.
+
+- **A misconfigured LLM provider no longer aborts the librarian's whole
+  wiki-dedup phase (athenaeum#715, Seer finding on the athenaeum#1227
+  cut-over).** With `librarian.comparator_enabled` ON,
+  `librarian._run_wiki_dedup_phase` built its Gate-2 client outside any
+  local `try`, so a `ProviderConfigError` unwound to the phase's generic
+  `except Exception` — skipping the pass wholesale (including the
+  deterministic Gate 1 work, which needs no LLM at all) and logging a
+  misleading `wiki-page dedup pass failed`. The client build is now wrapped
+  to mirror the CLI sibling `_cmd_curate._cmd_dedupe_wiki_pages`: the
+  provider error is logged as what it is, `client` stays `None`, and
+  `propose_wiki_page_merges` runs in Gate-1-only degraded mode (a pair Gate
+  1 cannot settle reports no verdict, never a fabricated one).
+
+- **athenaeum#1142's wiki-dedupe suppression ledger is left without a producer
+  by this cut-over (tracked in athenaeum#1243).** The comparator path writes no
+  `wiki/_pending_merges.md` proposal block and no
+  `_wiki_dedupe_suppressions.jsonl` sidecar, so athenaeum#1142's embedder- and
+  suppression-attribution surfaces (and the tests that asserted on them) no
+  longer have anything to observe. `DEFAULT_WIKI_SUPPRESSIONS_FILENAME` and
+  those tests are removed here rather than left asserting on a dead path;
+  athenaeum#1243 ("Re-site athenaeum#1142's embedder + non-proposal attribution
+  into the comparator's verdict ledger") recovers them verbatim from ref
+  `b79efc0` and gates re-siting on enabling `comparator_enabled`.
+
 ### Fixed
 
 - **The push-boundary public-safe-lint gate no longer dies on stock macOS

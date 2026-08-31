@@ -127,21 +127,29 @@ shallower node of two hierarchy coordinates -- never the intersection or
 either side alone. ``tests/test_comparator.py``'s widening tests assert the
 widened bound is never tighter than either input on both edges.
 
-**Landing dark (issue athenaeum#715 AC).** This module is not called from
-:mod:`athenaeum.librarian`, :mod:`athenaeum.decision_answers`, or any other
-pipeline entry point -- that cut-over is an explicit, separate, future step
-(see athenaeum#715's own Scope-boundaries section).
-:func:`athenaeum.config.resolve_comparator_enabled` is the documented,
-default-off knob that wiring gates on, mirroring
+**Landing dark, then a partial cut-over (issue athenaeum#715 AC).** Through
+PRs athenaeum#1128/athenaeum#1131 this module was not called from any pipeline entry point at all.
+The cut-over PR wires ONE pipeline phase to it:
+:func:`athenaeum.wiki_dedupe.propose_wiki_page_merges` (the wiki-page dedup
+pass, called every run from
+:func:`athenaeum.librarian._run_wiki_dedup_phase`) now compares every
+candidate pair via :func:`record_comparison` and enacts the verdict via
+:mod:`athenaeum.verdict_effects`, replacing that pass's own retired
+duplicate-detection algorithm outright (not run alongside it — see
+:mod:`athenaeum.wiki_dedupe`'s module docstring). This module is still NOT
+called from :mod:`athenaeum.decision_answers`, and the separate C1-C4
+auto-memory compile pipeline (:mod:`athenaeum.merge`) is UNCHANGED — its own
+intra-cluster contradiction detector still runs unconditionally, not yet
+folded into this comparator; that remains an explicit, separate, future
+step. :func:`athenaeum.config.resolve_comparator_enabled` is the documented,
+default-off knob every one of these call sites gates on, mirroring
 :func:`athenaeum.config.resolve_verdict_ledger_enabled`'s shape exactly. Its
-one live reader is ``athenaeum merges recompare``
+other live reader is ``athenaeum merges recompare``
 (:mod:`athenaeum._cmd_merges`), the explicit opt-in command that re-runs this
-comparator over the pending merge queue -- which is a command an operator
-invokes, not a nightly phase, so the dark-in-the-pipeline property above is
-unaffected. Nothing in this module reads that knob itself (the same way
-:mod:`athenaeum.verdicts` never reads ``resolve_verdict_ledger_enabled`` --
-the gate belongs to the CALLER that decides whether to invoke the subsystem
-at all, not to the subsystem).
+comparator over the pending merge queue. Nothing in this module reads that
+knob itself (the same way :mod:`athenaeum.verdicts` never reads
+``resolve_verdict_ledger_enabled`` -- the gate belongs to the CALLER that
+decides whether to invoke the subsystem at all, not to the subsystem).
 
 **Layering:** L4 orchestrator, sitting above athenaeum#714's dimension registry
 (L1/L2, :mod:`athenaeum.dimensions`) and athenaeum#712's verdict ledger (L2,
@@ -153,8 +161,8 @@ at all, not to the subsystem).
 (C4, athenaeum#198) already stands on, deliberately mirrored rather than
 reinvented. Does NOT import :mod:`athenaeum.librarian`,
 :mod:`athenaeum.decision_answers`, or :mod:`athenaeum.merge` -- this module
-owns the comparator's decision logic only; wiring it into a pipeline phase is
-out of scope (see "Landing dark" above).
+owns the comparator's decision logic only; :mod:`athenaeum.wiki_dedupe` is
+the caller that wires it into a pipeline phase.
 """
 
 from __future__ import annotations
@@ -837,12 +845,21 @@ def record_comparison(
     not re-check it itself).
 
     Returns ``{"ok": bool, "pair": str, "verdict": str|None, "skipped":
-    str|None, "reason": str|None}``. ``skipped="fresh"`` -- memoized,
-    nothing recomputed. ``ok=False`` -- either Gate 2 was unavailable
-    (``reason`` set, nothing ledgered) or the pair was refused as
-    erasure-class (``reason="erasure_class_refused"``, mirroring
-    :func:`athenaeum.verdicts.refuse_if_erasure_class`'s posture -- see
-    module docstring).
+    str|None, "reason": str|None, "outcome": CompareOutcome|None}``.
+    ``skipped="fresh"`` -- memoized, nothing recomputed (``outcome`` is
+    ``None``: this call did not re-decide anything, so there is no fresh
+    :class:`CompareOutcome` to hand a caller wanting to enact an effect --
+    see athenaeum#715's cut-over, :mod:`athenaeum.wiki_dedupe`, which only
+    calls :func:`athenaeum.verdict_effects.apply_verdict_effect` when
+    ``skipped`` is falsy). ``ok=False`` -- either Gate 2 was unavailable
+    (``reason`` set, nothing ledgered, ``outcome`` is ``None``) or the pair
+    was refused as erasure-class (``reason="erasure_class_refused"``,
+    mirroring :func:`athenaeum.verdicts.refuse_if_erasure_class`'s posture
+    -- see module docstring). ``outcome`` is populated ONLY on a freshly
+    decided, successfully-ledgered pair (``ok=True`` and ``skipped=None``)
+    -- the full :class:`CompareOutcome` this call itself computed, so a
+    caller can enact its storage-side effect without re-comparing (and
+    therefore without a second, redundant Gate 2 call).
     """
     pair_key = make_pair_key(page_a.id, page_b.id)
     status = get_verdict_status(wiki_root, pair_key)
@@ -853,6 +870,7 @@ def record_comparison(
             "verdict": status["verdict"],
             "skipped": "fresh",
             "reason": None,
+            "outcome": None,
         }
 
     if is_pii_flagged(page_a.meta) or is_pii_flagged(page_b.meta):
@@ -868,6 +886,7 @@ def record_comparison(
             "verdict": None,
             "skipped": None,
             "reason": "erasure_class_refused",
+            "outcome": None,
         }
 
     outcome = compare_pages(
@@ -886,6 +905,7 @@ def record_comparison(
             "verdict": None,
             "skipped": None,
             "reason": outcome.reason,
+            "outcome": None,
         }
 
     basis = Basis(
@@ -915,6 +935,7 @@ def record_comparison(
         "verdict": outcome.verdict,
         "skipped": None,
         "reason": None,
+        "outcome": outcome,
     }
 
 

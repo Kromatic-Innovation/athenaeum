@@ -319,14 +319,18 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
 
 
 def _cmd_dedupe_wiki_pages(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum dedupe wiki-pages`` (issue athenaeum#290).
+    """Dispatch ``athenaeum dedupe wiki-pages`` (issues athenaeum#290, athenaeum#715).
 
-    Clusters concept/reference/principle wiki pages and proposes merges
-    for near-duplicate topics via the shared
-    ``wiki/_pending_merges.md`` sidecar. Default writes proposals
-    (idempotent — a rerun is a no-op for source sets already proposed);
-    ``--dry-run`` previews without writing.
+    Clusters concept/reference/principle wiki pages; every candidate pair is
+    then decided by the five-verdict comparator and its verdict enacted (a
+    ``duplicate`` verdict writes fold EVIDENCE — never a merged body, never
+    ``wiki/_pending_merges.md``; see ``athenaeum.verdict_effects``). Since
+    athenaeum#715's cut-over this command's own OLD confidence/suppression-gate
+    algorithm no longer exists, so it refuses to run (rather than silently
+    doing nothing) when the comparator subsystem is disabled — the same
+    posture ``athenaeum merges recompare`` already takes.
     """
+    from athenaeum.config import load_config, resolve_comparator_enabled
     from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
     knowledge_root = args.path.expanduser().resolve()
@@ -335,31 +339,59 @@ def _cmd_dedupe_wiki_pages(args: argparse.Namespace) -> int:
         print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
         return 1
 
-    # Issue athenaeum#309: --dry-run writes nothing, so it does NOT take the lock. The
-    # proposal-append path (default) mutates wiki/_pending_merges.md → locked.
+    config = load_config(knowledge_root)
+    if not resolve_comparator_enabled(config):
+        print(
+            "The five-verdict comparator is disabled. Enable it with "
+            "ATHENAEUM_COMPARATOR_ENABLED=1 or librarian.comparator_enabled: true "
+            "before running this command (issue athenaeum#715) — the old "
+            "detection algorithm this command used to run has been retired.",
+            file=sys.stderr,
+        )
+        return 2
+
+    from athenaeum.provider import ProviderConfigError, build_llm_client
+
+    client = None
+    try:
+        client = build_llm_client(config=config, knob="classify")
+    except ProviderConfigError as exc:
+        print(f"Provider misconfigured: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 — offline degrade, mirrors `_cmd_recompare`
+        print(
+            f"No LLM client ({exc}); Gate 2 unavailable — pairs Gate 1 cannot "
+            "settle will report no verdict.",
+            file=sys.stderr,
+        )
+
+    # Issue athenaeum#309: --dry-run writes nothing, so it does NOT take the lock. A
+    # real run ledgers verdicts and enacts effects → locked.
     lock: RunLock | int | None = None
     if not args.dry_run:
-        from athenaeum.config import load_config
-
-        lock = _acquire_or_exit(knowledge_root, args, load_config(knowledge_root))
+        lock = _acquire_or_exit(knowledge_root, args, config)
         if isinstance(lock, int):
             return lock
     try:
-        proposals = propose_wiki_page_merges(
+        results = propose_wiki_page_merges(
             knowledge_root,
+            config=config,
             threshold=args.threshold,
             dry_run=args.dry_run,
+            client=client,
+            lock=None if isinstance(lock, int) else lock,
         )
     finally:
         if lock is not None and not isinstance(lock, int):
             lock.release()
 
     if args.dry_run:
-        print(f"[DRY RUN] would propose {len(proposals)} merge(s):")
+        print(f"[DRY RUN] would decide {len(results)} pair(s):")
     else:
-        print(f"Proposed {len(proposals)} new merge(s) (see wiki/_pending_merges.md):")
-    for p in proposals:
-        print(f"  - {p['merge_target_name']}: {len(p['sources'])} source(s)")
+        print(f"Decided {len(results)} pair(s) (fresh/memoized pairs are skipped):")
+    for r in results:
+        action = r.get("action", "preview")
+        print(f"  - {r['pair']}: verdict={r['verdict']} action={action}")
     return 0
 
 

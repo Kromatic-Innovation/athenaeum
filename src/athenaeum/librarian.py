@@ -5112,16 +5112,25 @@ def _run_correction_phase(ctx: RunContext) -> None:
 
 
 def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
-    """Issue athenaeum#290 wiki-page dedup pass, then the post-phase deadline check.
+    """Issue athenaeum#290/athenaeum#715 wiki-page dedup pass, then the post-phase deadline check.
 
     Clusters compiled wiki/*.md concept/reference/principle pages against
-    EACH OTHER (not against raw/auto-memory intake) and proposes merges via
-    the shared wiki/_pending_merges.md sidecar. Independent of the C1-C4
-    auto-memory pipeline, so it runs on every mode (full run, --cluster-only,
+    EACH OTHER (not against raw/auto-memory intake). Since issue athenaeum#715's
+    cut-over, every candidate pair is decided and enacted by the five-verdict
+    comparator subsystem — see :func:`athenaeum.wiki_dedupe.propose_wiki_page_merges`'s
+    own docstring for exactly which modules that call reaches; this whole
+    pass is a no-op while ``librarian.comparator_enabled`` (default OFF)
+    stays off, same as every other comparator-subsystem consumer. This
+    module itself only checks the flag (to decide whether an LLM client is
+    even worth building) and delegates everything else to
+    ``athenaeum.wiki_dedupe`` — it does not import the comparator subsystem
+    directly. Independent of the C1-C4 auto-memory
+    pipeline, so it runs on every mode (full run, --cluster-only,
     --merge-only) whenever wiki/ exists — same cadence as the rest of the
     scheduled librarian pipeline. A failure here is logged and swallowed
-    rather than aborting the run: this pass is diagnostic (it only appends
-    human-reviewed proposals), not load-bearing for the rest of the pipeline.
+    rather than aborting the run: this pass is diagnostic (it only writes
+    human-reviewed evidence/queue items), not load-bearing for the rest of
+    the pipeline.
 
     Returns EXIT_GRACEFUL_PARTIAL (75, via ``ctx.stop_on_deadline``) to
     short-circuit ``run()`` when the deadline trips immediately after this
@@ -5130,10 +5139,64 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
     if ctx.wiki_root.is_dir():
         _wiki_dedup_start = time.monotonic()
         try:
+            from athenaeum.config import resolve_comparator_enabled
             from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
+            # Issue athenaeum#715: only resolve a client when the comparator
+            # subsystem is actually enabled — with the (default-off) flag
+            # off, `propose_wiki_page_merges` no-ops immediately, so building
+            # a live LLM client here would be pure waste and could log a
+            # confusing "wiki-page dedup pass failed" for an unrelated
+            # provider misconfiguration nobody asked this phase to surface.
+            #
+            # That reasoning covered only the comparator-DISABLED case. With
+            # the flag ON and the provider misconfigured, `build_llm_client`
+            # (via `resolve_provider`) raises `ProviderConfigError`, which
+            # used to unwind to the generic `except Exception` below —
+            # aborting the WHOLE phase, including the deterministic Gate 1
+            # work that needs no LLM at all, and logging exactly the
+            # confusing "wiki-page dedup pass failed" line this comment set
+            # out to avoid. The CLI sibling
+            # (`_cmd_curate._cmd_dedupe_wiki_pages`) already has the right
+            # posture: catch the provider error, leave `client` None, and let
+            # the pass run in Gate-1-only degraded mode. Mirror it here.
+            # `client=None` is a first-class degraded mode, not a no-op:
+            # `comparator.compare_pages` runs `gate1_separator_relations`
+            # first and returns DISTINCT on a disjoint dimension without ever
+            # touching the client; only a pair Gate 1 cannot settle reaches
+            # Gate 2, where `content_relation` returns UNAVAILABLE and the
+            # pair reports no verdict rather than a fabricated one.
+            _client = None
+            if resolve_comparator_enabled(ctx.config):
+                try:
+                    _provider = resolve_provider(
+                        ctx.config, knob="classify", default=ctx.provider
+                    )
+                    ctx.knob_providers["classify"] = _provider
+                    _client = build_llm_client(
+                        ctx.config, knob="classify", api_key=ctx.api_key, max_retries=3
+                    )
+                except ProviderConfigError as exc:
+                    log.warning(
+                        "wiki-page dedup: LLM provider misconfigured (%s); "
+                        "comparator Gate 2 unavailable — continuing in "
+                        "Gate-1-only degraded mode",
+                        exc,
+                    )
+                except Exception as exc:  # noqa: BLE001 - mirrors the CLI offline degrade
+                    log.warning(
+                        "wiki-page dedup: no LLM client (%s); comparator "
+                        "Gate 2 unavailable — continuing in Gate-1-only "
+                        "degraded mode",
+                        exc,
+                    )
             propose_wiki_page_merges(
-                ctx.knowledge_root, config=ctx.config, dry_run=ctx.dry_run
+                ctx.knowledge_root,
+                config=ctx.config,
+                dry_run=ctx.dry_run,
+                client=_client,
+                usage=ctx.usage,
+                lock=ctx.lock,
             )
         except Exception:
             log.exception("wiki-page dedup pass failed; continuing run")

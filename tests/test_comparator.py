@@ -148,10 +148,14 @@ class TestAC1LandedDark:
         assert resolve_comparator_enabled(config) is False
 
     def test_comparator_module_not_imported_by_pipeline_entry_points(self) -> None:
-        """Issue athenaeum#715's own scope boundary: the cut-over that calls this
-        module from the pipeline is a separate, future step. Until then,
-        landing dark is trivially true because nothing calls in — this
-        proves that by inspecting the two obvious wiring sites' source."""
+        """Neither ``librarian.py`` nor ``decision_answers.py`` imports this
+        module DIRECTLY. Issue athenaeum#715's cut-over does wire the comparator
+        into the pipeline — but through ``athenaeum.wiki_dedupe`` (see
+        ``tests/test_comparator_phase2_integration.py::TestPhase2StaysDark``
+        for the full, up-to-date map of who is and is not authorized to
+        import it), never a direct import here. ``merge.py``'s own C1-C4
+        contradiction detector is separately unaffected and still does not
+        reach this module at all."""
         repo_root = Path(__file__).resolve().parents[1]
         for rel in ("src/athenaeum/librarian.py", "src/athenaeum/decision_answers.py"):
             src = (repo_root / rel).read_text(encoding="utf-8")
@@ -307,6 +311,25 @@ class TestAC5Memoization:
         status = get_verdict_status(tmp_path, first["pair"])
         assert status["decided"] is True
         assert status["fresh"] is True
+
+    def test_outcome_populated_only_on_fresh_decision(self, tmp_path: Path) -> None:
+        """Issue athenaeum#715 cut-over: a caller (``athenaeum.wiki_dedupe``) needs the
+        full :class:`CompareOutcome` to enact ``apply_verdict_effect`` without a
+        second, redundant Gate 2 call. ``outcome`` carries it on a genuine
+        decision and is ``None`` on every other branch (fresh-skip, refused,
+        Gate-2-unavailable) so a caller never mistakes "nothing to enact" for
+        a decided verdict."""
+        page_a = _page("alpha", claimed_scope="org-a")
+        page_b = _page("beta", claimed_scope="org-b")
+        client = MagicMock()
+        lock = RunLock(tmp_path)
+        with lock:
+            first = record_comparison(tmp_path, page_a, page_b, client=client, lock=lock)
+            assert first["outcome"] is not None
+            assert first["outcome"].verdict == first["verdict"]
+            second = record_comparison(tmp_path, page_a, page_b, client=client, lock=lock)
+            assert second["skipped"] == "fresh"
+            assert second["outcome"] is None
 
     def test_fresh_pair_gate2_path_not_recalled(self, tmp_path: Path) -> None:
         page_a = _page("alpha", body="claim one")
