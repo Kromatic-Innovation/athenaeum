@@ -95,8 +95,16 @@ PYTEST_EXIT=$?
 
 cat "$OUT_FILE"
 
-mapfile -t CURRENT_FAILURES < <(grep '^FAILED ' "$OUT_FILE" | sed -E 's/^FAILED //; s/ - .*$//' | sort -u)
-mapfile -t BASELINE < <(grep -vE '^[[:space:]]*(#|$)' "$BASELINE_FILE" 2>/dev/null | sed -E 's/[[:space:]]+$//' | sort -u)
+# NB: read-loops rather than `mapfile`/`readarray` -- bash 4.0+ builtins,
+# and stock macOS ships bash 3.2.57 (athenaeum#1104).
+CURRENT_FAILURES=()
+while IFS= read -r nodeid; do
+  if [ -n "$nodeid" ]; then CURRENT_FAILURES+=("$nodeid"); fi
+done < <(grep '^FAILED ' "$OUT_FILE" | sed -E 's/^FAILED //; s/ - .*$//' | sort -u)
+BASELINE=()
+while IFS= read -r known_nodeid; do
+  if [ -n "$known_nodeid" ]; then BASELINE+=("$known_nodeid"); fi
+done < <(grep -vE '^[[:space:]]*(#|$)' "$BASELINE_FILE" 2>/dev/null | sed -E 's/[[:space:]]+$//' | sort -u)
 
 if [ "$UPDATE_BASELINE" -eq 1 ]; then
   ADDED=()
