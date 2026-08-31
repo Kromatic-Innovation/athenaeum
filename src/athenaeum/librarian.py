@@ -417,6 +417,20 @@ STUCK_MANIFEST_NAME = "_stuck_files.json"
 # :func:`librarian_stuck_file_threshold` (env > yaml > this default).
 DEFAULT_STUCK_FILE_THRESHOLD = 3
 
+# Issue athenaeum#1185: base backoff window (seconds) BETWEEN a raw file's
+# consecutive failures, BEFORE it crosses DEFAULT_STUCK_FILE_THRESHOLD and
+# becomes permanently stuck. Resolved via
+# :func:`librarian_stuck_file_backoff_base_seconds` (env > yaml > this
+# default). The window for a file's Nth consecutive failure is
+# ``base_seconds * 2 ** (N - 1)`` (exponential, doubling each failure) --
+# see ``_stuck_backoff_seconds``. 3600 (1 hour) is deliberately LONGER than
+# the ~30-minute run cadence, so a file's 2nd attempt is not simply "the
+# very next scheduled run" (which would be no backoff at all in practice) --
+# it genuinely skips at least one run, spacing the (still-bounded, still
+# exactly DEFAULT_STUCK_FILE_THRESHOLD-many) attempts before quarantine
+# across a wider window instead of three consecutive cadence ticks.
+DEFAULT_STUCK_FILE_BACKOFF_BASE_SECONDS = 3600
+
 # Stable, machine-greppable prefix for the WARNING emitted when a file is
 # surfaced as stuck (crossing the threshold, or skipped on a later run). A
 # log-scraper / watchdog can grep this without parsing prose — the athenaeum#663
@@ -2649,6 +2663,90 @@ def librarian_stuck_file_threshold(config: dict[str, object] | None = None) -> i
     return DEFAULT_STUCK_FILE_THRESHOLD
 
 
+def librarian_stuck_file_backoff_base_seconds(
+    config: dict[str, object] | None = None,
+) -> int:
+    """Resolve the base exponential-backoff window (seconds) between a raw
+    file's consecutive failures, before it reaches
+    :func:`librarian_stuck_file_threshold` (issue athenaeum#1185).
+
+    Mirrors :func:`librarian_stuck_file_threshold` exactly: the
+    ``ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS`` env override wins over the
+    yaml ``librarian.stuck_file_backoff_base_seconds`` key. See
+    :func:`_stuck_backoff_seconds` for how the base combines with a file's
+    current failure count. Must be ``>= 0`` (``0`` disables backoff
+    entirely -- every cadence tick is retry-eligible, the pre-athenaeum#1185
+    behavior); non-numeric or bool values fall back to
+    :data:`DEFAULT_STUCK_FILE_BACKOFF_BASE_SECONDS`.
+    """
+    env = os.environ.get("ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS")
+    if env is not None:
+        try:
+            value = int(env)
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    if config is not None:
+        cfg = config.get("librarian") if isinstance(config, dict) else None
+        if isinstance(cfg, dict):
+            raw = cfg.get("stuck_file_backoff_base_seconds")
+            # bool is an int subclass — `stuck_file_backoff_base_seconds: yes`
+            # in yaml must not silently become a base of 1 second.
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                return raw
+    return DEFAULT_STUCK_FILE_BACKOFF_BASE_SECONDS
+
+
+def _stuck_backoff_seconds(failures: int, *, base_seconds: int) -> int:
+    """Exponential backoff window (seconds) after a file's *failures*-th
+    consecutive failure, before it is retry-eligible again (issue
+    athenaeum#1185).
+
+    ``base_seconds * 2 ** (failures - 1)`` — the 1st failure's window is
+    ``base_seconds``, the 2nd doubles it, and so on. ``failures <= 0``
+    (a file with no recorded failure yet) returns ``0``: a fresh file is
+    always immediately eligible, matching pre-athenaeum#1185 behavior. A
+    non-positive ``base_seconds`` (backoff disabled) also returns ``0``
+    regardless of ``failures``.
+    """
+    if failures <= 0 or base_seconds <= 0:
+        return 0
+    return base_seconds * (2 ** (failures - 1))
+
+
+def _stuck_backoff_window_open(
+    entry: dict[str, Any], *, base_seconds: int, now: datetime
+) -> bool:
+    """True when a stuck-ledger *entry* is still within its exponential
+    backoff window (issue athenaeum#1185) and must NOT be retried yet.
+
+    Reads ``entry["last_failed"]`` — the same ISO-8601 UTC string
+    :func:`_record_stuck_failure` stamps on every failure — and compares
+    against *now* plus the window :func:`_stuck_backoff_seconds` computes
+    for this entry's current ``failures`` count. Fails OPEN (returns
+    ``False`` — immediately eligible) on a missing/unparseable
+    ``last_failed`` or a zero/negative window, rather than silently
+    withholding a file forever on a ledger read the caller has no way to
+    fix.
+    """
+    window = _stuck_backoff_seconds(
+        int(entry.get("failures", 0)), base_seconds=base_seconds
+    )
+    if window <= 0:
+        return False
+    last_failed = entry.get("last_failed")
+    if not isinstance(last_failed, str) or not last_failed:
+        return False
+    try:
+        last_failed_at = datetime.strptime(last_failed, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return False
+    return (now - last_failed_at).total_seconds() < window
+
+
 def librarian_quarantine_threshold(config: dict[str, object] | None = None) -> int:
     """Resolve the consecutive-bound-violation threshold before quarantine (athenaeum#898).
 
@@ -2779,6 +2877,7 @@ def _record_stuck_failure(
     error: str,
     action: str | None,
     threshold: int,
+    now: datetime | None = None,
 ) -> dict[str, Any] | None:
     """Increment a raw file's consecutive-failure count in the ledger (athenaeum#663).
 
@@ -2787,16 +2886,30 @@ def _record_stuck_failure(
     CROSSES the threshold for the first time (so the caller surfaces it exactly
     once), else ``None``. The ``escalated`` flag makes the crossing idempotent
     across runs — a file that stays stuck is not re-surfaced as "newly stuck"
-    every night, only skipped."""
+    every night, only skipped.
+
+    *now* (issue athenaeum#1185) is the run's OWN clock — ``ctx.now`` when the
+    caller has one, else real wall-clock — threaded through so the
+    ``last_failed`` timestamp this stamps is comparable against the SAME
+    clock :func:`_stuck_backoff_window_open` reads it back with later.
+    ``None`` (every pre-athenaeum#1185 caller) falls back to real wall-clock,
+    byte-identical to before.
+    """
     key = raw.ref
     content_hash = _stuck_content_hash(raw)
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _now_dt = now if now is not None else datetime.now(timezone.utc)
+    now_str = _now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     entry = ledger.get(key)
     if not isinstance(entry, dict) or entry.get("hash") != content_hash:
         # New file, or the content changed since the last failure — fresh count.
-        entry = {"hash": content_hash, "failures": 0, "first_failed": now, "escalated": False}
+        entry = {
+            "hash": content_hash,
+            "failures": 0,
+            "first_failed": now_str,
+            "escalated": False,
+        }
     entry["failures"] = int(entry.get("failures", 0)) + 1
-    entry["last_failed"] = now
+    entry["last_failed"] = now_str
     entry["last_error"] = error
     if action:
         entry["last_action"] = action
@@ -3593,6 +3706,13 @@ class RunContext:
     # ``stuck_files`` — a materially heavier disposition than "stuck", so it
     # is a separate list, not folded into it.
     quarantined_files: list[dict[str, Any]] = field(default_factory=list)
+    # Issue athenaeum#1185: raw refs skipped THIS run because they are still
+    # within their exponential-backoff window (already failed at least once,
+    # not yet stuck) — distinct from ``stuck_files`` (permanently skipped,
+    # threshold crossed) and ``failed_files`` (attempted and failed THIS
+    # run). Exported to ``out_run_stats["backoff_skipped_files"]``, same
+    # convention as the two lists above.
+    backoff_skipped_files: list[str] = field(default_factory=list)
 
     # --- auto-memory / retire handoff -------------------------------------
     merged_entries: list = field(default_factory=list)
@@ -3675,6 +3795,10 @@ class RunContext:
             # Issue athenaeum#898: quarantined files (moved out of the discovery set
             # this run) as machine-detectable state, mirroring stuck_files above.
             self.out_run_stats["quarantined_files"] = list(self.quarantined_files)
+            # Issue athenaeum#1185: refs skipped this run because they are still
+            # within their exponential-backoff window, mirroring stuck_files/
+            # quarantined_files above.
+            self.out_run_stats["backoff_skipped_files"] = list(self.backoff_skipped_files)
             # Issue athenaeum#669: surface the entity-phase share yield (athenaeum#440) as
             # machine-detectable run state. cron-fleet#94 detects a capped run by
             # DURATION (`LIBRARIAN_CAP_DEADLINE`), which the athenaeum#440 yield made inert
@@ -5451,6 +5575,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # run state, rather than retried identically forever.
                     stuck_ledger = _load_stuck_ledger(ctx.wiki_root)
                     stuck_threshold = librarian_stuck_file_threshold(ctx.config)
+                    # Issue athenaeum#1185: exponential backoff BETWEEN a file's
+                    # consecutive failures, before it crosses stuck_threshold
+                    # above — see _stuck_backoff_seconds's docstring.
+                    stuck_backoff_base_seconds = librarian_stuck_file_backoff_base_seconds(
+                        ctx.config
+                    )
                     # Issue athenaeum#898: the persistent bound-violation ledger (mirrors
                     # the stuck-file ledger's shape, tracked separately — see
                     # QUARANTINE_CANDIDATE_MANIFEST_NAME's module comment). A raw
@@ -5515,11 +5645,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # "deferred" and "failed") for a human to fix or remove; a
                         # content edit resets its count via the hash-keyed ledger.
                         _stuck = stuck_ledger.get(raw.ref)
+                        _raw_content_hash = _stuck_content_hash(raw)
                         if (
                             not ctx.dry_run
                             and _stuck is not None
+                            and _stuck.get("hash") == _raw_content_hash
                             and int(_stuck.get("failures", 0)) >= stuck_threshold
-                            and _stuck.get("hash") == _stuck_content_hash(raw)
                         ):
                             ctx.stuck_files.append(
                                 {
@@ -5537,6 +5668,33 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 int(_stuck.get("failures", 0)),
                                 _stuck.get("last_action") or "unknown",
                                 _stuck.get("last_error") or "unknown",
+                            )
+                            continue
+                        # Issue athenaeum#1185: a file that has already failed at
+                        # least once but has NOT yet crossed stuck_threshold is
+                        # still within its exponential backoff window — skip it
+                        # THIS run without spending an attempt or recording a
+                        # new failure, so its (still-bounded) run at
+                        # stuck_threshold is spaced out rather than consuming
+                        # every single 30-minute cadence tick.
+                        if (
+                            not ctx.dry_run
+                            and _stuck is not None
+                            and _stuck.get("hash") == _raw_content_hash
+                            and 0 < int(_stuck.get("failures", 0)) < stuck_threshold
+                            and _stuck_backoff_window_open(
+                                _stuck,
+                                base_seconds=stuck_backoff_base_seconds,
+                                now=ctx.now if ctx.now is not None else datetime.now(timezone.utc),
+                            )
+                        ):
+                            ctx.backoff_skipped_files.append(raw.ref)
+                            log.info(
+                                "librarian-stuck-file-backoff: skipping %s this run — "
+                                "%d consecutive failure(s), still within its backoff "
+                                "window (issue athenaeum#1185)",
+                                raw.ref,
+                                int(_stuck.get("failures", 0)),
                             )
                             continue
                         if not ctx.dry_run and ctx.usage.api_calls >= ctx.max_api_calls:
@@ -5813,6 +5971,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     error=f"TransientAPIError:{type(exc.last_error).__name__}",
                                     action=getattr(exc, "athenaeum_failing_action", None),
                                     threshold=stuck_threshold,
+                                    now=ctx.now,
                                 )
                                 if _crossed is not None:
                                     _surface_newly_stuck(ctx, raw, _crossed)
@@ -5850,6 +6009,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     error=type(exc).__name__,
                                     action=getattr(exc, "athenaeum_failing_action", None),
                                     threshold=stuck_threshold,
+                                    now=ctx.now,
                                 )
                                 if _crossed is not None:
                                     _surface_newly_stuck(ctx, raw, _crossed)
@@ -6180,6 +6340,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     **(
                         {"quarantined": len(ctx.quarantined_files)}
                         if ctx.quarantined_files
+                        else {}
+                    ),
+                    # athenaeum#1185: files skipped THIS run because they are still
+                    # within their exponential backoff window (already failed at
+                    # least once, not yet stuck). Only rendered when non-zero,
+                    # mirroring "stuck=N"/"quarantined=N" above.
+                    **(
+                        {"backoff_skipped": len(ctx.backoff_skipped_files)}
+                        if ctx.backoff_skipped_files
                         else {}
                     ),
                     # athenaeum#669: the entity phase yielded its window share (athenaeum#440).
