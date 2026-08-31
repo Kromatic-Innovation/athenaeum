@@ -41,6 +41,7 @@ from athenaeum.librarian import process_one
 from athenaeum.models import ClassifiedEntity, EntityIndex, RawFile, TokenUsage
 from athenaeum.tiers import (
     DEFAULT_CREATE_NAME_ESCALATE_MAX_CHARS,
+    CreateNameCollisionError,
     CreateNameEscalatedError,
     CreateNameRejectedError,
     gate_create_name_classifications,
@@ -52,10 +53,16 @@ VALID_TYPES = ["person", "company", "concept", "reference"]
 VALID_ACCESS = ["open", "internal", "confidential", "personal"]
 
 
-def _classified(name: str, *, is_new: bool = True, observations: str = "") -> ClassifiedEntity:
+def _classified(
+    name: str,
+    *,
+    is_new: bool = True,
+    observations: str = "",
+    entity_type: str = "concept",
+) -> ClassifiedEntity:
     return ClassifiedEntity(
         name=name,
-        entity_type="concept",
+        entity_type=entity_type,
         tags=[],
         access="internal",
         is_new=is_new,
@@ -69,6 +76,32 @@ def _raw(raw_dir: Path, content: str, filename: str = "note.md") -> RawFile:
     path = raw_dir / filename
     path.write_text(content, encoding="utf-8")
     return RawFile(path=path, source=raw_dir.name, timestamp="", uuid8="")
+
+
+def _write_page(
+    wiki: Path,
+    filename: str,
+    *,
+    uid: str,
+    name: str,
+    type_: str | None = None,
+    aliases: list[str] | None = None,
+    body: str = "Some content.\n",
+) -> Path:
+    """Write a minimal wiki page with frontmatter (issue athenaeum#1170 fixtures)."""
+    wiki.mkdir(parents=True, exist_ok=True)
+    lines = ["---", f"uid: {uid}", f"name: {name}"]
+    if type_ is not None:
+        lines.append(f"type: {type_}")
+    if aliases:
+        lines.append("aliases:")
+        lines.extend(f"  - {a}" for a in aliases)
+    lines.append("---")
+    lines.append("")
+    lines.append(body)
+    path = wiki / filename
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +173,88 @@ class TestValidateCreateName:
         is shape-only, not a word-list membership test."""
         for name in ("Amazon", "Ford", "Gap", "Box", "Docker", "Oracle"):
             validate_create_name(name)  # must not raise for any of these
+
+
+# ---------------------------------------------------------------------------
+# validate_create_name — uniqueness check (issue athenaeum#1170, AC1)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateCreateNameUniqueness:
+    def test_no_index_supplied_skips_the_check_entirely(self) -> None:
+        """Byte-identical-behavior guard: with `index=None` (every
+        pre-athenaeum#1170 caller), a name that WOULD collide if an index were
+        supplied must still pass, since the check never runs."""
+        validate_create_name("WidgetCo")  # must not raise — no index given
+
+    def test_no_collision_passes(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="company")
+        index = EntityIndex(wiki)
+        validate_create_name("WidgetCo", index=index, entity_type="company")
+
+    def test_same_type_collision_raises(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="company")
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError) as exc_info:
+            validate_create_name("Acme", index=index, entity_type="company")
+        assert exc_info.value.existing_uid == "u1"
+        assert exc_info.value.existing_type == "company"
+
+    def test_alias_collision_raises(self, tmp_path: Path) -> None:
+        """An alias hit is a genuine reachability collision, same as a
+        primary-name hit."""
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki, "acme.md", uid="u1", name="Acme Corp", type_="company",
+            aliases=["Acme"],
+        )
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError):
+            validate_create_name("Acme", index=index, entity_type="company")
+
+    def test_unknown_existing_type_still_raises_with_none_type(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme")  # no type: at all
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError) as exc_info:
+            validate_create_name("Acme", index=index, entity_type="company")
+        assert exc_info.value.existing_type is None
+
+    def test_different_type_is_allowed_through_unchanged(self, tmp_path: Path) -> None:
+        """The operator's worked example: a `type: project` repo and a
+        `type: person` sharing a name must NOT collide."""
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki, "tristankromer-project.md", uid="u1",
+            name="tristankromer", type_="project",
+        )
+        index = EntityIndex(wiki)
+        validate_create_name("tristankromer", index=index, entity_type="person")
+
+    def test_type_comparison_is_case_insensitive_and_stripped(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="Company")
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError):
+            validate_create_name("Acme", index=index, entity_type=" company ")
+
+    def test_no_entity_type_declared_treats_as_same_type_collision(
+        self, tmp_path: Path
+    ) -> None:
+        """`entity_type` falsy (e.g. an update-only classification's default
+        `""`) never triggers the different-type exemption — collision still
+        raises."""
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="company")
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError):
+            validate_create_name("Acme", index=index, entity_type=None)
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +333,85 @@ class TestGateCreateNameClassifications:
         assert outcome.rejected == ("#453",)
         assert len(outcome.escalations) == 1
         assert outcome.escalations[0].entity_name == "ready"
+
+
+# ---------------------------------------------------------------------------
+# gate_create_name_classifications — uniqueness wiring (issue athenaeum#1170, AC1)
+# ---------------------------------------------------------------------------
+
+
+class TestGateCreateNameClassificationsCollision:
+    def test_same_type_collision_is_disambiguated_to_an_update(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="company")
+        index = EntityIndex(wiki)
+        c = _classified("Acme", entity_type="company", observations="New fact.")
+        outcome = gate_create_name_classifications(
+            [c], "raw/ref.md", "New fact.", index=index
+        )
+        assert outcome.rejected == ()
+        assert outcome.escalations == ()
+        assert outcome.disambiguated == ("Acme",)
+        assert len(outcome.kept) == 1
+        kept = outcome.kept[0]
+        assert kept.is_new is False
+        assert kept.existing_uid == "u1"
+        assert kept.name == "Acme"
+        assert kept.observations == "New fact."
+
+    def test_unknown_type_collision_is_escalated_not_disambiguated(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme")  # no type:
+        index = EntityIndex(wiki)
+        c = _classified("Acme", entity_type="company", observations="New fact.")
+        outcome = gate_create_name_classifications(
+            [c], "raw/ref.md", "New fact.", index=index
+        )
+        assert outcome.kept == []
+        assert outcome.rejected == ()
+        assert outcome.disambiguated == ()
+        assert len(outcome.escalations) == 1
+        item = outcome.escalations[0]
+        assert item.entity_name == "Acme"
+        assert item.conflict_type == "name_collision"
+        assert "New fact." in item.description
+
+    def test_different_type_collision_is_allowed_through_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki, "tristankromer-project.md", uid="u1",
+            name="tristankromer", type_="project",
+        )
+        index = EntityIndex(wiki)
+        c = _classified("tristankromer", entity_type="person")
+        outcome = gate_create_name_classifications([c], "raw/ref.md", "", index=index)
+        assert outcome.kept == [c]
+        assert outcome.rejected == ()
+        assert outcome.escalations == ()
+        assert outcome.disambiguated == ()
+
+    def test_no_collision_kept_unchanged(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="company")
+        index = EntityIndex(wiki)
+        c = _classified("WidgetCo", entity_type="company")
+        outcome = gate_create_name_classifications([c], "raw/ref.md", "", index=index)
+        assert outcome.kept == [c]
+        assert outcome.disambiguated == ()
+
+    def test_no_index_supplied_is_byte_identical(self, tmp_path: Path) -> None:
+        """Default `index=None`: the athenaeum#1173-era call shape is unaffected
+        even for a name that WOULD collide if an index were supplied."""
+        c = _classified("Acme", entity_type="company")
+        outcome = gate_create_name_classifications([c], "raw/ref.md", "")
+        assert outcome.kept == [c]
+        assert outcome.disambiguated == ()
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +523,120 @@ class TestSyncTransportWiring:
         # Rejected (not escalated): no pending-question entry, no page.
         assert result.escalated == []
         assert list(wiki.glob("*.md")) == []
+
+    def test_colliding_create_disambiguates_to_an_update_no_new_page(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1 end-to-end (issue athenaeum#1170): a create for a name that
+        already indexes to a SAME-TYPE existing page must be rewritten to an
+        update against that page's uid, never mint a second, colliding page."""
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="company")
+        raw = _raw(
+            knowledge / "raw" / "producer",
+            "Acme announced a new product line today.\n",
+        )
+
+        def _fake_tier2_classify(*_args: object, **_kwargs: object) -> list[ClassifiedEntity]:
+            return [
+                _classified(
+                    "Acme",
+                    entity_type="company",
+                    observations="Acme announced a new product line today.",
+                )
+            ]
+
+        monkeypatch.setattr("athenaeum.librarian.tier2_classify", _fake_tier2_classify)
+
+        def _fake_tier3_merge(action, existing_body, source_ref, client, **_kwargs):
+            return existing_body + "\n\nNew product line announced.\n", None
+
+        monkeypatch.setattr("athenaeum.tiers.tier3_merge", _fake_tier3_merge)
+
+        classify_client = MagicMock()
+        classify_client.messages.create.side_effect = AssertionError(
+            "tier2_classify is monkeypatched — the real classify client must never be called"
+        )
+        write_client = MagicMock()
+        write_client.messages.create.side_effect = AssertionError(
+            "tier3_merge is monkeypatched — the real write client must never be called"
+        )
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            classify_client,
+            valid_types=VALID_TYPES,
+            valid_tags=[],
+            valid_access=VALID_ACCESS,
+            write_client=write_client,
+        )
+
+        # No new page was minted — still exactly the one pre-existing page.
+        page_names = sorted(p.stem for p in wiki.glob("*.md") if not p.name.startswith("_"))
+        assert page_names == ["acme"]
+        assert result.created == []
+        assert result.updated == ["u1"]
+        assert result.escalated == []
+        assert "New product line announced." in (wiki / "acme.md").read_text(encoding="utf-8")
+
+    def test_unknown_type_collision_escalates_no_page_created(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1 end-to-end: a create colliding with an existing page whose
+        type cannot be confirmed is escalated, not silently folded in and
+        not minted as a duplicate."""
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme")  # no type: at all
+        raw = _raw(
+            knowledge / "raw" / "producer",
+            "Acme announced a new product line today.\n",
+        )
+
+        def _fake_tier2_classify(*_args: object, **_kwargs: object) -> list[ClassifiedEntity]:
+            return [
+                _classified(
+                    "Acme",
+                    entity_type="company",
+                    observations="Acme announced a new product line today.",
+                )
+            ]
+
+        monkeypatch.setattr("athenaeum.librarian.tier2_classify", _fake_tier2_classify)
+
+        classify_client = MagicMock()
+        classify_client.messages.create.side_effect = AssertionError(
+            "tier2_classify is monkeypatched — the real classify client must never be called"
+        )
+        write_client = MagicMock()
+        write_client.messages.create.side_effect = AssertionError(
+            "No actions survive the name gate here — tier-3 must never be called"
+        )
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            classify_client,
+            valid_types=VALID_TYPES,
+            valid_tags=[],
+            valid_access=VALID_ACCESS,
+            write_client=write_client,
+        )
+
+        assert result.created == []
+        assert result.updated == []
+        assert len(result.escalated) == 1
+        assert result.escalated[0].entity_name == "Acme"
+        assert result.escalated[0].conflict_type == "name_collision"
+
+        page_names = sorted(p.stem for p in wiki.glob("*.md") if not p.name.startswith("_"))
+        assert page_names == ["acme"]  # unchanged, byte-for-byte
+        pending = (wiki / "_pending_questions.md").read_text(encoding="utf-8")
+        assert "Acme" in pending
 
 
 # ---------------------------------------------------------------------------
