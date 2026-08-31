@@ -980,8 +980,8 @@ def resolve_reasoning_tier_auditing_enabled(config: dict[str, Any] | None) -> bo
     be set as well. This is a change in what the EXISTING key's value means,
     and it changes it in the safe direction only: it can only ever REMOVE
     auto-apply authority an old config previously had, never grant new
-    authority a config didn't already have. To restore the exact pre-#1200
-    combined behavior, add ONE line:
+    authority a config didn't already have. To restore the exact
+    pre-athenaeum#1200 combined behavior, add ONE line:
     ``librarian.reasoning_tier_t2_auto_apply_enabled: true``. See
     ``docs/configuration.md``'s "Reasoning-tier screening" section for the
     full migration story.
