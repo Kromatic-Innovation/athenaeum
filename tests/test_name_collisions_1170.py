@@ -369,19 +369,60 @@ class TestRunNameCollisionPhase:
 # ---------------------------------------------------------------------------
 
 
-class TestFoldTargetSafetyGuard:
-    def test_entity_template_canonical_is_never_automerged(self, tmp_path: Path) -> None:
-        """The unambiguous pair's canonical page is filed as
-        ``u1-acme.md`` (an entity-template filename), not the bare
-        ``acme.md`` pending_merges' fold machinery would target. Auto-merge
-        must be refused (forced ambiguous) rather than creating a spurious
-        THIRD page at ``acme.md``."""
+class TestEntityTemplateAutomergeIsTheRealisticCase:
+    """The realistic corpus shape (issue athenaeum#1170 code review): EVERY
+    tier-3-created page is filed as ``<uid>-<slug>.md``
+    (:attr:`athenaeum.models.WikiEntity.filename`), never a bare
+    ``<slug>.md`` — the issue's own worked examples (John Sechrest,
+    Tristan Kromer) are all this shape. Auto-merge must actually fire for
+    this case, not just the bare-slug convention pending_merges' fold
+    machinery happened to be built for first."""
+
+    def test_entity_template_canonical_automerges_no_third_page_minted(
+        self, tmp_path: Path
+    ) -> None:
         wiki = tmp_path / "wiki"
         _write_page(
             wiki, "u1-acme.md", uid="u1", name="Acme", type_="company",
             body="Acme is a widget company.",
         )
-        _write_page(wiki, "u2-acme.md", uid="u2", name="Acme", type_="company", body="")
+        dup_path = _write_page(
+            wiki, "u2-acme.md", uid="u2", name="Acme", type_="company", body=""
+        )
+        init_git_repo(wiki)
+
+        result = resolve_name_collisions(wiki, auto_merge=True, dry_run=False)
+
+        assert result["merged"] == 1
+        assert result["ambiguous"] == 0
+        # The fold landed INTO the existing entity-template canonical file --
+        # the duplicate is gone, and no THIRD page was minted at the
+        # bare-slug path a pre-fix run would have (mis)targeted.
+        assert not dup_path.exists()
+        page_names = sorted(p.name for p in wiki.glob("*.md") if not p.name.startswith("_"))
+        assert page_names == ["u1-acme.md"]
+        assert not (wiki / "acme.md").exists()
+
+        meta, _ = parse_frontmatter((wiki / "u1-acme.md").read_text(encoding="utf-8"))
+        assert meta["name"] == "Acme"  # human-readable name preserved on disk
+        assert "u2-acme" in [str(a).lower() for a in meta.get("aliases") or []]
+
+
+class TestFoldTargetSafetyGuard:
+    def test_non_slug_filename_canonical_is_never_automerged(self, tmp_path: Path) -> None:
+        """The residual case the stem-based fix does NOT cover: a canonical
+        page whose FILENAME STEM is not already a valid slug (mixed case,
+        a space) -- e.g. a hand-authored file that never went through the
+        create path's filename convention. ``slugify(stem) != stem`` here,
+        so the derived fold target still would not resolve to the
+        canonical's own file. Auto-merge must be refused (forced ambiguous)
+        rather than creating a spurious THIRD page at the slugified path."""
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki, "Weird Page.md", uid="u1", name="Weird", type_="company",
+            body="Weird is a widget company.",
+        )
+        _write_page(wiki, "weird-dup.md", uid="u2", name="Weird", type_="company", body="")
         init_git_repo(wiki)
 
         result = resolve_name_collisions(wiki, auto_merge=True, dry_run=False)
@@ -389,10 +430,10 @@ class TestFoldTargetSafetyGuard:
         assert result["merged"] == 0
         assert result["ambiguous"] == 1
         # Neither original page was touched, and no THIRD page was created
-        # at the bare-slug path the (inapplicable) fold target would use.
-        assert (wiki / "u1-acme.md").exists()
-        assert (wiki / "u2-acme.md").exists()
-        assert not (wiki / "acme.md").exists()
+        # at the slugified path the (inapplicable) fold target would use.
+        assert (wiki / "Weird Page.md").exists()
+        assert (wiki / "weird-dup.md").exists()
+        assert not (wiki / "weird-page.md").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +500,10 @@ class TestResolveNameCollisionsIdempotency:
 
 class TestResolveNameCollisionsReversibility:
     def test_automerge_produces_discrete_recoverable_commits(self, tmp_path: Path) -> None:
+        """Uses entity-template naming (``<uid>-<slug>.md``) as the fixture's
+        default convention -- issue athenaeum#1170 code review: this is the
+        shape EVERY tier-3-created page actually uses, not a bare-slug
+        edge case."""
         wiki = tmp_path / "wiki"
         # Seed the repo with UNRELATED content only, so the target/source
         # pages written below are still UNTRACKED when the merge runs and
@@ -471,17 +516,19 @@ class TestResolveNameCollisionsReversibility:
         assert len(seed_messages) == 1
 
         _write_page(
-            wiki, "acme.md", uid="u1", name="Acme", type_="company",
+            wiki, "u1-acme.md", uid="u1", name="Acme", type_="company",
             body="Acme is a widget company.",
         )
         dup_path = _write_page(
-            wiki, "acme-dup.md", uid="u2", name="Acme", type_="company", body=""
+            wiki, "u2-acme.md", uid="u2", name="Acme", type_="company", body=""
         )
         original_dup_content = dup_path.read_text(encoding="utf-8")
 
         result = resolve_name_collisions(wiki, auto_merge=True, dry_run=False)
         assert result["merged"] == 1
         assert not dup_path.exists()
+        # No spurious bare-slug third page either.
+        assert not (wiki / "acme.md").exists()
 
         messages = _git_log_messages(wiki)
         assert len(messages) == 3  # seed + provenance snapshot + fold
@@ -496,7 +543,7 @@ class TestResolveNameCollisionsReversibility:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
         recovered = subprocess.run(
-            ["git", "show", f"{fold_sha}~1:acme-dup.md"],
+            ["git", "show", f"{fold_sha}~1:u2-acme.md"],
             cwd=str(wiki), capture_output=True, text=True, check=True,
         ).stdout
         assert recovered == original_dup_content
@@ -520,8 +567,14 @@ class TestResolveNameCollisionsAmbiguousQueue:
         self, tmp_path: Path
     ) -> None:
         wiki = tmp_path / "wiki"
+        # Unambiguous tiebreak on body length (avoids the canonical-page
+        # tiebreak's path-ordering rule picking a surprising file), so the
+        # canonical page -- and its filename stem, the proposal's
+        # merge_target_name (see resolve_name_collisions' docstring) -- is
+        # deterministically "acme.md" / "acme".
         page_a = _write_page(
-            wiki, "acme.md", uid="u1", name="Acme", type_="company", body="Content A."
+            wiki, "acme.md", uid="u1", name="Acme", type_="company",
+            body="Content A, clearly the longer of the two.",
         )
         page_b = _write_page(
             wiki, "acme-dup.md", uid="u2", name="Acme", type_="company", body="Content B."
@@ -535,13 +588,18 @@ class TestResolveNameCollisionsAmbiguousQueue:
         # Both pages are untouched -- no merge occurred despite auto_merge=True.
         assert page_a.exists()
         assert page_b.exists()
-        assert "Content A." in page_a.read_text(encoding="utf-8")
+        assert "Content A" in page_a.read_text(encoding="utf-8")
         assert "Content B." in page_b.read_text(encoding="utf-8")
 
         decisions = list_pending_decisions(wiki)
         merge_decisions = [d for d in decisions if d["type"] == "merge"]
         assert len(merge_decisions) == 1
-        assert merge_decisions[0]["payload"]["merge_target_name"] == "Acme"
+        # The proposal's merge_target_name is the canonical page's FILENAME
+        # STEM (issue athenaeum#1170 code review), not its name: value -- the
+        # human-readable name is preserved on disk (draft_merged_body) and
+        # still surfaces in the decision's rationale for a reviewer.
+        assert merge_decisions[0]["payload"]["merge_target_name"] == "acme"
+        assert "Acme" in merge_decisions[0]["payload"]["rationale"]
 
 
 # ---------------------------------------------------------------------------
@@ -553,29 +611,33 @@ class TestResolveNameCollisionsAliasSurvival:
     def test_absorbed_name_is_alias_and_still_resolves_via_entity_index(
         self, tmp_path: Path
     ) -> None:
+        """Uses entity-template naming (``<uid>-<slug>.md``) as the default
+        convention -- issue athenaeum#1170 code review."""
         wiki = tmp_path / "wiki"
         canonical_path = _write_page(
-            wiki, "acme.md", uid="u1", name="Acme", type_="company",
+            wiki, "u1-acme.md", uid="u1", name="Acme", type_="company",
             body="Acme is a widget company.",
         )
-        _write_page(wiki, "acme-corp.md", uid="u2", name="Acme Corp", type_="company", body="")
+        _write_page(wiki, "u2-acme-corp.md", uid="u2", name="Acme Corp", type_="company", body="")
         # Same lowercase key ("acme corp" vs "acme") would NOT collide by
         # construction -- use an exact-name duplicate under a distinct
         # filename instead, matching this module's own grouping contract.
         dup_path = _write_page(
-            wiki, "acme-duplicate.md", uid="u3", name="Acme", type_="company", body=""
+            wiki, "u3-acme-duplicate.md", uid="u3", name="Acme", type_="company", body=""
         )
 
         init_git_repo(wiki)
         result = resolve_name_collisions(wiki, auto_merge=True, dry_run=False)
         assert result["merged"] == 1
         assert not dup_path.exists()
+        assert not (wiki / "acme.md").exists()  # no spurious bare-slug page
 
         meta, _ = parse_frontmatter(canonical_path.read_text(encoding="utf-8"))
+        assert meta["name"] == "Acme"
         aliases = meta.get("aliases") or []
-        assert "acme-duplicate" in [str(a).lower() for a in aliases]
+        assert "u3-acme-duplicate" in [str(a).lower() for a in aliases]
 
         index = EntityIndex(wiki)
-        hit = index.lookup("acme-duplicate")
+        hit = index.lookup("u3-acme-duplicate")
         assert hit is not None
         assert hit.path == canonical_path
