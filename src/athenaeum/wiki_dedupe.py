@@ -84,11 +84,14 @@ above); it is a plain in-function convenience import.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.authority import is_pointer_stub
 from athenaeum.clusters import (
     EMBEDDER_CHROMADB_DEFAULT,
@@ -96,7 +99,9 @@ from athenaeum.clusters import (
     Cluster,
     _fallback_embeddings,
     cluster_auto_memory_files,
+    prune_cluster_rotations,
     resolve_cluster_threshold,
+    resolve_rotation_retention,
 )
 from athenaeum.config import load_config, resolve_heartbeat_interval
 from athenaeum.merge import (
@@ -136,6 +141,17 @@ EmbeddingProvider = Callable[[list[str]], "list[list[float]] | None"]
 # ``run_shadow_linkage`` call); fires at most once per process so a run that
 # repeatedly hits the no-chromadb path doesn't spam the log.
 _WIKI_FALLBACK_WARNED = False
+
+# Issue athenaeum#1142 (AC2): durable sidecar ledger for wiki-dedupe clusters
+# SUPPRESSED by the athenaeum#400/#421 degenerate-over-cluster gate
+# (``_merge_proposal_suppression_reason``) — today the ONLY trace of a
+# suppression is a one-shot log.info line (see ``propose_wiki_page_merges``
+# below), and a suppressed cluster never becomes a ``_pending_merges.md``
+# proposal, so nothing durable in the store can answer "which embedder
+# produced cluster X, and why was it suppressed?" without a live host log
+# read. Lives alongside ``_pending_merges.md`` under ``wiki/`` — the natural
+# home for a wiki-dedupe-pass artifact, per the issue's own suggestion.
+DEFAULT_WIKI_SUPPRESSIONS_FILENAME = "_wiki_dedupe_suppressions.jsonl"
 
 
 def discover_wiki_dedupe_candidates(
@@ -337,6 +353,55 @@ def _member_bodies_for_cluster(
     return triples
 
 
+def _write_wiki_suppressions_report(
+    rows: list[dict[str, Any]],
+    wiki_root: Path,
+    *,
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    rotate: bool = True,
+) -> Path:
+    """Persist THIS RUN's suppressed wiki-dedupe clusters durably (athenaeum#1142 AC2).
+
+    Mirrors :func:`athenaeum.clusters.write_cluster_report`'s convention
+    deliberately, rather than inventing a new one (issue athenaeum#1142's own
+    guidance: follow how the existing operational ledgers in this repo
+    handle retention) — the CANONICAL file
+    (``wiki/_wiki_dedupe_suppressions.jsonl``) is fully REPLACED on every
+    call (current-run state, not an accumulating log), and one timestamped
+    ``<stem>-<UTC-iso>.jsonl`` rotation sibling is written alongside it so
+    history isn't lost between runs. Rotations are pruned to the SAME
+    ``librarian.rotation_retention`` window (env ``ATHENAEUM_ROTATION_RETENTION``
+    > yaml > default 30) that already governs
+    ``raw/_librarian-clusters.jsonl``'s rotations — one retention policy for
+    every JSONL cluster/suppression report in the store, not a second knob.
+    This is the AC4 retention answer stated in code: bounded, self-pruning,
+    never unbounded-append (contrast the sibling athenaeum#1229 item, fixing
+    exactly the failure mode — a 1.4M-row unbounded ledger — an
+    unbounded design here would eventually reproduce).
+
+    Called even when *rows* is empty, so the canonical file always reflects
+    "this run suppressed nothing" rather than going stale from the last run
+    that did.
+    """
+    output_path = wiki_root / DEFAULT_WIKI_SUPPRESSIONS_FILENAME
+    payload_lines = [json.dumps(row, sort_keys=True) for row in rows]
+    text = "\n".join(payload_lines) + ("\n" if payload_lines else "")
+
+    if rotate:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        timestamped = output_path.with_name(
+            f"{output_path.stem}-{ts}{output_path.suffix}"
+        )
+        atomic_write_text(timestamped, text)
+
+    atomic_write_text(output_path, text)
+
+    retention = resolve_rotation_retention(knowledge_root, config)
+    prune_cluster_rotations(output_path, keep=retention)
+    return output_path
+
+
 def propose_wiki_page_merges(
     knowledge_root: Path,
     *,
@@ -412,10 +477,19 @@ def propose_wiki_page_merges(
     heartbeat.start()
     if not clusters:
         heartbeat.done()
+        # Issue athenaeum#1142 AC2/AC4: the suppressions ledger reflects THIS
+        # run's state even when there was nothing to cluster at all — a
+        # dry_run preview still touches no durable state, matching every
+        # other write in this function.
+        if not dry_run:
+            _write_wiki_suppressions_report(
+                [], wiki_root, knowledge_root=knowledge_root, config=resolved_config
+            )
         return []
 
     merges_path = wiki_root / "_pending_merges.md"
     proposals: list[dict[str, Any]] = []
+    suppressed_rows: list[dict[str, Any]] = []
 
     for cluster in clusters:
         heartbeat.tick(cluster.cluster_id)
@@ -494,6 +568,25 @@ def propose_wiki_page_merges(
                 cluster.embedder,
                 len(sources),
             )
+            # Issue athenaeum#1142 AC2: durably record what the log line above
+            # only states once, in a rotating log an operator may never see
+            # again — reason, embedder, and the shape numbers that produced
+            # the suppression, keyed by cluster id.
+            suppressed_rows.append(
+                {
+                    "cluster_id": cluster.cluster_id,
+                    "n_sources": len(sources),
+                    "reason": suppression,
+                    "embedder": cluster.embedder,
+                    "mean_similarity": float(cluster.centroid_score),
+                    "min_pairwise_score": float(cluster.min_pairwise_score),
+                    "cluster_threshold": float(resolved_threshold),
+                    "sources": list(sources),
+                    "suppressed_at": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                }
+            )
             continue
 
         # Issue athenaeum#433: type-compatibility precheck. A cluster spanning >1
@@ -563,6 +656,10 @@ def propose_wiki_page_merges(
             rationale=rationale,
             draft_merged_body=draft_body,
             confidence=cluster.centroid_score,
+            # Issue athenaeum#1142 AC1: carries the same embedder identity athenaeum#1032
+            # already stamps on the log line into the durable proposal
+            # itself.
+            embedder=cluster.embedder,
         )
         proposals.append(proposal)
         log.info(
@@ -572,4 +669,12 @@ def propose_wiki_page_merges(
         )
 
     heartbeat.done()
+    # Issue athenaeum#1142 AC2/AC4: one snapshot of THIS run's suppressions,
+    # replacing the canonical file every real run (never touched on
+    # dry_run) — see _write_wiki_suppressions_report's docstring for the
+    # retention story.
+    if not dry_run:
+        _write_wiki_suppressions_report(
+            suppressed_rows, wiki_root, knowledge_root=knowledge_root, config=resolved_config
+        )
     return proposals

@@ -53,6 +53,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Wiki-dedupe proposals and suppressions now carry durable embedder +
+  reason attribution (athenaeum#1142).** athenaeum#1032 stamped `embedder=` onto
+  suppression log lines and the raw-intake clusters JSONL, but never
+  reached `wiki/_pending_merges.md` or any durable record of a SUPPRESSED
+  wiki-dedupe cluster — a suppressed cluster never becomes a proposal, and
+  suppression was a one-shot log line, so a question as simple as "which
+  embedder produced this cluster, and why was it suppressed?" needed a live
+  operator host-read (the exact cost that produced two independently wrong
+  diagnostic conclusions on athenaeum#1005). `write_pending_merge` (and
+  `render_block` / `_parse_block` / `PendingMerge`) gained an optional
+  `embedder` field, rendered as a `**Embedder**:` block line only when
+  supplied — `wiki_dedupe.py`'s write path now passes the cluster's
+  recorded embedder; `merge.py`'s two raw-intake call sites are untouched
+  and render byte-identical blocks (confirmed: no consumer of
+  `_pending_merges.md` parses it positionally — every reader goes through
+  `parse_pending_merges`'s labeled-block parser). A new sidecar,
+  `wiki/_wiki_dedupe_suppressions.jsonl`, durably records every cluster the
+  athenaeum#400/#421 over-cluster gate suppresses this run (cluster id,
+  reason, embedder, similarity shape, sources, timestamp) — following the
+  SAME convention `raw/_librarian-clusters.jsonl` already uses (canonical
+  file replaced each run + one timestamped rotation, pruned to the
+  existing `librarian.rotation_retention` window) rather than an unbounded
+  append-only ledger.
 - **Batch spend reservation and settlement — `ceiling_tripped` is no longer
   blind to committed in-flight cost (athenaeum#1147).**
   `TokenUsage.add_batch_tokens` fires at COLLECT, so under the async
