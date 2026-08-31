@@ -1,0 +1,26 @@
+# Committed CI-environment known-fail baseline (athenaeum#1105).
+#
+# Regenerate with: scripts/run-tests.sh --update-baseline
+#
+# One pytest nodeid per line ('#'-prefixed and blank lines ignored).
+# Deliberately scoped to the CI environment only, NOT any particular
+# developer/agent host -- CI (.github/workflows/ci.yml's `test` job,
+# `pytest tests/ -v --tb=short --cov=athenaeum --cov-report=term-missing
+# --cov-fail-under=75`) is fully green on develop as of the measurement
+# below, so this file is empty besides this header.
+#
+# A given local host (a contributor's laptop, an agent container) may show
+# ADDITIONAL failures this baseline does not list -- the issue that
+# motivated this file measured 7 failures on one host and 9 on another,
+# neither of which is 0, and this repo's own dev-container baseline is 40.
+# scripts/run-tests.sh reports those as a clearly labelled "UNRECOGNIZED"
+# category (still non-zero exit, never silently passed) rather than either
+# (a) folding them into this file, which would let a real CI regression
+# hide among host noise, or (b) ignoring them, which would silently waive
+# the "full suite green" DoD line back into meaninglessness. See that
+# script's header comment and athenaeum#1105's PR body for the full
+# rationale.
+#
+# Measured basis: CI run 33398798879 (test (3.13) job) on develop,
+# 2026-08-31 — "7860 passed, 66 skipped, 41 deselected, 1 xfailed" — 0
+# failed.

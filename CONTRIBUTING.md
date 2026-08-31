@@ -6,7 +6,7 @@ Thank you for your interest in contributing to Athenaeum!
 
 1. Fork and clone the repository
 2. Install in development mode: `pip install -e ".[dev,vector]"`
-3. Run the test suite: `pytest tests/ -v`
+3. Run the test suite: `pytest tests/ -v`, or `scripts/run-tests.sh` (see below)
 4. Run the linter: `ruff check src/ tests/`
 
 The `[dev,vector]` install matches what CI installs
@@ -15,6 +15,45 @@ same test set CI runs — nothing is silently skipped. The `vector` extra pulls
 in `chromadb`, which the vector-search and clustering tests need. If you don't
 intend to touch search or clustering, `[dev]` alone works and those tests skip
 automatically; MCP server tests need `fastmcp` (already included in `[dev]`).
+
+## Making "the tests passed" a checkable claim
+
+Plain `pytest tests/ -v` is fine for a quick check or a single test
+(`pytest tests/test_x.py::test_y -v` — nothing here changes that). For the
+"is the full suite green" question that gates a PR, use
+`scripts/run-tests.sh` instead (athenaeum#1105):
+
+```bash
+scripts/run-tests.sh                 # same as `pytest tests/`, plus a baseline diff
+scripts/run-tests.sh tests/test_x.py # narrower target, same diff logic
+scripts/run-tests.sh --update-baseline   # after confirming a new CI-environment failure is real, not a mistake
+```
+
+Two problems this closes, both hit in the same real session
+(athenaeum#1105's own report): a pytest exit code silently masked by piping
+through `tee`/`tail` (bash reports the *last* command's exit status, not
+pytest's — this script never internally pipes pytest into anything; it
+redirects straight to a file), and "the suite passed" being unfalsifiable
+because the failing set is environment-sensitive — 0 on CI, a different
+handful on each of two other hosts a past session measured.
+
+`tests/known-ci-failures.txt` is the committed baseline this script diffs
+against, and it is deliberately the **CI-environment** baseline only (empty,
+since CI is green on develop) — not a stand-in for whatever your particular
+host happens to fail. A failing nodeid the script has never seen in that
+file is reported under an **UNRECOGNIZED** heading and always makes the
+script exit non-zero, even if you're fairly sure it's a pre-existing quirk
+of your host rather than something your change broke — this script can't
+tell those apart from a single run, so it surfaces the failure instead of
+guessing. See the script's own header comment for the full rationale, and
+`scripts/run-tests.sh --help`-style usage at the top of the file.
+
+**If you're piping this script's own output** (`scripts/run-tests.sh | tee
+run.log`), a bare `$?` afterward reports `tee`'s exit status, not this
+script's — that is a property of the pipe, unrelated to anything this
+script can control from inside itself. Read `${PIPESTATUS[0]}` (bash) for
+the real exit code, or skip the pipe and redirect instead:
+`scripts/run-tests.sh > run.log 2>&1`.
 
 ## Supported Python version
 
