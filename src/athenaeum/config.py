@@ -3800,6 +3800,68 @@ def resolve_comparator_enabled(config: dict[str, Any] | None) -> bool:
     return False
 
 
+def resolve_name_collision_scan_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the nightly name-collision scan opt-out (issue athenaeum#1170). DEFAULT ON.
+
+    Gates :func:`athenaeum.librarian._run_name_collision_phase` /
+    :func:`athenaeum.name_collisions.resolve_name_collisions` — a
+    deterministic, zero-cost, exact-``name:``-match scan over ``wiki/*.md``
+    (no LLM, no vectors, no network). Unlike :func:`resolve_comparator_enabled`'s
+    expensive comparator pass, there is no cost reason to ship this off by
+    default; ``librarian.name_collision_scan: false`` exists only as an
+    operator escape hatch. Mirrors :func:`resolve_delta_enabled`'s shape:
+    yaml ``librarian.name_collision_scan`` (a plain ``bool``) overrides the
+    ``True`` default; anything else (missing, non-bool) falls through to
+    ``True``.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("name_collision_scan")
+            if isinstance(raw, bool):
+                return raw
+    return True
+
+
+def resolve_name_collision_automerge_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the name-collision auto-merge opt-in (issue athenaeum#1170). DEFAULT OFF.
+
+    Gates only the UNAMBIGUOUS-collision auto-merge branch of
+    :func:`athenaeum.name_collisions.resolve_name_collisions` — with this
+    off (the default), every collision the nightly scan finds still writes
+    a proposal block to ``_pending_merges.md`` (see
+    :func:`resolve_name_collision_scan_enabled`), it just never
+    self-approves.
+
+    This default is a deliberate, reasoned choice, not an oversight: issue
+    athenaeum#1170 was split on 2026-08-31 from the one-time destructive
+    repair sweep over collisions ALREADY PRESENT in the operator's live
+    corpus, which is issue athenaeum#1246 — ``~operator``-gated and blocked
+    by this issue. Shipping auto-merge ON by default here would make the
+    very next nightly run perform exactly that unattended sweep, defeating
+    the split athenaeum#1170 -> athenaeum#1246 was meant to create. So the
+    auto-merge path is fully built and fully tested (see
+    :mod:`athenaeum.name_collisions` and its test suite) and ships OFF: an
+    operator who explicitly sets ``librarian.name_collision_automerge:
+    true`` gets auto-merge of the unambiguous subset only (an ambiguous
+    collision always queues for human review regardless of this flag), and
+    every auto-merge is reversible via ``git revert``/``git show`` by
+    construction (the same ``fold-into-existing`` write path issue athenaeum#947
+    already made recoverable).
+
+    Precedence: yaml ``librarian.name_collision_automerge`` (a plain
+    ``bool``) overrides the ``False`` default; anything else (missing,
+    non-bool) falls through to ``False``.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("name_collision_automerge")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
 def resolve_verdict_epoch_batch_interval_days(config: dict[str, Any] | None) -> int:
     """Resolve the comparator-epoch batching interval in days (issue athenaeum#712).
 

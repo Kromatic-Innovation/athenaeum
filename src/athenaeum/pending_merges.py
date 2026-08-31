@@ -1054,12 +1054,27 @@ def _apply_fold_into_existing(
     classification only assigns that write_kind when the slug already
     exists; this function does not re-check.
 
-    Concurrency (issue athenaeum#947 AC3): this function performs real file
-    mutation and git commits, but it is only ever reached via the deferred
-    apply path (:func:`athenaeum.decision_answers.apply_decision_answers` ->
-    this module's :func:`resolve_merge`), which
-    :func:`athenaeum._cmd_pending.cmd_ingest_answers` runs after acquiring
-    the CLI run lock (issue athenaeum#309, ``_cli_shared._acquire_or_exit``).
+    Concurrency (issue athenaeum#947 AC3, extended by athenaeum#1170): this function
+    performs real file mutation and git commits. It is reached via TWO
+    callers of :func:`resolve_merge`, both already covered by the same
+    single-machine run lock:
+
+    1. The deferred apply path (:func:`athenaeum.decision_answers.apply_decision_answers`
+       -> this module's :func:`resolve_merge`), which
+       :func:`athenaeum._cmd_pending.cmd_ingest_answers` runs after acquiring
+       the CLI run lock (issue athenaeum#309, ``_cli_shared._acquire_or_exit``).
+    2. :func:`athenaeum.name_collisions.resolve_name_collisions`'s
+       unambiguous-collision auto-merge branch (issue athenaeum#1170), called from
+       :func:`athenaeum.librarian._run_name_collision_phase`, itself only
+       reached from a non-``--dry-run`` :func:`athenaeum.librarian.run` —
+       and :func:`athenaeum._cmd_run.cmd_run` only ever calls ``run()`` for a
+       real (non-dry-run) invocation AFTER acquiring that identical run
+       lock. A ``--dry-run`` invocation never reaches this function at all
+       (:func:`athenaeum.name_collisions.resolve_name_collisions` short-
+       circuits before any write when ``dry_run`` is true), so the "runs
+       under the lock" property holds for every path that can actually call
+       this function.
+
     The MCP ``resolve_merge`` tool (``mcp_server.py``) never calls this
     function directly — issue athenaeum#908 changed it to only validate and
     write a decision-answer file under ``raw/answers/``. So a concurrent
