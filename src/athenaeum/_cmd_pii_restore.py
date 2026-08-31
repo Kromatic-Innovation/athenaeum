@@ -15,7 +15,10 @@ Exit codes, matching the ``athenaeum repair`` convention this issue names
 branches):
 
     0 -- clean run (zero restorable markers found, OR ``--apply`` succeeded).
-    1 -- errors (a PII-safety refusal, an unreadable root, lock contention).
+    1 -- errors (a PII-safety refusal, an unreadable root, lock contention,
+         or git history being unconsultable for at least one marker --
+         athenaeum#1228; the tool refuses to report a plan in that state
+         rather than print a false ``TOTAL RESTORABLE = 0``).
     2 -- dry-run found markers that WOULD be restored (CI gate signal).
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
@@ -94,6 +97,7 @@ def cmd_pii_restore(args: argparse.Namespace) -> int:
     from athenaeum.config import load_config
     from athenaeum.pii import contacts_surface_root
     from athenaeum.pii_restore import (
+        GIT_HISTORY_UNAVAILABLE_REASON,
         PiiRestoreSafetyError,
         apply_restore_plan,
         build_restore_plan,
@@ -114,6 +118,25 @@ def cmd_pii_restore(args: argparse.Namespace) -> int:
     )
 
     plan = build_restore_plan(knowledge_root, wiki_root, contacts_root, limit=args.limit)
+
+    unavailable = plan.git_history_unavailable_count()
+    if unavailable:
+        # Fail loudly rather than proceeding (athenaeum#1228): do NOT print a
+        # dry-run/apply report here -- with even one marker's history
+        # unconsulted, "TOTAL RESTORABLE"/"TOTAL RESTORED" would not be a
+        # trustworthy corpus fact, only an artifact of git being unreachable.
+        print(
+            f"error: git history could not be consulted for {unavailable} "
+            f"marker site(s) under {knowledge_root} ({GIT_HISTORY_UNAVAILABLE_REASON}) "
+            "-- refusing to report a restore plan. This usually means the "
+            "knowledge root is not a git repository, or `git log` failed for "
+            "some other reason. Every affected marker would otherwise be "
+            "misclassified as 'no-pre-image:page-created-after-migration' and "
+            "TOTAL RESTORABLE would silently read as a false 0. Fix the "
+            "repository/mount and re-run.",
+            file=sys.stderr,
+        )
+        return 1
 
     if not args.apply:
         print(render_report(plan, applied=False))

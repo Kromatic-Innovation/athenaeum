@@ -111,6 +111,30 @@ def test_wiki_root_not_found_returns_1(tmp_path: Path, capsys) -> None:
     assert "Wiki root not found" in capsys.readouterr().err
 
 
+def test_missing_git_repository_fails_loudly_instead_of_reporting_false_zero(
+    tmp_path: Path, capsys
+) -> None:
+    """athenaeum#1228 AC1/AC3: a knowledge root with no ``.git`` at all must
+    never silently produce a plausible-looking ``TOTAL RESTORABLE = 0`` --
+    the tool must refuse to report a plan and fail loudly instead."""
+    root = tmp_path / "knowledge"
+    wiki = root / "wiki"
+    wiki.mkdir(parents=True)
+    (wiki / "page.md").write_text(f"---\nuid: 1\n---\nEmail: {MARKER}\n")
+    # Separate the excluded surface from wiki/ (mirrors the fixture repo's
+    # own athenaeum.yaml) -- without this, the default contacts_root
+    # collapses onto wiki_root and every page looks excluded/unscanned.
+    (root / "athenaeum.yaml").write_text("storage:\n  mapping:\n    pii: excluded\n")
+    # Deliberately no `git init`.
+
+    rc = _run(root)
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "git history could not be consulted" in captured.err
+    assert "TOTAL RESTORABLE" not in captured.out
+
+
 def test_clean_corpus_dry_run_returns_zero(tmp_path: Path) -> None:
     """A corpus with no markers at all is a clean 0, not the CI-gate 2."""
     root = tmp_path / "knowledge"
