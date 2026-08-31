@@ -730,7 +730,7 @@ Respond with ONLY a JSON object of the shape:
 ## `rule_proposals.system_prompt`
 
 - **Constant:** `athenaeum.rule_proposals._RULE_PROPOSAL_SYSTEM_PROMPT`
-- **Source:** `src/athenaeum/rule_proposals.py:436`
+- **Source:** `src/athenaeum/rule_proposals.py:463`
 - **Model knob:** `rule_proposals` &middot; **max_tokens:** `4096`
 - **sha256:** `738c5d707f74a4582c6357d478d6949024bbfe238940ec6cf16b59eb0983fd2f`
 
