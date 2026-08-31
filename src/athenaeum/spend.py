@@ -1456,6 +1456,7 @@ def ceiling_tripped(
     config: dict[str, Any] | None = None,
     ledger_path: Path | None = None,
     cache_dir: Path | None = None,
+    wiki_root: Path | None = None,
     now: datetime | None = None,
 ) -> str | None:
     """Return a human reason when a configured spend ceiling is breached, else None.
@@ -1483,6 +1484,19 @@ def ceiling_tripped(
     goes to. The warning check runs BEFORE the trip checks below and does not
     gate on their outcome, so a run at or past the ceiling both trips AND
     still logs the warning (never a trip with no warning).
+
+    Issue athenaeum#1147: when *wiki_root* is supplied, OUTSTANDING batch
+    reservations — cost committed server-side by an earlier submit and not yet
+    settled by a collect — count toward BOTH the per-run and the per-day
+    dollar figures. Without this the check is structurally blind to in-flight
+    spend: ``add_batch_tokens`` fires at collect, so a submitting run's
+    ``usage`` never sees the cost of the batch it just submitted, and that
+    cost is already committed and cannot be halted. Only the metered API
+    branch reads them, because batch mode is Anthropic-endpoint-only (the
+    ``claude-cli`` combination is refused at startup), so no reservation can
+    exist on the subscription path. *wiki_root* omitted (every
+    pre-athenaeum#1147 caller, and every non-batch call site) resolves
+    byte-identically to before.
     """
     from athenaeum.config import (
         resolve_spend_max_pct_per_day,
@@ -1564,20 +1578,319 @@ def ceiling_tripped(
     except Exception as exc:  # noqa: BLE001 — a warning must never break the run
         log.debug("spend headroom warning check failed (%s): %s", type(exc).__name__, exc)
 
+    # Issue athenaeum#1147: committed-but-unbilled batch spend. Best-effort —
+    # a ledger that cannot be read must not break the ceiling check it informs,
+    # and reading it as 0.0 leaves behaviour exactly as it was before this
+    # ledger existed.
+    outstanding_usd = 0.0
+    if wiki_root is not None:
+        try:
+            outstanding_usd = outstanding_reservation_usd(
+                wiki_root, cache_dir=cache_dir
+            )
+        except Exception as exc:  # noqa: BLE001 — never break the run it measures
+            log.debug(
+                "outstanding batch reservations unreadable (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+    _in_flight = (
+        f", incl. ${outstanding_usd:.2f} committed in flight)"
+        if outstanding_usd
+        else ")"
+    )
+
     run_cap_usd = resolve_spend_max_usd_per_run(config)
-    if run_cap_usd is not None and usage.estimated_cost_usd >= run_cap_usd:
-        return (
-            f"per-run API dollar ceiling reached "
-            f"(${usage.estimated_cost_usd:.2f}/${run_cap_usd:.2f})"
-        )
+    if run_cap_usd is not None:
+        run_total = usage.estimated_cost_usd + outstanding_usd
+        if run_total >= run_cap_usd:
+            return (
+                f"per-run API dollar ceiling reached "
+                f"(${run_total:.2f}/${run_cap_usd:.2f}" + _in_flight
+            )
     day_cap_usd = resolve_spend_max_usd_per_day(config)
     if day_cap_usd is not None:
         target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
         prior = spend_today(target, config=config, now=now)["api_usd"]
-        day_total = prior + usage.estimated_cost_usd
+        day_total = prior + usage.estimated_cost_usd + outstanding_usd
         if day_total >= day_cap_usd:
             return (
                 f"per-day API dollar ceiling reached "
-                f"(${day_total:.2f}/${day_cap_usd:.2f} today)"
+                f"(${day_total:.2f}/${day_cap_usd:.2f} today" + _in_flight
             )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1147 — batch spend reservation and settlement.
+#
+# ``TokenUsage.add_batch_tokens`` fires at COLLECT, inside ``execute_batch``'s
+# results loop. Under the athenaeum#1138 submit/collect split the submitting
+# run's ``usage`` therefore never sees the cost of the batch it just
+# submitted -- and that cost is already committed server-side and cannot be
+# halted. ``ceiling_tripped`` is structurally blind to it.
+#
+# Three moments, which must not be collapsed:
+#
+#   at submit  -- cost is committed and unstoppable. Write a ``reserved``
+#                 record: batch id, knob, estimated tokens, estimated USD,
+#                 and the submit run's accounting day.
+#   at collect -- ``add_batch_tokens`` books the actual. Write a ``settled``
+#                 record superseding the reservation, with the collect run's
+#                 accounting day and the estimate-vs-actual delta.
+#   at check   -- outstanding reservations count against the allowance, so a
+#                 run cannot submit new work while a large in-flight
+#                 commitment is unbilled.
+#
+# WHY THE CARRY IS REAL (athenaeum#1147 AC8, and the reason this issue was
+# blocked on athenaeum#1136). That issue had a choice: exempt the nightly from the
+# per-day ceiling entirely, in which case most of the cross-day carry problem
+# evaporates and this ledger shrinks to bookkeeping -- or align the accounting
+# window to the operator's LOCAL day. It landed the SECOND
+# (``spend.accounting_timezone``, defaulting to the system's local timezone;
+# see ``athenaeum.config.resolve_spend_accounting_timezone``). The per-day
+# ceiling therefore still applies to every run, and a batch submitted on
+# accounting day N can settle on day N+1. So a reservation MUST keep counting
+# against the day it was reserved on until it settles: otherwise a submit
+# whose collect lands the next day escapes day N's ceiling entirely, which is
+# the exact blindness this ledger exists to close.
+#
+# This also prevents a specific self-inflicted oscillation: without it,
+# collect charges land wholly on the collect run's day, can exhaust that day's
+# ceiling, prevent that run from submitting new work, empty the pipeline, and
+# leave the next run with nothing to collect.
+# ---------------------------------------------------------------------------
+
+#: On-disk record version for the reservation/settlement ledger. Bumped only
+#: for a shape change an older reader could misread.
+RESERVATION_LEDGER_VERSION = 1
+
+#: Ledger filename, mirroring :data:`LEDGER_FILENAME`'s convention.
+RESERVATION_LEDGER_FILENAME = "batch_reservations.jsonl"
+
+#: The two states a reservation record can carry. A ``settled`` record
+#: SUPERSEDES the ``reserved`` one for the same batch id; both are kept,
+#: because the estimate-vs-actual delta is the whole point of keeping a
+#: reservation ledger rather than a running total.
+RESERVATION_STATE_RESERVED = "reserved"
+RESERVATION_STATE_SETTLED = "settled"
+
+
+def reservation_ledger_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
+    """``<wiki_root>/batch_reservations.jsonl``, with the legacy cache-dir fallback.
+
+    Mirrors :func:`durable_ledger_path` exactly (AC1), including its migration
+    rule: an installation with records already at the legacy ``<cache_dir>``
+    path keeps using it until something copies the file forward.
+    """
+    new_path = Path(wiki_root) / RESERVATION_LEDGER_FILENAME
+    legacy_path = Path(
+        cache_dir if cache_dir is not None else default_cache_dir()
+    ) / RESERVATION_LEDGER_FILENAME
+    if new_path.exists() or not legacy_path.exists():
+        return new_path
+    return legacy_path
+
+
+def _append_reservation_record(
+    wiki_root: Path, record: dict[str, Any], *, cache_dir: Path | None = None
+) -> bool:
+    path = reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError as exc:
+        log.warning(
+            "could not append a batch-spend %s record for %s (%s: %s) — the "
+            "ceiling check will be blind to this commitment (issue athenaeum#1147)",
+            record.get("state"),
+            record.get("batch_id"),
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    return True
+
+
+def record_reservation(
+    wiki_root: Path,
+    *,
+    batch_id: str,
+    knob: str,
+    est_input_tokens: int,
+    est_output_tokens: int,
+    est_usd: float,
+    model: str | None = None,
+    requests: int = 0,
+    config: dict[str, Any] | None = None,
+    cache_dir: Path | None = None,
+    now: datetime | None = None,
+) -> bool:
+    """Record a batch's committed-but-unbilled cost at SUBMIT time (AC2).
+
+    *est_usd* must already be priced at the 50%-discounted batch rate (AC5) —
+    pricing a batch reservation at the synchronous rate trips the ceiling
+    roughly 2x too early and defeats the entire purpose of the epic. The
+    caller prices it through :class:`athenaeum.models.TokenUsage` so there is
+    exactly one pricing site, never a second hardcoded one here.
+
+    ``day`` is the ACCOUNTING day (athenaeum#1136's configured timezone), not the
+    UTC calendar day, so a reservation is compared against the same window the
+    per-day ceiling is enforced over.
+    """
+    if not batch_id:
+        return False
+    stamp = now or datetime.now(timezone.utc)
+    return _append_reservation_record(
+        wiki_root,
+        {
+            "v": RESERVATION_LEDGER_VERSION,
+            "state": RESERVATION_STATE_RESERVED,
+            "ts": stamp.astimezone(timezone.utc).isoformat(),
+            "day": _accounting_day_key(stamp, config=config),
+            "batch_id": batch_id,
+            "knob": knob,
+            "model": model,
+            "requests": int(requests),
+            "est_input_tokens": int(est_input_tokens),
+            "est_output_tokens": int(est_output_tokens),
+            "est_usd": round(float(est_usd), 6),
+        },
+        cache_dir=cache_dir,
+    )
+
+
+def record_settlement(
+    wiki_root: Path,
+    *,
+    batch_id: str,
+    knob: str,
+    actual_input_tokens: int,
+    actual_output_tokens: int,
+    actual_usd: float,
+    est_usd: float | None = None,
+    reason: str = "collected",
+    actual_source: str = "measured",
+    config: dict[str, Any] | None = None,
+    cache_dir: Path | None = None,
+    now: datetime | None = None,
+) -> bool:
+    """Supersede *batch_id*'s reservation with its actual cost (AC3, AC6).
+
+    *actual_source* records HOW the actual was arrived at, because the two
+    cases are not equally trustworthy and conflating them would hide the
+    difference:
+
+    - ``"measured"`` — the results were read and ``add_batch_tokens`` booked
+      them. The figure is real.
+    - ``"expired"`` — every request came back ``expired``. The API documents
+      an expired request as NOT billed, so the actual is genuinely **zero**.
+    - ``"estimate"`` — the handle was retired uncollected (athenaeum#1146:
+      past retention, unretrievable, or with no applicable context), so the
+      real figure is unknowable. The batch DID run and was billed, so
+      settling at the estimate is the honest close; settling at zero would
+      under-report real spend, and leaving it open would leak a permanent
+      phantom charge against every future ceiling check.
+
+    Whatever the source, the reservation is ALWAYS closed. A reservation that
+    never settles is the failure mode this function exists to prevent.
+    """
+    if not batch_id:
+        return False
+    stamp = now or datetime.now(timezone.utc)
+    record: dict[str, Any] = {
+        "v": RESERVATION_LEDGER_VERSION,
+        "state": RESERVATION_STATE_SETTLED,
+        "ts": stamp.astimezone(timezone.utc).isoformat(),
+        "day": _accounting_day_key(stamp, config=config),
+        "batch_id": batch_id,
+        "knob": knob,
+        "reason": reason,
+        "actual_source": actual_source,
+        "actual_input_tokens": int(actual_input_tokens),
+        "actual_output_tokens": int(actual_output_tokens),
+        "actual_usd": round(float(actual_usd), 6),
+    }
+    if est_usd is not None:
+        record["est_usd"] = round(float(est_usd), 6)
+        record["delta_usd"] = round(float(actual_usd) - float(est_usd), 6)
+    return _append_reservation_record(wiki_root, record, cache_dir=cache_dir)
+
+
+def _accounting_day_key(
+    stamp: datetime, *, config: dict[str, Any] | None = None
+) -> str:
+    """``YYYY-MM-DD`` in the configured ACCOUNTING timezone (athenaeum#1136)."""
+    from athenaeum.config import resolve_spend_accounting_timezone
+
+    tz = resolve_spend_accounting_timezone(config)
+    return stamp.astimezone(tz).date().isoformat()
+
+
+def read_reservation_ledger(
+    wiki_root: Path, *, cache_dir: Path | None = None
+) -> list[dict[str, Any]]:
+    """Read the reservation ledger, tolerating a torn trailing line (AC1).
+
+    Mirrors :func:`read_ledger`: a partially-written final record (the process
+    died mid-append) is skipped rather than raised on — the rest of the ledger
+    is still good data, and a ceiling check must never be broken by one torn
+    line.
+    """
+    path = reservation_ledger_path(wiki_root, cache_dir=cache_dir)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        log.warning("batch-reservation ledger unreadable (%s) — reading empty", exc)
+        return []
+    out: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("v") == RESERVATION_LEDGER_VERSION:
+            out.append(record)
+    return out
+
+
+def outstanding_reservations(
+    wiki_root: Path, *, cache_dir: Path | None = None
+) -> list[dict[str, Any]]:
+    """Reservations with no settlement yet, newest reservation per batch id.
+
+    A ``settled`` record supersedes the ``reserved`` one for the same batch id.
+    Both stay on the ledger — the estimate-vs-actual delta is the point of
+    keeping a ledger rather than a running total — so "outstanding" is derived
+    at read time rather than by mutating history.
+    """
+    reserved: dict[str, dict[str, Any]] = {}
+    settled: set[str] = set()
+    for record in read_reservation_ledger(wiki_root, cache_dir=cache_dir):
+        batch_id = record.get("batch_id")
+        if not isinstance(batch_id, str) or not batch_id:
+            continue
+        if record.get("state") == RESERVATION_STATE_RESERVED:
+            reserved[batch_id] = record
+        elif record.get("state") == RESERVATION_STATE_SETTLED:
+            settled.add(batch_id)
+    return [r for batch_id, r in sorted(reserved.items()) if batch_id not in settled]
+
+
+def outstanding_reservation_usd(
+    wiki_root: Path, *, cache_dir: Path | None = None
+) -> float:
+    """Total committed-but-unbilled dollars across outstanding reservations."""
+    total = 0.0
+    for record in outstanding_reservations(wiki_root, cache_dir=cache_dir):
+        try:
+            total += float(record.get("est_usd") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return total
