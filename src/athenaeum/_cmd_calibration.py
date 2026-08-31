@@ -35,17 +35,21 @@ from athenaeum.calibration import calibration_summary, record_audit_review
 from athenaeum.config import (
     DEFAULT_KNOWLEDGE_ROOT,
     load_config,
-    resolve_reasoning_tier_auditing_enabled,
+    resolve_reasoning_tier_any_screen_enabled,
 )
 
 # Issue athenaeum#518: the message shown when the reasoning-tier subsystem is not
 # enabled — an explicit state so an operator never mistakes a permanent
-# 0/0/0 all-clear for "the tiers ran and are well calibrated".
+# 0/0/0 all-clear for "the tiers ran and are well calibrated". Checked via
+# resolve_reasoning_tier_any_screen_enabled (issue athenaeum#1200: T1 and T2 are
+# now independently armed, so this must be OR, not just T1's flag — a T2-only
+# config must still see its own sampled audit items here, not a false
+# "not enabled").
 _NOT_ENABLED_MSG = (
     "tier auditing not enabled "
-    "(set librarian.reasoning_tier_auditing_enabled: true, or "
-    "ATHENAEUM_REASONING_TIER_AUDITING_ENABLED=1, to enable the reasoning "
-    "tiers and their calibration loop)"
+    "(set librarian.reasoning_tier_auditing_enabled: true for T1, and/or "
+    "librarian.reasoning_tier_t2_auto_apply_enabled: true for T2, to enable "
+    "the reasoning tiers and their calibration loop)"
 )
 
 
@@ -68,7 +72,7 @@ def cmd_calibration(args: argparse.Namespace) -> int:
     # Issue athenaeum#518: gate the calibration surface behind the explicit opt-in.
     # When off, report the not-enabled state rather than an empty-but-"green"
     # summary that lies about a subsystem that never ran.
-    if not resolve_reasoning_tier_auditing_enabled(load_config(wiki_root.parent)):
+    if not resolve_reasoning_tier_any_screen_enabled(load_config(wiki_root.parent)):
         if getattr(args, "json", False):
             sys.stdout.write(
                 json.dumps({"enabled": False, "error": _NOT_ENABLED_MSG}) + "\n"
