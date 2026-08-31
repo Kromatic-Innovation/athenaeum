@@ -167,6 +167,9 @@ class TestRunContext:
             # exported the same way (empty here — the batch transport is not
             # exercised by this unit test).
             "in_flight_refs": [],
+            # Issue athenaeum#1145: refs collected from a PRIOR run's batch
+            # (empty here — same reason).
+            "collected_refs": [],
             # Issue athenaeum#669: the entity-share yield (athenaeum#440) as
             # machine-detectable state.
             "entity_budget_tripped": True,
