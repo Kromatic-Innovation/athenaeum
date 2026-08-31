@@ -515,15 +515,17 @@ class TestEntityIndex:
         index = EntityIndex(wiki_dir)
         result = index.lookup("Acme Corp")
         assert result is not None
-        uid, path = result
+        # Still a plain (uid, path) unpack via positional access -- IndexEntry
+        # is a tuple subclass (issue athenaeum#1169), so this keeps working.
+        uid, path = result[0], result[1]
         assert uid == "a1b2c3d4"
+        assert path.name == "a1b2c3d4-acme-corp.md"
 
     def test_lookup_by_alias(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
         result = index.lookup("Acme")
         assert result is not None
-        uid, _ = result
-        assert uid == "a1b2c3d4"
+        assert result.uid == "a1b2c3d4"
 
     def test_lookup_case_insensitive(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
@@ -534,13 +536,32 @@ class TestEntityIndex:
         index = EntityIndex(wiki_dir)
         result = index.lookup("Auth tokens must use system keychain")
         assert result is not None
-        uid_or_name, _ = result
         # Old format has no uid, so it returns the name
-        assert uid_or_name == "Auth tokens must use system keychain"
+        assert result.uid == "Auth tokens must use system keychain"
 
     def test_lookup_missing(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
         assert index.lookup("Nonexistent Entity") is None
+
+    def test_lookup_carries_type(self, wiki_dir: Path) -> None:
+        """Issue athenaeum#1169: EntityIndex._load carries `type:` into IndexEntry."""
+        index = EntityIndex(wiki_dir)
+        result = index.lookup("Acme Corp")
+        assert result is not None
+        assert result.type == "company"
+
+    def test_lookup_untyped_page_is_kept_with_none_type(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1169: a page with no `type:` is indexed and KEPT,
+        with an explicit `type=None` rather than a silently-defaulted value."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "untyped-note.md").write_text(
+            "---\nname: Untyped Note\n---\n\nNo type field here.\n"
+        )
+        index = EntityIndex(wiki)
+        result = index.lookup("Untyped Note")
+        assert result is not None
+        assert result.type is None
 
     def test_has_entity_format(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
