@@ -2083,6 +2083,20 @@ class TokenUsage:
     # athenaeum#1167 measured but nothing before this issue tracked per run.
     merge_calls: int = 0
     merge_echoed_chars: int = 0
+    # Tier-3 create-path preamble guard (issue athenaeum#1171). A create
+    # response can open with first-person planning/meta-commentary (e.g.
+    # "Looking at the new observation, I need to...") that must never reach
+    # a persisted page body — see ``athenaeum.tiers.strip_planning_preamble``.
+    # ``preamble_stripped`` counts creates where such a leading preamble was
+    # detected and removed, WITH substantive content surviving underneath
+    # (the common case). ``preamble_rejected`` counts creates where the
+    # preamble was the entire response — stripping it left nothing
+    # substantive, so the create was rejected outright (see
+    # ``athenaeum.tiers.PreambleOnlyResponseError``) rather than persist an
+    # empty page. Additive across a run, same convention as ``merge_calls``
+    # above; rendered in ``librarian-run-summary`` only when non-zero.
+    preamble_stripped: int = 0
+    preamble_rejected: int = 0
 
     def record_merge_echo(self, echoed_chars: int) -> None:
         """Record one Tier-3 merge LLM call's echoed-existing-page char count.
@@ -2603,6 +2617,14 @@ class ProcessingResult:
     #: was actually escalated. Surfaced as ``oversize_suppressed=N`` in the
     #: run summary, mirroring the degraded/truncated convention above.
     oversize_suppressed: int = 0
+    #: Count of NEW entity writes this file's Tier-3 create phase produced
+    #: whose ``type`` was outside declared ∪ ``KNOWN_TYPES`` and was
+    #: therefore REFUSED by the write-boundary guard (issue athenaeum#1196,
+    #: :func:`athenaeum.wiki_write_guard.guard_entity_write_type`) rather
+    #: than written to ``wiki/``. Not counted in ``created`` — a refused
+    #: entity was never applied. Surfaced as ``type_rejected=N`` in the run
+    #: summary, mirroring the ``degraded``/``truncated`` convention above.
+    type_rejected: int = 0
 
 
 # --- Schema loading ---

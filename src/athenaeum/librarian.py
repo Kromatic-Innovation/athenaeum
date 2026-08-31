@@ -229,6 +229,7 @@ from athenaeum.tiers import (
     tier3_derive_actions,
     tier4_escalate,
 )
+from athenaeum.wiki_write_guard import guard_entity_write_type
 
 log = logging.getLogger(__name__)
 
@@ -1223,6 +1224,18 @@ def _apply_tier3_results(
         # re-parsing ``rendered``.
         rendered_meta, _ = parse_frontmatter(rendered)
         validate_wiki_meta(rendered_meta)
+        # Write-boundary type guard (issue athenaeum#1196): a backstop BEHIND
+        # validate_wiki_meta's UserWarning-only check above — a type outside
+        # declared ∪ KNOWN_TYPES is refused here regardless of whether any
+        # upstream clamp (tier0_passthrough / parse_tier2_entities) already
+        # should have caught it. The rejected write is parked under
+        # wiki_root/_type_rejected/ and ledgered, never applied to wiki/, and
+        # never counted in result.created.
+        if not guard_entity_write_type(
+            wiki_root, entity.filename, rendered, rendered_meta, source="tier3-create"
+        ):
+            result.type_rejected += 1
+            continue
         atomic_write_text(page_path, rendered)
         index.register(entity)
         result.created.append(entity)
@@ -3417,6 +3430,13 @@ class RunContext:
     total_skipped: int = 0
     total_degraded: int = 0
     total_truncated: int = 0
+    #: Issue athenaeum#1196: NEW entity writes refused this run by the
+    #: write-boundary type guard (``wiki_write_guard.guard_entity_write_type``)
+    #: because their ``type`` was outside declared ∪ ``KNOWN_TYPES``. Folded
+    #: in from ``ProcessingResult.type_rejected`` (sync path) and
+    #: ``BatchRunResult``/``BatchCollectResult.type_rejected`` (batch path),
+    #: mirroring the ``total_degraded``/``total_truncated`` accumulators.
+    total_type_rejected: int = 0
     failed_files: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
     # Issue athenaeum#1144: refs whose Batch API submission was still running when
@@ -4946,6 +4966,7 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
     ctx.total_degraded += outcome.degraded
     ctx.total_truncated += outcome.truncated
     ctx.total_oversize_suppressed += outcome.oversize_suppressed  # issue athenaeum#1182
+    ctx.total_type_rejected += outcome.type_rejected  # issue athenaeum#1196
     ctx.collected_refs = list(outcome.collected_refs)
     ctx.batch_reconciliation = dict(outcome.reconciliation)
     ctx.failed_files.extend(outcome.failed_refs)
@@ -5220,6 +5241,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.total_oversize_suppressed = (
                         outcome.oversize_suppressed
                     )  # issue athenaeum#1182
+                    ctx.total_type_rejected = outcome.type_rejected  # issue athenaeum#1196
                     ctx.failed_files = outcome.failed_refs
                     ctx.deferred_refs = outcome.deferred_refs
                     # Issue athenaeum#1144 AC5.
@@ -5647,6 +5669,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # (the real ProcessingResult always carries it, default 0).
                         ctx.total_degraded += getattr(result, "degraded", 0)
                         ctx.total_truncated += getattr(result, "truncated", 0)  # athenaeum#476
+                        ctx.total_type_rejected += getattr(
+                            result, "type_rejected", 0
+                        )  # issue athenaeum#1196
                         # Issue athenaeum#1184: fan-out (matches) and the "produced
                         # actions" denominator — ``getattr`` for the same
                         # stubbed-test-seam reason as ``degraded``/``truncated``
@@ -5890,6 +5915,36 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     **(
                         {"oversize_suppressed": ctx.total_oversize_suppressed}
                         if ctx.total_oversize_suppressed
+                        else {}
+                    ),
+                    # athenaeum#1171: tier-3 create responses whose leading
+                    # first-person planning preamble was stripped (substantive
+                    # content survived) or rejected (the response was ENTIRELY
+                    # preamble). Read directly off ``ctx.usage`` — the same
+                    # shared TokenUsage instance accumulates these across both
+                    # the synchronous and Batch API create paths (see
+                    # ``tiers.tier3_entity_from_text``), so no separate
+                    # ``ctx.total_*`` accumulator is needed. Rendered only when
+                    # non-zero, matching the degraded/truncated convention.
+                    **(
+                        {"preamble_stripped": ctx.usage.preamble_stripped}
+                        if ctx.usage.preamble_stripped
+                        else {}
+                    ),
+                    **(
+                        {"preamble_rejected": ctx.usage.preamble_rejected}
+                        if ctx.usage.preamble_rejected
+                        else {}
+                    ),
+                    # athenaeum#1196: NEW entity writes the write-boundary type guard
+                    # refused (type outside declared ∪ KNOWN_TYPES). Only
+                    # rendered when non-zero, mirroring degraded/truncated —
+                    # an operator sees "type_rejected=N" without grepping the
+                    # guard's own WARNING lines or reading
+                    # wiki_root/_type_rejected.jsonl directly.
+                    **(
+                        {"type_rejected": ctx.total_type_rejected}
+                        if ctx.total_type_rejected
                         else {}
                     ),
                     # athenaeum#663: files skipped/surfaced as stuck this run. Only
