@@ -166,6 +166,10 @@ class TestRunContext:
             # Issue athenaeum#898: quarantined files exported as machine-detectable
             # run state, mirroring stuck_files above (empty here — none set).
             "quarantined_files": [],
+            # Issue athenaeum#1185: refs skipped this run because they are still
+            # within their exponential-backoff window, mirroring stuck_files/
+            # quarantined_files above (empty here — none set).
+            "backoff_skipped_files": [],
             # Issue athenaeum#1144: batch refs left running at the run deadline,
             # exported the same way (empty here — the batch transport is not
             # exercised by this unit test).
