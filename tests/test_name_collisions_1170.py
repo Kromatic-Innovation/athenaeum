@@ -602,11 +602,15 @@ class TestResolveNameCollisionsAmbiguousQueue:
         merge_decisions = [d for d in decisions if d["type"] == "merge"]
         assert len(merge_decisions) == 1
         # The proposal's merge_target_name is the canonical page's FILENAME
-        # STEM (issue athenaeum#1170 code review), not its name: value -- the
-        # human-readable name is preserved on disk (draft_merged_body) and
-        # still surfaces in the decision's rationale for a reviewer.
+        # STEM (issue athenaeum#1170 code review), not its name: value --
+        # but the decision's "summary" (list_pending_decisions' surface for
+        # merge_to_rich's phrased "question" -- decisions.py's own reason
+        # for existing: "a proposal shown as merge_target_name=28e56467-...
+        # is undecidable") uses display_name, so a reviewer sees the human
+        # name, never the stem.
         assert merge_decisions[0]["payload"]["merge_target_name"] == "acme"
-        assert "Acme" in merge_decisions[0]["payload"]["rationale"]
+        assert "Acme" in merge_decisions[0]["summary"]
+        assert "acme" not in merge_decisions[0]["summary"]
 
 
 # ---------------------------------------------------------------------------

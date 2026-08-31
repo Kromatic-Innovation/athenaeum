@@ -175,6 +175,20 @@ class PendingMerge:
     # pre-existing block still parses without a KeyError and without
     # fabricating an embedder value nobody recorded.
     embedder: str = ""
+    # Issue athenaeum#1170 code review: the human-readable name to show a
+    # reviewer, when it differs from ``merge_target_name`` (which, for a
+    # name-collision proposal, is deliberately the canonical page's
+    # FILENAME STEM — see :mod:`athenaeum.name_collisions` — so the fold
+    # target derivation resolves correctly for an entity-template
+    # ``<uid>-<slug>.md`` page, not just a bare-slug one). ``""`` (the
+    # default, and every pre-athenaeum#1170 block) means "no override" —
+    # :func:`athenaeum.decisions.merge_to_rich` falls back to
+    # ``merge_target_name`` in that case, so a caller that never passes
+    # this renders and reads byte-identically to before this field existed.
+    # Never affects the block's own header title or the fold-target slug
+    # derivation — those still use ``merge_target_name`` — this is a pure
+    # display override.
+    display_name: str = ""
 
 
 WRITE_KINDS = ("create-merged", "fold-into-existing")
@@ -268,6 +282,7 @@ def render_block(
     created_at: str | None = None,
     write_kind: str = "create-merged",
     embedder: str | None = None,
+    display_name: str | None = None,
 ) -> str:
     """Render one pending-merge block as markdown.
 
@@ -283,6 +298,17 @@ def render_block(
     (every pre-athenaeum#1142 call site, and the raw-intake C3 write path in
     :mod:`athenaeum.merge`, which is out of this issue's scope) renders a
     byte-identical block to before this change.
+
+    Issue athenaeum#1170 code review: ``display_name`` — when a caller
+    supplies one — is rendered as its own ``**Display name**:`` line, read
+    back by :func:`athenaeum.decisions.merge_to_rich` in preference to
+    ``merge_target_name`` when phrasing the reviewer-facing question. This
+    lets a caller (:mod:`athenaeum.name_collisions`) pass a machine-shaped
+    ``merge_target_name`` (a filename stem, for correct fold-target
+    derivation) without the decision queue ever showing that stem to a
+    human. ``None`` (the default) omits the line entirely, so every
+    existing caller renders a byte-identical block to before this field
+    existed.
     """
     today = created_at or date.today().isoformat()
     target_escaped = _escape_quotes(merge_target_name)
@@ -296,6 +322,8 @@ def render_block(
     ]
     if embedder:
         parts.append(f"**Embedder**: {embedder}")
+    if display_name:
+        parts.append(f"**Display name**: {display_name}")
     parts.append("**Sources**:")
     for src in sources:
         parts.append(f"- {src}")
@@ -382,6 +410,7 @@ def _parse_block(block_text: str) -> PendingMerge | None:
     write_kind = "create-merged"
     auto_applied = False
     embedder = ""
+    display_name = ""
 
     in_sources = False
     in_draft = False
@@ -450,6 +479,10 @@ def _parse_block(block_text: str) -> PendingMerge | None:
             in_sources = False
             embedder = s.removeprefix("**Embedder**:").strip()
             continue
+        if s.startswith("**Display name**:"):
+            in_sources = False
+            display_name = s.removeprefix("**Display name**:").strip()
+            continue
         if in_sources and s.startswith("- "):
             sources.append(s[2:].strip())
             continue
@@ -479,6 +512,7 @@ def _parse_block(block_text: str) -> PendingMerge | None:
         write_kind=write_kind,
         auto_applied=auto_applied,
         embedder=embedder,
+        display_name=display_name,
     )
 
 
@@ -501,6 +535,7 @@ def write_pending_merge(
     created_at: str | None = None,
     write_kind: str | None = None,
     embedder: str | None = None,
+    display_name: str | None = None,
 ) -> str:
     """Append one merge-proposal block to ``_pending_merges.md``.
 
@@ -517,6 +552,13 @@ def write_pending_merge(
     default) omits it, so a caller that doesn't pass it (e.g. the
     raw-intake C3 write path in :mod:`athenaeum.merge`) writes a
     byte-identical block to before this parameter existed.
+
+    Issue athenaeum#1170 code review: ``display_name`` — when supplied — is
+    rendered as a ``**Display name**:`` line (see :func:`render_block`) and
+    read back by :func:`athenaeum.decisions.merge_to_rich` in preference to
+    ``merge_target_name`` for the reviewer-facing question. ``None`` (the
+    default) omits it, so every existing caller writes a byte-identical
+    block to before this parameter existed.
 
     Issue athenaeum#748: ``write_kind`` is DERIVED here, not trusted from the
     caller. The classification is computed from whether the target slug
@@ -558,6 +600,7 @@ def write_pending_merge(
         created_at=created_at,
         write_kind=write_kind,
         embedder=embedder,
+        display_name=display_name,
     )
     block_id = _make_id(sources, merge_target_name)
 

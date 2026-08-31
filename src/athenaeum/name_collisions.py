@@ -318,9 +318,12 @@ def resolve_name_collisions(
       That function is already idempotent on the source-set + target-name
       id, so re-running this scan over an unchanged corpus never appends a
       duplicate block (AC3). The canonical page's human-readable name is
-      never lost: ``draft_merged_body`` carries its full raw text
-      (frontmatter included), so the ``name:`` on disk is unaffected by
-      what the proposal calls the target.
+      never lost, on disk OR in the decision queue: ``draft_merged_body``
+      carries its full raw text (frontmatter included), so the ``name:``
+      on disk is unaffected by what the proposal calls the target, and
+      ``display_name`` (issue athenaeum#1170 code review) carries that same
+      human name so :func:`athenaeum.decisions.merge_to_rich`'s
+      reviewer-facing question shows it instead of the filename stem.
     - **Ambiguous** collisions stop there — the unresolved block is
       surfaced through :func:`athenaeum.decisions.list_pending_decisions`
       (which already reads every unresolved ``_pending_merges.md`` block),
@@ -426,6 +429,12 @@ def resolve_name_collisions(
         write_pending_merge(
             merges_path,
             merge_target_name=canonical.path.stem,
+            # Issue athenaeum#1170 code review: display_name carries the
+            # canonical page's actual human-readable name -- the decision
+            # queue's phrased question (athenaeum.decisions.merge_to_rich)
+            # reads this in preference to merge_target_name, so a reviewer
+            # never sees the filename stem as the "question".
+            display_name=canonical.name,
             sources=sources,
             rationale=rationale,
             draft_merged_body=draft_full_text,
