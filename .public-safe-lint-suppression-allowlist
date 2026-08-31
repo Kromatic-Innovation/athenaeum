@@ -1,0 +1,29 @@
+# Explicit allowlist of public-safe-lint rule NAMES permitted to carry
+# active suppressions (via .public-safe-lintignore) without failing the
+# push-boundary gate (scripts/public-safe-lint-gate.sh, athenaeum#1104).
+#
+# Different grain than .public-safe-lintignore: that file maps specific
+# (rule, path-glob) pairs to specific rationale. This file is the set of
+# rule NAMES the gate accepts as already reviewed and knowingly suppressed
+# somewhere in this repo. The gate computes the set of rule names that
+# actually carry active suppressions in the current scan and requires it
+# to be a SUBSET of this file's set.
+#
+# Adding a brand-new rule to .public-safe-lintignore without adding it here
+# fails the gate on the next push — that is the point: a rule suppressed
+# for the first time is exactly the "am I about to publish something new
+# and unreviewed" signal AC2 (athenaeum#1104) exists to catch. Shrinking
+# suppression coverage (fixing a suppressed hit for good, or removing an
+# ignore entry) is always safe and never requires touching this file.
+#
+# Measured basis (2026-08-31, clean HEAD export via `git archive` + `tar -x`,
+# matching what CI's checkout sees):
+#   verdict: clean against 7 rule(s) over 634 file(s) -- WITH 399
+#   SUPPRESSED HIT(S) (3/7 rule(s) partially suppressed; this is NOT
+#   unconditional 7/7 coverage)
+# The 3 rule names below are exactly the 3 named in .public-safe-lintignore's
+# own header as reviewed, intentional exemptions (tilde-rooted config-path
+# prose, and two PII/leak-detector test fixture files).
+tilde-rooted-path
+bare-issue-ref
+plus-alias-email

@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# .githooks/pre-push — public-safe-lint push-boundary gate (athenaeum#1104).
+#
+# Installed via `git config core.hooksPath .githooks`
+# (run scripts/install-git-hooks.sh once per clone -- cloning does not wire
+# this in by itself). Runs scripts/public-safe-lint-gate.sh against a CLEAN
+# EXPORT of each ref being pushed (via `git archive`), so the result matches
+# what CI's clean checkout would see -- not a possibly-dirty working tree or
+# one cluttered with gitignored dirs (.venv, .zenodotus, ...) that a clean
+# checkout never has.
+#
+# Bypass (verbatim, athenaeum#1104's own issue text): "a pre-push hook or
+# push wrapper accepts an explicit --skip-public-lint override, recorded in
+# the push, for a repo that is genuinely private or a push that carries no
+# doc/prose change". A native git pre-push hook takes no CLI flags of its
+# own, and push options (`--push-option`) depend on the remote advertising
+# `receive.advertisePushOptions`, which we do not control on a GitHub
+# remote -- so the override is an environment variable pair instead:
+#
+#   SKIP_PUBLIC_LINT=1 SKIP_PUBLIC_LINT_REASON=private-repo   git push ...
+#   SKIP_PUBLIC_LINT=1 SKIP_PUBLIC_LINT_REASON=no-doc-change  git push ...
+#
+# REASON must be one of the two bypass justifications named in the issue --
+# an unset or unrecognized reason is treated as an ambiguous bypass and
+# refused, not silently allowed. Every bypass is appended to
+# .git/public-safe-lint-bypass.log (untracked, local to this clone -- never
+# silent) with a timestamp, branch, remote and the reason, and printed
+# loudly to stderr as part of the push transcript.
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+GATE="$REPO_ROOT/scripts/public-safe-lint-gate.sh"
+LINTER="$REPO_ROOT/public-safe-lint.sh"
+BYPASS_LOG="$REPO_ROOT/.git/public-safe-lint-bypass.log"
+REMOTE_NAME="${1:-unknown-remote}"
+
+_current_branch() { git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown-branch"; }
+
+if [ "${SKIP_PUBLIC_LINT:-0}" = "1" ]; then
+  reason="${SKIP_PUBLIC_LINT_REASON:-}"
+  case "$reason" in
+    private-repo | no-doc-change) ;;
+    *)
+      {
+        echo "pre-push: SKIP_PUBLIC_LINT=1 requires SKIP_PUBLIC_LINT_REASON=private-repo|no-doc-change (got '${reason}')."
+        echo "pre-push: refusing an unrecorded/ambiguous bypass -- see .githooks/pre-push header."
+      } >&2
+      exit 1
+      ;;
+  esac
+  record="$(date -u +%Y-%m-%dT%H:%M:%SZ) branch=$(_current_branch) remote=$REMOTE_NAME reason=$reason user=$(git config user.email 2>/dev/null || echo unknown)"
+  echo "$record" >>"$BYPASS_LOG"
+  echo "pre-push: PUBLIC-SAFE-LINT BYPASSED (recorded): $record" >&2
+  exit 0
+fi
+
+if [ ! -f "$GATE" ]; then
+  echo "pre-push: gate script missing at $GATE -- refusing to push unchecked." >&2
+  exit 1
+fi
+
+# Save the hook's own stdin (the git-supplied ref list) on fd 3 so commands
+# inside the loop body (git archive, the gate script) don't accidentally
+# consume it from fd 0.
+exec 3<&0
+FAIL=0
+SEEN_SHAS=""
+
+while read -r local_ref local_sha remote_ref remote_sha <&3; do
+  [ -z "${local_ref:-}" ] && continue
+  case "$local_sha" in
+    0000000000000000000000000000000000000000) continue ;; # ref deletion -- nothing to scan
+  esac
+  case " $SEEN_SHAS " in
+    *" $local_sha "*) continue ;; # already scanned this commit for another ref
+  esac
+  SEEN_SHAS="$SEEN_SHAS $local_sha"
+
+  scan_dir="$(mktemp -d)"
+  if ! git archive "$local_sha" | tar -x -C "$scan_dir" 2>/dev/null; then
+    echo "pre-push: failed to export $local_sha for scanning." >&2
+    rm -rf "$scan_dir"
+    FAIL=1
+    continue
+  fi
+
+  echo "pre-push: running public-safe-lint gate against clean export of $local_sha ($local_ref) ..." >&2
+  if ! bash "$GATE" "$scan_dir" "$LINTER"; then
+    echo "pre-push: public-safe-lint gate FAILED for $local_ref ($local_sha)." >&2
+    FAIL=1
+  fi
+  rm -rf "$scan_dir"
+done
+exec 3<&-
+
+if [ "$FAIL" -ne 0 ]; then
+  {
+    echo "pre-push: aborting push -- fix the finding(s) above, or use the recorded bypass"
+    echo "  (SKIP_PUBLIC_LINT=1 SKIP_PUBLIC_LINT_REASON=private-repo|no-doc-change) if genuinely applicable."
+  } >&2
+  exit 1
+fi
+
+exit 0
