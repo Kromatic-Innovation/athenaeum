@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from athenaeum.models import parse_frontmatter, resolve_page_type
+from athenaeum.models import parse_frontmatter, resolve_page_type, slugify
 from athenaeum.pending_merges import parse_pending_merges, resolve_merge, write_pending_merge
 
 log = logging.getLogger(__name__)
@@ -225,6 +225,38 @@ def classify_collision(collision: NameCollision) -> Literal["unambiguous", "ambi
     return "unambiguous"
 
 
+def _fold_target_matches_canonical(wiki_root: Path, canonical: CollisionPage) -> bool:
+    """Whether ``pending_merges``'s fold-into-existing target path is
+    actually the canonical page's own file (issue athenaeum#1170 safety guard).
+
+    :func:`athenaeum.pending_merges.classify_write_kind` / ``resolve_merge``
+    derive the fold TARGET purely from ``wiki_root / f"{slugify(merge_target_name)}.md"``
+    — they have no notion of "the page that already carries this name might
+    be filed under a different filename". A ``compiled`` wiki page (the
+    convention :mod:`athenaeum.wiki_dedupe` / this reused fold machinery was
+    built for) IS named exactly that bare slug, but an entity-template page
+    minted via the create path is not — its filename is
+    ``<uid>-<slug>.md`` (see :attr:`athenaeum.models.WikiEntity.filename`).
+
+    When the canonical page's own file is not at the derived target path,
+    routing its collision through :func:`~athenaeum.pending_merges.write_pending_merge`'s
+    ``write_kind=None`` derivation would silently classify it as
+    ``create-merged`` (the bare-slug path doesn't exist yet) and, on
+    auto-merge, WRITE A NEW near-duplicate page at that bare-slug path
+    instead of folding into the canonical page that already exists under a
+    different name — worse than doing nothing. Rather than teaching
+    ``pending_merges`` a second target-resolution convention, this function
+    lets :func:`resolve_name_collisions` force such a collision to
+    ``ambiguous`` (queued for a human, never auto-merged) regardless of what
+    :func:`classify_collision` would otherwise say.
+    """
+    target_path = wiki_root / f"{slugify(canonical.name)}.md"
+    try:
+        return target_path.resolve() == canonical.path.resolve()
+    except OSError:
+        return False
+
+
 def _find_open_merge_id(merges_path: Path, sources: list[str], target_name: str) -> str | None:
     """Find the unresolved :class:`~athenaeum.pending_merges.PendingMerge` id
     matching *sources* + *target_name* (issue athenaeum#1170 AC3).
@@ -317,7 +349,13 @@ def resolve_name_collisions(
 
     if dry_run:
         for collision in collisions:
-            if classify_collision(collision) == "unambiguous":
+            canonical = canonical_page(collision)
+            verdict = classify_collision(collision)
+            if verdict == "unambiguous" and not _fold_target_matches_canonical(
+                wiki_root, canonical
+            ):
+                verdict = "ambiguous"
+            if verdict == "unambiguous":
                 unambiguous += 1
             else:
                 ambiguous += 1
@@ -334,18 +372,44 @@ def resolve_name_collisions(
         canonical = canonical_page(collision)
         sources = [str(page.path) for page in collision.pages]
         verdict = classify_collision(collision)
+        if verdict == "unambiguous" and not _fold_target_matches_canonical(
+            wiki_root, canonical
+        ):
+            log.warning(
+                "name-collision-fold-target-mismatch name=%r canonical=%s — "
+                "canonical page's filename does not match the fold "
+                "machinery's derived target (slugify(name).md); forcing "
+                "ambiguous so this is queued for a human instead of "
+                "auto-merged incorrectly",
+                collision.name,
+                canonical.path.name,
+            )
+            verdict = "ambiguous"
         type_note = f" (type: {collision.type})" if collision.type else " (type: unknown)"
         rationale = (
             f"athenaeum#1170 nightly name-collision scan: {len(collision.pages)} pages "
             f"share the name {collision.name!r}{type_note}; classified {verdict} "
             f"(canonical: {canonical.path.name})."
         )
+        # Pass the canonical page's FULL raw text (frontmatter included),
+        # not just its body. _apply_fold_into_existing's step 1 overwrites
+        # target_path verbatim with draft_merged_body, and step 3 only
+        # carries the PRIOR target's uid/type/etc. forward when the draft
+        # itself already has frontmatter to parse (see that function's own
+        # step-3 comment) — passing body-only would silently drop the
+        # canonical page's own uid/type/name on every auto-merge. Since the
+        # canonical page IS the fold target, writing its own unchanged text
+        # back is a content no-op; only the aliases: line changes.
+        try:
+            draft_full_text = canonical.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            draft_full_text = canonical.body
         write_pending_merge(
             merges_path,
             merge_target_name=canonical.name,
             sources=sources,
             rationale=rationale,
-            draft_merged_body=canonical.body,
+            draft_merged_body=draft_full_text,
             confidence=1.0,
             write_kind=None,
         )
