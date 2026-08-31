@@ -304,7 +304,7 @@ def cmd_recall(args: argparse.Namespace) -> int:
     # all — for a non-handle-shaped query, so the fallthrough below is
     # byte-identical to before this branch existed. Both `recall` entry
     # points (this one and the MCP tool) call the SAME resolver.
-    from athenaeum import identity_resolution
+    from athenaeum import identity_resolution, pii
 
     handle_resolution = identity_resolution.resolve_handle_query(
         knowledge_root,
@@ -316,7 +316,19 @@ def cmd_recall(args: argparse.Namespace) -> int:
         usage_classes=getattr(args, "usage_class", None) or None,
     )
     if handle_resolution is not None:
-        print(json.dumps(handle_resolution.to_dict(), indent=2, sort_keys=True))
+        # Issue athenaeum#1110: `contact_values[].source` can carry a raw
+        # frontmatter/record value (including a bare YAML date) straight
+        # through from `ContactClassification.source` — coerce it the same
+        # way the MCP `recall` tool's mirror of this call does (issue
+        # athenaeum#1002).
+        print(
+            json.dumps(
+                handle_resolution.to_dict(),
+                indent=2,
+                sort_keys=True,
+                default=pii.json_date_default,
+            )
+        )
         return 0
 
     try:
@@ -558,7 +570,7 @@ def _read_entity_to_stdout(
     behaviour.
     """
     from athenaeum.config import load_config
-    from athenaeum.pii import read_entity, surface_class_for_page_class
+    from athenaeum.pii import json_date_default, read_entity, surface_class_for_page_class
 
     knowledge_root = path.expanduser().resolve()
     config = load_config(knowledge_root)
@@ -575,7 +587,12 @@ def _read_entity_to_stdout(
         print(f"Error: no {not_found_label} found for uid={uid!r}", file=sys.stderr)
         return 1
 
-    print(json.dumps(result.to_dict(), indent=2))
+    # Issue athenaeum#1110: `result.to_dict()["frontmatter"]` is the page's
+    # RAW parsed frontmatter, which can carry a `datetime.date`/`datetime`
+    # value straight from a bare YAML date — coerce it to ISO-8601 the same
+    # way the MCP `entity`-equivalent tool's mirror of this call does (issue
+    # athenaeum#1002), rather than letting `json.dumps` raise on it.
+    print(json.dumps(result.to_dict(), indent=2, default=json_date_default))
     return 0
 
 
