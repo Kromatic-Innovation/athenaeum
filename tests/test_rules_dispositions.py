@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,9 @@ from athenaeum.intake_audit import discover_unclaimed_shape_rule_candidates
 from athenaeum.rules import (
     TERMINAL_DISPOSITIONS,
     ShapeRule,
+    append_shape_rule_disposition_row,
     default_shape_rule_dispositions_path,
+    prune_shape_rule_dispositions,
     record_key_fingerprint,
     run_shape_rule_phase,
 )
@@ -1003,6 +1006,245 @@ class TestForwardOnlyAppend:
 
         assert len(second_rows) == 2
         assert second_rows[0] == first_rows[0]
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1229 part 1: dedupe-at-write. Re-running the shape-rule phase
+# over an UNCHANGED corpus must add no new rows for a record whose
+# disposition has not changed -- the fix for the 148x duplication (1,440,670
+# rows across only 9,737 distinct tuples) a real deployment hit.
+# ---------------------------------------------------------------------------
+
+
+class TestDedupeAtWrite:
+    def test_running_twice_over_unchanged_corpus_appends_nothing_new(
+        self, tmp_path: Path
+    ) -> None:
+        # A rule is loaded (so the phase actually runs) but never matches
+        # this source -- the record is "no-match" both times. Crucially, a
+        # no-match record's raw file is left in place (unlike `emit`, which
+        # retires it), so the exact same raw file is re-evaluated on the
+        # second run -- precisely what a real nightly librarian invocation
+        # does over an unchanged backlog.
+        _write_rule(tmp_path / "rules", "r1.yaml", _emit_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "unrelated-source",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            {"whatever": "shape"},
+        )
+
+        first_summary = _run(tmp_path)
+        first_rows = _disposition_rows(tmp_path)
+        assert len(first_rows) == 1
+        assert first_rows[0]["disposition"] == "no-match"
+        assert first_summary["files_evaluated"] == 1
+
+        second_summary = _run(tmp_path)
+        second_rows = _disposition_rows(tmp_path)
+
+        # The record was still EVALUATED the second time (the phase did
+        # real work -- `files_evaluated` is untouched by dedupe) -- but the
+        # per-record ledger gained nothing, because the outcome is
+        # byte-identical to the row already recorded for it.
+        assert second_summary["files_evaluated"] == 1
+        assert second_rows == first_rows
+
+    def test_running_three_times_still_leaves_exactly_one_row(
+        self, tmp_path: Path
+    ) -> None:
+        _write_rule(tmp_path / "rules", "r1.yaml", _emit_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "unrelated-source",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            {"whatever": "shape"},
+        )
+        for _ in range(3):
+            _run(tmp_path)
+        assert len(_disposition_rows(tmp_path)) == 1
+
+    def test_disposition_change_still_appends_a_new_row(self, tmp_path: Path) -> None:
+        # A record whose disposition genuinely CHANGES between runs (an
+        # operator adds a matching rule) is a NEW (source, key_fingerprint,
+        # source_ref, rule_id, disposition) tuple -- dedupe must not
+        # suppress this; only a byte-identical repeat is skipped.
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "delivery-monitor",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            _record(),
+        )
+        # An unrelated rule (matches a different source) keeps `rules`
+        # non-empty so the phase runs at all; this record falls through as
+        # "no-match" the first time.
+        _write_rule(tmp_path / "rules", "unrelated.yaml", _retain_rule())
+        _run(tmp_path)
+        first_rows = _disposition_rows(tmp_path)
+        assert len(first_rows) == 1
+        assert first_rows[0]["disposition"] == "no-match"
+
+        # Now a rule that actually matches "delivery-monitor" is loaded.
+        # The SAME raw file (never retired -- no-match never removes
+        # anything) now resolves to "emit" instead.
+        _write_rule(tmp_path / "rules", "matching.yaml", _emit_rule())
+        _run(tmp_path)
+        second_rows = _disposition_rows(tmp_path)
+
+        assert len(second_rows) == 2
+        assert {row["disposition"] for row in second_rows} == {"no-match", "emit"}
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1229 part 3: retention. Rows older than
+# `librarian.rule_proposals.window_days` are pruned -- bounding the ledger
+# independently of dedupe-at-write (see athenaeum.rules's module-level
+# "Dedupe-at-write + retention" note for why both are needed).
+# ---------------------------------------------------------------------------
+
+
+def _seed_disposition_row(
+    wiki_root: Path, *, source_ref: str, at: datetime, key_fingerprint: str = "fp"
+) -> None:
+    append_shape_rule_disposition_row(
+        wiki_root,
+        {
+            "schema_version": 1,
+            "at": at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source": "s",
+            "source_ref": source_ref,
+            "key_fingerprint": key_fingerprint,
+            "tier": None,
+            "rule_id": None,
+            "disposition": "no-match",
+        },
+    )
+
+
+class TestPruneShapeRuleDispositions:
+    _NOW = datetime(2026, 8, 31, 0, 0, 0, tzinfo=timezone.utc)
+
+    def test_row_outside_window_is_dropped_row_inside_is_kept(
+        self, tmp_path: Path
+    ) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        _seed_disposition_row(
+            wiki_root, source_ref="s/old.jsonl", at=self._NOW - timedelta(days=31)
+        )
+        _seed_disposition_row(
+            wiki_root, source_ref="s/fresh.jsonl", at=self._NOW - timedelta(days=1)
+        )
+
+        dropped = prune_shape_rule_dispositions(wiki_root, window_days=30, now=self._NOW)
+
+        assert dropped == 1
+        remaining = _disposition_rows(tmp_path)
+        assert len(remaining) == 1
+        assert remaining[0]["source_ref"] == "s/fresh.jsonl"
+
+    def test_row_exactly_at_the_window_boundary_is_kept(self, tmp_path: Path) -> None:
+        # Mirrors `_grouped_deferred_rows`'s own `at < cutoff` (strict) --
+        # a row exactly `window_days` old still satisfies `at == cutoff`,
+        # so the detector's own read still counts it. Pruning must never
+        # drop a row the detector would still see, so this boundary case is
+        # KEPT here too, not dropped.
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        _seed_disposition_row(
+            wiki_root, source_ref="s/boundary.jsonl", at=self._NOW - timedelta(days=30)
+        )
+        dropped = prune_shape_rule_dispositions(wiki_root, window_days=30, now=self._NOW)
+        assert dropped == 0
+        assert len(_disposition_rows(tmp_path)) == 1
+
+    def test_row_one_second_past_the_boundary_is_dropped(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        _seed_disposition_row(
+            wiki_root,
+            source_ref="s/just-outside.jsonl",
+            at=self._NOW - timedelta(days=30, seconds=1),
+        )
+        dropped = prune_shape_rule_dispositions(wiki_root, window_days=30, now=self._NOW)
+        assert dropped == 1
+        assert _disposition_rows(tmp_path) == []
+
+    def test_nothing_to_prune_leaves_the_file_untouched(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        _seed_disposition_row(
+            wiki_root, source_ref="s/fresh.jsonl", at=self._NOW - timedelta(days=1)
+        )
+        path = default_shape_rule_dispositions_path(wiki_root)
+        before = path.read_bytes()
+
+        dropped = prune_shape_rule_dispositions(wiki_root, window_days=30, now=self._NOW)
+
+        assert dropped == 0
+        assert path.read_bytes() == before
+
+    def test_missing_ledger_prunes_nothing(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        assert prune_shape_rule_dispositions(wiki_root, window_days=30, now=self._NOW) == 0
+
+    def test_row_with_unparseable_at_is_kept_not_dropped(self, tmp_path: Path) -> None:
+        # Fail-open: a malformed timestamp is a reason to leave a row
+        # alone, never a license to silently delete it.
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        path = default_shape_rule_dispositions_path(wiki_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "at": "not-a-timestamp",
+                    "source": "s",
+                    "source_ref": "s/weird.jsonl",
+                    "key_fingerprint": "fp",
+                    "tier": None,
+                    "rule_id": None,
+                    "disposition": "no-match",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        dropped = prune_shape_rule_dispositions(wiki_root, window_days=30, now=self._NOW)
+        assert dropped == 0
+        assert len(_disposition_rows(tmp_path)) == 1
+
+    def test_wired_into_run_shape_rule_phase_end_to_end(self, tmp_path: Path) -> None:
+        # An old row (pre-existing, outside the window) sits alongside a
+        # fresh candidate this run actually evaluates. After the phase
+        # runs, the old row is gone from the on-disk ledger and the fresh
+        # one (from THIS run) is present.
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        _seed_disposition_row(
+            wiki_root, source_ref="s/ancient.jsonl", at=self._NOW - timedelta(days=90)
+        )
+        _write_rule(tmp_path / "rules", "r1.yaml", _emit_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "unrelated-source",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            {"whatever": "shape"},
+        )
+
+        summary = run_shape_rule_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=tmp_path / "wiki",
+            knowledge_root=tmp_path,
+            config={"librarian": {"rule_proposals": {"window_days": 30}}},
+        )
+
+        assert summary["disposition_rows_pruned"] == 1
+        remaining_refs = {row["source_ref"] for row in _disposition_rows(tmp_path)}
+        assert "s/ancient.jsonl" not in remaining_refs
+        assert "unrelated-source/20260806T140211Z-9f3ac1d2.jsonl" in remaining_refs
 
 
 # ---------------------------------------------------------------------------

@@ -176,6 +176,96 @@ class TestDetector:
         assert summary["proposed"] == 0
 
 
+def _seed_reevaluated_record(
+    tmp_path: Path,
+    *,
+    source: str,
+    times: int,
+    record: dict | None = None,
+    at: datetime | None = None,
+) -> str:
+    """Append *times* deferred disposition rows for the SAME record (one
+    fixed ``source_ref``) -- reproducing the pre-athenaeum#1229 duplication a
+    real deployment hit (the same record re-evaluated on every nightly run
+    of an unchanged corpus), independent of the dedupe-at-write fix in
+    :mod:`athenaeum.rules`. Lets a detector-level test assert the counting
+    UNIT directly, without depending on dedupe-at-write ever running.
+
+    Returns the record's ``key_fingerprint``.
+    """
+    wiki_root = tmp_path / "wiki"
+    raw_root = tmp_path / "raw"
+    rec = record if record is not None else {"widget_id": "w", "status": "new"}
+    fp = record_key_fingerprint(rec)
+    filename = "20260806T140200Z-000000.jsonl"
+    source_ref = _write_raw(raw_root, source, filename, rec)
+    at_str = (at or _NOW).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for _ in range(times):
+        append_shape_rule_disposition_row(
+            wiki_root,
+            {
+                "schema_version": 1,
+                "at": at_str,
+                "source": source,
+                "source_ref": source_ref,
+                "key_fingerprint": fp,
+                "tier": None,
+                "rule_id": None,
+                "disposition": "no-match",
+            },
+        )
+    return fp
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1229 part 2: the detector's counting unit is DISTINCT RECORDS
+# (by source_ref), never disposition ROWS -- pins the ~9.5x-consequential
+# reading against resolve_rule_proposals_threshold's own "record count"
+# docstring wording. On the deployment that motivated this issue, 57 of 66
+# shapes crossed threshold=50 by row count vs. only 6 by distinct record.
+# ---------------------------------------------------------------------------
+
+
+class TestDetectorCountsDistinctRecordsNotRows:
+    def test_reevaluating_one_record_is_counted_once(self, tmp_path: Path) -> None:
+        fp = _seed_reevaluated_record(tmp_path, source="s", times=50)
+        freq = detect_shape_frequency(tmp_path / "wiki", config=_SMALL_CONFIG, now=_NOW)
+        assert freq[("s", fp)] == 1
+
+    def test_reevaluating_one_record_never_crosses_threshold(self, tmp_path: Path) -> None:
+        # _SMALL_CONFIG's threshold is 3 -- 50 rows for ONE record must not
+        # cross it, even though 50 rows alone would trivially cross a row
+        # count. This is the regression test the AC asks for.
+        _seed_reevaluated_record(tmp_path, source="s", times=50)
+        summary = run_rule_proposal_detection(
+            wiki_root=tmp_path / "wiki",
+            raw_root=tmp_path / "raw",
+            config=_SMALL_CONFIG,
+            client=_fake_client(),
+            now=_NOW,
+        )
+        assert summary["threshold_crossed"] == 0
+        assert summary["proposed"] == 0
+
+    def test_the_same_number_of_distinct_records_still_crosses(
+        self, tmp_path: Path
+    ) -> None:
+        # Positive control: 3 DISTINCT records of the same shape (not one
+        # record re-evaluated 3 times) must still cross threshold=3 --
+        # proves the fix counts records, not that it stopped counting
+        # anything at all.
+        _seed_deferred_rows(tmp_path, source="s", count=3, tier=None)
+        summary = run_rule_proposal_detection(
+            wiki_root=tmp_path / "wiki",
+            raw_root=tmp_path / "raw",
+            config=_SMALL_CONFIG,
+            client=_fake_client(),
+            now=_NOW,
+        )
+        assert summary["threshold_crossed"] == 1
+        assert summary["proposed"] == 1
+
+
 # ---------------------------------------------------------------------------
 # AC3: the draft -- YAML valid against the rule schema, plus projected impact
 # ---------------------------------------------------------------------------

@@ -173,25 +173,30 @@ from this document rather than re-deriving them.
 
 ## Reporting the divergence
 
-`athenaeum bounce-divergence --path <store-root>` reports the difference
-between the two surfaces in both directions, over the `uid` join key defined
-above (athenaeum#853). It is read-only, takes the store root as a parameter,
-and its output is safe to paste into a public issue — aggregate counts and
-opaque handles only.
+`athenaeum surface-divergence --field bounced --path <store-root>` (issue
+athenaeum#963, see
+[configuration.md](configuration.md#surface-divergence-guard-athenaeum963))
+reports the difference between the two surfaces in both directions, over the
+`uid` join key defined above (athenaeum#853). It is read-only, takes the
+store root as a parameter, and its output is safe to paste into a public
+issue — aggregate counts and opaque handles only.
 
 Read its output with the asymmetry above in mind: **an entry on the wiki
 surface with no pii mark is the expected state** for every evidence class the
 Tier-0 gate does not admit, so a non-zero divergence is not by itself a
 defect. What the report defends is a *moving* number.
 
-**`athenaeum bounce-divergence` never fails on this — that is deliberate for
-this command, and it is exactly the property athenaeum#963 generalizes past.**
-`athenaeum surface-divergence --field bounced` (issue athenaeum#963, see
-[configuration.md](configuration.md#surface-divergence-guard-athenaeum963))
-reports the identical two surfaces and the identical numbers, but exits
-non-zero when the asymmetry above is violated in the direction it does NOT
-excuse: a pii mark with no wiki entry (`marked_not_on_wiki`). A wiki-only
-entry (`on_wiki_not_marked`) stays tolerated, unchanged, for the reason
-stated above. Use `bounce-divergence` for interactive inspection;
-`surface-divergence --field bounced` is the entry point an unattended
-caller should use.
+This command exits non-zero only when the asymmetry above is violated in the
+direction it does NOT excuse: a pii mark with no wiki entry
+(`marked_not_on_wiki`). A wiki-only entry (`on_wiki_not_marked`) stays
+tolerated. Pass `--report-only` for interactive inspection (report the
+numbers, never fail on divergence) — the default, failing mode is what an
+unattended caller should use.
+
+Historical note: this superseded the original `athenaeum bounce-divergence`
+command (athenaeum#853), which reported the identical two surfaces and
+numbers but never failed on divergence at all — that command was removed
+(issue athenaeum#1111) once `surface-divergence --field bounced` had no
+remaining reason to coexist with it; the underlying
+`athenaeum.bounce_divergence` library module is unchanged and still backs
+this command's `bounced` field.
