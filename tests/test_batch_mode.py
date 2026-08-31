@@ -61,7 +61,11 @@ from athenaeum.librarian import (
 )
 from athenaeum.models import EntityIndex, TokenUsage
 from athenaeum.schemas import KNOWN_TYPES
-from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL, tier1_programmatic_match
+from athenaeum.tiers import (
+    DEFAULT_CLASSIFY_MODEL,
+    DEFAULT_PAGE_SIZE_THRESHOLD_CHARS,
+    tier1_programmatic_match,
+)
 
 # Issue athenaeum#964: ``librarian.FALLBACK_TYPES`` was consolidated into the
 # one ``schemas.KNOWN_TYPES`` definition (drift fix -- see librarian.py's
@@ -3513,3 +3517,185 @@ class TestBatchSpendReservation:
         assert spend.reservation_ledger_path(
             root / "wiki", cache_dir=cache_dir
         ) == cache_dir / spend.RESERVATION_LEDGER_FILENAME
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1182 — page-size invariant on the BATCH transport
+# ---------------------------------------------------------------------------
+#
+# check_page_size_gate (athenaeum.tiers) is applied at BOTH of this
+# transport's merge-dispatch sites: the batch-submission assembly loop
+# (``batch_write=True``, an over-threshold page never becomes a batch
+# request) and the finalize-time ``sync_merges`` fallback (``batch_write=
+# False``, or a same-page multi-merge group — the same synchronous
+# ``tier3_merge`` call ``tier3_derive_actions`` makes on the process_one
+# transport). Both sites reuse check_page_size_gate UNCHANGED.
+
+
+def _seed_oversized_acme_root(
+    tmp_path: Path, name: str, raw_contents: list[str]
+) -> Path:
+    """Like ``_seed_root(..., with_acme=True)`` but Acme Corp's existing body
+    is over the page-size threshold, so a merge into it must be suppressed."""
+    root = _seed_root(tmp_path, name, raw_contents, with_acme=True)
+    oversized_body = "Original body line. " * 600
+    assert len(oversized_body) > DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
+    (root / "wiki" / "acme1234-acme-corp.md").write_text(
+        textwrap.dedent(
+            f"""\
+            ---
+            uid: acme1234
+            type: company
+            name: Acme Corp
+            access: internal
+            created: '2024-01-01'
+            updated: '2024-01-01'
+            ---
+
+            # Acme Corp
+
+            {oversized_body}
+        """
+        ),
+        encoding="utf-8",
+    )
+    return root
+
+
+class TestPageSizeGateBatchTransport:
+    def test_oversized_page_produces_no_batch_merge_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """batch_write=True: the gate fires at ASSEMBLY — an over-threshold
+        page never becomes a batch request, so the tier-3 write batch's
+        only candidate item is suppressed before ``t3_requests`` ever gets
+        an entry for it, and no write batch is submitted at all."""
+        _patch_uids(monkeypatch)
+        root = _seed_oversized_acme_root(
+            tmp_path, "p-batch-oversize", ["Acme Corp shipped a thing.\n"]
+        )
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        before = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+
+        result = process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=True,
+            batch_write=True,
+        )
+
+        assert result.updated == 0
+        assert result.oversize_suppressed == 1
+        assert result.escalated == 1
+        # Only the tier-2 classify batch was submitted — the tier-3 write
+        # batch's only candidate item was suppressed before assembly, so
+        # t3_requests stayed empty and that batch was never submitted.
+        assert len(client.batches.submitted) == 1
+        after = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+        assert after == before
+
+    def test_oversized_page_never_reaches_sync_merges_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """batch_write=False routes the merge to the finalize-time
+        sync_merges fallback. ``allow_sync=False`` means ANY
+        ``messages.create`` call (the merge this gate must suppress) raises
+        immediately — the strongest possible proof no model call was made."""
+        _patch_uids(monkeypatch)
+        root = _seed_oversized_acme_root(
+            tmp_path, "p-sync-oversize", ["Acme Corp shipped a thing.\n"]
+        )
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        before = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+
+        result = process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=True,
+            batch_write=False,
+        )
+
+        assert result.updated == 0
+        assert result.oversize_suppressed == 1
+        assert result.escalated == 1
+        assert client.sync_calls == []
+        after = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+        assert after == before
+
+    def test_under_threshold_page_still_merges_on_both_sub_transports(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: the small (pre-existing fixture) Acme page must
+        merge exactly as before on BOTH the batched-write assembly path and
+        the unbatched-write sync_merges fallback."""
+        _patch_uids(monkeypatch)
+
+        root_batched = _seed_root(
+            tmp_path, "p-batched-ok", ["Acme Corp shipped a thing.\n"], with_acme=True
+        )
+        client_batched = _FakeClient(_scripted_responder, allow_sync=False)
+        result_batched = process_batch_run(
+            discover_raw_files(root_batched / "raw"),
+            EntityIndex(root_batched / "wiki"),
+            root_batched / "wiki",
+            client_batched,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=True,
+            batch_write=True,
+        )
+        assert result_batched.updated == 1
+        assert result_batched.oversize_suppressed == 0
+        body_batched = (root_batched / "wiki" / "acme1234-acme-corp.md").read_text(
+            encoding="utf-8"
+        )
+        assert "Merged note from" in body_batched
+
+        root_sync = _seed_root(
+            tmp_path, "p-sync-ok", ["Acme Corp shipped a thing.\n"], with_acme=True
+        )
+        client_sync = _FakeClient(_scripted_responder, allow_sync=True)
+        result_sync = process_batch_run(
+            discover_raw_files(root_sync / "raw"),
+            EntityIndex(root_sync / "wiki"),
+            root_sync / "wiki",
+            client_sync,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=True,
+            batch_write=False,
+        )
+        assert result_sync.updated == 1
+        assert result_sync.oversize_suppressed == 0
+        body_sync = (root_sync / "wiki" / "acme1234-acme-corp.md").read_text(
+            encoding="utf-8"
+        )
+        assert "Merged note from" in body_sync
