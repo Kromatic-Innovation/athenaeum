@@ -487,9 +487,16 @@ registered field diverged beyond its declared allowance. An unregistered
 ## Models
 
 All model values are free-form model-id strings passed to the Anthropic SDK.
-All four live under the `models:` yaml block (athenaeum#232, athenaeum#513) and share one
-resolver helper (`config.resolve_model`). The resolver model additionally
-accepts the pre-athenaeum#232 `resolve.model` key for backward compatibility.
+The table below is the **full set** of model knobs, one row per entry in
+`prompt_registry.KNOBS` (derived from `_META_ROWS`, athenaeum#781) — not a fixed
+count restated here, so this table cannot go stale the next time a knob is
+added. They all live under the `models:` yaml block (athenaeum#232, athenaeum#513)
+and share one resolver helper (`config.resolve_model`). The resolver model
+additionally accepts the pre-athenaeum#232 `resolve.model` key for backward
+compatibility. See [routing.md](routing.md) for provider + model + batch
+mode assembled per function in one table, the per-knob-yaml-vs-global-env
+precedence rule, and the `athenaeum explain-routing` preview command
+(athenaeum#1176).
 
 | Knob | Env var | YAML key | Default | Used by |
 |---|---|---|---|---|
@@ -668,6 +675,10 @@ against the catalog directly.
 > belongs in its own issue.
 
 ## LLM provider selection (athenaeum#330)
+
+> For provider + model + batch mode assembled **per function** in a single
+> table, plus the subscription-only (`claude-cli`) install recipe and its
+> preconditions, see [routing.md](routing.md) (athenaeum#1176).
 
 Athenaeum's librarian pipeline talks to Claude through a single **provider
 seam** (`athenaeum.provider.build_llm_client`). Two backends ship:
