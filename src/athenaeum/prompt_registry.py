@@ -39,7 +39,7 @@ load-bearing adjacency between a prompt and its parser (e.g.
 EVERY L4 module that owns a registered prompt (:mod:`athenaeum.tiers`,
 :mod:`athenaeum.contradictions`, :mod:`athenaeum.resolutions`,
 :mod:`athenaeum.claim_kind`, :mod:`athenaeum.query_topics`,
-:mod:`athenaeum.reasoning_tiers`) at IMPORT TIME (module-scope
+:mod:`athenaeum.reasoning_tiers`, :mod:`athenaeum.rule_proposals`) at IMPORT TIME (module-scope
 :data:`PROMPTS` dict comprehension) to resolve the live constants. This is the
 one deliberate exception to "L3 does not import L4" in this file's
 assignment: the registry's whole point is indexing prompts that live in L4
@@ -108,6 +108,14 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
     ("query_topics.user_template", "_USER_TEMPLATE", "topic", 256, False),
     ("reasoning_tiers.t1_system_prompt", "T1_SYSTEM_PROMPT", "reasoning_t1", 256, False),
     ("reasoning_tiers.t2_system_prompt", "T2_SYSTEM_PROMPT", "reasoning_t2", 4096, False),
+    # athenaeum#1174: the seventh routed knob — was missing from this list (and,
+    # by extension, from ``KNOBS`` below and every list derived from it). The
+    # ``rule_proposals`` phase itself defaults OFF
+    # (``config.resolve_rule_proposals_enabled``); adding this row does not
+    # change that. No cache_control breakpoint is set at the call site
+    # (`rule_proposals.build_rule_proposal_request_params`), so ``cacheable``
+    # is ``False`` like every row above except ``resolutions.resolve_system``.
+    ("rule_proposals.system_prompt", "_RULE_PROPOSAL_SYSTEM_PROMPT", "rule_proposals", 4096, False),
 ]
 
 PROMPT_META: dict[str, PromptMeta] = {
@@ -135,7 +143,7 @@ def _resolve(meta: PromptMeta) -> str:
 
 
 # Stable name -> the live prompt constant, imported from its home module. This is
-# the registry: 16 prompts, each text still owned (and parsed) by its module.
+# the registry: 17 prompts, each text still owned (and parsed) by its module.
 PROMPTS: dict[str, str] = {name: _resolve(meta) for name, meta in PROMPT_META.items()}
 
 
