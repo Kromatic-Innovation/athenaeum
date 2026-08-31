@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Collect-only adoption path: a run can apply a PRIOR run's batch, before
+  it claims anything of its own (athenaeum#1145).** `athenaeum.batch`
+  gains `collect_pending_batches`, run at the start of the entity phase —
+  before `discover_raw_files` and before any new submission. It loads each
+  outstanding athenaeum#1143 handle, retrieves its batch, applies the results
+  through the *existing* finalize path (by re-entering `process_batch_run`
+  itself, so the per-file "all calls succeeded before anything is written"
+  guarantee and the raw-unlink-on-success are the same code, not a parallel
+  write path), and retires the handle — releasing its lease in the same atomic
+  store write. The ordering is load-bearing for three independent reasons:
+  collected cost must be in `usage` before the next spend-ceiling check;
+  collected creations must be in the corpus before the new cohort's tier-1
+  pass reads it; and leases must be released before the claim set is computed.
+  Collecting a `classify` handle and submitting the resulting tier-3 batch
+  within the same run is supported. A run whose only work is a collect is a
+  valid, successful run: its collected refs count toward
+  `files_processed_count` and render as `collected=N` in the run summary, so
+  it neither reads as idle nor trips the athenaeum#899 zero-yield alarm.
+  `--dry-run` collects nothing and retires nothing. A handle now also records
+  each request's serving model (so the athenaeum#247 per-model attribution
+  survives the run boundary) and, for a tier-3 batch, the per-request
+  application context a later run needs in order to finalize it.
+
 - **The batch poll is bounded by the run's wall-clock deadline and spills to
   a handle instead of cancelling (athenaeum#1144).** `execute_batch` polled
   against a 24h module constant inside a bounded nightly window, and on

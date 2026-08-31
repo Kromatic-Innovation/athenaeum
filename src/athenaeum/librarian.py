@@ -3348,6 +3348,11 @@ class RunContext:
     # therefore NOT drained this run (see ``files_processed_count``) and must
     # not read as wasted spend.
     in_flight_refs: list[str] = field(default_factory=list)
+    # Issue athenaeum#1145: refs a PRIOR run submitted and this run collected and
+    # consumed. They were never in this run's claim (their lease excluded
+    # them), but they were drained by it, so ``files_processed_count`` counts
+    # them — otherwise a collect-only run reads as having done nothing.
+    collected_refs: list[str] = field(default_factory=list)
     beyond_window: int = 0
     processed_count: int = 0
     deadline_tripped: bool = False
@@ -3464,6 +3469,8 @@ class RunContext:
             # machine-detectable alongside the other run-state lists rather
             # than requiring a consumer to parse the run-summary line.
             self.out_run_stats["in_flight_refs"] = list(self.in_flight_refs)
+            # Issue athenaeum#1145: refs collected from a prior run's batch.
+            self.out_run_stats["collected_refs"] = list(self.collected_refs)
             # Issue athenaeum#663: stuck files (crossed the consecutive-failure threshold
             # or skipped because they already had) as machine-detectable state,
             # so a consumer can distinguish a permanent no-progress loop from a
@@ -4689,6 +4696,94 @@ def _prioritize_caller_scoped_raw(
     return callers + backlog, len(callers)
 
 
+def _resolve_schema_lists(wiki_root: Path) -> tuple[list[str], list[str], list[str]]:
+    """The corpus's ``(types, tags, access)`` vocabularies, with fallbacks.
+
+    Extracted (issue athenaeum#1145) so the pending-batch collect phase and the
+    entity phase's claim path resolve them from ONE place — a collect applies
+    tier-2 classifications and must validate them against exactly the same
+    vocabularies the submitting run used.
+    """
+    schema_path = wiki_root / "_schema"
+    valid_types = load_schema_list(schema_path, "types.md") or sorted(KNOWN_TYPES)
+    valid_tags = load_schema_list(schema_path, "tags.md") or FALLBACK_TAGS
+    valid_access = load_schema_list(schema_path, "access-levels.md") or FALLBACK_ACCESS
+    return valid_types, valid_tags, valid_access
+
+
+def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
+    """Collect prior runs' outstanding batches, BEFORE this run claims anything.
+
+    Issue athenaeum#1145. Ordering is load-bearing, for three independent reasons
+    (any one of which alone forces it) — see
+    :func:`athenaeum.batch.collect_pending_batches`'s module comment: ceiling
+    correctness, index freshness, and lease release. Running here, ahead of
+    ``discover_raw_files`` / :func:`_apply_pending_batch_leases`, satisfies all
+    three: a retired handle's refs are claimable on THIS pass, and a collected
+    tier-3 create is on disk before the fresh ``EntityIndex`` below reads the
+    wiki for the new cohort's ``tier1_programmatic_match``.
+
+    A run whose ONLY work is this is a valid, successful run — its collected
+    creations count toward ``files_processed_count``, so it neither looks idle
+    nor trips the athenaeum#899 zero-yield alarm.
+
+    Skipped entirely on ``--dry-run`` (AC8: a dry run collects nothing and
+    retires nothing), when batch mode is off, and when there is no batch
+    client to talk to.
+    """
+    if ctx.dry_run or not ctx.batch_mode or ctx.classify_client is None:
+        return
+    cache_dir = batch_state.resolve_cache_dir()
+    if not batch_state.load(cache_dir):
+        return
+
+    from athenaeum.batch import collect_pending_batches
+
+    valid_types, valid_tags, valid_access = _resolve_schema_lists(ctx.wiki_root)
+    index = EntityIndex(ctx.wiki_root)
+    assert ctx.max_api_calls is not None
+    outcome = collect_pending_batches(
+        index,
+        ctx.wiki_root,
+        ctx.classify_client,
+        valid_types,
+        valid_tags,
+        valid_access,
+        usage=ctx.usage,
+        config=ctx.config,
+        max_api_calls=ctx.max_api_calls,
+        provider=ctx.provider,
+        write_client=ctx.write_client,
+        # Issue athenaeum#1144: a collect that pipelines into a new tier-3 batch
+        # is bounded by the same wall-clock budget the submit path is.
+        deadline=(
+            ctx.entity_deadline
+            if ctx.entity_deadline is not None
+            else ctx.run_deadline
+        ),
+        cache_dir=cache_dir,
+    )
+
+    ctx.total_created += outcome.created
+    ctx.total_updated += outcome.updated
+    ctx.total_escalated += outcome.escalated
+    ctx.total_skipped += outcome.skipped
+    ctx.total_degraded += outcome.degraded
+    ctx.total_truncated += outcome.truncated
+    ctx.collected_refs = list(outcome.collected_refs)
+    ctx.failed_files.extend(outcome.failed_refs)
+    ctx.in_flight_refs.extend(outcome.in_flight_refs)
+    if outcome.collected_refs or outcome.in_flight_refs or outcome.failed_refs:
+        log.info(
+            "Collected %d pending batch handle(s): %d file(s) applied, %d still "
+            "in flight, %d failed (issue athenaeum#1145)",
+            len(outcome.retired_handles),
+            len(outcome.collected_refs),
+            len(outcome.in_flight_refs),
+            len(outcome.failed_refs),
+        )
+
+
 def _run_entity_tier_phase(ctx: RunContext) -> None:
     """The ENTITY phase (C1 raw discovery, tier1-4 routing, INCLUDING the
     Batch API fan-out branch) — issue athenaeum#461/#337/#396/#378/#236 seam.
@@ -4721,6 +4816,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
     # summary without a by-hand token-ratio calculation next time.
     _entity_phase_output_before = ctx.usage.output_tokens
     if not ctx.cluster_only:
+        # Issue athenaeum#1145: collect BEFORE claiming. A prior run's batch is
+        # already paid for; applying it first books its cost into ``usage``
+        # (so the ceiling check below is not blind to it), puts its creations
+        # on disk (so this run's tier-1 pass can match them), and releases its
+        # leases (so the claim below is computed against a current exclusion).
+        _run_pending_batch_collect_phase(ctx)
         ctx.raw_files = discover_raw_files(ctx.raw_root, ctx.config)
         # Issue athenaeum#1143: a raw file held by an in-flight batch's lease is
         # NOT claimable — re-claiming it would re-submit work already paid for.
@@ -4771,13 +4872,8 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             # the in-window remainder.
             ctx.beyond_window = total_intake - len(ctx.raw_files)
 
-            schema_path = ctx.wiki_root / "_schema"
-            valid_types = load_schema_list(schema_path, "types.md") or sorted(
-                KNOWN_TYPES
-            )
-            valid_tags = load_schema_list(schema_path, "tags.md") or FALLBACK_TAGS
-            valid_access = (
-                load_schema_list(schema_path, "access-levels.md") or FALLBACK_ACCESS
+            valid_types, valid_tags, valid_access = _resolve_schema_lists(
+                ctx.wiki_root
             )
 
             index = EntityIndex(ctx.wiki_root)
@@ -5552,6 +5648,13 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         if ctx.in_flight_refs
                         else {}
                     ),
+                    # athenaeum#1145: files applied from a PRIOR run's batch. Rendered
+                    # only when non-zero, matching the convention above.
+                    **(
+                        {"collected": len(ctx.collected_refs)}
+                        if ctx.collected_refs
+                        else {}
+                    ),
                     # athenaeum#472: only render when non-zero so a clean run's summary
                     # line is unchanged, but an operator watching a drain sees
                     # "degraded=N" (files whose classification JSON dropped
@@ -6213,7 +6316,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         - len(ctx.deferred_refs)
         - len(ctx.failed_files)
         - len(ctx.in_flight_refs),
-    )
+    ) + len(ctx.collected_refs)
     if not ctx.dry_run:
         # Issue athenaeum#568 (H1): do NOT discard record_spend's return. When this run
         # actually spent budget and the ledger is enabled, a False return means
