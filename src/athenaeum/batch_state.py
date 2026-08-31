@@ -142,6 +142,13 @@ class RefRecord:
     ref: str
     path: str
     content_hash: str
+    #: Issue athenaeum#1145: the serving model id this request was submitted
+    #: with, read from its ``params["model"]`` at claim time. A later run's
+    #: collect books the batch's token usage against THIS model, preserving the
+    #: athenaeum#247 per-model attribution ``execute_batch`` performs within a run via
+    #: ``model_by_cid`` — which is otherwise unrecoverable once the submitting
+    #: run has exited. ``None`` on a handle recorded before athenaeum#1145.
+    model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -158,6 +165,16 @@ class PendingBatch:
     leased_until: str | None = None
     #: ``custom_id -> RefRecord``.
     refs: dict[str, RefRecord] = field(default_factory=dict)
+    #: Issue athenaeum#1145: an OPAQUE, JSON-serializable document carrying whatever
+    #: the collecting run needs to apply this batch's results through the
+    #: normal finalize path. This module round-trips it and never interprets
+    #: it: the schema belongs to :mod:`athenaeum.batch`, which is the only
+    #: module that knows what a tier-3 merge needs in order to be applied.
+    #: Putting it here rather than inventing a second sidecar keeps ONE
+    #: atomically-written document per batch, so a handle and the work it
+    #: describes can never disagree. ``None`` on a handle recorded before
+    #: athenaeum#1145, and on any handle whose knob needs no extra context.
+    work: dict[str, Any] | None = None
 
     def lease_active(self, now: datetime | None = None) -> bool:
         """Whether this handle's lease is still holding its refs."""
@@ -211,10 +228,12 @@ def _ref_from_json(raw: Any) -> RefRecord | None:
         return None
     path = raw.get("path")
     chash = raw.get("content_hash")
+    model = raw.get("model")
     return RefRecord(
         ref=ref,
         path=path if isinstance(path, str) else "",
         content_hash=chash if isinstance(chash, str) else "",
+        model=model if isinstance(model, str) else None,
     )
 
 
@@ -232,6 +251,7 @@ def _handle_from_json(batch_id: str, raw: Any) -> PendingBatch | None:
     leased_until = raw.get("leased_until")
     submitted_at = raw.get("submitted_at")
     phase = raw.get("phase")
+    work = raw.get("work")
     return PendingBatch(
         batch_id=batch_id,
         knob=knob if isinstance(knob, str) else "",
@@ -239,11 +259,15 @@ def _handle_from_json(batch_id: str, raw: Any) -> PendingBatch | None:
         phase=phase if isinstance(phase, str) else DEFAULT_PHASE,
         leased_until=leased_until if isinstance(leased_until, str) else None,
         refs=refs,
+        # Fail-open on shape, like every other field here: a ``work`` document
+        # that is not an object reads as absent, which degrades the collect to
+        # "retire and re-claim" rather than raising.
+        work=work if isinstance(work, dict) else None,
     )
 
 
 def _handle_to_json(handle: PendingBatch) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "knob": handle.knob,
         "submitted_at": handle.submitted_at,
         "phase": handle.phase,
@@ -253,10 +277,14 @@ def _handle_to_json(handle: PendingBatch) -> dict[str, Any]:
                 "ref": record.ref,
                 "path": record.path,
                 "content_hash": record.content_hash,
+                "model": record.model,
             }
             for custom_id, record in sorted(handle.refs.items())
         },
     }
+    if handle.work is not None:
+        out["work"] = handle.work
+    return out
 
 
 def load(cache_dir: Path) -> dict[str, PendingBatch]:
@@ -350,6 +378,7 @@ def record_handle(
     refs: Mapping[str, Any],
     config: dict[str, Any] | None = None,
     phase: str = DEFAULT_PHASE,
+    work: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> PendingBatch | None:
     """Record a submitted batch and take a lease over its raw files.
@@ -366,6 +395,10 @@ def record_handle(
     (the operator set the knob ``<= 0``) records the handle with NO lease —
     the explicit opt-out, not a silent default. Returns the stored handle, or
     ``None`` when *batch_id* is empty (nothing to key on).
+
+    *work* (issue athenaeum#1145) is an opaque JSON document stored verbatim on the
+    handle — see :attr:`PendingBatch.work`. This module neither reads nor
+    validates it.
 
     Idempotent: re-recording the same *batch_id* replaces its handle and
     re-takes the lease from *now*.
@@ -404,6 +437,7 @@ def record_handle(
         phase=phase,
         leased_until=leased_until,
         refs=records,
+        work=work,
     )
     handles = load(cache_dir)
     handles[batch_id] = handle

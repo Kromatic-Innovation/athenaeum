@@ -298,16 +298,50 @@ def execute_batch(
 
     log.info("Batch %s ended after %.0fs (%s)", batch.id, waited, description)
 
-    results: dict[str, Any] = {r.custom_id: None for r in requests}
     # Map each request's custom_id to its serving model-id so batch token
     # usage attributes per model (issue athenaeum#247). The model lives in each
     # request's params (``messages.create`` payload).
     model_by_cid: dict[str, str | None] = {
         r.custom_id: r.params.get("model") for r in requests
     }
+    results = collect_batch_results(
+        client,
+        batch.id,
+        model_by_cid,
+        description=description,
+        usage=usage,
+        knob=knob,
+    )
+    return BatchOutcome(batch_id=batch.id, results=results)
+
+
+def collect_batch_results(
+    client: anthropic.Anthropic,
+    batch_id: str,
+    model_by_cid: dict[str, str | None],
+    *,
+    description: str,
+    usage: TokenUsage | None = None,
+    knob: str | None = None,
+) -> dict[str, Any]:
+    """Read an ENDED batch's results and book their token usage.
+
+    Split out of :func:`execute_batch` (issue athenaeum#1145) so the
+    across-run collect path books usage through the SAME code as the
+    within-run one — including the athenaeum#247 per-model attribution, which is
+    the reason *model_by_cid* is a parameter rather than being re-derived from
+    the request payloads: a collecting run no longer has those payloads, only
+    the models the athenaeum#1143 handle recorded at claim time.
+
+    Returns ``{custom_id: Message}``, with ``None`` for a per-request
+    ``errored`` / ``canceled`` / ``expired`` result — the caller's existing
+    per-file failure path. Raises :class:`BatchExecutionError` if the results
+    cannot be read at all.
+    """
+    results: dict[str, Any] = {cid: None for cid in model_by_cid}
     try:
         entries = with_retry(
-            lambda: client.messages.batches.results(batch.id),
+            lambda: client.messages.batches.results(batch_id),
             description=f"batch results ({description})",
         )
         for entry in entries:
@@ -337,7 +371,7 @@ def execute_batch(
         raise BatchExecutionError(
             f"batch results failed ({description}): {exc}"
         ) from exc
-    return BatchOutcome(batch_id=batch.id, results=results)
+    return results
 
 
 def _refuse_oversized_batch(
@@ -451,6 +485,160 @@ class BatchRunResult:
     in_flight_batch_ids: list[str] = field(default_factory=list)
 
 
+@dataclass
+class _ResumedWork:
+    """A previously-submitted batch's results, re-entering :func:`process_batch_run`.
+
+    Issue athenaeum#1145. The collect path does NOT get its own write path: it
+    hands the pipeline a set of already-built :class:`_FileState` objects plus
+    the results the batch produced, and the SAME body runs from there —
+    classification parsing, tier-3 assembly, the spend ceiling, and finalize,
+    with its per-file "all calls succeeded before anything is written"
+    guarantee and its raw-unlink-on-success. AC2 is structural, not a
+    convention someone has to remember.
+
+    Two entry points, one per knob:
+
+    - a ``classify`` handle supplies *t2_results* and leaves *t3_results*
+      ``None``, so the run parses the classifications, assembles a NEW tier-3
+      batch, and submits it — the pipelining case (AC7), still subject to the
+      spend ceiling and to athenaeum#1144's deadline;
+    - a ``write`` handle supplies *t3_results* over states whose
+      ``create_ids`` / ``merge_ids`` were restored from the handle, so the run
+      goes straight to finalize.
+    """
+
+    states: list["_FileState"]
+    t2_results: dict[str, Any] = field(default_factory=dict)
+    #: ``None`` means "assemble and submit tier-3 normally".
+    t3_results: dict[str, Any] | None = None
+
+
+#: Version of the opaque ``work`` document :func:`_spill_to_handle` writes onto
+#: an athenaeum#1143 handle. Bumped only for a shape change an older reader could
+#: misread; an unknown version is ignored (the handle then retires uncollected
+#: and its refs are re-claimed from scratch, which is safe — never silent).
+WORK_DOC_VERSION = 1
+
+
+def _action_to_json(action: EntityAction) -> dict[str, Any]:
+    return {
+        "kind": action.kind,
+        "name": action.name,
+        "entity_type": action.entity_type,
+        "tags": list(action.tags),
+        "access": action.access,
+        "existing_uid": action.existing_uid,
+        "observations": action.observations,
+    }
+
+
+def _action_from_json(raw: Any) -> EntityAction | None:
+    if not isinstance(raw, dict):
+        return None
+    kind = raw.get("kind")
+    name = raw.get("name")
+    if kind not in ("create", "update") or not isinstance(name, str) or not name:
+        return None
+    tags = raw.get("tags")
+    uid = raw.get("existing_uid")
+    return EntityAction(
+        kind=kind,
+        name=name,
+        entity_type=str(raw.get("entity_type") or ""),
+        tags=[str(t) for t in tags] if isinstance(tags, list) else [],
+        access=str(raw.get("access") or ""),
+        existing_uid=uid if isinstance(uid, str) else None,
+        observations=str(raw.get("observations") or ""),
+    )
+
+
+def _escalation_to_json(item: EscalationItem) -> dict[str, Any]:
+    return {
+        "raw_ref": item.raw_ref,
+        "entity_name": item.entity_name,
+        "conflict_type": item.conflict_type,
+        "description": item.description,
+    }
+
+
+def _escalation_from_json(raw: Any) -> EscalationItem | None:
+    if not isinstance(raw, dict):
+        return None
+    ref = raw.get("raw_ref")
+    if not isinstance(ref, str) or not ref:
+        return None
+    return EscalationItem(
+        raw_ref=ref,
+        entity_name=str(raw.get("entity_name") or ""),
+        conflict_type=str(raw.get("conflict_type") or ""),
+        description=str(raw.get("description") or ""),
+    )
+
+
+def _tier3_work_document(states: list["_FileState"]) -> dict[str, Any]:
+    """Everything a later run needs to finalize a spilled tier-3 batch.
+
+    A ``classify`` handle needs none of this — its refs are enough, because
+    the collecting run re-runs the (programmatic, free) tier-0/1 pass and
+    re-parses the classifications from the batch response. A ``write`` handle
+    is the opposite: the parse already happened in the submitting run, and the
+    per-request application context (which entity to create, which page to
+    merge into, and the body the merge ops were generated against) exists
+    nowhere else once that run exits.
+
+    ``meta`` is deliberately NOT stored. It is re-parsed from the target page
+    at collect time, so no YAML scalar (a date, most commonly) has to survive
+    a JSON round-trip and come back as a string that ``render_frontmatter``
+    would then write back differently. The body the ops apply to IS stored,
+    because the ops were anchored against it. (Detecting a page that CHANGED
+    under a pending handle is athenaeum#1146's job, not this one's.)
+    """
+    files: dict[str, Any] = {}
+    for st in states:
+        if not (st.create_ids or st.merge_ids):
+            continue
+        files[st.raw.ref] = {
+            "path": str(st.raw.path),
+            "skipped": list(st.skipped),
+            "escalations": [
+                _escalation_to_json(e) for e in st.address_escalations
+            ],
+            "sync_merges": [_action_to_json(a) for a in st.sync_merges],
+            "creates": {cid: _action_to_json(a) for cid, a in st.create_ids},
+            "merges": {
+                cid: {
+                    "action": _action_to_json(action),
+                    "page_path": str(page_path),
+                    "existing_body": existing_body,
+                }
+                for cid, action, page_path, _meta, existing_body in st.merge_ids
+            },
+        }
+    return {"version": WORK_DOC_VERSION, "files": files}
+
+
+def _ref_records(
+    raw_by_cid: dict[str, RawFile], model_by_cid: dict[str, str | None]
+) -> dict[str, batch_state.RefRecord]:
+    """Build the handle's ``custom_id -> RefRecord`` map, models included.
+
+    Hashing here rather than letting :func:`athenaeum.batch_state.record_handle`
+    duck-type the ``RawFile`` is what lets the per-request MODEL ride along
+    (athenaeum#1145 AC5) — ``record_handle`` accepts a ``RefRecord`` verbatim.
+    """
+    records: dict[str, batch_state.RefRecord] = {}
+    for custom_id, raw in raw_by_cid.items():
+        absolute = Path(raw.path).resolve()
+        records[custom_id] = batch_state.RefRecord(
+            ref=raw.ref,
+            path=str(absolute),
+            content_hash=batch_state.content_hash(absolute),
+            model=model_by_cid.get(custom_id),
+        )
+    return records
+
+
 def _spill_to_handle(
     outcome: BatchOutcome,
     raw_by_cid: dict[str, RawFile],
@@ -459,6 +647,8 @@ def _spill_to_handle(
     cache_dir: Path,
     config: dict[str, object] | None,
     result: BatchRunResult,
+    model_by_cid: dict[str, str | None] | None = None,
+    work: dict[str, Any] | None = None,
 ) -> None:
     """Persist an athenaeum#1143 handle for a batch left running at the deadline.
 
@@ -477,8 +667,9 @@ def _spill_to_handle(
             cache_dir,
             batch_id=outcome.batch_id,
             knob=knob,
-            refs=raw_by_cid,
+            refs=_ref_records(raw_by_cid, model_by_cid or {}),
             config=cast("dict[str, Any] | None", config),
+            work=work,
         )
     except Exception:  # a marker store must never wedge a run
         log.exception(
@@ -513,6 +704,7 @@ def process_batch_run(
     write_client: "anthropic.Anthropic | None" = None,
     deadline: float | None = None,
     cache_dir: Path | None = None,
+    resume: _ResumedWork | None = None,
 ) -> BatchRunResult:
     """Process the intake window through the Batch API phases (issue athenaeum#236).
 
@@ -560,6 +752,12 @@ def process_batch_run(
     :func:`athenaeum.batch_state.resolve_cache_dir`, which is what production
     wants and what keeps the submit side and a later run's collect side
     pointing at the same file.
+
+    Issue athenaeum#1145: *resume* re-enters this pipeline mid-way with a
+    previously-submitted batch's results (see :class:`_ResumedWork`). It is
+    what :func:`collect_pending_batches` uses, so a collected batch is applied
+    by THIS function rather than by a second write path. When *resume* is
+    supplied, *raw_files* is not read: the states come from the handle.
     """
     effective_write_client = write_client if write_client is not None else client
     effective_cache_dir = (
@@ -569,7 +767,17 @@ def process_batch_run(
 
     owner = resolve_owner(config)
     result = BatchRunResult()
-    states: list[_FileState] = []
+    # Issue athenaeum#1145: a resumed run enters with its states already built from
+    # the handle, so the tier-0/1 + phase-1 assembly loop below iterates
+    # nothing (its cohort was claimed and submitted by an earlier run).
+    states: list[_FileState] = list(resume.states) if resume is not None else []
+    # A resumed ``write`` handle arrives with its tier-3 results already in
+    # hand: its classifications were parsed by the SUBMITTING run, so it must
+    # skip the tier-2 parse below entirely. Not merely a wasted pass — that
+    # loop sets ``st.done`` on a state it finds no actions for, and a ``done``
+    # state finalizes by unlinking the raw file and writing nothing, silently
+    # destroying the very work this collect exists to apply.
+    _t3_seeded = resume is not None and resume.t3_results is not None
     t2_requests: list[BatchRequest] = []
     # ``custom_id -> RawFile`` for each phase, so a deadline spill can record
     # the athenaeum#1143 handle's ref map without re-deriving it from the request ids.
@@ -577,7 +785,7 @@ def process_batch_run(
     t3_raw_by_cid: dict[str, RawFile] = {}
 
     # --- Tier 0/1 + phase-1 assembly (budget gate per file, athenaeum#220) ---
-    for i, raw in enumerate(raw_files):
+    for i, raw in enumerate([] if resume is not None else raw_files):
         if usage.api_calls >= max_api_calls:
             log.warning(
                 "API call budget exhausted (%d/%d) at batch assembly — "
@@ -653,8 +861,19 @@ def process_batch_run(
     # has breached the ceiling we must not submit another batch that would run
     # to completion server-side. Defer every not-yet-resolved file and fall
     # through to finalize (which still writes the zero-cost T0 passthroughs).
-    t2_results: dict[str, Any] = {}
-    t2_ceiling = spend.ceiling_tripped(usage, provider=provider, config=config)
+    t2_results: dict[str, Any] = dict(resume.t2_results) if resume is not None else {}
+    # A resumed run submits no tier-2 batch, so there is no pre-submit ceiling
+    # decision to make here — the athenaeum#483 gate exists to refuse a SUBMIT, and
+    # refusing one that is not happening would defer every collected file
+    # instead of applying results already paid for. The tier-3 gate below is
+    # NOT skipped: a resumed classify handle can still submit a new tier-3
+    # batch, and that submit must face the ceiling with the collected cost
+    # already booked into ``usage`` (athenaeum#1145 AC1, reason 1).
+    t2_ceiling = (
+        None
+        if resume is not None
+        else spend.ceiling_tripped(usage, provider=provider, config=config)
+    )
     if t2_ceiling is not None:
         pending = [st for st in states if not st.done and not st.failed]
         log.error(
@@ -691,6 +910,9 @@ def process_batch_run(
                     cache_dir=effective_cache_dir,
                     config=config,
                     result=result,
+                    model_by_cid={
+                        r.custom_id: r.params.get("model") for r in t2_requests
+                    },
                 )
                 for st in states:
                     if st.t2_id is not None and not st.failed and not st.done:
@@ -700,7 +922,7 @@ def process_batch_run(
 
     # Parse classifications and build per-file actions (same shape as
     # process_one: creates from tier-2, updates from tier-1 matches).
-    for st in states:
+    for st in [] if _t3_seeded else states:
         if st.failed or st.done or st.deferred or st.in_flight:
             continue
         classified = []
@@ -984,8 +1206,17 @@ def process_batch_run(
     # merges — is deferred rather than half-written. Finalize checks
     # ``st.deferred`` first, so a deferred file never tries to read a result
     # from the (unsubmitted) batch.
-    t3_results: dict[str, Any] = {}
-    t3_ceiling = spend.ceiling_tripped(usage, provider=provider, config=config)
+    # A resumed ``write`` handle goes straight to finalize; a resumed
+    # ``classify`` handle leaves ``t3_results`` unseeded and assembles/submits
+    # a new tier-3 batch below, exactly like a fresh cohort.
+    t3_results: dict[str, Any] = (
+        dict(resume.t3_results or {}) if resume is not None and _t3_seeded else {}
+    )
+    t3_ceiling = (
+        None
+        if _t3_seeded
+        else spend.ceiling_tripped(usage, provider=provider, config=config)
+    )
     t3_pending = [
         st
         for st in states
@@ -1030,6 +1261,14 @@ def process_batch_run(
                     cache_dir=effective_cache_dir,
                     config=config,
                     result=result,
+                    model_by_cid={
+                        r.custom_id: r.params.get("model") for r in t3_requests
+                    },
+                    # Issue athenaeum#1145: a tier-3 spill's application context —
+                    # which entity to create, which page to merge into, the
+                    # body the ops were anchored against — exists nowhere else
+                    # once this run exits.
+                    work=_tier3_work_document(states),
                 )
                 for st in states:
                     if st.create_ids or st.merge_ids:
@@ -1226,3 +1465,397 @@ def process_batch_run(
     # deferred at phase-1 assembly (raw_files[i:]).
     result.deferred_refs = deferred_now + result.deferred_refs
     return result
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1145 — the collect-only adoption path.
+#
+# A run whose only work is collecting a PRIOR run's batch is a valid and
+# useful run. This phase executes at the START of the entity phase, before
+# the claim loop and before any new submission, for three independent
+# reasons — any one of which alone forces the ordering:
+#
+#   1. Ceiling correctness. Collected batch cost enters ``usage`` via
+#      ``add_batch_tokens``. Submitting first evaluates the pre-submit
+#      ceiling check against a ``usage`` missing the cost the run is about to
+#      book.
+#   2. Index freshness. Collected tier-3 creates mutate the corpus that a new
+#      cohort's ``tier1_programmatic_match`` reads. Submitting first means the
+#      new cohort cannot tier-1-match entities this very run created.
+#   3. Lease release. Leased refs must be released before the claim loop
+#      computes the new submit set, or that set is computed against a stale
+#      exclusion and either double-claims or starves.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BatchCollectResult:
+    """Aggregate outcome of :func:`collect_pending_batches`."""
+
+    created: int = 0
+    updated: int = 0
+    escalated: int = 0
+    skipped: int = 0
+    degraded: int = 0
+    truncated: int = 0
+    #: Refs whose results were applied and whose raw file was consumed. These
+    #: ARE files drained this run, even though they were never in this run's
+    #: claim — the athenaeum#470 backlog-drain advisor must see them.
+    collected_refs: list[str] = field(default_factory=list)
+    #: Refs whose application failed; raw stays on disk, re-claimed next run.
+    failed_refs: list[str] = field(default_factory=list)
+    #: Refs still held by a batch that had not ended at collect time, plus any
+    #: whose collect pipelined into a NEW batch that then spilled (athenaeum#1144).
+    in_flight_refs: list[str] = field(default_factory=list)
+    #: Batch ids retired (results consumed) and kept (still in flight).
+    retired_handles: list[str] = field(default_factory=list)
+    kept_handles: list[str] = field(default_factory=list)
+
+
+def _raw_file_from_record(record: batch_state.RefRecord) -> RawFile | None:
+    """Rebuild the :class:`RawFile` a handle's ref record points at.
+
+    ``None`` when the file is gone from disk. A leased raw file that vanished
+    cannot be finalized (finalize unlinks it on success), so its result is
+    dropped rather than half-applied — athenaeum#1146 formalizes that case and
+    the mutated-content one alongside it.
+    """
+    from athenaeum.intake import RAW_FILE_RE
+
+    path = Path(record.path)
+    if not path.is_file():
+        return None
+    source = record.ref.split("/", 1)[0] if "/" in record.ref else path.parent.name
+    m = RAW_FILE_RE.match(path.name)
+    return RawFile(
+        path=path,
+        source=source,
+        timestamp=m.group(1) if m else "",
+        uuid8=m.group(2) if m else "",
+    )
+
+
+def _states_for_classify_handle(
+    handle: batch_state.PendingBatch,
+    index: EntityIndex,
+    *,
+    config: dict[str, object] | None,
+) -> tuple[list[_FileState], list[str]]:
+    """Rebuild the per-file states a collected ``classify`` batch applies to.
+
+    The tier-0/1 pass is re-run rather than restored: it is programmatic and
+    free, and re-running it against the CURRENT index is strictly better than
+    replaying a stale match set — a page created since the submit is now
+    tier-1-matchable. ``tier0_passthrough`` is deliberately not re-run: a
+    passthrough file never gets a tier-2 request, so no ref in a classify
+    handle can be one.
+    """
+    states: list[_FileState] = []
+    dropped: list[str] = []
+    for custom_id, record in sorted(handle.refs.items()):
+        raw = _raw_file_from_record(record)
+        if raw is None:
+            log.warning(
+                "collect: leased raw file is gone, dropping its result (%s, batch %s)",
+                record.ref,
+                handle.batch_id,
+            )
+            dropped.append(record.ref)
+            continue
+        st = _FileState(raw=raw)
+        # Same in-memory guard the submitting run applied before assembling
+        # the request, so the observations this file contributes are the same
+        # bytes either transport would have produced.
+        raw._content = flag_self_resolving_claims(raw.content)
+        st.matched = tier1_programmatic_match(raw, index, config=config)
+        for name, _uid, fpath in st.matched:
+            if not index.has_entity_format(fpath):
+                st.skipped.append(name)
+        st.t2_id = custom_id
+        states.append(st)
+    return states, dropped
+
+
+def _states_for_write_handle(
+    handle: batch_state.PendingBatch,
+) -> tuple[list[_FileState], list[str]]:
+    """Rebuild the per-file states a collected ``write`` batch applies to.
+
+    Everything comes from the handle's ``work`` document — see
+    :func:`_tier3_work_document`. A handle with no usable document (recorded
+    before athenaeum#1145, or written by a newer version this reader does not
+    understand) yields no states: it retires uncollected and its refs are
+    re-claimed from scratch. Wasteful, but never silent and never wrong.
+    """
+    work = handle.work
+    if not isinstance(work, dict) or work.get("version") != WORK_DOC_VERSION:
+        return [], sorted({r.ref for r in handle.refs.values()})
+    files = work.get("files")
+    if not isinstance(files, dict):
+        return [], sorted({r.ref for r in handle.refs.values()})
+
+    record_by_ref = {r.ref: r for r in handle.refs.values()}
+    states: list[_FileState] = []
+    dropped: list[str] = []
+    for ref in sorted(files):
+        entry = files[ref]
+        record = record_by_ref.get(ref)
+        if not isinstance(entry, dict) or record is None:
+            dropped.append(ref)
+            continue
+        raw = _raw_file_from_record(record)
+        if raw is None:
+            log.warning(
+                "collect: leased raw file is gone, dropping its result (%s, batch %s)",
+                ref,
+                handle.batch_id,
+            )
+            dropped.append(ref)
+            continue
+        st = _FileState(raw=raw)
+        skipped = entry.get("skipped")
+        st.skipped = [str(x) for x in skipped] if isinstance(skipped, list) else []
+        escalations = entry.get("escalations")
+        if isinstance(escalations, list):
+            st.address_escalations = [
+                e
+                for e in (_escalation_from_json(x) for x in escalations)
+                if e is not None
+            ]
+        sync_merges = entry.get("sync_merges")
+        if isinstance(sync_merges, list):
+            st.sync_merges = [
+                a for a in (_action_from_json(x) for x in sync_merges) if a is not None
+            ]
+        creates = entry.get("creates")
+        if isinstance(creates, dict):
+            for cid in sorted(creates):
+                action = _action_from_json(creates[cid])
+                if action is not None:
+                    st.create_ids.append((cid, action))
+        merges = entry.get("merges")
+        if isinstance(merges, dict):
+            for cid in sorted(merges):
+                spec = merges[cid]
+                if not isinstance(spec, dict):
+                    continue
+                action = _action_from_json(spec.get("action"))
+                page_path = spec.get("page_path")
+                existing_body = spec.get("existing_body")
+                if action is None or not isinstance(page_path, str):
+                    continue
+                page = Path(page_path)
+                if not page.is_file():
+                    log.warning(
+                        "collect: merge target %s is gone, dropping its result "
+                        "(%s, batch %s)",
+                        page_path,
+                        ref,
+                        handle.batch_id,
+                    )
+                    continue
+                # ``meta`` is re-parsed from the page rather than restored from
+                # the handle, so no YAML scalar has to survive a JSON round
+                # trip. The BODY is the stored one: the merge ops were anchored
+                # against it.
+                meta, _current_body = parse_frontmatter(page.read_text(encoding="utf-8"))
+                st.merge_ids.append(
+                    (
+                        cid,
+                        action,
+                        page,
+                        meta,
+                        existing_body if isinstance(existing_body, str) else "",
+                    )
+                )
+        states.append(st)
+    return states, dropped
+
+
+def collect_pending_batches(
+    index: EntityIndex,
+    wiki_root: Path,
+    client: anthropic.Anthropic,
+    valid_types: list[str],
+    valid_tags: list[str],
+    valid_access: list[str],
+    *,
+    usage: TokenUsage,
+    config: dict[str, object] | None,
+    max_api_calls: int,
+    provider: str = "api",
+    sleep: Callable[[float], None] = time.sleep,
+    write_client: "anthropic.Anthropic | None" = None,
+    deadline: float | None = None,
+    cache_dir: Path | None = None,
+) -> BatchCollectResult:
+    """Collect every outstanding athenaeum#1143 handle, oldest first.
+
+    For each handle: retrieve the batch by id; if it has ENDED, read its
+    results, apply them through :func:`process_batch_run` (via
+    :class:`_ResumedWork` — the same finalize path, never a parallel one), and
+    retire the handle, which releases its lease in the same atomic store write
+    (AC3). A batch that has not ended keeps its handle and its lease
+    untouched; athenaeum#1146 hardens the rest of the un-collectible cases
+    (retention expiry, 404s, mutated raw files).
+
+    Collecting a ``classify`` handle and submitting the resulting tier-3 batch
+    within the same run is supported and is the point (AC7): the resumed run
+    reaches the normal tier-3 assembly, spend ceiling, and submit.
+    """
+    effective_cache_dir = (
+        cache_dir if cache_dir is not None else batch_state.resolve_cache_dir()
+    )
+    out = BatchCollectResult()
+    handles = batch_state.load(effective_cache_dir)
+    if not handles:
+        return out
+
+    for batch_id, handle in sorted(
+        handles.items(), key=lambda kv: (kv[1].submitted_at, kv[0])
+    ):
+        knob = handle.knob
+        reader = (
+            write_client
+            if knob == "write" and write_client is not None
+            else client
+        )
+        try:
+            batch = with_retry(
+                lambda: reader.messages.batches.retrieve(batch_id),
+                description=f"batch poll (collect {batch_id})",
+            )
+        except Exception as exc:  # noqa: BLE001 — see below
+            # Deliberately broad, and deliberately NOT a retire. The SDK does
+            # not distinguish a 404 (the batch is genuinely gone) from a
+            # transient network failure, and retiring on the latter would
+            # strand a live, paid-for batch forever. Keeping the handle costs
+            # at worst one more run's retry; athenaeum#1146 owns the retention /
+            # 404 discrimination this defers.
+            log.warning(
+                "collect: could not retrieve batch %s (%s) — keeping the handle",
+                batch_id,
+                exc,
+            )
+            out.kept_handles.append(batch_id)
+            out.in_flight_refs.extend(sorted({r.ref for r in handle.refs.values()}))
+            continue
+
+        if getattr(batch, "processing_status", None) != "ended":
+            log.info(
+                "collect: batch %s (%s) is still in flight — keeping the handle, "
+                "not resubmitting its %d ref(s)",
+                batch_id,
+                knob,
+                len({r.ref for r in handle.refs.values()}),
+            )
+            out.kept_handles.append(batch_id)
+            out.in_flight_refs.extend(sorted({r.ref for r in handle.refs.values()}))
+            continue
+
+        if knob == "classify":
+            states, dropped = _states_for_classify_handle(handle, index, config=config)
+        elif knob == "write":
+            states, dropped = _states_for_write_handle(handle)
+        else:
+            log.warning(
+                "collect: handle %s has an unknown knob %r — retiring it, its "
+                "refs are re-claimed from scratch",
+                batch_id,
+                knob,
+            )
+            batch_state.retire_handle(effective_cache_dir, batch_id)
+            out.retired_handles.append(batch_id)
+            continue
+
+        out.failed_refs.extend(dropped)
+        if not states:
+            log.warning(
+                "collect: nothing applicable in batch %s (%s) — retiring it",
+                batch_id,
+                knob,
+            )
+            batch_state.retire_handle(effective_cache_dir, batch_id)
+            out.retired_handles.append(batch_id)
+            continue
+
+        model_by_cid = {cid: rec.model for cid, rec in handle.refs.items()}
+        try:
+            results = collect_batch_results(
+                reader,
+                batch_id,
+                model_by_cid,
+                description=f"collect {knob}",
+                usage=usage,
+                knob=knob,
+            )
+        except BatchExecutionError as exc:
+            log.warning(
+                "collect: could not read results for batch %s (%s) — keeping "
+                "the handle for a later run",
+                batch_id,
+                exc,
+            )
+            out.kept_handles.append(batch_id)
+            out.in_flight_refs.extend(sorted({r.ref for r in handle.refs.values()}))
+            continue
+
+        resumed = (
+            _ResumedWork(states=states, t2_results=results)
+            if knob == "classify"
+            else _ResumedWork(states=states, t3_results=results)
+        )
+        applied = process_batch_run(
+            [],
+            index,
+            wiki_root,
+            client,
+            valid_types,
+            valid_tags,
+            valid_access,
+            usage=usage,
+            config=config,
+            max_api_calls=max_api_calls,
+            provider=provider,
+            sleep=sleep,
+            write_client=write_client,
+            deadline=deadline,
+            cache_dir=effective_cache_dir,
+            resume=resumed,
+        )
+
+        out.created += applied.created
+        out.updated += applied.updated
+        out.escalated += applied.escalated
+        out.skipped += applied.skipped
+        out.degraded += applied.degraded
+        out.truncated += applied.truncated
+        out.failed_refs.extend(applied.failed_refs)
+        out.in_flight_refs.extend(applied.in_flight_refs)
+        unresolved = (
+            set(applied.failed_refs)
+            | set(applied.deferred_refs)
+            | set(applied.in_flight_refs)
+        )
+        out.collected_refs.extend(
+            sorted({st.raw.ref for st in states} - unresolved)
+        )
+        # The handle's results have been consumed, whatever became of the
+        # files downstream — a file whose collect pipelined into a NEW batch is
+        # now held by that batch's OWN handle, and one that failed keeps its
+        # raw on disk for a fresh claim. Retiring drops the handle and its
+        # lease in one atomic store write (AC3).
+        batch_state.retire_handle(effective_cache_dir, batch_id)
+        out.retired_handles.append(batch_id)
+        log.info(
+            "collect: applied batch %s (%s) — created=%d updated=%d "
+            "escalated=%d failed=%d",
+            batch_id,
+            knob,
+            applied.created,
+            applied.updated,
+            applied.escalated,
+            len(applied.failed_refs),
+        )
+
+    return out
