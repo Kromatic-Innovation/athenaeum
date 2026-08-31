@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`athenaeum bounce-divergence` and `athenaeum do-not-email-divergence` CLI
+  subcommands (athenaeum#1111).** Both were fully superseded by `athenaeum
+  surface-divergence --field {bounced,do_not_email}` (athenaeum#963): running
+  either superseded command and the generalized equivalent against the live
+  store produced byte-identical JSON, and per architectural guidance
+  (`docs/north-star.md` §2.2, "no per-writer entry points") the per-field
+  duplicates should not have kept existing once the generalization landed.
+  `bounce-divergence` had zero remaining callers; `do-not-email-divergence`
+  had exactly one — a redundant third invocation in cron-fleet's nightly
+  `pre-dawn-sweep.sh` Step 3b that duplicated the sweep's own
+  `surface-divergence --field do_not_email` invocation and was removed in
+  the same change. The parser registrations and the `_cmd_bounce_divergence.py`
+  / `_cmd_do_not_email_divergence.py` CLI-wiring modules are removed from
+  `src/athenaeum/cli.py`; the underlying `athenaeum.bounce_divergence` and
+  `athenaeum.do_not_email_divergence` library modules are UNCHANGED and stay
+  in place — `athenaeum.surface_divergence` still wraps their
+  compute/report/render/dict implementations verbatim. The CLI-level tests
+  for the removed commands (`tests/test_bounce_divergence.py::TestCli`,
+  `tests/test_do_not_email_divergence.py::TestCli`) are removed; their
+  coverage already existed, or was added, at the surviving command's own
+  `tests/test_surface_divergence.py::TestCli` / `TestAllowance`.
+
+### Fixed
+
+- **`athenaeum surface-divergence --json`'s `diverged` field could contradict
+  its own exit code (athenaeum#1111).** The wrapped library modules'
+  `report_as_dict` reports `diverged` as true whenever EITHER direction of
+  the two-surface comparison is non-empty, but the command's exit code only
+  fails on the field's declared NOT-tolerated direction
+  (`exceeds_allowance`) — so a wiki-only `do_not_email` mark (the design's
+  own only legal steady state, athenaeum#1039) exited `0` while the JSON
+  body read `"diverged": true`, and the same shape affected `bounced`'s
+  tolerated wiki-only-entry case. A consumer reading `diverged` instead of
+  the exit code got the wrong answer on the design's own legal state. Fixed
+  by having `athenaeum._cmd_surface_divergence` override `diverged` in its
+  JSON output to track `exceeds_allowance` — the same predicate driving the
+  exit code — so the two can never disagree; a direct caller of the wrapped
+  modules' own `report_as_dict` (unchanged) still sees their original,
+  broader both-directions semantics. Regression tests:
+  `tests/test_surface_divergence.py::TestCli::test_json_diverged_do_not_email_wiki_only_mark_matches_exit_code`
+  and `::test_json_diverged_bounced_wiki_only_entry_matches_exit_code`.
+
 ### Added
 
 - **`athenaeum reconcile` retires pending raw-intake files a source dual-wrote

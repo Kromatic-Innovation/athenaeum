@@ -27,14 +27,16 @@ the excluded surface), so ``marked_on_wiki_not_excluded`` is the design's
 ONLY legal steady state, not a residual to tolerate away — it is simply not
 a divergence. The tolerated residual is exactly zero only for
 ``marked_on_excluded_not_wiki``, the excluded surface newly carrying the
-field. That is why, unlike ``bounce-divergence``, this module's CLI command
-(:mod:`athenaeum._cmd_do_not_email_divergence`) exits non-zero on that ONE
-direction of divergence, not only on an unreadable surface — the mistake
-athenaeum#853 shipped and athenaeum#960's issue names explicitly (a check
-that only ever exits 0 or 2 is silent about the number moving). Before
-athenaeum#1039, the CLI command (and the equivalent `surface-divergence
---field do_not_email` predicate) alerted on EITHER direction, which meant
-alerting on the design's only legal state.
+field. That is why, unlike ``bounce-divergence``, ``athenaeum
+surface-divergence --field do_not_email`` (the sole surviving entry point
+for this field as of issue athenaeum#1111; formerly also
+``athenaeum do-not-email-divergence``, removed by that issue) exits
+non-zero on that ONE direction of divergence, not only on an unreadable
+surface — the mistake athenaeum#853 shipped and athenaeum#960's issue names
+explicitly (a check that only ever exits 0 or 2 is silent about the number
+moving). Before athenaeum#1039, the CLI command (and the equivalent
+`surface-divergence --field do_not_email` predicate) alerted on EITHER
+direction, which meant alerting on the design's only legal state.
 
 **Both surfaces are keyed by ``uid``, not by address.** Unlike bounce (which
 marks individual email ADDRESSES), ``do_not_email`` is a per-RECORD /
@@ -232,10 +234,12 @@ class DoNotEmailDivergenceReport:
         athenaeum#1039, ``marked_on_wiki_not_excluded`` alone is the
         design's legal steady state (athenaeum#960 forbids backfill onto
         the excluded surface), so this property is ``True`` in that case
-        without it being anything to alert on. The CLI commands' exit-code
-        decisions key off ``marked_on_excluded_not_wiki`` specifically, not
-        this property — see :mod:`athenaeum._cmd_do_not_email_divergence`
-        and :mod:`athenaeum.surface_divergence`.
+        without it being anything to alert on. The CLI's exit-code decision
+        keys off ``marked_on_excluded_not_wiki`` specifically, not this
+        property — see :mod:`athenaeum._cmd_surface_divergence` (issue
+        athenaeum#1111 also overrides this property's value in that
+        command's JSON output for the same reason: a consumer reading
+        ``diverged`` there must not disagree with the exit code).
         """
         return bool(self.marked_on_wiki_not_excluded or self.marked_on_excluded_not_wiki)
 
