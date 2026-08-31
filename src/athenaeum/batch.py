@@ -158,6 +158,263 @@ class BatchRequest:
     params: dict[str, Any]
 
 
+#: Characters per token for the submit-time input estimate. A reservation is
+#: an ESTIMATE by construction — the exact figure only exists once the batch
+#: returns — so this deliberately uses the standard ~4-chars-per-token
+#: approximation over the assembled payloads rather than pulling in a
+#: tokenizer. The settlement record carries the estimate-vs-actual delta, so
+#: the accuracy of this constant is measurable from the ledger rather than
+#: being an article of faith.
+_CHARS_PER_TOKEN = 4.0
+
+
+@dataclass
+class _SpendReservation:
+    """Records a batch's committed-but-unbilled cost (issue athenaeum#1147).
+
+    ``TokenUsage.add_batch_tokens`` fires at COLLECT. Under the athenaeum#1138
+    submit/collect split the submitting run's ``usage`` therefore never sees
+    the cost of the batch it just submitted — and that cost is committed
+    server-side and cannot be halted, so ``spend.ceiling_tripped`` is
+    structurally blind to it.
+
+    The three moments must not be collapsed: reserve at submit, settle at
+    collect, and count outstanding reservations at ceiling-check time. This
+    object owns the first two; :func:`athenaeum.spend.ceiling_tripped` owns
+    the third.
+    """
+
+    wiki_root: Path
+    config: dict[str, object] | None
+    cache_dir: Path | None = None
+
+    def reserve(
+        self, *, batch_id: str, knob: str, requests: list[BatchRequest]
+    ) -> None:
+        if not batch_id:
+            return
+        est_in, est_out, model = _estimate_batch_tokens(
+            requests,
+            config=self.config,
+            wiki_root=self.wiki_root,
+            cache_dir=self.cache_dir,
+        )
+        # AC5: priced at the 50%-DISCOUNTED batch rate. Pricing a batch
+        # reservation at the synchronous rate trips the ceiling roughly 2x too
+        # early and defeats the entire purpose of the epic. Routed through
+        # ``TokenUsage`` rather than a local multiplication so there is exactly
+        # one pricing site in the codebase, and the discount, the cache
+        # multipliers, and the per-model rate table all compose the same way
+        # they do for real spend.
+        priced = TokenUsage()
+        priced.add_batch_tokens(est_in, est_out, model=model, knob=knob)
+        spend.record_reservation(
+            self.wiki_root,
+            batch_id=batch_id,
+            knob=knob,
+            est_input_tokens=est_in,
+            est_output_tokens=est_out,
+            est_usd=priced.estimated_cost_usd,
+            model=model,
+            requests=len(requests),
+            config=cast("dict[str, Any] | None", self.config),
+            cache_dir=self.cache_dir,
+        )
+
+    def settle_measured(
+        self,
+        *,
+        batch_id: str,
+        knob: str,
+        before: "_UsageSnapshot",
+        after: "_UsageSnapshot",
+        result_types: dict[str, int] | None = None,
+    ) -> None:
+        """Close the reservation with what ``add_batch_tokens`` actually booked.
+
+        A batch whose every request came back ``expired`` books nothing, so
+        the measured delta is genuinely ZERO — which is correct: the API
+        documents an expired request as not billed (AC6). The record says so
+        explicitly rather than leaving a reader to infer it from a zero.
+        """
+        types = result_types or {}
+        source = (
+            "expired"
+            if after.usd == before.usd and set(types) == {"expired"}
+            else "measured"
+        )
+        self._settle(
+            batch_id=batch_id,
+            knob=knob,
+            actual_in=after.batch_input - before.batch_input,
+            actual_out=after.batch_output - before.batch_output,
+            actual_usd=after.usd - before.usd,
+            reason="collected",
+            actual_source=source,
+        )
+
+    def settle_at_estimate(self, *, batch_id: str, knob: str, reason: str) -> None:
+        """Close a reservation whose actual is unknowable (AC6).
+
+        A handle retired uncollected (athenaeum#1146: past retention,
+        unretrievable, or with no applicable context) never yields a real
+        figure — but the batch DID run and WAS billed. Settling at zero would
+        under-report real spend; leaving it open would leak a permanent
+        phantom charge against every future ceiling check. Settling at the
+        estimate is the honest close, and ``actual_source="estimate"`` makes
+        it distinguishable from a measured one.
+        """
+        record = self._outstanding(batch_id)
+        est_usd = float(record.get("est_usd") or 0.0) if record else 0.0
+        est_in = int(record.get("est_input_tokens") or 0) if record else 0
+        est_out = int(record.get("est_output_tokens") or 0) if record else 0
+        if record is None:
+            return
+        self._settle(
+            batch_id=batch_id,
+            knob=knob,
+            actual_in=est_in,
+            actual_out=est_out,
+            actual_usd=est_usd,
+            reason=reason,
+            actual_source="estimate",
+        )
+
+    def _outstanding(self, batch_id: str) -> dict[str, Any] | None:
+        for record in spend.outstanding_reservations(
+            self.wiki_root, cache_dir=self.cache_dir
+        ):
+            if record.get("batch_id") == batch_id:
+                return record
+        return None
+
+    def _settle(
+        self,
+        *,
+        batch_id: str,
+        knob: str,
+        actual_in: int,
+        actual_out: int,
+        actual_usd: float,
+        reason: str,
+        actual_source: str,
+    ) -> None:
+        record = self._outstanding(batch_id)
+        if record is None:
+            # Nothing outstanding: either this batch was never reserved (a
+            # caller with no reservation context) or it already settled.
+            # Writing a second settlement would double-count in any future
+            # reader, so this is a deliberate no-op.
+            return
+        spend.record_settlement(
+            self.wiki_root,
+            batch_id=batch_id,
+            knob=knob,
+            actual_input_tokens=max(0, actual_in),
+            actual_output_tokens=max(0, actual_out),
+            actual_usd=max(0.0, actual_usd),
+            est_usd=float(record.get("est_usd") or 0.0),
+            reason=reason,
+            actual_source=actual_source,
+            config=cast("dict[str, Any] | None", self.config),
+            cache_dir=self.cache_dir,
+        )
+
+
+@dataclass(frozen=True)
+class _UsageSnapshot:
+    """The batch-attributed counters, sampled either side of a collect."""
+
+    batch_input: int
+    batch_output: int
+    usd: float
+
+
+def _usage_snapshot(usage: TokenUsage | None) -> _UsageSnapshot:
+    if usage is None:
+        return _UsageSnapshot(0, 0, 0.0)
+    return _UsageSnapshot(
+        batch_input=usage.batch_input_tokens,
+        batch_output=usage.batch_output_tokens,
+        usd=usage.estimated_cost_usd,
+    )
+
+
+def _estimate_batch_tokens(
+    requests: list[BatchRequest],
+    *,
+    config: dict[str, object] | None,
+    wiki_root: Path,
+    cache_dir: Path | None = None,
+) -> tuple[int, int, str | None]:
+    """Estimate ``(input, output, model)`` for an assembled batch (AC2).
+
+    INPUT comes from the assembled request payloads — the prompts are in hand
+    at submit time, so this is the closest thing to a measurement available
+    before the batch returns.
+
+    OUTPUT follows the :func:`athenaeum.drain_advisor.observed_tokens_per_file`
+    precedent: the recent spend ledger's observed output-tokens-per-file,
+    falling back to that module's documented default when there is no usable
+    history. Capped per request by its own ``max_tokens``, which the model
+    cannot exceed — so a batch of small-budget requests is not estimated as if
+    every one ran to the corpus-wide average.
+    """
+    if not requests:
+        return 0, 0, None
+    from athenaeum import drain_advisor
+
+    est_input = 0
+    for request in requests:
+        params = request.params
+        text_len = 0
+        system = params.get("system")
+        if isinstance(system, str):
+            text_len += len(system)
+        elif isinstance(system, list):
+            text_len += sum(
+                len(block.get("text", "")) for block in system if isinstance(block, dict)
+            )
+        for message in params.get("messages", []) or []:
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, str):
+                text_len += len(content)
+            elif isinstance(content, list):
+                text_len += sum(
+                    len(block.get("text", ""))
+                    for block in content
+                    if isinstance(block, dict)
+                )
+        est_input += int(text_len / _CHARS_PER_TOKEN)
+
+    observed_output = drain_advisor.DEFAULT_AVG_OUTPUT_TOKENS_PER_FILE
+    try:
+        ledger_path = spend.resolve_ledger_path(
+            cast("dict[str, Any] | None", config),
+            cache_dir=cache_dir,
+            wiki_root=wiki_root,
+        )
+        observed = drain_advisor.observed_tokens_per_file(spend.read_ledger(ledger_path))
+        if observed is not None:
+            observed_output = observed[1]
+    except Exception as exc:  # noqa: BLE001 — an estimate must never break a submit
+        log.debug(
+            "batch output estimate fell back to the default (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+
+    est_output = 0
+    for request in requests:
+        budget = request.params.get("max_tokens")
+        cap = budget if isinstance(budget, int) and budget > 0 else None
+        per_request = observed_output if cap is None else min(observed_output, cap)
+        est_output += int(per_request)
+
+    model = requests[0].params.get("model")
+    return est_input, est_output, model if isinstance(model, str) else None
+
+
 @dataclass
 class BatchOutcome:
     """What one :func:`execute_batch` call produced (issue athenaeum#1144 AC3).
@@ -192,6 +449,7 @@ def execute_batch(
     poll_interval: float = BATCH_POLL_INTERVAL_SECONDS,
     timeout: float = BATCH_POLL_TIMEOUT_SECONDS,
     deadline: float | None = None,
+    reservation: "_SpendReservation | None" = None,
 ) -> BatchOutcome:
     """Submit *requests*, poll to completion, return a :class:`BatchOutcome`.
 
@@ -256,6 +514,13 @@ def execute_batch(
         len(requests),
         description,
     )
+    # Issue athenaeum#1147: the submit is the moment the cost becomes committed
+    # and unstoppable, so the reservation is written HERE — before the poll,
+    # before any deadline spill, and before the tier-3 ceiling check that runs
+    # after this call returns. Reserving after the poll would leave the very
+    # window this ledger exists to cover uncovered.
+    if reservation is not None:
+        reservation.reserve(batch_id=batch.id, knob=knob or "", requests=requests)
 
     waited = 0.0
     # Remaining wall-clock budget for THIS poll, snapshotted at entry (see the
@@ -308,6 +573,8 @@ def execute_batch(
     model_by_cid: dict[str, str | None] = {
         r.custom_id: r.params.get("model") for r in requests
     }
+    result_types: dict[str, int] = {}
+    before = _usage_snapshot(usage)
     results = collect_batch_results(
         client,
         batch.id,
@@ -315,7 +582,19 @@ def execute_batch(
         description=description,
         usage=usage,
         knob=knob,
+        out_result_types=result_types,
     )
+    # Issue athenaeum#1147: ``add_batch_tokens`` has just booked the actual, so
+    # this is the settlement moment. The delta between the two snapshots IS
+    # the batch's real cost — no second pricing path.
+    if reservation is not None:
+        reservation.settle_measured(
+            batch_id=batch.id,
+            knob=knob or "",
+            before=before,
+            after=_usage_snapshot(usage),
+            result_types=result_types,
+        )
     return BatchOutcome(batch_id=batch.id, results=results)
 
 
@@ -802,6 +1081,11 @@ def process_batch_run(
     effective_cache_dir = (
         cache_dir if cache_dir is not None else batch_state.resolve_cache_dir()
     )
+    # Issue athenaeum#1147: one reservation recorder for the whole run, shared by
+    # both phase submits and by the collect path.
+    reservation = _SpendReservation(
+        wiki_root=wiki_root, config=config, cache_dir=effective_cache_dir
+    )
     from athenaeum.config import load_config, resolve_owner
 
     owner = resolve_owner(config)
@@ -936,7 +1220,16 @@ def process_batch_run(
     t2_ceiling = (
         None
         if resume is not None
-        else spend.ceiling_tripped(usage, provider=provider, config=config)
+        else spend.ceiling_tripped(
+            usage,
+            provider=provider,
+            config=config,
+            # Issue athenaeum#1147 AC4/AC7: the athenaeum#483 pre-submit check is
+            # PRESERVED, not replaced — it simply now counts committed
+            # in-flight cost as well as this run's own accrual.
+            wiki_root=wiki_root,
+            cache_dir=effective_cache_dir,
+        )
     )
     if t2_ceiling is not None:
         pending = [st for st in states if not st.done and not st.failed]
@@ -958,6 +1251,7 @@ def process_batch_run(
                 knob="classify",
                 sleep=sleep,
                 deadline=deadline,
+                reservation=reservation,
             )
         except BatchExecutionError as exc:
             log.error("Tier-2 batch failed (%s) — affected files retried next run", exc)
@@ -1298,7 +1592,13 @@ def process_batch_run(
     t3_ceiling = (
         None
         if _t3_seeded
-        else spend.ceiling_tripped(usage, provider=provider, config=config)
+        else spend.ceiling_tripped(
+            usage,
+            provider=provider,
+            config=config,
+            wiki_root=wiki_root,
+            cache_dir=effective_cache_dir,
+        )
     )
     t3_pending = [
         st
@@ -1328,6 +1628,7 @@ def process_batch_run(
                 knob="write",
                 sleep=sleep,
                 deadline=deadline,
+                reservation=reservation,
             )
         except BatchExecutionError as exc:
             log.error("Tier-3 batch failed (%s) — affected files retried next run", exc)
@@ -1863,6 +2164,7 @@ def _retire_uncollected(
     *,
     reason: str,
     out: "BatchCollectResult",
+    reservation: "_SpendReservation | None" = None,
 ) -> None:
     """Retire a handle whose results were never applied, and RECORD it (AC8).
 
@@ -1890,6 +2192,15 @@ def _retire_uncollected(
         submitted_at=handle.submitted_at,
         cache_dir=cache_dir,
     )
+    # Issue athenaeum#1147 AC6: close the reservation. This batch's real cost is
+    # unknowable — it ran, it was billed, and its results are gone — so it
+    # settles at the ESTIMATE. Leaving it open would leak a permanent phantom
+    # charge against every future ceiling check, which is precisely the
+    # failure the reservation ledger exists to prevent.
+    if reservation is not None:
+        reservation.settle_at_estimate(
+            batch_id=handle.batch_id, knob=handle.knob, reason=reason
+        )
     batch_state.retire_handle(cache_dir, handle.batch_id)
     out.retired_handles.append(handle.batch_id)
     out._count(reason)
@@ -1972,6 +2283,9 @@ def collect_pending_batches(
     effective_cache_dir = (
         cache_dir if cache_dir is not None else batch_state.resolve_cache_dir()
     )
+    reservation = _SpendReservation(
+        wiki_root=wiki_root, config=config, cache_dir=effective_cache_dir
+    )
     out = BatchCollectResult()
     handles = batch_state.load(effective_cache_dir)
     if not handles:
@@ -1998,6 +2312,7 @@ def collect_pending_batches(
                 handle,
                 reason="retention-expired",
                 out=out,
+                reservation=reservation,
             )
             continue
 
@@ -2017,6 +2332,7 @@ def collect_pending_batches(
                     handle,
                     reason="unretrievable",
                     out=out,
+                    reservation=reservation,
                 )
             else:
                 log.warning(
@@ -2073,6 +2389,7 @@ def collect_pending_batches(
                 handle,
                 reason="unknown-knob",
                 out=out,
+                reservation=reservation,
             )
             continue
 
@@ -2084,11 +2401,13 @@ def collect_pending_batches(
                 handle,
                 reason="no-context",
                 out=out,
+                reservation=reservation,
             )
             continue
 
         model_by_cid = {cid: rec.model for cid, rec in handle.refs.items()}
         result_types: dict[str, int] = {}
+        before = _usage_snapshot(usage)
         try:
             results = collect_batch_results(
                 reader,
@@ -2115,6 +2434,19 @@ def collect_pending_batches(
                 extend=True,
             )
             continue
+
+        # Issue athenaeum#1147: the actual is booked, so the reservation this
+        # batch's SUBMITTING run wrote (possibly on an earlier accounting day)
+        # settles here — with the collect run's day and the estimate-vs-actual
+        # delta. A batch whose every request expired settles at ZERO, which is
+        # correct: the API documents an expired request as not billed.
+        reservation.settle_measured(
+            batch_id=batch_id,
+            knob=knob,
+            before=before,
+            after=_usage_snapshot(usage),
+            result_types=result_types,
+        )
 
         # AC2 + AC7: per-request terminals, counted by type. These map onto the
         # EXISTING per-file failure path below (a ``None`` result raises

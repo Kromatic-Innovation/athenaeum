@@ -399,6 +399,20 @@ def cmd_spend(args: argparse.Namespace) -> int:
     except Exception:  # noqa: BLE001 — additive section, never breaks the report
         budget_window = None
 
+    # Issue athenaeum#1147 AC9: committed-but-unbilled batch spend. A batch is
+    # paid for the moment it is submitted, but ``add_batch_tokens`` only books
+    # it at COLLECT — so between a submit run and its collect run there is real
+    # money the ledger above cannot see. Surfacing it here means an operator
+    # can answer "what have I committed?" without hand-tracing the reservation
+    # ledger. Additive and best-effort, exactly like the budget window above.
+    try:
+        outstanding = spend.outstanding_reservations(
+            target / "wiki",
+            cache_dir=resolve_cache_dir(args.cache_dir).resolve(),
+        )
+    except Exception:  # noqa: BLE001 — additive section, never breaks the report
+        outstanding = []
+
     if args.json:
         payload = {
             "since": since_dt.isoformat().replace("+00:00", "Z"),
@@ -407,6 +421,13 @@ def cmd_spend(args: argparse.Namespace) -> int:
         }
         if budget_window is not None:
             payload["budget_window"] = budget_window
+        payload["outstanding_reservations"] = {
+            "count": len(outstanding),
+            "est_usd": round(
+                sum(float(r.get("est_usd") or 0.0) for r in outstanding), 6
+            ),
+            "batches": outstanding,
+        }
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(
@@ -425,4 +446,17 @@ def cmd_spend(args: argparse.Namespace) -> int:
         )
         if budget_window_line:
             print(budget_window_line)
+        if outstanding:
+            total = sum(float(r.get("est_usd") or 0.0) for r in outstanding)
+            print(
+                f"in flight: {len(outstanding)} batch(es) committed but not yet "
+                f"billed, est. ${total:.2f} (athenaeum#1147)"
+            )
+            for record in outstanding:
+                print(
+                    f"  {record.get('batch_id')} "
+                    f"[{record.get('knob')}] "
+                    f"reserved {record.get('day')} "
+                    f"est. ${float(record.get('est_usd') or 0.0):.2f}"
+                )
     return 0
