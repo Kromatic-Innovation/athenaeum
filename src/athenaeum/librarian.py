@@ -3537,12 +3537,13 @@ class RunContext:
     total_matched: int = 0
     total_files_acted: int = 0
 
-    # Issue athenaeum#1182: page-size-invariant suppressions, summed across the
-    # synchronous entity loop the same way total_degraded/total_truncated
-    # are above. Best-effort over the synchronous path only, matching
-    # total_matched's documented scope — the batch-API transport
-    # (``ctx.batch_mode``, off by default) has no equivalent per-file
-    # aggregation point wired here and leaves this at 0.
+    # Issue athenaeum#1182: page-size-invariant suppressions. UNLIKE
+    # total_matched (documented as synchronous-only above), this counter
+    # covers BOTH transports: the synchronous entity loop (summed the same
+    # way total_degraded/total_truncated are, below) AND the batch-API
+    # transport's two independent merge-dispatch sites (assembly + the
+    # sync_merges finalize fallback in athenaeum.batch), via
+    # BatchRunResult.oversize_suppressed / BatchCollectResult.oversize_suppressed.
     total_oversize_suppressed: int = 0
 
     def deadline_exceeded(self) -> bool:
@@ -4944,6 +4945,7 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
     ctx.total_skipped += outcome.skipped
     ctx.total_degraded += outcome.degraded
     ctx.total_truncated += outcome.truncated
+    ctx.total_oversize_suppressed += outcome.oversize_suppressed  # issue athenaeum#1182
     ctx.collected_refs = list(outcome.collected_refs)
     ctx.batch_reconciliation = dict(outcome.reconciliation)
     ctx.failed_files.extend(outcome.failed_refs)
@@ -5215,6 +5217,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.total_skipped = outcome.skipped
                     ctx.total_degraded = outcome.degraded
                     ctx.total_truncated = outcome.truncated  # issue athenaeum#476
+                    ctx.total_oversize_suppressed = (
+                        outcome.oversize_suppressed
+                    )  # issue athenaeum#1182
                     ctx.failed_files = outcome.failed_refs
                     ctx.deferred_refs = outcome.deferred_refs
                     # Issue athenaeum#1144 AC5.
