@@ -5172,6 +5172,13 @@ def _run_name_collision_phase(ctx: RunContext) -> None:
             _fields = {"reason": "completed", **counts}
     except Exception:
         log.exception("name-collision scan failed; continuing run")
+        # Issue athenaeum#1170 code review: a phase that crashed must not read
+        # as "completed" in the run summary / durable ledger -- _fields was
+        # still {"reason": "completed"} from initialization above (the
+        # `if not resolve_name_collision_scan_enabled` / else branch never
+        # ran), which made a genuine failure indistinguishable from a clean
+        # run that found zero collisions.
+        _fields = {"reason": "failed"}
     finally:
         ctx.run_profile.append(
             ("name-collisions", time.monotonic() - _start, _fields)

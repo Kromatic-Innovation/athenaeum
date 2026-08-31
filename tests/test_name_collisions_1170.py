@@ -305,6 +305,13 @@ class TestRunNameCollisionPhase:
             _run_name_collision_phase(ctx)
         assert len(ctx.run_profile) == 1
         assert ctx.run_profile[0][0] == "name-collisions"
+        # issue athenaeum#1170 code review: a CRASHED phase must not read as
+        # "completed" -- it must be distinguishable from a clean run that
+        # found zero collisions, both in the run summary and the durable
+        # run-summary ledger record.
+        assert ctx.run_profile[0][2] == {"reason": "failed"}
+        record = build_run_summary_ledger_record(ctx.run_profile)
+        assert record["phases"]["name-collisions"]["reason"] == "failed"
 
     def test_metric_survives_a_wiki_dedup_failure_independence(self, tmp_path: Path) -> None:
         """AC2 independence: a wiki-dedup failure must never suppress this
