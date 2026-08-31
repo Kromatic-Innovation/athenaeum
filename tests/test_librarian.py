@@ -995,17 +995,20 @@ class TestTier0HandleUpsert:
 
         Pinned directly at the index level so the two gate tests below read
         unambiguously — they assert on WHICH page the seed reaches, and that
-        depends entirely on this collision. `lookup` has no `type` parameter
-        and no ambiguity signal in its return type (`tuple | None`), so the
-        loser is simply not reachable by name.
+        depends entirely on this collision. `lookup` takes no disambiguation
+        parameter, and its return carries no ambiguity signal (issue athenaeum#1169
+        added a `.type` field to the return value, but that is the WINNING
+        page's own type -- it says nothing about the loser), so the loser is
+        simply not reachable by name.
         """
         wiki = tmp_path / "wiki"
         _company, person = self._two_same_named(wiki)
 
         resolved = EntityIndex(wiki).lookup("X")
         assert resolved is not None
-        resolved_uid, resolved_path = resolved
+        resolved_uid, resolved_path = resolved.uid, resolved.path
         assert (resolved_uid, resolved_path) == ("person-x", person)
+        assert resolved.type == "person"
 
     def test_ambiguous_name_match_cross_type_declines_and_writes_nothing(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
