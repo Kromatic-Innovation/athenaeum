@@ -9,7 +9,7 @@
 {observations}
 
 ## Instructions
-Return a JSON object of anchored edit operations that fold the new
+{scoping_note}Return a JSON object of anchored edit operations that fold the new
 observation into the existing page body, per the system instructions, e.g.:
 {{"ops": [{{"op": "insert_after", "anchor": "<verbatim snippet>", "text": "..."}}]}}
 Copy every anchor VERBATIM from the existing body above; each anchor must

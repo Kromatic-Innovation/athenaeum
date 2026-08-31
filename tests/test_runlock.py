@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -515,6 +516,171 @@ class TestRunHeartbeatWiring:
             retire=False,
         )
         assert rc == 0
+
+
+class TestIngestPathHeartbeatWiring:
+    """Issue athenaeum#1230: `ingest`/`session-end` thread the run lock's
+    heartbeat through, the same way `run`'s H10 fix (athenaeum#526) does above —
+    `ingest()`/`session_end()` forward it via **run_kwargs straight into
+    `run()`, so this proves the WIRING actually reaches `run()`'s
+    `ctx.tick_heartbeat()`, not just that the parameter exists.
+    """
+
+    def _seed_root(self, tmp_path: Path) -> Path:
+        import subprocess
+
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        (root / "athenaeum.yaml").write_text(
+            "recall:\n  extra_intake_roots: []\n", encoding="utf-8"
+        )
+        subprocess.run(["git", "init", "-q", "-b", "test-branch"], cwd=root, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=root, check=True)
+        return root
+
+    def test_ingest_invokes_heartbeat_callback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.librarian import ingest
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path / "cache"))
+        root = self._seed_root(tmp_path)
+
+        calls = {"n": 0}
+
+        def hb() -> None:
+            calls["n"] += 1
+
+        # First call: no prior ingest-manifest exists, so the incremental
+        # fast-no-op guard (`stored is not None and new_or_changed == 0`)
+        # does not short-circuit — this reaches `run()` exactly like a real
+        # on-demand `athenaeum ingest` invocation would on an empty backlog.
+        result = ingest(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            incremental=True,
+            cache_dir=tmp_path / "cache",
+            dry_run=False,
+            retire=False,
+            install_signal_handlers=False,
+            heartbeat=hb,
+        )
+        assert result.exit_code == 0
+        assert calls["n"] >= 1
+
+    def test_session_end_invokes_heartbeat_callback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.librarian import session_end
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path / "cache"))
+        root = self._seed_root(tmp_path)
+
+        calls = {"n": 0}
+
+        def hb() -> None:
+            calls["n"] += 1
+
+        result = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            incremental=True,
+            cache_dir=tmp_path / "cache",
+            dry_run=False,
+            retire=False,
+            install_signal_handlers=False,
+            heartbeat=hb,
+        )
+        assert result.ingest.exit_code == 0
+        assert calls["n"] >= 1
+
+
+class TestIngestPathLongRunSurvivesContendedBreak:
+    """AC2 (issue athenaeum#1230): pin the CHOSEN behaviour end to end — a
+    holder that heartbeats while making progress past `break_stale_after`
+    must not be broken by a contending `acquire`. Uses an injected clock (no
+    real multi-hour sleep): `athenaeum.store` is where every ISO timestamp
+    this module reads/writes actually comes from (`RunLock` re-exports its
+    helpers — see the module docstring), so patching `store.datetime` moves
+    both what `heartbeat()` writes and what `heartbeat_age_seconds` reads.
+    """
+
+    def _install_fake_clock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> dict[str, datetime]:
+        from athenaeum import store
+
+        fake_now = {"t": datetime.now(timezone.utc)}
+
+        class _FakeDatetime(datetime):
+            @classmethod
+            def now(cls, tz: object = None) -> datetime:
+                return fake_now["t"]
+
+        monkeypatch.setattr(store, "datetime", _FakeDatetime)
+        return fake_now
+
+    def test_heartbeating_holder_survives_a_simulated_7h_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from datetime import timedelta
+
+        fake_now = self._install_fake_clock(monkeypatch)
+
+        holder = RunLock(tmp_path)
+        holder.acquire()
+        try:
+            # Simulate the ingest path making progress for 7h (past the
+            # deployment's 6h break_stale_after default) — heartbeating every
+            # simulated 10 minutes, the same per-phase cadence run()'s
+            # ctx.tick_heartbeat() uses. Total ACQUIRE age is now 7h, but the
+            # heartbeat has never gone stale for more than 10 simulated
+            # minutes at a stretch.
+            for _ in range(42):
+                fake_now["t"] = fake_now["t"] + timedelta(minutes=10)
+                holder.heartbeat()
+
+            # A contending acquire resolving the deployment default
+            # (break_stale_after=6h) must NOT auto-break: the holder is
+            # genuinely making progress, not wedged.
+            contender = RunLock(tmp_path, break_stale_after=6 * 3600)
+            with pytest.raises(LockHeld):
+                contender.acquire()
+        finally:
+            holder.release()
+
+    def test_non_heartbeating_holder_is_broken_under_the_same_clock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The counterpart proving the test above is not vacuous: SAME injected
+        # 7h clock advance, but no heartbeat refresh (the pre-athenaeum#1230
+        # `ingest` behaviour) — the holder's heartbeat age also reaches 7h, so
+        # the contending acquire's break_stale_after (6h) DOES fire.
+        from datetime import timedelta
+
+        fake_now = self._install_fake_clock(monkeypatch)
+
+        holder = RunLock(tmp_path)
+        holder.acquire()
+        try:
+            fake_now["t"] = fake_now["t"] + timedelta(hours=7)
+
+            contender = RunLock(tmp_path, break_stale_after=6 * 3600)
+            contender.acquire()  # auto-breaks the wedged-looking holder
+            try:
+                holder_meta = read_holder(tmp_path / runlock.LOCKFILE_NAME)
+                assert holder_meta is not None
+                assert holder_meta["pid"] == str(os.getpid())
+            finally:
+                contender.release()
+        finally:
+            holder.release()  # already-broken flock; release() is still safe
 
 
 class TestRunLockLoudStaleWarning:

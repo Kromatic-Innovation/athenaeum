@@ -115,6 +115,60 @@ open/flock/inode-check/metadata-write mechanism). Otherwise unchanged: this
 module owns the lock/heartbeat *policy* — it has no knowledge of what a "run"
 does; that belongs to :mod:`athenaeum.librarian` and the CLI, which call
 :meth:`RunLock.acquire` / :meth:`RunLock.heartbeat` around their own logic.
+
+**Heartbeat audit (issue athenaeum#1230).** ``break_stale_after`` is only safe if
+every holder that can plausibly run long enough to approach it actually calls
+:meth:`RunLock.heartbeat`. athenaeum#1230 found one gap by observation (``athenaeum
+ingest``, whose heartbeat age equalled its total run time); this table
+records a full sweep of every acquisition site in ``src/athenaeum/`` so the
+next holder that skips it is a deliberate, reviewed decision rather than a
+rediscovery. "Bounded" below means: deterministic and/or capped work with no
+plausible path to the 6h default threshold, not a formal proof.
+
+* ``_cmd_run.py`` (``run``) — **Yes.** athenaeum#526 (H10) precedent: threads
+  ``lock.heartbeat`` into ``run()``'s ``ctx.tick_heartbeat()`` phase/per-file
+  ticks.
+* ``_cmd_index.py`` (``ingest``) — **Yes** (athenaeum#1230 fix). Threads
+  ``lock.heartbeat`` into ``ingest()``, which forwards it to ``run()`` exactly
+  like the ``run`` command.
+* ``_cmd_index.py`` (``session-end``) — **Yes** (athenaeum#1230 fix).
+  ``session_end()`` forwards to ``ingest()`` then ``run()`` — same chain,
+  same fix. The inner timeout defaults to 900s (well under 6h) but
+  ``KNOWLEDGE_REBUILD_TIMEOUT`` is operator-configurable, so this is wired
+  rather than left latent behind a larger outer timeout.
+* ``_cmd_index.py`` (``reindex``/``rebuild-index``) — **No; bounded.**
+  Deterministic FTS5/local-embedding index build, no LLM/network call —
+  bounded by corpus size, not wall-clock-open-ended.
+* ``_cmd_drain.py`` (``drain``) — **Yes** (athenaeum#1230 fix). The SAME class
+  of gap as ``ingest``, found by this sweep: explicitly unbounded
+  (``max_runtime=0``), batch mode block-polls the Anthropic Batch API (which
+  can itself take hours), and ONE lock is held across every window of the
+  whole drain.
+* ``_cmd_merges.py`` (``merges recompare --apply``) — **Yes** (athenaeum#1230
+  fix). Found by this sweep: an unbounded-proposal-count, per-pair LLM
+  classify loop with no existing heartbeat tick despite already receiving
+  the caller's lock. Ticked once per proposal in
+  :func:`athenaeum.recompare.recompare_pending_merges`.
+* ``_cmd_decay.py`` (``decay-sweep --apply``) — **No; bounded.** Deterministic
+  file archive sweep, no LLM/network call.
+* ``_cmd_repair.py`` (``repair --apply``, all modes) — **No; bounded.**
+  Deterministic frontmatter/slug/bounce-fold rewrites, no LLM call.
+* ``_cmd_curate.py`` (``dedupe``/``auto-memory prune*``) — **No; bounded.**
+  Deterministic clustering/report-application passes, no LLM call at apply
+  time (pairs are pre-computed in a separate dry-run step).
+* ``_cmd_reconcile.py`` (``reconcile --apply``) — **No; bounded.**
+  Deterministic raw-tree retirement, no LLM/network call.
+* ``_cmd_pii_restore.py`` (``pii-restore --apply``) — **No; bounded.**
+  Deterministic restore bounded by ``--limit``, no LLM call.
+* ``_cmd_pending.py`` (``ingest-answers``) — **No; bounded.** Bounded by the
+  operator/agent-paced pending-answer backlog (not the raw-intake backlog);
+  occasional single LLM call per answer.
+* ``_cmd_pending.py`` (``ingest-merges``) — **No; bounded.** Deterministic
+  sidecar move/compact, no LLM call.
+* ``_cmd_pending.py`` (``reresolve-questions``) — **No; bounded.** LLM-backed,
+  but capped at ``resolve_max_per_run`` (default 250) resolver calls — stays
+  well under 6h at normal API latency even at the cap. Re-audit if that
+  default is ever raised materially.
 """
 
 from __future__ import annotations

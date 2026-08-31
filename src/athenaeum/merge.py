@@ -1612,6 +1612,112 @@ def render_merged_entry(entry: MergedWikiEntry) -> str:
     return render_frontmatter(meta) + "\n" + body
 
 
+def _off_corpus_erasure_class_slugs(
+    config: dict[str, Any] | None, knowledge_root: Path
+) -> set[str]:
+    """Slugs already present in the off-corpus store (issue athenaeum#1116 AC1).
+
+    :mod:`athenaeum.erasure`'s ``classify_inference_taint`` needs the set of
+    slugs that are ALREADY erasure-class to decide whether a compiled
+    ``## Inference`` block's basis taints its page. This module has no
+    page-level ``data_class`` classification of its own to consult (that is
+    :mod:`athenaeum.erasure`'s territory, out of scope here) — the live
+    signal a wired system actually has is off-corpus STORE MEMBERSHIP
+    itself: a page already routed off-corpus (by this same routing, by the
+    answers lane's re-ingestion classification, or by an operator) is
+    exactly what "erasure-class content" cashes out to once a real
+    off-corpus surface exists. Empty when off-corpus is not configured (the
+    common case today) — see :func:`_route_merged_entry_write`'s docstring
+    for the off-corpus-absent posture that follows from that.
+    """
+    from athenaeum.off_corpus import off_corpus_adapter, off_corpus_store
+
+    store = off_corpus_store(config, knowledge_root)
+    if store is None:
+        return set()
+    adapter = off_corpus_adapter(config)
+    assert adapter is not None  # off_corpus_store already returned non-None
+    slugs: set[str] = set()
+    for meta in store.iter_meta(adapter.name):
+        stem = Path(meta.key.key).stem
+        slugs.add(stem)
+        if stem.startswith(AUTO_WIKI_PREFIX):
+            slugs.add(stem[len(AUTO_WIKI_PREFIX) :])
+    return slugs
+
+
+def _route_merged_entry_write(
+    entry: MergedWikiEntry,
+    text: str,
+    *,
+    wiki_root: Path,
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    erasure_class_slugs: set[str],
+) -> Path | None:
+    """Write one compiled entry, routing a derivation-tainted page off-corpus
+    instead of the ordinary git-tracked corpus (issue athenaeum#1116 AC1).
+
+    A page is tainted when one of its ``## Inference`` blocks' ``**Basis**``
+    cites a slug in *erasure_class_slugs*
+    (:func:`athenaeum.erasure.classify_inference_taint`) — "a paraphrase in
+    git is the same leak as a quote" (that function's docstring).
+
+    **Reversible default (issue athenaeum#1116).** When off-corpus IS
+    configured, a tainted page is written there instead of under
+    ``wiki_root`` and this function returns ``None`` — nothing lands in the
+    ordinary corpus. When off-corpus is NOT configured, there is nothing to
+    route to; hard-failing every deployment that has not configured
+    off-corpus would be worse than the gap this issue closes, so the page
+    still lands in the ordinary corpus exactly as it did before this
+    wiring, but a structured, greppable WARNING names the taint and the
+    page so the gap is visible in logs instead of silent. This default is
+    reversible — revisit if review prefers a hard failure instead.
+
+    Returns the path written under ``wiki_root``, or ``None`` when the page
+    was routed off-corpus instead (so callers can log accordingly).
+    """
+    from athenaeum.erasure import classify_inference_taint
+
+    tainted = classify_inference_taint(text, erasure_class_slugs=erasure_class_slugs)
+    if tainted:
+        basis_slugs = sorted({basis for block in tainted for basis in block.basis})
+        from athenaeum.off_corpus import off_corpus_adapter, off_corpus_store
+        from athenaeum.store import StoreKey
+
+        store = off_corpus_store(config, knowledge_root)
+        if store is not None:
+            adapter = off_corpus_adapter(config)
+            assert adapter is not None  # off_corpus_store already returned non-None
+            store.put(
+                StoreKey(surface=adapter.name, key=entry.filename), text.encode("utf-8")
+            )
+            # Propagate within this same run: a later entry's basis may cite
+            # THIS entry, and it must see it as erasure-class too.
+            erasure_class_slugs.add(entry.topic_slug)
+            log.info(
+                "merge: routed %s off-corpus (athenaeum#1116 AC1 - %d inference "
+                "block(s) derived from erasure-class basis %s)",
+                entry.filename,
+                len(tainted),
+                basis_slugs,
+            )
+            return None
+        log.warning(
+            "erasure-taint-not-routed: %s carries %d inference block(s) derived "
+            "from erasure-class basis %s but no off-corpus surface is configured "
+            "(off_corpus.enabled=false) - writing to the ordinary corpus "
+            "(athenaeum#1116)",
+            entry.filename,
+            len(tainted),
+            basis_slugs,
+        )
+
+    page_path = wiki_root / entry.filename
+    atomic_write_text(page_path, text)
+    return page_path
+
+
 def merge_clusters_to_wiki(
     knowledge_root: Path,
     *,
@@ -2425,15 +2531,25 @@ def merge_clusters_to_wiki(
         )
         write_heartbeat.start()
         wiki_root.mkdir(parents=True, exist_ok=True)
+        # Issue athenaeum#1116 AC1: the set of slugs a tainted ``## Inference``
+        # basis is checked against, seeded from current off-corpus store
+        # membership and grown in-run as entries get routed off-corpus below.
+        erasure_class_slugs = _off_corpus_erasure_class_slugs(resolved_config, knowledge_root)
         for entry in entries:
             text = render_merged_entry(entry)
             first_write_render[entry.filename] = text
-            page_path = wiki_root / entry.filename
-            atomic_write_text(page_path, text)
+            page_path = _route_merged_entry_write(
+                entry,
+                text,
+                wiki_root=wiki_root,
+                knowledge_root=knowledge_root,
+                config=resolved_config,
+                erasure_class_slugs=erasure_class_slugs,
+            )
             log.info(
                 "merge: wrote %s (cluster %s, %d source(s), contradictions=%s) "
                 "[pre-C4 first write, athenaeum#462]",
-                page_path,
+                page_path if page_path is not None else f"{entry.filename} (off-corpus)",
                 entry.cluster_id,
                 len(entry.sources),
                 entry.contradictions_detected,
@@ -2691,7 +2807,17 @@ def merge_clusters_to_wiki(
         if not dry_run:
             new_text = render_merged_entry(entry)
             if new_text != first_write_render.get(entry.filename):
-                atomic_write_text(wiki_root / entry.filename, new_text)
+                # Issue athenaeum#1116 AC1: same taint check/routing as the
+                # first write above — a re-write must not silently un-route a
+                # tainted page back into the ordinary corpus.
+                _route_merged_entry_write(
+                    entry,
+                    new_text,
+                    wiki_root=wiki_root,
+                    knowledge_root=knowledge_root,
+                    config=resolved_config,
+                    erasure_class_slugs=erasure_class_slugs,
+                )
                 first_write_render[entry.filename] = new_text
                 log.info(
                     "merge: re-wrote %s after C4 (cluster %s, contradictions=%s) "

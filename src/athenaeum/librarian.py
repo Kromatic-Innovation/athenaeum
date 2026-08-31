@@ -89,7 +89,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from athenaeum import batch_state, detection_state, spend, zero_yield
+from athenaeum import batch_state, detection_state, push_state, spend, zero_yield
 from athenaeum._retry import TransientAPIError
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.authority import AuthorityManifest, load_authority_manifest
@@ -203,7 +203,7 @@ from athenaeum.provider import (
     resolve_provider,
 )
 from athenaeum.quarantine import quarantine_file as _quarantine_file
-from athenaeum.registry import collect_handles
+from athenaeum.registry import assert_handles_placed, collect_handles
 from athenaeum.rule_proposals import _get_rule_proposals_model, run_rule_proposal_detection
 from athenaeum.rules import run_shape_rule_phase
 from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home now
@@ -504,6 +504,33 @@ DEFAULT_ZERO_YIELD_ALERT_THRESHOLD = 3
 # yaml override).
 ZERO_YIELD_ALERT_PREFIX = "librarian-zero-yield-alert"
 
+# Issue athenaeum#1229 part 4: a push rejected for the SAME reason on repeated
+# runs must surface, not retry silently forever -- the exact gap a real
+# deployment hit (GH001, an oversized blob) for four days / 1,527 commits
+# before anyone noticed, because `git_push`'s existing per-attempt WARNING
+# (below) looks identical to an ordinary one-off transient failure. Mirrors
+# ZERO_YIELD_PREFIX/ZERO_YIELD_ALERT_PREFIX's two-tier shape exactly: the
+# per-attempt WARNING already exists (`athenaeum-push-failed:`, unchanged)
+# and fires every failed push regardless of streak length; this is the
+# escalation, a separately-greppable ERROR line once the SAME reason has
+# recurred `DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD`-many (or the env-tuned)
+# consecutive times. Persisted cross-run state lives in
+# :mod:`athenaeum.push_state` (see that module's docstring for why the
+# cache dir, not `wiki_root`).
+PUSH_FAILURE_ALERT_PREFIX = "librarian-push-failure-alert"
+
+# Consecutive-same-reason push failures at which the ALERT fires. 3 mirrors
+# DEFAULT_STUCK_FILE_THRESHOLD / DEFAULT_ZERO_YIELD_ALERT_THRESHOLD's own
+# default exactly: `push_after_run` is opt-in and typically runs once per
+# nightly librarian invocation, so 3 consecutive same-reason failures means
+# an operator is alerted within ~3 nightly cycles of a persistent problem
+# (a real misconfiguration or a hard limit like GH001) rather than after the
+# four-day / ~120-run silence the motivating incident actually ran to.
+# Resolved via :func:`librarian_push_failure_alert_threshold` (env override
+# only -- see that function's docstring for why `config` is not threaded
+# through `git_push`).
+DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD = 3
+
 # Fallback valid values if schema files are missing.
 #
 # Issue athenaeum#964: a ``FALLBACK_TYPES`` used to be defined here AND, separately,
@@ -688,6 +715,22 @@ def git_push(
     When *branch* is ``None``, ``git push`` defaults to the configured
     upstream for the current branch (the conventional nightly setup).
     Passing an explicit branch makes the refspec deterministic.
+
+    Issue athenaeum#1229 part 4: every attempt updates a small cross-run streak
+    in :mod:`athenaeum.push_state` — how many CONSECUTIVE attempts have
+    failed for the exact same reason text. A success resets it to zero,
+    unconditionally. A failure for the SAME reason as last time extends it;
+    a failure for a DIFFERENT reason starts a fresh streak of 1 (a new kind
+    of failure is not evidence the old one is still happening). Once the
+    streak reaches :func:`librarian_push_failure_alert_threshold`, a
+    SEPARATE, louder ``PUSH_FAILURE_ALERT_PREFIX`` ERROR line fires in
+    addition to (not instead of) the existing per-attempt WARNING below —
+    mirrors :data:`ZERO_YIELD_PREFIX`/:data:`ZERO_YIELD_ALERT_PREFIX`'s
+    two-tier shape exactly. This never changes the return value or makes a
+    push failure fatal: the non-fatal-retry behaviour is correct for a
+    one-off transient failure; the defect this closes is that repeating it
+    forever for the SAME reason was previously invisible, not that a single
+    failure needs to become an error.
     """
     if not (knowledge_root / ".git").exists():
         log.warning("No .git in %s — skipping git push", knowledge_root)
@@ -702,7 +745,9 @@ def git_push(
         capture_output=True,
         text=True,
     )
+    _push_cache_dir = _resolve_cache_dir(None)
     if result.returncode != 0:
+        reason = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
         # Non-fatal: surface the failure with a distinct log line so an
         # operator (or the routine watching the run) can see exactly which
         # remote rejected the push and why. Commits remain intact locally.
@@ -712,9 +757,32 @@ def git_push(
             remote,
             f" {branch}" if branch else "",
             result.returncode,
-            (result.stderr or result.stdout or "").strip(),
+            reason,
         )
+        _previous_push_state = push_state.load_state(_push_cache_dir)
+        _consecutive = (
+            _previous_push_state["consecutive"] + 1
+            if _previous_push_state["last_reason"] == reason[: push_state.MAX_REASON_LENGTH]
+            else 1
+        )
+        push_state.write_state(_push_cache_dir, consecutive=_consecutive, last_reason=reason)
+        _push_alert_threshold = librarian_push_failure_alert_threshold()
+        if _consecutive >= _push_alert_threshold:
+            log.error(
+                "%s: git push %s%s has failed for the SAME reason on %d "
+                "consecutive attempt(s) — at or past the alert threshold of "
+                "%d (ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD, issue athenaeum#1229); "
+                "commits remain local and keep being retried automatically, "
+                "but this is no longer a silent retry: %s",
+                PUSH_FAILURE_ALERT_PREFIX,
+                remote,
+                f" {branch}" if branch else "",
+                _consecutive,
+                _push_alert_threshold,
+                reason,
+            )
         return False
+    push_state.write_state(_push_cache_dir, consecutive=0, last_reason="")
     log.info(
         "Pushed knowledge commits to %s%s",
         remote,
@@ -1228,6 +1296,7 @@ def _apply_tier3_results(
     wiki_root: Path,
     index: EntityIndex,
     config: dict[str, object] | None,
+    incoming_handles: dict[str, object] | None = None,
 ) -> None:
     """Write a Tier-3 result set to disk and fold it into *result* in place.
 
@@ -1239,7 +1308,36 @@ def _apply_tier3_results(
     or the partial payload carried on a caught
     :class:`~athenaeum.models.RawFileOverBudgetError` (bound tripped
     mid-file); this function does not know or care which.
+
+    ``incoming_handles`` (issue athenaeum#1109) is :func:`athenaeum.registry.collect_handles`
+    applied to the source raw file's OWN frontmatter, or ``None``/``{}`` when
+    it carried none. When non-empty, every key it names must appear on at
+    least one of *new_entities* / *pending_updates* — Tier 2/3 has no schema
+    awareness of the athenaeum#453 source-handle keys and would otherwise fold them
+    into page-body prose, the exact defect athenaeum#1109 exists to close.
+    Checked BEFORE any write below, so a miss refuses the whole batch rather
+    than partially writing it: :func:`athenaeum.registry.assert_handles_placed`
+    raises :class:`~athenaeum.registry.UnplaceableSourceHandleError`, which
+    propagates out of this function (and out of :func:`process_one`)
+    uncaught — the same "raw stays on disk, run continues, failure is
+    ledgered" contract every other Tier-2/3 processing failure already gets
+    from the entity-sweep loop's generic exception handler. The over-budget
+    partial-progress call site deliberately passes ``None`` here — see its
+    call site's comment — to preserve issue athenaeum#994's guarantee that
+    already-computed partial progress always lands durably.
     """
+    if incoming_handles:
+        _written_metas: list[dict[str, object]] = []
+        for _, _pending_content in pending_updates:
+            _pending_meta, _ = parse_frontmatter(_pending_content)
+            if _pending_meta:
+                _written_metas.append(_pending_meta)
+        for _entity in new_entities:
+            _entity_meta, _ = parse_frontmatter(_entity.render())
+            if _entity_meta:
+                _written_metas.append(_entity_meta)
+        assert_handles_placed(incoming_handles, _written_metas)
+
     for _update_path, _update_content in pending_updates:
         atomic_write_text(_update_path, _update_content)
 
@@ -1395,6 +1493,12 @@ def process_one(
     # and `dry_run`'s own early return before Tier 2/3 (below) means no LLM
     # call is at risk from skipping this either way.
     raw_meta, raw_body = parse_frontmatter(raw.content)
+    # Issue athenaeum#1109: snapshot the raw's OWN populated source handles (if any)
+    # before anything downstream touches raw_meta/raw_body, so the Tier 2/3
+    # write path below can verify they actually reach frontmatter and not
+    # just page-body prose. `{}` for the overwhelming majority of raws that
+    # carry no source handle at all.
+    incoming_handles = collect_handles(raw_meta)
     if not dry_run:
         preamble = raw.content[: len(raw.content) - len(raw_body)]
         redacted_body = route_sensitive_values(
@@ -1703,13 +1807,20 @@ def process_one(
 
     if not actions:
         log.info("  No actions needed for %s", raw.ref)
-        if address_escalations:
+        if address_escalations or incoming_handles:
             # Issue athenaeum#1126: the raw file is unlinked after this run
             # regardless of outcome (below, on the write path) — if the ONLY
             # classification for this file was a declined address, the
             # early return above would otherwise destroy the fact silently.
             # Flush the escalation(s) through the same write/escalate seam
             # the normal completion path uses.
+            #
+            # Issue athenaeum#1109: also reached (with `address_escalations` possibly
+            # empty) when this raw carries populated source handles but Tier
+            # 1/2 found NO action to take for it at all — the most direct
+            # form of "these handles are about to be silently dropped".
+            # `_apply_tier3_results` raises before this would otherwise be a
+            # silent no-op return.
             _apply_tier3_results(
                 result,
                 new_entities=[],
@@ -1719,6 +1830,7 @@ def process_one(
                 wiki_root=wiki_root,
                 index=index,
                 config=config,
+                incoming_handles=incoming_handles,
             )
         return result
 
@@ -1753,6 +1865,14 @@ def process_one(
         # instead of discarding it. Mirrors the full-completion write path
         # below exactly, applied to the exception's partial payload instead
         # of a clean return.
+        #
+        # Issue athenaeum#1109: `incoming_handles` is deliberately NOT passed here
+        # (left at its default, `None`). This is athenaeum#994's partial-progress
+        # path — the whole point is that already-computed work lands durably
+        # no matter what. Refusing this write over a handle-placement miss
+        # would risk losing legitimate partial progress the budget trip cut
+        # short before it got there. The over-budget/quarantine-ledger path
+        # (unchanged) still flags this file, so it is retried next run.
         _apply_tier3_results(
             result,
             new_entities=exc.new_entities,
@@ -1775,6 +1895,7 @@ def process_one(
         wiki_root=wiki_root,
         index=index,
         config=config,
+        incoming_handles=incoming_handles,
     )
     return result
 
@@ -2812,6 +2933,38 @@ def librarian_zero_yield_alert_threshold(config: dict[str, object] | None = None
             if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
                 return raw
     return DEFAULT_ZERO_YIELD_ALERT_THRESHOLD
+
+
+def librarian_push_failure_alert_threshold() -> int:
+    """Resolve the consecutive-same-reason push-failure count at which the
+    ALERT fires (issue athenaeum#1229 part 4).
+
+    Env-override only (``ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD`` >
+    :data:`DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD`) -- deliberately NOT
+    threaded through ``config`` like :func:`librarian_zero_yield_alert_threshold`
+    is. ``git_push`` (unlike the zero-yield predicate, which only ever runs
+    from inside ``_run_finalize_phase`` with a ``RunContext`` on hand) is a
+    small leaf helper called from several independent sites across a run
+    (the phase-boundary deadline trip, the finalize-phase push, a future
+    call site) and is also directly unit-tested with a bare bool-returning
+    fake standing in for it
+    (``tests/test_librarian_push.py::_patch_git_push``,
+    ``tests/test_librarian_deadline.py::_spy_git_push``) -- threading
+    ``config`` through it would widen its signature, and every one of those
+    test doubles, for a value an operator can already tune per-host via env
+    var without any of that churn. Non-numeric, non-positive, or bool
+    values fall back to :data:`DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD`,
+    mirroring :func:`librarian_zero_yield_alert_threshold`'s own validation.
+    """
+    env = os.environ.get("ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD")
+    if env is not None:
+        try:
+            value = int(env)
+            if value >= 1:
+                return value
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD
 
 
 def _stuck_content_hash(raw: Any) -> str:

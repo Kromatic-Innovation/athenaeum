@@ -162,6 +162,92 @@ def auto_memory_type_from_frontmatter(meta: dict[str, Any] | None) -> str | None
 _AUTO_MEMORY_SKIP_NAMES: frozenset[str] = frozenset({"MEMORY.md"})
 
 
+def _raise_if_knowledge_root_is_actually_raw_root(
+    knowledge_root: Path, config: dict[str, object] | None
+) -> None:
+    """Raise ``ValueError`` naming ``knowledge_root`` when *knowledge_root*
+    looks like it is actually ``knowledge_root/raw`` -- the raw-intake
+    root itself -- one level too deep (issue athenaeum#1134).
+
+    Every ``recall.extra_intake_roots`` entry (default ``raw/auto-memory``)
+    is resolved RELATIVE TO ``knowledge_root``. Pass the raw root
+    (``knowledge_root/raw``) where ``knowledge_root`` is expected and every
+    entry resolves one level too deep (``raw_root/raw/auto-memory`` instead
+    of the real ``raw_root/auto-memory``), so :func:`resolve_extra_intake_roots`
+    finds nothing and warns -- indistinguishable, to a caller, from "no
+    extra intake configured" (this is exactly the ``raw_root``-passed-as-
+    ``knowledge_root`` mistake the issue's retro traces).
+
+    Detected by noticing an entry's LAST path segment (e.g.
+    ``auto-memory``) sitting directly under *knowledge_root* while the
+    full configured relative entry (``raw/auto-memory``) does not exist
+    there -- the one-level shift the mistake produces. Only called on the
+    already-empty-roots fallback path, and only inspects MULTI-SEGMENT
+    relative entries (a single-segment entry, e.g. ``auto-memory``, or an
+    absolute path has no "shift" to detect). A knowledge root that simply
+    has not been populated yet (no matching directory at either depth)
+    triggers nothing here and falls through to the ordinary "nothing
+    configured" empty-list return -- this guard flags a *positive* sign of
+    misuse, never the mere absence of one.
+    """
+    resolved_config = config if config is not None else load_config(knowledge_root)
+    recall_cfg = resolved_config.get("recall") if isinstance(resolved_config, dict) else None
+    raw_entries = recall_cfg.get("extra_intake_roots") if isinstance(recall_cfg, dict) else None
+    if not isinstance(raw_entries, list):
+        return
+    for item in raw_entries:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        entry = Path(item)
+        if entry.is_absolute() or len(entry.parts) < 2:
+            continue  # nothing to shift for a single-segment or absolute entry
+        shifted = knowledge_root / entry.name
+        intended = knowledge_root / entry
+        if shifted.is_dir() and not intended.is_dir():
+            raise ValueError(
+                f"knowledge_root={knowledge_root!r} looks like the raw-intake "
+                f"root itself, not the knowledge root: found "
+                f"'{entry.name}/' directly inside it but no '{entry}/'. Pass "
+                "the knowledge root (raw_root.parent), not raw_root, as "
+                "knowledge_root."
+            )
+
+
+def _raise_if_raw_root_is_actually_knowledge_root(
+    raw_root: Path, *, param_name: str
+) -> None:
+    """Raise ``ValueError`` naming *param_name* when *raw_root* is not a
+    plausible raw-intake root but the knowledge root one level up instead
+    (issue athenaeum#1134).
+
+    A knowledge root's own two top-level children are ``wiki/`` and
+    ``raw/`` (see this module's docstring and e.g.
+    ``tests/test_librarian_auto_memory.py``'s fixtures). A raw-intake
+    root's own children are SOURCE directories (``sessions``,
+    ``auto-memory``, ``answers``, ...) -- no production source and no test
+    fixture in this repo names one ``wiki`` or ``raw``. So either name
+    appearing as a direct child of *raw_root* is the adjacent-wrong-root
+    mistake this guards against: the caller passed the knowledge root
+    (whose ``raw/`` child is the value this function actually wants)
+    instead of ``knowledge_root / "raw"`` itself.
+
+    Only fires when *raw_root* already exists as a directory -- a
+    not-yet-created or genuinely empty raw root is a legitimate,
+    empty-backlog call that existing callers rely on returning ``[]``,
+    never raising.
+    """
+    if not raw_root.is_dir():
+        return
+    for marker in ("wiki", "raw"):
+        if (raw_root / marker).is_dir():
+            raise ValueError(
+                f"{param_name}={raw_root!r} looks like a knowledge_root (it "
+                f"has a '{marker}/' child) -- pass the raw-intake directory "
+                f"itself (knowledge_root / 'raw'), not its parent, as "
+                f"{param_name}."
+            )
+
+
 def discover_auto_memory_files(
     knowledge_root: Path | None = None,
     config: dict[str, object] | None = None,
@@ -178,6 +264,36 @@ def discover_auto_memory_files(
     at the auto-memory root (e.g. ``_migration-log.jsonl``) are excluded.
     The ``_unscoped/`` directory is included as a scope alongside named
     scopes — its files are first-class memories, not metadata.
+
+    ``knowledge_root`` must be the KNOWLEDGE root (the parent of ``wiki/``
+    and ``raw/``), never ``raw_root`` itself -- the two are adjacent,
+    type-identical :class:`Path` values, and passing the wrong one used to
+    fail open (issue athenaeum#1134): it silently returned ``[]``, reading
+    exactly like a truthful "nothing here" instead of the caller error it
+    is. When the ordinary resolution finds no extra intake roots, this
+    function now additionally checks for that specific mistake (see
+    :func:`_raise_if_knowledge_root_is_actually_raw_root`) and raises
+    ``ValueError`` naming ``knowledge_root`` when it detects it, rather
+    than falling through.
+
+    ``config`` distinguishes two DIFFERENT callers (issue athenaeum#1134 AC3):
+
+    - ``config=None`` (the default) loads ``knowledge_root``'s
+      ``athenaeum.yaml`` merged with the code defaults (see
+      :func:`athenaeum.config.load_config`) -- the default
+      ``recall.extra_intake_roots`` is ``["raw/auto-memory"]``, so a caller
+      who passes nothing gets the normal, populated behavior.
+    - ``config={}`` (or any dict with no ``recall`` key) is taken
+      LITERALLY, exactly like every other ``resolve_*`` helper in
+      :mod:`athenaeum.config` treats an explicit config dict -- it is
+      NEVER merged with disk/defaults. An empty (or ``recall``-less) dict
+      therefore means "this config explicitly configures zero extra
+      intake roots," and this function returns ``[]``, the same as a
+      correctly-identified root that genuinely has nothing configured
+      (AC2's bypass). This is a real behavioral difference from
+      ``config=None``, not a bug -- see
+      ``TestConfigNoneVersusEmptyDict`` in
+      ``tests/test_intake_root_guard.py`` for both directions pinned.
     """
     if knowledge_root is None:
         knowledge_root = Path.home() / "knowledge"
@@ -187,6 +303,7 @@ def discover_auto_memory_files(
     # raw/auto-memory but callers can configure more, so we iterate all.
     roots = resolve_extra_intake_roots(knowledge_root, config=config)
     if not roots:
+        _raise_if_knowledge_root_is_actually_raw_root(knowledge_root, config)
         return []
 
     # Issue athenaeum#278: resolve the ephemeral/operational classifier inputs once.
@@ -497,10 +614,21 @@ def discover_raw_files(
     file directly at its root — so this guard changes nothing about
     pre-athenaeum#974 behaviour, it only stops this issue's new code from
     reaching into a tree a sibling function already owns.
+
+    ``raw_root`` must be the raw-intake root (``knowledge_root / "raw"``),
+    never ``knowledge_root`` itself -- issue athenaeum#1134: the two are
+    adjacent, type-identical :class:`Path` values, and passing
+    ``knowledge_root`` here used to silently mis-scan ``wiki/`` and
+    ``raw/`` as if they were ordinary source directories rather than
+    raising. Raises ``ValueError`` naming ``raw_root`` when *raw_root*
+    exists and has a ``wiki/`` or ``raw/`` child of its own (see
+    :func:`_raise_if_raw_root_is_actually_knowledge_root`) -- the shape
+    only the knowledge root, never a genuine raw root, ever has.
     """
     files: list[RawFile] = []
     if not raw_root.exists():
         return files
+    _raise_if_raw_root_is_actually_knowledge_root(raw_root, param_name="raw_root")
 
     non_intake = resolve_non_intake_sources(config)
     raw_file_max_bytes = resolve_raw_file_max_bytes(config)
@@ -630,10 +758,16 @@ def discover_shape_rule_extra_intake_files(
     the only caller is :func:`athenaeum.rules.run_shape_rule_phase`, so
     ordinary intake discovery (compile, drain, status, merge, ...) is
     provably unchanged by this function's existence.
+
+    ``raw_root`` must be the raw-intake root, never ``knowledge_root``
+    itself -- same adjacent-wrong-root mistake documented on
+    :func:`discover_raw_files` (issue athenaeum#1134); raises ``ValueError``
+    naming ``raw_root`` under the same condition.
     """
     files: list[RawFile] = []
     if not raw_root.exists():
         return files
+    _raise_if_raw_root_is_actually_knowledge_root(raw_root, param_name="raw_root")
 
     non_intake = resolve_non_intake_sources(config)
     raw_file_max_bytes = resolve_raw_file_max_bytes(config)
@@ -683,6 +817,10 @@ def discover_raw_backlog_bytes(
     concurrent compile/retire pass): a per-file ``OSError`` is skipped rather
     than raising, mirroring :func:`athenaeum.models.RawFile.content`'s own
     stat-failure tolerance.
+
+    Delegates entirely to :func:`discover_raw_files` for discovery, so the
+    adjacent-wrong-root guard on ``raw_root`` (issue athenaeum#1134) applies
+    here too, transitively -- no separate check needed.
     """
     total = 0
     for raw in discover_raw_files(raw_root, config):

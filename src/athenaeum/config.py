@@ -3640,12 +3640,25 @@ def resolve_shape_rules_runtime_share(config: dict[str, Any] | None) -> float:
 def resolve_rule_proposals_threshold(config: dict[str, Any] | None) -> int:
     """``librarian.rule_proposals.threshold`` (default 50).
 
-    Issue athenaeum#905 AC1/AC2: the record count -- grouped by ``(source,
+    Issue athenaeum#905 AC1/AC2, respecified by issue athenaeum#1229 part 2: the
+    count of DISTINCT RECORDS (by ``source_ref``, never disposition ROWS --
+    see :func:`athenaeum.rule_proposals._distinct_record_count`, the single
+    function that makes this concrete) -- grouped by ``(source,
     key_fingerprint)``, restricted to rows the shape-rules pass deferred to
     the reasoning ladder (``tier is None`` in
     ``_shape_rule_dispositions.jsonl``; see :mod:`athenaeum.rule_proposals`)
     -- that must be crossed within :func:`resolve_rule_proposals_window_days`
     before the librarian drafts a candidate rule for that shape.
+
+    Counting rows instead of records is a real, ~9.5x-consequential
+    difference in practice: before the ledger deduped re-evaluations at
+    write time (issue athenaeum#1229 part 1), a handful of records
+    re-evaluated on every nightly run alone crossed a threshold of 50 by
+    row count while their DISTINCT record count stayed far below it (57 of
+    66 shapes crossed by row count vs. 6 by distinct record on the
+    deployment that motivated athenaeum#1229). This docstring's "record count"
+    was always the intent; :mod:`athenaeum.rule_proposals` now measures it,
+    not rows.
     """
     return _resolve_corrections_int(
         config,

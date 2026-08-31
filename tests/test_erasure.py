@@ -574,17 +574,25 @@ class TestAC9RetentionPacks:
 
 
 # ---------------------------------------------------------------------------
-# Wiring boundary: decay_sweep is untouched by this module (see
-# reconcile_bucket_daily_with_pack's docstring for why).
+# Wiring boundary: as of athenaeum#985, decay_sweep did not import this module
+# (see reconcile_bucket_daily_with_pack's docstring for why). Issue
+# athenaeum#1116 is exactly the wiring slice that docstring named — it
+# supplies decay_sweep's own known ``memory_class`` frontmatter field as
+# reconcile_bucket_daily_with_pack's *memory_class*, gated on a page also
+# carrying an explicit ``data_class`` (no shipped write path stamps one, so
+# this is a no-op on every corpus produced by shipped code today) — see
+# tests/test_decay_sweep.py for the round-trip coverage of that wiring.
 # ---------------------------------------------------------------------------
 
 
 class TestWiringBoundary:
-    def test_decay_sweep_does_not_import_erasure(self) -> None:
+    def test_decay_sweep_consults_erasure_for_pack_authority(self) -> None:
+        """Issue athenaeum#1116 AC3 flipped this invariant deliberately — see the
+        comment above."""
         import athenaeum.decay_sweep as decay_sweep_mod
 
         source = inspect.getsource(decay_sweep_mod)
-        assert "erasure" not in source
+        assert "erasure" in source
 
     def test_erasure_module_makes_no_llm_calls(self) -> None:
         """Structurally, not just in practice -- mirrors

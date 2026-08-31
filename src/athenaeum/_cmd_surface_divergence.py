@@ -4,11 +4,29 @@
 Generalizes ``bounce-divergence`` (issue athenaeum#853) and
 ``do-not-email-divergence`` (issue athenaeum#960) into ONE command,
 parameterized by ``--field``, driven by the :mod:`athenaeum.surface_divergence`
-registry. The two prior commands stay in place unchanged (their exact
-existing behavior — including ``bounce-divergence``'s historical
-exit-0-unless-unreadable contract — is a live, documented, tested surface
-this issue does not regress); this command is the new, failing-capable
-entry point an unattended caller should use going forward.
+registry. The two prior commands were removed once this command replaced
+them (issue athenaeum#1111) — this is now the ONLY divergence-guard entry
+point; ``bounce-divergence``'s historical exit-0-unless-unreadable contract
+lives on only as this command's opt-in ``--report-only`` mode. The two
+underlying library modules (:mod:`athenaeum.bounce_divergence`,
+:mod:`athenaeum.do_not_email_divergence`) stay in place — this command still
+wraps their unchanged compute/report/render/dict implementations — only
+their CLI wiring (``_cmd_bounce_divergence.py`` /
+``_cmd_do_not_email_divergence.py``) was removed.
+
+**The JSON ``diverged`` field is redefined at this layer (issue
+athenaeum#1111).** Each wrapped module's own ``report_as_dict`` reports
+``diverged`` as true whenever EITHER direction of the two-surface
+comparison differs — a broader notion than this command's exit code, which
+only fails on the field's declared NOT-tolerated direction
+(:func:`athenaeum.surface_divergence.get_field`'s
+``exceeds_allowance``). Left unmodified, a caller reading ``diverged``
+instead of the exit code could see ``"diverged": true`` on exit 0 (the
+design's own legal steady state for ``do_not_email``) — a live trap. This
+command's JSON output overrides ``diverged`` to track ``exceeds_allowance``
+so it can never contradict the exit code; a direct caller of the wrapped
+modules' own ``report_as_dict`` still gets their original, broader
+both-directions ``diverged`` semantics unchanged.
 
 **Why this is the "runs unattended and fails" half of the issue.** Every
 prior divergence command either never failed on divergence at all
@@ -77,7 +95,13 @@ def cmd_surface_divergence(args: argparse.Namespace) -> int:
     report = spec.compute(wiki_root, contacts_root, None)
 
     if args.json:
-        sys.stdout.write(json.dumps(spec.report_as_dict(report)) + "\n")
+        # athenaeum#1111: "diverged" is overridden to track exceeds_allowance
+        # (what actually drives the exit code below), not the wrapped
+        # module's own broader both-directions notion — see the module
+        # docstring's "The JSON diverged field is redefined at this layer".
+        payload = dict(spec.report_as_dict(report))
+        payload["diverged"] = spec.exceeds_allowance(report)
+        sys.stdout.write(json.dumps(payload) + "\n")
     else:
         sys.stdout.write(spec.render_report(report))
 

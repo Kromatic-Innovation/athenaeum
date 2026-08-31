@@ -158,6 +158,7 @@ See [exit-codes.md](exit-codes.md) for the full `athenaeum run` exit-code table 
 | T1-reject audit rate | — | `ATHENAEUM_AUDIT_SAMPLE_RATE_T1_REJECTS` | `librarian.audit_sample_rate_t1_rejects` | `0.075` | Share of T1 (haiku/sonnet) rejects randomly sampled into the human decisions queue as `type: "audit"` calibration items (athenaeum#438) — the false-reject half of the tier calibration loop. Deterministic per `(tier, proposal)`. Clamped to `[0.0, 1.0]` (`0.0` = OFF, `1.0` = audit everything); default `0.075` is the midpoint of the settled 5-10% band. `bool` / non-numeric values fall through to the default. |
 | Embedding cache root | — | `ATHENAEUM_CACHE_DIR` | — | `~/.cache/athenaeum` | Cache root used by the librarian's cluster pass (chromadb lives at `<dir>/wiki-vectors/`). The `recall` / `rebuild-index` commands do **not** read this var — they take `--cache-dir` (same default). |
 | Post-run git push | `--push` | — | `librarian.push_after_run` | off | Push the knowledge repo to its remote after a successful run that produced at least one commit (athenaeum#284). Closes the move-then-retire recovery gap on multi-machine setups: without it, scheduled nightly runs commit locally but origin silently drifts. Uses the operator's ambient git auth (credential helper / SSH); athenaeum handles no tokens or secrets. `--dry-run` never pushes; a run with no new commits never pushes; a push failure is a non-fatal warning (`athenaeum-push-failed:`) and the next run retries. Remote/branch come from `librarian.push_remote` (default `origin`) and `librarian.push_branch` (default: current branch's upstream). |
+| Push-failure alert threshold | — | `ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD` | — | `3` | Consecutive-SAME-REASON push-failure count at which `git_push` logs a dedicated `librarian-push-failure-alert` ERROR-level line (athenaeum#1229) — distinct from the plain `athenaeum-push-failed:` WARNING that fires on every failed push regardless of streak length. A push that keeps failing for the identical reason (e.g. `GH001`, an oversized blob) previously looked, on every retry, like an ordinary one-off transient failure — one deployment stranded 1,527 commits locally for four days before anyone noticed. A failure for a DIFFERENT reason than last time restarts the streak at 1 rather than extending it. State (the streak count and last reason text) is cross-run, persisted at `<cache_dir>/push_failure_state.json`, reset to 0 on the next successful push. Env-only (no yaml key) — see `librarian_push_failure_alert_threshold`'s docstring for why. Must be `>= 1`; non-numeric / non-positive / bool values fall back to the default. |
 | Run-lock wait | `--wait` | `ATHENAEUM_LOCK_TIMEOUT` | `librarian.lock_timeout` | `0` | Default seconds a mutating command blocks for the single-machine run lock before failing (athenaeum#309). `0` = fail-fast (name the holder, exit non-zero). The `--wait` flag overrides per-invocation. See the run-lock note below. |
 | Run-lock auto-break age | — | `ATHENAEUM_LOCK_BREAK_STALE_AFTER` | `librarian.lock_break_stale_after` | `21600` (6h) | Seconds of holder-heartbeat age after which a contended acquire auto-breaks a wedged-but-alive holder's lock, without a human passing `--force` (athenaeum#397). Comfortably above any healthy run; lower it once the librarian reliably refreshes the heartbeat. |
 | Run-lock stale warning age | — | `ATHENAEUM_LOCK_WARN_STALE_AFTER` | `librarian.lock_warn_stale_after` | `7200` (2h) | Seconds of holder-heartbeat age after which a contended acquire logs a prominent "likely wedged" warning naming the holder (athenaeum#397) — typically lower than the auto-break age, so an operator gets an early heads-up before auto-break fires. |
@@ -476,9 +477,11 @@ guard for the class of defect athenaeum#853/#960/#963 name: two surfaces
 (wiki frontmatter and the contacts/excluded surface) record the same fact
 under independent write paths with no invariant binding them, so a
 divergence is invisible unless something actually checks and can fail. It
-supersedes `bounce-divergence` / `do-not-email-divergence` as the entry
-point an unattended caller should use (those two commands still exist,
-unchanged, for backward compatibility and interactive use).
+replaced `bounce-divergence` / `do-not-email-divergence`, which were
+removed (issue athenaeum#1111) once this became the sole entry point for
+both fields — the per-field commands had zero remaining callers other than
+a redundant duplicate invocation of this one in cron-fleet's nightly sweep,
+which was collapsed to the generalized form in the same change.
 
 ```
 athenaeum surface-divergence --field bounced --path ~/knowledge
@@ -490,12 +493,15 @@ athenaeum surface-divergence --field do_not_email --path ~/knowledge
 | `bounced` | issue athenaeum#853 | Wiki-surface entries with no pii mark are TOLERATED — the documented evidence-class asymmetry, [bounce-surface-convergence.md](bounce-surface-convergence.md). Pii marks with no wiki entry are NOT tolerated (zero). |
 | `do_not_email` | issue athenaeum#960 | The excluded surface newly carrying the field (`marked_on_excluded_not_wiki`) is NOT tolerated (zero). The wiki carrying a mark the excluded surface does not (`marked_on_wiki_not_excluded`) is the design's only legal steady state and is TOLERATED — the wiki page is the sole authoring surface; athenaeum#960's design forbids backfilling marks onto the excluded surface (narrowed by athenaeum#1039, which had alerted on this legal state). |
 
-Exit codes (shared with `bounce-divergence` / `do-not-email-divergence`):
-`0` clean (or `--report-only`, which reports and never fails on divergence —
-interactive-inspection only, never for an unattended caller); `2` a surface
-could not be read (the difference is not a divergence measurement); `3` a
-registered field diverged beyond its declared allowance. An unregistered
-`--field` value is rejected by argument parsing rather than guessed at.
+Exit codes: `0` clean (or `--report-only`, which reports and never fails on
+divergence — interactive-inspection only, never for an unattended caller);
+`2` a surface could not be read (the difference is not a divergence
+measurement); `3` a registered field diverged beyond its declared
+allowance. An unregistered `--field` value is rejected by argument parsing
+rather than guessed at. The `--json` output's `diverged` field tracks this
+exit-code predicate, not the wrapped module's own broader (both-directions)
+notion of divergence — issue athenaeum#1111 fixed a defect where the two
+could disagree (JSON reporting `"diverged": true` on a `0` exit).
 
 **Where this runs unattended:**
 
