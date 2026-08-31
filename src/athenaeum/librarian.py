@@ -473,6 +473,23 @@ QUARANTINE_FILE_PREFIX = "librarian-quarantine-file"
 # updates.
 ZERO_YIELD_PREFIX = "librarian-zero-yield"
 
+# Issue athenaeum#1177 (AC2): consecutive-zero-yield count at which the ALERT
+# (distinct from the per-trip WARNING logged under ZERO_YIELD_PREFIX above,
+# which fires every zero-yield run regardless of streak length) escalates.
+# Resolved via :func:`librarian_zero_yield_alert_threshold` (env > yaml >
+# this default), mirroring DEFAULT_STUCK_FILE_THRESHOLD /
+# DEFAULT_QUARANTINE_THRESHOLD's precedence exactly. At the observed ~40
+# librarian runs/day, a default of 3 alerts within roughly two hours of
+# zero-yield runs starting — the four-day silent incident this issue exists
+# to prevent a recurrence of is ~160 runs; 3 is nowhere near that.
+DEFAULT_ZERO_YIELD_ALERT_THRESHOLD = 3
+
+# Stable, machine-greppable prefix for the ALERT line (distinct from
+# ZERO_YIELD_PREFIX's per-trip WARNING) emitted once a run's consecutive
+# zero-yield streak reaches DEFAULT_ZERO_YIELD_ALERT_THRESHOLD (or its env/
+# yaml override).
+ZERO_YIELD_ALERT_PREFIX = "librarian-zero-yield-alert"
+
 # Fallback valid values if schema files are missing.
 #
 # Issue athenaeum#964: a ``FALLBACK_TYPES`` used to be defined here AND, separately,
@@ -2666,6 +2683,39 @@ def librarian_quarantine_threshold(config: dict[str, object] | None = None) -> i
     return DEFAULT_QUARANTINE_THRESHOLD
 
 
+def librarian_zero_yield_alert_threshold(config: dict[str, object] | None = None) -> int:
+    """Resolve the consecutive-zero-yield count at which the ALERT fires (issue athenaeum#1177).
+
+    Mirrors :func:`librarian_stuck_file_threshold` (athenaeum#663) exactly: the
+    ``ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD`` env override wins over the yaml
+    ``librarian.zero_yield_alert_threshold`` key so a cron deployment can
+    tune it on a single run. Distinct from the existing per-trip WARNING
+    (``ZERO_YIELD_PREFIX``, logged every single zero-yield run) — this is
+    the escalation AC2 asks for: after N CONSECUTIVE zero-yield runs, a
+    louder, separately-greppable line fires. Must be ``>= 1`` (a threshold
+    below 1 could never distinguish "just tripped" from "escalated"),
+    non-numeric, non-positive, or bool values fall back to
+    :data:`DEFAULT_ZERO_YIELD_ALERT_THRESHOLD`.
+    """
+    env = os.environ.get("ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD")
+    if env is not None:
+        try:
+            value = int(env)
+            if value >= 1:
+                return value
+        except (TypeError, ValueError):
+            pass
+    if config is not None:
+        cfg = config.get("librarian") if isinstance(config, dict) else None
+        if isinstance(cfg, dict):
+            raw = cfg.get("zero_yield_alert_threshold")
+            # bool is an int subclass — `zero_yield_alert_threshold: yes` in
+            # yaml must not silently become a threshold of 1.
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+                return raw
+    return DEFAULT_ZERO_YIELD_ALERT_THRESHOLD
+
+
 def _stuck_content_hash(raw: Any) -> str:
     """Stable short hash of a raw file's content (athenaeum#663 stuck-file ledger key).
 
@@ -3504,6 +3554,14 @@ class RunContext:
     # ``merge_only``), distinguishing "no entity phase" from "entity phase
     # completed cleanly" (``"completed"``).
     entity_exit_reason: str | None = None
+    # Issue athenaeum#1177: the exception CLASS name of the most recent
+    # entity-phase per-file failure this run (e.g. ``"BadRequestError"``),
+    # set alongside every ``ctx.failed_files.append(raw.ref)`` in the entity
+    # loop's per-file except blocks. Read by ``_run_entity_tier_phase`` when
+    # classifying a run where every attempted call failed -- AC3 asks that
+    # such a run's ``reason`` name the error class, not read as a plain
+    # ``"completed"``. ``None`` when no file has failed this run.
+    entity_last_failure_class: str | None = None
     # Issue athenaeum#1135: CLI ``--allow-degraded`` escape hatch. When True, a
     # zero-progress refusal (see ``EXIT_LIBRARIAN_REFUSAL``) still logs the
     # ``librarian-run-degraded`` marker line but the run exits 0 instead of
@@ -4827,6 +4885,42 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
     return None
 
 
+def _auto_memory_reason(merge_stats: dict) -> str:
+    """The auto-memory (C1-C4) phase's ``reason`` classification (issue
+    athenaeum#1177, AC3), mirroring ``_entity_exit_reason``'s "must not read as
+    completed when everything failed" fix for this phase's own run-profile
+    entry.
+
+    ``merge_stats`` is the ``out_stats``/``out_merge_stats`` dict
+    :func:`athenaeum.merge.merge_clusters_to_wiki` populates (see its
+    docstring) — ``haiku_calls``/``resolve_calls`` count ATTEMPTS,
+    ``haiku_calls_succeeded``/``resolve_calls_succeeded`` (also issue
+    athenaeum#1177) count the subset that actually landed a response. A phase
+    that attempted at least one detector/resolver call and landed ZERO
+    successes must not read as ``"completed"`` — the exact shape a
+    four-day credits-exhausted incident produced (``detector_haiku: 20``
+    while the token ledger recorded zero tokens for all twenty). A phase
+    that made no attempts at all (nothing to detect/resolve this run) is a
+    genuine, unremarkable completion, not a failure — same distinction
+    ``_zero_yield_tripped``'s ``attempted_calls`` check draws.
+
+    Deliberately does not name the underlying exception class the way
+    ``_entity_exit_reason``'s ``all-calls-failed:<class>`` does:
+    :class:`~athenaeum.contradictions.ContradictionResult`'s
+    ``rationale="llm-unavailable"`` is an exact-match contract several
+    tests and :mod:`athenaeum.retire` already depend on, so it is not
+    threaded further here — see this issue's PR body for the scoping
+    rationale.
+    """
+    attempted = merge_stats.get("haiku_calls", 0) + merge_stats.get("resolve_calls", 0)
+    succeeded = merge_stats.get("haiku_calls_succeeded", 0) + merge_stats.get(
+        "resolve_calls_succeeded", 0
+    )
+    if attempted > 0 and succeeded == 0:
+        return "all-calls-failed"
+    return "completed"
+
+
 def _run_merge_only_phase(ctx: RunContext) -> int:
     """The ``merge_only`` early-return path: C3 merge from a prior C2 cluster
     JSONL, retire, reresolve, push, and summary emit. Issue athenaeum#461 seam.
@@ -4863,7 +4957,8 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
         return ctx.stop_on_deadline(exc.phase)
     # Issue athenaeum#1102 (AC1): a ``RunDeadlineExceeded`` above returns before
     # this append is ever reached, so reaching here always means the phase
-    # completed.
+    # ran to completion OR every attempted call failed -- see athenaeum#1177's
+    # ``_auto_memory_reason`` just below, which distinguishes the two.
     ctx.run_profile.append(
         (
             "auto-memory",
@@ -4876,7 +4971,7 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
                 ),
                 "clusters_merged": _merge_only_stats.get("entries_merged", 0),
                 "escalations": _merge_only_stats.get("escalations_written", 0),
-                "reason": "completed",
+                "reason": _auto_memory_reason(_merge_only_stats),
             },
         )
     )
@@ -5106,6 +5201,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
     assert ctx.max_api_calls is not None
     _entity_phase_start = time.monotonic()  # issue athenaeum#464
     _entity_phase_calls_before = ctx.usage.api_calls  # issue athenaeum#464
+    # Issue athenaeum#1177: snapshot the ATTEMPTED counter too, mirroring
+    # ``_entity_phase_calls_before`` above -- see the ``_entity_attempted``
+    # diff below, used to tell "made no attempts" (idle) apart from "every
+    # attempt failed" (the AC3 all-calls-failed classification).
+    _entity_phase_attempted_before = ctx.usage.attempted_calls
     # Issue athenaeum#490 (slice A): snapshot output tokens too, so the entity segment
     # can render output-tokens-per-call — the one figure that makes the silent
     # full-page-echo fallback (a ~10x output-cost degrade) visible in the run
@@ -5696,6 +5796,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             )
                             entity_heartbeat.tick(raw.ref, error=1)
                             ctx.failed_files.append(raw.ref)
+                            # Issue athenaeum#1177: named for the all-calls-failed exit
+                            # reason below, mirroring the WARNING line's own
+                            # exception-type naming just above.
+                            ctx.entity_last_failure_class = type(exc.last_error).__name__
                             # Issue athenaeum#663: a genuinely transient overload will NOT
                             # recur on the same file N nights running, so counting
                             # it toward "stuck" is safe — only a RELIABLY-failing
@@ -5729,6 +5833,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             )
                             entity_heartbeat.tick(raw.ref, error=1)
                             ctx.failed_files.append(raw.ref)
+                            # Issue athenaeum#1177: named for the all-calls-failed exit
+                            # reason below, mirroring the WARNING line's own
+                            # exception-type naming just above.
+                            ctx.entity_last_failure_class = type(exc).__name__
                             # Issue athenaeum#663: same stuck-file accounting for a
                             # non-transient processing failure (malformed file, a
                             # persistently-failing action). The failing action is
@@ -5909,6 +6017,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         # ``cluster_only`` (the phase never ran, so it is absent from the
         # summary rather than a misleading zero).
         _entity_calls = ctx.usage.api_calls - _entity_phase_calls_before
+        # Issue athenaeum#1177: attempted count for the SAME phase window, used
+        # below to distinguish "made no attempts" (idle) from "every
+        # attempt failed" (AC3) — see ``_entity_phase_attempted_before``'s
+        # comment.
+        _entity_attempted = ctx.usage.attempted_calls - _entity_phase_attempted_before
         # athenaeum#490 (slice A): output tokens per entity call. A silent full-page-echo
         # fallback re-emits a whole 16-23KB page, so this figure spikes when the
         # fallback fires often — the entity-cost regression the WARNINGs above
@@ -5938,10 +6051,24 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         # flight) still reports the event that actually shaped it. Deliberately
         # OUTSIDE ``_LIBRARIAN_EARLY_STOP_REASONS``: the athenaeum#1135 zero-progress
         # refusal must not fire on a run whose progress is in flight.
+        # Issue athenaeum#1177 (AC3): a run that ATTEMPTED work but landed zero
+        # successful calls must not read as "completed" -- that label is
+        # reserved for genuine completion (idle-with-nothing-to-do OR real
+        # successes), never for "every attempted call errored". Checked
+        # AFTER in_flight/deferred (both real, non-failure explanations for
+        # zero completed calls) so this only classifies the residual case:
+        # nothing deferred, nothing in flight, yet every attempt failed.
+        # Names the failure's exception class (``ctx.entity_last_failure_class``,
+        # set alongside ``ctx.failed_files`` in the per-file except blocks
+        # above) so the reason itself answers "failed how", not just "failed".
         if ctx.in_flight_refs:
             _entity_exit_reason = "batch-in-flight"
+        elif ctx.deferred_refs:
+            _entity_exit_reason = manifest_reason
+        elif _entity_attempted > 0 and _entity_calls == 0:
+            _entity_exit_reason = f"all-calls-failed:{ctx.entity_last_failure_class or 'unknown'}"
         else:
-            _entity_exit_reason = manifest_reason if ctx.deferred_refs else "completed"
+            _entity_exit_reason = "completed"
         # Issue athenaeum#1135: mirror onto ``ctx`` (not just the local var / the
         # run_profile dict) so the finalize phase's zero-progress-refusal
         # predicate can read it without re-deriving the same classification.
@@ -6378,7 +6505,9 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 ),
                 "clusters_merged": _merge_stats.get("entries_merged", 0),
                 "escalations": _merge_stats.get("escalations_written", 0),
-                "reason": "completed",  # issue athenaeum#1102 AC1
+                # Issue athenaeum#1177 (AC3): no longer unconditionally
+                # "completed" -- see ``_auto_memory_reason``.
+                "reason": _auto_memory_reason(_merge_stats),
             },
         )
     )
@@ -6520,8 +6649,20 @@ def _zero_yield_tripped(ctx: "RunContext", previous_deferred_refs: "list[str]") 
 
     True exactly when all three hold:
 
-    1. The run spent at least one LLM call (``ctx.usage.api_calls > 0`` — a
-       run with nothing to do that made zero calls is idle, not wasteful).
+    1. The run spent at least one LLM call, OR ATTEMPTED at least one
+       (``ctx.usage.api_calls > 0 or ctx.usage.attempted_calls > 0`` — a run
+       with nothing to do that made zero calls is idle, not wasteful).
+       ``attempted_calls`` (issue athenaeum#1177) is checked alongside
+       ``api_calls`` deliberately, not in its place: some call sites (the
+       entity phase's tier2/tier3 pipeline, via ``tiers._timed_llm_call``)
+       only ever bumped ``api_calls`` on a SUCCESSFUL response, so a run
+       where every entity-phase call raised (e.g. credits exhausted,
+       ``BadRequestError``) reported ``api_calls == 0`` — indistinguishable
+       from a genuinely idle run, which is exactly what let this predicate
+       stay untripped (and ``zero_yield_state.json``'s ``consecutive`` stay
+       at 0) through a four-day all-failing incident. ``attempted_calls``
+       is bumped before dispatch regardless of outcome, so it stays > 0 for
+       that run even though ``api_calls`` does not.
     2. The run committed zero files (``ctx.files_processed_count == 0`` — the
        same figure the athenaeum#470 spend-ledger write and backlog-drain advisor
        already use as "files actually drained this run").
@@ -6529,9 +6670,9 @@ def _zero_yield_tripped(ctx: "RunContext", previous_deferred_refs: "list[str]") 
        ref that was deferred last run left the deferred set this run. An
        idle run (nothing to defer, before or after) trivially satisfies this
        third condition too, but condition 1 already excludes it — an idle
-       run makes no LLM calls.
+       run makes no LLM calls and attempts none.
     """
-    if ctx.usage.api_calls <= 0:
+    if ctx.usage.api_calls <= 0 and ctx.usage.attempted_calls <= 0:
         return False
     if ctx.files_processed_count != 0:
         return False
@@ -6758,15 +6899,39 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         )
         if ctx.zero_yield_tripped:
             _zy_total_secs = sum(secs for _phase, secs, _fields in ctx.run_profile)
+            # Issue athenaeum#1177: report ``attempted_calls`` when ``api_calls``
+            # reads 0 -- exactly the shape an all-failing run now produces
+            # (every call attempted, none succeeded). Reporting "0 LLM
+            # call(s)" here would misrepresent a genuinely wasteful run as
+            # having done nothing at all, the opposite of what this line
+            # exists to make visible.
+            _zy_calls_spent = (
+                ctx.usage.api_calls if ctx.usage.api_calls > 0 else ctx.usage.attempted_calls
+            )
             log.warning(
                 "%s: run spent %d LLM call(s) over %.1fs and committed %d "
                 "file(s) — %d consecutive zero-yield run(s) (issue athenaeum#899)",
                 ZERO_YIELD_PREFIX,
-                ctx.usage.api_calls,
+                _zy_calls_spent,
                 _zy_total_secs,
                 ctx.files_processed_count,
                 ctx.zero_yield_consecutive,
             )
+            # Issue athenaeum#1177 (AC2): the escalation, distinct from the
+            # per-trip WARNING above (which fires every zero-yield run
+            # regardless of streak length). ERROR level + its own
+            # greppable prefix so a log-scraper / watchdog can alert on
+            # THIS line specifically without threshold logic of its own.
+            _zy_alert_threshold = librarian_zero_yield_alert_threshold(ctx.config)
+            if ctx.zero_yield_consecutive >= _zy_alert_threshold:
+                log.error(
+                    "%s: %d consecutive zero-yield run(s) — at or past the "
+                    "alert threshold of %d (librarian.zero_yield_alert_threshold "
+                    "/ ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD, issue athenaeum#1177)",
+                    ZERO_YIELD_ALERT_PREFIX,
+                    ctx.zero_yield_consecutive,
+                    _zy_alert_threshold,
+                )
 
     _maybe_push_after_run(
         ctx.knowledge_root,
