@@ -2593,6 +2593,14 @@ class ProcessingResult:
     #: path that never reaches Tier 1 (e.g. the Tier-0 do-not-email/handle
     #: short-circuits), which is correct — those paths dispatch no matches.
     matched: int = 0
+    #: Count of NEW entity writes this file's Tier-3 create phase produced
+    #: whose ``type`` was outside declared ∪ ``KNOWN_TYPES`` and was
+    #: therefore REFUSED by the write-boundary guard (issue athenaeum#1196,
+    #: :func:`athenaeum.wiki_write_guard.guard_entity_write_type`) rather
+    #: than written to ``wiki/``. Not counted in ``created`` — a refused
+    #: entity was never applied. Surfaced as ``type_rejected=N`` in the run
+    #: summary, mirroring the ``degraded``/``truncated`` convention above.
+    type_rejected: int = 0
 
 
 # --- Schema loading ---
