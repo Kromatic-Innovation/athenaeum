@@ -160,22 +160,36 @@ def canonical_page(collision: NameCollision) -> CollisionPage:
     return sorted(collision.pages, key=_sort_key)[0]
 
 
-def _page_frontmatter(page: CollisionPage) -> dict[str, object]:
+def _page_frontmatter(page: CollisionPage) -> dict[str, object] | None:
     """Re-read *page*'s frontmatter from disk for :func:`classify_collision`.
 
     :class:`CollisionPage` deliberately carries only ``body`` (the content
     that matters for the empty/substring check) — frontmatter is read here,
     on demand, only when a classification actually needs to compare it.
-    Any read/parse failure degrades to ``{}`` (an empty frontmatter can
-    never look like it's missing a key the canonical page has, so this
-    never manufactures a false ``ambiguous`` from a page that briefly failed
-    to read — though a genuinely different frontmatter shape elsewhere in
-    the comparison still catches real disagreement).
+
+    Returns ``None`` — an EXPLICIT, distinguishable sentinel, never ``{}``
+    — on a read/parse failure (issue athenaeum#1170 code review). An earlier
+    version of this function degraded a failed read to ``{}`` on the
+    reasoning that "an empty frontmatter can never look like it's missing a
+    key the canonical page has". That is true, but it is optimizing for the
+    wrong direction on the page that is about to be DELETED: in
+    :func:`classify_collision`, a NON-canonical page's ``{}`` frontmatter
+    makes its ``for key, value in other_meta.items()`` loop never run, and
+    the only remaining check (the body substring test) passes trivially
+    when the page's body is also empty — so a page whose frontmatter could
+    not be read would be classified ``unambiguous`` and, with auto-merge
+    on, folded away and ``git rm``'d WITHOUT its content ever actually
+    being compared. That is exactly the outcome this module's own docstring
+    says to err against: "a false 'ambiguous' costs a human glance; a false
+    'unambiguous' destroys content." Returning ``None`` instead lets
+    :func:`classify_collision` treat "could not read" as its own case —
+    unreadable implies uncompared implies never safely absorbable — rather
+    than silently indistinguishable from "genuinely has no frontmatter".
     """
     try:
         text = page.path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return {}
+        return None
     meta, _ = parse_frontmatter(text)
     return meta if isinstance(meta, dict) else {}
 
@@ -195,10 +209,15 @@ def classify_collision(collision: NameCollision) -> Literal["unambiguous", "ambi
     Everything else is ``ambiguous`` — two or more pages with distinct
     content, a group whose resolved type is ``None`` (an untyped page
     cannot be confidently disambiguated the way a typed one can — mirrors
-    AC1's escalate-on-unknown-type posture), or any group this function
-    cannot confidently reduce. Erring toward ``ambiguous`` is deliberate: a
-    false "ambiguous" costs a human glance; a false "unambiguous" destroys
-    content.
+    AC1's escalate-on-unknown-type posture), a page whose frontmatter could
+    not be re-read (issue athenaeum#1170 code review — see
+    :func:`_page_frontmatter`'s docstring: unreadable implies uncompared
+    implies never safely absorbable, checked for BOTH the canonical page
+    and every other page in the group), or any group this function cannot
+    confidently reduce. Erring toward ``ambiguous`` is deliberate: a false
+    "ambiguous" costs a human glance; a false "unambiguous" destroys
+    content — and a page whose content could not actually be compared is
+    the sharpest form of "cannot confidently reduce".
     """
     if collision.type is None:
         return "ambiguous"
@@ -209,6 +228,8 @@ def classify_collision(collision: NameCollision) -> Literal["unambiguous", "ambi
     canonical = canonical_page(collision)
     canonical_norm = _normalize_body(canonical.body)
     canonical_meta = _page_frontmatter(canonical)
+    if canonical_meta is None:
+        return "ambiguous"
 
     for other in collision.pages:
         if other.path == canonical.path:
@@ -217,6 +238,8 @@ def classify_collision(collision: NameCollision) -> Literal["unambiguous", "ambi
         if other_norm and other_norm not in canonical_norm:
             return "ambiguous"
         other_meta = _page_frontmatter(other)
+        if other_meta is None:
+            return "ambiguous"
         for key, value in other_meta.items():
             if key in _IGNORED_FRONTMATTER_KEYS:
                 continue
