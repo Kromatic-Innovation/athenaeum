@@ -299,18 +299,45 @@ def _grouped_deferred_rows(
     return grouped
 
 
+def _distinct_record_count(rows: list[dict[str, Any]]) -> int:
+    """The detector's counting unit (issue athenaeum#1229 part 2): the number of
+    DISTINCT ``source_ref``s among *rows*, never ``len(rows)``.
+
+    Before this fix the detector counted ROWS -- one row per (record x
+    evaluation) -- while :func:`athenaeum.config.resolve_rule_proposals_threshold`'s
+    own docstring says "the record count ... that must be crossed". Those
+    two readings differ by exactly the ledger's re-evaluation duplication
+    factor: on the deployment that motivated this issue, 148x (measured: 57
+    of 66 shapes crossed a threshold of 50 by row count vs. only 6 by
+    distinct ``source_ref`` -- ~9.5x over-triggering). This function is the
+    single place that decision is made; every caller below (ordering,
+    the threshold comparison, the persisted proposal's ``count`` field, the
+    no-exemplar log line) goes through it so none of them can drift back to
+    counting rows independently.
+
+    A row with a missing/non-string ``source_ref`` (should not happen --
+    :func:`_grouped_deferred_rows` already filters those out before a row
+    ever reaches a group) falls back to counting the row itself, so a
+    malformed row is never silently dropped from the count.
+    """
+    refs = {row.get("source_ref") for row in rows if isinstance(row.get("source_ref"), str)}
+    malformed = sum(1 for row in rows if not isinstance(row.get("source_ref"), str))
+    return len(refs) + malformed
+
+
 def detect_shape_frequency(
     wiki_root: Path, *, config: dict[str, Any] | None = None, now: datetime | None = None
 ) -> Counter[tuple[str, str]]:
-    """AC1's detector: counts of deferred records by ``(source,
-    key_fingerprint)``, over :func:`athenaeum.config.resolve_rule_proposals_window_days`.
+    """AC1's detector: counts of DISTINCT deferred records (never rows -- see
+    :func:`_distinct_record_count`) by ``(source, key_fingerprint)``, over
+    :func:`athenaeum.config.resolve_rule_proposals_window_days`.
 
     Pure and side-effect-free -- reads the disposition ledger, writes
     nothing.
     """
     window_days = resolve_rule_proposals_window_days(config)
     grouped = _grouped_deferred_rows(wiki_root, window_days=window_days, now=now)
-    return Counter({key: len(rows) for key, rows in grouped.items()})
+    return Counter({key: _distinct_record_count(rows) for key, rows in grouped.items()})
 
 
 # ---------------------------------------------------------------------------
@@ -752,11 +779,14 @@ def run_rule_proposal_detection(
         if r.get("kind") == PROPOSAL_KIND and str(r.get("id")) not in resolved_ids
     }
 
-    # Deterministic order: most-frequent shape first, then (source,
-    # key_fingerprint) as a tiebreak -- so a run bounded by an external
-    # deadline (issue athenaeum#1063's librarian wiring) drains the
+    # Deterministic order: most-frequent shape first (by DISTINCT record
+    # count, never row count -- see :func:`_distinct_record_count`), then
+    # (source, key_fingerprint) as a tiebreak -- so a run bounded by an
+    # external deadline (issue athenaeum#1063's librarian wiring) drains the
     # highest-value shapes first.
-    ordered_shapes = sorted(grouped.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    ordered_shapes = sorted(
+        grouped.items(), key=lambda kv: (-_distinct_record_count(kv[1]), kv[0])
+    )
     for _idx, ((source, key_fingerprint), rows) in enumerate(ordered_shapes):
         if deadline_check is not None and deadline_check():
             # Mirrors `athenaeum.rules.run_shape_rule_phase`'s file-boundary
@@ -766,7 +796,8 @@ def run_rule_proposal_detection(
             # disposition rows -- nothing here is lost, only deferred.
             summary["skipped_deadline"] += len(ordered_shapes) - _idx
             break
-        if len(rows) < threshold:
+        record_count = _distinct_record_count(rows)
+        if record_count < threshold:
             continue
         summary["threshold_crossed"] += 1
 
@@ -782,11 +813,11 @@ def run_rule_proposal_detection(
         if not exemplars:
             summary["skipped_no_exemplars"] += 1
             log.warning(
-                "rule-proposals: no readable exemplar for %s:%s (%d deferred rows) "
-                "-- skipping this run",
+                "rule-proposals: no readable exemplar for %s:%s (%d deferred "
+                "record(s)) -- skipping this run",
                 source,
                 key_fingerprint,
-                len(rows),
+                record_count,
             )
             continue
 
@@ -819,7 +850,7 @@ def run_rule_proposal_detection(
             "created_at": _now_iso(now),
             "source": source,
             "key_fingerprint": key_fingerprint,
-            "count": len(rows),
+            "count": record_count,
             "window_days": window_days,
             "threshold": threshold,
             "rule_name": name,
