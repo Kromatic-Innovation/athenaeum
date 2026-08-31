@@ -14,8 +14,10 @@ issue athenaeum#602) consults a T1 pass-up and AUTO-FINALIZES a safe-class
 :func:`athenaeum.pending_merges.resolve_merge`'s existing approve-time
 fold, marked ``auto_applied`` in provenance. See each function's own
 docstring and :mod:`athenaeum.reasoning_tiers` for the gated/default-OFF
-wiring detail (both tiers share ONE opt-in flag,
-``reasoning_tier_auditing_enabled``, default OFF).
+wiring detail. **Independently gated as of issue athenaeum#1200:** T1 by
+``reasoning_tier_auditing_enabled`` (default OFF), T2's auto-apply by its
+own ``reasoning_tier_t2_auto_apply_enabled`` (default OFF, independent of
+T1's value) — before athenaeum#1200 one flag armed both together.
 
 SCC membership (L4 domain/pipeline). ``merge.py`` is imported at TOP level by
 ``librarian.py``, ``retire.py``, and ``wiki_dedupe.py`` (normal downward
@@ -98,6 +100,7 @@ from athenaeum.config import (
     resolve_min_cluster_cohesion_scopes,
     resolve_operational_markers,
     resolve_reasoning_tier_auditing_enabled,
+    resolve_reasoning_tier_t2_auto_apply_enabled,
 )
 from athenaeum.contradictions import ContradictionResult, detect_contradictions
 from athenaeum.cross_scope import (
@@ -1768,16 +1771,26 @@ def merge_clusters_to_wiki(
     # for the subscription path, dollars for the metered API path — is keyed on
     # it). Mirrors ``librarian.run``'s single ``resolve_provider(config)`` read.
     resolved_provider = resolve_provider(resolved_config)
-    # Issue athenaeum#518: the reasoning-tier screen, resolved once. DEFAULT OFF —
+    # Issue athenaeum#518 / athenaeum#1200: the two reasoning-tier screens, resolved
+    # ONCE EACH, from their OWN independent flags — before athenaeum#1200 both were
+    # fed by a single combined boolean, which meant arming the harmless T1
+    # screen also armed T2's unreviewed auto-apply. Both still default OFF —
     # production merge behavior is byte-identical to today until an operator
-    # opts in. When on, T1 screens each merge proposal before it reaches the
-    # human queue (a confident reject drops it; a pass-up flows through
-    # unchanged). The authority manifest (loaded once, only when enabled) feeds
-    # T1's live-source-duplicate check; a missing manifest is an inert empty one.
-    reasoning_tier_enabled = resolve_reasoning_tier_auditing_enabled(resolved_config)
+    # opts in to EACH. When T1 is on, it screens each merge proposal before
+    # it reaches the human queue (a confident reject drops it; a pass-up
+    # flows through unchanged). When T2 is on, a T1 pass-up may be
+    # auto-finalized within the safe class (see `t2_screen_merge_proposal`'s
+    # own docstring) with NO human review. The authority manifest (loaded
+    # once, only when EITHER screen is enabled) feeds T1's
+    # live-source-duplicate check and T2's own tier call; a missing manifest
+    # is an inert empty one.
+    reasoning_t1_enabled = resolve_reasoning_tier_auditing_enabled(resolved_config)
+    reasoning_t2_auto_apply_enabled = resolve_reasoning_tier_t2_auto_apply_enabled(
+        resolved_config
+    )
     reasoning_authority_manifest = (
         load_authority_manifest_for_pipeline(knowledge_root)
-        if reasoning_tier_enabled
+        if (reasoning_t1_enabled or reasoning_t2_auto_apply_enabled)
         else None
     )
     # Issue athenaeum#398: resolved once and threaded into every dark-zone
@@ -2071,7 +2084,7 @@ def merge_clusters_to_wiki(
                 config=resolved_config,
                 provider=resolved_provider,
                 authority_manifest=reasoning_authority_manifest,
-                enabled=reasoning_tier_enabled,
+                enabled=reasoning_t1_enabled,
                 dry_run=dry_run,
             ):
                 return
@@ -2086,16 +2099,19 @@ def merge_clusters_to_wiki(
             # Issue athenaeum#602: T2 reasoning-tier screen — a second, more expensive
             # tier consulted ONLY on a T1 pass-up (a T1 reject already
             # returned above, so an already-rejected proposal never reaches
-            # this Opus call). Gated behind the SAME
-            # ``reasoning_tier_auditing_enabled`` flag as T1 — there is no
-            # separate opt-in for T2. A safe-class ``approve`` auto-applies
-            # the merge (bypassing the human queue) via the exact same
-            # write_pending_merge + resolve_merge mechanics used below,
-            # marked auto_applied in provenance. Every other outcome —
-            # disabled, dry-run, no client, ceiling tripped, escalate/amend/
-            # draft, or an approve that fails safe_class_violation — returns
-            # False and falls through to the unscreened write below
-            # unchanged, matching T1's own degrade-to-human-queue contract.
+            # this Opus call). **Independently gated as of issue athenaeum#1200** by
+            # its OWN ``reasoning_tier_t2_auto_apply_enabled`` flag — NOT the
+            # same flag as T1 (that was the athenaeum#1200 defect: one key armed
+            # both a harmless screen and unreviewed auto-apply together).
+            # T2's flag defaults OFF independent of T1's value. A safe-class
+            # ``approve`` auto-applies the merge (bypassing the human queue)
+            # via the exact same write_pending_merge + resolve_merge
+            # mechanics used below, marked auto_applied in provenance. Every
+            # other outcome — disabled, dry-run, no client, ceiling tripped,
+            # escalate/amend/draft, or an approve that fails
+            # safe_class_violation — returns False and falls through to the
+            # unscreened write below unchanged, matching T1's own
+            # degrade-to-human-queue contract.
             if t2_screen_merge_proposal(
                 member_paths=member_paths,
                 merge_target_name=proposal.merge_target_name,
@@ -2111,7 +2127,7 @@ def merge_clusters_to_wiki(
                 config=resolved_config,
                 provider=resolved_provider,
                 authority_manifest=reasoning_authority_manifest,
-                enabled=reasoning_tier_enabled,
+                enabled=reasoning_t2_auto_apply_enabled,
                 dry_run=dry_run,
             ):
                 return
