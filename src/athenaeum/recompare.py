@@ -295,6 +295,16 @@ def recompare_pending_merges(
     skipped_missing = 0
 
     for proposal in unresolved:
+        # Issue athenaeum#1230: an --apply recompare over a large backlog is a
+        # per-PAIR LLM classify loop (up to MAX_PAIRS_PER_PROPOSAL pairs per
+        # proposal, no cap on the number of proposals) with the SAME shape as
+        # the ingest-path gap this issue fixes elsewhere — the run lock this
+        # function was already handed (for the verdict-ledger single-appender
+        # contract) is never refreshed, so its heartbeat age grows with total
+        # wall time. Tick it once per proposal (not per pair — cheap enough
+        # that no separate interval/throttle is worth the complexity here).
+        if apply and lock is not None:
+            lock.heartbeat()
         notes: list[str] = []
         paths: list[Path] = []
         for source in proposal.sources:

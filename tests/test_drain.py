@@ -456,6 +456,42 @@ class TestRunDrainLoop:
         )
         return kwargs, calls, backlog
 
+    def test_heartbeat_is_threaded_into_every_window(self, tmp_path: Path) -> None:
+        # Issue athenaeum#1230: the drain loop forces max_runtime=0 (unbounded —
+        # batch mode block-polls the Anthropic Batch API) and the CLI wrapper
+        # holds ONE run lock across the whole multi-window drain, so it must
+        # heartbeat like every other long-running holder. Verify the
+        # `heartbeat` callable passed into `run_drain` reaches `run_fn` on
+        # EVERY window, not just wired-but-unused.
+        received: list[object] = []
+        backlog = [20]
+
+        def fake_run(**kwargs):
+            received.append(kwargs.get("heartbeat"))
+            backlog[0] = 0  # this window drains the whole (fake) backlog
+            return 0
+
+        ledger = tmp_path / "spend.jsonl"
+        start = datetime(2026, 7, 10, tzinfo=timezone.utc)
+
+        def sentinel_heartbeat() -> None:
+            pass
+
+        rc = drain.run_drain(
+            knowledge_root=tmp_path,
+            raw_root=tmp_path / "raw",
+            wiki_root=tmp_path / "wiki",
+            max_usd=10.0,
+            max_files=50,
+            ledger_path=ledger,
+            run_fn=fake_run,
+            backlog_fn=lambda _root: backlog[0],
+            now=start,
+            heartbeat=sentinel_heartbeat,
+        )
+        assert rc == 0
+        assert received == [sentinel_heartbeat]
+
     def test_empty_backlog_returns_immediately(self, tmp_path: Path) -> None:
         kwargs, calls, _ = self._harness(tmp_path, 0, [])
         assert drain.run_drain(max_usd=10.0, **kwargs) == 0

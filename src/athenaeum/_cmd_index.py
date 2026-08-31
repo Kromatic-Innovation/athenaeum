@@ -686,6 +686,16 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             config=cfg,
             dry_run=args.dry_run,
             install_signal_handlers=not args.dry_run,
+            # Issue athenaeum#1230: thread the run lock's heartbeat through the
+            # SAME way _cmd_run.py's H10 fix (athenaeum#526) does — `ingest`
+            # forwards **run_kwargs straight into `run()`, which already
+            # ticks `ctx.heartbeat` at phase/per-file boundaries. Without
+            # this, a long on-demand ingest's heartbeat age equals its total
+            # wall time, so a healthy multi-hour compile looks progressively
+            # more "wedged" to a contending `acquire`'s `break_stale_after`
+            # check. `lock` is guaranteed non-None here (dry-run returns
+            # before this block acquires one).
+            heartbeat=lock.heartbeat if lock is not None and not isinstance(lock, int) else None,
         )
     except Exception as exc:  # noqa: BLE001 — surface a clean JSON error line
         print(
@@ -931,6 +941,16 @@ def cmd_session_end(args: argparse.Namespace) -> int:
             max_runtime=session_end_max_runtime(cfg),
             max_files=SESSION_END_MAX_FILES,
             max_api_calls=SESSION_END_MAX_API_CALLS,
+            # Issue athenaeum#1230: `session_end` forwards **run_kwargs into
+            # `ingest`, which forwards them into `run` — the same chain
+            # `cmd_ingest` above now threads a heartbeat through. Session-end's
+            # inner `max_runtime` is derived from the 900s-default SessionEnd
+            # wrapper timeout, far below `break_stale_after`'s 6h default, but
+            # `KNOWLEDGE_REBUILD_TIMEOUT` is operator-configurable — wire the
+            # SAME heartbeat here rather than leaving a same-shaped gap latent
+            # behind a larger outer timeout. `lock` is non-None here (dry-run
+            # returns before acquiring one).
+            heartbeat=lock.heartbeat if lock is not None and not isinstance(lock, int) else None,
         )
     except Exception as exc:  # noqa: BLE001 — surface a clean JSON error line
         print(
