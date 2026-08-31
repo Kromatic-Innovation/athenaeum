@@ -35,7 +35,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import ItemsView, Iterator, Mapping
@@ -2638,12 +2638,40 @@ def load_schema_list(schema_path: Path, filename: str) -> list[str]:
 # --- Entity Index ---
 
 
+class IndexEntry(NamedTuple):
+    """One ``EntityIndex._by_name`` value: identity + type of an indexed key.
+
+    ``uid`` and ``path`` are the original ``(uid_or_name, path)`` pair this
+    index has always carried. ``type`` is new (issue athenaeum#1169): the page's
+    ``type:`` frontmatter value (resolved via :func:`resolve_page_type`), so a
+    matcher can gate on it without re-reading the page from disk.
+
+    ``type`` is ``None`` when the page carries no ``type:`` frontmatter at
+    all — an EXPLICIT sentinel, not an empty string, so a gate can branch on
+    ``is None`` rather than an implicit falsy check. See
+    :func:`athenaeum.tiers._passes_type_gate` for the KEPT-by-default policy
+    this represents.
+
+    Because ``NamedTuple`` subclasses ``tuple``, existing code that reads a
+    ``_by_name`` value POSITIONALLY (``entry[0]`` for uid, ``entry[1]`` for
+    path — e.g. :func:`athenaeum.reconcile`'s ``looked[1]``) keeps working
+    unchanged, including against a plain ``(uid, path)`` 2-tuple poked
+    directly into ``_by_name`` by tests that predate this issue — reading
+    ``.type`` off one of those via ``getattr(entry, "type", None)`` degrades
+    to "no type known" rather than raising.
+    """
+
+    uid: str
+    path: Path
+    type: str | None = None
+
+
 class EntityIndex:
     """In-memory index of all wiki entities for name/alias lookup."""
 
     def __init__(self, wiki_root: Path) -> None:
         self.wiki_root = wiki_root
-        self._by_name: dict[str, tuple[str, Path]] = {}
+        self._by_name: dict[str, IndexEntry] = {}
         self._entities: dict[str, dict] = {}
         self._by_uid: dict[str, Path] = {}
         self._entity_format_paths: set[Path] = set()
@@ -2673,8 +2701,18 @@ class EntityIndex:
             uid = uid_raw
             name = name_raw
 
+            # Issue athenaeum#1169: carry the page's type through the index.
+            # resolve_page_type is the single canonical precedence resolver
+            # (top-level `type:` first, `metadata.type` fallback, else "") —
+            # reused here rather than reading meta["type"] directly so this
+            # index agrees with athenaeum.search / athenaeum.entity_schema on what a
+            # page's type IS. "" (no type: found) is normalized to the
+            # explicit IndexEntry.type=None sentinel below.
+            page_type = resolve_page_type(meta)
+            entry_type = page_type if page_type else None
+
             key = name.lower()
-            self._by_name[key] = (uid or name, fpath)
+            self._by_name[key] = IndexEntry(uid or name, fpath, entry_type)
             if uid:
                 self._entities[uid] = meta
                 self._by_uid[uid] = fpath
@@ -2689,10 +2727,15 @@ class EntityIndex:
             for alias in aliases_raw:
                 if alias:
                     assert isinstance(alias, str)
-                    self._by_name[alias.lower()] = (uid or name, fpath)
+                    self._by_name[alias.lower()] = IndexEntry(uid or name, fpath, entry_type)
 
-    def lookup(self, name: str) -> tuple[str, Path] | None:
-        """Look up by name or alias (case-insensitive). Returns (uid_or_name, path) or None."""
+    def lookup(self, name: str) -> IndexEntry | None:
+        """Look up by name or alias (case-insensitive).
+
+        Returns an :class:`IndexEntry` (``.uid``/``.path``/``.type``, and
+        still positionally ``(uid_or_name, path, type)`` since it is a
+        tuple) or ``None``.
+        """
         return self._by_name.get(name.lower())
 
     def get_by_uid(self, uid: str) -> Path | None:
@@ -2707,7 +2750,7 @@ class EntityIndex:
         """Add a newly created entity to the index."""
         key = entity.name.lower()
         path = self.wiki_root / entity.filename
-        self._by_name[key] = (entity.uid, path)
+        self._by_name[key] = IndexEntry(entity.uid, path, entity.type or None)
         self._entities[entity.uid] = {
             "uid": entity.uid,
             "type": entity.type,
@@ -2717,14 +2760,14 @@ class EntityIndex:
         self._entity_format_paths.add(path)
         for alias in entity.aliases:
             if alias:
-                self._by_name[alias.lower()] = (entity.uid, path)
+                self._by_name[alias.lower()] = IndexEntry(entity.uid, path, entity.type or None)
 
     def __len__(self) -> int:
         """Number of unique name/alias keys indexed."""
         return len(self._by_name)
 
-    def items(self) -> "ItemsView[str, tuple[str, Path]]":
-        """Iterate over ``(name_or_alias_key, (uid_or_name, path))`` pairs.
+    def items(self) -> "ItemsView[str, IndexEntry]":
+        """Iterate over ``(name_or_alias_key, IndexEntry(uid, path, type))`` pairs.
 
         Replaces direct access to ``_by_name`` from callers that need to
         walk the index (e.g. tier-based scans). Returns a live view — do

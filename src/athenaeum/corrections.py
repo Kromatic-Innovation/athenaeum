@@ -489,7 +489,7 @@ def resolve_target(
         resolved = index.lookup(name.strip())
         if resolved is None:
             return None
-        _, path = resolved
+        path = resolved.path
         if not path.exists() or not index.has_entity_format(path):
             return None
         return _cross_type_guard(path, etype.strip())

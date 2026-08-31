@@ -469,10 +469,111 @@ def _passes_mention_density_gate(
     return False
 
 
+def resolve_type_gate_allowed_types(config: dict[str, Any] | None = None) -> set[str] | None:
+    """Resolve ``librarian.type_gate_allowed_types`` (issue athenaeum#1169).
+
+    ``None`` (unset/malformed config, or an empty list) means "no type gate
+    configured" -- :func:`tier1_programmatic_match` matches every type
+    exactly as it always has. This is the DEFAULT for every existing caller,
+    and is deliberate: the issue's binding CORRECTION found the originally
+    proposed default gate (allow ``person``/``company``/``project``/``tool``)
+    backwards -- it would have killed matching for the highest-recall page
+    types (``concept``/``principle``) while keeping the mostly-inert
+    ``person`` bulk. So no default allow-list ships here; a real policy is
+    something an operator configures only after measuring it, via this knob.
+
+    A non-empty configured list narrows matching to those types, PLUS every
+    untyped key -- see :func:`_passes_type_gate` for why untyped keys are
+    always kept regardless of this set.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("type_gate_allowed_types")
+            if isinstance(raw, list):
+                allowed = {v.strip() for v in raw if isinstance(v, str) and v.strip()}
+                if allowed:
+                    return allowed
+    return None
+
+
+def resolve_type_gate_excluded_keys(config: dict[str, Any] | None = None) -> set[str] | None:
+    """Resolve ``librarian.type_gate_excluded_keys`` (issue athenaeum#1169).
+
+    An explicit set of index keys (matched case-insensitively, same
+    lower-casing :class:`athenaeum.models.EntityIndex` indexes by) to always
+    drop from Tier-1 matching, independent of type. This is how the issue's
+    corrected policy -- exclude specific INERT (never-touched) keys, e.g.
+    the ~17.5k mostly-dead ``person`` keys the original type-only gate would
+    have kept -- gets expressed: "never-touched" is a commit-history
+    property this module has no access to, so it is never computed here;
+    the caller (a host-side sweep over corpus history) supplies the list.
+    ``None``/unset/empty means no keys are excluded -- the default, a no-op.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("type_gate_excluded_keys")
+            if isinstance(raw, list):
+                excluded = {v.strip().lower() for v in raw if isinstance(v, str) and v.strip()}
+                if excluded:
+                    return excluded
+    return None
+
+
+#: Sentinel documenting the issue athenaeum#1169 policy decision: a page with no
+#: ``type:`` frontmatter is always KEPT/matchable by the type gate below,
+#: never silently dropped. Referenced from :func:`_passes_type_gate`'s
+#: docstring rather than compared against directly -- the branch itself
+#: tests ``entry_type is None`` explicitly (see that function).
+UNTYPED_PAGES_ARE_KEPT = True
+
+
+def _passes_type_gate(
+    name_key: str,
+    entry_type: str | None,
+    allowed_types: set[str] | None,
+    excluded_keys: set[str] | None,
+) -> bool:
+    """Type + excluded-key gate for Tier-1 matching (issue athenaeum#1169).
+
+    Two independent checks, either of which can drop a match:
+
+    1. *excluded_keys* -- an explicit key-level exclusion, checked first,
+       regardless of type (e.g. one specific inert ``person`` key).
+    2. *allowed_types* -- when configured, keeps only keys whose type is in
+       the set -- with ONE explicit exception, below.
+
+    UNTYPED KEYS ARE ALWAYS KEPT (:data:`UNTYPED_PAGES_ARE_KEPT`): when
+    *entry_type* is ``None`` (the page carries no ``type:`` frontmatter),
+    this always returns ``True`` for the allowed_types check, even with an
+    allow-list configured -- an absent ``type:`` must never silently remove
+    a real entity from matching. This is an EXPLICIT branch on
+    ``entry_type is None``, never an implicit falsy check on the type
+    string, per the issue's binding decision.
+
+    With both *allowed_types* and *excluded_keys* ``None`` (the default in
+    every existing caller), this always returns ``True`` -- the whole gate
+    is a no-op and matching is byte-identical to before this issue.
+    """
+    if excluded_keys is not None and name_key in excluded_keys:
+        return False
+    if allowed_types is None:
+        return True
+    if entry_type is None:
+        # Explicit KEPT decision for untyped pages -- see docstring above.
+        return True
+    return entry_type in allowed_types
+
+
 def tier1_programmatic_match(
     raw: RawFile,
     index: EntityIndex,
     config: dict[str, Any] | None = None,
+    *,
+    allowed_types: set[str] | None = None,
+    excluded_keys: set[str] | None = None,
+    suppressed: dict[str, int] | None = None,
 ) -> list[tuple[str, str, Path]]:
     """Match entity names in raw content against the wiki index.
 
@@ -493,12 +594,37 @@ def tier1_programmatic_match(
     longer costs a tier-3 merge call. The gate does not touch which KEYS can
     match (no key stops firing entirely) -- it only suppresses individual
     low-density matches for low-specificity keys, per the issue's AC.
+
+    Issue athenaeum#1169: an optional type gate runs last, via
+    :func:`_passes_type_gate`. *allowed_types* / *excluded_keys* passed
+    explicitly here take precedence over config; otherwise each is resolved
+    from ``librarian.type_gate_allowed_types`` / ``librarian.type_gate_excluded_keys``
+    in *config* (:func:`resolve_type_gate_allowed_types` /
+    :func:`resolve_type_gate_excluded_keys`). Both default to ``None``,
+    meaning NO gate -- with nothing configured (every existing caller today),
+    this function matches EXACTLY what it matched before this issue; that is
+    a deliberate, reversible default (see the issue's binding correction
+    against shipping a hardcoded default gate). Untyped keys are always kept
+    even when a type gate IS configured.
+
+    Pass a plain ``dict`` as *suppressed* to have this call increment
+    ``suppressed["type"]`` / ``suppressed["excluded_key"]`` with the count of
+    candidate matches (word-boundary hits that cleared the junk filter) each
+    half of the gate removed -- this is what a host-side run over the live
+    corpus (issue athenaeum#1169 AC4, which needs corpus data this container does
+    not have) would read to compute a reduction percentage.
     """
     matched: list[tuple[str, str, Path]] = []
     content_lower = raw.content.lower()
     junk_names = resolve_junk_match_names(config)
+    effective_allowed_types = (
+        allowed_types if allowed_types is not None else resolve_type_gate_allowed_types(config)
+    )
+    effective_excluded_keys = (
+        excluded_keys if excluded_keys is not None else resolve_type_gate_excluded_keys(config)
+    )
 
-    for name_key, (uid_or_name, fpath) in index.items():
+    for name_key, entry in index.items():
         # Only match names that are at least 3 chars to avoid false positives
         if len(name_key) < 3:
             continue
@@ -506,11 +632,39 @@ def tier1_programmatic_match(
         if name_key.strip().lower() in junk_names:
             log.debug("  T1 junk match skipped (issue athenaeum#662): %s", name_key)
             continue
+        # entry is an IndexEntry(uid, path, type) NamedTuple in every
+        # production index, but read positionally (not by name-count
+        # unpacking) so a plain (uid, path) 2-tuple poked directly into
+        # _by_name by tests that predate issue athenaeum#1169 keeps working too.
+        uid_or_name = entry[0]
+        fpath = entry[1]
+        entry_type = getattr(entry, "type", None)
         if name_key in content_lower:
             # Verify it's a word boundary match (not a substring)
             pattern = re.compile(r"\b" + re.escape(name_key) + r"\b", re.IGNORECASE)
             occurrences = len(pattern.findall(raw.content))
             if occurrences < 1:
+                continue
+            # Issue athenaeum#1169: type / excluded-key gate.
+            if not _passes_type_gate(
+                name_key, entry_type, effective_allowed_types, effective_excluded_keys
+            ):
+                if suppressed is not None:
+                    reason = (
+                        "excluded_key"
+                        if effective_excluded_keys is not None
+                        and name_key in effective_excluded_keys
+                        else "type"
+                    )
+                    suppressed[reason] = suppressed.get(reason, 0) + 1
+                log.debug(
+                    "T1 type-gate match dropped (issue athenaeum#1169): "
+                    "key=%r type=%r allowed_types=%s excluded=%s",
+                    name_key,
+                    entry_type,
+                    effective_allowed_types,
+                    effective_excluded_keys is not None and name_key in effective_excluded_keys,
+                )
                 continue
             # Issue athenaeum#1168: mention-density union gate.
             if not _passes_mention_density_gate(name_key, occurrences, config):
