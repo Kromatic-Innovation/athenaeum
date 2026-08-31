@@ -419,8 +419,8 @@ def _apply_off_corpus_routing(
 
     Deliberately a SEPARATE code path from :func:`apply_sweep`'s kill-list
     ``git rm`` below, not a shared refactor of it — this issue is a wiring
-    slice; the existing, already-tested archive flow (issue athenaeum#904/#969)
-    is left untouched. Mirrors its Commit A (provenance snapshot) / ledger /
+    slice; the existing, already-tested archive flow (issues athenaeum#904 and
+    athenaeum#969) is left untouched. Mirrors its Commit A (provenance snapshot) / ledger /
     Commit B discipline exactly, so a routed page is exactly as recoverable
     from git history as an archived one, and never removed from the
     ordinary corpus without BOTH a successful off-corpus write and a
