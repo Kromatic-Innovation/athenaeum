@@ -25,6 +25,7 @@ detector's own logic in isolation:
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -538,6 +539,76 @@ class TestFoldTargetSafetyGuard:
         assert (wiki / "Weird Page.md").exists()
         assert (wiki / "weird-dup.md").exists()
         assert not (wiki / "weird-page.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Silent-fallback hardening on the auto-merge path (issue athenaeum#1170 code
+# review): both _find_open_merge_id's None return and resolve_merge's
+# ok=False return were previously reachable with zero log output.
+# ---------------------------------------------------------------------------
+
+
+class TestAutoMergeFailureModesAreLogged:
+    def test_unfindable_merge_block_is_logged_and_left_queued(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Forces _find_open_merge_id to return None (as if the block this
+        iteration just wrote could not be re-found by value) and asserts
+        the failure is logged, not silent -- the collision stays merged=0
+        / queued, both pages untouched."""
+        wiki = tmp_path / "wiki"
+        page_a = _write_page(
+            wiki, "acme.md", uid="u1", name="Acme", type_="company",
+            body="Acme is a widget company.",
+        )
+        page_b = _write_page(
+            wiki, "acme-dup.md", uid="u2", name="Acme", type_="company", body=""
+        )
+        init_git_repo(wiki)
+
+        with patch(
+            "athenaeum.name_collisions._find_open_merge_id", return_value=None
+        ), caplog.at_level(logging.WARNING):
+            result = resolve_name_collisions(wiki, auto_merge=True, dry_run=False)
+
+        assert result["unambiguous"] == 1
+        assert result["merged"] == 0
+        assert "name-collision-auto-merge-block-not-found" in caplog.text
+        assert page_a.exists()
+        assert page_b.exists()
+        # The proposal WAS written -- it is simply left queued.
+        merges_text = (wiki / "_pending_merges.md").read_text(encoding="utf-8")
+        assert "Acme" in merges_text
+
+    def test_resolve_merge_failure_is_logged_neither_page_touched(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A real (unmocked) resolve_merge failure: the wiki is NOT a git
+        repo, so the fold-into-existing approve fails closed with
+        error_code=no_git_repo BEFORE any mutation (issue athenaeum#947).
+        Asserts the failure is logged, merged is not incremented, and
+        neither page is touched -- the integration boundary with the reused
+        fold machinery, not just the happy path."""
+        wiki = tmp_path / "wiki"
+        page_a = _write_page(
+            wiki, "acme.md", uid="u1", name="Acme", type_="company",
+            body="Acme is a widget company.",
+        )
+        page_b = _write_page(
+            wiki, "acme-dup.md", uid="u2", name="Acme", type_="company", body=""
+        )
+        # Deliberately no init_git_repo(wiki) here.
+
+        with caplog.at_level(logging.WARNING):
+            result = resolve_name_collisions(wiki, auto_merge=True, dry_run=False)
+
+        assert result["unambiguous"] == 1
+        assert result["merged"] == 0
+        assert "name-collision-auto-merge-failed" in caplog.text
+        assert "no_git_repo" in caplog.text
+        assert page_a.exists()
+        assert page_b.exists()
+        assert "Acme is a widget company." in page_a.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
