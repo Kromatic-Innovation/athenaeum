@@ -39,6 +39,7 @@ import pytest
 from athenaeum.config import resolve_cache_dir
 from athenaeum.librarian import EXIT_GRACEFUL_PARTIAL, _render_run_summary, run
 from athenaeum.merge import RunDeadlineExceeded, merge_clusters_to_wiki
+from athenaeum.models import TokenUsage
 from athenaeum.run_summary_log import (
     default_run_summary_ledger_path,
     read_run_summary_ledger,
@@ -784,8 +785,9 @@ class TestMergeOutStatsThreading:
         ]
 
         out_stats: dict = {}
+        usage = TokenUsage()
         entries = merge_clusters_to_wiki(
-            knowledge_root, client=fake_client, out_stats=out_stats
+            knowledge_root, client=fake_client, usage=usage, out_stats=out_stats
         )
         assert len(entries) == 1
         assert out_stats["haiku_calls"] == 1
@@ -793,6 +795,93 @@ class TestMergeOutStatsThreading:
         assert out_stats["entries_merged"] == 1
         # not_a_conflict clears the flag and writes no escalation.
         assert out_stats["escalations_written"] == 0
+        # Issue athenaeum#1177 (AC4): both calls SUCCEEDED, so the succeeded
+        # counters must equal the attempted counters exactly.
+        assert out_stats["haiku_calls_succeeded"] == 1
+        assert out_stats["resolve_calls_succeeded"] == 1
+        assert usage.attempted_calls == 2  # detector + resolver, both attempted
+        assert usage.succeeded_calls == 2  # ...and both succeeded
+
+    def test_out_stats_distinguishes_attempted_from_succeeded_on_detector_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1177 (AC4): the exact shape a credits-exhausted run
+        produces at the C4 detector -- the call is ATTEMPTED
+        (``haiku_calls``) but errors before a response lands, so
+        ``haiku_calls_succeeded`` must stay 0 even though ``haiku_calls``
+        is 1. The resolver never runs (a degraded ``detected=False``
+        result short-circuits ``_maybe_propose`` before it counts an
+        attempt), so both its counters stay 0 too."""
+        knowledge_root = tmp_path / "knowledge"
+        scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+        _write_am_file(
+            scope,
+            "feedback_v1.md",
+            frontmatter_name="v1",
+            origin_session_id="s-111",
+            origin_turn=1,
+            sources=[
+                {"session": "s-111", "turn": 1, "date": "2026-04-10", "excerpt": "x"}
+            ],
+            body="Commit prior-session debris directly to develop.",
+        )
+        _write_am_file(
+            scope,
+            "feedback_v2.md",
+            frontmatter_name="v2",
+            origin_session_id="s-222",
+            origin_turn=2,
+            sources=[
+                {"session": "s-222", "turn": 2, "date": "2026-04-11", "excerpt": "y"}
+            ],
+            body="Park prior-session debris on a WIP branch.",
+        )
+        _write_cluster_jsonl(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "code-0001",
+                    "member_paths": [
+                        "-Users-tristankromer-Code/feedback_v1.md",
+                        "-Users-tristankromer-Code/feedback_v2.md",
+                    ],
+                    "centroid_score": 0.62,
+                    "rationale": "cosine >= 0.55",
+                }
+            ],
+        )
+        _write_config(knowledge_root)
+
+        import httpx
+        from anthropic import BadRequestError
+
+        req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        resp = httpx.Response(400, request=req)
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = BadRequestError(
+            "Bad request", response=resp, body=None
+        )
+
+        out_stats: dict = {}
+        usage = TokenUsage()
+        entries = merge_clusters_to_wiki(
+            knowledge_root, client=fake_client, usage=usage, out_stats=out_stats
+        )
+        assert len(entries) == 1  # C3 merge is unaffected -- C4 is a pure add-on
+        assert out_stats["haiku_calls"] == 1
+        assert out_stats["haiku_calls_succeeded"] == 0
+        assert out_stats["resolve_calls"] == 0
+        assert out_stats["resolve_calls_succeeded"] == 0
+        assert usage.attempted_calls == 1
+        assert usage.succeeded_calls == 0
+        # NOTE: unlike the entity phase's tier2/tier3 pipeline (where
+        # api_calls only increments on success), THIS call site already
+        # pre-increments api_calls as an ATTEMPT count (issue athenaeum#1177
+        # deliberately left that pre-existing, inconsistent convention
+        # unchanged here — see this issue's PR body) — so api_calls reads 1
+        # (attempted), not 0. attempted_calls/succeeded_calls above are the
+        # NEW, semantically-consistent counters this issue adds.
+        assert usage.api_calls == 1
 
     def test_default_out_stats_none_is_backward_compatible(
         self, tmp_path: Path
