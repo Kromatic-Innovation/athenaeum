@@ -826,6 +826,29 @@ class TestStripPlanningPreamble:
         assert stripped is False
         assert cleaned == body
 
+    def test_multi_line_no_blank_line_body_survives_past_first_line(self) -> None:
+        """Gate-review should-fix (issue athenaeum#1171).
+
+        No heading, no blank line — but a second line exists, so only the
+        first line is preamble; everything after it is substantive content
+        and must survive (rather than the whole body being classified as
+        preamble-only).
+        """
+        body = (
+            "I'll Be Back is a 1984 film catchphrase.\n"
+            "Second line has real content that must survive.[^1]"
+        )
+        cleaned, stripped = strip_planning_preamble(body)
+        assert stripped is True
+        assert cleaned == "Second line has real content that must survive.[^1]"
+
+    def test_single_line_preamble_shaped_body_yields_empty_remainder(self) -> None:
+        """No newline at all -- genuinely nothing to fall back to."""
+        body = "I'll Be Back is a 1984 film catchphrase used by Schwarzenegger."
+        cleaned, stripped = strip_planning_preamble(body)
+        assert stripped is True
+        assert cleaned == ""
+
 
 class TestTier3CreatePreambleGuard:
     """Regression tests driven through :func:`tier3_create` (issue athenaeum#1171 AC4).
@@ -895,6 +918,85 @@ class TestTier3CreatePreambleGuard:
         usage = TokenUsage()
         with pytest.raises(PreambleOnlyResponseError):
             tier3_create(self._action(), "sessions/raw.md", client, usage=usage)
+        assert usage.preamble_rejected == 1
+        assert usage.preamble_stripped == 0
+
+
+class TestTier3DeriveActionsPreambleRejectionIsPerAction:
+    """Gate-review must-fix (issue athenaeum#1171): rejecting a preamble-only
+    create must be scoped to THAT action, not the whole raw file.
+
+    Drives :func:`tier3_derive_actions` directly (the function whose
+    per-action ``try/except`` is the fix) with TWO create actions for the
+    SAME raw file — one whose response is preamble-only, one normal.
+    Before the fix, ``PreambleOnlyResponseError`` propagated out of this
+    function entirely (caught only by the generic ``except Exception`` that
+    annotates and re-raises), discarding every action already derived for
+    the file. After the fix, the function returns normally: the rejected
+    action is simply absent from ``new_entities`` and its sibling still
+    lands. See ``tests/test_batch_mode.py::TestBatchSyncEquivalence::
+    test_preamble_only_sibling_create_is_skipped_not_file_aborted`` for the
+    same behavior proved end-to-end through BOTH the sync and batch
+    transports.
+    """
+
+    def test_preamble_only_action_skipped_sibling_still_lands(
+        self, wiki_dir: Path
+    ) -> None:
+        raw = _make_raw("WidgetPreambleOnly and WidgetGood both mentioned.")
+        index = EntityIndex(wiki_dir)
+        actions = [
+            EntityAction(
+                kind="create",
+                name="WidgetPreambleOnly",
+                entity_type="concept",
+                tags=[],
+                access="internal",
+                existing_uid=None,
+                observations="Facts about WidgetPreambleOnly.",
+            ),
+            EntityAction(
+                kind="create",
+                name="WidgetGood",
+                entity_type="concept",
+                tags=[],
+                access="internal",
+                existing_uid=None,
+                observations="Facts about WidgetGood.",
+            ),
+        ]
+
+        preamble_response = MagicMock()
+        preamble_response.content = [
+            MagicMock(
+                text="Looking at the new observation, I need to think this through."
+            )
+        ]
+        good_response = MagicMock()
+        good_response.content = [MagicMock(text="# WidgetGood\n\nFacts.[^1]")]
+
+        client = MagicMock()
+        # Ordered: the REJECTED action is first, so a bug that stops the
+        # loop (rather than skipping just this one action) would never
+        # even attempt the second call — the mock's 2-item queue makes that
+        # failure mode a StopIteration instead of a silent pass.
+        client.messages.create.side_effect = [preamble_response, good_response]
+
+        usage = TokenUsage()
+        new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
+            raw,
+            actions,
+            index,
+            wiki_dir,
+            client,
+            usage=usage,
+        )
+
+        # No exception propagated — the function returned normally.
+        assert [e.name for e in new_entities] == ["WidgetGood"]
+        assert pending_updates == []
+        assert updated_uids == []
+        assert escalations == []
         assert usage.preamble_rejected == 1
         assert usage.preamble_stripped == 0
 
