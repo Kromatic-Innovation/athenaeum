@@ -205,11 +205,15 @@ class TestPhase2StaysDark:
     """The invariant ``tests/test_comparator.py::TestAC1LandedDark`` pins for
     the comparator core, extended to every phase-2 module.
 
-    Each of these is reachable only from the comparator subsystem or from the
-    explicit, opt-in ``athenaeum merges recompare`` command. A future edit
-    that wires one into the nightly path without the cut-over -- which
-    athenaeum#715 requires to REPLACE the old paths rather than run beside
-    them -- must break this test rather than quietly double the night's work.
+    Issue athenaeum#715's cut-over authorizes exactly ONE new wiring: the
+    wiki-page dedup pass (:mod:`athenaeum.wiki_dedupe`), whose own retired
+    duplicate-detection algorithm this issue REPLACES outright (not run
+    beside it — see that module's docstring). Every module below is still
+    reachable ONLY from the comparator subsystem itself, the explicit opt-in
+    ``athenaeum merges recompare`` command, or that one authorized wiring —
+    a future edit that wires one into any OTHER pipeline entry point without
+    doing the same real replacement must break this test rather than quietly
+    double the night's work.
     """
 
     PIPELINE_ENTRY_POINTS = (
@@ -245,8 +249,25 @@ class TestPhase2StaysDark:
         effects = (repo_root / "src/athenaeum/verdict_effects.py").read_text(encoding="utf-8")
         assert "athenaeum.supersession" in effects
 
-    def test_recompare_is_the_only_live_reader_of_the_comparator_gate(self) -> None:
-        """``resolve_comparator_enabled`` has exactly ONE caller in ``src/``.
+    def test_wiki_dedupe_is_the_one_authorized_cut_over_wiring(self) -> None:
+        """Issue athenaeum#715's cut-over: ``wiki_dedupe.py`` now imports the
+        comparator core and ``verdict_effects`` directly, replacing its own
+        old algorithm — stated here as a positive assertion (not merely an
+        omission from ``PIPELINE_ENTRY_POINTS`` above) so this authorized
+        wiring is visible to a reader of this test file, not just absent
+        from the forbidden list."""
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "src/athenaeum/wiki_dedupe.py").read_text(encoding="utf-8")
+        assert "from athenaeum.comparator import" in source
+        assert "from athenaeum.verdict_effects import" in source
+
+    def test_comparator_gate_callers_are_recompare_and_the_wiki_dedupe_cutover(self) -> None:
+        """``resolve_comparator_enabled`` has exactly FOUR callers in ``src/``
+        post-cut-over: the pre-existing ``athenaeum merges recompare`` command,
+        and the three new call sites the wiki-dedup cut-over added —
+        ``librarian.py`` and ``_cmd_curate.py`` (each decides whether to even
+        build an LLM client / refuses to run) and ``wiki_dedupe.py`` (the
+        actual dark/live gate on the comparator pass itself).
 
         Matches a CALL (``resolve_comparator_enabled(``), not any textual
         mention -- ``comparator.py`` names the resolver in its docstring
@@ -260,4 +281,9 @@ class TestPhase2StaysDark:
             if path.name != "config.py"
             and "resolve_comparator_enabled(" in path.read_text(encoding="utf-8")
         )
-        assert callers == ["_cmd_merges.py"]
+        assert callers == [
+            "_cmd_curate.py",
+            "_cmd_merges.py",
+            "librarian.py",
+            "wiki_dedupe.py",
+        ]

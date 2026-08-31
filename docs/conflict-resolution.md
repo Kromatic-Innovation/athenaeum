@@ -663,19 +663,30 @@ historical merge proposals were both wrong, at 0.84 and 0.82, while the one
 verified-correct cluster sat at 0.77), and similarity's only remaining job is
 proposing which pairs to compare.
 
-### Status: not yet cut over
+### Status: partially cut over
 
 The comparator and its verdict effects (auto-supersession with its
 partial-order authority treatment and rate limits, evidence-artifact fold
 proposals, the `compatible` TTL re-check, sibling-scope widening probes) are
-**built and tested but gated off** behind `librarian.comparator_enabled`
+**built and tested, gated off by default** behind `librarian.comparator_enabled`
 (default `false`) — see
 [`docs/configuration.md`](configuration.md#five-verdict-comparator-athenaeum715--off-by-default).
 
-**So everything else in this document still describes live behaviour.** The
-remaining step on athenaeum#715 is the cut-over itself: the split paths are to
-be **removed, not left running in parallel**. Until that lands, the one live
-reader of the new path is the explicit, opt-in
+**Tier 3 / `tier3_merge` and this document's audit-locked frontmatter
+disagreement catalog are UNCHANGED and still describe live behaviour.**
+athenaeum#715's cut-over so far only replaces `athenaeum.wiki_dedupe`'s
+wiki-page-vs-wiki-page dedup pass (already-COMPILED `wiki/*.md` pages
+compared against each other) — that pass's own confidence/suppression-gate
+algorithm is deleted outright and replaced by the comparator, gated on the
+SAME `librarian.comparator_enabled` knob. The C1-C4 auto-memory pipeline's
+own intra-cluster contradiction detector (`athenaeum.merge` /
+`athenaeum.contradictions`, see
+[`docs/contradiction-detection.md`](contradiction-detection.md) for the
+full pipeline) is **still the old path** — deeply interleaved with
+run-level deadline checkpointing, the detection-incomplete retry queue, and
+the shared API-call/spend budget, so retiring it safely is scoped as its
+own follow-up. Until it lands, the other live reader of the new path
+(besides `athenaeum.wiki_dedupe` above) is the explicit, opt-in
 `athenaeum merges recompare` command, which re-runs the comparator over the
 existing pending merge proposals and records a verdict per source pair —
 dry-run by default, and with no path to approving a merge at all.

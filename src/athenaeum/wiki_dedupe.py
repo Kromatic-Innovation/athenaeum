@@ -1,16 +1,44 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Wiki-page dedup pass (issue athenaeum#290) — L4 domain/pipeline.
+"""Wiki-page dedup pass (issues athenaeum#290, athenaeum#715) — L4 domain/pipeline.
 
 Contract: clusters already-COMPILED wiki pages (not raw intake) against
-each other and appends a merge proposal to ``wiki/_pending_merges.md``
-when two-or-more concept/reference/principle pages look like duplicates.
-Factoring rule: this module owns the WIKI-VS-WIKI clustering pass only —
-it deliberately does NOT reimplement clustering (reuses
-``clusters.cluster_auto_memory_files``), draft synthesis (reuses
-``merge.synthesize_body`` / ``merge.derive_topic_slug``), or the
-sidecar-write/idempotency logic (reuses
-``pending_merges.write_pending_merge``); it is glue over those three, not
-a fourth implementation of any of them.
+each other and, for every candidate PAIR inside a cluster, runs the
+five-verdict comparator (:mod:`athenaeum.comparator`) and enacts whatever
+it decides (:mod:`athenaeum.verdict_effects`) — a ``duplicate`` verdict
+writes fold EVIDENCE (never a merged body), ``specialization`` writes
+``refines:``, ``contradiction`` routes to supersession-or-queue,
+``underdetermined``/``distinct`` are ledger-only. Factoring rule: this
+module owns the WIKI-VS-WIKI clustering pass only — it deliberately does
+NOT reimplement clustering (reuses ``clusters.cluster_auto_memory_files``)
+or verdict decision/enactment (reuses ``comparator``/``verdict_effects``);
+it is glue over those two, not a third implementation of either.
+
+**Cut-over (issue athenaeum#715).** Before this issue, this module ran its OWN
+duplicate-detection algorithm: the same complete-linkage clustering below,
+followed by the ``merge_type_gate`` confidence/complete-linkage/mean-
+similarity suppression gates, a deterministic-concatenation draft body
+(``merge.synthesize_body``), and a direct write to
+``wiki/_pending_merges.md`` (``pending_merges.write_pending_merge``) —
+entirely independent of, and running in PARALLEL with, the five-verdict
+comparator once it landed (PRs #1128/#1131). Issue athenaeum#715's own AC
+forbids exactly that shape ("the old paths are removed, not left in
+parallel"). That old algorithm is DELETED, not merely gated: clustering is
+kept (candidate generation — "similarity's only job is proposing pairs"),
+but everything downstream of it now runs through the comparator. The
+CROSS-CLASS precheck (:func:`athenaeum.merge_type_gate.cross_class_precheck`)
+is kept as a pre-comparator filter, NOT deleted with the rest of
+``merge_type_gate``'s gates: the comparator's own ``MEMORY_CLASS`` kernel
+dimension (:mod:`athenaeum.dimensions`) ships in ``LifecycleState.BACKFILL``,
+not ``ENFORCED``, so Gate 1 does not yet consult it — until it does, this is
+the only live defense against clustering a policy page with the records it
+governs (the PII-hazard shape athenaeum#715's own comments call out).
+
+The whole pass is gated on :func:`athenaeum.config.resolve_comparator_enabled`
+— the SAME pre-existing comparator master switch (default OFF), not a new
+flag. With it off, this function returns ``[]`` immediately: no proposals,
+old-style or new, are produced. This is not a half-cut-over: there is
+exactly one implementation (the comparator's), currently dark by the same
+knob the rest of the comparator subsystem already ships behind.
 
 The C1-C4 auto-memory pipeline (:mod:`athenaeum.clusters`,
 :mod:`athenaeum.merge`) only ever clusters ``raw/auto-memory/*.md`` intake
@@ -55,39 +83,36 @@ Design (see PR body for the full rationale):
   that mismatch. When chromadb is unavailable, falls back to the same
   hashing-trick embedder ``clusters.py`` already uses for its own
   no-deps degradation path (imported, not duplicated).
-- Draft synthesis reuses :func:`athenaeum.merge.synthesize_body` (C3's
-  deterministic concatenate-with-paragraph-dedupe strategy) and
-  :func:`athenaeum.merge.derive_topic_slug` (C3's topic-slug heuristic) —
-  no new synthesis strategy, per the issue's explicit scope note.
-- Idempotency: proposals are appended via
-  :func:`athenaeum.pending_merges.write_pending_merge`, which already
-  skips a re-append when a block with the same source-set + target-name
-  id exists (resolved or not) in ``wiki/_pending_merges.md`` — this
-  module does not re-derive that stability logic.
+- Every pair within a candidate cluster (``itertools.combinations``) is
+  compared independently — clustering only proposes candidates, the
+  comparator decides each pair on its own, per athenaeum#715's "similarity is
+  never a verdict input" rule.
+- Idempotency is the ledger's: :func:`athenaeum.comparator.record_comparison`
+  skips a pair whose verdict is already FRESH before spending an LLM call —
+  this module does not re-derive that check.
 
-Out of scope (deliberate — see issue athenaeum#290):
+Out of scope (deliberate):
 
-- LLM-based draft synthesis / rich merge rationale.
-- Real contradiction detection beyond the existing cohesion threshold.
+- Real-time re-clustering triggered by a single page edit (issue athenaeum#290
+  scope) or applying/enacting a duplicate fold (a separate, future child of
+  athenaeum#709 — this module only ever produces evidence, never a merged page).
 - Retroactively re-clustering already ``archived``/``superseded_by`` pages.
 
-Layering (L4 domain/pipeline). ``wiki_dedupe.py`` imports ``athenaeum.merge``
-and ``athenaeum.pending_merges`` at module TOP level — normal downward
-dependencies; neither imports this module back. After issue athenaeum#545 dissolved
-the librarian-centered named-8 coupling, ``wiki_dedupe.py`` is NOT part of any
-import SCC. ``librarian.py`` calls into this module only via its own deferred
-import (a one-way edge). The one function-local ``from athenaeum.pending_merges
-import _make_id, parse_pending_merges`` inside ``propose_wiki_page_merges`` is
-NOT a cycle-breaker (``pending_merges`` is already imported at top level
-above); it is a plain in-function convenience import.
+Layering (L4 domain/pipeline). ``wiki_dedupe.py`` imports
+``athenaeum.comparator`` / ``athenaeum.verdict_effects`` at module TOP level
+— normal downward dependencies; neither imports this module back. After
+issue athenaeum#545 dissolved the librarian-centered named-8 coupling,
+``wiki_dedupe.py`` is NOT part of any import SCC. ``librarian.py`` calls
+into this module only via its own deferred import (a one-way edge).
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
+from itertools import combinations
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from athenaeum.authority import is_pointer_stub
 from athenaeum.clusters import (
@@ -98,22 +123,19 @@ from athenaeum.clusters import (
     cluster_auto_memory_files,
     resolve_cluster_threshold,
 )
-from athenaeum.config import load_config, resolve_heartbeat_interval
-from athenaeum.merge import (
-    derive_topic_slug,
-    synthesize_body,
-)
-from athenaeum.merge_type_gate import (
-    _merge_proposal_suppression_reason,
-    build_cite_proposal,
-    cross_class_precheck,
-)
-from athenaeum.models import AutoMemoryFile, parse_frontmatter, validity_bound_str
-from athenaeum.pending_merges import write_pending_merge
+from athenaeum.comparator import page_from_path, record_comparison
+from athenaeum.config import load_config, resolve_comparator_enabled, resolve_heartbeat_interval
+from athenaeum.merge_type_gate import cross_class_precheck
+from athenaeum.models import AutoMemoryFile, TokenUsage, parse_frontmatter, validity_bound_str
 from athenaeum.pii import is_pii_flagged
 from athenaeum.progress import PhaseHeartbeat
+from athenaeum.runlock import RunLock
 from athenaeum.search import embed_texts
 from athenaeum.storage import is_merge_eligible
+from athenaeum.verdict_effects import apply_verdict_effect
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from athenaeum.provider import LLMBackend
 
 log = logging.getLogger(__name__)
 
@@ -323,20 +345,6 @@ def find_wiki_page_clusters(
     return [c for c in clusters if len(c.member_paths) >= 2]
 
 
-def _member_bodies_for_cluster(
-    cluster: Cluster,
-    by_relpath: dict[str, AutoMemoryFile],
-) -> list[tuple[str, str, str]]:
-    """Build the ``(scope, filename, body)`` triples ``synthesize_body`` wants."""
-    triples: list[tuple[str, str, str]] = []
-    for relpath in cluster.member_paths:
-        am = by_relpath.get(relpath)
-        if am is None:
-            continue
-        triples.append((WIKI_ORIGIN_SCOPE, am.path.name, am.content))
-    return triples
-
-
 def propose_wiki_page_merges(
     knowledge_root: Path,
     *,
@@ -344,15 +352,26 @@ def propose_wiki_page_merges(
     threshold: float | None = None,
     embedding_provider: EmbeddingProvider | None = None,
     dry_run: bool = False,
+    client: "LLMBackend | None" = None,
+    usage: TokenUsage | None = None,
+    lock: RunLock | None = None,
 ) -> list[dict[str, Any]]:
-    """Find duplicate-topic wiki pages and propose merges for human review.
+    """Compare candidate duplicate wiki pages via the five-verdict comparator.
 
     For each cluster of size >= 2 above the configured cluster-cohesion
-    threshold, checks whether a merge proposal for this exact source set
-    already exists (resolved or not) in ``wiki/_pending_merges.md`` —
-    reusing :func:`athenaeum.pending_merges.write_pending_merge`'s own
-    idempotency check (source-set + target-name id stability) rather than
-    re-deriving it here — and appends a new proposal when none does.
+    threshold, every PAIR within the cluster (``itertools.combinations``) is
+    compared independently via :func:`athenaeum.comparator.record_comparison`
+    — clustering only proposes candidates (issue athenaeum#715: "similarity's
+    only job is proposing pairs"); it never decides a verdict itself. A
+    decided, non-fresh verdict is enacted via
+    :func:`athenaeum.verdict_effects.apply_verdict_effect` (a ``duplicate``
+    verdict writes fold EVIDENCE, never a merged body — see that module's
+    docstring for all five branches).
+
+    Dark by default: returns ``[]`` immediately unless
+    :func:`athenaeum.config.resolve_comparator_enabled` is true — the SAME
+    knob the rest of the comparator subsystem gates on (issue athenaeum#715's
+    cut-over deliberately does not introduce a second flag).
 
     Args:
         knowledge_root: Root of the knowledge directory (``wiki/`` lives
@@ -364,19 +383,36 @@ def propose_wiki_page_merges(
             issue's explicit "don't invent a new threshold" scope note.
         embedding_provider: Optional embedder override — see
             :func:`_resolve_wiki_embeddings`. Tests inject a stub.
-        dry_run: When True, returns the proposals that WOULD be written
-            without touching ``wiki/_pending_merges.md``.
+        dry_run: When True, every pair is compared via
+            :func:`athenaeum.comparator.compare_pages` directly (no ledger
+            write, no memoization, no enacted effect) and the WOULD-BE
+            verdicts are returned for preview.
+        client: Optional live LLM client for the comparator's Gate 2
+            (:func:`athenaeum.comparator.content_relation`). ``None``
+            degrades to Gate-1-only pairs reporting a verdict; a pair Gate 1
+            cannot settle reports no verdict (never a fabricated one).
+        usage: Optional run-level :class:`~athenaeum.models.TokenUsage` so
+            the comparator's Gate 2 calls are threaded into the run budget.
+        lock: The caller's already-acquired :class:`~athenaeum.runlock.RunLock`
+            — required (and used) for every non-dry-run comparison, since
+            ledgering a verdict is a single-appender write. When ``None`` and
+            *dry_run* is also ``False``, this pass is skipped entirely
+            (logged, never raised) rather than comparing without a lock.
 
     Returns:
-        A list of dicts (one per NEWLY-written or would-be-written
-        proposal this call) with ``merge_target_name``, ``sources``,
-        ``rationale``, and ``confidence`` — for CLI reporting and tests.
-        Proposals already present from a prior run are silently skipped
-        (not returned) since nothing new happened for them.
+        A list of dicts, one per pair this call actually decided a verdict
+        for (fresh/memoized pairs are silently skipped — nothing new
+        happened for them): ``pair`` (the ledger pair key), ``verdict``,
+        ``action`` (the :class:`~athenaeum.verdict_effects.EffectResult`
+        action token; omitted in dry-run, which never enacts anything), and
+        ``sources`` (the two absolute page paths).
     """
     resolved_config = config if config is not None else load_config(knowledge_root)
     wiki_root = knowledge_root / "wiki"
     if not wiki_root.is_dir():
+        return []
+
+    if not resolve_comparator_enabled(resolved_config):
         return []
 
     resolved_threshold = (
@@ -414,8 +450,16 @@ def propose_wiki_page_merges(
         heartbeat.done()
         return []
 
-    merges_path = wiki_root / "_pending_merges.md"
-    proposals: list[dict[str, Any]] = []
+    if not dry_run and lock is None:
+        log.warning(
+            "wiki-page dedup: comparator pass skipped — no RunLock held and "
+            "not a dry-run (ledgering a verdict requires the caller's "
+            "already-acquired lock)"
+        )
+        heartbeat.done()
+        return []
+
+    results: list[dict[str, Any]] = []
 
     for cluster in clusters:
         heartbeat.tick(cluster.cluster_id)
@@ -427,149 +471,92 @@ def propose_wiki_page_merges(
         if len(members) < 2:
             continue
 
-        # Sources are absolute paths — wiki pages (unlike raw auto-memory
-        # intake) are not retired/moved by any downstream pass, so these
-        # stay stable across runs and are safe to use as the id-stability
-        # key inside write_pending_merge.
-        sources = [str(am.path.resolve()) for am in members]
+        for am_a, am_b in combinations(members, 2):
+            path_a, path_b = am_a.path.resolve(), am_b.path.resolve()
+            sources = [str(path_a), str(path_b)]
 
-        # Issue athenaeum#478: the athenaeum#400/#421 degenerate-over-cluster suppression gate
-        # must run on THIS write path too, not just merge.py's resolver path.
-        # ``find_wiki_page_clusters`` uses the SAME shared formation routine
-        # (``cluster_auto_memory_files``) as the raw-source C1-C4 pass — as of
-        # issue athenaeum#681, formation itself is complete-linkage (single-linkage
-        # connected components refined into cliques), so a weak bridging edge
-        # can no longer chain hundreds/thousands of loosely-related pages into
-        # a giant component in the first place. This gate is therefore a
-        # BACKSTOP, not the load-bearing defense: it still matters for
-        # legitimately large/incohesive cliques and for any pre-athenaeum#681
-        # legacy data, but it is no longer what stands between formation and
-        # the giant-component incident.
-        #
-        # Historical note (pre-athenaeum#681, before formation was complete-linkage):
-        # single-linkage chains reached ``_pending_merges.md`` directly (the
-        # live 1,711-/1,746-source ``merge-workflow-pattern`` and 16-source
-        # ``contact-contacts-wiki`` proposals), bypassing the active-by-default
-        # ``max_merge_sources`` (5) / ``min_merge_mean_similarity`` (0.6)
-        # guardrails below.
-        #
-        # Issue athenaeum#803: confirmed this formation logic is (and must stay)
-        # shared with the raw-source clusterer rather than forked a second
-        # time — do not reimplement single-linkage-then-complete-linkage
-        # refinement here or in ``merge.py``'s resolver path. Change the
-        # algorithm once, in :mod:`athenaeum.clusters`
-        # (``_single_linkage``/``_complete_linkage``/``cluster_auto_memory_files``),
-        # and both call sites pick it up.
-        #
-        # This gate call mirrors merge.py ``_emit_escalation``'s call EXACTLY
-        # (size cap + complete-linkage min-pairwise + mean-cohesion +
-        # confidence floor), evaluated BEFORE the proposal is written — and
-        # before the ``dry_run`` branch, so a dry-run preview reflects what a
-        # real gated run would do.
-        suppression = _merge_proposal_suppression_reason(
-            n_sources=len(sources),
-            confidence=cluster.centroid_score,
-            config=resolved_config,
-            mean_similarity=cluster.centroid_score,
-            min_pairwise=cluster.min_pairwise_score,
-            cluster_threshold=resolved_threshold,
-        )
-        if suppression is not None:
-            # Issue athenaeum#1032: names the embedder that produced the suppressed
-            # cluster's vectors — the over-cluster diagnosis this gate guards
-            # against needs to know whether a coarse hashing-trick fallback
-            # (rather than real MiniLM similarity) drove the suppression.
-            # Issue athenaeum#1085: n_sources is recorded as its own structured field,
-            # UNCONDITIONALLY — not parsed out of `suppression`, which only
-            # embeds the source count when the size-cap gate happens to be
-            # the one that fired (gate ordering is pinned by
-            # TestGateOrdering, so a cohesion/confidence/chain suppression
-            # previously recorded no size at all).
-            log.info(
-                "wiki-page dedup: SUPPRESSED degenerate merge proposal for "
-                "cluster %s (%s); embedder=%s; n_sources=%d; not written to "
-                "_pending_merges.md",
-                cluster.cluster_id,
-                suppression,
-                cluster.embedder,
-                len(sources),
-            )
-            continue
+            # Issue athenaeum#433: type-compatibility precheck, kept as a
+            # pre-comparator filter (see module docstring) since the
+            # comparator's own MEMORY_CLASS dimension is not yet ENFORCED.
+            # A cross-class pair is skipped entirely — no proposal, no
+            # ledger entry, no LLM call.
+            rejection = cross_class_precheck(sources)
+            if rejection is not None:
+                log.info(
+                    "wiki-page dedup: cross-class pair skipped (%s): %s / %s",
+                    rejection.reason,
+                    path_a,
+                    path_b,
+                )
+                continue
 
-        # Issue athenaeum#433: type-compatibility precheck. A cluster spanning >1
-        # distinct memory_class values may not be merged — same-class only
-        # (docs/memory-taxonomy.md #3). Rejected BEFORE the merge-target
-        # slug/draft body are even computed: a cross-class cluster never
-        # becomes a merge proposal, a cite proposal is built in its place.
-        rejection = cross_class_precheck(sources)
-        if rejection is not None:
-            cite = build_cite_proposal(sources, rejection)
-            log.info(
-                "wiki-page dedup: cross-class cluster rejected for merge "
-                "(%s); emitting cite proposal instead (citing=%d, cited=%d)",
-                rejection.reason,
-                len(cite.citing),
-                len(cite.cited),
+            try:
+                page_a = page_from_path(path_a)
+                page_b = page_from_path(path_b)
+            except (OSError, UnicodeDecodeError) as exc:
+                log.warning(
+                    "wiki-page dedup: could not read pair for comparison "
+                    "(%s / %s): %s",
+                    path_a,
+                    path_b,
+                    exc,
+                )
+                continue
+
+            if dry_run:
+                from athenaeum.comparator import compare_pages
+
+                dry_outcome = compare_pages(
+                    page_a, page_b, client=client, config=resolved_config, usage=usage
+                )
+                if dry_outcome.verdict is not None:
+                    results.append(
+                        {
+                            "pair": "|".join(sorted((page_a.id, page_b.id))),
+                            "verdict": dry_outcome.verdict,
+                            "sources": sources,
+                        }
+                    )
+                continue
+
+            assert lock is not None  # guarded above
+            record = record_comparison(
+                wiki_root,
+                page_a,
+                page_b,
+                client=client,
+                config=resolved_config,
+                usage=usage,
+                lock=lock,
             )
-            proposals.append(
+            if not record["ok"] or record.get("skipped") == "fresh":
+                continue
+            outcome = record.get("outcome")
+            if outcome is None:
+                continue
+            effect = apply_verdict_effect(
+                page_a,
+                page_b,
+                outcome,
+                wiki_root=wiki_root,
+                path_a=path_a,
+                path_b=path_b,
+                config=resolved_config,
+            )
+            results.append(
                 {
-                    "action": cite.action,
-                    "citing": cite.citing,
-                    "cited": cite.cited,
-                    "rationale": cite.rationale,
-                    "rejection": rejection.to_dict(),
+                    "pair": record["pair"],
+                    "verdict": record["verdict"],
+                    "action": effect.action,
+                    "sources": sources,
                 }
             )
-            continue
-
-        merge_target_name = derive_topic_slug(cluster.member_paths, cluster.cluster_id)
-        member_bodies = _member_bodies_for_cluster(cluster, by_relpath)
-        draft_body = synthesize_body(member_bodies)
-        rationale = (
-            f"{len(members)} wiki pages cluster on the same topic "
-            f"({cluster.rationale})"
-        )
-
-        # Check idempotency BEFORE branching on dry_run — otherwise a
-        # dry-run preview reports proposals a real run would silently
-        # skip as already-present, which contradicts dry-run's own
-        # "what would a real run do" framing (Quine review of athenaeum#293).
-        from athenaeum.pending_merges import _make_id, parse_pending_merges
-
-        existing_ids = {pm.id for pm in parse_pending_merges(merges_path)}
-        block_id = _make_id(sources, merge_target_name)
-        if block_id in existing_ids:
-            log.debug(
-                "wiki-page dedup: proposal %s already present; skipping", block_id
+            log.info(
+                "wiki-page dedup: comparator verdict=%s action=%s for %s",
+                record["verdict"],
+                effect.action,
+                record["pair"],
             )
-            continue
-
-        proposal = {
-            "merge_target_name": merge_target_name,
-            "sources": sources,
-            "rationale": rationale,
-            "draft_merged_body": draft_body,
-            "confidence": cluster.centroid_score,
-        }
-
-        if dry_run:
-            proposals.append(proposal)
-            continue
-
-        write_pending_merge(
-            merges_path,
-            merge_target_name=merge_target_name,
-            sources=sources,
-            rationale=rationale,
-            draft_merged_body=draft_body,
-            confidence=cluster.centroid_score,
-        )
-        proposals.append(proposal)
-        log.info(
-            "wiki-page dedup: proposed merge %r covering %d page(s)",
-            merge_target_name,
-            len(members),
-        )
 
     heartbeat.done()
-    return proposals
+    return results

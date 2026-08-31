@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Wiki-page dedup cut over to the five-verdict comparator; its own old
+  duplicate-detection algorithm is retired, not run alongside it
+  (athenaeum#715).** `athenaeum.wiki_dedupe.propose_wiki_page_merges` used to
+  cluster candidate wiki pages (unchanged) and then run its OWN
+  confidence-scored suppression-gate pipeline
+  (`merge_type_gate._merge_proposal_suppression_reason`, deterministic draft
+  synthesis, a direct `write_pending_merge` append) — a second,
+  independent duplicate-detection implementation running in parallel with
+  the five-verdict comparator (`athenaeum.comparator`, landed dark in
+  athenaeum#1128/#1131). That old algorithm is deleted outright: clustering
+  still only proposes candidate PAIRS (never a verdict), and every pair is
+  now decided by the comparator and enacted via `athenaeum.verdict_effects`
+  — a `duplicate` verdict writes fold EVIDENCE (never a merged body,
+  never `_pending_merges.md`), `specialization` writes `refines:`,
+  `contradiction` routes to supersession-or-queue, `distinct`/
+  `underdetermined` are ledger-only. `merge_type_gate.cross_class_precheck`
+  is kept as a pre-comparator filter (the comparator's own `MEMORY_CLASS`
+  dimension is not yet `enforced`). Gated on the SAME pre-existing
+  `librarian.comparator_enabled` / `ATHENAEUM_COMPARATOR_ENABLED` knob
+  (still default OFF) — not a new flag; with it off, this pass is now a
+  complete no-op (old or new), which is the intended shape of a real
+  cut-over rather than a second parallel path. `athenaeum.comparator.record_comparison`
+  now also returns the decided `CompareOutcome` (`"outcome"` key, `None`
+  except on a freshly-ledgered pair) so a caller can enact its effect
+  without a second, redundant Gate 2 call.
+
+  **This is a partial cut-over, not the full one athenaeum#715 ultimately
+  requires.** The separate C1-C4 auto-memory compile pipeline
+  (`athenaeum.merge`'s `merge_clusters_to_wiki`, the ~940-line intra-cluster
+  LLM contradiction detector + Opus resolver + T1/T2 reasoning-tier screens
+  + cross-scope similarity sweep) is UNCHANGED and still runs
+  unconditionally — it is deeply interleaved with run-level deadline
+  checkpointing, the detection-incomplete retry queue
+  (`athenaeum.detection_state`), and the shared API-call/spend-ceiling
+  budget across multiple `librarian.py` call sites, none of which this PR
+  touches. Retiring it safely needs its own dedicated pass; see the PR
+  description and the athenaeum#715 issue comment for the precise scope
+  handed to a follow-up lane.
+
 ### Added
 
 - **Batch spend reservation and settlement — `ceiling_tripped` is no longer

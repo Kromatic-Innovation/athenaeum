@@ -4959,16 +4959,25 @@ def _run_correction_phase(ctx: RunContext) -> None:
 
 
 def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
-    """Issue athenaeum#290 wiki-page dedup pass, then the post-phase deadline check.
+    """Issue athenaeum#290/athenaeum#715 wiki-page dedup pass, then the post-phase deadline check.
 
     Clusters compiled wiki/*.md concept/reference/principle pages against
-    EACH OTHER (not against raw/auto-memory intake) and proposes merges via
-    the shared wiki/_pending_merges.md sidecar. Independent of the C1-C4
-    auto-memory pipeline, so it runs on every mode (full run, --cluster-only,
+    EACH OTHER (not against raw/auto-memory intake). Since issue athenaeum#715's
+    cut-over, every candidate pair is decided and enacted by the five-verdict
+    comparator subsystem — see :func:`athenaeum.wiki_dedupe.propose_wiki_page_merges`'s
+    own docstring for exactly which modules that call reaches; this whole
+    pass is a no-op while ``librarian.comparator_enabled`` (default OFF)
+    stays off, same as every other comparator-subsystem consumer. This
+    module itself only checks the flag (to decide whether an LLM client is
+    even worth building) and delegates everything else to
+    ``athenaeum.wiki_dedupe`` — it does not import the comparator subsystem
+    directly. Independent of the C1-C4 auto-memory
+    pipeline, so it runs on every mode (full run, --cluster-only,
     --merge-only) whenever wiki/ exists — same cadence as the rest of the
     scheduled librarian pipeline. A failure here is logged and swallowed
-    rather than aborting the run: this pass is diagnostic (it only appends
-    human-reviewed proposals), not load-bearing for the rest of the pipeline.
+    rather than aborting the run: this pass is diagnostic (it only writes
+    human-reviewed evidence/queue items), not load-bearing for the rest of
+    the pipeline.
 
     Returns EXIT_GRACEFUL_PARTIAL (75, via ``ctx.stop_on_deadline``) to
     short-circuit ``run()`` when the deadline trips immediately after this
@@ -4977,10 +4986,29 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
     if ctx.wiki_root.is_dir():
         _wiki_dedup_start = time.monotonic()
         try:
+            from athenaeum.config import resolve_comparator_enabled
             from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
+            # Issue athenaeum#715: only resolve a client when the comparator
+            # subsystem is actually enabled — with the (default-off) flag
+            # off, `propose_wiki_page_merges` no-ops immediately, so building
+            # a live LLM client here would be pure waste and could log a
+            # confusing "wiki-page dedup pass failed" for an unrelated
+            # provider misconfiguration nobody asked this phase to surface.
+            _client = None
+            if resolve_comparator_enabled(ctx.config):
+                _provider = resolve_provider(ctx.config, knob="classify", default=ctx.provider)
+                ctx.knob_providers["classify"] = _provider
+                _client = build_llm_client(
+                    ctx.config, knob="classify", api_key=ctx.api_key, max_retries=3
+                )
             propose_wiki_page_merges(
-                ctx.knowledge_root, config=ctx.config, dry_run=ctx.dry_run
+                ctx.knowledge_root,
+                config=ctx.config,
+                dry_run=ctx.dry_run,
+                client=_client,
+                usage=ctx.usage,
+                lock=ctx.lock,
             )
         except Exception:
             log.exception("wiki-page dedup pass failed; continuing run")

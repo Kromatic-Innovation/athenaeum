@@ -687,7 +687,14 @@ class TestCommandWiring:
         assert rc == 0
         assert not (root / runlock.LOCKFILE_NAME).exists()
 
-    def test_dry_run_does_not_acquire_lock(self, tmp_path: Path) -> None:
+    def test_dry_run_does_not_acquire_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Issue athenaeum#715: `dedupe wiki-pages` refuses to run at all while the
+        # comparator subsystem is disabled (its own old algorithm is retired),
+        # so enable it here — the assertion under test is about the LOCK, not
+        # about the comparator gate.
+        monkeypatch.setenv("ATHENAEUM_COMPARATOR_ENABLED", "1")
         root = self._make_knowledge_dir(tmp_path)
         # dedupe wiki-pages --dry-run must not take the lock.
         rc = main(["dedupe", "wiki-pages", "--path", str(root), "--dry-run"])
