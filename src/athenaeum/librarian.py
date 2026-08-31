@@ -852,7 +852,7 @@ def tier0_handle_upsert(
                 sorted(incoming),
             )
             return None
-        resolved_uid, existing_path = resolved
+        resolved_uid, existing_path = resolved.uid, resolved.path
         if (
             not resolved_uid
             or not existing_path.exists()
@@ -1112,7 +1112,7 @@ def tier0_do_not_email_mark(
                 fact.identifier,
             )
             return None
-        resolved_uid, existing_path = resolved
+        resolved_uid, existing_path = resolved.uid, resolved.path
         if (
             not resolved_uid
             or not existing_path.exists()
