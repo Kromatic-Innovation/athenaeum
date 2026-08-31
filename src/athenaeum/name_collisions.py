@@ -491,6 +491,22 @@ def resolve_name_collisions(
                             collision.name,
                             result.get("error_code"),
                         )
+                else:
+                    # Issue athenaeum#1170 code review: fails safe (the
+                    # collision is simply left queued, same as any other
+                    # unresolved proposal), but a mismatch here means the
+                    # block this iteration just wrote via write_pending_merge
+                    # cannot be found by value -- e.g. a future edit to id
+                    # computation or merge_target_name round-tripping broke
+                    # the match. That should never be silent.
+                    log.warning(
+                        "name-collision-auto-merge-block-not-found name=%r "
+                        "canonical=%s sources=%s — proposal was written but "
+                        "could not be re-found by value; left queued",
+                        collision.name,
+                        canonical.path.name,
+                        sources,
+                    )
         else:
             ambiguous += 1
 
