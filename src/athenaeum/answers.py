@@ -483,15 +483,26 @@ def _render_archive_block(pq: PendingQuestion, archived_at: str) -> str:
     return f"{pq.raw_block}\n\n" f"**Archived**: {archived_at}\n"
 
 
-def _render_answer_raw_file(pq: PendingQuestion, resolved_at: str) -> str:
-    """Render the raw intake markdown for a resolved question."""
+def _render_answer_raw_file(
+    pq: PendingQuestion, resolved_at: str, *, source_field: str = "pending_question_answer"
+) -> str:
+    """Render the raw intake markdown for a resolved question.
+
+    *source_field* defaults to the literal ``pending_question_answer`` this
+    function always used before issue athenaeum#1116 AC2 — callers pass
+    :func:`athenaeum.erasure.off_corpus_recall_source`'s output instead when
+    the question's own source traces to an off-corpus recall
+    (:func:`athenaeum.erasure.classify_by_provenance`), so the re-ingested
+    fact's OWN provenance says where it came from rather than the next
+    reader having to re-guess it from content.
+    """
     body = "\n".join(pq.answer_lines).strip()
     if not body:
         body = "(no answer body provided)"
 
     return (
         "---\n"
-        "source: pending_question_answer\n"
+        f"source: {source_field}\n"
         f"original_source: raw/{pq.source}\n"
         f"entity: {pq.entity}\n"
         f"resolved_at: {resolved_at}\n"
@@ -870,6 +881,10 @@ def ingest_answers(
         return 0
 
     answers_dir = raw_root / "answers"
+    # Issue athenaeum#1116: bound unconditionally (not only inside the
+    # best-effort try block below) so the AC2 off-corpus routing check
+    # further down always has a knowledge_root even if config loading fails.
+    knowledge_root = raw_root.parent
     # Issue athenaeum#197: roots under which a block's source ref(s) are resolved for
     # write-back. raw_root first (auto-memory sources live there), then the
     # wiki root (``pending_path.parent``) for wiki-side memories.
@@ -941,12 +956,77 @@ def ingest_answers(
         # within the same second (two answers resolved in the same run).
         answers_dir.mkdir(parents=True, exist_ok=True)
         slug = _slugify(pq.entity)
-        candidate = answers_dir / f"{filename_ts}-{slug}.md"
+        answer_filename = f"{filename_ts}-{slug}.md"
+        candidate = answers_dir / answer_filename
         counter = 1
         while candidate.exists():
-            candidate = answers_dir / f"{filename_ts}-{slug}-{counter}.md"
+            answer_filename = f"{filename_ts}-{slug}-{counter}.md"
+            candidate = answers_dir / answer_filename
             counter += 1
-        atomic_write_text(candidate, _render_answer_raw_file(pq, iso_ts))
+
+        # Issue athenaeum#1116 AC2: classify by PROVENANCE, never re-guess from
+        # content — a question raised against off-corpus-recalled content
+        # (``pq.source`` shaped ``recall-offcorpus:<ref>``, issue athenaeum#985 AC5)
+        # means the ratified answer re-ingests that same off-corpus lineage.
+        from athenaeum.erasure import classify_by_provenance, off_corpus_recall_source
+        from athenaeum.provenance import parse_source
+
+        recall_ref: str | None = None
+        try:
+            # ``pq.source`` is usually a bare file path (the pending-question
+            # header's "(from <ref>)" — see ``_HEADER_RE``), not a
+            # ``"<type>:<ref>"`` provenance scalar; ``parse_source`` raises
+            # ValueError on that legacy/non-scalar shape rather than
+            # returning None (issue athenaeum#97's retired bare-slug form).
+            # That is exactly the common case here, so it is caught and
+            # treated as "not provenance-taintable" — never re-guessed from
+            # content, just not classifiable by provenance at all.
+            if classify_by_provenance(pq.source):
+                parsed_source = parse_source(pq.source)
+                if parsed_source is not None:
+                    recall_ref = parsed_source.ref
+        except ValueError:
+            recall_ref = None
+
+        if recall_ref is not None:
+            raw_text = _render_answer_raw_file(
+                pq, iso_ts, source_field=off_corpus_recall_source(recall_ref)
+            )
+            # Reversible default (issue athenaeum#1116, matching AC1's posture):
+            # when an off-corpus surface IS configured, the re-ingested answer
+            # is routed there instead of the ordinary raw intake tree. When it
+            # is NOT configured, there is nothing to route to — the answer
+            # still lands in the ordinary raw intake tree exactly as before
+            # this wiring (breaking every deployment that has not configured
+            # off-corpus would be worse than the gap this issue closes), but a
+            # structured, greppable WARNING names the taint and the file.
+            from athenaeum.off_corpus import off_corpus_adapter, off_corpus_store
+            from athenaeum.store import StoreKey
+
+            store = off_corpus_store(config, knowledge_root)
+            if store is not None:
+                adapter = off_corpus_adapter(config)
+                assert adapter is not None  # off_corpus_store already returned non-None
+                relpath = f"answers/{answer_filename}"
+                store.put(StoreKey(surface=adapter.name, key=relpath), raw_text.encode("utf-8"))
+                log.info(
+                    "answers: routed re-ingested off-corpus recall %s off-corpus "
+                    "(athenaeum#1116 AC2, source=%s)",
+                    relpath,
+                    pq.source,
+                )
+            else:
+                log.warning(
+                    "erasure-taint-not-routed: answer for entity=%s re-ingests an "
+                    "off-corpus recall (source=%s) but no off-corpus surface is "
+                    "configured (off_corpus.enabled=false) - writing to the "
+                    "ordinary raw intake corpus (athenaeum#1116)",
+                    pq.entity,
+                    pq.source,
+                )
+                atomic_write_text(candidate, raw_text)
+        else:
+            atomic_write_text(candidate, _render_answer_raw_file(pq, iso_ts))
 
         # Issue athenaeum#197/#210: apply the ratified verdict to the source memory
         # file(s). The provenance doc above is the audit trail and is ALWAYS

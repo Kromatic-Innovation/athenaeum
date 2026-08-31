@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`athenaeum.erasure` (athenaeum#985) wired into the production write and
+  recall paths (athenaeum#1116) — S3 of the athenaeum#985 slice, mirroring
+  `athenaeum.sensitivity`'s S1a/S1b -> S3 migration (athenaeum#992).**
+  `athenaeum.erasure` shipped fully implemented and fully tested with zero
+  production callers; this closes that gap with three wirings, each proven
+  by a round-trip test through the real write/read path (see
+  `tests/test_erasure_wiring.py`):
+  - `athenaeum.merge`'s C3 compile write loop now calls
+    `classify_inference_taint` on every compiled page and routes a page
+    whose `## Inference` block basis cites erasure-class content to the
+    off-corpus surface (athenaeum#984) instead of the ordinary corpus.
+  - `athenaeum.answers`'s `ingest_answers` re-ingestion path now calls
+    `classify_by_provenance` on a ratified answer's source and, when it
+    traces to an off-corpus recall, applies `off_corpus_recall_source`'s
+    convention and routes the re-ingested answer off-corpus — never
+    re-guessing the taint from content.
+  - `athenaeum.decay_sweep` now consults the active retention pack
+    (`reconcile_bucket_daily_with_pack`) for a page's `(memory_class,
+    data_class)` before falling back to its independent `bucket: daily` /
+    `valid_until` logic (`docs/provenance-shape.md` §8.8), gated on an
+    explicit `data_class` frontmatter field — no shipped write path stamps
+    one yet, so this is a no-op on any corpus produced by shipped code
+    today.
+  - **Reversible default:** when no off-corpus surface is configured, all
+    three wirings keep their pre-athenaeum#1116 destination (the ordinary
+    corpus) rather than failing closed, but emit a structured, greppable
+    `erasure-taint-not-routed` warning naming the taint and the page.
+
 ### Removed
 
 - **`athenaeum bounce-divergence` and `athenaeum do-not-email-divergence` CLI

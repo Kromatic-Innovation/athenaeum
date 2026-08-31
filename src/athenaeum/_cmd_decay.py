@@ -89,17 +89,26 @@ def cmd_decay_sweep(args: argparse.Namespace) -> int:
         return 1
 
     cfg = load_config(knowledge_root)
-    report = build_sweep_report(wiki_root, as_of=args.as_of)
+    report = build_sweep_report(
+        wiki_root, as_of=args.as_of, knowledge_root=knowledge_root, config=cfg
+    )
 
     mode = "APPLY" if args.apply else "DRY RUN"
     print(f"=== decay sweep ({mode}) ===")
-    print(f"  scanned:  {report.scanned}")
-    print(f"  kill:     {len(report.kill)}")
-    print(f"  retained: {len(report.retained)}")
+    print(f"  scanned:         {report.scanned}")
+    print(f"  kill:            {len(report.kill)}")
+    # Issue athenaeum#1116 AC3: pages the active retention pack claims
+    # authoritatively (routed off-corpus instead of archived).
+    print(f"  routed off-corpus: {len(report.routed_off_corpus)}")
+    print(f"  retained:        {len(report.retained)}")
 
     if report.kill:
         print("\n  KILL-LIST:")
         for cand in report.kill:
+            print(f"    {cand.path.name}: {cand.reason}")
+    if report.routed_off_corpus:
+        print("\n  ROUTED OFF-CORPUS:")
+        for cand in report.routed_off_corpus:
             print(f"    {cand.path.name}: {cand.reason}")
     if report.retained:
         print("\n  RETAINED:")
@@ -111,7 +120,7 @@ def cmd_decay_sweep(args: argparse.Namespace) -> int:
             print(f"  ERR {err}", file=sys.stderr)
         if report.errors:
             return 1
-        return 2 if report.kill else 0
+        return 2 if (report.kill or report.routed_off_corpus) else 0
 
     # --apply (mutating): acquire the single-machine run lock (issue athenaeum#309).
     lock = _acquire_or_exit(knowledge_root, args, cfg)
@@ -119,7 +128,10 @@ def cmd_decay_sweep(args: argparse.Namespace) -> int:
         return lock
     try:
         report = apply_sweep(
-            knowledge_root, report, cache_dir=getattr(args, "cache_dir", None)
+            knowledge_root,
+            report,
+            cache_dir=getattr(args, "cache_dir", None),
+            config=cfg,
         )
         for err in report.errors:
             print(f"  ERR {err}", file=sys.stderr)
@@ -127,10 +139,13 @@ def cmd_decay_sweep(args: argparse.Namespace) -> int:
             return 1
 
         if report.committed:
-            print(f"\n  archived {len(report.kill)} page(s); committed.")
+            print(
+                f"\n  archived {len(report.kill)} page(s), routed "
+                f"{len(report.routed_off_corpus)} page(s) off-corpus; committed."
+            )
             _rebuild_recall_index(knowledge_root, cfg, args)
         else:
-            print("\n  nothing archived.")
+            print("\n  nothing archived or routed.")
         return 0
     finally:
         lock.release()
