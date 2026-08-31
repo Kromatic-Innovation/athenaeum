@@ -4995,13 +4995,48 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
             # a live LLM client here would be pure waste and could log a
             # confusing "wiki-page dedup pass failed" for an unrelated
             # provider misconfiguration nobody asked this phase to surface.
+            #
+            # That reasoning covered only the comparator-DISABLED case. With
+            # the flag ON and the provider misconfigured, `build_llm_client`
+            # (via `resolve_provider`) raises `ProviderConfigError`, which
+            # used to unwind to the generic `except Exception` below —
+            # aborting the WHOLE phase, including the deterministic Gate 1
+            # work that needs no LLM at all, and logging exactly the
+            # confusing "wiki-page dedup pass failed" line this comment set
+            # out to avoid. The CLI sibling
+            # (`_cmd_curate._cmd_dedupe_wiki_pages`) already has the right
+            # posture: catch the provider error, leave `client` None, and let
+            # the pass run in Gate-1-only degraded mode. Mirror it here.
+            # `client=None` is a first-class degraded mode, not a no-op:
+            # `comparator.compare_pages` runs `gate1_separator_relations`
+            # first and returns DISTINCT on a disjoint dimension without ever
+            # touching the client; only a pair Gate 1 cannot settle reaches
+            # Gate 2, where `content_relation` returns UNAVAILABLE and the
+            # pair reports no verdict rather than a fabricated one.
             _client = None
             if resolve_comparator_enabled(ctx.config):
-                _provider = resolve_provider(ctx.config, knob="classify", default=ctx.provider)
-                ctx.knob_providers["classify"] = _provider
-                _client = build_llm_client(
-                    ctx.config, knob="classify", api_key=ctx.api_key, max_retries=3
-                )
+                try:
+                    _provider = resolve_provider(
+                        ctx.config, knob="classify", default=ctx.provider
+                    )
+                    ctx.knob_providers["classify"] = _provider
+                    _client = build_llm_client(
+                        ctx.config, knob="classify", api_key=ctx.api_key, max_retries=3
+                    )
+                except ProviderConfigError as exc:
+                    log.warning(
+                        "wiki-page dedup: LLM provider misconfigured (%s); "
+                        "comparator Gate 2 unavailable — continuing in "
+                        "Gate-1-only degraded mode",
+                        exc,
+                    )
+                except Exception as exc:  # noqa: BLE001 - mirrors the CLI offline degrade
+                    log.warning(
+                        "wiki-page dedup: no LLM client (%s); comparator "
+                        "Gate 2 unavailable — continuing in Gate-1-only "
+                        "degraded mode",
+                        exc,
+                    )
             propose_wiki_page_merges(
                 ctx.knowledge_root,
                 config=ctx.config,

@@ -48,6 +48,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description and the athenaeum#715 issue comment for the precise scope
   handed to a follow-up lane.
 
+- **A misconfigured LLM provider no longer aborts the librarian's whole
+  wiki-dedup phase (athenaeum#715, Seer finding on the athenaeum#1227
+  cut-over).** With `librarian.comparator_enabled` ON,
+  `librarian._run_wiki_dedup_phase` built its Gate-2 client outside any
+  local `try`, so a `ProviderConfigError` unwound to the phase's generic
+  `except Exception` — skipping the pass wholesale (including the
+  deterministic Gate 1 work, which needs no LLM at all) and logging a
+  misleading `wiki-page dedup pass failed`. The client build is now wrapped
+  to mirror the CLI sibling `_cmd_curate._cmd_dedupe_wiki_pages`: the
+  provider error is logged as what it is, `client` stays `None`, and
+  `propose_wiki_page_merges` runs in Gate-1-only degraded mode (a pair Gate
+  1 cannot settle reports no verdict, never a fabricated one).
+
 ### Added
 
 - **Batch spend reservation and settlement — `ceiling_tripped` is no longer
