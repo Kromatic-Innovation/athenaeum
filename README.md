@@ -158,10 +158,12 @@ built-in consumer (the PII-exclusion surface), not a general policy engine.
 > but it is not part of any default run path. It has two production call
 > sites in `merge.py` — `t1_screen_rejects_merge_proposal` (reject/pass-up
 > only) and `t2_screen_merge_proposal` (which can auto-apply a safe-class
-> merge with **no human review**) — both gated behind the same
-> `resolve_reasoning_tier_auditing_enabled` flag, an explicit opt-in that
-> defaults to **off**. Until an operator turns that setting on, production
-> merge behavior is unaffected. Full writeup, including when it's worth
+> merge with **no human review**) — each gated behind its OWN explicit
+> opt-in, both defaulting to **off**: `resolve_reasoning_tier_auditing_enabled`
+> for T1, `resolve_reasoning_tier_t2_auto_apply_enabled` for T2 (split in
+> two as of issue athenaeum#1200; T2's auto-apply authority is never implied by T1's
+> flag). Until an operator turns either setting on, production merge
+> behavior is unaffected. Full writeup, including when it's worth
 > turning on and what it costs:
 > [Reasoning-tier screening (T1/T2)](docs/configuration.md#reasoning-tier-screening-t1t2--off-by-default).
 

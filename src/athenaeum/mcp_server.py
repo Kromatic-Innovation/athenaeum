@@ -2372,19 +2372,23 @@ def create_server(
         """
         # Issue athenaeum#518: gate behind the reasoning-tier opt-in. When off, return
         # an explicit not-enabled state instead of a permanent 0/0/0 all-clear
-        # that reads as "the tiers ran and are well calibrated".
+        # that reads as "the tiers ran and are well calibrated". Issue
+        # athenaeum#1200: T1 and T2 are independently armed, so this checks
+        # EITHER via resolve_reasoning_tier_any_screen_enabled, not T1's flag
+        # alone — a T2-only config must still see T2's sampled audit items.
         from athenaeum.config import (
             load_config,
-            resolve_reasoning_tier_auditing_enabled,
+            resolve_reasoning_tier_any_screen_enabled,
         )
 
-        if not resolve_reasoning_tier_auditing_enabled(load_config(wiki_root.parent)):
+        if not resolve_reasoning_tier_any_screen_enabled(load_config(wiki_root.parent)):
             return {
                 "enabled": False,
                 "error": (
                     "tier auditing not enabled (set "
-                    "librarian.reasoning_tier_auditing_enabled: true, or "
-                    "ATHENAEUM_REASONING_TIER_AUDITING_ENABLED=1)"
+                    "librarian.reasoning_tier_auditing_enabled: true for T1, "
+                    "and/or librarian.reasoning_tier_t2_auto_apply_enabled: "
+                    "true for T2)"
                 ),
             }
 
@@ -2436,12 +2440,14 @@ def create_server(
 
         # Issue athenaeum#518: reviewing tier audits is meaningless when the tiers are
         # disabled — gate behind the same opt-in as the summary surface.
+        # Issue athenaeum#1200: checks EITHER tier's flag (see calibration_summary
+        # above for why T1's flag alone is no longer sufficient).
         from athenaeum.config import (
             load_config,
-            resolve_reasoning_tier_auditing_enabled,
+            resolve_reasoning_tier_any_screen_enabled,
         )
 
-        if not resolve_reasoning_tier_auditing_enabled(load_config(wiki_root.parent)):
+        if not resolve_reasoning_tier_any_screen_enabled(load_config(wiki_root.parent)):
             return {
                 "ok": False,
                 "enabled": False,

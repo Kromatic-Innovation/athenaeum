@@ -1777,22 +1777,64 @@ question+merge view) — both report the live depth of
 in the README.) There is no built-in numeric threshold; "beyond what you can
 handle" is an operator judgment call, not a code-enforced ceiling.
 
-**How to enable.** One flag gates *both* tiers — there is no separate
-opt-in for T1 vs. T2:
+**How to enable — TWO independent keys as of issue athenaeum#1200.** Before
+athenaeum#1200, one flag gated *both* tiers together: turning on the harmless
+T1 pre-screen also, unavoidably, armed T2's **unreviewed auto-apply**. That
+coupling is the defect athenaeum#1200 fixes — T1 and T2 now have their OWN
+opt-ins, and **T2 defaults off independent of T1's value**:
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
-| Reasoning-tier auditing | `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED` | `librarian.reasoning_tier_auditing_enabled` | `false` (**off**) | Gates the T1 screen in the merge path, the T2 screen it can pass up to, and the `athenaeum calibration` display surface, all together. `1`/`true`/`yes`/`on` (case-insensitive) enable via env; a non-bool yaml value or an unrecognized env string falls through to off. See [`resolve_reasoning_tier_auditing_enabled`](../src/athenaeum/config.py). |
+| T1 screen (reject/pass-up only, no write authority) | `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED` | `librarian.reasoning_tier_auditing_enabled` | `false` (**off**) | Gates the T1 screen in the merge path. `1`/`true`/`yes`/`on` (case-insensitive) enable via env; a non-bool yaml value or an unrecognized env string falls through to off. See [`resolve_reasoning_tier_auditing_enabled`](../src/athenaeum/config.py). |
+| T2 unreviewed auto-apply | `ATHENAEUM_REASONING_TIER_T2_AUTO_APPLY_ENABLED` | `librarian.reasoning_tier_t2_auto_apply_enabled` | `false` (**off**) | Gates T2's screen — including its safe-class **auto-apply** authority. Independent of the T1 key above: T1 on does **not** turn this on, and this does not require T1 to be on. Same env/yaml parsing rules as the T1 key. See [`resolve_reasoning_tier_t2_auto_apply_enabled`](../src/athenaeum/config.py). |
+
+The `athenaeum calibration` display surface (and the `calibration_summary` /
+`review_audit_item` MCP tools) report "not enabled" only when **both** keys
+are off (`resolve_reasoning_tier_any_screen_enabled`) — so a config running
+only one tier still sees that tier's own calibration data, not a misleading
+all-clear.
 
 ```yaml
 librarian:
-  reasoning_tier_auditing_enabled: true
+  reasoning_tier_auditing_enabled: true          # T1 screen only
+  # reasoning_tier_t2_auto_apply_enabled: true   # add this line too for T2 auto-apply
 ```
+
+### Migration for an existing config (issue athenaeum#1200 AC4/AC5)
+
+**If your `athenaeum.yaml` already has `librarian.reasoning_tier_auditing_enabled: true`,
+read this.** Before this change, that one line armed T1 **and** T2's
+unreviewed auto-apply together. As of this change:
+
+- **What changes:** that same line now arms **T1 only**. T2's auto-apply
+  no longer runs off it. Nothing else about the key's env var, yaml
+  location, or parsing changed.
+- **Which direction this moves you:** safe-by-default only. This can never
+  grant a config authority it didn't already have — it can only **remove**
+  unreviewed-auto-apply authority a config previously had. If your config
+  had `reasoning_tier_auditing_enabled: true`, after upgrading, T2 stops
+  auto-applying merges until you explicitly re-arm it. If you never set the
+  flag, nothing changes for you at all.
+- **To restore the exact pre-athenaeum#1200 combined behavior — a single
+  documented edit, as promised:** add ONE line:
+  ```yaml
+  librarian:
+    reasoning_tier_auditing_enabled: true
+    reasoning_tier_t2_auto_apply_enabled: true   # the one-line revert
+  ```
+- **Why this direction and not the reverse** (re-reading the existing key
+  as still-arming-both, with a new key to *narrow* it to T1-only): AC3
+  independently requires the T2 half to default off regardless of what the
+  T1 half resolves to. Re-reading the existing key as T1-only is the only
+  interpretation consistent with that — and it is the one that changes an
+  existing config's *effective* behavior only in the safe direction
+  (removing an authority, never granting one), rather than the other way
+  around.
 
 The T1/T2 *model* and per-stage token/thinking knobs (`ATHENAEUM_REASONING_T1_MODEL` /
 `ATHENAEUM_REASONING_T2_MODEL` and friends, see [Models](#models) and
 [Per-stage token and thinking tuning](#per-stage-token-and-thinking-tuning-athenaeum688)
-above) are read regardless of this flag, but have no runtime effect while it
+above) are read regardless of these flags, but have no runtime effect while their own tier
 is off — there is nothing for them to tune until the screen actually runs.
 
 **What it costs.** Enabling this adds LLM calls on a merge path that
