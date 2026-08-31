@@ -1087,8 +1087,9 @@ def resolve_address_named_classifications(
 # tier3_create / tier3_entity_from_text applied no minimum specificity, no
 # common-word check, and no uniqueness check — the create path minted entity
 # names that can never be useful as index keys (measured: "develop", "ready",
-# "claim", "cwc", "yml", plus bare issue refs "#453"/"#454"/"#486" minted as
-# reference-typed pages). Every existing gate (athenaeum#680 code artifacts,
+# "claim", "cwc", "yml", plus bare issue refs shaped "#NNN" — e.g. issue
+# numbers 453, 454, 486 in the issue's own report — minted as reference-typed
+# pages). Every existing gate (athenaeum#680 code artifacts,
 # athenaeum#1126 bare emails, athenaeum#662 read-side stopwords) runs AFTER a
 # bad name already exists, or is a read-side match filter — NONE of them run
 # on the create path itself. This closes that gap with two checks, sequenced
@@ -1110,9 +1111,9 @@ def resolve_address_named_classifications(
 # regardless of length or how common the underlying word is.
 
 _BARE_ISSUE_REF_RE = re.compile(r"^#\d+$")
-"""AC1: a name that IS a bare issue-number reference (``#453``), and nothing
+"""AC1: a name that IS a bare issue-number reference (``#NNN``), and nothing
 else. Anchored both ends so a name that merely CONTAINS an issue ref (e.g.
-``"Fix #453 crash"``) is untouched — only a name whose entire text is the
+``"Fix #NNN crash"``) is untouched — only a name whose entire text is the
 citation is unambiguous junk."""
 
 
@@ -1169,7 +1170,7 @@ class CreateNameRejectedError(Exception):
     """AC1: *name* is unambiguous junk and must never mint a page (issue athenaeum#1173).
 
     Raised by :func:`validate_create_name` for a bare issue-number-shaped
-    name (``#453``) — a citation, not a candidate entity. There is nothing to
+    name (``#NNN``) — a citation, not a candidate entity. There is nothing to
     route for human review (contrast :class:`CreateNameEscalatedError`), so
     the caller drops the classification/action outright — mirroring
     :class:`PreambleOnlyResponseError`'s (issue athenaeum#1171) reject-and-
