@@ -520,6 +520,7 @@ precedence rule, and the `athenaeum explain-routing` preview command
 | Resolver | `ATHENAEUM_RESOLVE_MODEL` | `models.resolve` (_also_ `resolve.model`¹) | `claude-opus-4-7` | Contradiction resolver (proposes a winner once the detector flags a conflict). |
 | Reasoning tier 1 | `ATHENAEUM_REASONING_T1_MODEL` | `models.reasoning_t1` | `claude-haiku-4-5-20251001` | First-pass model for the reasoning-tier chain.² |
 | Reasoning tier 2 | `ATHENAEUM_REASONING_T2_MODEL` | `models.reasoning_t2` | `claude-opus-4-1-20250805` | Escalation model for the reasoning-tier chain.² |
+| Rule proposals | `ATHENAEUM_RULE_PROPOSALS_MODEL` | `models.rule_proposals` | `claude-opus-4-8` | Rule-proposal drafting call (athenaeum#1174) — see the "Rule proposals" section above (`librarian.rule_proposals.*`) for the full knob set (threshold, window, exemplar count, max tokens, thinking). |
 
 > ¹ `resolve.model` is still read post-athenaeum#512/#513 (`athenaeum.resolutions._get_model`), not yet removed. Precedence, highest first: `ATHENAEUM_RESOLVE_MODEL` env var, then `models.resolve` yaml, then `resolve.model` yaml (legacy), then the code default — so if both `models.resolve` and `resolve.model` are set, **`models.resolve` wins**. There is no scheduled removal; it is kept indefinitely so existing `athenaeum.yaml` files keep working unchanged. Prefer `models.resolve` for new configs, for consistency with the other model knobs.
 >
