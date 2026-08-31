@@ -28,6 +28,20 @@ effect without a config migration.
 Every default figure on this page is verified against the code under
 `src/athenaeum/`. When another doc and the code disagree, the code is truth.
 
+**Prose drift is expected — sweep it by hand (athenaeum#1178).** The
+operator-side `athenaeum_config_key_set` tool edits `athenaeum.yaml` keys
+surgically: it changes a value in place and does not touch the surrounding
+comments or rationale blocks, and it cannot delete a key. A key set through
+that tool therefore leaves any nearby prose exactly as it was, even when the
+prose describes a rationale, a promise, or a condition that the new value no
+longer matches — and restoring an "unset" state requires a hand edit, since
+the tool has no delete. Nothing re-derives or re-checks that prose
+automatically, so comments in a live `athenaeum.yaml` can silently go stale
+or (worse) end up stating the opposite of what the value now does. Treat any
+comment in `athenaeum.yaml` as a hint to verify against the value and this
+page, not as a guarantee — and when you change a value by hand or via the
+tool, update or remove the comment above it in the same edit.
+
 ## Librarian run (`athenaeum run`)
 
 | Knob | CLI flag | Env var | YAML key | Default | What it does |
