@@ -5379,7 +5379,16 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # continue).
                         if not ctx.dry_run:
                             _ceiling = spend.ceiling_tripped(
-                                ctx.usage, provider=ctx.provider, config=ctx.config
+                                ctx.usage,
+                                provider=ctx.provider,
+                                config=ctx.config,
+                                # Issue athenaeum#1147: this run's SYNCHRONOUS
+                                # accrual and its committed-but-unbilled batch
+                                # commitments are the same budget. A run that
+                                # spilled a large batch earlier must not then
+                                # spend the rest of the day's allowance
+                                # synchronously as if that batch were free.
+                                wiki_root=ctx.wiki_root,
                             )
                             if _ceiling is not None:
                                 log.error(

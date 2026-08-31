@@ -38,7 +38,7 @@ import httpx
 import pytest
 
 import athenaeum.models as models_mod
-from athenaeum import batch_state
+from athenaeum import batch_state, spend
 from athenaeum.batch import (
     BATCH_MAX_REQUESTS,
     BATCH_POLL_INTERVAL_SECONDS,
@@ -3151,3 +3151,365 @@ class TestPerKnobBatchTransport:
         assert list((root / "wiki").glob("*widgete2e*"))
         # Batch mode was never set globally, yet the write knob batched.
         assert self._batched_knobs(client) == {"write"}
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1147 — batch spend reservation and settlement.
+#
+# ``TokenUsage.add_batch_tokens`` fires at COLLECT. Under the athenaeum#1138
+# submit/collect split the SUBMITTING run's ``usage`` therefore never sees the
+# cost of the batch it just submitted -- and that cost is committed
+# server-side and cannot be halted, so ``ceiling_tripped`` is structurally
+# blind to it.
+#
+# Three moments, which must not be collapsed: reserve at submit, settle at
+# collect, count outstanding reservations at ceiling-check time.
+#
+# Note what this does NOT change: athenaeum#483's pre-submit checks at the
+# tier-2 and tier-3 phase boundaries are preserved, not replaced. They simply
+# now see in-flight commitments as well as this run's own accrual.
+# ---------------------------------------------------------------------------
+
+
+class TestBatchSpendReservation:
+    def test_a_submit_reserves_and_a_collect_settles_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2 + AC3: reserved at submit, superseded by a settlement at collect."""
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "s1", ["Standalone fact about WidgetReserve gadget.\n"]
+        )
+        cache_dir = tmp_path / "s1-cache"
+        cache_dir.mkdir()
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+
+        process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        ledger = spend.read_reservation_ledger(root / "wiki", cache_dir=cache_dir)
+        states = [r["state"] for r in ledger]
+        # Both phases reserved, and both settled within the run.
+        assert states.count("reserved") == 2
+        assert states.count("settled") == 2
+        # Nothing left outstanding: the batches were collected.
+        assert spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir) == []
+
+        reserved = [r for r in ledger if r["state"] == "reserved"]
+        assert {r["knob"] for r in reserved} == {"classify", "write"}
+        for record in reserved:
+            assert record["est_input_tokens"] > 0
+            assert record["est_output_tokens"] > 0
+            assert record["est_usd"] > 0
+            assert record["day"]  # the submit run's ACCOUNTING day
+
+        settled = [r for r in ledger if r["state"] == "settled"]
+        for record in settled:
+            assert record["actual_source"] == "measured"
+            assert record["actual_input_tokens"] > 0
+            # AC3: the estimate-vs-actual delta rides the settlement.
+            assert "delta_usd" in record
+
+    def test_a_spilled_batch_leaves_an_outstanding_reservation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gap this closes: a submit run exits, its cost unbilled."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, _usage, _raws = _spill_a_classify_batch(
+            tmp_path, "s2", ["Standalone fact about WidgetOutstanding gadget.\n"]
+        )
+
+        outstanding = spend.outstanding_reservations(
+            root / "wiki", cache_dir=cache_dir
+        )
+        assert [r["batch_id"] for r in outstanding] == ["msgbatch_1"]
+        assert outstanding[0]["knob"] == "classify"
+        assert spend.outstanding_reservation_usd(
+            root / "wiki", cache_dir=cache_dir
+        ) == pytest.approx(outstanding[0]["est_usd"])
+
+    def test_the_collect_settles_a_reservation_from_an_earlier_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3: the settlement carries the COLLECT run's day, not the submit's."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, _raws = _spill_a_classify_batch(
+            tmp_path, "s3", ["Standalone fact about WidgetSettle gadget.\n"]
+        )
+        assert spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir)
+
+        _collect(root, cache_dir, client, usage)
+
+        assert spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir) == []
+        settled = [
+            r
+            for r in spend.read_reservation_ledger(root / "wiki", cache_dir=cache_dir)
+            if r["state"] == "settled" and r["batch_id"] == "msgbatch_1"
+        ]
+        assert len(settled) == 1
+        assert settled[0]["actual_source"] == "measured"
+        assert settled[0]["actual_input_tokens"] > 0
+
+    def test_reservations_are_priced_at_the_batch_discount(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC5. Pricing at the synchronous rate trips the ceiling ~2x too early.
+
+        Asserted against the ONE pricing site rather than a second hardcoded
+        multiplication: the same tokens booked as synchronous cost exactly
+        twice what they cost booked as batch.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, _client, _usage, _raws = _spill_a_classify_batch(
+            tmp_path, "s4", ["Standalone fact about WidgetPrice gadget.\n"]
+        )
+        record = spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir)[0]
+
+        batched = TokenUsage()
+        batched.add_batch_tokens(
+            record["est_input_tokens"],
+            record["est_output_tokens"],
+            model=record["model"],
+            knob=record["knob"],
+        )
+        synchronous = TokenUsage()
+        synchronous.add_tokens(
+            record["est_input_tokens"],
+            record["est_output_tokens"],
+            model=record["model"],
+            knob=record["knob"],
+        )
+
+        assert record["est_usd"] == pytest.approx(batched.estimated_cost_usd)
+        assert batched.estimated_cost_usd == pytest.approx(
+            synchronous.estimated_cost_usd / 2
+        )
+
+    def test_a_large_outstanding_reservation_refuses_a_new_submit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4, the whole point: the ceiling stops being blind to in-flight cost.
+
+        The same run, the same ledger, the same ceiling — the ONLY difference
+        is whether a committed-but-unbilled batch is counted.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "s5", ["Standalone fact about WidgetCeiling gadget.\n"]
+        )
+        cache_dir = tmp_path / "s5-cache"
+        cache_dir.mkdir()
+        config: dict[str, Any] = {"spend": {"max_usd_per_run": 0.10}}
+
+        # No reservation on the ledger: a fresh run is under the ceiling.
+        assert (
+            spend.ceiling_tripped(
+                TokenUsage(),
+                provider="api",
+                config=config,
+                wiki_root=root / "wiki",
+                cache_dir=cache_dir,
+            )
+            is None
+        )
+
+        spend.record_reservation(
+            root / "wiki",
+            batch_id="msgbatch_big",
+            knob="write",
+            est_input_tokens=1_000_000,
+            est_output_tokens=200_000,
+            est_usd=5.00,
+            model=DEFAULT_CLASSIFY_MODEL,
+            requests=300,
+            config=None,
+            cache_dir=cache_dir,
+        )
+
+        tripped = spend.ceiling_tripped(
+            TokenUsage(),
+            provider="api",
+            config=config,
+            wiki_root=root / "wiki",
+            cache_dir=cache_dir,
+        )
+        assert tripped is not None
+        assert "committed in flight" in tripped
+
+        # And the batch transport actually refuses to submit: the athenaeum#483
+        # pre-submit gate is unchanged, it just sees more.
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        result = process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=config,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+        assert client.batches.submitted == []
+        assert result.created == 0
+        assert result.deferred_refs
+
+    def test_ceiling_without_a_wiki_root_is_unchanged(self, tmp_path: Path) -> None:
+        """AC7: every pre-athenaeum#1147 caller resolves byte-identically.
+
+        ``wiki_root`` omitted means no reservation ledger is consulted at all,
+        so the athenaeum#483 regression tests — which never pass one — keep
+        their exact behaviour.
+        """
+        root = _seed_root(tmp_path, "s6", [])
+        cache_dir = tmp_path / "s6-cache"
+        cache_dir.mkdir()
+        spend.record_reservation(
+            root / "wiki",
+            batch_id="msgbatch_ignored",
+            knob="write",
+            est_input_tokens=1_000_000,
+            est_output_tokens=200_000,
+            est_usd=99.00,
+            config=None,
+            cache_dir=cache_dir,
+        )
+        assert (
+            spend.ceiling_tripped(
+                TokenUsage(),
+                provider="api",
+                config={"spend": {"max_usd_per_run": 0.10}},
+                cache_dir=cache_dir,
+            )
+            is None
+        )
+
+    def test_an_all_expired_batch_settles_to_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC6: the API documents an expired request as NOT billed."""
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "s7", ["Standalone fact about WidgetZero gadget.\n"]
+        )
+        cache_dir = tmp_path / "s7-cache"
+        cache_dir.mkdir()
+        client = _FakeClient(
+            _scripted_responder, allow_sync=False, expire_marker="WidgetZero"
+        )
+
+        process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        settled = [
+            r
+            for r in spend.read_reservation_ledger(root / "wiki", cache_dir=cache_dir)
+            if r["state"] == "settled"
+        ]
+        assert settled
+        assert settled[0]["actual_source"] == "expired"
+        assert settled[0]["actual_usd"] == 0.0
+        assert spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir) == []
+
+    def test_a_handle_retired_uncollected_settles_at_the_estimate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC6: never a permanent phantom charge, and never a false zero.
+
+        The batch RAN and WAS billed; its results are simply gone. Settling at
+        zero would under-report real spend, and leaving it open would count
+        against every future ceiling check forever.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, _raws = _spill_a_classify_batch(
+            tmp_path, "s8", ["Standalone fact about WidgetPhantom gadget.\n"]
+        )
+        reserved = spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir)[0]
+
+        out = _collect(
+            root,
+            cache_dir,
+            client,
+            usage,
+            now=datetime.now(timezone.utc)
+            + timedelta(days=BATCH_RETENTION_DAYS + 1),
+        )
+        assert out.reconciliation == {"retention-expired": 1}
+
+        assert spend.outstanding_reservations(root / "wiki", cache_dir=cache_dir) == []
+        settled = [
+            r
+            for r in spend.read_reservation_ledger(root / "wiki", cache_dir=cache_dir)
+            if r["state"] == "settled"
+        ]
+        assert len(settled) == 1
+        assert settled[0]["actual_source"] == "estimate"
+        assert settled[0]["reason"] == "retention-expired"
+        assert settled[0]["actual_usd"] == pytest.approx(reserved["est_usd"])
+        assert settled[0]["actual_usd"] > 0
+
+    def test_the_ledger_tolerates_a_torn_trailing_line(self, tmp_path: Path) -> None:
+        """AC1: mirrors spend.read_ledger — one torn record is not a broken check."""
+        root = _seed_root(tmp_path, "s9", [])
+        cache_dir = tmp_path / "s9-cache"
+        cache_dir.mkdir()
+        spend.record_reservation(
+            root / "wiki",
+            batch_id="msgbatch_ok",
+            knob="write",
+            est_input_tokens=10,
+            est_output_tokens=5,
+            est_usd=0.01,
+            config=None,
+            cache_dir=cache_dir,
+        )
+        path = spend.reservation_ledger_path(root / "wiki", cache_dir=cache_dir)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write('{"v": 1, "state": "reser')
+
+        records = spend.read_reservation_ledger(root / "wiki", cache_dir=cache_dir)
+        assert [r["batch_id"] for r in records] == ["msgbatch_ok"]
+
+    def test_the_ledger_path_follows_the_spend_ledger_convention(
+        self, tmp_path: Path
+    ) -> None:
+        """AC1: ``<wiki_root>/…`` with the legacy ``<cache_dir>`` fallback."""
+        root = _seed_root(tmp_path, "s10", [])
+        cache_dir = tmp_path / "s10-cache"
+        cache_dir.mkdir()
+        # Fresh store: behind the seam.
+        assert spend.reservation_ledger_path(
+            root / "wiki", cache_dir=cache_dir
+        ) == root / "wiki" / spend.RESERVATION_LEDGER_FILENAME
+        # Legacy store with records and nothing migrated: stays put.
+        (cache_dir / spend.RESERVATION_LEDGER_FILENAME).write_text("", encoding="utf-8")
+        assert spend.reservation_ledger_path(
+            root / "wiki", cache_dir=cache_dir
+        ) == cache_dir / spend.RESERVATION_LEDGER_FILENAME
