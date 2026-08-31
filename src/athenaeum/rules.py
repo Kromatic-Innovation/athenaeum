@@ -102,7 +102,7 @@ import subprocess
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
@@ -115,6 +115,7 @@ from athenaeum.compiled_exempt import mark_exempt
 from athenaeum.config import (
     resolve_preserved_log_adapter,
     resolve_preserved_log_dir,
+    resolve_rule_proposals_window_days,
     resolve_shape_rules_max_records_per_run,
 )
 from athenaeum.corrections import compute_correction_id
@@ -1522,6 +1523,202 @@ def _shape_rule_disposition_row(
 
 
 # ---------------------------------------------------------------------------
+# Dedupe-at-write + retention (issue athenaeum#1229)
+# ---------------------------------------------------------------------------
+#
+# A real deployment's `_shape_rule_dispositions.jsonl` grew to 1,440,670 rows
+# in 9 days across only 9,737 distinct `(source_ref, rule_id, disposition)`
+# tuples -- every re-evaluation of an already-seen record on every nightly
+# run appended ANOTHER row, a 148x duplication factor that both crossed
+# GitHub's 100 MB blob limit (breaking the knowledge store's git remote) and
+# inflated athenaeum#905's rule-proposal detector (see that module's
+# `_grouped_deferred_rows`/`detect_shape_frequency`).
+#
+# Two independent, additive fixes -- (1) does not make (2) unnecessary, or
+# vice versa, per the issue's own "Retention alone is NOT sufficient" note:
+#
+# 1. Dedupe-at-write (:func:`_load_existing_disposition_keys`,
+#    :func:`_append_disposition_row_deduped`): a row whose full
+#    `(source, key_fingerprint, source_ref, rule_id, disposition)` tuple is
+#    already recorded for that record is never appended again -- this is
+#    what collapses 1,440,670 rows to ~9,737 on the measured corpus. The key
+#    set is built ONCE per `run_shape_rule_phase` call, not re-read per
+#    candidate: O(current ledger size), never O(evaluations this run). Once
+#    dedupe has taken effect the ledger size converges toward the corpus's
+#    distinct-tuple count, so this up-front read stays cheap on every
+#    subsequent run too -- it scales with the corpus, not with run count
+#    (the exact axis the pre-fix ledger grew unboundedly along). Migrating
+#    an already-oversized pre-fix ledger is explicitly out of scope (see the
+#    module's "Per-record disposition rows" section above); a deployment
+#    that upgrades onto one pays a one-time larger read on its first
+#    post-fix run.
+# 2. Retention (:func:`prune_shape_rule_dispositions`): rows older than
+#    `librarian.rule_proposals.window_days` (the same window
+#    `detect_shape_frequency` already restricts its own read to -- nothing
+#    downstream ever reads past it) are dropped from the ledger outright,
+#    independent of whether dedupe ever fires for a given record. Needed
+#    because dedupe alone still lets the file grow without bound as
+#    genuinely NEW distinct records accumulate over months; retention alone
+#    still reaches roughly 1.1 GB at the observed pre-dedupe rate over a
+#    30-day window (the issue's own arithmetic) -- both together are what
+#    bounds the file.
+
+
+def _disposition_row_key(row: dict[str, Any]) -> tuple[str, str, str, str | None, str]:
+    """The dedupe-at-write identity for one disposition row: everything that
+    makes two evaluations of the SAME record with the SAME outcome
+    indistinguishable, deliberately excluding `at` and `schema_version` (a
+    re-evaluation's timestamp is exactly the field that must NOT make a row
+    look new)."""
+    return (
+        row["source"],
+        row["key_fingerprint"],
+        row["source_ref"],
+        row["rule_id"],
+        row["disposition"],
+    )
+
+
+def _load_existing_disposition_keys(
+    wiki_root: Path,
+) -> set[tuple[str, str, str, str | None, str]]:
+    """Read `_shape_rule_dispositions.jsonl` ONCE, up front, into the
+    dedupe-at-write key set :func:`_append_disposition_row_deduped` consults
+    before appending each new row (issue athenaeum#1229).
+
+    Cost: a single sequential read + JSON-parse per existing line, done once
+    per :func:`run_shape_rule_phase` call -- see the "Dedupe-at-write +
+    retention" section above for why this stays cheap run over run rather
+    than growing with evaluation count the way the pre-fix ledger did.
+    Fails open per-line (malformed JSON, a non-dict row, or a row missing
+    one of the key fields is skipped rather than aborting the read) and
+    fails open on a missing/unreadable file (empty set) -- mirroring
+    :func:`athenaeum.rule_proposals._grouped_deferred_rows`'s own tolerance
+    for a hand-edited or partially-written ledger.
+    """
+    keys: set[tuple[str, str, str, str | None, str]] = set()
+    path = default_shape_rule_dispositions_path(wiki_root)
+    if not path.is_file():
+        return keys
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return keys
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        source = row.get("source")
+        key_fingerprint = row.get("key_fingerprint")
+        source_ref = row.get("source_ref")
+        rule_id = row.get("rule_id")
+        disposition = row.get("disposition")
+        if not (
+            isinstance(source, str)
+            and isinstance(key_fingerprint, str)
+            and isinstance(source_ref, str)
+            and isinstance(disposition, str)
+            and (rule_id is None or isinstance(rule_id, str))
+        ):
+            continue
+        keys.add((source, key_fingerprint, source_ref, rule_id, disposition))
+    return keys
+
+
+def _append_disposition_row_deduped(
+    wiki_root: Path,
+    row: dict[str, Any],
+    existing_keys: set[tuple[str, str, str, str | None, str]],
+) -> None:
+    """Append *row* to the disposition ledger unless its
+    :func:`_disposition_row_key` is already present in *existing_keys* --
+    the dedupe-at-write guard (issue athenaeum#1229). *existing_keys* is
+    mutated in place so a SECOND evaluation of the same record within the
+    SAME run (e.g. a rollup group's members sharing a key -- not expected
+    today, but never assumed away) is caught too, not only cross-run
+    duplicates.
+    """
+    key = _disposition_row_key(row)
+    if key in existing_keys:
+        return
+    existing_keys.add(key)
+    append_shape_rule_disposition_row(wiki_root, row)
+
+
+def prune_shape_rule_dispositions(
+    wiki_root: Path, *, window_days: int, now: datetime | None = None
+) -> int:
+    """Drop `_shape_rule_dispositions.jsonl` rows older than *window_days*
+    (issue athenaeum#1229 part 3).
+
+    Bounds the ledger independently of dedupe-at-write (see the "Dedupe-at-
+    write + retention" section above for why both are needed): nothing
+    downstream ever reads a row past `librarian.rule_proposals.window_days`
+    (:func:`athenaeum.rule_proposals._grouped_deferred_rows` applies the
+    identical cutoff at READ time), so a row this old is dead weight the
+    ledger has been carrying for nothing.
+
+    A row whose `at` is missing or unparseable is KEPT, not dropped --
+    fail-open, mirroring :func:`athenaeum.rule_proposals._parse_row_at`'s
+    own tolerance: a malformed timestamp is a reason to leave a row alone,
+    never a license to silently delete it.
+
+    Returns the number of rows dropped. Rewrites the file atomically
+    (:func:`athenaeum.atomic_io.atomic_write_text`) ONLY when at least one
+    row was actually dropped -- an unchanged ledger is left byte-identical
+    rather than churned every run.
+    """
+    path = default_shape_rule_dispositions_path(wiki_root)
+    if not path.is_file():
+        return 0
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    resolved_now = now or datetime.now(timezone.utc)
+    if resolved_now.tzinfo is None:
+        resolved_now = resolved_now.replace(tzinfo=timezone.utc)
+    cutoff = resolved_now - timedelta(days=window_days)
+
+    kept_lines: list[str] = []
+    dropped = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            row = json.loads(stripped)
+        except json.JSONDecodeError:
+            kept_lines.append(stripped)
+            continue
+        at_raw = row.get("at") if isinstance(row, dict) else None
+        at: datetime | None = None
+        if isinstance(at_raw, str):
+            try:
+                at = datetime.strptime(at_raw, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc
+                )
+            except ValueError:
+                at = None
+        if at is not None and at < cutoff:
+            dropped += 1
+            continue
+        kept_lines.append(stripped)
+
+    if dropped == 0:
+        return 0
+    new_text = "".join(f"{line}\n" for line in kept_lines)
+    atomic_write_text(path, new_text)
+    return dropped
+
+
+# ---------------------------------------------------------------------------
 # Rollup aggregation (issue athenaeum#903)
 # ---------------------------------------------------------------------------
 
@@ -1655,6 +1852,7 @@ def run_shape_rule_phase(
         "files_evaluated": 0,
         "files_matched": 0,
         "dispositions": {},
+        "disposition_rows_pruned": 0,
     }
     rules, load_errors = load_rules(knowledge_root)
     summary["rules_loaded"] = len(rules)
@@ -1691,6 +1889,15 @@ def run_shape_rule_phase(
     if unclaimed_candidates:
         candidates.extend((r, True) for r in unclaimed_candidates)
 
+    # Issue athenaeum#1229: dedupe-at-write. Built ONCE, up front -- see the
+    # "Dedupe-at-write + retention" section above `_disposition_row_key` for
+    # why this is cheap even on a long-lived corpus. `None` in dry-run: no
+    # row is ever appended on that path either, so there is nothing to
+    # dedupe against and no reason to pay the read.
+    existing_disposition_keys: set[tuple[str, str, str, str | None, str]] | None = (
+        None if dry_run else _load_existing_disposition_keys(wiki_root)
+    )
+
     # Per-(rule, mode) tallies -- keyed so an observe-mode pass and a
     # live-mode pass for the SAME rule (an operator edited it mid-run
     # history) never merge into one ledger line's denominator.
@@ -1726,11 +1933,13 @@ def run_shape_rule_phase(
         # place, structurally, rather than at each of the dispositions' many
         # call sites.
         if not dry_run:
-            append_shape_rule_disposition_row(
+            assert existing_disposition_keys is not None
+            _append_disposition_row_deduped(
                 wiki_root,
                 _shape_rule_disposition_row(
                     raw=raw, record=record, rule_id=rule_tag, disposition=disposition
                 ),
+                existing_disposition_keys,
             )
 
     evaluated = 0
@@ -1756,11 +1965,13 @@ def run_shape_rule_phase(
             # precisely the ones no rule claims -- so this candidate still gets
             # a disposition row, just with no rule/tier to attribute it to.
             if not dry_run:
-                append_shape_rule_disposition_row(
+                assert existing_disposition_keys is not None
+                _append_disposition_row_deduped(
                     wiki_root,
                     _shape_rule_disposition_row(
                         raw=raw, record=record, rule_id=None, disposition="no-match"
                     ),
+                    existing_disposition_keys,
                 )
             continue
         summary["files_matched"] += 1
@@ -2169,6 +2380,25 @@ def run_shape_rule_phase(
                     "records_total": records_total,
                     "dispositions": counts,
                 },
+            )
+
+        # Issue athenaeum#1229 part 3: bound the ledger independently of
+        # dedupe-at-write above -- see the "Dedupe-at-write + retention"
+        # section for why retention alone and dedupe alone are each
+        # insufficient on their own. Same window
+        # `athenaeum.rule_proposals._grouped_deferred_rows` already reads
+        # against, so a row this old was already invisible to the detector
+        # before it is physically dropped here.
+        _pruned = prune_shape_rule_dispositions(
+            wiki_root, window_days=resolve_rule_proposals_window_days(config)
+        )
+        if _pruned:
+            summary["disposition_rows_pruned"] = _pruned
+            log.info(
+                "shape-rules: pruned %d disposition row(s) older than %d day(s) "
+                "(librarian.rule_proposals.window_days, issue athenaeum#1229)",
+                _pruned,
+                resolve_rule_proposals_window_days(config),
             )
 
     return summary

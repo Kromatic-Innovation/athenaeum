@@ -187,6 +187,116 @@ class TestGitPushUnit:
 
 
 # ---------------------------------------------------------------------------
+# git_push() — cross-run failure-streak state (issue athenaeum#1229 part 4)
+#
+# A push rejected for the SAME reason on repeated runs must be surfaced, not
+# retried silently forever -- the exact gap a real deployment hit for four
+# days / 1,527 stranded commits, because every retry looked, on its own,
+# like an ordinary one-off transient failure. These tests drive the REAL
+# subprocess-based failure path (like TestGitPushUnit's own
+# `test_failed_push_logs_distinct_warning_and_returns_false`) rather than
+# mocking `git_push` itself, since the streak lives INSIDE it.
+# ---------------------------------------------------------------------------
+
+
+class TestPushFailureAlertState:
+    def test_repeated_same_reason_failure_escalates_to_an_alert(
+        self, push_root: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from athenaeum import push_state
+        from athenaeum.config import resolve_cache_dir
+        from athenaeum.librarian import (
+            DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD,
+            PUSH_FAILURE_ALERT_PREFIX,
+            git_push,
+        )
+
+        caplog.set_level("WARNING", logger="athenaeum")
+        cache_dir = resolve_cache_dir()
+
+        # Every attempt before the threshold: the streak grows, but no
+        # ALERT line fires yet -- only the ordinary per-attempt WARNING.
+        for i in range(DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD - 1):
+            caplog.clear()
+            ok = git_push(push_root, remote="origin")
+            assert ok is False
+            state = push_state.load_state(cache_dir)
+            assert state["consecutive"] == i + 1
+            assert not any(
+                PUSH_FAILURE_ALERT_PREFIX in r.message for r in caplog.records
+            ), f"alert must not fire before the threshold (attempt {i + 1})"
+
+        # The Nth consecutive same-reason failure crosses the threshold.
+        caplog.clear()
+        ok = git_push(push_root, remote="origin")
+        assert ok is False
+        state = push_state.load_state(cache_dir)
+        assert state["consecutive"] == DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD
+        assert any(
+            record.levelname == "ERROR" and PUSH_FAILURE_ALERT_PREFIX in record.message
+            for record in caplog.records
+        ), "must escalate to a separately-greppable ERROR line at the threshold"
+
+    def test_env_override_tunes_the_alert_threshold(
+        self,
+        push_root: Path,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from athenaeum.librarian import PUSH_FAILURE_ALERT_PREFIX, git_push
+
+        monkeypatch.setenv("ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD", "1")
+        caplog.set_level("WARNING", logger="athenaeum")
+        ok = git_push(push_root, remote="origin")
+        assert ok is False
+        assert any(
+            record.levelname == "ERROR" and PUSH_FAILURE_ALERT_PREFIX in record.message
+            for record in caplog.records
+        ), "threshold=1 must alert on the very first failure"
+
+    def test_successful_push_resets_the_streak(
+        self, push_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import librarian, push_state
+        from athenaeum.config import resolve_cache_dir
+
+        cache_dir = resolve_cache_dir()
+        assert librarian.git_push(push_root, remote="origin") is False
+        assert push_state.load_state(cache_dir)["consecutive"] == 1
+
+        def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(librarian.subprocess, "run", fake_run)
+        assert librarian.git_push(push_root, remote="origin") is True
+        assert push_state.load_state(cache_dir) == {"consecutive": 0, "last_reason": ""}
+
+    def test_a_different_reason_restarts_the_streak_at_one(
+        self, push_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import librarian, push_state
+        from athenaeum.config import resolve_cache_dir
+
+        cache_dir = resolve_cache_dir()
+        assert librarian.git_push(push_root, remote="origin") is False
+        first_state = push_state.load_state(cache_dir)
+        assert first_state["consecutive"] == 1
+
+        def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="a completely different failure reason"
+            )
+
+        monkeypatch.setattr(librarian.subprocess, "run", fake_run)
+        assert librarian.git_push(push_root, remote="origin") is False
+        second_state = push_state.load_state(cache_dir)
+        # A NEW reason is not evidence the OLD one is still happening --
+        # the streak restarts at 1, it does not keep climbing to 2.
+        assert second_state["consecutive"] == 1
+        assert second_state["last_reason"] != first_state["last_reason"]
+
+
+# ---------------------------------------------------------------------------
 # run() — gating tests
 # ---------------------------------------------------------------------------
 
