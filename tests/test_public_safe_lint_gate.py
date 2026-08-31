@@ -25,6 +25,7 @@ run directly in CI and in the push-boundary hook this issue adds).
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -346,3 +347,114 @@ def test_push_wrapper_survives_hostile_hookspath_override(
     )
     assert guarded.returncode != 0, guarded.stdout + guarded.stderr
     assert "bare-issue-ref" in (guarded.stdout + guarded.stderr)
+
+
+# --- bash 3.2 portability (Seer HIGH finding on PR athenaeum#1233) ----------
+#
+# The gate ran `mapfile -t ARR < <(...)` at two call sites. `mapfile` (and its
+# synonym `readarray`) is a bash 4.0 builtin; stock macOS ships GNU bash
+# 3.2.57 at /bin/bash, and `.githooks/pre-push` invokes the gate through
+# `bash`. Every macOS contributor's push therefore died with
+# `mapfile: command not found` -- a leak gate that hard-fails on the majority
+# developer platform. These two tests are the regression guard.
+
+#: Shell scripts on the push path (or that CONTRIBUTING tells contributors to
+#: run), all of which must stay bash-3.2-clean.
+PUSH_PATH_SHELL_SCRIPTS = [
+    REPO_ROOT / "scripts" / "public-safe-lint-gate.sh",
+    REPO_ROOT / "scripts" / "install-git-hooks.sh",
+    REPO_ROOT / "scripts" / "git-push-safe.sh",
+    REPO_ROOT / "scripts" / "run-tests.sh",
+    REPO_ROOT / ".githooks" / "pre-push",
+    REPO_ROOT / "public-safe-lint.sh",
+]
+
+#: (regex, human explanation) for constructs that need bash >= 4.0. Written
+#: as regexes over the script source rather than a shell-version probe, so
+#: this test has teeth on CI (where /bin/bash is 5.x and a version-gated
+#: executable test would skip vacuously).
+BASH4_ONLY_CONSTRUCTS = [
+    (r"(?<![\w-])mapfile\b", "mapfile is a bash 4.0 builtin"),
+    (r"(?<![\w-])readarray\b", "readarray is a bash 4.0 builtin"),
+    (r"\bdeclare\s+-[A-Za-z]*[Ag]", "declare -A/-g need bash 4.0"),
+    (r"\blocal\s+-[A-Za-z]*A", "local -A needs bash 4.0"),
+    (r"\$\{[A-Za-z_][A-Za-z0-9_]*\^\^", "${var^^} needs bash 4.0"),
+    (r"\$\{[A-Za-z_][A-Za-z0-9_]*,,", "${var,,} needs bash 4.0"),
+    (r"(?<![\w-])coproc\b", "coproc needs bash 4.0"),
+    (r"(?<![\w-])globstar\b", "globstar needs bash 4.0"),
+    (r"\bwait\s+-n\b", "wait -n needs bash 4.3"),
+    (r"\bread\b[^\n|]*\s-[A-Za-z]*[iN]\b", "read -i/-N need bash 4.0"),
+    (r"\|&", "|& needs bash 4.0"),
+    (r"&>>", "&>> needs bash 4.0"),
+]
+
+
+@pytest.mark.parametrize("script", PUSH_PATH_SHELL_SCRIPTS, ids=lambda p: p.name)
+def test_push_path_scripts_are_bash_3_2_portable(script: Path) -> None:
+    """No bash-4-only construct on the push path.
+
+    stock macOS /bin/bash is 3.2.57; the pre-push hook runs these through
+    `bash`, so a bash-4-only builtin breaks pushing for every macOS
+    contributor (athenaeum#1104, Seer finding on PR athenaeum#1233).
+    """
+    assert script.exists(), f"{script} missing -- update PUSH_PATH_SHELL_SCRIPTS"
+    source = script.read_text()
+    offenders = []
+    for lineno, line in enumerate(source.splitlines(), start=1):
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue  # a comment naming the construct (like this file does)
+        for pattern, why in BASH4_ONLY_CONSTRUCTS:
+            if re.search(pattern, line):
+                offenders.append(f"{script.name}:{lineno}: {why} -- {stripped}")
+    assert not offenders, "bash-4-only construct(s) on the push path:\n" + "\n".join(offenders)
+
+
+def _bin_bash_major() -> int | None:
+    try:
+        out = subprocess.run(
+            ["/bin/bash", "-c", 'printf %s "${BASH_VERSINFO[0]}"'],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:  # pragma: no cover - no /bin/bash at all
+        return None
+    return int(out.stdout.strip()) if out.stdout.strip().isdigit() else None
+
+
+@pytest.mark.skipif(
+    (_bin_bash_major() or 99) >= 4,
+    reason="/bin/bash is >= 4.0 here; the static test above is the portable guard",
+)
+def test_gate_runs_under_system_bash_3_2(tmp_path: Path) -> None:
+    """Executable companion: on a host whose /bin/bash IS 3.2 (macOS), the
+    gate must actually complete under it -- both the empty-suppression-set
+    path and the non-empty one, since bash 3.2 also trips `set -u` on an
+    empty array without the `${ARR[@]:-}` guard."""
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    (clean / "README.md").write_text("hello\n")
+    empty = subprocess.run(
+        ["/bin/bash", str(GATE), str(clean), str(LINTER)],
+        capture_output=True,
+        text=True,
+    )
+    combined = empty.stdout + empty.stderr
+    assert "command not found" not in combined, combined
+    assert empty.returncode == 0, combined
+    assert "GATE OK" in empty.stdout, combined
+
+    supp = tmp_path / "supp"
+    supp.mkdir()
+    (supp / "notes.md").write_text("see issue #4321 for details\n")
+    (supp / ".public-safe-lintignore").write_text("bare-issue-ref\tnotes.md\n")
+    (supp / ".public-safe-lint-suppression-allowlist").write_text("bare-issue-ref\n")
+    nonempty = subprocess.run(
+        ["/bin/bash", str(GATE), str(supp), str(LINTER)],
+        capture_output=True,
+        text=True,
+    )
+    combined = nonempty.stdout + nonempty.stderr
+    assert "command not found" not in combined, combined
+    assert nonempty.returncode == 0, combined
+    assert "bare-issue-ref" in nonempty.stdout, combined
