@@ -3340,6 +3340,14 @@ class RunContext:
     total_truncated: int = 0
     failed_files: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
+    # Issue athenaeum#1144: refs whose Batch API submission was still running when
+    # the run's wall-clock deadline arrived. Batch transport only. Distinct
+    # from BOTH neighbours above: ``failed_files`` means "retry from scratch",
+    # ``deferred_refs`` means "never submitted"; these are submitted, billed,
+    # and collectable by a later run from the athenaeum#1143 handle. They are
+    # therefore NOT drained this run (see ``files_processed_count``) and must
+    # not read as wasted spend.
+    in_flight_refs: list[str] = field(default_factory=list)
     beyond_window: int = 0
     processed_count: int = 0
     deadline_tripped: bool = False
@@ -3452,6 +3460,10 @@ class RunContext:
             self.out_run_stats["beyond_window"] = self.beyond_window
             self.out_run_stats["deferred_refs"] = list(self.deferred_refs)
             self.out_run_stats["failed_files"] = list(self.failed_files)
+            # Issue athenaeum#1144: batch refs left running at the run deadline,
+            # machine-detectable alongside the other run-state lists rather
+            # than requiring a consumer to parse the run-summary line.
+            self.out_run_stats["in_flight_refs"] = list(self.in_flight_refs)
             # Issue athenaeum#663: stuck files (crossed the consecutive-failure threshold
             # or skipped because they already had) as machine-detectable state,
             # so a consumer can distinguish a permanent no-progress loop from a
@@ -4905,6 +4917,19 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # ``write`` knob client — ``None`` falls back to
                         # *client* (the ``classify`` client) unchanged.
                         write_client=write_client,
+                        # Issue athenaeum#1144: the run's wall-clock deadline, so the
+                        # batch poll stops at the earlier of batch-end or the
+                        # remaining window instead of blocking on the module's
+                        # 24h constant. Prefer the athenaeum#440 ENTITY share when it
+                        # is armed — that is this phase's own budget and is
+                        # always <= ``run_deadline`` — else the run deadline.
+                        # ``None`` on both (deadline disabled) preserves
+                        # today's unbounded-poll behaviour exactly.
+                        deadline=(
+                            ctx.entity_deadline
+                            if ctx.entity_deadline is not None
+                            else ctx.run_deadline
+                        ),
                     )
                     ctx.total_created = outcome.created
                     ctx.total_updated = outcome.updated
@@ -4914,6 +4939,8 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.total_truncated = outcome.truncated  # issue athenaeum#476
                     ctx.failed_files = outcome.failed_refs
                     ctx.deferred_refs = outcome.deferred_refs
+                    # Issue athenaeum#1144 AC5.
+                    ctx.in_flight_refs = outcome.in_flight_refs
                 else:
                     # Issue athenaeum#663: the persistent stuck-file ledger for this
                     # phase. A raw file that has failed the same content on
@@ -5485,7 +5512,18 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         # evaluating ``manifest_reason`` when ``ctx.deferred_refs`` is empty
         # (including the "no raw files at all" path, which never reaches the
         # block that assigns it) — so this is never an ``UnboundLocalError``.
-        _entity_exit_reason = manifest_reason if ctx.deferred_refs else "completed"
+        # Issue athenaeum#1144 AC8: a run that spilled a still-running batch to a
+        # handle is NOT a healthy zero-compile run, and it is not an early
+        # resource stop either — its work is submitted, billed, and waiting to
+        # be collected. It gets its own reason, taking precedence over the
+        # deferral classification so a mixed run (some files deferred, some in
+        # flight) still reports the event that actually shaped it. Deliberately
+        # OUTSIDE ``_LIBRARIAN_EARLY_STOP_REASONS``: the athenaeum#1135 zero-progress
+        # refusal must not fire on a run whose progress is in flight.
+        if ctx.in_flight_refs:
+            _entity_exit_reason = "batch-in-flight"
+        else:
+            _entity_exit_reason = manifest_reason if ctx.deferred_refs else "completed"
         # Issue athenaeum#1135: mirror onto ``ctx`` (not just the local var / the
         # run_profile dict) so the finalize phase's zero-progress-refusal
         # predicate can read it without re-deriving the same classification.
@@ -5505,6 +5543,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     "matched": ctx.total_matched,
                     "reason": _entity_exit_reason,
                     "out_tok_per_call": _entity_out_tok_per_call,
+                    # athenaeum#1144 AC5: files whose batch is still running, left for
+                    # a later run to collect. Rendered only when non-zero so a
+                    # clean run's summary line is unchanged, matching the
+                    # degraded/truncated/stuck convention below.
+                    **(
+                        {"in_flight": len(ctx.in_flight_refs)}
+                        if ctx.in_flight_refs
+                        else {}
+                    ),
                     # athenaeum#472: only render when non-zero so a clean run's summary
                     # line is unchanged, but an operator watching a drain sees
                     # "degraded=N" (files whose classification JSON dropped
@@ -6006,6 +6053,14 @@ def _zero_yield_tripped(ctx: "RunContext", previous_deferred_refs: "list[str]") 
         return False
     if ctx.files_processed_count != 0:
         return False
+    # Issue athenaeum#1144: a run that submitted a batch and spilled it to a handle
+    # at the wall-clock deadline committed zero files, but its calls are not
+    # wasted — they are running server-side and a later run collects them.
+    # That is the opposite of the "spent calls, produced nothing, made no
+    # progress on the backlog" condition athenaeum#899 alarms on, so it is excluded
+    # here rather than left to fire a false alarm every spilled night.
+    if ctx.in_flight_refs:
+        return False
     previously_deferred = set(previous_deferred_refs)
     currently_deferred = set(ctx.deferred_refs)
     resolved_since_last_run = previously_deferred - currently_deferred
@@ -6147,8 +6202,17 @@ def _run_finalize_phase(ctx: RunContext) -> int:
     # in-window count minus what was deferred (budget/deadline/ceiling trip) and
     # what failed (not consumed). Recorded on the ledger so the backlog-drain
     # advisor can read observed files-per-run throughput across runs.
+    # Issue athenaeum#1144: in-flight refs are subtracted too. Their raw files were
+    # NOT unlinked (the batch has not been collected yet), so counting them as
+    # drained would over-report throughput to the athenaeum#470 backlog-drain advisor
+    # and make the next run's re-discovery of the same files look like new
+    # intake.
     ctx.files_processed_count = max(
-        0, len(ctx.raw_files) - len(ctx.deferred_refs) - len(ctx.failed_files)
+        0,
+        len(ctx.raw_files)
+        - len(ctx.deferred_refs)
+        - len(ctx.failed_files)
+        - len(ctx.in_flight_refs),
     )
     if not ctx.dry_run:
         # Issue athenaeum#568 (H1): do NOT discard record_spend's return. When this run
