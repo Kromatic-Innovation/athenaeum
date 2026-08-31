@@ -13,11 +13,15 @@
 > and threaded in as its `authority_manifest` argument) and
 > `t2_screen_merge_proposal` (T2 — consulted on a T1 pass-up, and can consult
 > this same manifest again via `reasoning_tiers.safe_class_violation`'s
-> live-source-duplicate check before an auto-apply). Both callers are gated
-> behind the same flag and **default OFF**
-> (`resolve_reasoning_tier_auditing_enabled`, `src/athenaeum/config.py`), so
+> live-source-duplicate check before an auto-apply). As of issue athenaeum#1200,
+> each caller is gated behind its OWN flag, both **default OFF**
+> (`resolve_reasoning_tier_auditing_enabled` for T1,
+> `resolve_reasoning_tier_t2_auto_apply_enabled` for T2, both
+> `src/athenaeum/config.py`) — before athenaeum#1200 both shared one flag. The
+> manifest itself is loaded once per merge run whenever EITHER is on. So
 > production merge behavior is unchanged until an operator sets
-> `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED`. Full operator-facing writeup:
+> `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED` and/or
+> `ATHENAEUM_REASONING_TIER_T2_AUTO_APPLY_ENABLED`. Full operator-facing writeup:
 > [Reasoning-tier screening (T1/T2)](configuration.md#reasoning-tier-screening-t1t2--off-by-default).
 > Running the converter against the live corpus remains operator task athenaeum#437.
 > Neither is in scope here.

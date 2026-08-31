@@ -1471,7 +1471,12 @@ class TestPerKnobClientRouting:
         # and layer the reasoning-tier opt-in on top, rather than
         # overwriting it with a bare dict.
         config = load_config(contradiction_merge_root)
-        config.setdefault("librarian", {})["reasoning_tier_auditing_enabled"] = True
+        # Issue athenaeum#1200: T1 and T2 are independently armed — both keys
+        # are needed here to exercise BOTH clients (this test is about
+        # per-knob client routing, not about the flag split itself).
+        _librarian_cfg = config.setdefault("librarian", {})
+        _librarian_cfg["reasoning_tier_auditing_enabled"] = True
+        _librarian_cfg["reasoning_tier_t2_auto_apply_enabled"] = True
         detector_payload = (
             '{"detected": true, "conflict_type": "prescriptive", '
             '"members_involved": ['
@@ -1545,6 +1550,171 @@ class TestPerKnobClientRouting:
         entries = merge_clusters_to_wiki(contradiction_merge_root, client=fake_client)
         assert len(entries) == 1
         assert fake_client.messages.create.call_count == 2
+
+
+class TestReasoningTierGateSplit:
+    """Issue athenaeum#1200 AC2 (hard requirement): a configuration exists in
+    which T1 screens and T2 performs NO auto-apply, and in that
+    configuration ``resolve_merge(..., auto_applied=True)`` is never
+    reached. This is also the exact migration shape AC4 documents: an
+    existing config with ONLY ``reasoning_tier_auditing_enabled: true`` set
+    (T1's key) — no ``reasoning_tier_t2_auto_apply_enabled`` — must not let
+    T2 auto-apply, even when T2's own model would have said "approve"."""
+
+    @staticmethod
+    def _resp(text: str):
+        from unittest.mock import MagicMock
+
+        r = MagicMock()
+        r.content = [MagicMock(text=text)]
+        return r
+
+    def test_t1_only_config_never_reaches_t2_auto_apply(
+        self, contradiction_merge_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from athenaeum import merge as merge_mod
+        from athenaeum.config import load_config
+
+        monkeypatch.setattr(merge_mod.spend, "ceiling_tripped", lambda *a, **k: None)
+
+        # T1 armed; T2 left at its default (unset -> off). This is the
+        # migration shape: an operator's pre-athenaeum#1200 config with only
+        # the old combined key set.
+        config = load_config(contradiction_merge_root)
+        config.setdefault("librarian", {})["reasoning_tier_auditing_enabled"] = True
+        assert "reasoning_tier_t2_auto_apply_enabled" not in config["librarian"]
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        resolver_payload = (
+            '{"action": "propose_merge", '
+            '"merge_target_name": "prior-session-debris-policy", '
+            '"draft_merged_body": "Prefer parking prior-session debris on WIP.", '
+            '"confidence": 0.9, "source_precedence_used": []}'
+        )
+
+        classify_client = MagicMock()
+        classify_client.messages.create.return_value = self._resp(detector_payload)
+        resolve_client = MagicMock()
+        resolve_client.messages.create.return_value = self._resp(resolver_payload)
+        # T1 pass-up (unparseable text degrades to pass_up) so the proposal
+        # flows through to T2's block rather than being dropped by T1 first
+        # — the scenario has to actually REACH T2's gate to prove anything.
+        reasoning_t1_client = MagicMock()
+        reasoning_t1_client.messages.create.return_value = self._resp("T1 pass-up (test)")
+        # T2's client WOULD approve if it were ever consulted — proves T2 is
+        # skipped because it is disabled, not because the model happened to
+        # decline.
+        reasoning_t2_client = MagicMock()
+        reasoning_t2_client.messages.create.return_value = self._resp(
+            '{"verdict": "approve", "rationale": "safe class, single memory_class, 2 pages"}'
+        )
+
+        resolve_merge_auto_applied_values: list[object] = []
+        real_resolve_merge = merge_mod.resolve_merge
+
+        def _spy_resolve_merge(*args, **kwargs):
+            resolve_merge_auto_applied_values.append(kwargs.get("auto_applied"))
+            return real_resolve_merge(*args, **kwargs)
+
+        monkeypatch.setattr(merge_mod, "resolve_merge", _spy_resolve_merge)
+
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=classify_client,
+            resolve_client=resolve_client,
+            reasoning_t1_client=reasoning_t1_client,
+            reasoning_t2_client=reasoning_t2_client,
+            config=config,
+        )
+
+        # T1 actually ran (screened the proposal, passed it up).
+        reasoning_t1_client.messages.create.assert_called_once()
+        # T2's client was NEVER reached at all — disabled by the split
+        # default, structurally, not merely "a model happened to reject".
+        reasoning_t2_client.messages.create.assert_not_called()
+        # The AC2 hard assertion: resolve_merge is never called with
+        # auto_applied=True (in fact never called at all in this path).
+        assert resolve_merge_auto_applied_values == []
+        assert True not in resolve_merge_auto_applied_values
+
+        # The proposal still reaches the human queue, unscreened by T2 —
+        # falling through exactly like a disabled T2 always has.
+        pending = contradiction_merge_root / "wiki" / "_pending_merges.md"
+        assert pending.exists()
+        assert "prior-session-debris-policy" in pending.read_text(encoding="utf-8")
+
+    def test_default_config_neither_tier_armed_never_auto_applies(
+        self, contradiction_merge_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Control: an unconfigured install (no reasoning-tier keys at all)
+        is the OTHER configuration satisfying AC2 — also never reaches
+        auto-apply, and also never even consults either reasoning client."""
+        from unittest.mock import MagicMock
+
+        from athenaeum import merge as merge_mod
+        from athenaeum.config import load_config
+
+        monkeypatch.setattr(merge_mod.spend, "ceiling_tripped", lambda *a, **k: None)
+        config = load_config(contradiction_merge_root)
+        assert "librarian" not in config or "reasoning_tier_auditing_enabled" not in config.get(
+            "librarian", {}
+        )
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        resolver_payload = (
+            '{"action": "propose_merge", '
+            '"merge_target_name": "prior-session-debris-policy", '
+            '"draft_merged_body": "Prefer parking prior-session debris on WIP.", '
+            '"confidence": 0.9, "source_precedence_used": []}'
+        )
+        classify_client = MagicMock()
+        classify_client.messages.create.return_value = self._resp(detector_payload)
+        resolve_client = MagicMock()
+        resolve_client.messages.create.return_value = self._resp(resolver_payload)
+        reasoning_t1_client = MagicMock()
+        reasoning_t2_client = MagicMock()
+
+        resolve_merge_auto_applied_values: list[object] = []
+        real_resolve_merge = merge_mod.resolve_merge
+
+        def _spy_resolve_merge(*args, **kwargs):
+            resolve_merge_auto_applied_values.append(kwargs.get("auto_applied"))
+            return real_resolve_merge(*args, **kwargs)
+
+        monkeypatch.setattr(merge_mod, "resolve_merge", _spy_resolve_merge)
+
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=classify_client,
+            resolve_client=resolve_client,
+            reasoning_t1_client=reasoning_t1_client,
+            reasoning_t2_client=reasoning_t2_client,
+            config=config,
+        )
+
+        reasoning_t1_client.messages.create.assert_not_called()
+        reasoning_t2_client.messages.create.assert_not_called()
+        assert True not in resolve_merge_auto_applied_values
 
 
 class TestBudgetExhaustedC4Guard:
