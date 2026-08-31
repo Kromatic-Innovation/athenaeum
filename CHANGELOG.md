@@ -33,6 +33,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`athenaeum pii-restore` silently reported a false `TOTAL RESTORABLE = 0`
+  when the knowledge root's git history was unreachable (athenaeum#1228).**
+  `_history_with_paths()` returned an empty list on ANY non-zero `git log`
+  exit -- including "there is no repository here" -- indistinguishable from
+  a page genuinely having no pre-migration history, so
+  `_plan_anchored_restore()` forced every marker into
+  `no-pre-image:page-created-after-migration` and the dry-run report showed
+  a clean, plausible-looking `TOTAL RESTORABLE = 0` regardless of what was
+  actually recoverable. This produced a wrong published conclusion on
+  athenaeum#691 when run against an environment whose knowledge root had no
+  `.git`. Fixed by having `_history_with_paths()` raise the new
+  `GitHistoryUnavailableError` on a non-zero git exit (never conflating it
+  with a real empty-but-successful history), routing every marker that hits
+  it into a new, distinctly-named `git-history-unavailable` residue reason,
+  and having `athenaeum pii-restore` refuse to print a dry-run/apply report
+  at all when `RestorePlan.git_history_unavailable_count()` is non-zero --
+  exiting `1` with a loud stderr explanation instead. The legitimate
+  `no-pre-image:page-created-after-migration` bucket is unchanged for a page
+  that genuinely has no pre-image in a healthy repository. Regression
+  tests: `tests/test_pii_restore_tool.py::test_history_with_paths_raises_when_git_itself_fails`,
+  `::test_build_restore_plan_reports_git_history_unavailable_not_false_residue`,
+  `::test_reshaped_page_still_lands_in_legit_bucket_with_real_git_history`,
+  and `tests/test_cmd_pii_restore.py::test_missing_git_repository_fails_loudly_instead_of_reporting_false_zero`.
+
 - **`athenaeum surface-divergence --json`'s `diverged` field could contradict
   its own exit code (athenaeum#1111).** The wrapped library modules'
   `report_as_dict` reports `diverged` as true whenever EITHER direction of
