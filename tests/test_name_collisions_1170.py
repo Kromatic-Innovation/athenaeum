@@ -29,8 +29,6 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from athenaeum.decisions import list_pending_decisions
 from athenaeum.librarian import _run_name_collision_phase, _run_wiki_dedup_phase
 from athenaeum.models import EntityIndex, parse_frontmatter
