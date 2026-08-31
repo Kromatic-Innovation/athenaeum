@@ -125,7 +125,17 @@ _RESOLVER_NAMES = sorted(name for name, _ in _ALL_RESOLVERS)
 
 # The small, justified exclusion set (see module docstring). Membership is
 # asserted below so a new resolver cannot land in it silently.
-_NO_YAML_KEY = frozenset({"resolve_cache_dir"})
+#
+# ``resolve_reasoning_tier_any_screen_enabled`` (issue athenaeum#1200): a pure
+# OR-composition of two other public resolvers
+# (``resolve_reasoning_tier_auditing_enabled`` /
+# ``resolve_reasoning_tier_t2_auto_apply_enabled``), each independently
+# covered by this exact generic test under its own name. It contains no
+# yaml-key literal of its own by design — delegating avoids a second,
+# potentially-drifting copy of either key/env-var pair — and this test's
+# AST walk only follows PRIVATE ``_resolve*`` helpers, not calls to other
+# public ``resolve_*`` functions, so it cannot see through the delegation.
+_NO_YAML_KEY = frozenset({"resolve_cache_dir", "resolve_reasoning_tier_any_screen_enabled"})
 _GENERIC_HELPER_SIGNATURE = frozenset({"resolve_model"})
 _STRUCTURED_CONTAINER_VALUE = frozenset({"resolve_model_rates"})
 # Issue athenaeum#715: returns a frozenset filtered against a CLOSED vocabulary,
