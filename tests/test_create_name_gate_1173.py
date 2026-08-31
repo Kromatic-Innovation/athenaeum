@@ -640,6 +640,87 @@ class TestSyncTransportWiring:
 
 
 # ---------------------------------------------------------------------------
+# Batch-transport wiring — athenaeum.batch.process_batch_run (issue athenaeum#1170
+# code review "nit": the sync transport (TestSyncTransportWiring above) had a
+# collision end-to-end test; the batch transport's symmetric `index=index`
+# wiring (see batch.py's own "same call as the sync transport" comment) did
+# not. One minimal test, mirroring the sync one, so the two call sites stay
+# provably symmetric rather than merely commented as such.
+# ---------------------------------------------------------------------------
+
+
+class TestBatchTransportWiring:
+    def test_colliding_create_disambiguates_to_an_update_no_new_page(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.batch import process_batch_run
+
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "acme1234-acme-corp.md").write_text(
+            "---\nuid: acme1234\nname: Acme\ntype: company\n---\n\nAcme is a company.\n",
+            encoding="utf-8",
+        )
+        raw = _raw(
+            knowledge / "raw" / "producer",
+            "Acme announced a new product line today.\n",
+        )
+
+        def _fake_tier2_classify(*_args: object, **_kwargs: object) -> list[ClassifiedEntity]:
+            return [
+                _classified(
+                    "Acme",
+                    entity_type="company",
+                    observations="Acme announced a new product line today.",
+                )
+            ]
+
+        monkeypatch.setattr("athenaeum.batch.tier2_classify", _fake_tier2_classify)
+
+        def _fake_tier3_merge(action, existing_body, source_ref, client, **_kwargs):
+            return existing_body + "\n\nNew product line announced.\n", None
+
+        monkeypatch.setattr("athenaeum.batch.tier3_merge", _fake_tier3_merge)
+
+        classify_client = MagicMock()
+        classify_client.messages.create.side_effect = AssertionError(
+            "tier2_classify is monkeypatched — the real classify client must never be called"
+        )
+        write_client = MagicMock()
+        write_client.messages.create.side_effect = AssertionError(
+            "tier3_merge is monkeypatched — the real write client must never be called"
+        )
+
+        result = process_batch_run(
+            [raw],
+            EntityIndex(wiki),
+            wiki,
+            classify_client,
+            valid_types=VALID_TYPES,
+            valid_tags=[],
+            valid_access=VALID_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            batch_classify=False,
+            batch_write=False,
+        )
+
+        # No new page was minted -- still exactly the one pre-existing page --
+        # same "disambiguate, don't duplicate" outcome as the sync transport.
+        page_names = sorted(p.stem for p in wiki.glob("*.md") if not p.name.startswith("_"))
+        assert page_names == ["acme1234-acme-corp"]
+        assert result.created == 0
+        assert result.updated == 1
+        assert result.escalated == 0
+        assert "New product line announced." in (
+            wiki / "acme1234-acme-corp.md"
+        ).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
 # Config idiom (librarian.create_name_escalate_max_chars)
 # ---------------------------------------------------------------------------
 
