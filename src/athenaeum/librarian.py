@@ -1770,8 +1770,11 @@ def process_one(
     # athenaeum#1126 address gate above (same "kept" chaining) and BEFORE
     # actions are built — a rejected/escalated name never reaches a tier-3
     # create action. See gate_create_name_classifications' docstring.
+    # Issue athenaeum#1170: `index` (already a local parameter here) is threaded
+    # through so a colliding create disambiguates against — or escalates
+    # for — the existing page instead of minting a duplicate.
     name_gate_outcome = gate_create_name_classifications(
-        classified, raw.ref, raw.content, config
+        classified, raw.ref, raw.content, config, index=index
     )
     classified = name_gate_outcome.kept
     address_escalations.extend(name_gate_outcome.escalations)

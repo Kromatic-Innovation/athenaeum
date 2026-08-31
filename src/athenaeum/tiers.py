@@ -52,7 +52,7 @@ import os
 import re
 import textwrap
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -1218,7 +1218,56 @@ class CreateNameEscalatedError(Exception):
         super().__init__(f"tier3 create name {name!r} escalated: {reason}")
 
 
-def validate_create_name(name: str, config: dict[str, Any] | None = None) -> None:
+class CreateNameCollisionError(Exception):
+    """*name* collides with an EXISTING page/alias in the wiki index (issue athenaeum#1170).
+
+    Raised by :func:`validate_create_name` when a caller supplies ``index``
+    and the name (case-insensitively, matching either a page's ``name:`` or
+    one of its ``aliases:``) already resolves to a page. This is the
+    create-path half of athenaeum#1170's uniqueness enforcement — the nightly
+    scan in :mod:`athenaeum.name_collisions` is the other half, over
+    collisions already on disk. Unlike :class:`CreateNameRejectedError` /
+    :class:`CreateNameEscalatedError`, there is no verdict on the NAME's
+    quality here: the name is perfectly fine, it is simply not free.
+
+    Never raised for a same-name, DIFFERENT-type pair (see
+    :func:`validate_create_name`'s type-scoping paragraph) — a
+    ``type: project`` page and a ``type: person`` page may legitimately
+    share a name, and a scan that ignored type would wrongly pair them.
+
+    ``existing_type`` carries the collision target's resolved type (``None``
+    when that page has no ``type:`` frontmatter at all — the explicit
+    :class:`~athenaeum.models.IndexEntry` sentinel). The caller
+    (:func:`gate_create_name_classifications`) uses it to decide between
+    disambiguating (existing type known -> fold into the existing page) and
+    escalating (existing type unknown -> a human must confirm before any
+    fold, since matching an untyped page is not a safe disambiguation).
+    """
+
+    def __init__(
+        self,
+        name: str,
+        reason: str,
+        *,
+        existing_uid: str,
+        existing_path: Path,
+        existing_type: str | None,
+    ) -> None:
+        self.name = name
+        self.reason = reason
+        self.existing_uid = existing_uid
+        self.existing_path = existing_path
+        self.existing_type = existing_type
+        super().__init__(f"tier3 create name {name!r} collides: {reason}")
+
+
+def validate_create_name(
+    name: str,
+    config: dict[str, Any] | None = None,
+    *,
+    index: "EntityIndex | None" = None,
+    entity_type: str | None = None,
+) -> None:
     """Single validation point for a Tier-3 CREATE name (issue athenaeum#1173 AC3).
 
     Runs each name-quality check in a fixed sequence; the first check that
@@ -1229,20 +1278,29 @@ def validate_create_name(name: str, config: dict[str, Any] | None = None) -> Non
     1. :data:`_BARE_ISSUE_REF_RE` — AC1, raises :class:`CreateNameRejectedError`.
     2. :func:`_is_short_lowercase_token` — AC2, raises
        :class:`CreateNameEscalatedError`.
+    3. Name-uniqueness (issue athenaeum#1170), only when *index* is supplied —
+       raises :class:`CreateNameCollisionError`.
 
-    Returns ``None`` (no exception) when *name* passes both checks — the
+    Returns ``None`` (no exception) when *name* passes every check — the
     caller proceeds with the create exactly as before this issue.
 
-    EXTENSION POINT — issue athenaeum#1170 (open, ``~operator``, unstarted):
-    that issue owns enforcing name UNIQUENESS on this same create path
-    (nightly duplicate detection + collision repair). It is deliberately NOT
-    implemented here — issue athenaeum#1173 AC3 explicitly separates "build
-    the seam" from "build the check": a partial uniqueness implementation
-    shipped from this lane would collide with athenaeum#1170's own design
-    instead of complementing it. When athenaeum#1170 lands, its check is ONE
-    more call inserted into this same sequence (after the two above,
-    following the same raise-on-failure contract) — not a restructuring of
-    this function or its callers.
+    Issue athenaeum#1170 — uniqueness check: ``index`` and ``entity_type`` are
+    both keyword-only with ``None`` defaults, so every athenaeum#1173-era caller
+    that does not pass them is byte-identical in behaviour (the check is
+    skipped entirely when ``index is None``). When ``index`` IS supplied:
+
+    - ``hit = index.lookup(name)`` — already case-insensitive, and matches
+      both a page's ``name:`` and its ``aliases:``; an alias hit is a
+      genuine reachability collision (creating a same-named page would make
+      the alias ambiguous) and is treated identically to a primary-name hit.
+    - ``hit is None`` — no collision, passes.
+    - **Type-scoping.** When ``hit.type`` is not ``None`` and *entity_type*
+      is truthy and the two differ (case-insensitively, stripped), this
+      passes — NOT a collision. A ``type: project`` page and a ``type:
+      person`` page may legitimately share a name (the operator's worked
+      example: the ``tristankromer`` repo vs. the person of the same
+      name) — a scan that ignored type would wrongly pair them.
+    - Otherwise, raises :class:`CreateNameCollisionError`.
     """
     if _BARE_ISSUE_REF_RE.match(name.strip()):
         raise CreateNameRejectedError(name, "bare issue-number-shaped name")
@@ -1251,8 +1309,23 @@ def validate_create_name(name: str, config: dict[str, Any] | None = None) -> Non
         raise CreateNameEscalatedError(
             name, f"short single lowercase token (<= {max_chars} chars)"
         )
-    # --- athenaeum#1170 extension point: uniqueness check inserts here, as one
-    # more `raise` guarded by one more `if`, once that issue ships it. ---
+    if index is not None:
+        hit = index.lookup(name)
+        if hit is not None:
+            if (
+                hit.type is not None
+                and entity_type
+                and hit.type.strip().lower() != entity_type.strip().lower()
+            ):
+                pass  # different type: legitimate name reuse, not a collision.
+            else:
+                raise CreateNameCollisionError(
+                    name,
+                    f"name already indexed (uid={hit.uid})",
+                    existing_uid=hit.uid,
+                    existing_path=hit.path,
+                    existing_type=hit.type,
+                )
 
 
 @dataclass(frozen=True)
@@ -1262,6 +1335,13 @@ class CreateNameGateOutcome:
     kept: list[ClassifiedEntity]
     rejected: tuple[str, ...]
     escalations: tuple[EscalationItem, ...]
+    #: Issue athenaeum#1170: names of classifications that collided with an
+    #: existing (type-known) page and were rewritten in place to target that
+    #: page (``is_new=False``, ``existing_uid`` set) instead of minting a
+    #: colliding page — see :func:`gate_create_name_classifications`'s
+    #: "DISAMBIGUATE" branch. Defaults to ``()`` so every pre-athenaeum#1170
+    #: construction site/test is unaffected.
+    disambiguated: tuple[str, ...] = ()
 
 
 def gate_create_name_classifications(
@@ -1269,6 +1349,8 @@ def gate_create_name_classifications(
     raw_ref: str,
     raw_content: str = "",
     config: dict[str, Any] | None = None,
+    *,
+    index: "EntityIndex | None" = None,
 ) -> CreateNameGateOutcome:
     """Stop tier-2 from minting unusable entity NAMES at create (issue athenaeum#1173).
 
@@ -1305,16 +1387,78 @@ def gate_create_name_classifications(
     escalation description built at this call site) is embedded in an AC2
     escalation's description so the observation is not lost if the raw file
     is deleted before a human resolves the escalation.
+
+    ``index`` (issue athenaeum#1170, keyword-only, ``None`` default) threads a
+    live :class:`~athenaeum.models.EntityIndex` into :func:`validate_create_name`'s
+    uniqueness check, along with each classification's own declared
+    ``entity_type`` (for the type-scoping rule — see that function's
+    docstring). ``None`` skips the check entirely, so a caller that does not
+    pass it is byte-identical to before this issue. A
+    :class:`CreateNameCollisionError` produces a THIRD outcome, distinct
+    from reject/escalate:
+
+    - **DISAMBIGUATE** (``exc.existing_type is not None`` — the colliding
+      page's type is known): the classification is kept, but rewritten via
+      :func:`dataclasses.replace` to ``is_new=False,
+      existing_uid=exc.existing_uid`` — its name is recorded in
+      ``disambiguated``. The observation then flows into the EXISTING page
+      as an update instead of minting a colliding page. Nothing is lost and
+      no collider is created.
+    - **ESCALATE** (``exc.existing_type is None`` — the colliding page's
+      type is unknown): dropped from ``kept`` and an
+      :class:`~athenaeum.models.EscalationItem` (``conflict_type=
+      "name_collision"``) is appended to ``escalations``, mirroring the AC2
+      branch above — folding an observation into a page whose type cannot
+      be confirmed is not a safe disambiguation.
     """
     kept: list[ClassifiedEntity] = []
     rejected: list[str] = []
     escalations: list[EscalationItem] = []
+    disambiguated: list[str] = []
     for c in classified:
         if not c.is_new:
             kept.append(c)
             continue
         try:
-            validate_create_name(c.name, config)
+            validate_create_name(c.name, config, index=index, entity_type=c.entity_type)
+        except CreateNameCollisionError as exc:
+            if exc.existing_type is not None:
+                log.info(
+                    "tier3-create-name-disambiguated ref=%s name=%r "
+                    "existing_uid=%s reason=%s",
+                    raw_ref,
+                    exc.name,
+                    exc.existing_uid,
+                    exc.reason,
+                )
+                kept.append(replace(c, is_new=False, existing_uid=exc.existing_uid))
+                disambiguated.append(c.name)
+            else:
+                log.warning(
+                    "tier3-create-name-collision-escalated ref=%s name=%r "
+                    "existing_uid=%s reason=%s",
+                    raw_ref,
+                    exc.name,
+                    exc.existing_uid,
+                    exc.reason,
+                )
+                escalations.append(
+                    EscalationItem(
+                        raw_ref=raw_ref,
+                        entity_name=c.name,
+                        conflict_type="name_collision",
+                        description=(
+                            f"Tier-3 create for {c.name!r} was suppressed "
+                            f"(issue athenaeum#1170): {exc.reason}, but the "
+                            "existing page's type could not be confirmed, "
+                            "so folding this observation into it is not a "
+                            "safe disambiguation. No page was created; the "
+                            "observation follows so the fact is not lost:"
+                            f"\n\n{raw_content[:2000]}"
+                        ),
+                    )
+                )
+            continue
         except CreateNameRejectedError as exc:
             log.warning(
                 "tier3-create-name-rejected ref=%s name=%r reason=%s",
@@ -1350,7 +1494,10 @@ def gate_create_name_classifications(
             continue
         kept.append(c)
     return CreateNameGateOutcome(
-        kept=kept, rejected=tuple(rejected), escalations=tuple(escalations)
+        kept=kept,
+        rejected=tuple(rejected),
+        escalations=tuple(escalations),
+        disambiguated=tuple(disambiguated),
     )
 
 
