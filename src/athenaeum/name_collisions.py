@@ -226,31 +226,44 @@ def classify_collision(collision: NameCollision) -> Literal["unambiguous", "ambi
 
 
 def _fold_target_matches_canonical(wiki_root: Path, canonical: CollisionPage) -> bool:
-    """Whether ``pending_merges``'s fold-into-existing target path is
-    actually the canonical page's own file (issue athenaeum#1170 safety guard).
+    """Backstop check: does the fold TARGET :func:`resolve_name_collisions`
+    is about to pass actually resolve to the canonical page's own file
+    (issue athenaeum#1170 safety guard)?
 
+    This is defense-in-depth, not the primary mechanism. The primary fix
+    (issue athenaeum#1170 code review) is that :func:`resolve_name_collisions`
+    passes the canonical page's own FILENAME STEM as ``merge_target_name`` to
+    :func:`~athenaeum.pending_merges.write_pending_merge` / ``resolve_merge``
+    — never its ``name:`` frontmatter value. ``slugify`` is idempotent on an
+    already-slugified stem (``slugify("47f5ac89-john-sechrest") ==
+    "47f5ac89-john-sechrest"``, same for a bare-slug ``"acme"`` stem), so
+    ``wiki_root / f"{slugify(stem)}.md"`` — the exact path
     :func:`athenaeum.pending_merges.classify_write_kind` / ``resolve_merge``
-    derive the fold TARGET purely from ``wiki_root / f"{slugify(merge_target_name)}.md"``
-    — they have no notion of "the page that already carries this name might
-    be filed under a different filename". A ``compiled`` wiki page (the
+    derive the fold target from — resolves to the canonical page's own file
+    for BOTH wiki-page-convention shapes: a bare-slug ``compiled`` page (the
     convention :mod:`athenaeum.wiki_dedupe` / this reused fold machinery was
-    built for) IS named exactly that bare slug, but an entity-template page
-    minted via the create path is not — its filename is
-    ``<uid>-<slug>.md`` (see :attr:`athenaeum.models.WikiEntity.filename`).
+    originally built for) and an entity-template page minted via the create
+    path, whose filename is ``<uid>-<slug>.md`` (see
+    :attr:`athenaeum.models.WikiEntity.filename`) — the shape EVERY
+    tier-3-created page actually uses, and therefore the realistic case this
+    detector must handle, not the exception. The canonical page's
+    human-readable ``name:`` is preserved on disk regardless: it lives in
+    ``draft_merged_body`` (the canonical's own full raw text, frontmatter
+    included), not in the slug used to find the file.
 
-    When the canonical page's own file is not at the derived target path,
-    routing its collision through :func:`~athenaeum.pending_merges.write_pending_merge`'s
-    ``write_kind=None`` derivation would silently classify it as
-    ``create-merged`` (the bare-slug path doesn't exist yet) and, on
-    auto-merge, WRITE A NEW near-duplicate page at that bare-slug path
-    instead of folding into the canonical page that already exists under a
-    different name — worse than doing nothing. Rather than teaching
-    ``pending_merges`` a second target-resolution convention, this function
-    lets :func:`resolve_name_collisions` force such a collision to
-    ``ambiguous`` (queued for a human, never auto-merged) regardless of what
-    :func:`classify_collision` would otherwise say.
+    This function now only catches the residual case the stem-based fix does
+    NOT cover: a canonical page whose FILENAME STEM is itself not already a
+    valid slug (mixed case, spaces, punctuation ``slugify`` would rewrite —
+    e.g. a hand-authored file that never went through the create path's
+    filename convention at all). For such a page, ``slugify(stem) != stem``,
+    so the derived fold target still would not resolve to the canonical
+    page's own file, and :func:`resolve_name_collisions` forces the
+    collision to ``ambiguous`` (queued for a human, never auto-merged)
+    rather than risk :func:`~athenaeum.pending_merges.write_pending_merge`'s
+    ``write_kind=None`` deriving ``create-merged`` and minting a spurious
+    near-duplicate page at the wrong path.
     """
-    target_path = wiki_root / f"{slugify(canonical.name)}.md"
+    target_path = wiki_root / f"{slugify(canonical.path.stem)}.md"
     try:
         return target_path.resolve() == canonical.path.resolve()
     except OSError:
@@ -295,13 +308,19 @@ def resolve_name_collisions(
 
     - For EVERY collision (ambiguous and unambiguous alike),
       :func:`~athenaeum.pending_merges.write_pending_merge` appends one
-      proposal block naming the :func:`canonical_page` as the merge target
-      and every page in the group as a source, with ``write_kind=None`` so
-      the derived classification (``fold-into-existing`` — the canonical
-      slug already exists) is trusted rather than asserted (issue athenaeum#748).
+      proposal block naming the :func:`canonical_page`'s own FILENAME STEM
+      (not its ``name:`` frontmatter value — see
+      :func:`_fold_target_matches_canonical`'s docstring for why) as the
+      merge target, and every page in the group as a source, with
+      ``write_kind=None`` so the derived classification
+      (``fold-into-existing`` — the canonical page's own file already
+      exists at that stem) is trusted rather than asserted (issue athenaeum#748).
       That function is already idempotent on the source-set + target-name
       id, so re-running this scan over an unchanged corpus never appends a
-      duplicate block (AC3).
+      duplicate block (AC3). The canonical page's human-readable name is
+      never lost: ``draft_merged_body`` carries its full raw text
+      (frontmatter included), so the ``name:`` on disk is unaffected by
+      what the proposal calls the target.
     - **Ambiguous** collisions stop there — the unresolved block is
       surfaced through :func:`athenaeum.decisions.list_pending_decisions`
       (which already reads every unresolved ``_pending_merges.md`` block),
@@ -406,7 +425,7 @@ def resolve_name_collisions(
             draft_full_text = canonical.body
         write_pending_merge(
             merges_path,
-            merge_target_name=canonical.name,
+            merge_target_name=canonical.path.stem,
             sources=sources,
             rationale=rationale,
             draft_merged_body=draft_full_text,
@@ -416,7 +435,7 @@ def resolve_name_collisions(
         if verdict == "unambiguous":
             unambiguous += 1
             if auto_merge:
-                merge_id = _find_open_merge_id(merges_path, sources, canonical.name)
+                merge_id = _find_open_merge_id(merges_path, sources, canonical.path.stem)
                 if merge_id is not None:
                     result = resolve_merge(
                         merges_path,
