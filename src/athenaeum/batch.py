@@ -1729,7 +1729,9 @@ def process_batch_run(
                 new_entities.append(
                     # Issue athenaeum#578: tier-3 create enables adaptive thinking —
                     # response_text skips any leading thinking block.
-                    tier3_entity_from_text(action, response_text(msg), config=config)
+                    tier3_entity_from_text(
+                        action, response_text(msg), usage=usage, config=config
+                    )
                 )
 
             for cid, action, page_path, meta, existing_body in st.merge_ids:

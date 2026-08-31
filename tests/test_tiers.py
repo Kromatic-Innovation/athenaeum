@@ -32,10 +32,12 @@ from athenaeum.tiers import (
     TIER2_DEGRADED_MARKER,
     TIER2_TRUNCATED_MARKER,
     MergeOpsError,
+    PreambleOnlyResponseError,
     Tier2ParseStats,
     apply_merge_ops,
     parse_merge_ops_response,
     parse_tier2_entities,
+    strip_planning_preamble,
     tier1_programmatic_match,
     tier2_classify,
     tier2_reclassify_larger_budget,
@@ -742,6 +744,159 @@ class TestTier3Create:
         assert "concept" in user_msg
         assert "methodology" in user_msg
         assert "open" in user_msg
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 — Create planning-preamble guard (issue athenaeum#1171)
+# ---------------------------------------------------------------------------
+
+
+class TestStripPlanningPreamble:
+    """Unit tests for the standalone :func:`strip_planning_preamble` helper.
+
+    Issue athenaeum#1171: this is the SAME detector the create path runs on every
+    response — see :class:`TestTier3CreatePreambleGuard` below for the
+    through-the-create-path regression coverage the issue's AC4 asks for.
+    """
+
+    def test_no_preamble_returns_body_unchanged(self) -> None:
+        body = "# Alice Zhang\n\nProduct lead at Acme Corp.[^1]\n\n[^1]: sessions/raw.md"
+        cleaned, stripped = strip_planning_preamble(body)
+        assert stripped is False
+        assert cleaned is body  # same object — not even re-stripped
+
+    def test_leading_preamble_stripped_heading_boundary(self) -> None:
+        body = (
+            "Looking at the new observation, I need to write a page for "
+            "Alice.\n\n# Alice Zhang\n\nProduct lead at Acme Corp.[^1]\n\n"
+            "[^1]: sessions/raw.md"
+        )
+        cleaned, stripped = strip_planning_preamble(body)
+        assert stripped is True
+        assert cleaned.startswith("# Alice Zhang")
+        assert "Looking at" not in cleaned
+        assert "Product lead at Acme Corp." in cleaned
+
+    def test_leading_preamble_stripped_blank_line_boundary(self) -> None:
+        body = "I'll draft this concisely.\n\nAcme Corp is a software vendor.[^1]"
+        cleaned, stripped = strip_planning_preamble(body)
+        assert stripped is True
+        assert cleaned == "Acme Corp is a software vendor.[^1]"
+
+    def test_preamble_only_body_yields_empty_remainder(self) -> None:
+        body = "Looking at the new observation, I need to think this through."
+        cleaned, stripped = strip_planning_preamble(body)
+        assert stripped is True
+        assert cleaned == ""
+
+    def test_mid_body_first_person_sentence_not_stripped(self) -> None:
+        body = (
+            "# Alice Zhang\n\nAlice told the team, \"I need to leave early "
+            "today.\" She works at Acme Corp.[^1]"
+        )
+        cleaned, stripped = strip_planning_preamble(body)
+        assert stripped is False
+        assert cleaned == body
+
+    def test_trailing_first_person_sentence_not_stripped(self) -> None:
+        body = "# Acme Corp\n\nA software vendor.[^1]\n\nI'll keep this updated."
+        cleaned, stripped = strip_planning_preamble(body)
+        assert stripped is False
+        assert cleaned == body
+
+    def test_let_me_opener_stripped(self) -> None:
+        body = "Let me summarize what I found.\n\n# Bob Lee\n\nEngineer at Acme.[^1]"
+        cleaned, stripped = strip_planning_preamble(body)
+        assert stripped is True
+        assert cleaned.startswith("# Bob Lee")
+
+    def test_based_on_lead_in_stripped(self) -> None:
+        body = (
+            "Based on the new observation, I need to create this entity.\n\n"
+            "# Carol\n\nDesigner.[^1]"
+        )
+        cleaned, stripped = strip_planning_preamble(body)
+        assert stripped is True
+        assert cleaned.startswith("# Carol")
+
+    def test_ordinary_capitalized_i_sentence_not_treated_as_preamble(self) -> None:
+        """A body that happens to start with 'I' but isn't a planning verb."""
+        body = "I-beam Systems is a construction supplier.[^1]"
+        cleaned, stripped = strip_planning_preamble(body)
+        assert stripped is False
+        assert cleaned == body
+
+
+class TestTier3CreatePreambleGuard:
+    """Regression tests driven through :func:`tier3_create` (issue athenaeum#1171 AC4).
+
+    Exercises the full create path (prompt build -> mocked LLM call ->
+    :func:`tier3_entity_from_text`), not just the helper directly, per the
+    issue's explicit instruction.
+    """
+
+    def _action(self) -> EntityAction:
+        return EntityAction(
+            kind="create",
+            name="Alice Zhang",
+            entity_type="person",
+            tags=["active"],
+            access="internal",
+            existing_uid=None,
+            observations="Runs product at Acme Corp.",
+        )
+
+    def test_create_strips_leading_planning_preamble(self) -> None:
+        client = _mock_client(
+            "Looking at the new observation, I need to write a page for "
+            "Alice.\n\n# Alice Zhang\n\nProduct lead at Acme Corp.[^1]\n\n"
+            "[^1]: sessions/raw.md"
+        )
+        entity = tier3_create(self._action(), "sessions/raw.md", client)
+        assert "Looking at the new observation" not in entity.body
+        assert "I need to write a page" not in entity.body
+        assert entity.body.startswith("# Alice Zhang")
+        assert "Product lead at Acme Corp." in entity.body
+
+    def test_create_with_no_preamble_body_unchanged(self) -> None:
+        raw_text = "# Alice Zhang\n\nProduct lead at Acme Corp.[^1]\n\n[^1]: sessions/raw.md"
+        client = _mock_client(raw_text)
+        entity = tier3_create(self._action(), "sessions/raw.md", client)
+        assert entity.body == raw_text
+
+    def test_create_preamble_only_response_is_rejected(self) -> None:
+        client = _mock_client(
+            "Looking at the new observation, I need to think about how to "
+            "phrase this."
+        )
+        with pytest.raises(PreambleOnlyResponseError):
+            tier3_create(self._action(), "sessions/raw.md", client)
+
+    def test_create_mid_body_first_person_sentence_not_stripped(self) -> None:
+        raw_text = (
+            "# Alice Zhang\n\nAlice said, \"I need to leave early today.\" "
+            "She works at Acme Corp.[^1]"
+        )
+        client = _mock_client(raw_text)
+        entity = tier3_create(self._action(), "sessions/raw.md", client)
+        assert entity.body == raw_text
+
+    def test_create_stripped_preamble_increments_usage_counter(self) -> None:
+        client = _mock_client(
+            "I'll draft this now.\n\n# Alice Zhang\n\nProduct lead.[^1]"
+        )
+        usage = TokenUsage()
+        tier3_create(self._action(), "sessions/raw.md", client, usage=usage)
+        assert usage.preamble_stripped == 1
+        assert usage.preamble_rejected == 0
+
+    def test_create_rejected_preamble_increments_usage_counter(self) -> None:
+        client = _mock_client("I'll think about this some more.")
+        usage = TokenUsage()
+        with pytest.raises(PreambleOnlyResponseError):
+            tier3_create(self._action(), "sessions/raw.md", client, usage=usage)
+        assert usage.preamble_rejected == 1
+        assert usage.preamble_stripped == 0
 
 
 # ---------------------------------------------------------------------------

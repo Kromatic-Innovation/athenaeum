@@ -1981,6 +1981,114 @@ def tier3_create_params(
     }
 
 
+class PreambleOnlyResponseError(Exception):
+    """Raised when a Tier-3 create response is ENTIRELY planning preamble.
+
+    Issue athenaeum#1171: :func:`strip_planning_preamble` removes a leading
+    first-person planning paragraph and returns whatever substantive content
+    survives underneath it. When nothing survives, the model never actually
+    produced page content — there is nothing to persist. Rejecting here (vs.
+    silently writing an empty/near-empty page) mirrors :class:`MergeOpsError`'s
+    all-or-nothing contract for a malformed merge response: the caller's
+    existing per-action exception handling (see
+    :func:`tier3_derive_actions`) discards this action's result and lets the
+    raw file's next run retry it from scratch, rather than durably persisting
+    a junk page under this entity's name.
+    """
+
+
+# Issue athenaeum#1171: a leading first-person planning/meta-commentary clause,
+# the model narrating its own reasoning about the task instead of writing the
+# entity page it was asked for. Anchored at the very START of the string
+# (``re.match``, never ``re.search``) so only a LEADING occurrence can ever
+# match — text.py never touches the middle or end of a body.
+#
+# Shapes matched (see the athenaeum#1171 filing's three examples, all of this form):
+#   - "Looking at the new observation, I need to ..."
+#   - "Based on the new observation, I need to ..."
+#   - "Given ..., I'll ..." / "Reviewing ..., I should ..." / "Considering ..., I will ..."
+#   - A bare first-person opener with no lead-in clause: "I'll ...",
+#     "I need to ...", "I should ...", "I will ...", "I want to ...",
+#     "Let me ..."
+#
+# Deliberately conservative: matched verbs are restricted to planning/meta
+# modals ("need to", "should", "will", "'ll", "want to") plus "Let me" — NOT
+# every "I ..." sentence, which would false-positive on legitimate first-
+# person content the source observation itself contains (e.g. a quoted "I
+# love this product").
+_PREAMBLE_LEAD_INS = r"(?:Looking at|Based on|Given|Reviewing|Considering)"
+_PREAMBLE_FIRST_PERSON = r"(?:I(?:'ll| need to| should| will| want to)|Let me)\b"
+_PREAMBLE_RE = re.compile(
+    rf"^(?:{_PREAMBLE_LEAD_INS}[^\n]{{0,200}}?,\s*)?{_PREAMBLE_FIRST_PERSON}"
+)
+
+# Boundaries that mark the end of the leading preamble block and the start of
+# real content, in order of preference (issue athenaeum#1171):
+#   1. A markdown heading line (``CREATE_SYSTEM`` instructs the model to
+#      "Start with `# Entity Name`", so a heading is the strongest signal
+#      that real page content has begun).
+#   2. A blank line (an ordinary paragraph break).
+# Whichever boundary occurs FIRST after the preamble match wins, so the cut
+# is as tight as possible around the preamble paragraph alone.
+_PREAMBLE_HEADING_RE = re.compile(r"\n(#{1,6}\s)")
+_PREAMBLE_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
+
+
+def strip_planning_preamble(body: str) -> tuple[str, bool]:
+    """Detect and remove a leading first-person planning-preamble block.
+
+    Issue athenaeum#1171: the tier-3 create path occasionally has the model narrate
+    its own reasoning about the task ("Looking at the new observation, I need
+    to...") instead of only writing the entity page body it was asked for.
+    That reasoning must never reach a persisted wiki page — anything that
+    later reads the page (recall, merge echo, the dedupe vectorizer) would
+    read the model's scratch thinking as if it were a fact about the entity.
+
+    Detection is intentionally conservative (a false positive here silently
+    deletes real content, on EVERY create):
+
+    - Matched ONLY at the very start of *body* (see :data:`_PREAMBLE_RE`) —
+      a first-person sentence anywhere else in the body is left untouched.
+    - Only a closed set of planning/meta-commentary shapes match: an
+      optional lead-in clause ("Looking at ...", "Based on ...", "Given
+      ...", "Reviewing ...", "Considering ...") followed by a comma and a
+      first-person planning verb ("I'll" / "I need to" / "I should" /
+      "I will" / "I want to"), OR a bare "Let me ..." / first-person
+      planning opener with no lead-in clause.
+    - The removed span is bounded to the leading paragraph/sentence block:
+      it stops at the first markdown heading or blank line after the match
+      (see :data:`_PREAMBLE_HEADING_RE` / :data:`_PREAMBLE_BLANK_LINE_RE`).
+      If the body offers no such boundary at all (the whole response is one
+      unbroken block that starts with the preamble), the entire body is
+      treated as preamble and the returned cleaned body is empty — see
+      :class:`PreambleOnlyResponseError`, which the create path raises for
+      exactly this case rather than guess where content might begin inside
+      an unstructured blob.
+
+    Returns ``(cleaned_body, stripped)``. When no leading preamble is
+    detected, returns ``(body, False)`` with *body* returned UNCHANGED
+    (same string, not even re-stripped) — this is the common case and must
+    be a no-op byte for byte. When a preamble IS detected and removed,
+    returns ``(remainder, True)`` where *remainder* is stripped of
+    surrounding whitespace (possibly empty, when nothing substantive
+    survived underneath the preamble).
+    """
+    match = _PREAMBLE_RE.match(body)
+    if not match:
+        return body, False
+
+    cut_points: list[int] = []
+    heading_m = _PREAMBLE_HEADING_RE.search(body, match.end())
+    if heading_m:
+        cut_points.append(heading_m.start(1))
+    blank_m = _PREAMBLE_BLANK_LINE_RE.search(body, match.end())
+    if blank_m:
+        cut_points.append(blank_m.end())
+
+    remainder = body[min(cut_points):].strip() if cut_points else ""
+    return remainder, True
+
+
 def tier3_create(
     action: EntityAction,
     source_ref: str,
@@ -2000,20 +2108,49 @@ def tier3_create(
 
     # Issue athenaeum#578: tier3_create enables adaptive thinking — response_text skips
     # any leading thinking block and returns the created page body.
-    return tier3_entity_from_text(action, response_text(response), config=config)
+    return tier3_entity_from_text(action, response_text(response), usage=usage, config=config)
 
 
 def tier3_entity_from_text(
     action: EntityAction,
     text: str,
+    usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
 ) -> WikiEntity:
     """Construct the :class:`WikiEntity` from a Tier-3 create response body.
 
     Shared by the synchronous and batch transports so provenance stamping
     and entity construction are identical.
+
+    Issue athenaeum#1171: before construction, the response body is run through
+    :func:`strip_planning_preamble`. A leading planning preamble with
+    substantive content surviving underneath is stripped (the common case,
+    counted in ``usage.preamble_stripped`` when *usage* is supplied); a
+    response that is ENTIRELY preamble raises :class:`PreambleOnlyResponseError`
+    (counted in ``usage.preamble_rejected``) instead of persisting an empty
+    page — see that exception's docstring for why reject, not silently drop.
     """
-    body = text.strip()
+    body, stripped = strip_planning_preamble(text.strip())
+    if stripped:
+        if not body:
+            if usage is not None:
+                usage.preamble_rejected += 1
+            log.warning(
+                "tier3-create-preamble-rejected name=%s: response was entirely "
+                "planning preamble with no substantive content underneath",
+                action.name,
+            )
+            raise PreambleOnlyResponseError(
+                f"tier3 create for {action.name!r} produced only planning "
+                "preamble, no substantive page content"
+            )
+        if usage is not None:
+            usage.preamble_stripped += 1
+        log.warning(
+            "tier3-create-preamble-stripped name=%s: leading planning "
+            "preamble removed before persisting the page body",
+            action.name,
+        )
     today = date.today().isoformat()
 
     # Issue athenaeum#95: stamp authoritative provenance at construction time.
