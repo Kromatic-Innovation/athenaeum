@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cross-module coverage for per-knob spend attribution (issue athenaeum#781).
 
-The six model knobs (``classify`` / ``write`` / ``resolve`` / ``topic`` /
-``reasoning_t1`` / ``reasoning_t2``) are defined once in
+The seven model knobs (``classify`` / ``write`` / ``resolve`` / ``topic`` /
+``reasoning_t1`` / ``reasoning_t2`` / ``rule_proposals``) are defined once in
 ``prompt_registry._META_ROWS`` (:data:`athenaeum.prompt_registry.KNOBS`). This
 file exercises the REAL call site for each knob -- not just
 ``TokenUsage.add(knob=...)`` directly (that's covered in ``test_models.py``)
@@ -10,12 +10,17 @@ file exercises the REAL call site for each knob -- not just
 ``TokenUsage`` shows up here. ``topic`` is exercised through the real ledger
 write path in ``tests/test_spend.py::TestQueryTopicsLedger`` instead of here,
 because ``query_topics.extract_topics`` records straight to the ledger and
-never returns its accumulator to the caller.
+never returns its accumulator to the caller. ``rule_proposals`` (issue
+athenaeum#1174) is likewise exercised elsewhere --
+``tests/test_librarian_run_phases.py``'s
+``TestRunRuleProposalPhase::test_records_usage_and_knob_attribution`` -- since
+its real call site is ``librarian._run_rule_proposal_phase``, not a bare
+function this module can call standalone.
 
-A trailing drift-guard test pins the six-knob set actually exercised here
-against :data:`athenaeum.prompt_registry.KNOBS`, so a new knob added to
-``_META_ROWS`` without a corresponding call-site test here fails loudly
-rather than silently going unattributed.
+A trailing drift-guard test pins the knob set actually exercised (here, plus
+the two call sites noted above) against :data:`athenaeum.prompt_registry.KNOBS`,
+so a new knob added to ``_META_ROWS`` without a corresponding call-site test
+fails loudly rather than silently going unattributed.
 """
 
 from __future__ import annotations
@@ -205,14 +210,15 @@ class TestReasoningT2Knob:
 
 
 # ---------------------------------------------------------------------------
-# Drift guard -- the six knobs exercised above must equal prompt_registry's
-# derived set (issue athenaeum#781: prompt_registry._META_ROWS is the single
-# source of truth; this test fails loudly if a knob is added there without a
-# matching call-site test here, or vice versa).
+# Drift guard -- the knobs exercised above (plus the two noted elsewhere)
+# must equal prompt_registry's derived set (issue athenaeum#781:
+# prompt_registry._META_ROWS is the single source of truth; this test fails
+# loudly if a knob is added there without a matching call-site test
+# somewhere, or vice versa).
 # ---------------------------------------------------------------------------
 
 
-def test_all_six_registry_knobs_are_exercised_above() -> None:
+def test_all_registry_knobs_are_exercised_above() -> None:
     exercised = {
         "classify",
         "write",
@@ -222,5 +228,10 @@ def test_all_six_registry_knobs_are_exercised_above() -> None:
         "topic",
         "reasoning_t1",
         "reasoning_t2",
+        # "rule_proposals" (issue athenaeum#1174) is exercised end to end via
+        # librarian._run_rule_proposal_phase in
+        # tests/test_librarian_run_phases.py::TestRunRuleProposalPhase::
+        # test_records_usage_and_knob_attribution
+        "rule_proposals",
     }
     assert exercised == set(KNOBS)

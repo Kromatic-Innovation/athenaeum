@@ -120,7 +120,6 @@ from athenaeum.config import (
     resolve_intake_runtime_floor,
     resolve_live_delta_enabled,
     resolve_memory_tier_sweep_enabled,
-    resolve_model,
     resolve_model_rates,
     resolve_pull_before_run,
     resolve_push_after_run,
@@ -205,7 +204,7 @@ from athenaeum.provider import (
 )
 from athenaeum.quarantine import quarantine_file as _quarantine_file
 from athenaeum.registry import collect_handles
-from athenaeum.rule_proposals import DEFAULT_RULE_PROPOSALS_MODEL, run_rule_proposal_detection
+from athenaeum.rule_proposals import _get_rule_proposals_model, run_rule_proposal_detection
 from athenaeum.rules import run_shape_rule_phase
 from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home now
     REGRESSION_ALERT_PREFIX,
@@ -3787,45 +3786,123 @@ class RunContext:
         return EXIT_GRACEFUL_PARTIAL
 
 
-def _resolve_run_models(config: dict[str, Any] | None) -> list[tuple[str, str]]:
-    """Resolve the model id each LLM-serving knob resolves to for THIS run
-    (issue athenaeum#783's preflight input).
+def _knob_model_getters() -> dict[str, Callable[[dict[str, Any] | None], str]]:
+    """Map every :data:`athenaeum.prompt_registry.KNOBS` entry to its OWN
+    getter (env > yaml > default precedence, unchanged) rather than
+    hand-rolling a second resolution path (issue athenaeum#783 / athenaeum#1174).
 
-    Calls each knob's OWN getter (its existing env > yaml > default
-    precedence, unchanged) rather than hand-rolling a second resolution
-    path, so the preflight sees exactly what the run will actually serve
-    traffic with. Six DISTINCT knobs — ``claim_kind.py`` and
-    ``contradictions.py`` both resolve the same ``"classify"`` knob
-    :func:`athenaeum.tiers._get_classify_model` does (same env var, same
-    default), so they are not re-listed separately here; same for
-    ``drain_advisor.py``'s ``"write"`` knob. Imports are function-local,
-    matching this module's existing lazy-import convention for
-    ``claim_kind``/``drain_advisor`` (avoids a module-level import cycle:
-    several of these modules already import from ``athenaeum.librarian``
-    at the type-checking layer or import ``athenaeum.config``, which this
-    function's caller lives in).
+    ``claim_kind.py`` and ``contradictions.py`` both resolve the same
+    ``"classify"`` knob :func:`athenaeum.tiers._get_classify_model` does
+    (same env var, same default), so they are not re-listed separately
+    here; same for ``drain_advisor.py``'s ``"write"`` knob. Imports are
+    function-local, matching this module's existing lazy-import convention
+    for ``claim_kind``/``drain_advisor`` (avoids a module-level import
+    cycle: several of these modules already import from
+    ``athenaeum.librarian`` at the type-checking layer or import
+    ``athenaeum.config``, which this function's caller lives in) — and,
+    same reason ``prompt_registry`` itself is NOT imported at this module's
+    top level (see ``_resolve_run_models`` below): ``prompt_registry``
+    eagerly ``importlib.import_module``s every prompt-owning module,
+    including ``claim_kind``, at ITS OWN import time, which would leak
+    ``claim_kind``/``llm_schemas`` into the ~3s recall hot path
+    (``athenaeum._cmd_query`` imports this module at module level; see
+    ``tests/test_claim_kind_intake_wiring.py::TestAC6NoHotPathLazyImport``).
+
+    Built as an explicit dict rather than an inline list so
+    :func:`_resolve_run_models` can assert it covers EXACTLY
+    ``prompt_registry.KNOBS`` — an eighth knob added to ``_META_ROWS``
+    without a getter here fails loudly (a test, not a silent omission),
+    instead of repeating the athenaeum#1174 defect this function's derivation
+    exists to prevent.
     """
     from athenaeum.query_topics import _get_topic_model
     from athenaeum.reasoning_tiers import get_t1_model, get_t2_model
     from athenaeum.resolutions import _get_model as _get_resolve_model
+    from athenaeum.rule_proposals import _get_rule_proposals_model
     from athenaeum.tiers import _get_classify_model, _get_write_model
 
-    return [
-        ("classify", _get_classify_model(config)),
-        ("write", _get_write_model(config)),
-        ("topic", _get_topic_model(config)),
-        ("resolve", _get_resolve_model(config)),
-        ("reasoning_t1", get_t1_model(config)),
-        ("reasoning_t2", get_t2_model(config)),
-    ]
+    return {
+        "classify": _get_classify_model,
+        "write": _get_write_model,
+        "topic": _get_topic_model,
+        "resolve": _get_resolve_model,
+        "reasoning_t1": get_t1_model,
+        "reasoning_t2": get_t2_model,
+        "rule_proposals": _get_rule_proposals_model,
+    }
 
 
-#: The five knobs the librarian's entity/merge pipeline serves, each through
-#: its OWN per-knob client (issue athenaeum#841 — see ``_arm_run_deadline``,
+def _resolve_run_models(config: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """Resolve the model id each LLM-serving knob resolves to for THIS run
+    (issue athenaeum#783's preflight input).
+
+    DERIVED from :data:`athenaeum.prompt_registry.KNOBS` (issue athenaeum#1174) —
+    the single source of truth for the routed-knob set — rather than a
+    hand-maintained list of pairs, so a knob added to ``_META_ROWS`` (e.g.
+    ``rule_proposals``) automatically appears here, and therefore
+    automatically passes through :func:`athenaeum.config.preflight_model_rates`
+    (the ``_run_preconditions`` call site below), with no second list to
+    remember to update.
+
+    ``prompt_registry`` is imported FUNCTION-LOCALLY, not at this module's
+    top level: it eagerly imports every prompt-owning module (including
+    ``claim_kind``) at ITS OWN import time, and this module is imported by
+    the ~3s recall hot path (``athenaeum._cmd_query``) — see
+    :func:`_knob_model_getters`'s docstring. This function is only ever
+    called from ``_run_preconditions``, i.e. a real ``athenaeum run``, never
+    from that hot path, so the deferred import costs nothing there.
+    """
+    from athenaeum import prompt_registry
+
+    getters = _knob_model_getters()
+    missing = [knob for knob in prompt_registry.KNOBS if knob not in getters]
+    if missing:  # pragma: no cover - defensive; covered by test_knob_derivation
+        raise AssertionError(
+            f"_knob_model_getters() is missing a getter for: {sorted(missing)} "
+            "-- add one alongside its prompt_registry._META_ROWS row (athenaeum#1174)"
+        )
+    return [(knob, getters[knob](config)) for knob in prompt_registry.KNOBS]
+
+
+#: Knobs excluded from ``_LIBRARIAN_ROUTED_KNOBS`` despite being members of
+#: ``prompt_registry.KNOBS`` (issue athenaeum#1174) — each resolves its OWN
+#: provider/client independently rather than through the librarian
+#: entity/merge pipeline's per-knob client cache (``_arm_run_deadline``,
+#: issue athenaeum#841):
+#:
+#: * ``topic`` — :mod:`athenaeum.query_topics` resolves it independently
+#:   (issue athenaeum#786), outside this pipeline.
+#: * ``rule_proposals`` — a default-OFF phase
+#:   (:func:`~athenaeum.config.resolve_rule_proposals_enabled`);
+#:   ``_run_rule_proposal_phase`` builds its own client lazily, only when
+#:   the phase is enabled, rather than unconditionally at
+#:   ``_arm_run_deadline`` time for a phase most runs never use.
+#:
+#: Naively setting ``_LIBRARIAN_ROUTED_KNOBS = prompt_registry.KNOBS`` would
+#: silently fold both of these into the client-cache pipeline — a behaviour
+#: change neither knob's own issue asked for (in ``rule_proposals``'s case,
+#: it would also mean building a real LLM client at startup for a phase that
+#: is off by default).
+_LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS = frozenset({"topic", "rule_proposals"})
+
+#: The knobs the librarian's entity/merge pipeline serves, each through its
+#: OWN per-knob client (issue athenaeum#841 — see ``_arm_run_deadline``,
 #: which resolves and constructs one client per entry here via a shared
-#: :class:`~athenaeum.provider.LLMClientCache`). ``topic`` is deliberately
-#: excluded — :mod:`athenaeum.query_topics` resolves it independently
-#: (issue athenaeum#786), outside this pipeline.
+#: :class:`~athenaeum.provider.LLMClientCache`). Conceptually
+#: ``prompt_registry.KNOBS`` minus ``_LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS``
+#: (issue athenaeum#1174), but kept as an EXPLICIT, hand-written literal
+#: (unlike ``_resolve_run_models`` above) rather than computed from
+#: ``prompt_registry.KNOBS`` at this module's top level: ``prompt_registry``
+#: eagerly imports ``claim_kind``/every prompt-owning module at ITS OWN
+#: import time (see ``_knob_model_getters``'s docstring), and doing that
+#: computation here — at THIS module's import time, since this is a
+#: module-level constant — would leak that cost into the ~3s recall hot
+#: path (``athenaeum._cmd_query`` imports this module at module level).
+#: ``tests/test_pricing_config.py::TestLibrarianRoutedKnobsDerivation``
+#: asserts ``set(_LIBRARIAN_ROUTED_KNOBS) | _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS
+#: == set(prompt_registry.KNOBS)`` (with no overlap) at TEST time instead, so
+#: a ninth knob added to ``_META_ROWS`` without an explicit routing decision
+#: here still fails loudly — just via a test, not a runtime import.
 _LIBRARIAN_ROUTED_KNOBS = ("classify", "write", "resolve", "reasoning_t1", "reasoning_t2")
 
 
@@ -3852,6 +3929,19 @@ def _run_preconditions(ctx: RunContext) -> int | None:
         # the actual client.
         for _knob in _LIBRARIAN_ROUTED_KNOBS:
             resolve_provider(ctx.config, knob=_knob, default=ctx.provider)
+        # Issue athenaeum#1174: ``rule_proposals`` is independently routed
+        # (excluded from ``_LIBRARIAN_ROUTED_KNOBS`` above — see
+        # ``_LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS``) and previously had NO
+        # preflight validation at all: a bad ``llm.providers.rule_proposals``
+        # value surfaced as an uncaught ``ProviderConfigError`` traceback the
+        # first time ``_run_rule_proposal_phase`` actually ran (only
+        # reachable when the phase is enabled), instead of a clean startup
+        # failure like every knob above. Validated here unconditionally
+        # (even while the phase defaults off), for the same reason the loop
+        # above validates before any client is built: cheap (no client
+        # construction, no I/O) — and a bad value should fail at startup,
+        # not the first night an operator flips the phase on.
+        resolve_provider(ctx.config, knob="rule_proposals", default=ctx.provider)
     except ProviderConfigError as exc:
         log.error("%s", exc)
         return 1
@@ -4487,12 +4577,7 @@ def _run_rule_proposal_phase(ctx: RunContext) -> None:
 
     _provider = resolve_provider(ctx.config, knob="rule_proposals", default=ctx.provider)
     ctx.knob_providers["rule_proposals"] = _provider
-    ctx.knob_models["rule_proposals"] = resolve_model(
-        "rule_proposals",
-        "ATHENAEUM_RULE_PROPOSALS_MODEL",
-        DEFAULT_RULE_PROPOSALS_MODEL,
-        ctx.config,
-    )
+    ctx.knob_models["rule_proposals"] = _get_rule_proposals_model(ctx.config)
     client = build_llm_client(
         ctx.config, knob="rule_proposals", api_key=ctx.api_key, max_retries=3
     )
