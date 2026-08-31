@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 from athenaeum.pii_restore import (
+    _RETRO_FRAGMENT_RE,
     MARKER,
     ApplyResult,
     PiiRestoreSafetyError,
@@ -133,6 +134,62 @@ def test_classify_or_refuse_retro_method_accepts_single_dash_digit_list() -> Non
     )
     with pytest.raises(PiiRestoreSafetyError):
         _classify_or_refuse("801-835-841-843", method="anchored-rename-follow")
+
+
+# --------------------------------------------------------------------------- #
+# _RETRO_FRAGMENT_RE -- athenaeum#1107: the marker need not span the WHOLE
+# ``--``...``.md`` region. Most live citations keep filename text (an
+# issue-number prefix, a slug suffix, or both) around the marker; the
+# pre-fix anchor (``--`` + MARKER + ``.md`` with nothing else permitted)
+# only matched when that surrounding text happened to be empty.
+# --------------------------------------------------------------------------- #
+
+_TS = "20260612T214502Z"
+
+
+@pytest.mark.parametrize(
+    "case,line",
+    [
+        ("full_span", f"See retros/{_TS}--{MARKER}.md for details."),
+        ("marker_at_start", f"See retros/{_TS}--{MARKER}-236config.md for details."),
+        ("marker_at_end", f"See retros/{_TS}--athenaeum-1091-{MARKER}.md for details."),
+        (
+            "marker_in_middle",
+            f"See retros/{_TS}--athenaeum-{MARKER}-236config.md for details.",
+        ),
+    ],
+)
+def test_retro_fragment_re_matches_marker_embedded_anywhere_in_span(
+    case: str, line: str
+) -> None:
+    """athenaeum#1107 AC1/AC2: an embedded marker -- at the start, middle, or
+    end of the ``--``...``.md`` span, not only spanning it entirely -- must
+    still match and yield the correct timestamp key."""
+    m = _RETRO_FRAGMENT_RE.search(line)
+    assert m is not None, f"{case}: expected a match, got none for {line!r}"
+    assert m.group("ts") == _TS
+
+
+def test_retro_fragment_re_does_not_span_two_separate_citations_on_one_line() -> None:
+    """Two DIFFERENT retro citations on one line must each be matched (or
+    not) on their own -- the non-greedy, non-whitespace/non-slash-bounded
+    filler must never let a match starting at the first citation's ``--``
+    run all the way through to a MARKER that belongs to the second."""
+    ts_a, ts_b = "20260101T000000Z", "20260202T000000Z"
+    line = f"See retros/{ts_a}--clean-841.md and retros/{ts_b}--{MARKER}-843.md."
+    m = _RETRO_FRAGMENT_RE.search(line)
+    assert m is not None
+    # Must anchor to the SECOND citation (the one that actually holds the
+    # marker), never stretch from the first citation's "--" through to it.
+    assert m.group("ts") == ts_b
+    assert m.group(0).startswith(f"retros/{ts_b}--")
+
+
+def test_retro_fragment_re_no_match_when_no_marker_present() -> None:
+    """A clean (uncorrupted) retro citation must never match -- there is
+    nothing to restore."""
+    line = f"See retros/{_TS}--801-835-841-843.md for details."
+    assert _RETRO_FRAGMENT_RE.search(line) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -366,6 +423,74 @@ def test_retro_filename_resolved_by_history_lookup_after_rotation(fixture_repo: 
     assert restoration.token == "801-835-841-843"
     assert restoration.restore_class == "issue-list"
     assert restoration.source_ref == "20260612T214502Z--801-835-841-843.md"
+
+
+@pytest.mark.parametrize(
+    "citation_line",
+    [
+        pytest.param(
+            f"See retros/{_TS}--{MARKER}-236config.md for details.\n",
+            id="marker_at_start_of_span",
+        ),
+        pytest.param(
+            f"See retros/{_TS}--athenaeum-{MARKER}-236config.md for details.\n",
+            id="marker_in_middle_of_span",
+        ),
+        pytest.param(
+            f"See retros/{_TS}--athenaeum-1091-{MARKER}.md for details.\n",
+            id="marker_at_end_of_span",
+        ),
+    ],
+)
+def test_retro_filename_resolved_when_marker_is_embedded_not_full_span(
+    tmp_path: Path, citation_line: str
+) -> None:
+    """athenaeum#1107 AC1/AC2: end-to-end proof that a corrupted citation
+    with the marker embedded partway through the ``--``...``.md`` span --
+    not spanning it entirely -- still resolves through the full
+    match -> resolve -> classify -> restore pipeline. Before the fix,
+    :data:`_RETRO_FRAGMENT_RE` never matched any of these shapes, so
+    :func:`build_restore_plan` routed them to :func:`_plan_anchored_restore`
+    instead (the wrong method, and one with no pre-image to find), leaving
+    them stuck as residue rather than restored via the retro-filename
+    lookup."""
+    root = tmp_path / "knowledge"
+    wiki = root / "wiki"
+    retros = root / "raw" / "retros"
+    contacts = root / "excluded"
+    for d in (wiki, retros, contacts):
+        d.mkdir(parents=True, exist_ok=True)
+
+    _git(root, "init", "-q", "-b", "develop")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Athenaeum Test")
+    (root / "athenaeum.yaml").write_text("storage:\n  mapping:\n    pii: excluded\n")
+
+    real_filename = f"{_TS}--801-835-841-843.md"
+    (wiki / "citing-page.md").write_text(
+        _page("2001", "Embedded Marker Citer", f"See retros/{_TS}--801-835-841-843.md.\n")
+    )
+    (retros / real_filename).write_text("# Retro\n\nBody text.\n")
+    _commit(root, "initial: seed clean corpus")
+
+    (wiki / "citing-page.md").write_text(
+        _page("2001", "Embedded Marker Citer", citation_line)
+    )
+    _commit(root, "storage: migrate contact data to the excluded surface")
+
+    wiki_root, contacts_root = root / "wiki", root / "excluded"
+    plan = build_restore_plan(root, wiki_root, contacts_root)
+
+    matches = [r for r in plan.restorations if r.hit.page_relpath == "wiki/citing-page.md"]
+    assert len(matches) == 1, (
+        f"expected the embedded-marker citation to resolve; residue was "
+        f"{[e.reason for e in plan.residue if e.hit.page_relpath == 'wiki/citing-page.md']}"
+    )
+    restoration = matches[0]
+    assert restoration.method == "retro-filename-lookup"
+    assert restoration.token == "801-835-841-843"
+    assert restoration.restore_class == "issue-list"
+    assert restoration.source_ref == real_filename
 
 
 @pytest.mark.parametrize(
