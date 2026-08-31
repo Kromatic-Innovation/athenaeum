@@ -250,6 +250,33 @@ class PiiRestoreSafetyError(RuntimeError):
     """
 
 
+class GitHistoryUnavailableError(RuntimeError):
+    """``git log`` itself failed for a page -- history was never consulted.
+
+    Raised by :func:`_history_with_paths` on any non-zero ``git`` exit: no
+    repository at the given root, a corrupted repository, a detached/
+    unreadable ``HEAD``, or any other git-level error. This is deliberately
+    a DIFFERENT signal than an empty-but-successful history (``git`` exits
+    0 with no commits for a path that is genuinely new) -- only the latter
+    is a real "this page has no pre-image" corpus fact.
+
+    Before athenaeum#1228, :func:`_history_with_paths` returned ``[]`` for
+    both cases, so :func:`_plan_anchored_restore` forced every marker into
+    ``no-pre-image:page-created-after-migration`` whenever git could not
+    even be consulted -- producing a plausible-looking but entirely false
+    ``TOTAL RESTORABLE = 0`` (demonstrated against a lane container's
+    ``/knowledge`` mount, which carries no ``.git``).
+    """
+
+
+#: Residue reason for a marker :func:`_plan_anchored_restore` could not
+#: classify because :func:`_history_with_paths` raised
+#: :class:`GitHistoryUnavailableError` -- named so a reader cannot mistake
+#: it for ``no-pre-image:page-created-after-migration`` (a statement ABOUT
+#: the corpus): this one is a statement about the tool's own environment.
+GIT_HISTORY_UNAVAILABLE_REASON = "git-history-unavailable"
+
+
 def _classify_or_refuse(token: str, *, method: str) -> str:
     """Classify *token* for restoration under *method*, or raise.
 
@@ -313,6 +340,13 @@ def _history_with_paths(repo_root: Path, current_relpath: str) -> list[tuple[str
     at or before the rename is then paired with the OLD path, which is
     exactly what a raw ``git show <old-sha>:<current-path>`` lookup (the
     thing the pre-athenaeum#1037 script effectively did) gets wrong.
+
+    Raises:
+        GitHistoryUnavailableError: if the ``git log`` invocation itself
+            failed (non-zero exit) -- see that class's docstring for why
+            this must NOT collapse into the empty-list return below (that
+            return is reserved for a git command that SUCCEEDED and found
+            no history, which is a real, reportable corpus fact).
     """
     proc = _git(
         repo_root,
@@ -323,7 +357,13 @@ def _history_with_paths(repo_root: Path, current_relpath: str) -> list[tuple[str
         "--",
         current_relpath,
     )
-    if proc.returncode != 0 or not proc.stdout.strip():
+    if proc.returncode != 0:
+        raise GitHistoryUnavailableError(
+            f"git log --follow failed for {current_relpath!r} under "
+            f"{repo_root} (exit {proc.returncode}): "
+            f"{proc.stderr.strip() or '<no stderr>'}"
+        )
+    if not proc.stdout.strip():
         return []
     entries: list[tuple[str, str]] = []
     tracked = current_relpath
@@ -515,7 +555,9 @@ class ResidueEntry:
 
     hit: MarkerHit
     #: One of: ``"kept:real-pii"``, ``"no-pre-image:page-created-after-migration"``,
-    #: ``"no-pre-image:context-not-found"``, ``"retro-filename:not-found-in-history"``.
+    #: ``"no-pre-image:context-not-found"``, ``"retro-filename:not-found-in-history"``,
+    #: ``"git-history-unavailable"`` (:data:`GIT_HISTORY_UNAVAILABLE_REASON` --
+    #: git itself could not be consulted; NOT a statement about the corpus).
     reason: str
 
 
@@ -536,6 +578,16 @@ class RestorePlan:
 
     def residue_counts_by_reason(self) -> Counter:
         return Counter(entry.reason for entry in self.residue)
+
+    def git_history_unavailable_count(self) -> int:
+        """How many markers hit :data:`GIT_HISTORY_UNAVAILABLE_REASON`.
+
+        Non-zero here means the classifier could not consult git history for
+        at least one marker -- callers (the CLI's dry-run/apply paths) must
+        treat that as "cannot report a plan", never fold it into a quiet
+        ``TOTAL RESTORABLE`` count (athenaeum#1228).
+        """
+        return sum(1 for entry in self.residue if entry.reason == GIT_HISTORY_UNAVAILABLE_REASON)
 
 
 def build_restore_plan(
@@ -598,8 +650,15 @@ def _plan_anchored_restore(repo_root: Path, hit: MarkerHit, plan: RestorePlan) -
     anchor_before = line[max(0, start - ANCHOR_CONTEXT_CHARS) : start]
     anchor_after = line[end : end + ANCHOR_CONTEXT_CHARS]
 
-    history = _history_with_paths(repo_root, hit.page_relpath)
-    found = _find_preimage_token(repo_root, hit.page_relpath, anchor_before, anchor_after)
+    try:
+        history = _history_with_paths(repo_root, hit.page_relpath)
+        found = _find_preimage_token(repo_root, hit.page_relpath, anchor_before, anchor_after)
+    except GitHistoryUnavailableError:
+        # git itself could not be consulted for this page -- this is NOT
+        # the same as a genuinely empty history, so it must never land in
+        # no-pre-image:page-created-after-migration (athenaeum#1228).
+        plan.residue.append(ResidueEntry(hit, GIT_HISTORY_UNAVAILABLE_REASON))
+        return
     if found is None:
         if len(history) <= 1:
             # The page's own history has nothing before the current
