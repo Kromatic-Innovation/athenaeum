@@ -63,6 +63,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`athenaeum ingest` held the run lock without heartbeating, so
+  `break_stale_after` could break a healthy long run (athenaeum#1230).** Only
+  `librarian.py` refreshed the lock's heartbeat; the ingest path did not, so
+  `heartbeat_age_seconds` equalled its total wall time — a long-running,
+  correctly-progressing ingest looked progressively more "wedged" the longer
+  it ran, and a contending `acquire` could auto-break it under
+  `break_stale_after` (default 6h). Fixed by threading `lock.heartbeat` into
+  `ingest()`/`session_end()` exactly like `athenaeum run`'s athenaeum#526
+  (H10) precedent — both already forward `**run_kwargs` into `run()`, which
+  ticks the heartbeat at phase/per-file boundaries. A full sweep of every
+  `RunLock` acquisition site in `src/athenaeum/` (recorded in
+  `athenaeum.runlock`'s module docstring) found two more holders with the
+  same latent gap and fixed both: `athenaeum drain` (an explicitly unbounded,
+  batch-mode drain that block-polls the Anthropic Batch API for potentially
+  hours, with one lock held across the whole multi-window loop) and
+  `athenaeum merges recompare --apply` (an unbounded-proposal-count,
+  per-pair LLM classify loop that already received the caller's lock but
+  never refreshed it). Every other acquisition site was audited and found
+  correctly bounded (deterministic, or capped well under the 6h default) —
+  see the docstring table for the full per-site reasoning. Regression tests:
+  `tests/test_runlock.py::TestIngestPathHeartbeatWiring`,
+  `tests/test_runlock.py::TestIngestPathLongRunSurvivesContendedBreak`,
+  `tests/test_recompare.py::TestApplyHeartbeatsTheLock`, and
+  `tests/test_drain.py::TestRunDrainLoop::test_heartbeat_is_threaded_into_every_window`.
+
+- **`athenaeum pii-restore` silently reported a false `TOTAL RESTORABLE = 0`
+  when the knowledge root's git history was unreachable (athenaeum#1228).**
+  `_history_with_paths()` returned an empty list on ANY non-zero `git log`
+  exit -- including "there is no repository here" -- indistinguishable from
+  a page genuinely having no pre-migration history, so
+  `_plan_anchored_restore()` forced every marker into
+  `no-pre-image:page-created-after-migration` and the dry-run report showed
+  a clean, plausible-looking `TOTAL RESTORABLE = 0` regardless of what was
+  actually recoverable. This produced a wrong published conclusion on
+  athenaeum#691 when run against an environment whose knowledge root had no
+  `.git`. Fixed by having `_history_with_paths()` raise the new
+  `GitHistoryUnavailableError` on a non-zero git exit (never conflating it
+  with a real empty-but-successful history), routing every marker that hits
+  it into a new, distinctly-named `git-history-unavailable` residue reason,
+  and having `athenaeum pii-restore` refuse to print a dry-run/apply report
+  at all when `RestorePlan.git_history_unavailable_count()` is non-zero --
+  exiting `1` with a loud stderr explanation instead. The legitimate
+  `no-pre-image:page-created-after-migration` bucket is unchanged for a page
+  that genuinely has no pre-image in a healthy repository. Regression
+  tests: `tests/test_pii_restore_tool.py::test_history_with_paths_raises_when_git_itself_fails`,
+  `::test_build_restore_plan_reports_git_history_unavailable_not_false_residue`,
+  `::test_reshaped_page_still_lands_in_legit_bucket_with_real_git_history`,
+  and `tests/test_cmd_pii_restore.py::test_missing_git_repository_fails_loudly_instead_of_reporting_false_zero`.
+
 - **`athenaeum surface-divergence --json`'s `diverged` field could contradict
   its own exit code (athenaeum#1111).** The wrapped library modules'
   `report_as_dict` reports `diverged` as true whenever EITHER direction of
