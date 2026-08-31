@@ -170,6 +170,9 @@ class TestRunContext:
             # Issue athenaeum#1145: refs collected from a PRIOR run's batch
             # (empty here — same reason).
             "collected_refs": [],
+            # Issue athenaeum#1146: the pending-batch reconciliation tally
+            # (empty here — no handles were reconciled).
+            "batch_reconciliation": {},
             # Issue athenaeum#669: the entity-share yield (athenaeum#440) as
             # machine-detectable state.
             "entity_budget_tripped": True,

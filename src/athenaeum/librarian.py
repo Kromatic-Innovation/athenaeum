@@ -3353,6 +3353,12 @@ class RunContext:
     # them), but they were drained by it, so ``files_processed_count`` counts
     # them — otherwise a collect-only run reads as having done nothing.
     collected_refs: list[str] = field(default_factory=list)
+    # Issue athenaeum#1146 AC7: every pending-batch reconciliation outcome this run
+    # reached, counted by reason (``athenaeum.batch.RECONCILE_REASONS``). None
+    # of them is silent: the map is rendered in the run summary and exported
+    # as run state, so "3 kept in flight, 1 retired past retention, 2 refs
+    # discarded as mutated" is readable without grepping the log.
+    batch_reconciliation: dict[str, int] = field(default_factory=dict)
     beyond_window: int = 0
     processed_count: int = 0
     deadline_tripped: bool = False
@@ -3471,6 +3477,11 @@ class RunContext:
             self.out_run_stats["in_flight_refs"] = list(self.in_flight_refs)
             # Issue athenaeum#1145: refs collected from a prior run's batch.
             self.out_run_stats["collected_refs"] = list(self.collected_refs)
+            # Issue athenaeum#1146 AC7: the reconciliation tally, machine-detectable
+            # rather than only rendered into the run-summary line.
+            self.out_run_stats["batch_reconciliation"] = dict(
+                self.batch_reconciliation
+            )
             # Issue athenaeum#663: stuck files (crossed the consecutive-failure threshold
             # or skipped because they already had) as machine-detectable state,
             # so a consumer can distinguish a permanent no-progress loop from a
@@ -4771,16 +4782,19 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
     ctx.total_degraded += outcome.degraded
     ctx.total_truncated += outcome.truncated
     ctx.collected_refs = list(outcome.collected_refs)
+    ctx.batch_reconciliation = dict(outcome.reconciliation)
     ctx.failed_files.extend(outcome.failed_refs)
     ctx.in_flight_refs.extend(outcome.in_flight_refs)
     if outcome.collected_refs or outcome.in_flight_refs or outcome.failed_refs:
         log.info(
             "Collected %d pending batch handle(s): %d file(s) applied, %d still "
-            "in flight, %d failed (issue athenaeum#1145)",
+            "in flight, %d failed; reconciliation %s (issues athenaeum#1145 / "
+            "athenaeum#1146)",
             len(outcome.retired_handles),
             len(outcome.collected_refs),
             len(outcome.in_flight_refs),
             len(outcome.failed_refs),
+            dict(sorted(outcome.reconciliation.items())) or "{}",
         )
 
 
@@ -5653,6 +5667,23 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     **(
                         {"collected": len(ctx.collected_refs)}
                         if ctx.collected_refs
+                        else {}
+                    ),
+                    # athenaeum#1146 AC7: every reconciliation outcome, as one
+                    # comma-joined ``reason:count`` token. Rendered only when
+                    # something was reconciled, so a run with no outstanding
+                    # handles has an unchanged summary line — but no outcome is
+                    # ever dropped when there was one.
+                    **(
+                        {
+                            "reconciled": ",".join(
+                                f"{reason}:{count}"
+                                for reason, count in sorted(
+                                    ctx.batch_reconciliation.items()
+                                )
+                            )
+                        }
+                        if ctx.batch_reconciliation
                         else {}
                     ),
                     # athenaeum#472: only render when non-zero so a clean run's summary
