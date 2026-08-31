@@ -1695,6 +1695,358 @@ class TestTier3MergeTruncationGuard:
         assert "1180" in esc.description
 
 
+def _build_multi_section_page(*, filler_bullets: int) -> str:
+    """A realistic multi-section entity page (issue athenaeum#1181 fixture).
+
+    Mirrors ``schema/_entity-template.md``'s typical multi-section shape
+    for an entity that has accumulated enough merges to reach the
+    oversized end of the real corpus (Overview / Relationship History /
+    Key Outcomes / Contacts, per the template's "company" row). Each
+    section's filler bullets carry a distinct, section-specific note word
+    so a test can assert exactly which section's content did or did not
+    make it into a merge prompt.
+    """
+    notes = {
+        "Overview": "General background",
+        "Relationship History": "Interaction",
+        "Key Outcomes": "Outcome",
+        "Contacts": "Contact detail",
+    }
+    parts = ["# Acme Corp\n\n"]
+    for heading, note in notes.items():
+        bullets = "\n".join(
+            f"- {note} accumulated fact #{i}, recorded via routine merge.[^{i}]"
+            for i in range(filler_bullets)
+        )
+        parts.append(f"## {heading}\n\n{bullets}\n\n")
+    return "".join(parts)
+
+
+class TestSectionScopedMerge:
+    """Issue athenaeum#1181: section-scoped merging.
+
+    The OUTPUT side of the ~84%-echo problem (anchored edit ops applied to
+    the real file) was already solved by athenaeum#469 — see
+    ``TestTier3MergePatchOps`` below. These tests cover the INPUT side:
+    what ``tier3_merge_params`` fences into ``<existing_page>``.
+    """
+
+    def test_scopes_prompt_to_the_matching_section_not_the_whole_page(self) -> None:
+        """AC1: a merge sends only the section(s) it targets."""
+        from athenaeum.tiers import tier3_merge_params
+
+        body = _build_multi_section_page(filler_bullets=30)
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Contacts update: support line moved to a toll-free number.",
+        )
+        params = tier3_merge_params(action, body, "sessions/raw.md")
+        sent = params["messages"][0]["content"]
+
+        assert "Contact detail accumulated fact #0" in sent
+        # The other sections' own filler content must NOT be present — this
+        # is genuinely scoped, not the whole page.
+        assert "General background accumulated fact #0" not in sent
+        assert "Interaction accumulated fact #0" not in sent
+        assert "Outcome accumulated fact #0" not in sent
+        # The lightweight outline still names every section, so the model
+        # can see the page's structure without its full content.
+        assert "Overview" in sent
+        assert "Relationship History" in sent
+        assert "Key Outcomes" in sent
+
+    def test_no_matching_section_falls_back_to_last_section_with_outline(self) -> None:
+        """AC1: 'a merge that has nothing to attach to must still work' —
+        an observation sharing no vocabulary with any section still gets
+        real section content (the last section) plus the outline, and a
+        pointer to the anchor-free ``append_section`` op, never an empty
+        fence."""
+        from athenaeum.tiers import tier3_merge_params
+
+        body = _build_multi_section_page(filler_bullets=10)
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Zzyzx qwerty plonk frobnicate wibble.",
+        )
+        params = tier3_merge_params(action, body, "sessions/raw.md")
+        sent = params["messages"][0]["content"]
+
+        assert "<existing_page>" in sent
+        assert "Contact detail accumulated fact #0" in sent  # last section
+        assert "Overview" in sent  # named in the outline
+        assert "append_section" in sent  # scoping note steers to the anchor-free op
+
+    def test_single_heading_body_is_not_scoped(self) -> None:
+        """A body with fewer than two heading-delimited sections (the
+        common freshly-created-entity shape — one ``# Entity Name``
+        heading, no ``##`` substructure yet) is left completely unscoped —
+        byte-identical to pre-athenaeum#1181 behavior."""
+        from athenaeum.tiers import _select_merge_section
+
+        body = "# Acme Corp\n\n" + ("Fact.\n" * 50)
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="New fact about Acme.",
+        )
+        selected, was_scoped = _select_merge_section(body, action)
+        assert selected == body
+        assert was_scoped is False
+
+    def test_kill_switch_restores_full_body_echo(self) -> None:
+        """The kill switch (``librarian.section_scoped_merge_enabled:
+        false``) restores today's whole-body echo — no scoping note — for
+        a page that would otherwise be scoped, with no code change."""
+        from athenaeum.tiers import tier3_merge_params
+
+        body = _build_multi_section_page(filler_bullets=5)
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Contacts update: support line moved to a toll-free number.",
+        )
+        config = {"librarian": {"section_scoped_merge_enabled": False}}
+        params = tier3_merge_params(action, body, "sessions/raw.md", config=config)
+        sent = params["messages"][0]["content"]
+
+        # Every section's own filler is present — the whole body, not a
+        # scoped excerpt.
+        assert "General background accumulated fact #0" in sent
+        assert "Interaction accumulated fact #0" in sent
+        assert "Outcome accumulated fact #0" in sent
+        assert "Contact detail accumulated fact #0" in sent
+        # No scoping note — the Instructions section is byte-identical to
+        # pre-athenaeum#1181.
+        assert "is not the whole page" not in sent
+
+    def test_ambiguous_anchor_across_sections_falls_back_not_misapplied(self) -> None:
+        """THE correctness hazard (issue athenaeum#1181): an anchor unique
+        WITHIN the section a merge is scoped to can still be ambiguous in
+        the full page if the same text also occurs in a section that was
+        NOT sent. The model, seeing only the Engineering section, has no
+        way to know "Runs on Python 3.12." is not unique — but
+        ``apply_merge_ops`` checks every anchor against the REAL, full,
+        untruncated body regardless of what was sent, so it must refuse
+        (found more than once) rather than silently editing one of the two
+        occurrences. ``tier3_merge`` must fall back to full-echo, never
+        guess.
+        """
+        shared_line = "Runs on Python 3.12."
+        existing_body = (
+            "# Acme Corp\n\n"
+            "## Engineering\n\n"
+            f"- {shared_line}\n"
+            "- Uses Kubernetes for container orchestration.[^1]\n\n"
+            "## Contact\n\n"
+            f"- {shared_line}\n"
+            "- Reach support via email at ACME-HELP.\n"
+        )
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations=(
+                "Engineering: services now run inside Kubernetes containers "
+                "for better orchestration."
+            ),
+        )
+        ops_response = json.dumps(
+            {
+                "ops": [
+                    {
+                        "op": "insert_after",
+                        "anchor": shared_line,
+                        "text": " Also uses Django.[^2]",
+                    }
+                ]
+            }
+        )
+        full_echo_response = "# Acme Corp\n\n(full-echo fallback body)"
+        client = _sequenced_client([ops_response, full_echo_response])
+
+        body, esc = tier3_merge(action, existing_body, "sessions/raw.md", client)
+
+        # TWO calls: the patch attempt (whose anchor turned out ambiguous
+        # against the real full body) plus the full-echo fallback — never
+        # a single call that silently applied the edit to one of the two
+        # occurrences.
+        assert client.messages.create.call_count == 2
+        first_call_msg = client.messages.create.call_args_list[0].kwargs["messages"][
+            0
+        ]["content"]
+        # Proves selection actually narrowed the prompt to Engineering —
+        # otherwise this test would not be exercising athenaeum#1181 at all.
+        assert "Uses Kubernetes" in first_call_msg
+        assert "Reach support via email" not in first_call_msg
+        # The ambiguous op was refused; the (mocked) full-echo fallback's
+        # own output is what the merge actually returned.
+        assert body is not None
+        assert "full-echo fallback body" in body
+        assert esc is None
+
+    def test_echoed_chars_drop_materially_on_oversized_cohort(self) -> None:
+        """AC2: measured echoed-chars-per-merge drops materially with
+        section-scoping on vs off, on an oversized-page (20k+) fixture
+        cohort. Uses the EXISTING ``merge_echoed_chars`` /
+        ``echoed_chars_per_call`` instrumentation (issue athenaeum#1184) via
+        the real params-building path (``tier3_merge_params``) — not a
+        second, parallel measurement.
+
+        This is a FIXTURE cohort, not the live 84-page real-corpus cohort
+        — this container has no access to that corpus (see this issue's
+        Honesty clause). See the lane's final report for the actual
+        numbers measured here.
+        """
+        from athenaeum.tiers import _MAX_EXISTING_BODY_CHARS, tier3_merge_params
+
+        cohort = [
+            (
+                "Overview",
+                "Overview update: the company rebranded its logo this quarter.",
+            ),
+            (
+                "Contacts",
+                "Contacts update: support line moved to a toll-free number.",
+            ),
+            (
+                "Key Outcomes",
+                "Key Outcomes update: Q3 renewal closed above target.",
+            ),
+        ]
+        usage_off = TokenUsage()
+        usage_on = TokenUsage()
+        for _target_heading, obs_text in cohort:
+            body = _build_multi_section_page(filler_bullets=120)
+            assert len(body) > _MAX_EXISTING_BODY_CHARS
+            action = EntityAction(
+                kind="update",
+                name="Acme Corp",
+                entity_type="company",
+                tags=[],
+                access="",
+                existing_uid="a1b2c3d4",
+                observations=obs_text,
+            )
+            tier3_merge_params(
+                action,
+                body,
+                "sessions/raw.md",
+                config={"librarian": {"section_scoped_merge_enabled": False}},
+                usage=usage_off,
+            )
+            tier3_merge_params(
+                action,
+                body,
+                "sessions/raw.md",
+                config={"librarian": {"section_scoped_merge_enabled": True}},
+                usage=usage_on,
+            )
+
+        assert usage_off.merge_calls == usage_on.merge_calls == len(cohort)
+        # Material drop: scoped echo stays well under half of whole-body
+        # echo on every page in this cohort.
+        assert usage_on.merge_echoed_chars < usage_off.merge_echoed_chars * 0.5
+
+    def test_relevant_content_beyond_20k_window_survives_scoping(self) -> None:
+        """AC3: a merge on a >20,000-char page whose relevant content sits
+        BEYOND the 20,000-char cut completes without the input window
+        truncating it away — the case showing section-scoping supersedes
+        raising ``_MAX_EXISTING_BODY_CHARS`` again."""
+        from athenaeum.tiers import _MAX_EXISTING_BODY_CHARS, tier3_merge_params
+
+        # "Key Outcomes" is the LAST section, pushed well past char 20,000
+        # by the three sections ahead of it.
+        body = _build_multi_section_page(filler_bullets=200)
+        key_outcomes_start = body.index("## Key Outcomes")
+        assert key_outcomes_start > _MAX_EXISTING_BODY_CHARS, (
+            "fixture must place the targeted section past the truncation window"
+        )
+        marker = "UNIQUE_OUTCOME_MARKER_XYZ"
+        body = body.replace("## Key Outcomes\n\n", f"## Key Outcomes\n\n{marker}\n\n", 1)
+
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations=(
+                "Key Outcomes update: outcome exceeded target this quarter, "
+                "renewal closed above target."
+            ),
+        )
+        params = tier3_merge_params(action, body, "sessions/raw.md")
+        sent = params["messages"][0]["content"]
+        assert marker in sent
+
+    def test_splice_back_leaves_untargeted_sections_byte_identical(self) -> None:
+        """AC4: driven through the real ``tier3_merge`` pipeline (not just
+        ``apply_merge_ops`` in isolation) — a section-scoped merge
+        targeting one section leaves every other section byte-for-byte
+        unchanged."""
+        from athenaeum.tiers import _split_into_sections
+
+        body = _build_multi_section_page(filler_bullets=20)
+        untargeted = {
+            heading: text
+            for heading, text in _split_into_sections(body)
+            if heading != "Overview"
+        }
+        assert untargeted
+
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Overview update: rebranded logo this quarter.",
+        )
+        ops_response = json.dumps(
+            {
+                "ops": [
+                    {
+                        "op": "insert_after",
+                        "anchor": "## Overview\n\n",
+                        "text": "- Rebranded logo this quarter.[^999]\n",
+                    }
+                ]
+            }
+        )
+        client = _mock_client(ops_response)
+
+        updated_body, esc = tier3_merge(action, body, "sessions/raw.md", client)
+
+        assert esc is None
+        assert updated_body is not None
+        assert "Rebranded logo" in updated_body
+        for heading, text in untargeted.items():
+            assert text in updated_body, f"section {heading!r} was altered"
+
+
 class TestTier3MergePatchOps:
     """Issue athenaeum#469: the tier-3 merge returns ANCHORED EDIT OPERATIONS that the
     librarian applies deterministically (cutting output ~80–90%), with a
