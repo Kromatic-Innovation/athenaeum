@@ -325,6 +325,37 @@ class TestDateTypedFrontmatterCoercion:
 
         assert payload["frontmatter"]["dob"] == "1990-01-01"
 
+    def test_cli_entity_command_round_trips_a_dated_page(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """CLI mirror of ``test_read_entity_round_trips_a_bare_date_and_a_datetime``
+        (issue athenaeum#1110) — ``athenaeum entity``'s own
+        ``_read_entity_to_stdout``'s ``json.dumps(result.to_dict(), indent=2)``
+        call had no ``default=`` at all before this fix. This is the exact
+        ``TypeError: Object of type date is not JSON serializable`` crash
+        athenaeum#1110 reports, on the shell entry point rather than the MCP
+        tool or the primitive `_cmd_query.py`.
+
+        Covers both a bare date AND a datetime, and pins the ISO-8601 form
+        (not ``str()``'s space-separated datetime rendering) exactly as the
+        MCP-side test above pins it for ``read_entity``.
+        """
+        knowledge = tmp_path / "knowledge"
+        _write_config(knowledge)
+        _write_page(
+            knowledge / "wiki",
+            "alex",
+            name="Alex Widget",
+            extra="dob: 1990-01-01\nlast_synced: 2026-03-01T10:30:00\n",
+        )
+
+        rc = cmd_entity(_entity_args(knowledge, "alex"))
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        assert payload["frontmatter"]["dob"] == "1990-01-01"
+        assert payload["frontmatter"]["last_synced"] == "2026-03-01T10:30:00"
+
     def _dated_source_corpus(self, tmp_path: Path) -> Path:
         """A person with an excluded value whose classification ``source`` is
         a BARE (unquoted) YAML datetime — the vector for ``recall``'s crash,
@@ -377,6 +408,29 @@ class TestDateTypedFrontmatterCoercion:
         result = tool.fn("alex@example.org", with_pii=True)
         payload = json.loads(result)
 
+        assert payload["resolved"] is True
+        assert payload["contact_values"][0]["source"] == "2026-03-01T10:30:00"
+
+    def test_cli_recall_handle_shaped_query_coerces_the_source_datetime(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """CLI mirror of ``test_recall_with_pii_handle_shaped_query_does_not_crash``
+        (issue athenaeum#1110) — ``athenaeum recall``'s own
+        ``print(json.dumps(handle_resolution.to_dict(), indent=2,
+        sort_keys=True))`` call had NO ``default=`` fallback at all before this
+        fix, identical to the pre-athenaeum#1002 gap in the MCP tool's mirror of
+        this exact call. Also pins the ISO-8601 ``'T'``-separated form."""
+        knowledge = self._dated_source_corpus(tmp_path)
+        # Unlike the MCP tool above (which is handed `config=EXCLUDED_CONFIG`
+        # directly), `cmd_recall` loads `athenaeum.yaml` from disk itself —
+        # write the same mapping so it resolves the same contacts surface
+        # `_dated_source_corpus` populated.
+        _write_config(knowledge)
+
+        rc = cmd_recall(_recall_args(knowledge, "alex@example.org", with_pii=True))
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
         assert payload["resolved"] is True
         assert payload["contact_values"][0]["source"] == "2026-03-01T10:30:00"
 
