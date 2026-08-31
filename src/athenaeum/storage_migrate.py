@@ -68,6 +68,7 @@ from athenaeum.pii import (
     DURABLE_IDENTIFIER_FIELDS,
     PII_ENTITY_CLASS,
     PII_FLAG,
+    is_pii_class_excluded,
     is_service_address,
     name_field_holds_pii,
 )
@@ -120,6 +121,24 @@ INLINE_REDACTION_MARKER = "[contact redacted → excluded surface]"
 
 
 @dataclass(frozen=True)
+class ExcludedRecordConflict:
+    """One identity field where a re-migration disagrees with the record on disk.
+
+    Raised (as a finding, not an exception) by :func:`_merge_excluded_record`
+    when the excluded record already at ``excluded_page_path`` carries a
+    DIFFERENT value for a scalar identity field (``uid``/``name``/
+    ``contact_of``) than this run would write. This is deliberately narrow:
+    ``emails``/``phones`` are plural by nature, so a re-migration that finds a
+    NEW value there is additive (a union), never a conflict — only a
+    disagreeing SCALAR is (issue athenaeum#1108, AC1).
+    """
+
+    field: str
+    existing_value: Any
+    new_value: Any
+
+
+@dataclass(frozen=True)
 class PiiMigrationPlan:
     """The would-be result of migrating one page's PII off the corpus surface."""
 
@@ -132,8 +151,10 @@ class PiiMigrationPlan:
     #: Rewritten original-page text (archival contact fields dropped, inline
     #: tokens redacted). ``None`` when :attr:`changed` is False.
     rewritten_page_text: str | None
-    #: The archival contact-record text for the excluded surface. ``None`` when
-    #: :attr:`changed` is False.
+    #: The archival contact-record text for the excluded surface — a MERGE
+    #: with whatever is already on disk at ``excluded_page_path`` when that
+    #: file exists (issue athenaeum#1108), not a wholesale replacement. ``None``
+    #: when :attr:`changed` is False.
     excluded_page_text: str | None
     #: True when the page's ``name:`` / ``preferred_name:`` is itself an email
     #: (or phone). Such pages are the athenaeum#502 name-is-an-email population — EXCLUDED
@@ -143,6 +164,14 @@ class PiiMigrationPlan:
     #: silently dropped. Independent of :attr:`changed` — a page can both carry
     #: a migratable alias AND be named after an email.
     name_field_pii: bool = False
+    #: True when a record already existed at ``excluded_page_path`` before
+    #: this plan was computed — distinguishes "new record" from "merged into
+    #: existing" in CLI output (issue athenaeum#1108, AC3).
+    excluded_record_existed: bool = False
+    #: Non-empty when the record already on disk disagrees with this run on a
+    #: scalar identity field. The CLI refuses to ``--apply`` a conflicted plan
+    #: (issue athenaeum#1108, AC1: surfaced, never silently resolved).
+    excluded_record_conflicts: tuple[ExcludedRecordConflict, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -313,18 +342,19 @@ def _migrate_frontmatter(
     return new_meta, emails, phones
 
 
-def _render_excluded_record(
+def _build_excluded_record(
     meta: dict[str, Any],
     emails: list[str],
     phones: list[str],
-) -> str:
-    """Render the archival contact record for the excluded surface.
+) -> dict[str, Any]:
+    """Build the archival contact-record frontmatter dict (pure, no I/O).
 
     Carries the durable identity linkage back to the origin entity (``uid`` /
     ``name``) plus the archival ``emails``/``phones``, and sets ``pii: true``
-    (belt-and-suspenders: excluded even by the flag path, not only by placement).
-    Kept deliberately minimal — the excluded surface is outside the corpus, so
-    this record is never embedded, recalled, or merged.
+    (belt-and-suspenders: excluded even by the flag path, not only by
+    placement). Split out from :func:`_render_excluded_record` (issue
+    athenaeum#1108) so :func:`plan_pii_migration` can merge this dict against
+    whatever record already exists on disk before rendering.
     """
     record: dict[str, Any] = {}
     uid = meta.get("uid")
@@ -339,15 +369,91 @@ def _render_excluded_record(
         record["emails"] = emails
     if phones:
         record["phones"] = phones
+    return record
 
+
+def _excluded_record_body(meta: dict[str, Any]) -> str:
+    """Boilerplate body text for an excluded contact record. No data lives here."""
     origin = meta.get("name") or meta.get("uid") or "the entity page"
-    body = (
+    return (
         f"Archival contact data migrated off entity page {origin!r} to the "
         "excluded surface (issues athenaeum#427/#437). This record is outside the "
         "corpus: not embedded, recalled, or merge-eligible. The origin page "
         "retains durable identifiers only.\n"
     )
-    return render_frontmatter(record) + "\n" + body
+
+
+def _render_excluded_record(
+    meta: dict[str, Any],
+    emails: list[str],
+    phones: list[str],
+) -> str:
+    """Render a brand-new archival contact record for the excluded surface.
+
+    Kept deliberately minimal — the excluded surface is outside the corpus, so
+    this record is never embedded or recalled. Used only when NO record
+    already exists at the target path; when one does, :func:`plan_pii_migration`
+    merges into it via :func:`_merge_excluded_record` instead of calling this.
+    """
+    record = _build_excluded_record(meta, emails, phones)
+    return render_frontmatter(record) + "\n" + _excluded_record_body(meta)
+
+
+#: Scalar identity fields on an excluded contact record. A DIFFERING value
+#: here between the record on disk and a fresh migration run is a genuine
+#: disagreement about the entity's own identity (a corrected ``uid``, a
+#: changed display ``name``) and must be surfaced, never silently resolved
+#: by picking a winner (issue athenaeum#1108, AC1).
+_EXCLUDED_SCALAR_IDENTITY_FIELDS = ("uid", "name", "contact_of")
+
+#: List-valued fields on an excluded contact record. Plural by nature — an
+#: entity can genuinely have more than one email/phone — so a NEW value found
+#: here on re-migration is additive (a union with what is already on disk),
+#: never a conflict.
+_EXCLUDED_LIST_FIELDS = ("emails", "phones")
+
+
+def _merge_excluded_record(
+    existing_meta: dict[str, Any],
+    new_record: dict[str, Any],
+) -> tuple[dict[str, Any], list[ExcludedRecordConflict]]:
+    """Merge a freshly-planned excluded record into the one already on disk.
+
+    Pre-existing keys survive; ``emails``/``phones`` are unioned (order-
+    preserving, deduped) rather than replaced — a second email discovered on
+    re-migration is a NEW fact, not a disagreement. A differing SCALAR
+    identity field (:data:`_EXCLUDED_SCALAR_IDENTITY_FIELDS`) is a genuine
+    conflict: the existing on-disk value is kept (never silently overwritten)
+    and reported via the returned conflict list — the caller (``_cmd_storage``)
+    refuses to ``--apply`` a plan with any conflicts, so this function's
+    keep-existing default never actually reaches disk unresolved.
+    """
+    merged: dict[str, Any] = dict(existing_meta)
+    conflicts: list[ExcludedRecordConflict] = []
+
+    for field in _EXCLUDED_SCALAR_IDENTITY_FIELDS:
+        if field not in new_record:
+            continue
+        new_value = new_record[field]
+        if field not in existing_meta:
+            merged[field] = new_value
+            continue
+        existing_value = existing_meta[field]
+        if existing_value != new_value:
+            conflicts.append(ExcludedRecordConflict(field, existing_value, new_value))
+        # else: identical — nothing to do, `merged` already carries it.
+
+    for field in _EXCLUDED_LIST_FIELDS:
+        new_values = new_record.get(field) or []
+        existing_values = existing_meta.get(field) or []
+        if not isinstance(existing_values, list):
+            existing_values = [existing_values]
+        combined = _dedupe_preserving_order([*existing_values, *new_values])
+        if combined:
+            merged[field] = combined
+
+    merged[PII_FLAG] = True
+    return merged, conflicts
 
 
 def plan_pii_migration(
@@ -405,7 +511,34 @@ def plan_pii_migration(
     new_body = _redact_inline_tokens(body, inline_emails + inline_phones)
     rewritten_page_text = render_frontmatter(new_meta) + "\n" + new_body
 
-    excluded_page_text = _render_excluded_record(meta, emails, phones)
+    # athenaeum#1108: when this page was migrated before, a record already sits at
+    # excluded_page_path. MERGE into it rather than overwriting — the earlier
+    # bug wrote only this run's values, silently dropping everything a prior
+    # migration had archived. Pre-existing keys survive; emails/phones union;
+    # a differing scalar identity field is surfaced as a conflict, never
+    # silently picked (see _merge_excluded_record).
+    new_record = _build_excluded_record(meta, emails, phones)
+    # Only attempt a merge when 'pii' is actually mapped to a distinct
+    # excluded surface. When it is NOT (is_pii_class_excluded is False),
+    # surface_root_for_class falls back to the default wiki surface — so
+    # excluded_page_path can equal page_path itself, and treating the ORIGIN
+    # page's own frontmatter as if it were a prior excluded record would
+    # manufacture a bogus conflict on every dry-run preview. --apply is
+    # already refused in that configuration by the CLI's own safety gate
+    # (_cmd_storage.py); dry-run simply previews a would-be-new record, same
+    # as before this fix.
+    excluded_record_existed = is_pii_class_excluded(config) and excluded_page_path.is_file()
+    excluded_record_conflicts: tuple[ExcludedRecordConflict, ...] = ()
+    if excluded_record_existed:
+        existing_text = excluded_page_path.read_text(encoding="utf-8")
+        existing_meta, _existing_body = parse_frontmatter(existing_text)
+        if not isinstance(existing_meta, dict):
+            existing_meta = {}
+        merged_record, conflicts = _merge_excluded_record(existing_meta, new_record)
+        excluded_record_conflicts = tuple(conflicts)
+        excluded_page_text = render_frontmatter(merged_record) + "\n" + _excluded_record_body(meta)
+    else:
+        excluded_page_text = render_frontmatter(new_record) + "\n" + _excluded_record_body(meta)
 
     return PiiMigrationPlan(
         page_path=page_path,
@@ -415,6 +548,8 @@ def plan_pii_migration(
         rewritten_page_text=rewritten_page_text,
         excluded_page_text=excluded_page_text,
         name_field_pii=name_field_pii,
+        excluded_record_existed=excluded_record_existed,
+        excluded_record_conflicts=excluded_record_conflicts,
     )
 
 
