@@ -45,3 +45,38 @@ def cosine(a: Sequence[float], b: Sequence[float]) -> float:
     if na == 0.0 or nb == 0.0:
         return 0.0
     return dot / (math.sqrt(na) * math.sqrt(nb))
+
+
+def mean_pool(vectors: Sequence[Sequence[float]]) -> list[float]:
+    """Element-wise mean of one-or-more equal-length vectors, re-normalized.
+
+    Issue athenaeum#1140: a chunk-and-mean-pool embedding strategy needs to combine
+    several chunk vectors for one document into a single vector. chromadb's
+    default embedding function L2-normalizes every individual vector it
+    produces (``onnx_mini_lm_l6_v2.py``'s ``_normalize``), so averaging
+    several already-unit vectors and re-normalizing the mean is the
+    standard recipe for a cosine-similarity consumer — the mean of unit
+    vectors is not itself unit length, so skipping the re-normalize step
+    would silently shrink the magnitude of any document embedded from more
+    than one chunk relative to a single-chunk document, which would bias
+    every downstream cosine comparison.
+
+    A single-vector input is returned re-normalized (a no-op when it is
+    already unit length). Returns ``[]`` for zero vectors, and returns the
+    (unnormalized) mean unchanged when its norm is exactly zero — mirrors
+    :func:`cosine`'s "zero norm is not an error" convention rather than
+    raising.
+    """
+    if not vectors:
+        return []
+    dim = len(vectors[0])
+    summed = [0.0] * dim
+    for vec in vectors:
+        for i, x in enumerate(vec):
+            summed[i] += x
+    count = float(len(vectors))
+    mean = [x / count for x in summed]
+    norm = math.sqrt(sum(x * x for x in mean))
+    if norm == 0.0:
+        return mean
+    return [x / norm for x in mean]

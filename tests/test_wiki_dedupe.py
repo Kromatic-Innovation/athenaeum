@@ -698,3 +698,184 @@ class TestWikiClusterFormationIsCompleteLinkage:
         # in an out-of-chain source.
         all_sources = {Path(s).name for p in proposals for s in p["sources"]}
         assert all_sources <= {f"chain-{i}.md" for i in range(7)}
+
+
+# --- Issue athenaeum#1140: chunk-and-mean-pool fixes the truncation collapse ---
+#
+# Root cause (full measurement trail in the issue): chromadb's default ONNX
+# MiniLM embedding function hard-codes a 256-token truncation window. Content
+# past that window is invisible to the embedder. This corpus's wiki pages
+# open with a structurally uniform lede (``H1 | blank | para | H2``), so two
+# pages sharing that lede but diverging completely in their body collapse to
+# a near-identical vector once both are truncated to "lede only" — the
+# defect this AC targets directly.
+#
+# The fixture below models that failure mode explicitly rather than
+# hand-waving it: LEDE is long enough (930 raw chars) that it alone exceeds
+# ``_CHUNK_CHARS`` (900) — i.e. long enough to fill an entire truncation
+# window by itself, exactly like the corpus's real ledes with their H1 +
+# intro paragraph. BODY_A and BODY_B are two substantively different,
+# same-length continuations. A pre-athenaeum#1140 whole-page embed would see
+# only the shared lede for both pages (truncated at the SAME point,
+# independent of which body follows) and report them as identical; the
+# chunk-and-mean-pool representation embeds every chunk — including the
+# chunks made up entirely of body content the old representation never
+# reached — so the differing bodies pull the pooled vectors apart.
+
+
+_SHARED_LEDE = (
+    "Merge Workflow Standard Operating Procedure\n\n"
+    "This page documents the standard operating procedure every reviewer follows "
+    "before approving a proposed wiki merge in this knowledge base, independent of "
+    "which two pages are actually involved in any given proposal. The reviewer "
+    "first confirms both source pages are still live and unresolved, then reads "
+    "the synthesized draft body end to end checking for any accidental loss of a "
+    "distinguishing fact, and only then flips the checkbox to approve or leaves a "
+    "rejection note explaining what specifically should be preserved instead of "
+    "folded together. This same checklist applies uniformly no matter which two "
+    "workspaces happen to be the source of the cluster under review, since the "
+    "review procedure itself is workspace-agnostic and was written once for the "
+    "whole knowledge base rather than per team, and it has not changed since the "
+    "process was first documented two reorganizations ago. "
+)
+
+_DIVERGENT_BODY_A = (
+    "For the finance workspace specifically, every invoice above the departmental "
+    "threshold routes through a three-stage approval chain: the cost-center controller "
+    "signs off first, then a CFO delegate reviews the vendor contract terms, and "
+    "finally the vendor-master data owner confirms the banking details before the "
+    "payment batch is released to the clearing house. Exceptions require a written "
+    "waiver from the controller and are logged in the quarterly audit trail alongside "
+    "every other manual override issued that quarter. " * 3
+)
+
+_DIVERGENT_BODY_B = (
+    "For the marketing workspace specifically, every campaign brief above the "
+    "quarterly spend threshold routes through a two-stage creative review: the brand "
+    "lead checks tone and asset compliance first, and then the paid-media buyer signs "
+    "off on the channel mix and flight dates before any spend is committed to a "
+    "vendor. Exceptions require a written waiver from the brand lead and are logged "
+    "in the campaign register alongside every other late addition made that quarter. " * 3
+)
+
+assert len(_SHARED_LEDE) > 900, "fixture assumption: lede alone must exceed _CHUNK_CHARS"
+
+_PAGE_A_CONTENT = _SHARED_LEDE + _DIVERGENT_BODY_A
+_PAGE_B_CONTENT = _SHARED_LEDE + _DIVERGENT_BODY_B
+
+
+def _build_chunk_vector_map(
+    chunks_a: list[str], chunks_b: list[str]
+) -> dict[str, list[float]]:
+    """Map every chunk to one of three orthogonal vectors.
+
+    A chunk shared verbatim between both pages' chunk lists (there is at
+    least one — the lede, which is long enough to fill a chunk on its own)
+    maps to ``LEDE_VEC``; a chunk unique to page A maps to ``BODY_A_VEC``;
+    a chunk unique to page B maps to ``BODY_B_VEC``. Orthogonal vectors
+    make the mean-pooled cosine fully deterministic and hand-checkable —
+    no hashing noise, no dependence on a particular chromadb version's
+    actual semantic geometry.
+    """
+    shared = set(chunks_a) & set(chunks_b)
+    assert shared, (
+        "fixture design assumption broken: expected the shared lede to "
+        "produce at least one identical chunk between page A and page B"
+    )
+    vector_map: dict[str, list[float]] = {}
+    for chunk in chunks_a:
+        vector_map[chunk] = _LEDE_VEC if chunk in shared else _BODY_A_VEC
+    for chunk in chunks_b:
+        if chunk not in vector_map:
+            vector_map[chunk] = _LEDE_VEC if chunk in shared else _BODY_B_VEC
+    return vector_map
+
+
+_LEDE_VEC = [1.0, 0.0, 0.0]
+_BODY_A_VEC = [0.0, 1.0, 0.0]
+_BODY_B_VEC = [0.0, 0.0, 1.0]
+
+
+class TestChunkAndMeanPoolFixesTruncationCollapse:
+    """Issue athenaeum#1140 AC2: shared-lede/divergent-body pages must NOT reach
+    cosine >= 0.55 under the chunk-and-mean-pool representation, even though
+    a pre-fix whole-page embed (truncated to the shared lede) would have."""
+
+    def test_old_whole_page_truncation_would_have_collapsed_them(self) -> None:
+        """Not a tautology: pin the REGRESSION this AC fixes. A hypothetical
+        embedder that only ever sees the first ~900 chars of a page (chromadb's
+        real truncation behavior) reports these two substantively different
+        pages as byte-identical, because both pages' first 900 characters
+        ARE the shared lede."""
+        from athenaeum.vecmath import cosine
+
+        assert _PAGE_A_CONTENT[:900] == _PAGE_B_CONTENT[:900]
+        truncated_a = _PAGE_A_CONTENT[:900]
+        truncated_b = _PAGE_B_CONTENT[:900]
+        old_style_vectors = {truncated_a: _LEDE_VEC}  # same key for both
+        cos_old = cosine(
+            old_style_vectors[truncated_a], old_style_vectors[truncated_b]
+        )
+        assert cos_old == 1.0
+
+    def test_chunk_and_mean_pool_representation_stays_below_threshold(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.vecmath import cosine as vec_cosine
+        from athenaeum.wiki_dedupe import (
+            _chunk_page_text,
+            _resolve_wiki_embeddings,
+            discover_wiki_dedupe_candidates,
+        )
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        path_a = _write_page(wiki_root, "shared-lede-a.md", body=_PAGE_A_CONTENT)
+        path_b = _write_page(wiki_root, "shared-lede-b.md", body=_PAGE_B_CONTENT)
+
+        chunks_a = _chunk_page_text(_PAGE_A_CONTENT)
+        chunks_b = _chunk_page_text(_PAGE_B_CONTENT)
+        assert len(chunks_a) > 1 and len(chunks_b) > 1, (
+            "fixture design assumption broken: each page must span multiple "
+            "chunks for mean-pooling to have anything to combine"
+        )
+        vector_map = _build_chunk_vector_map(chunks_a, chunks_b)
+
+        def stub_provider(texts: list[str]) -> list[list[float]]:
+            return [vector_map[t] for t in texts]
+
+        files = discover_wiki_dedupe_candidates(wiki_root)
+        by_name = {am.path.name: am for am in files}
+        embeddings, sources = _resolve_wiki_embeddings(
+            files, embedding_provider=stub_provider
+        )
+        vec_a = embeddings[str(by_name[path_a.name].path)]
+        vec_b = embeddings[str(by_name[path_b.name].path)]
+        cos_new = vec_cosine(vec_a, vec_b)
+
+        assert cos_new < 0.55, (
+            f"chunk-and-mean-pool cosine {cos_new!r} did not clear the "
+            "shared-lede/divergent-body pair below the 0.55 formation "
+            "threshold — the athenaeum#1140 defect is not fixed"
+        )
+
+    def test_pages_do_not_cluster_together(self, tmp_path: Path) -> None:
+        """End-to-end confirmation through the real entry point: at the
+        production 0.55 threshold, the two pages never land in the same
+        cluster once the chunk-and-mean-pool representation is in effect."""
+        from athenaeum.wiki_dedupe import _chunk_page_text, find_wiki_page_clusters
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        _write_page(wiki_root, "shared-lede-a.md", body=_PAGE_A_CONTENT)
+        _write_page(wiki_root, "shared-lede-b.md", body=_PAGE_B_CONTENT)
+
+        chunks_a = _chunk_page_text(_PAGE_A_CONTENT)
+        chunks_b = _chunk_page_text(_PAGE_B_CONTENT)
+        vector_map = _build_chunk_vector_map(chunks_a, chunks_b)
+
+        def stub_provider(texts: list[str]) -> list[list[float]]:
+            return [vector_map[t] for t in texts]
+
+        clusters = find_wiki_page_clusters(
+            wiki_root, threshold=0.55, embedding_provider=stub_provider
+        )
+        assert clusters == []
