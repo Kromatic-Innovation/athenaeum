@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The push-boundary public-safe-lint gate no longer dies on stock macOS
+  bash 3.2 (athenaeum#1104).** `scripts/public-safe-lint-gate.sh` used
+  `mapfile -t` at two call sites; `mapfile` is a bash 4.0 builtin and stock
+  macOS ships GNU bash 3.2.57 at `/bin/bash`, which `.githooks/pre-push`
+  invokes the gate through. Every macOS contributor's push aborted with
+  `mapfile: command not found` -- a leak gate broken on the majority
+  developer platform. Both sites now use a bash-3.2-portable
+  `while IFS= read -r` loop over an explicitly-initialized array, keeping the
+  `"${ARR[@]:-}"` guards that `set -u` still needs in 3.2.
+  `scripts/run-tests.sh` (athenaeum#1105) carried the identical defect and is
+  fixed the same way. `tests/test_public_safe_lint_gate.py` now asserts every
+  push-path shell script is free of bash-4-only constructs (`mapfile`,
+  `readarray`, `declare -A`/`-g`, `${var^^}`/`${var,,}`, `coproc`,
+  `globstar`, `wait -n`, `read -i`/`-N`, `|&`, `&>>`), plus an executable
+  companion that runs the gate under a real 3.2 `/bin/bash` where one exists.
+
 ### Added
 
 - **`athenaeum.erasure` (athenaeum#985) wired into the production write and
