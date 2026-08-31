@@ -2055,14 +2055,29 @@ def strip_planning_preamble(body: str) -> tuple[str, bool]:
       first-person planning verb ("I'll" / "I need to" / "I should" /
       "I will" / "I want to"), OR a bare "Let me ..." / first-person
       planning opener with no lead-in clause.
-    - The removed span is bounded to the leading paragraph/sentence block:
-      it stops at the first markdown heading or blank line after the match
-      (see :data:`_PREAMBLE_HEADING_RE` / :data:`_PREAMBLE_BLANK_LINE_RE`).
-      If the body offers no such boundary at all (the whole response is one
-      unbroken block that starts with the preamble), the entire body is
-      treated as preamble and the returned cleaned body is empty — see
+    - The removed span is bounded to the leading paragraph/sentence block,
+      via a THREE-step fallback, tightest boundary first:
+
+      1. The first markdown heading after the match (see
+         :data:`_PREAMBLE_HEADING_RE`) — the strongest signal, since
+         ``CREATE_SYSTEM`` instructs the model to "Start with `# Entity
+         Name`".
+      2. Else the first blank line after the match (see
+         :data:`_PREAMBLE_BLANK_LINE_RE`) — an ordinary paragraph break.
+      3. Else the first NEWLINE after the match, if any — a body with no
+         heading and no blank-line separator can still be a genuine
+         run-on paragraph the model wrote with no structural break from
+         its preamble opener (e.g. the pattern matches the OPENING of "I'll
+         Be Back is a 1984 film catchphrase..."); everything past that
+         first line is substantive content and must survive, so only the
+         first line is ever risked, never the whole body.
+
+      Only when *body* has no newline at ALL — a genuinely single-line
+      response whose entirety is the preamble-shaped opener, with nothing
+      else in the response — does none of the three boundaries exist, and
+      the returned cleaned body is empty. See
       :class:`PreambleOnlyResponseError`, which the create path raises for
-      exactly this case rather than guess where content might begin inside
+      exactly that case rather than guess where content might begin inside
       an unstructured blob.
 
     Returns ``(cleaned_body, stripped)``. When no leading preamble is
@@ -2070,8 +2085,8 @@ def strip_planning_preamble(body: str) -> tuple[str, bool]:
     (same string, not even re-stripped) — this is the common case and must
     be a no-op byte for byte. When a preamble IS detected and removed,
     returns ``(remainder, True)`` where *remainder* is stripped of
-    surrounding whitespace (possibly empty, when nothing substantive
-    survived underneath the preamble).
+    surrounding whitespace (possibly empty, only in the single-line case
+    described above).
     """
     match = _PREAMBLE_RE.match(body)
     if not match:
@@ -2085,7 +2100,15 @@ def strip_planning_preamble(body: str) -> tuple[str, bool]:
     if blank_m:
         cut_points.append(blank_m.end())
 
-    remainder = body[min(cut_points):].strip() if cut_points else ""
+    if cut_points:
+        remainder = body[min(cut_points):].strip()
+    else:
+        # Should-fix (issue athenaeum#1171 gate review): no heading and no
+        # blank line found — fall back to the first newline after the
+        # match rather than treating the WHOLE body as preamble. Only a
+        # body with no newline at all has nothing to fall back to.
+        newline_idx = body.find("\n", match.end())
+        remainder = body[newline_idx + 1 :].strip() if newline_idx != -1 else ""
     return remainder, True
 
 
@@ -2894,8 +2917,19 @@ def tier3_derive_actions(
         # distinctly) survives.
         try:
             if action.kind == "create":
-                new_entities.append(
-                    tier3_create(
+                # Issue athenaeum#1171: PreambleOnlyResponseError is caught HERE,
+                # scoped to just this one create call, NOT by the generic
+                # ``except Exception`` below. "Reject" per athenaeum#1171 means "do
+                # not persist THIS page" — it must not abort the whole raw
+                # file (discarding every other action already computed) or
+                # wedge the file into a permanent stuck-file retry loop if
+                # the model deterministically re-produces preamble-only
+                # output for this entity. usage.preamble_rejected is already
+                # incremented inside tier3_entity_from_text; there is
+                # nothing else to record before moving on to the next
+                # action.
+                try:
+                    new_entity = tier3_create(
                         action,
                         raw.ref,
                         client,
@@ -2903,7 +2937,15 @@ def tier3_derive_actions(
                         usage=usage,
                         config=config,
                     )
-                )
+                except PreambleOnlyResponseError:
+                    log.warning(
+                        "tier3-create-preamble-rejected-skipped ref=%s name=%s: "
+                        "action skipped, NOT treated as a raw-file failure",
+                        raw.ref,
+                        action.name,
+                    )
+                else:
+                    new_entities.append(new_entity)
 
             elif action.kind == "update" and action.existing_uid:
                 existing_path = index.get_by_uid(action.existing_uid)
