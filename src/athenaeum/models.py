@@ -2607,6 +2607,24 @@ class ProcessingResult:
     #: path that never reaches Tier 1 (e.g. the Tier-0 do-not-email/handle
     #: short-circuits), which is correct — those paths dispatch no matches.
     matched: int = 0
+    #: Count of Tier-3 merges suppressed by the page-size invariant (issue
+    #: athenaeum#1182): a page over ``librarian.page_size_threshold_chars``
+    #: routes to escalation (``EscalationItem.conflict_type=
+    #: "oversize_page"``) instead of another merge, and is left unmodified.
+    #: Derived from ``escalated`` by conflict_type — see
+    #: ``athenaeum.librarian._apply_tier3_results`` — rather than tracked as
+    #: an independent counter, so it can never drift out of sync with what
+    #: was actually escalated. Surfaced as ``oversize_suppressed=N`` in the
+    #: run summary, mirroring the degraded/truncated convention above.
+    oversize_suppressed: int = 0
+    #: Count of NEW entity writes this file's Tier-3 create phase produced
+    #: whose ``type`` was outside declared ∪ ``KNOWN_TYPES`` and was
+    #: therefore REFUSED by the write-boundary guard (issue athenaeum#1196,
+    #: :func:`athenaeum.wiki_write_guard.guard_entity_write_type`) rather
+    #: than written to ``wiki/``. Not counted in ``created`` — a refused
+    #: entity was never applied. Surfaced as ``type_rejected=N`` in the run
+    #: summary, mirroring the ``degraded``/``truncated`` convention above.
+    type_rejected: int = 0
 
 
 # --- Schema loading ---

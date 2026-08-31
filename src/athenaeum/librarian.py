@@ -230,6 +230,7 @@ from athenaeum.tiers import (
     tier3_derive_actions,
     tier4_escalate,
 )
+from athenaeum.wiki_write_guard import guard_entity_write_type
 
 log = logging.getLogger(__name__)
 
@@ -1224,6 +1225,18 @@ def _apply_tier3_results(
         # re-parsing ``rendered``.
         rendered_meta, _ = parse_frontmatter(rendered)
         validate_wiki_meta(rendered_meta)
+        # Write-boundary type guard (issue athenaeum#1196): a backstop BEHIND
+        # validate_wiki_meta's UserWarning-only check above — a type outside
+        # declared ∪ KNOWN_TYPES is refused here regardless of whether any
+        # upstream clamp (tier0_passthrough / parse_tier2_entities) already
+        # should have caught it. The rejected write is parked under
+        # wiki_root/_type_rejected/ and ledgered, never applied to wiki/, and
+        # never counted in result.created.
+        if not guard_entity_write_type(
+            wiki_root, entity.filename, rendered, rendered_meta, source="tier3-create"
+        ):
+            result.type_rejected += 1
+            continue
         atomic_write_text(page_path, rendered)
         index.register(entity)
         result.created.append(entity)
@@ -1231,6 +1244,13 @@ def _apply_tier3_results(
 
     result.updated.extend(updated_uids)
     result.escalated.extend(escalations)
+    # Issue athenaeum#1182: derived from the escalations just folded in above,
+    # by conflict_type — see ProcessingResult.oversize_suppressed's docstring
+    # for why this is derived rather than an independent counter threaded
+    # through tier3_derive_actions's return tuple.
+    result.oversize_suppressed += sum(
+        1 for _e in escalations if _e.conflict_type == "oversize_page"
+    )
 
     # --- Tier 4: Escalation ---
     if escalations:
@@ -3421,6 +3441,13 @@ class RunContext:
     total_skipped: int = 0
     total_degraded: int = 0
     total_truncated: int = 0
+    #: Issue athenaeum#1196: NEW entity writes refused this run by the
+    #: write-boundary type guard (``wiki_write_guard.guard_entity_write_type``)
+    #: because their ``type`` was outside declared ∪ ``KNOWN_TYPES``. Folded
+    #: in from ``ProcessingResult.type_rejected`` (sync path) and
+    #: ``BatchRunResult``/``BatchCollectResult.type_rejected`` (batch path),
+    #: mirroring the ``total_degraded``/``total_truncated`` accumulators.
+    total_type_rejected: int = 0
     failed_files: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
     # Issue athenaeum#1144: refs whose Batch API submission was still running when
@@ -3540,6 +3567,15 @@ class RunContext:
     # ``run_summary_log.compute_run_economics``.
     total_matched: int = 0
     total_files_acted: int = 0
+
+    # Issue athenaeum#1182: page-size-invariant suppressions. UNLIKE
+    # total_matched (documented as synchronous-only above), this counter
+    # covers BOTH transports: the synchronous entity loop (summed the same
+    # way total_degraded/total_truncated are, below) AND the batch-API
+    # transport's two independent merge-dispatch sites (assembly + the
+    # sync_merges finalize fallback in athenaeum.batch), via
+    # BatchRunResult.oversize_suppressed / BatchCollectResult.oversize_suppressed.
+    total_oversize_suppressed: int = 0
 
     def deadline_exceeded(self) -> bool:
         return self.run_deadline is not None and time.monotonic() >= self.run_deadline
@@ -4940,6 +4976,8 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
     ctx.total_skipped += outcome.skipped
     ctx.total_degraded += outcome.degraded
     ctx.total_truncated += outcome.truncated
+    ctx.total_oversize_suppressed += outcome.oversize_suppressed  # issue athenaeum#1182
+    ctx.total_type_rejected += outcome.type_rejected  # issue athenaeum#1196
     ctx.collected_refs = list(outcome.collected_refs)
     ctx.batch_reconciliation = dict(outcome.reconciliation)
     ctx.failed_files.extend(outcome.failed_refs)
@@ -5211,6 +5249,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.total_skipped = outcome.skipped
                     ctx.total_degraded = outcome.degraded
                     ctx.total_truncated = outcome.truncated  # issue athenaeum#476
+                    ctx.total_oversize_suppressed = (
+                        outcome.oversize_suppressed
+                    )  # issue athenaeum#1182
+                    ctx.total_type_rejected = outcome.type_rejected  # issue athenaeum#1196
                     ctx.failed_files = outcome.failed_refs
                     ctx.deferred_refs = outcome.deferred_refs
                     # Issue athenaeum#1144 AC5.
@@ -5638,12 +5680,20 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # (the real ProcessingResult always carries it, default 0).
                         ctx.total_degraded += getattr(result, "degraded", 0)
                         ctx.total_truncated += getattr(result, "truncated", 0)  # athenaeum#476
+                        ctx.total_type_rejected += getattr(
+                            result, "type_rejected", 0
+                        )  # issue athenaeum#1196
                         # Issue athenaeum#1184: fan-out (matches) and the "produced
                         # actions" denominator — ``getattr`` for the same
                         # stubbed-test-seam reason as ``degraded``/``truncated``
                         # above (a double predating this issue has no ``matched``
                         # attribute).
                         ctx.total_matched += getattr(result, "matched", 0)
+                        # Issue athenaeum#1182: same getattr-tolerance rationale as
+                        # degraded/truncated/matched above.
+                        ctx.total_oversize_suppressed += getattr(
+                            result, "oversize_suppressed", 0
+                        )
                         if result.created or result.updated:
                             ctx.total_files_acted += 1
 
@@ -5868,6 +5918,16 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # separately from a parse ``degraded`` so the two are
                     # never conflated in the summary either.
                     **({"truncated": ctx.total_truncated} if ctx.total_truncated else {}),
+                    # athenaeum#1182: pages the page-size invariant suppressed a
+                    # merge into this run (routed to "review" escalation
+                    # instead, page left unmodified). Only rendered when
+                    # non-zero, mirroring the degraded/truncated convention
+                    # immediately above.
+                    **(
+                        {"oversize_suppressed": ctx.total_oversize_suppressed}
+                        if ctx.total_oversize_suppressed
+                        else {}
+                    ),
                     # athenaeum#1171: tier-3 create responses whose leading
                     # first-person planning preamble was stripped (substantive
                     # content survived) or rejected (the response was ENTIRELY
@@ -5885,6 +5945,17 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     **(
                         {"preamble_rejected": ctx.usage.preamble_rejected}
                         if ctx.usage.preamble_rejected
+                        else {}
+                    ),
+                    # athenaeum#1196: NEW entity writes the write-boundary type guard
+                    # refused (type outside declared ∪ KNOWN_TYPES). Only
+                    # rendered when non-zero, mirroring degraded/truncated —
+                    # an operator sees "type_rejected=N" without grepping the
+                    # guard's own WARNING lines or reading
+                    # wiki_root/_type_rejected.jsonl directly.
+                    **(
+                        {"type_rejected": ctx.total_type_rejected}
+                        if ctx.total_type_rejected
                         else {}
                     ),
                     # athenaeum#663: files skipped/surfaced as stuck this run. Only
