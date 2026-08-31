@@ -221,6 +221,7 @@ from athenaeum.tiers import (
     TIER2_ADDRESS_RESOLVED_MARKER,
     TIER2_ADDRESS_UNRESOLVED_MARKER,
     Tier2ParseStats,
+    gate_create_name_classifications,
     partition_code_artifact_classifications,
     resolve_address_named_classifications,
     schema_fragment_state,
@@ -1610,6 +1611,16 @@ def process_one(
                 ),
             )
         )
+
+    # Issue athenaeum#1173: create-path name gate. Sits immediately after the
+    # athenaeum#1126 address gate above (same "kept" chaining) and BEFORE
+    # actions are built — a rejected/escalated name never reaches a tier-3
+    # create action. See gate_create_name_classifications' docstring.
+    name_gate_outcome = gate_create_name_classifications(
+        classified, raw.ref, raw.content, config
+    )
+    classified = name_gate_outcome.kept
+    address_escalations.extend(name_gate_outcome.escalations)
 
     # Build actions
     actions: list[EntityAction] = []

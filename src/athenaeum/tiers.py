@@ -1081,6 +1081,262 @@ def resolve_address_named_classifications(
 
 
 # ---------------------------------------------------------------------------
+# Issue athenaeum#1173: create-path name gate
+# ---------------------------------------------------------------------------
+#
+# tier3_create / tier3_entity_from_text applied no minimum specificity, no
+# common-word check, and no uniqueness check — the create path minted entity
+# names that can never be useful as index keys (measured: "develop", "ready",
+# "claim", "cwc", "yml", plus bare issue refs "#453"/"#454"/"#486" minted as
+# reference-typed pages). Every existing gate (athenaeum#680 code artifacts,
+# athenaeum#1126 bare emails, athenaeum#662 read-side stopwords) runs AFTER a
+# bad name already exists, or is a read-side match filter — NONE of them run
+# on the create path itself. This closes that gap with two checks, sequenced
+# in validate_create_name below, following the SAME "shared-by-both-
+# transports, applied before any EntityAction is built" contract that
+# partition_code_artifact_classifications (athenaeum#680) and
+# resolve_address_named_classifications (athenaeum#1126) already established
+# immediately above.
+#
+# AC5 (issue athenaeum#1173) is a load-bearing NEGATIVE constraint recorded
+# here so it is not proposed again: NO dictionary-word ban. Only 183 of
+# 23,224 measured index keys are dictionary words, and most of those are
+# legitimate (Amazon, Ford, Gap, Box, Docker, Oracle, ~50 person first
+# names) — a dictionary ban would delete roughly three real entities per
+# junk one. Neither check below consults a word list of any kind: AC1
+# matches a NAME SHAPE (bare "#<digits>"), and AC2 matches NAME SHAPE + CASE
+# (a short, single, ALL-LOWERCASE token) — "Ford"/"Gap"/"Box"/"Docker"/
+# "Oracle" all carry a capital letter and are therefore never touched by AC2,
+# regardless of length or how common the underlying word is.
+
+_BARE_ISSUE_REF_RE = re.compile(r"^#\d+$")
+"""AC1: a name that IS a bare issue-number reference (``#453``), and nothing
+else. Anchored both ends so a name that merely CONTAINS an issue ref (e.g.
+``"Fix #453 crash"``) is untouched — only a name whose entire text is the
+citation is unambiguous junk."""
+
+
+DEFAULT_CREATE_NAME_ESCALATE_MAX_CHARS = 7
+"""AC2: a single, all-lowercase, whitespace-free token at or under this many
+characters escalates instead of minting. The issue's own boundary ("under
+~7 chars") is approximate; the concrete value is picked directly against its
+five named examples — ``develop`` (7), ``ready`` (5), ``claim`` (5), ``cwc``
+(3), ``yml`` (3). ``develop`` is the longest at exactly 7 characters, so the
+boundary must be INCLUSIVE of 7 (a strict "< 7" would let the issue's own
+headline example, "develop", straight through) — picked 7, not 6, for that
+reason."""
+
+
+def resolve_create_name_escalate_max_chars(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.create_name_escalate_max_chars`` (issue athenaeum#1173).
+
+    Same validation contract as :func:`resolve_mention_density_min_occurrences`
+    (the ``librarian.*`` config idiom this mirrors, issue athenaeum#1168): must
+    be ``>= 1`` (``bool`` rejected explicitly — an ``int`` subclass in Python,
+    so ``create_name_escalate_max_chars: yes`` in yaml cannot silently become
+    a threshold of 1); non-numeric, non-positive, missing, or bool values
+    fall back to :data:`DEFAULT_CREATE_NAME_ESCALATE_MAX_CHARS`.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("create_name_escalate_max_chars")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+                return raw
+    return DEFAULT_CREATE_NAME_ESCALATE_MAX_CHARS
+
+
+def _is_short_lowercase_token(name: str, config: dict[str, Any] | None) -> bool:
+    """AC2 name-shape test: single, whitespace-free, ALL-lowercase token at or
+    under :func:`resolve_create_name_escalate_max_chars`.
+
+    Deliberately shape-only (length + case + token-count), never a word-list
+    lookup — see the AC5 module comment above for why. A name carrying any
+    uppercase letter (``Ford``, ``Docker``, ``CWC``) or any whitespace (a
+    genuine multi-word name) is exempt outright, regardless of length.
+    """
+    stripped = name.strip()
+    if not stripped or any(ch.isspace() for ch in stripped):
+        return False
+    if stripped != stripped.lower():
+        return False
+    if not any(ch.isalpha() for ch in stripped):
+        return False
+    return len(stripped) <= resolve_create_name_escalate_max_chars(config)
+
+
+class CreateNameRejectedError(Exception):
+    """AC1: *name* is unambiguous junk and must never mint a page (issue athenaeum#1173).
+
+    Raised by :func:`validate_create_name` for a bare issue-number-shaped
+    name (``#453``) — a citation, not a candidate entity. There is nothing to
+    route for human review (contrast :class:`CreateNameEscalatedError`), so
+    the caller drops the classification/action outright — mirroring
+    :class:`PreambleOnlyResponseError`'s (issue athenaeum#1171) reject-and-
+    skip-this-one-action contract rather than aborting the whole raw file.
+    """
+
+    def __init__(self, name: str, reason: str) -> None:
+        self.name = name
+        self.reason = reason
+        super().__init__(f"tier3 create name {name!r} rejected: {reason}")
+
+
+class CreateNameEscalatedError(Exception):
+    """AC2: *name* must be escalated rather than minted (issue athenaeum#1173).
+
+    Raised by :func:`validate_create_name` for a short, single, all-lowercase
+    token (``develop``, ``ready``, ``claim``, ``cwc``, ``yml`` — exactly the
+    shape of the measured junk mints). Unlike a bare issue ref, this is not
+    UNAMBIGUOUS junk, so the caller must route it to :func:`tier4_escalate` /
+    ``_pending_questions.md`` for a second look (see
+    :class:`~athenaeum.models.EscalationItem`) rather than silently dropping
+    it OR silently minting it.
+    """
+
+    def __init__(self, name: str, reason: str) -> None:
+        self.name = name
+        self.reason = reason
+        super().__init__(f"tier3 create name {name!r} escalated: {reason}")
+
+
+def validate_create_name(name: str, config: dict[str, Any] | None = None) -> None:
+    """Single validation point for a Tier-3 CREATE name (issue athenaeum#1173 AC3).
+
+    Runs each name-quality check in a fixed sequence; the first check that
+    fails determines the outcome, raised as an exception (never a bool/enum
+    return, so a caller cannot forget to check a return value) — same
+    contract as :class:`PreambleOnlyResponseError`.
+
+    1. :data:`_BARE_ISSUE_REF_RE` — AC1, raises :class:`CreateNameRejectedError`.
+    2. :func:`_is_short_lowercase_token` — AC2, raises
+       :class:`CreateNameEscalatedError`.
+
+    Returns ``None`` (no exception) when *name* passes both checks — the
+    caller proceeds with the create exactly as before this issue.
+
+    EXTENSION POINT — issue athenaeum#1170 (open, ``~operator``, unstarted):
+    that issue owns enforcing name UNIQUENESS on this same create path
+    (nightly duplicate detection + collision repair). It is deliberately NOT
+    implemented here — issue athenaeum#1173 AC3 explicitly separates "build
+    the seam" from "build the check": a partial uniqueness implementation
+    shipped from this lane would collide with athenaeum#1170's own design
+    instead of complementing it. When athenaeum#1170 lands, its check is ONE
+    more call inserted into this same sequence (after the two above,
+    following the same raise-on-failure contract) — not a restructuring of
+    this function or its callers.
+    """
+    if _BARE_ISSUE_REF_RE.match(name.strip()):
+        raise CreateNameRejectedError(name, "bare issue-number-shaped name")
+    if _is_short_lowercase_token(name, config):
+        max_chars = resolve_create_name_escalate_max_chars(config)
+        raise CreateNameEscalatedError(
+            name, f"short single lowercase token (<= {max_chars} chars)"
+        )
+    # --- athenaeum#1170 extension point: uniqueness check inserts here, as one
+    # more `raise` guarded by one more `if`, once that issue ships it. ---
+
+
+@dataclass(frozen=True)
+class CreateNameGateOutcome:
+    """Result of :func:`gate_create_name_classifications` (issue athenaeum#1173)."""
+
+    kept: list[ClassifiedEntity]
+    rejected: tuple[str, ...]
+    escalations: tuple[EscalationItem, ...]
+
+
+def gate_create_name_classifications(
+    classified: list[ClassifiedEntity],
+    raw_ref: str,
+    raw_content: str = "",
+    config: dict[str, Any] | None = None,
+) -> CreateNameGateOutcome:
+    """Stop tier-2 from minting unusable entity NAMES at create (issue athenaeum#1173).
+
+    Sits immediately after :func:`resolve_address_named_classifications` at
+    both transports (``librarian.process_one`` and
+    ``batch.process_batch_run``) — same "shared by both transports, applied
+    BEFORE any EntityAction is built" contract that function and
+    :func:`partition_code_artifact_classifications` already established.
+
+    Scope: only ``c.is_new`` (create-bound) classifications are checked. A
+    classification with ``is_new=False`` names an EXISTING page this raw
+    file is about to update/merge into — that page was already named and
+    already exists, so gating it here would be gating MATCHING, not
+    creation, which issue athenaeum#1173 puts explicitly out of scope
+    ("gating what gets created, not what gets matched"). Every
+    ``is_new=False`` classification passes through completely unchanged, in
+    original order.
+
+    For each ``is_new=True`` classification, runs :func:`validate_create_name`:
+
+    - :class:`CreateNameRejectedError` (AC1): the name is dropped from
+      ``kept`` and recorded in ``rejected`` — logged, never escalated (it is
+      unambiguous junk, nothing for a human to review).
+    - :class:`CreateNameEscalatedError` (AC2): the name is dropped from
+      ``kept`` and an :class:`~athenaeum.models.EscalationItem` is appended
+      to ``escalations`` — mirrors :func:`resolve_address_named_classifications`'s
+      ``declined`` contract: a decline ALONE would destroy the fact (the raw
+      file is unlinked after processing regardless of outcome), so the
+      caller MUST flush ``escalations`` through :func:`tier4_escalate` /
+      ``_pending_questions.md`` rather than just dropping the classification.
+    - Neither raised: kept unchanged.
+
+    ``raw_content`` (truncated to 2000 chars, matching every other
+    escalation description built at this call site) is embedded in an AC2
+    escalation's description so the observation is not lost if the raw file
+    is deleted before a human resolves the escalation.
+    """
+    kept: list[ClassifiedEntity] = []
+    rejected: list[str] = []
+    escalations: list[EscalationItem] = []
+    for c in classified:
+        if not c.is_new:
+            kept.append(c)
+            continue
+        try:
+            validate_create_name(c.name, config)
+        except CreateNameRejectedError as exc:
+            log.warning(
+                "tier3-create-name-rejected ref=%s name=%r reason=%s",
+                raw_ref,
+                exc.name,
+                exc.reason,
+            )
+            rejected.append(c.name)
+            continue
+        except CreateNameEscalatedError as exc:
+            log.warning(
+                "tier3-create-name-escalated ref=%s name=%r reason=%s",
+                raw_ref,
+                exc.name,
+                exc.reason,
+            )
+            escalations.append(
+                EscalationItem(
+                    raw_ref=raw_ref,
+                    entity_name=c.name,
+                    conflict_type="short_name_escalated",
+                    description=(
+                        f"Tier-3 create for {c.name!r} was suppressed (issue "
+                        f"athenaeum#1173): {exc.reason}. A short, generic "
+                        "single-word name like this is exactly the shape of "
+                        "prior junk mints (\"develop\", \"ready\", \"claim\", "
+                        "\"cwc\", \"yml\") that were never useful as index "
+                        "keys. No page was created; the observation follows "
+                        f"so the fact is not lost:\n\n{raw_content[:2000]}"
+                    ),
+                )
+            )
+            continue
+        kept.append(c)
+    return CreateNameGateOutcome(
+        kept=kept, rejected=tuple(rejected), escalations=tuple(escalations)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tier 2 — Classification (fast LLM)
 # ---------------------------------------------------------------------------
 
