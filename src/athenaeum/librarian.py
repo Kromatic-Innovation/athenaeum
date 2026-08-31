@@ -120,7 +120,6 @@ from athenaeum.config import (
     resolve_intake_runtime_floor,
     resolve_live_delta_enabled,
     resolve_memory_tier_sweep_enabled,
-    resolve_model,
     resolve_model_rates,
     resolve_pull_before_run,
     resolve_push_after_run,
@@ -205,7 +204,7 @@ from athenaeum.provider import (
 )
 from athenaeum.quarantine import quarantine_file as _quarantine_file
 from athenaeum.registry import collect_handles
-from athenaeum.rule_proposals import DEFAULT_RULE_PROPOSALS_MODEL, run_rule_proposal_detection
+from athenaeum.rule_proposals import _get_rule_proposals_model, run_rule_proposal_detection
 from athenaeum.rules import run_shape_rule_phase
 from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home now
     REGRESSION_ALERT_PREFIX,
@@ -418,6 +417,20 @@ STUCK_MANIFEST_NAME = "_stuck_files.json"
 # :func:`librarian_stuck_file_threshold` (env > yaml > this default).
 DEFAULT_STUCK_FILE_THRESHOLD = 3
 
+# Issue athenaeum#1185: base backoff window (seconds) BETWEEN a raw file's
+# consecutive failures, BEFORE it crosses DEFAULT_STUCK_FILE_THRESHOLD and
+# becomes permanently stuck. Resolved via
+# :func:`librarian_stuck_file_backoff_base_seconds` (env > yaml > this
+# default). The window for a file's Nth consecutive failure is
+# ``base_seconds * 2 ** (N - 1)`` (exponential, doubling each failure) --
+# see ``_stuck_backoff_seconds``. 3600 (1 hour) is deliberately LONGER than
+# the ~30-minute run cadence, so a file's 2nd attempt is not simply "the
+# very next scheduled run" (which would be no backoff at all in practice) --
+# it genuinely skips at least one run, spacing the (still-bounded, still
+# exactly DEFAULT_STUCK_FILE_THRESHOLD-many) attempts before quarantine
+# across a wider window instead of three consecutive cadence ticks.
+DEFAULT_STUCK_FILE_BACKOFF_BASE_SECONDS = 3600
+
 # Stable, machine-greppable prefix for the WARNING emitted when a file is
 # surfaced as stuck (crossing the threshold, or skipped on a later run). A
 # log-scraper / watchdog can grep this without parsing prose — the athenaeum#663
@@ -473,6 +486,23 @@ QUARANTINE_FILE_PREFIX = "librarian-quarantine-file"
 # (consecutive count + previous-run deferred set) this predicate reads and
 # updates.
 ZERO_YIELD_PREFIX = "librarian-zero-yield"
+
+# Issue athenaeum#1177 (AC2): consecutive-zero-yield count at which the ALERT
+# (distinct from the per-trip WARNING logged under ZERO_YIELD_PREFIX above,
+# which fires every zero-yield run regardless of streak length) escalates.
+# Resolved via :func:`librarian_zero_yield_alert_threshold` (env > yaml >
+# this default), mirroring DEFAULT_STUCK_FILE_THRESHOLD /
+# DEFAULT_QUARANTINE_THRESHOLD's precedence exactly. At the observed ~40
+# librarian runs/day, a default of 3 alerts within roughly two hours of
+# zero-yield runs starting — the four-day silent incident this issue exists
+# to prevent a recurrence of is ~160 runs; 3 is nowhere near that.
+DEFAULT_ZERO_YIELD_ALERT_THRESHOLD = 3
+
+# Stable, machine-greppable prefix for the ALERT line (distinct from
+# ZERO_YIELD_PREFIX's per-trip WARNING) emitted once a run's consecutive
+# zero-yield streak reaches DEFAULT_ZERO_YIELD_ALERT_THRESHOLD (or its env/
+# yaml override).
+ZERO_YIELD_ALERT_PREFIX = "librarian-zero-yield-alert"
 
 # Fallback valid values if schema files are missing.
 #
@@ -2633,6 +2663,90 @@ def librarian_stuck_file_threshold(config: dict[str, object] | None = None) -> i
     return DEFAULT_STUCK_FILE_THRESHOLD
 
 
+def librarian_stuck_file_backoff_base_seconds(
+    config: dict[str, object] | None = None,
+) -> int:
+    """Resolve the base exponential-backoff window (seconds) between a raw
+    file's consecutive failures, before it reaches
+    :func:`librarian_stuck_file_threshold` (issue athenaeum#1185).
+
+    Mirrors :func:`librarian_stuck_file_threshold` exactly: the
+    ``ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS`` env override wins over the
+    yaml ``librarian.stuck_file_backoff_base_seconds`` key. See
+    :func:`_stuck_backoff_seconds` for how the base combines with a file's
+    current failure count. Must be ``>= 0`` (``0`` disables backoff
+    entirely -- every cadence tick is retry-eligible, the pre-athenaeum#1185
+    behavior); non-numeric or bool values fall back to
+    :data:`DEFAULT_STUCK_FILE_BACKOFF_BASE_SECONDS`.
+    """
+    env = os.environ.get("ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS")
+    if env is not None:
+        try:
+            value = int(env)
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    if config is not None:
+        cfg = config.get("librarian") if isinstance(config, dict) else None
+        if isinstance(cfg, dict):
+            raw = cfg.get("stuck_file_backoff_base_seconds")
+            # bool is an int subclass — `stuck_file_backoff_base_seconds: yes`
+            # in yaml must not silently become a base of 1 second.
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                return raw
+    return DEFAULT_STUCK_FILE_BACKOFF_BASE_SECONDS
+
+
+def _stuck_backoff_seconds(failures: int, *, base_seconds: int) -> int:
+    """Exponential backoff window (seconds) after a file's *failures*-th
+    consecutive failure, before it is retry-eligible again (issue
+    athenaeum#1185).
+
+    ``base_seconds * 2 ** (failures - 1)`` — the 1st failure's window is
+    ``base_seconds``, the 2nd doubles it, and so on. ``failures <= 0``
+    (a file with no recorded failure yet) returns ``0``: a fresh file is
+    always immediately eligible, matching pre-athenaeum#1185 behavior. A
+    non-positive ``base_seconds`` (backoff disabled) also returns ``0``
+    regardless of ``failures``.
+    """
+    if failures <= 0 or base_seconds <= 0:
+        return 0
+    return base_seconds * (2 ** (failures - 1))
+
+
+def _stuck_backoff_window_open(
+    entry: dict[str, Any], *, base_seconds: int, now: datetime
+) -> bool:
+    """True when a stuck-ledger *entry* is still within its exponential
+    backoff window (issue athenaeum#1185) and must NOT be retried yet.
+
+    Reads ``entry["last_failed"]`` — the same ISO-8601 UTC string
+    :func:`_record_stuck_failure` stamps on every failure — and compares
+    against *now* plus the window :func:`_stuck_backoff_seconds` computes
+    for this entry's current ``failures`` count. Fails OPEN (returns
+    ``False`` — immediately eligible) on a missing/unparseable
+    ``last_failed`` or a zero/negative window, rather than silently
+    withholding a file forever on a ledger read the caller has no way to
+    fix.
+    """
+    window = _stuck_backoff_seconds(
+        int(entry.get("failures", 0)), base_seconds=base_seconds
+    )
+    if window <= 0:
+        return False
+    last_failed = entry.get("last_failed")
+    if not isinstance(last_failed, str) or not last_failed:
+        return False
+    try:
+        last_failed_at = datetime.strptime(last_failed, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return False
+    return (now - last_failed_at).total_seconds() < window
+
+
 def librarian_quarantine_threshold(config: dict[str, object] | None = None) -> int:
     """Resolve the consecutive-bound-violation threshold before quarantine (athenaeum#898).
 
@@ -2665,6 +2779,39 @@ def librarian_quarantine_threshold(config: dict[str, object] | None = None) -> i
             if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
                 return raw
     return DEFAULT_QUARANTINE_THRESHOLD
+
+
+def librarian_zero_yield_alert_threshold(config: dict[str, object] | None = None) -> int:
+    """Resolve the consecutive-zero-yield count at which the ALERT fires (issue athenaeum#1177).
+
+    Mirrors :func:`librarian_stuck_file_threshold` (athenaeum#663) exactly: the
+    ``ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD`` env override wins over the yaml
+    ``librarian.zero_yield_alert_threshold`` key so a cron deployment can
+    tune it on a single run. Distinct from the existing per-trip WARNING
+    (``ZERO_YIELD_PREFIX``, logged every single zero-yield run) — this is
+    the escalation AC2 asks for: after N CONSECUTIVE zero-yield runs, a
+    louder, separately-greppable line fires. Must be ``>= 1`` (a threshold
+    below 1 could never distinguish "just tripped" from "escalated"),
+    non-numeric, non-positive, or bool values fall back to
+    :data:`DEFAULT_ZERO_YIELD_ALERT_THRESHOLD`.
+    """
+    env = os.environ.get("ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD")
+    if env is not None:
+        try:
+            value = int(env)
+            if value >= 1:
+                return value
+        except (TypeError, ValueError):
+            pass
+    if config is not None:
+        cfg = config.get("librarian") if isinstance(config, dict) else None
+        if isinstance(cfg, dict):
+            raw = cfg.get("zero_yield_alert_threshold")
+            # bool is an int subclass — `zero_yield_alert_threshold: yes` in
+            # yaml must not silently become a threshold of 1.
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+                return raw
+    return DEFAULT_ZERO_YIELD_ALERT_THRESHOLD
 
 
 def _stuck_content_hash(raw: Any) -> str:
@@ -2730,6 +2877,7 @@ def _record_stuck_failure(
     error: str,
     action: str | None,
     threshold: int,
+    now: datetime | None = None,
 ) -> dict[str, Any] | None:
     """Increment a raw file's consecutive-failure count in the ledger (athenaeum#663).
 
@@ -2738,16 +2886,30 @@ def _record_stuck_failure(
     CROSSES the threshold for the first time (so the caller surfaces it exactly
     once), else ``None``. The ``escalated`` flag makes the crossing idempotent
     across runs — a file that stays stuck is not re-surfaced as "newly stuck"
-    every night, only skipped."""
+    every night, only skipped.
+
+    *now* (issue athenaeum#1185) is the run's OWN clock — ``ctx.now`` when the
+    caller has one, else real wall-clock — threaded through so the
+    ``last_failed`` timestamp this stamps is comparable against the SAME
+    clock :func:`_stuck_backoff_window_open` reads it back with later.
+    ``None`` (every pre-athenaeum#1185 caller) falls back to real wall-clock,
+    byte-identical to before.
+    """
     key = raw.ref
     content_hash = _stuck_content_hash(raw)
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _now_dt = now if now is not None else datetime.now(timezone.utc)
+    now_str = _now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     entry = ledger.get(key)
     if not isinstance(entry, dict) or entry.get("hash") != content_hash:
         # New file, or the content changed since the last failure — fresh count.
-        entry = {"hash": content_hash, "failures": 0, "first_failed": now, "escalated": False}
+        entry = {
+            "hash": content_hash,
+            "failures": 0,
+            "first_failed": now_str,
+            "escalated": False,
+        }
     entry["failures"] = int(entry.get("failures", 0)) + 1
-    entry["last_failed"] = now
+    entry["last_failed"] = now_str
     entry["last_error"] = error
     if action:
         entry["last_action"] = action
@@ -3505,6 +3667,14 @@ class RunContext:
     # ``merge_only``), distinguishing "no entity phase" from "entity phase
     # completed cleanly" (``"completed"``).
     entity_exit_reason: str | None = None
+    # Issue athenaeum#1177: the exception CLASS name of the most recent
+    # entity-phase per-file failure this run (e.g. ``"BadRequestError"``),
+    # set alongside every ``ctx.failed_files.append(raw.ref)`` in the entity
+    # loop's per-file except blocks. Read by ``_run_entity_tier_phase`` when
+    # classifying a run where every attempted call failed -- AC3 asks that
+    # such a run's ``reason`` name the error class, not read as a plain
+    # ``"completed"``. ``None`` when no file has failed this run.
+    entity_last_failure_class: str | None = None
     # Issue athenaeum#1135: CLI ``--allow-degraded`` escape hatch. When True, a
     # zero-progress refusal (see ``EXIT_LIBRARIAN_REFUSAL``) still logs the
     # ``librarian-run-degraded`` marker line but the run exits 0 instead of
@@ -3536,6 +3706,13 @@ class RunContext:
     # ``stuck_files`` — a materially heavier disposition than "stuck", so it
     # is a separate list, not folded into it.
     quarantined_files: list[dict[str, Any]] = field(default_factory=list)
+    # Issue athenaeum#1185: raw refs skipped THIS run because they are still
+    # within their exponential-backoff window (already failed at least once,
+    # not yet stuck) — distinct from ``stuck_files`` (permanently skipped,
+    # threshold crossed) and ``failed_files`` (attempted and failed THIS
+    # run). Exported to ``out_run_stats["backoff_skipped_files"]``, same
+    # convention as the two lists above.
+    backoff_skipped_files: list[str] = field(default_factory=list)
 
     # --- auto-memory / retire handoff -------------------------------------
     merged_entries: list = field(default_factory=list)
@@ -3618,6 +3795,10 @@ class RunContext:
             # Issue athenaeum#898: quarantined files (moved out of the discovery set
             # this run) as machine-detectable state, mirroring stuck_files above.
             self.out_run_stats["quarantined_files"] = list(self.quarantined_files)
+            # Issue athenaeum#1185: refs skipped this run because they are still
+            # within their exponential-backoff window, mirroring stuck_files/
+            # quarantined_files above.
+            self.out_run_stats["backoff_skipped_files"] = list(self.backoff_skipped_files)
             # Issue athenaeum#669: surface the entity-phase share yield (athenaeum#440) as
             # machine-detectable run state. cron-fleet#94 detects a capped run by
             # DURATION (`LIBRARIAN_CAP_DEADLINE`), which the athenaeum#440 yield made inert
@@ -3787,45 +3968,123 @@ class RunContext:
         return EXIT_GRACEFUL_PARTIAL
 
 
-def _resolve_run_models(config: dict[str, Any] | None) -> list[tuple[str, str]]:
-    """Resolve the model id each LLM-serving knob resolves to for THIS run
-    (issue athenaeum#783's preflight input).
+def _knob_model_getters() -> dict[str, Callable[[dict[str, Any] | None], str]]:
+    """Map every :data:`athenaeum.prompt_registry.KNOBS` entry to its OWN
+    getter (env > yaml > default precedence, unchanged) rather than
+    hand-rolling a second resolution path (issue athenaeum#783 / athenaeum#1174).
 
-    Calls each knob's OWN getter (its existing env > yaml > default
-    precedence, unchanged) rather than hand-rolling a second resolution
-    path, so the preflight sees exactly what the run will actually serve
-    traffic with. Six DISTINCT knobs — ``claim_kind.py`` and
-    ``contradictions.py`` both resolve the same ``"classify"`` knob
-    :func:`athenaeum.tiers._get_classify_model` does (same env var, same
-    default), so they are not re-listed separately here; same for
-    ``drain_advisor.py``'s ``"write"`` knob. Imports are function-local,
-    matching this module's existing lazy-import convention for
-    ``claim_kind``/``drain_advisor`` (avoids a module-level import cycle:
-    several of these modules already import from ``athenaeum.librarian``
-    at the type-checking layer or import ``athenaeum.config``, which this
-    function's caller lives in).
+    ``claim_kind.py`` and ``contradictions.py`` both resolve the same
+    ``"classify"`` knob :func:`athenaeum.tiers._get_classify_model` does
+    (same env var, same default), so they are not re-listed separately
+    here; same for ``drain_advisor.py``'s ``"write"`` knob. Imports are
+    function-local, matching this module's existing lazy-import convention
+    for ``claim_kind``/``drain_advisor`` (avoids a module-level import
+    cycle: several of these modules already import from
+    ``athenaeum.librarian`` at the type-checking layer or import
+    ``athenaeum.config``, which this function's caller lives in) — and,
+    same reason ``prompt_registry`` itself is NOT imported at this module's
+    top level (see ``_resolve_run_models`` below): ``prompt_registry``
+    eagerly ``importlib.import_module``s every prompt-owning module,
+    including ``claim_kind``, at ITS OWN import time, which would leak
+    ``claim_kind``/``llm_schemas`` into the ~3s recall hot path
+    (``athenaeum._cmd_query`` imports this module at module level; see
+    ``tests/test_claim_kind_intake_wiring.py::TestAC6NoHotPathLazyImport``).
+
+    Built as an explicit dict rather than an inline list so
+    :func:`_resolve_run_models` can assert it covers EXACTLY
+    ``prompt_registry.KNOBS`` — an eighth knob added to ``_META_ROWS``
+    without a getter here fails loudly (a test, not a silent omission),
+    instead of repeating the athenaeum#1174 defect this function's derivation
+    exists to prevent.
     """
     from athenaeum.query_topics import _get_topic_model
     from athenaeum.reasoning_tiers import get_t1_model, get_t2_model
     from athenaeum.resolutions import _get_model as _get_resolve_model
+    from athenaeum.rule_proposals import _get_rule_proposals_model
     from athenaeum.tiers import _get_classify_model, _get_write_model
 
-    return [
-        ("classify", _get_classify_model(config)),
-        ("write", _get_write_model(config)),
-        ("topic", _get_topic_model(config)),
-        ("resolve", _get_resolve_model(config)),
-        ("reasoning_t1", get_t1_model(config)),
-        ("reasoning_t2", get_t2_model(config)),
-    ]
+    return {
+        "classify": _get_classify_model,
+        "write": _get_write_model,
+        "topic": _get_topic_model,
+        "resolve": _get_resolve_model,
+        "reasoning_t1": get_t1_model,
+        "reasoning_t2": get_t2_model,
+        "rule_proposals": _get_rule_proposals_model,
+    }
 
 
-#: The five knobs the librarian's entity/merge pipeline serves, each through
-#: its OWN per-knob client (issue athenaeum#841 — see ``_arm_run_deadline``,
+def _resolve_run_models(config: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """Resolve the model id each LLM-serving knob resolves to for THIS run
+    (issue athenaeum#783's preflight input).
+
+    DERIVED from :data:`athenaeum.prompt_registry.KNOBS` (issue athenaeum#1174) —
+    the single source of truth for the routed-knob set — rather than a
+    hand-maintained list of pairs, so a knob added to ``_META_ROWS`` (e.g.
+    ``rule_proposals``) automatically appears here, and therefore
+    automatically passes through :func:`athenaeum.config.preflight_model_rates`
+    (the ``_run_preconditions`` call site below), with no second list to
+    remember to update.
+
+    ``prompt_registry`` is imported FUNCTION-LOCALLY, not at this module's
+    top level: it eagerly imports every prompt-owning module (including
+    ``claim_kind``) at ITS OWN import time, and this module is imported by
+    the ~3s recall hot path (``athenaeum._cmd_query``) — see
+    :func:`_knob_model_getters`'s docstring. This function is only ever
+    called from ``_run_preconditions``, i.e. a real ``athenaeum run``, never
+    from that hot path, so the deferred import costs nothing there.
+    """
+    from athenaeum import prompt_registry
+
+    getters = _knob_model_getters()
+    missing = [knob for knob in prompt_registry.KNOBS if knob not in getters]
+    if missing:  # pragma: no cover - defensive; covered by test_knob_derivation
+        raise AssertionError(
+            f"_knob_model_getters() is missing a getter for: {sorted(missing)} "
+            "-- add one alongside its prompt_registry._META_ROWS row (athenaeum#1174)"
+        )
+    return [(knob, getters[knob](config)) for knob in prompt_registry.KNOBS]
+
+
+#: Knobs excluded from ``_LIBRARIAN_ROUTED_KNOBS`` despite being members of
+#: ``prompt_registry.KNOBS`` (issue athenaeum#1174) — each resolves its OWN
+#: provider/client independently rather than through the librarian
+#: entity/merge pipeline's per-knob client cache (``_arm_run_deadline``,
+#: issue athenaeum#841):
+#:
+#: * ``topic`` — :mod:`athenaeum.query_topics` resolves it independently
+#:   (issue athenaeum#786), outside this pipeline.
+#: * ``rule_proposals`` — a default-OFF phase
+#:   (:func:`~athenaeum.config.resolve_rule_proposals_enabled`);
+#:   ``_run_rule_proposal_phase`` builds its own client lazily, only when
+#:   the phase is enabled, rather than unconditionally at
+#:   ``_arm_run_deadline`` time for a phase most runs never use.
+#:
+#: Naively setting ``_LIBRARIAN_ROUTED_KNOBS = prompt_registry.KNOBS`` would
+#: silently fold both of these into the client-cache pipeline — a behaviour
+#: change neither knob's own issue asked for (in ``rule_proposals``'s case,
+#: it would also mean building a real LLM client at startup for a phase that
+#: is off by default).
+_LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS = frozenset({"topic", "rule_proposals"})
+
+#: The knobs the librarian's entity/merge pipeline serves, each through its
+#: OWN per-knob client (issue athenaeum#841 — see ``_arm_run_deadline``,
 #: which resolves and constructs one client per entry here via a shared
-#: :class:`~athenaeum.provider.LLMClientCache`). ``topic`` is deliberately
-#: excluded — :mod:`athenaeum.query_topics` resolves it independently
-#: (issue athenaeum#786), outside this pipeline.
+#: :class:`~athenaeum.provider.LLMClientCache`). Conceptually
+#: ``prompt_registry.KNOBS`` minus ``_LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS``
+#: (issue athenaeum#1174), but kept as an EXPLICIT, hand-written literal
+#: (unlike ``_resolve_run_models`` above) rather than computed from
+#: ``prompt_registry.KNOBS`` at this module's top level: ``prompt_registry``
+#: eagerly imports ``claim_kind``/every prompt-owning module at ITS OWN
+#: import time (see ``_knob_model_getters``'s docstring), and doing that
+#: computation here — at THIS module's import time, since this is a
+#: module-level constant — would leak that cost into the ~3s recall hot
+#: path (``athenaeum._cmd_query`` imports this module at module level).
+#: ``tests/test_pricing_config.py::TestLibrarianRoutedKnobsDerivation``
+#: asserts ``set(_LIBRARIAN_ROUTED_KNOBS) | _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS
+#: == set(prompt_registry.KNOBS)`` (with no overlap) at TEST time instead, so
+#: a ninth knob added to ``_META_ROWS`` without an explicit routing decision
+#: here still fails loudly — just via a test, not a runtime import.
 _LIBRARIAN_ROUTED_KNOBS = ("classify", "write", "resolve", "reasoning_t1", "reasoning_t2")
 
 
@@ -3852,6 +4111,19 @@ def _run_preconditions(ctx: RunContext) -> int | None:
         # the actual client.
         for _knob in _LIBRARIAN_ROUTED_KNOBS:
             resolve_provider(ctx.config, knob=_knob, default=ctx.provider)
+        # Issue athenaeum#1174: ``rule_proposals`` is independently routed
+        # (excluded from ``_LIBRARIAN_ROUTED_KNOBS`` above — see
+        # ``_LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS``) and previously had NO
+        # preflight validation at all: a bad ``llm.providers.rule_proposals``
+        # value surfaced as an uncaught ``ProviderConfigError`` traceback the
+        # first time ``_run_rule_proposal_phase`` actually ran (only
+        # reachable when the phase is enabled), instead of a clean startup
+        # failure like every knob above. Validated here unconditionally
+        # (even while the phase defaults off), for the same reason the loop
+        # above validates before any client is built: cheap (no client
+        # construction, no I/O) — and a bad value should fail at startup,
+        # not the first night an operator flips the phase on.
+        resolve_provider(ctx.config, knob="rule_proposals", default=ctx.provider)
     except ProviderConfigError as exc:
         log.error("%s", exc)
         return 1
@@ -4487,12 +4759,7 @@ def _run_rule_proposal_phase(ctx: RunContext) -> None:
 
     _provider = resolve_provider(ctx.config, knob="rule_proposals", default=ctx.provider)
     ctx.knob_providers["rule_proposals"] = _provider
-    ctx.knob_models["rule_proposals"] = resolve_model(
-        "rule_proposals",
-        "ATHENAEUM_RULE_PROPOSALS_MODEL",
-        DEFAULT_RULE_PROPOSALS_MODEL,
-        ctx.config,
-    )
+    ctx.knob_models["rule_proposals"] = _get_rule_proposals_model(ctx.config)
     client = build_llm_client(
         ctx.config, knob="rule_proposals", api_key=ctx.api_key, max_retries=3
     )
@@ -4742,6 +5009,42 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
     return None
 
 
+def _auto_memory_reason(merge_stats: dict) -> str:
+    """The auto-memory (C1-C4) phase's ``reason`` classification (issue
+    athenaeum#1177, AC3), mirroring ``_entity_exit_reason``'s "must not read as
+    completed when everything failed" fix for this phase's own run-profile
+    entry.
+
+    ``merge_stats`` is the ``out_stats``/``out_merge_stats`` dict
+    :func:`athenaeum.merge.merge_clusters_to_wiki` populates (see its
+    docstring) — ``haiku_calls``/``resolve_calls`` count ATTEMPTS,
+    ``haiku_calls_succeeded``/``resolve_calls_succeeded`` (also issue
+    athenaeum#1177) count the subset that actually landed a response. A phase
+    that attempted at least one detector/resolver call and landed ZERO
+    successes must not read as ``"completed"`` — the exact shape a
+    four-day credits-exhausted incident produced (``detector_haiku: 20``
+    while the token ledger recorded zero tokens for all twenty). A phase
+    that made no attempts at all (nothing to detect/resolve this run) is a
+    genuine, unremarkable completion, not a failure — same distinction
+    ``_zero_yield_tripped``'s ``attempted_calls`` check draws.
+
+    Deliberately does not name the underlying exception class the way
+    ``_entity_exit_reason``'s ``all-calls-failed:<class>`` does:
+    :class:`~athenaeum.contradictions.ContradictionResult`'s
+    ``rationale="llm-unavailable"`` is an exact-match contract several
+    tests and :mod:`athenaeum.retire` already depend on, so it is not
+    threaded further here — see this issue's PR body for the scoping
+    rationale.
+    """
+    attempted = merge_stats.get("haiku_calls", 0) + merge_stats.get("resolve_calls", 0)
+    succeeded = merge_stats.get("haiku_calls_succeeded", 0) + merge_stats.get(
+        "resolve_calls_succeeded", 0
+    )
+    if attempted > 0 and succeeded == 0:
+        return "all-calls-failed"
+    return "completed"
+
+
 def _run_merge_only_phase(ctx: RunContext) -> int:
     """The ``merge_only`` early-return path: C3 merge from a prior C2 cluster
     JSONL, retire, reresolve, push, and summary emit. Issue athenaeum#461 seam.
@@ -4778,7 +5081,8 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
         return ctx.stop_on_deadline(exc.phase)
     # Issue athenaeum#1102 (AC1): a ``RunDeadlineExceeded`` above returns before
     # this append is ever reached, so reaching here always means the phase
-    # completed.
+    # ran to completion OR every attempted call failed -- see athenaeum#1177's
+    # ``_auto_memory_reason`` just below, which distinguishes the two.
     ctx.run_profile.append(
         (
             "auto-memory",
@@ -4791,7 +5095,7 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
                 ),
                 "clusters_merged": _merge_only_stats.get("entries_merged", 0),
                 "escalations": _merge_only_stats.get("escalations_written", 0),
-                "reason": "completed",
+                "reason": _auto_memory_reason(_merge_only_stats),
             },
         )
     )
@@ -5021,6 +5325,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
     assert ctx.max_api_calls is not None
     _entity_phase_start = time.monotonic()  # issue athenaeum#464
     _entity_phase_calls_before = ctx.usage.api_calls  # issue athenaeum#464
+    # Issue athenaeum#1177: snapshot the ATTEMPTED counter too, mirroring
+    # ``_entity_phase_calls_before`` above -- see the ``_entity_attempted``
+    # diff below, used to tell "made no attempts" (idle) apart from "every
+    # attempt failed" (the AC3 all-calls-failed classification).
+    _entity_phase_attempted_before = ctx.usage.attempted_calls
     # Issue athenaeum#490 (slice A): snapshot output tokens too, so the entity segment
     # can render output-tokens-per-call — the one figure that makes the silent
     # full-page-echo fallback (a ~10x output-cost degrade) visible in the run
@@ -5266,6 +5575,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # run state, rather than retried identically forever.
                     stuck_ledger = _load_stuck_ledger(ctx.wiki_root)
                     stuck_threshold = librarian_stuck_file_threshold(ctx.config)
+                    # Issue athenaeum#1185: exponential backoff BETWEEN a file's
+                    # consecutive failures, before it crosses stuck_threshold
+                    # above — see _stuck_backoff_seconds's docstring.
+                    stuck_backoff_base_seconds = librarian_stuck_file_backoff_base_seconds(
+                        ctx.config
+                    )
                     # Issue athenaeum#898: the persistent bound-violation ledger (mirrors
                     # the stuck-file ledger's shape, tracked separately — see
                     # QUARANTINE_CANDIDATE_MANIFEST_NAME's module comment). A raw
@@ -5330,11 +5645,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # "deferred" and "failed") for a human to fix or remove; a
                         # content edit resets its count via the hash-keyed ledger.
                         _stuck = stuck_ledger.get(raw.ref)
+                        _raw_content_hash = _stuck_content_hash(raw)
                         if (
                             not ctx.dry_run
                             and _stuck is not None
+                            and _stuck.get("hash") == _raw_content_hash
                             and int(_stuck.get("failures", 0)) >= stuck_threshold
-                            and _stuck.get("hash") == _stuck_content_hash(raw)
                         ):
                             ctx.stuck_files.append(
                                 {
@@ -5352,6 +5668,33 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 int(_stuck.get("failures", 0)),
                                 _stuck.get("last_action") or "unknown",
                                 _stuck.get("last_error") or "unknown",
+                            )
+                            continue
+                        # Issue athenaeum#1185: a file that has already failed at
+                        # least once but has NOT yet crossed stuck_threshold is
+                        # still within its exponential backoff window — skip it
+                        # THIS run without spending an attempt or recording a
+                        # new failure, so its (still-bounded) run at
+                        # stuck_threshold is spaced out rather than consuming
+                        # every single 30-minute cadence tick.
+                        if (
+                            not ctx.dry_run
+                            and _stuck is not None
+                            and _stuck.get("hash") == _raw_content_hash
+                            and 0 < int(_stuck.get("failures", 0)) < stuck_threshold
+                            and _stuck_backoff_window_open(
+                                _stuck,
+                                base_seconds=stuck_backoff_base_seconds,
+                                now=ctx.now if ctx.now is not None else datetime.now(timezone.utc),
+                            )
+                        ):
+                            ctx.backoff_skipped_files.append(raw.ref)
+                            log.info(
+                                "librarian-stuck-file-backoff: skipping %s this run — "
+                                "%d consecutive failure(s), still within its backoff "
+                                "window (issue athenaeum#1185)",
+                                raw.ref,
+                                int(_stuck.get("failures", 0)),
                             )
                             continue
                         if not ctx.dry_run and ctx.usage.api_calls >= ctx.max_api_calls:
@@ -5611,6 +5954,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             )
                             entity_heartbeat.tick(raw.ref, error=1)
                             ctx.failed_files.append(raw.ref)
+                            # Issue athenaeum#1177: named for the all-calls-failed exit
+                            # reason below, mirroring the WARNING line's own
+                            # exception-type naming just above.
+                            ctx.entity_last_failure_class = type(exc.last_error).__name__
                             # Issue athenaeum#663: a genuinely transient overload will NOT
                             # recur on the same file N nights running, so counting
                             # it toward "stuck" is safe — only a RELIABLY-failing
@@ -5624,6 +5971,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     error=f"TransientAPIError:{type(exc.last_error).__name__}",
                                     action=getattr(exc, "athenaeum_failing_action", None),
                                     threshold=stuck_threshold,
+                                    now=ctx.now,
                                 )
                                 if _crossed is not None:
                                     _surface_newly_stuck(ctx, raw, _crossed)
@@ -5644,6 +5992,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             )
                             entity_heartbeat.tick(raw.ref, error=1)
                             ctx.failed_files.append(raw.ref)
+                            # Issue athenaeum#1177: named for the all-calls-failed exit
+                            # reason below, mirroring the WARNING line's own
+                            # exception-type naming just above.
+                            ctx.entity_last_failure_class = type(exc).__name__
                             # Issue athenaeum#663: same stuck-file accounting for a
                             # non-transient processing failure (malformed file, a
                             # persistently-failing action). The failing action is
@@ -5657,6 +6009,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     error=type(exc).__name__,
                                     action=getattr(exc, "athenaeum_failing_action", None),
                                     threshold=stuck_threshold,
+                                    now=ctx.now,
                                 )
                                 if _crossed is not None:
                                     _surface_newly_stuck(ctx, raw, _crossed)
@@ -5824,6 +6177,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         # ``cluster_only`` (the phase never ran, so it is absent from the
         # summary rather than a misleading zero).
         _entity_calls = ctx.usage.api_calls - _entity_phase_calls_before
+        # Issue athenaeum#1177: attempted count for the SAME phase window, used
+        # below to distinguish "made no attempts" (idle) from "every
+        # attempt failed" (AC3) — see ``_entity_phase_attempted_before``'s
+        # comment.
+        _entity_attempted = ctx.usage.attempted_calls - _entity_phase_attempted_before
         # athenaeum#490 (slice A): output tokens per entity call. A silent full-page-echo
         # fallback re-emits a whole 16-23KB page, so this figure spikes when the
         # fallback fires often — the entity-cost regression the WARNINGs above
@@ -5853,10 +6211,24 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         # flight) still reports the event that actually shaped it. Deliberately
         # OUTSIDE ``_LIBRARIAN_EARLY_STOP_REASONS``: the athenaeum#1135 zero-progress
         # refusal must not fire on a run whose progress is in flight.
+        # Issue athenaeum#1177 (AC3): a run that ATTEMPTED work but landed zero
+        # successful calls must not read as "completed" -- that label is
+        # reserved for genuine completion (idle-with-nothing-to-do OR real
+        # successes), never for "every attempted call errored". Checked
+        # AFTER in_flight/deferred (both real, non-failure explanations for
+        # zero completed calls) so this only classifies the residual case:
+        # nothing deferred, nothing in flight, yet every attempt failed.
+        # Names the failure's exception class (``ctx.entity_last_failure_class``,
+        # set alongside ``ctx.failed_files`` in the per-file except blocks
+        # above) so the reason itself answers "failed how", not just "failed".
         if ctx.in_flight_refs:
             _entity_exit_reason = "batch-in-flight"
+        elif ctx.deferred_refs:
+            _entity_exit_reason = manifest_reason
+        elif _entity_attempted > 0 and _entity_calls == 0:
+            _entity_exit_reason = f"all-calls-failed:{ctx.entity_last_failure_class or 'unknown'}"
         else:
-            _entity_exit_reason = manifest_reason if ctx.deferred_refs else "completed"
+            _entity_exit_reason = "completed"
         # Issue athenaeum#1135: mirror onto ``ctx`` (not just the local var / the
         # run_profile dict) so the finalize phase's zero-progress-refusal
         # predicate can read it without re-deriving the same classification.
@@ -5968,6 +6340,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     **(
                         {"quarantined": len(ctx.quarantined_files)}
                         if ctx.quarantined_files
+                        else {}
+                    ),
+                    # athenaeum#1185: files skipped THIS run because they are still
+                    # within their exponential backoff window (already failed at
+                    # least once, not yet stuck). Only rendered when non-zero,
+                    # mirroring "stuck=N"/"quarantined=N" above.
+                    **(
+                        {"backoff_skipped": len(ctx.backoff_skipped_files)}
+                        if ctx.backoff_skipped_files
                         else {}
                     ),
                     # athenaeum#669: the entity phase yielded its window share (athenaeum#440).
@@ -6293,7 +6674,9 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 ),
                 "clusters_merged": _merge_stats.get("entries_merged", 0),
                 "escalations": _merge_stats.get("escalations_written", 0),
-                "reason": "completed",  # issue athenaeum#1102 AC1
+                # Issue athenaeum#1177 (AC3): no longer unconditionally
+                # "completed" -- see ``_auto_memory_reason``.
+                "reason": _auto_memory_reason(_merge_stats),
             },
         )
     )
@@ -6435,8 +6818,20 @@ def _zero_yield_tripped(ctx: "RunContext", previous_deferred_refs: "list[str]") 
 
     True exactly when all three hold:
 
-    1. The run spent at least one LLM call (``ctx.usage.api_calls > 0`` — a
-       run with nothing to do that made zero calls is idle, not wasteful).
+    1. The run spent at least one LLM call, OR ATTEMPTED at least one
+       (``ctx.usage.api_calls > 0 or ctx.usage.attempted_calls > 0`` — a run
+       with nothing to do that made zero calls is idle, not wasteful).
+       ``attempted_calls`` (issue athenaeum#1177) is checked alongside
+       ``api_calls`` deliberately, not in its place: some call sites (the
+       entity phase's tier2/tier3 pipeline, via ``tiers._timed_llm_call``)
+       only ever bumped ``api_calls`` on a SUCCESSFUL response, so a run
+       where every entity-phase call raised (e.g. credits exhausted,
+       ``BadRequestError``) reported ``api_calls == 0`` — indistinguishable
+       from a genuinely idle run, which is exactly what let this predicate
+       stay untripped (and ``zero_yield_state.json``'s ``consecutive`` stay
+       at 0) through a four-day all-failing incident. ``attempted_calls``
+       is bumped before dispatch regardless of outcome, so it stays > 0 for
+       that run even though ``api_calls`` does not.
     2. The run committed zero files (``ctx.files_processed_count == 0`` — the
        same figure the athenaeum#470 spend-ledger write and backlog-drain advisor
        already use as "files actually drained this run").
@@ -6444,9 +6839,9 @@ def _zero_yield_tripped(ctx: "RunContext", previous_deferred_refs: "list[str]") 
        ref that was deferred last run left the deferred set this run. An
        idle run (nothing to defer, before or after) trivially satisfies this
        third condition too, but condition 1 already excludes it — an idle
-       run makes no LLM calls.
+       run makes no LLM calls and attempts none.
     """
-    if ctx.usage.api_calls <= 0:
+    if ctx.usage.api_calls <= 0 and ctx.usage.attempted_calls <= 0:
         return False
     if ctx.files_processed_count != 0:
         return False
@@ -6673,15 +7068,39 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         )
         if ctx.zero_yield_tripped:
             _zy_total_secs = sum(secs for _phase, secs, _fields in ctx.run_profile)
+            # Issue athenaeum#1177: report ``attempted_calls`` when ``api_calls``
+            # reads 0 -- exactly the shape an all-failing run now produces
+            # (every call attempted, none succeeded). Reporting "0 LLM
+            # call(s)" here would misrepresent a genuinely wasteful run as
+            # having done nothing at all, the opposite of what this line
+            # exists to make visible.
+            _zy_calls_spent = (
+                ctx.usage.api_calls if ctx.usage.api_calls > 0 else ctx.usage.attempted_calls
+            )
             log.warning(
                 "%s: run spent %d LLM call(s) over %.1fs and committed %d "
                 "file(s) — %d consecutive zero-yield run(s) (issue athenaeum#899)",
                 ZERO_YIELD_PREFIX,
-                ctx.usage.api_calls,
+                _zy_calls_spent,
                 _zy_total_secs,
                 ctx.files_processed_count,
                 ctx.zero_yield_consecutive,
             )
+            # Issue athenaeum#1177 (AC2): the escalation, distinct from the
+            # per-trip WARNING above (which fires every zero-yield run
+            # regardless of streak length). ERROR level + its own
+            # greppable prefix so a log-scraper / watchdog can alert on
+            # THIS line specifically without threshold logic of its own.
+            _zy_alert_threshold = librarian_zero_yield_alert_threshold(ctx.config)
+            if ctx.zero_yield_consecutive >= _zy_alert_threshold:
+                log.error(
+                    "%s: %d consecutive zero-yield run(s) — at or past the "
+                    "alert threshold of %d (librarian.zero_yield_alert_threshold "
+                    "/ ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD, issue athenaeum#1177)",
+                    ZERO_YIELD_ALERT_PREFIX,
+                    ctx.zero_yield_consecutive,
+                    _zy_alert_threshold,
+                )
 
     _maybe_push_after_run(
         ctx.knowledge_root,

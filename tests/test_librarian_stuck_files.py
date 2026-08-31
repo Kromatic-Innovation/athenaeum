@@ -244,11 +244,19 @@ def test_reliably_failing_file_becomes_stuck_and_is_then_skipped(
     called for it) and still surfaces it. Against the pre-athenaeum#663 code
     ``out_run_stats`` had no ``stuck_files`` key and process_one was re-invoked
     forever — this test fails there.
+
+    Backoff (issue athenaeum#1185) disabled here: this test drives three
+    ``run()`` calls back-to-back with no real wall-clock time elapsing
+    between them, and its whole point is isolating the THRESHOLD-crossing
+    behavior from timing concerns — see
+    ``tests/test_librarian_stuck_file_backoff.py`` for the backoff-specific
+    coverage.
     """
     root = _seed_knowledge_root(tmp_path, n_files=1)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
     monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
     monkeypatch.setenv("ATHENAEUM_STUCK_FILE_THRESHOLD", "2")
+    monkeypatch.setenv("ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS", "0")
 
     fake_process_one, calls = _raising_process_one(action="update:BigPage")
     monkeypatch.setattr("athenaeum.librarian.process_one", fake_process_one)

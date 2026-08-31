@@ -184,14 +184,31 @@ def _record_usage(
 ENTITY_LLM_CALL_MARKER = "librarian-entity-llm-call"
 
 
-def _timed_llm_call(call: Callable[[], Any], description: str) -> Any:
+def _timed_llm_call(
+    call: Callable[[], Any], description: str, usage: TokenUsage | None = None
+) -> Any:
     """Wrap :func:`with_retry` with entity-phase LLM call wall-clock logging.
 
     Every tier2/tier3 call site below already passes ``call``/*description*
     straight to :func:`with_retry` unchanged — this only times that same call
     and logs the duration; it does not alter what is sent, retried, or
     returned (issue athenaeum#800: observability only, no compile-logic change).
+
+    *usage* (issue athenaeum#1177), when given, records ONE attempt via
+    :meth:`TokenUsage.record_attempt` BEFORE ``with_retry`` runs — this is
+    the single choke point every tier2/tier3 entity-phase LLM call site
+    passes through, so it is where a persistently-failing call (retries
+    exhausted, or a non-transient error `with_retry` does not retry at all)
+    still counts as an ATTEMPT even though the caller never reaches
+    ``_record_usage`` (which only bumps ``usage.api_calls`` on a successful
+    response). Before this, a run where every entity-phase call errored
+    reported ``api_calls == 0`` — indistinguishable from an idle run with
+    nothing to do — which is exactly what let the athenaeum#899 zero-yield
+    alarm's ``consecutive`` counter stay at 0 through a four-day
+    all-failing incident (see ``librarian._zero_yield_tripped``).
     """
+    if usage is not None:
+        usage.record_attempt()
     _start = time.monotonic()
     result = with_retry(call, description=description)
     log.info(
@@ -1657,6 +1674,7 @@ def tier2_classify(
     response = _timed_llm_call(
         lambda: client.messages.create(**params),
         f"tier2_classify {raw.ref}",
+        usage=usage,
     )
     _record_usage(response, usage, model=params["model"], knob="classify")
 
@@ -1748,6 +1766,7 @@ def tier2_classify(
         retry_response = _timed_llm_call(
             lambda: client.messages.create(**retry_params),
             f"tier2_classify-retry {raw.ref}",
+            usage=usage,
         )
         _record_usage(
             retry_response, usage, model=retry_params["model"], knob="classify"
@@ -2053,6 +2072,7 @@ def tier2_reclassify_larger_budget(
     response = _timed_llm_call(
         lambda: client.messages.create(**params),
         f"tier2_classify-truncation-retry {raw.ref}",
+        usage=usage,
     )
     _record_usage(response, usage, model=params["model"], knob="classify")
     retry_stats = Tier2ParseStats()
@@ -2537,6 +2557,7 @@ def tier3_create(
     response = _timed_llm_call(
         lambda: client.messages.create(**params),
         f"tier3_create {source_ref}",
+        usage=usage,
     )
     _record_usage(response, usage, model=params["model"], knob="write")
 
@@ -3259,6 +3280,7 @@ def tier3_merge(
     response = _timed_llm_call(
         lambda: client.messages.create(**params),
         f"tier3_merge {source_ref}",
+        usage=usage,
     )
     _record_usage(response, usage, model=params["model"], knob="write")
 
@@ -3343,6 +3365,7 @@ def tier3_merge_full(
     response = _timed_llm_call(
         lambda: client.messages.create(**params),
         f"tier3_merge_full {source_ref}",
+        usage=usage,
     )
     _record_usage(response, usage, model=params["model"], knob="write")
     # Issue athenaeum#1184: same echo accounting as tier3_merge's patch attempt

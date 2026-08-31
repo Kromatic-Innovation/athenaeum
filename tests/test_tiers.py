@@ -34,6 +34,7 @@ from athenaeum.tiers import (
     MergeOpsError,
     PreambleOnlyResponseError,
     Tier2ParseStats,
+    _timed_llm_call,
     apply_merge_ops,
     parse_merge_ops_response,
     parse_tier2_entities,
@@ -3929,3 +3930,77 @@ class TestEntityLLMCallTiming:
 
         lines = self._call_timing_lines(caplog)
         assert len(lines) == 2
+
+
+# ---------------------------------------------------------------------------
+# _timed_llm_call attempt-counting (issue athenaeum#1177)
+# ---------------------------------------------------------------------------
+
+
+class TestTimedLLMCallRecordsAttempts:
+    """``_timed_llm_call`` is the single choke point every tier2/tier3
+    entity-phase LLM call site passes through (see
+    ``TestEntityLLMCallTiming`` above). Before athenaeum#1177, a call site's
+    ``usage.api_calls`` only ever incremented on a SUCCESSFUL response (via
+    ``_record_usage``, called after ``_timed_llm_call`` returns) — a
+    persistently-failing call (retries exhausted, or a non-transient error
+    ``with_retry`` never retries at all) left ``api_calls`` at 0, making an
+    all-failing run indistinguishable from a genuinely idle one. These
+    tests cover the fix directly at its source, independent of the full
+    end-to-end regression test in ``tests/test_librarian_zero_yield.py``.
+    """
+
+    def test_successful_call_records_one_attempt(self) -> None:
+        usage = TokenUsage()
+        result = _timed_llm_call(lambda: "ok", "desc", usage=usage)
+        assert result == "ok"
+        assert usage.attempted_calls == 1
+
+    def test_failing_call_still_records_the_attempt(self) -> None:
+        """The load-bearing case: the attempt is recorded BEFORE the call
+        runs, so a raised exception does not erase it."""
+        usage = TokenUsage()
+
+        def _boom() -> None:
+            raise RuntimeError("simulated non-transient failure")
+
+        with pytest.raises(RuntimeError):
+            _timed_llm_call(_boom, "desc", usage=usage)
+        assert usage.attempted_calls == 1
+
+    def test_multiple_failing_calls_each_record_an_attempt(self) -> None:
+        """The exact shape an all-failing run produces: N attempts, N
+        failures, ``attempted_calls == N`` even though nothing succeeded."""
+        usage = TokenUsage()
+
+        def _boom() -> None:
+            raise RuntimeError("simulated non-transient failure")
+
+        for _ in range(3):
+            with pytest.raises(RuntimeError):
+                _timed_llm_call(_boom, "desc", usage=usage)
+
+        assert usage.attempted_calls == 3
+        assert usage.api_calls == 0
+        assert usage.succeeded_calls == 0
+
+    def test_no_usage_given_is_a_pure_no_op_for_attempt_counting(self) -> None:
+        """``usage=None`` (the default) must not raise -- callers that do
+        not track usage (e.g. some test/CLI paths) are unaffected."""
+        result = _timed_llm_call(lambda: "ok", "desc")
+        assert result == "ok"
+
+    def test_tier2_classify_records_an_attempt_via_the_real_call_site(
+        self,
+    ) -> None:
+        """End-to-end through the REAL call site (not calling
+        ``_timed_llm_call`` directly) -- proves the wiring at
+        ``tier2_classify``'s call site actually threads ``usage`` through."""
+        usage = TokenUsage()
+        raw = _make_raw("Had coffee with Alice Zhang, she runs product at Acme.")
+        client = _mock_client("[]")
+
+        tier2_classify(raw, [], ["person"], [], ["internal"], client, usage=usage)
+
+        assert usage.attempted_calls == 1
+        assert usage.api_calls == 1  # this call succeeded too

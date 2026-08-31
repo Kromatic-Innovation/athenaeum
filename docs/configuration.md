@@ -28,6 +28,20 @@ effect without a config migration.
 Every default figure on this page is verified against the code under
 `src/athenaeum/`. When another doc and the code disagree, the code is truth.
 
+**Prose drift is expected — sweep it by hand (athenaeum#1178).** The
+operator-side `athenaeum_config_key_set` tool edits `athenaeum.yaml` keys
+surgically: it changes a value in place and does not touch the surrounding
+comments or rationale blocks, and it cannot delete a key. A key set through
+that tool therefore leaves any nearby prose exactly as it was, even when the
+prose describes a rationale, a promise, or a condition that the new value no
+longer matches — and restoring an "unset" state requires a hand edit, since
+the tool has no delete. Nothing re-derives or re-checks that prose
+automatically, so comments in a live `athenaeum.yaml` can silently go stale
+or (worse) end up stating the opposite of what the value now does. Treat any
+comment in `athenaeum.yaml` as a hint to verify against the value and this
+page, not as a guarantee — and when you change a value by hand or via the
+tool, update or remove the comment above it in the same edit.
+
 ## Librarian run (`athenaeum run`)
 
 | Knob | CLI flag | Env var | YAML key | Default | What it does |
@@ -52,6 +66,22 @@ Every default figure on this page is verified against the code under
 > uses. This answers athenaeum#608's original question ("did the resolver get a
 > representative window, or was it starved?") from the record itself, not
 > from re-deriving it against a WARNING line.
+>
+> As of athenaeum#1177, the entity phase's `reason` can also read
+> `all-calls-failed:<ExceptionClassName>` (e.g.
+> `all-calls-failed:BadRequestError`) — and the `auto-memory` phase's
+> `reason` can read `all-calls-failed` — when the phase ATTEMPTED at least
+> one LLM call and every one of them errored (nothing deferred, nothing
+> in flight), so it never has to read as `reason=completed` the way a
+> genuinely idle-with-nothing-to-do phase does. Before athenaeum#1177, the
+> entity phase's `api_calls` counter only incremented on a SUCCESSFUL
+> response, so a run where every call errored (e.g. exhausted API
+> credits) reported `calls=0 reason=completed` — indistinguishable from a
+> healthy idle run, which is exactly what let a four-day all-failing
+> incident go unreported. See `TokenUsage.attempted_calls` /
+> `.succeeded_calls` for the underlying counters, and the zero-yield
+> alert threshold row above for the paired fix to the `athenaeum#899`
+> zero-yield alarm this incident also disabled.
 >
 > **Zero-progress DEGRADED REFUSAL (athenaeum#1135).** When the entity phase's
 > `reason` names an early stop (any of the four non-`completed` values
@@ -90,10 +120,12 @@ Every default figure on this page is verified against the code under
 
 See [exit-codes.md](exit-codes.md) for the full `athenaeum run` exit-code table (`0` / `1` / `75` / `124`).
 | Stuck-file threshold | — | `ATHENAEUM_STUCK_FILE_THRESHOLD` | `librarian.stuck_file_threshold` | `3` | Consecutive-run failure count after which a raw file is treated as **stuck** (athenaeum#663). `tier3_write` is all-or-nothing per raw file (a partial write cannot leave the wiki half-merged), so one reliably-failing LLM call — e.g. an entity page large enough to time out every night — otherwise discards the file's other successful merges and the file is retried WHOLE every run, forever, silently. A file that fails on the **same content** this many runs running is instead SKIPPED (it stops consuming an LLM call each night) and surfaced as machine-detectable run state: `out_run_stats["stuck_files"]` (ref, consecutive failures, failing `kind:name` action, last error) plus a greppable `librarian-stuck-file` WARNING and a `stuck=N` field on the run-summary line. State lives in `wiki/_stuck_files.json` (keyed by ref + content hash, so editing the file resets its count); a run that finally succeeds on the file clears its entry. Must be `>= 1` (below that would quarantine a file on its first transient failure); non-numeric / non-positive / bool values fall back to the default. |
+| Stuck-file backoff base | — | `ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS` | `librarian.stuck_file_backoff_base_seconds` | `3600` (1 hour) | Base exponential-backoff window in **seconds** between a raw file's consecutive failures, BEFORE it crosses the stuck-file threshold above (athenaeum#1185). Without this, a file failing on run N was immediately retry-eligible on run N+1 — the very next ~30-minute cadence tick — all the way up to the threshold, so a persistently-failing file still cost one paid LLM call every single cadence tick during that ramp-up window (roughly 40 calls/day at the observed cadence, per file). The window for a file's Kth consecutive failure is `base * 2^(K-1)` (doubling each failure); a file is skipped (no LLM call, no new failure recorded) while still inside its window. Setting this to `0` disables backoff entirely, reverting to "every cadence tick is retry-eligible" (pre-athenaeum#1185 behavior). Skipped-in-backoff refs are surfaced as `out_run_stats["backoff_skipped_files"]` and a `backoff_skipped=N` field on the run-summary line, distinct from `stuck=N`. Non-numeric or bool values fall back to the default; unlike the threshold above, `0` is a valid (backoff-disabling) override, not rejected. |
 | Raw-file byte bound | — | `ATHENAEUM_RAW_FILE_MAX_BYTES` | `librarian.raw_file_max_bytes` | `5242880` (5 MiB) | Per-raw-file byte bound (athenaeum#898). Enforced by `RawFile.content` — a raw intake file over this is refused BEFORE it is read into memory or handed to the classifier (`RawFileTooLargeError`, checked via `stat()`, so an oversized file costs one syscall to reject, not a full read). Motivated by a measured 9.7MB dry-run artifact that accounted for 93% of timed entity-phase LLM calls for roughly three months. Counts toward the quarantine threshold below (bound `"bytes"`). `bool` / non-int / `<= 0` values fall through to the default. |
 | Raw-file LLM-call bound | — | `ATHENAEUM_RAW_FILE_MAX_API_CALLS` | `librarian.raw_file_max_api_calls` | `60` | Per-raw-file LLM-call bound (athenaeum#898, recalibrated athenaeum#994). Checked INCREMENTALLY by `tier3_derive_actions`, after each entity action a raw file drives, against the running LLM-call count THAT FILE has consumed so far. Measured reality (2026-08-15/16 nightly logs) put an ordinary file at 20-46 calls — un-batched `tier3_write` spends one call per entity action — so the old `8` default (assuming ~1-3 calls) rejected normal input; `60` covers the measured distribution with headroom. An over-bound file's completed actions (everything that finished BEFORE the bound tripped) ARE written — durable partial progress, not discarded — and only the unstarted remainder is dropped; the raw file itself is left on disk (not deleted, not counted as processed) so it can accumulate a consecutive-violation count. Counts toward the quarantine threshold below (bound `"llm_calls"`). `bool` / non-int / `<= 0` values fall through to the default. |
 | Raw-file wall-clock bound | — | `ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS` | `librarian.raw_file_max_runtime_seconds` | `900` | Per-raw-file wall-clock bound in **seconds** (athenaeum#898, recalibrated athenaeum#994). Checked alongside the LLM-call bound above, incrementally, after each entity action — the wall-clock spent inside one file's processing so far. Measured reality put an ordinary file at 300-690s; the old `120` default rejected normal input, `900` covers the measured distribution with headroom. Same partial-progress-on-trip behavior as the LLM-call bound. Counts toward the quarantine threshold below (bound `"wall_clock"`). `bool` / non-int / `<= 0` values fall through to the default. |
 | Quarantine threshold | — | `ATHENAEUM_QUARANTINE_THRESHOLD` | `librarian.quarantine_threshold` | `2` | Consecutive-run count after which a raw file that keeps exceeding ANY of the three bounds above is **quarantined** (athenaeum#898) — physically moved from `raw/<source>/` to `wiki/_quarantine/<source>/`, so it drops out of `discover_raw_files`'s discovery set, plus an audit-ledger record (`wiki/_quarantine.jsonl`) and a `type: "quarantine"` entry in `athenaeum decisions` / `list_pending_decisions`. Mirrors the stuck-file ledger's shape (`wiki/_quarantine_candidates.json`, keyed by ref + content hash, so editing the file resets its count) but is tracked as a SEPARATE ledger — a bound violation is a measured resource fact, not a processing exception, and its disposition (physical removal) is heavier than the stuck-file skip-in-place. Reversible only via an operator decision (`athenaeum.quarantine.release_quarantine`) — there is no automatic un-quarantine. Must be `>= 1`; non-numeric / non-positive / bool values fall back to the default. |
+| Zero-yield alert threshold | — | `ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD` | `librarian.zero_yield_alert_threshold` | `3` | Consecutive-zero-yield-run count (athenaeum#899's `zero_yield_state.json` `consecutive`) at which `athenaeum run` logs a dedicated `librarian-zero-yield-alert` ERROR-level line (athenaeum#1177) — distinct from the plain `librarian-zero-yield` WARNING that fires on every zero-yield run regardless of streak length. At the observed ~40 runs/day, the default of `3` alerts within roughly two hours, nowhere close to the four-day silent incident this issue exists to catch sooner. Must be `>= 1`; non-numeric / non-positive / bool values fall back to the default. |
 | Page-size threshold | — | — | `librarian.page_size_threshold_chars` | `10000` | Char threshold above which an existing wiki page is **too large to merge into** (athenaeum#1182). Enforced BEFORE a Tier-3 merge is dispatched — before the merge prompt is built or any model call is made — so an over-threshold page never pays for (or risks) a merge call at all; see `oversize_page_action` below for what happens instead. Picked from the corpus distribution (23,534 pages, non-`_`-prefixed `*.md`: median 1,544 bytes, p75 1,751, p90 2,061, p99 8,468), not the model's context window: well under the 20,000-char merge-input window and comfortably above p99, so it catches unbounded-accretion anomalies without false-positiving on the ordinary corpus. Must be `>= 1`; non-numeric / non-positive / bool values fall back to the default. |
 | Oversize-page action | — | — | `librarian.oversize_page_action` | `review` | What an over-`page_size_threshold_chars` page routes to instead of another merge (athenaeum#1182): one of `review`, `split`, `log_demote`. Only `review` is implemented — it escalates the page (`_pending_questions.md`, carrying the observation that would have been merged) and leaves the page byte-for-byte unmodified. `split` and `log_demote` are RESERVED (recognized values that raise `NotImplementedError` at dispatch, not a silent fallback to `review`) — both are destructive restructurings of durable operator data and must not run unattended on a first landing. Any other value falls back to `review`. |
 | Junk-match stopwords | — | — | `librarian.junk_match_stopwords` | *(extends the built-in default)* | Extra entity names to treat as **junk** so a Tier-1 match on them never issues a Tier-3 merge LLM call (athenaeum#662). Tier-1 matches any indexed page name ≥ 3 chars, and the index accumulates junk pages (`here`, `get`, `main`, `reach`, `lane a`, …) — each became a ~16-23KB merge call, roughly **half** of the ~15-18 Tier-3 calls per file. A conservative built-in default (the measured junk plus common English function words) is always applied; entries here are **added** to it, case-insensitively on the whole name. Tune per corpus as the junk set changes. |
@@ -487,9 +519,16 @@ registered field diverged beyond its declared allowance. An unregistered
 ## Models
 
 All model values are free-form model-id strings passed to the Anthropic SDK.
-All four live under the `models:` yaml block (athenaeum#232, athenaeum#513) and share one
-resolver helper (`config.resolve_model`). The resolver model additionally
-accepts the pre-athenaeum#232 `resolve.model` key for backward compatibility.
+The table below is the **full set** of model knobs, one row per entry in
+`prompt_registry.KNOBS` (derived from `_META_ROWS`, athenaeum#781) — not a fixed
+count restated here, so this table cannot go stale the next time a knob is
+added. They all live under the `models:` yaml block (athenaeum#232, athenaeum#513)
+and share one resolver helper (`config.resolve_model`). The resolver model
+additionally accepts the pre-athenaeum#232 `resolve.model` key for backward
+compatibility. See [routing.md](routing.md) for provider + model + batch
+mode assembled per function in one table, the per-knob-yaml-vs-global-env
+precedence rule, and the `athenaeum explain-routing` preview command
+(athenaeum#1176).
 
 | Knob | Env var | YAML key | Default | Used by |
 |---|---|---|---|---|
@@ -499,6 +538,7 @@ accepts the pre-athenaeum#232 `resolve.model` key for backward compatibility.
 | Resolver | `ATHENAEUM_RESOLVE_MODEL` | `models.resolve` (_also_ `resolve.model`¹) | `claude-opus-4-7` | Contradiction resolver (proposes a winner once the detector flags a conflict). |
 | Reasoning tier 1 | `ATHENAEUM_REASONING_T1_MODEL` | `models.reasoning_t1` | `claude-haiku-4-5-20251001` | First-pass model for the reasoning-tier chain.² |
 | Reasoning tier 2 | `ATHENAEUM_REASONING_T2_MODEL` | `models.reasoning_t2` | `claude-opus-4-1-20250805` | Escalation model for the reasoning-tier chain.² |
+| Rule proposals | `ATHENAEUM_RULE_PROPOSALS_MODEL` | `models.rule_proposals` | `claude-opus-4-8` | Rule-proposal drafting call (athenaeum#1174) — see the "Rule proposals" section above (`librarian.rule_proposals.*`) for the full knob set (threshold, window, exemplar count, max tokens, thinking). |
 
 > ¹ `resolve.model` is still read post-athenaeum#512/#513 (`athenaeum.resolutions._get_model`), not yet removed. Precedence, highest first: `ATHENAEUM_RESOLVE_MODEL` env var, then `models.resolve` yaml, then `resolve.model` yaml (legacy), then the code default — so if both `models.resolve` and `resolve.model` are set, **`models.resolve` wins**. There is no scheduled removal; it is kept indefinitely so existing `athenaeum.yaml` files keep working unchanged. Prefer `models.resolve` for new configs, for consistency with the other model knobs.
 >
@@ -669,6 +709,10 @@ against the catalog directly.
 
 ## LLM provider selection (athenaeum#330)
 
+> For provider + model + batch mode assembled **per function** in a single
+> table, plus the subscription-only (`claude-cli`) install recipe and its
+> preconditions, see [routing.md](routing.md) (athenaeum#1176).
+
 Athenaeum's librarian pipeline talks to Claude through a single **provider
 seam** (`athenaeum.provider.build_llm_client`). Two backends ship:
 
@@ -752,13 +796,14 @@ Constraints and semantics:
 ### Per-knob provider routing (athenaeum#786)
 
 `llm.provider` / `ATHENAEUM_LLM_PROVIDER` above set the **global default**
-provider. Each of the six model knobs (`classify`, `write`, `resolve`,
-`topic`, `reasoning_t1`, `reasoning_t2` — the single source of truth is
-`prompt_registry._META_ROWS`) can override that default independently:
+provider. Each of the seven model knobs (`classify`, `write`, `resolve`,
+`topic`, `reasoning_t1`, `reasoning_t2`, `rule_proposals` — the single
+source of truth is `prompt_registry._META_ROWS`) can override that default
+independently:
 
 | Override | Env var | YAML key |
 |---|---|---|
-| Per-knob provider | `ATHENAEUM_<KNOB>_LLM_PROVIDER` — the six concrete names: `ATHENAEUM_CLASSIFY_LLM_PROVIDER`, `ATHENAEUM_WRITE_LLM_PROVIDER`, `ATHENAEUM_RESOLVE_LLM_PROVIDER`, `ATHENAEUM_TOPIC_LLM_PROVIDER`, `ATHENAEUM_REASONING_T1_LLM_PROVIDER`, `ATHENAEUM_REASONING_T2_LLM_PROVIDER` | `llm.providers.<knob>` |
+| Per-knob provider | `ATHENAEUM_<KNOB>_LLM_PROVIDER` — the seven concrete names: `ATHENAEUM_CLASSIFY_LLM_PROVIDER`, `ATHENAEUM_WRITE_LLM_PROVIDER`, `ATHENAEUM_RESOLVE_LLM_PROVIDER`, `ATHENAEUM_TOPIC_LLM_PROVIDER`, `ATHENAEUM_REASONING_T1_LLM_PROVIDER`, `ATHENAEUM_REASONING_T2_LLM_PROVIDER`, `ATHENAEUM_RULE_PROPOSALS_LLM_PROVIDER` | `llm.providers.<knob>` |
 
 Precedence, per knob: `ATHENAEUM_<KNOB>_LLM_PROVIDER` env > `llm.providers.<knob>`
 yaml > the global default (`ATHENAEUM_LLM_PROVIDER` env > `llm.provider` yaml >
@@ -786,6 +831,11 @@ Every one of `classify` / `write` / `resolve` / `topic` / `reasoning_t1` /
   the `athenaeum ingest-answers` / `athenaeum reresolve-questions` CLI
   commands each resolve their own provider independently and construct
   their own client (issue athenaeum#786) — unchanged by athenaeum#841.
+  `rule_proposals` (`athenaeum.rule_proposals`, the default-off
+  drafting phase, issue athenaeum#1063) is routed the same way — its own
+  provider/client, resolved and validated at startup preflight
+  independently of this pipeline (issue athenaeum#1174) — also unchanged by
+  athenaeum#841.
 - `classify`, `write`, `resolve` (within an `athenaeum run` librarian run —
   distinct from the `resolve` knob's CLI-command path above, wired
   separately), `reasoning_t1`, and `reasoning_t2` are now each threaded
@@ -1745,22 +1795,64 @@ question+merge view) — both report the live depth of
 in the README.) There is no built-in numeric threshold; "beyond what you can
 handle" is an operator judgment call, not a code-enforced ceiling.
 
-**How to enable.** One flag gates *both* tiers — there is no separate
-opt-in for T1 vs. T2:
+**How to enable — TWO independent keys as of issue athenaeum#1200.** Before
+athenaeum#1200, one flag gated *both* tiers together: turning on the harmless
+T1 pre-screen also, unavoidably, armed T2's **unreviewed auto-apply**. That
+coupling is the defect athenaeum#1200 fixes — T1 and T2 now have their OWN
+opt-ins, and **T2 defaults off independent of T1's value**:
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
-| Reasoning-tier auditing | `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED` | `librarian.reasoning_tier_auditing_enabled` | `false` (**off**) | Gates the T1 screen in the merge path, the T2 screen it can pass up to, and the `athenaeum calibration` display surface, all together. `1`/`true`/`yes`/`on` (case-insensitive) enable via env; a non-bool yaml value or an unrecognized env string falls through to off. See [`resolve_reasoning_tier_auditing_enabled`](../src/athenaeum/config.py). |
+| T1 screen (reject/pass-up only, no write authority) | `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED` | `librarian.reasoning_tier_auditing_enabled` | `false` (**off**) | Gates the T1 screen in the merge path. `1`/`true`/`yes`/`on` (case-insensitive) enable via env; a non-bool yaml value or an unrecognized env string falls through to off. See [`resolve_reasoning_tier_auditing_enabled`](../src/athenaeum/config.py). |
+| T2 unreviewed auto-apply | `ATHENAEUM_REASONING_TIER_T2_AUTO_APPLY_ENABLED` | `librarian.reasoning_tier_t2_auto_apply_enabled` | `false` (**off**) | Gates T2's screen — including its safe-class **auto-apply** authority. Independent of the T1 key above: T1 on does **not** turn this on, and this does not require T1 to be on. Same env/yaml parsing rules as the T1 key. See [`resolve_reasoning_tier_t2_auto_apply_enabled`](../src/athenaeum/config.py). |
+
+The `athenaeum calibration` display surface (and the `calibration_summary` /
+`review_audit_item` MCP tools) report "not enabled" only when **both** keys
+are off (`resolve_reasoning_tier_any_screen_enabled`) — so a config running
+only one tier still sees that tier's own calibration data, not a misleading
+all-clear.
 
 ```yaml
 librarian:
-  reasoning_tier_auditing_enabled: true
+  reasoning_tier_auditing_enabled: true          # T1 screen only
+  # reasoning_tier_t2_auto_apply_enabled: true   # add this line too for T2 auto-apply
 ```
+
+### Migration for an existing config (issue athenaeum#1200 AC4/AC5)
+
+**If your `athenaeum.yaml` already has `librarian.reasoning_tier_auditing_enabled: true`,
+read this.** Before this change, that one line armed T1 **and** T2's
+unreviewed auto-apply together. As of this change:
+
+- **What changes:** that same line now arms **T1 only**. T2's auto-apply
+  no longer runs off it. Nothing else about the key's env var, yaml
+  location, or parsing changed.
+- **Which direction this moves you:** safe-by-default only. This can never
+  grant a config authority it didn't already have — it can only **remove**
+  unreviewed-auto-apply authority a config previously had. If your config
+  had `reasoning_tier_auditing_enabled: true`, after upgrading, T2 stops
+  auto-applying merges until you explicitly re-arm it. If you never set the
+  flag, nothing changes for you at all.
+- **To restore the exact pre-athenaeum#1200 combined behavior — a single
+  documented edit, as promised:** add ONE line:
+  ```yaml
+  librarian:
+    reasoning_tier_auditing_enabled: true
+    reasoning_tier_t2_auto_apply_enabled: true   # the one-line revert
+  ```
+- **Why this direction and not the reverse** (re-reading the existing key
+  as still-arming-both, with a new key to *narrow* it to T1-only): AC3
+  independently requires the T2 half to default off regardless of what the
+  T1 half resolves to. Re-reading the existing key as T1-only is the only
+  interpretation consistent with that — and it is the one that changes an
+  existing config's *effective* behavior only in the safe direction
+  (removing an authority, never granting one), rather than the other way
+  around.
 
 The T1/T2 *model* and per-stage token/thinking knobs (`ATHENAEUM_REASONING_T1_MODEL` /
 `ATHENAEUM_REASONING_T2_MODEL` and friends, see [Models](#models) and
 [Per-stage token and thinking tuning](#per-stage-token-and-thinking-tuning-athenaeum688)
-above) are read regardless of this flag, but have no runtime effect while it
+above) are read regardless of these flags, but have no runtime effect while their own tier
 is off — there is nothing for them to tune until the screen actually runs.
 
 **What it costs.** Enabling this adds LLM calls on a merge path that
