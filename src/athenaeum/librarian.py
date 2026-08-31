@@ -221,6 +221,7 @@ from athenaeum.tiers import (
     TIER2_ADDRESS_RESOLVED_MARKER,
     TIER2_ADDRESS_UNRESOLVED_MARKER,
     Tier2ParseStats,
+    gate_create_name_classifications,
     partition_code_artifact_classifications,
     resolve_address_named_classifications,
     schema_fragment_state,
@@ -1243,6 +1244,13 @@ def _apply_tier3_results(
 
     result.updated.extend(updated_uids)
     result.escalated.extend(escalations)
+    # Issue athenaeum#1182: derived from the escalations just folded in above,
+    # by conflict_type — see ProcessingResult.oversize_suppressed's docstring
+    # for why this is derived rather than an independent counter threaded
+    # through tier3_derive_actions's return tuple.
+    result.oversize_suppressed += sum(
+        1 for _e in escalations if _e.conflict_type == "oversize_page"
+    )
 
     # --- Tier 4: Escalation ---
     if escalations:
@@ -1623,6 +1631,16 @@ def process_one(
                 ),
             )
         )
+
+    # Issue athenaeum#1173: create-path name gate. Sits immediately after the
+    # athenaeum#1126 address gate above (same "kept" chaining) and BEFORE
+    # actions are built — a rejected/escalated name never reaches a tier-3
+    # create action. See gate_create_name_classifications' docstring.
+    name_gate_outcome = gate_create_name_classifications(
+        classified, raw.ref, raw.content, config
+    )
+    classified = name_gate_outcome.kept
+    address_escalations.extend(name_gate_outcome.escalations)
 
     # Build actions
     actions: list[EntityAction] = []
@@ -3550,6 +3568,15 @@ class RunContext:
     total_matched: int = 0
     total_files_acted: int = 0
 
+    # Issue athenaeum#1182: page-size-invariant suppressions. UNLIKE
+    # total_matched (documented as synchronous-only above), this counter
+    # covers BOTH transports: the synchronous entity loop (summed the same
+    # way total_degraded/total_truncated are, below) AND the batch-API
+    # transport's two independent merge-dispatch sites (assembly + the
+    # sync_merges finalize fallback in athenaeum.batch), via
+    # BatchRunResult.oversize_suppressed / BatchCollectResult.oversize_suppressed.
+    total_oversize_suppressed: int = 0
+
     def deadline_exceeded(self) -> bool:
         return self.run_deadline is not None and time.monotonic() >= self.run_deadline
 
@@ -4949,6 +4976,7 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
     ctx.total_skipped += outcome.skipped
     ctx.total_degraded += outcome.degraded
     ctx.total_truncated += outcome.truncated
+    ctx.total_oversize_suppressed += outcome.oversize_suppressed  # issue athenaeum#1182
     ctx.total_type_rejected += outcome.type_rejected  # issue athenaeum#1196
     ctx.collected_refs = list(outcome.collected_refs)
     ctx.batch_reconciliation = dict(outcome.reconciliation)
@@ -5221,6 +5249,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.total_skipped = outcome.skipped
                     ctx.total_degraded = outcome.degraded
                     ctx.total_truncated = outcome.truncated  # issue athenaeum#476
+                    ctx.total_oversize_suppressed = (
+                        outcome.oversize_suppressed
+                    )  # issue athenaeum#1182
                     ctx.total_type_rejected = outcome.type_rejected  # issue athenaeum#1196
                     ctx.failed_files = outcome.failed_refs
                     ctx.deferred_refs = outcome.deferred_refs
@@ -5658,6 +5689,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # above (a double predating this issue has no ``matched``
                         # attribute).
                         ctx.total_matched += getattr(result, "matched", 0)
+                        # Issue athenaeum#1182: same getattr-tolerance rationale as
+                        # degraded/truncated/matched above.
+                        ctx.total_oversize_suppressed += getattr(
+                            result, "oversize_suppressed", 0
+                        )
                         if result.created or result.updated:
                             ctx.total_files_acted += 1
 
@@ -5882,6 +5918,16 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # separately from a parse ``degraded`` so the two are
                     # never conflated in the summary either.
                     **({"truncated": ctx.total_truncated} if ctx.total_truncated else {}),
+                    # athenaeum#1182: pages the page-size invariant suppressed a
+                    # merge into this run (routed to "review" escalation
+                    # instead, page left unmodified). Only rendered when
+                    # non-zero, mirroring the degraded/truncated convention
+                    # immediately above.
+                    **(
+                        {"oversize_suppressed": ctx.total_oversize_suppressed}
+                        if ctx.total_oversize_suppressed
+                        else {}
+                    ),
                     # athenaeum#1171: tier-3 create responses whose leading
                     # first-person planning preamble was stripped (substantive
                     # content survived) or rejected (the response was ENTIRELY

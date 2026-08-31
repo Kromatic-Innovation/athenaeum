@@ -100,7 +100,9 @@ from athenaeum.tiers import (
     TIER2_ADDRESS_UNRESOLVED_MARKER,
     PreambleOnlyResponseError,
     Tier2ParseStats,
+    check_page_size_gate,
     existing_body_needs_full_echo,
+    gate_create_name_classifications,
     parse_merge_ops_response,
     parse_tier2_entities,
     partition_code_artifact_classifications,
@@ -740,7 +742,13 @@ class _FileState:
     # Issue athenaeum#1126: Tier-4 escalations for declined address-shaped
     # classifications, built at classification time and flushed at finalize
     # (in BOTH branches that unlink the raw file) so the fact survives even
-    # when the declined address was this file's only classification.
+    # when the declined address was this file's only classification. Issue
+    # athenaeum#1182 reuses this SAME carrier (not a parallel channel) for
+    # page-size-gate suppressions found at batch-assembly time (before a
+    # merge item is ever built) -- despite the field name, this is the
+    # general "escalation raised before finalize, for this file" list; both
+    # kinds are flushed identically and both count toward
+    # BatchRunResult.escalated.
     address_escalations: list[EscalationItem] = field(default_factory=list)
     failed: bool = False
     done: bool = False
@@ -778,6 +786,15 @@ class BatchRunResult:
     #: file is preserved and retried on the next run — but the raised default
     #: ``max_tokens`` (athenaeum#476) makes a truncation far rarer to begin with.
     truncated: int = 0
+    #: Issue athenaeum#1182: Tier-3 merges suppressed by the page-size
+    #: invariant across BOTH of this transport's merge-dispatch sites — the
+    #: batch-submission assembly loop (an over-threshold page never becomes
+    #: a batch request) and the finalize-time ``sync_merges`` fallback
+    #: (mirrors the synchronous transport's ``tier3_derive_actions`` exactly).
+    #: Derived from the same per-file escalations flushed via
+    #: ``tier4_escalate`` (by ``conflict_type == "oversize_page"``), the same
+    #: way ``athenaeum.models.ProcessingResult.oversize_suppressed`` is.
+    oversize_suppressed: int = 0
     #: Issue athenaeum#1196: NEW entity writes this run's finalize loop refused
     #: because their ``type`` was outside declared ∪ ``KNOWN_TYPES`` (the
     #: write-boundary guard — see ``athenaeum.wiki_write_guard``). Not
@@ -1428,6 +1445,16 @@ def process_batch_run(
                     ),
                 )
             )
+        # Issue athenaeum#1173: create-path name gate, same call as the sync
+        # transport (librarian.process_one) — sits immediately after the
+        # athenaeum#1126 address gate above and BEFORE actions are built, so a
+        # rejected/escalated name never reaches a tier-3 create action (batch
+        # request or sync-create) on this transport either.
+        name_gate_outcome = gate_create_name_classifications(
+            classified, st.raw.ref, st.raw.content, config
+        )
+        classified = name_gate_outcome.kept
+        st.address_escalations.extend(name_gate_outcome.escalations)
         for c in classified:
             st.actions.append(
                 EntityAction(
@@ -1553,6 +1580,23 @@ def process_batch_run(
                     # the anchor-free full-echo fallback.
                     if existing_body_needs_full_echo(existing_body):
                         st.sync_merges.append(action)
+                        continue
+                    # Issue athenaeum#1182: page-size invariant, enforced BEFORE a
+                    # batch merge item is ASSEMBLED — no request is ever
+                    # submitted for an over-threshold page, so it costs no
+                    # spend and receives no merge. Reuses check_page_size_gate
+                    # unchanged (same function tier3_derive_actions's
+                    # synchronous "update" branch calls); the escalation is
+                    # carried on st.address_escalations, which finalize
+                    # already flushes through the SAME tier4_escalate() call
+                    # every other per-file escalation on this transport uses
+                    # (see that field's docstring for the "flushed in BOTH
+                    # branches that unlink the raw file" contract).
+                    oversize_escalation = check_page_size_gate(
+                        action, existing_body, st.raw.ref, config
+                    )
+                    if oversize_escalation is not None:
+                        st.address_escalations.append(oversize_escalation)
                         continue
                     cid = f"t3-{i}-m{j}"
                     t3_raw_by_cid[cid] = st.raw
@@ -1731,6 +1775,14 @@ def process_batch_run(
                     config=resolved_config,
                 )
                 result.escalated += len(st.address_escalations)
+                # Issue athenaeum#1182: same derived-from-conflict_type counting
+                # as the main finalize branch below and the synchronous
+                # transport's _apply_tier3_results.
+                result.oversize_suppressed += sum(
+                    1
+                    for _e in st.address_escalations
+                    if _e.conflict_type == "oversize_page"
+                )
             st.raw.path.unlink()
             log.info("  Deleted: %s", st.raw.path)
             continue
@@ -1836,6 +1888,20 @@ def process_batch_run(
                     continue
                 text = existing_path.read_text(encoding="utf-8")
                 meta, existing_body = parse_frontmatter(text)
+
+                # Issue athenaeum#1182: page-size invariant, enforced BEFORE the
+                # merge prompt is built or any model call is made — mirrors
+                # tier3_derive_actions's synchronous "update" branch exactly
+                # (same check_page_size_gate call), since this loop is that
+                # same synchronous merge, just reached from the batch
+                # transport's finalize step instead of process_one.
+                oversize_escalation = check_page_size_gate(
+                    action, existing_body, st.raw.ref, config
+                )
+                if oversize_escalation is not None:
+                    escalations.append(oversize_escalation)
+                    continue
+
                 updated_body, esc = tier3_merge(
                     action,
                     existing_body,
@@ -1896,6 +1962,14 @@ def process_batch_run(
             result.created += len(written_entities)
             result.updated += len(updated_uids)
             result.escalated += len(escalations)
+            # Issue athenaeum#1182: derived from `escalations` by conflict_type,
+            # mirroring athenaeum.librarian._apply_tier3_results on the
+            # synchronous transport — covers BOTH this file's batched merge_ids
+            # escalations and its finalize-time sync_merges escalations, since
+            # both were folded into the same `escalations` list above.
+            result.oversize_suppressed += sum(
+                1 for _e in escalations if _e.conflict_type == "oversize_page"
+            )
             result.skipped += len(st.skipped)
             st.raw.path.unlink()
             log.info("  Deleted: %s", st.raw.path)
@@ -1955,6 +2029,9 @@ class BatchCollectResult:
     skipped: int = 0
     degraded: int = 0
     truncated: int = 0
+    #: Issue athenaeum#1182: summed from each inner process_batch_run() call's
+    #: BatchRunResult.oversize_suppressed — see that field's docstring.
+    oversize_suppressed: int = 0
     #: Issue athenaeum#1196: same write-boundary-guard counter as
     #: :attr:`BatchRunResult.type_rejected`, folded up from the underlying
     #: :func:`process_batch_run` call this collect delegates to.
@@ -2552,6 +2629,7 @@ def collect_pending_batches(
         out.skipped += applied.skipped
         out.degraded += applied.degraded
         out.truncated += applied.truncated
+        out.oversize_suppressed += applied.oversize_suppressed
         out.type_rejected += applied.type_rejected  # issue athenaeum#1196
         out.failed_refs.extend(applied.failed_refs)
         out.in_flight_refs.extend(applied.in_flight_refs)
