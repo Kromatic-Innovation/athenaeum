@@ -9,6 +9,7 @@ the suite is deterministic and dependency-free.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -700,6 +701,334 @@ class TestWikiClusterFormationIsCompleteLinkage:
         assert all_sources <= {f"chain-{i}.md" for i in range(7)}
 
 
+# --- Issue athenaeum#1142: durable embedder + suppression attribution ---
+#
+# athenaeum#1032 stamped the embedder onto suppression LOG LINES and the raw-intake
+# clusters JSONL. It never reached ``wiki/_pending_merges.md`` (a written
+# proposal carried no embedder field) or any durable record of a SUPPRESSED
+# wiki-dedupe cluster (suppression was a log.info call only) -- so a
+# suppressed cluster could never answer "which embedder, and why?" without
+# a live host log read. These tests exercise the two surfaces this issue
+# closes: the proposal block itself (AC1), and a new sidecar ledger for
+# suppressions (AC2), plus the AC3 non-constant-field guard and the AC4
+# bounded-retention behavior.
+
+
+class TestEmbedderAttributionOnProposals:
+    """AC1: a written proposal carries the embedder that produced its cluster."""
+
+    def test_proposal_block_carries_chromadb_default_embedder(
+        self, duplicate_topic_wiki: Path
+    ) -> None:
+        from athenaeum.pending_merges import parse_pending_merges
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        propose_wiki_page_merges(
+            duplicate_topic_wiki,
+            config={},
+            threshold=0.8,
+            embedding_provider=_fake_embed,
+        )
+        merges_path = duplicate_topic_wiki / "wiki" / "_pending_merges.md"
+        pm = parse_pending_merges(merges_path)[0]
+        assert pm.embedder == "chromadb-default"
+        assert "**Embedder**: chromadb-default" in merges_path.read_text(
+            encoding="utf-8"
+        )
+
+    def test_proposal_block_carries_fallback_hashing_embedder(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.pending_merges import parse_pending_merges
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        for i in range(3):
+            _write_page(
+                wiki_root,
+                f"dup-{i}.md",
+                body=(
+                    "Identical cohesive duplicate content for the "
+                    "fallback-hashing embedder-attribution test."
+                ),
+            )
+        knowledge_root = wiki_root.parent
+
+        def _no_vectors(texts: list[str]) -> list[list[float]] | None:
+            return None
+
+        proposals = propose_wiki_page_merges(
+            knowledge_root,
+            config={},  # 3 sources, well under max_merge_sources=5 -- not suppressed
+            threshold=0.6,
+            embedding_provider=_no_vectors,
+        )
+        assert len(proposals) == 1
+        merges_path = wiki_root / "_pending_merges.md"
+        pm = parse_pending_merges(merges_path)[0]
+        assert pm.embedder == "fallback-hashing"
+        assert "**Embedder**: fallback-hashing" in merges_path.read_text(
+            encoding="utf-8"
+        )
+
+    def test_raw_intake_write_path_unaffected_no_embedder_line(
+        self, tmp_path: Path
+    ) -> None:
+        """Blast-radius guard: ``write_pending_merge`` called without
+        ``embedder=`` (both of ``merge.py``'s raw-intake call sites, neither
+        modified by athenaeum#1142) renders byte-identical to before this
+        field existed -- no ``**Embedder**:`` line, empty string on parse."""
+        from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
+
+        merges_path = tmp_path / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="some-topic",
+            sources=[str(tmp_path / "a.md"), str(tmp_path / "b.md")],
+            rationale="test",
+            draft_merged_body="body",
+            confidence=0.9,
+        )
+        text = merges_path.read_text(encoding="utf-8")
+        assert "**Embedder**" not in text
+        pm = parse_pending_merges(merges_path)[0]
+        assert pm.embedder == ""
+
+
+class TestSuppressionLedger:
+    """AC2/AC4: suppressed clusters are recorded durably, with reason and
+    embedder, in a bounded (never unbounded-append) sidecar ledger."""
+
+    def _seed_cohesive_cluster(self, tmp_path: Path, n: int) -> Path:
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        for i in range(n):
+            _write_page(
+                wiki_root,
+                f"dup-{i}.md",
+                body=f"Cohesive duplicate-topic wiki page number {i}.",
+            )
+        return wiki_root.parent
+
+    def test_suppressed_cluster_recorded_with_reason_and_embedder(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.wiki_dedupe import (
+            DEFAULT_WIKI_SUPPRESSIONS_FILENAME,
+            propose_wiki_page_merges,
+        )
+
+        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
+        proposals = propose_wiki_page_merges(
+            knowledge_root,
+            config={},  # default max_merge_sources=5 < 6 sources -> suppressed
+            threshold=0.8,
+            embedding_provider=_identical_embed,
+        )
+        assert proposals == []
+
+        ledger_path = knowledge_root / "wiki" / DEFAULT_WIKI_SUPPRESSIONS_FILENAME
+        assert ledger_path.is_file()
+        rows = [
+            json.loads(line)
+            for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert len(rows) == 1
+        row = rows[0]
+        # AC5: this one row answers both "which embedder" and "why
+        # suppressed" with no live host read.
+        assert row["n_sources"] == 6
+        assert "over-cluster" in row["reason"]
+        assert row["embedder"] == "chromadb-default"
+        assert row["cluster_threshold"] == 0.8
+        assert len(row["sources"]) == 6
+        assert row["suppressed_at"]  # non-empty ISO timestamp
+
+    def test_ledger_written_even_with_zero_suppressions(
+        self, duplicate_topic_wiki: Path
+    ) -> None:
+        """Written every real run, even to empty -- so the canonical file
+        always reflects THIS run's state, never a stale prior one."""
+        from athenaeum.wiki_dedupe import (
+            DEFAULT_WIKI_SUPPRESSIONS_FILENAME,
+            propose_wiki_page_merges,
+        )
+
+        propose_wiki_page_merges(
+            duplicate_topic_wiki,
+            config={},
+            threshold=0.8,
+            embedding_provider=_fake_embed,
+        )
+        ledger_path = duplicate_topic_wiki / "wiki" / DEFAULT_WIKI_SUPPRESSIONS_FILENAME
+        assert ledger_path.is_file()
+        assert ledger_path.read_text(encoding="utf-8") == ""
+
+    def test_dry_run_never_writes_the_ledger(self, tmp_path: Path) -> None:
+        from athenaeum.wiki_dedupe import (
+            DEFAULT_WIKI_SUPPRESSIONS_FILENAME,
+            propose_wiki_page_merges,
+        )
+
+        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
+        propose_wiki_page_merges(
+            knowledge_root,
+            config={},
+            threshold=0.8,
+            embedding_provider=_identical_embed,
+            dry_run=True,
+        )
+        ledger_path = knowledge_root / "wiki" / DEFAULT_WIKI_SUPPRESSIONS_FILENAME
+        assert not ledger_path.exists()
+
+    def test_canonical_file_is_replaced_not_appended_across_runs(
+        self, tmp_path: Path
+    ) -> None:
+        """AC4: a current-run SNAPSHOT, not an accumulating append-only
+        ledger -- the exact asymmetry a sibling item (athenaeum#1229) is
+        separately fixing for a DIFFERENT ledger that grew unbounded."""
+        from athenaeum.wiki_dedupe import (
+            DEFAULT_WIKI_SUPPRESSIONS_FILENAME,
+            propose_wiki_page_merges,
+        )
+
+        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
+        propose_wiki_page_merges(
+            knowledge_root,
+            config={},
+            threshold=0.8,
+            embedding_provider=_identical_embed,
+        )
+        ledger_path = knowledge_root / "wiki" / DEFAULT_WIKI_SUPPRESSIONS_FILENAME
+        first_rows = ledger_path.read_text(encoding="utf-8").splitlines()
+        assert len(first_rows) == 1
+
+        # Same corpus, cap raised so THIS run suppresses nothing.
+        propose_wiki_page_merges(
+            knowledge_root,
+            config={"librarian": {"max_merge_sources": 10}},
+            threshold=0.8,
+            embedding_provider=_identical_embed,
+        )
+        second_text = ledger_path.read_text(encoding="utf-8")
+        assert second_text == ""  # replaced, not appended to the prior row
+
+    def test_rotation_pruned_to_configured_retention(self, tmp_path: Path) -> None:
+        """AC4: rotations follow the SAME ``librarian.rotation_retention``
+        policy ``_librarian-clusters.jsonl`` already uses -- reused, not a
+        second retention knob. Mirrors
+        ``tests/test_librarian_clusters.py::TestPruneClusterRotations``'s
+        hand-seeded-timestamp technique rather than depending on real
+        wall-clock separation between calls."""
+        from athenaeum.wiki_dedupe import (
+            DEFAULT_WIKI_SUPPRESSIONS_FILENAME,
+            _write_wiki_suppressions_report,
+        )
+
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        canonical = wiki_root / DEFAULT_WIKI_SUPPRESSIONS_FILENAME
+        stem = canonical.stem
+        for stamp in ["20260101T000000Z", "20260102T000000Z", "20260103T000000Z"]:
+            (wiki_root / f"{stem}-{stamp}.jsonl").write_text("{}\n", encoding="utf-8")
+
+        _write_wiki_suppressions_report(
+            [],
+            wiki_root,
+            knowledge_root=knowledge_root,
+            config={"librarian": {"rotation_retention": 2}},
+        )
+        remaining = sorted(p.name for p in wiki_root.glob(f"{stem}-*.jsonl"))
+        # The 3 hand-seeded rotations + the 1 just written = 4 candidates;
+        # keep=2 prunes down to the 2 newest (the just-written one is
+        # newest by construction -- today's real UTC timestamp).
+        assert len(remaining) == 2
+        assert canonical.is_file()  # canonical itself never matches the glob
+
+
+class TestEmbedderAttributionDiffersByRun:
+    """AC3: a run using a non-default embedder produces artifacts whose
+    attribution DIFFERS from a default-embedder run, on BOTH surfaces this
+    issue touches -- so the field cannot silently go constant."""
+
+    @staticmethod
+    def _make_identical_pages(root: Path, n: int = 3) -> Path:
+        wiki_root = root / "knowledge" / "wiki"
+        for i in range(n):
+            _write_page(
+                wiki_root,
+                f"dup-{i}.md",
+                body="Shared identical body text for the run-comparison fixture.",
+            )
+        return wiki_root.parent
+
+    def test_proposal_embedder_field_differs_between_runs(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.pending_merges import parse_pending_merges
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        real_root = self._make_identical_pages(tmp_path / "real")
+        propose_wiki_page_merges(
+            real_root, config={}, threshold=0.8, embedding_provider=_identical_embed
+        )
+        real_pm = parse_pending_merges(real_root / "wiki" / "_pending_merges.md")[0]
+
+        fallback_root = self._make_identical_pages(tmp_path / "fallback")
+        propose_wiki_page_merges(
+            fallback_root,
+            config={},
+            threshold=0.6,
+            embedding_provider=lambda texts: None,
+        )
+        fallback_pm = parse_pending_merges(
+            fallback_root / "wiki" / "_pending_merges.md"
+        )[0]
+
+        assert real_pm.embedder == "chromadb-default"
+        assert fallback_pm.embedder == "fallback-hashing"
+        assert real_pm.embedder != fallback_pm.embedder
+
+    def test_suppression_ledger_embedder_field_differs_between_runs(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.wiki_dedupe import (
+            DEFAULT_WIKI_SUPPRESSIONS_FILENAME,
+            propose_wiki_page_merges,
+        )
+
+        real_root = self._make_identical_pages(tmp_path / "real", n=6)
+        propose_wiki_page_merges(
+            real_root, config={}, threshold=0.8, embedding_provider=_identical_embed
+        )
+        real_rows = [
+            json.loads(line)
+            for line in (real_root / "wiki" / DEFAULT_WIKI_SUPPRESSIONS_FILENAME)
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+
+        fallback_root = self._make_identical_pages(tmp_path / "fallback", n=6)
+        propose_wiki_page_merges(
+            fallback_root,
+            config={},
+            # 0.6, not 0.8: the fallback-hashing embedder folds in each
+            # page's distinct filename token, so even byte-identical bodies
+            # land at ~0.667 pairwise (see TestSuppressionGates's docstring
+            # in this file) -- 0.8 would form no cluster at all here.
+            threshold=0.6,
+            embedding_provider=lambda texts: None,
+        )
+        fallback_rows = [
+            json.loads(line)
+            for line in (fallback_root / "wiki" / DEFAULT_WIKI_SUPPRESSIONS_FILENAME)
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+
+        assert real_rows[0]["embedder"] == "chromadb-default"
+        assert fallback_rows[0]["embedder"] == "fallback-hashing"
+        assert real_rows[0]["embedder"] != fallback_rows[0]["embedder"]
 # --- Issue athenaeum#1140: chunk-and-mean-pool fixes the truncation collapse ---
 #
 # Root cause (full measurement trail in the issue): chromadb's default ONNX
