@@ -71,6 +71,26 @@ op read "op://Agent Tools/Anthropic API Key/credential"
 
 Override path via `ATHENAEUM_OP_KEY_PATH`. The fetched key is cached in `~/.cache/athenaeum/config.env` with `0600` perms. Every failure mode is silent — the recall hook then degrades to the regex fallback.
 
+**On-disk exposure (athenaeum#1179).** The key is cached in *plaintext*, not
+encrypted — `0600` restricts it to the owning OS user, it does not protect it
+from another process running as that same user, and it is not cleared
+between sessions. `session-start-recall.sh` guarantees `~/.cache/athenaeum`
+is `0700` and `config.env` is `0600` on **every** run, regardless of the
+file's prior mode (an explicit `chmod` after each write, not just the
+process `umask` at creation time — see the "Re-assert the file mode" comment
+in the script), and this is asserted by
+`tests/test_shell_hooks.py::TestSessionStartRecall::test_preexisting_loose_permissions_are_hardened`.
+True zero-disk sourcing (reading from 1Password on every invocation instead
+of caching) was considered and rejected for the per-turn hooks: unlike
+`session-start-recall.sh` (once per session), `user-prompt-recall.sh` and
+`rebuild-index.sh` run as a fresh process on every turn / rebuild, so an
+env var exported in one process is not visible to the next — only a file on
+disk is. Shelling out to `op read` on every turn would add a 1Password CLI
+round-trip (and its own failure modes: session lock, vault re-auth) to the
+hot per-turn path this pipeline is designed to keep cheap. The cache is the
+accepted, reversible trade-off; the residual exposure is the plaintext file
+itself, mitigated to owner-only-readable, not eliminated.
+
 ## Failure modes and diagnostics
 
 | Symptom | First check |
