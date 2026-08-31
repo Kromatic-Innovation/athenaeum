@@ -5114,6 +5114,70 @@ def _run_correction_phase(ctx: RunContext) -> None:
         )
 
 
+def _run_name_collision_phase(ctx: RunContext) -> None:
+    """Issue athenaeum#1170 AC2: the nightly deterministic name-collision scan.
+
+    Deliberately its OWN phase — modelled exactly on
+    :func:`_run_wiki_dedup_phase` immediately below (same
+    ``if ctx.wiki_root.is_dir()`` guard, same "log and swallow, never abort
+    the run" posture, same finally-block profile append), but never folded
+    into it, and called BEFORE it (see ``run()``): the wiki-dedup pass is
+    expensive (vector/LLM-based) and, per its own module docstring, under
+    repair, while this detector is deterministic, zero-cost (a glob + a
+    dict grouping — no LLM, no vectors, no network), and independent by
+    design — a wiki-dedup failure must never suppress this phase's metric,
+    and this phase's own failure (swallowed below) must never suppress
+    wiki-dedup's.
+
+    Delegates entirely to :func:`athenaeum.name_collisions.resolve_name_collisions`,
+    gated by :func:`athenaeum.config.resolve_name_collision_scan_enabled`
+    (default ON — the scan itself is free) and, for the auto-merge subset
+    only, :func:`athenaeum.config.resolve_name_collision_automerge_enabled`
+    (default OFF — see that resolver's docstring for why). With the scan
+    flag off, this phase records ``{"reason": "disabled"}`` and does
+    nothing else — a disabled phase is distinguishable from one that ran
+    and found zero collisions.
+
+    ``ctx.dry_run`` is threaded straight through to
+    :func:`~athenaeum.name_collisions.resolve_name_collisions`, which scans
+    and reports accurate counts but writes nothing and merges nothing on
+    that path — mirrors every other dry-run-aware phase in this module.
+
+    Appends a ``"name-collisions"`` :attr:`RunContext.run_profile` entry
+    carrying ``collisions``/``unambiguous``/``ambiguous``/``merged``/
+    ``queued`` counts (or just ``reason`` when disabled/failed) — this flows
+    automatically into both :func:`_render_run_summary` and
+    :func:`athenaeum.run_summary_log.build_run_summary_ledger_record`
+    (``record["phases"]["name-collisions"]``), same as every other phase's
+    entry.
+    """
+    if not ctx.wiki_root.is_dir():
+        return
+    _start = time.monotonic()
+    _fields: dict[str, Any] = {"reason": "completed"}
+    try:
+        from athenaeum.config import (
+            resolve_name_collision_automerge_enabled,
+            resolve_name_collision_scan_enabled,
+        )
+        from athenaeum.name_collisions import resolve_name_collisions
+
+        if not resolve_name_collision_scan_enabled(ctx.config):
+            _fields = {"reason": "disabled"}
+        else:
+            auto_merge = resolve_name_collision_automerge_enabled(ctx.config)
+            counts = resolve_name_collisions(
+                ctx.wiki_root, auto_merge=auto_merge, dry_run=ctx.dry_run
+            )
+            _fields = {"reason": "completed", **counts}
+    except Exception:
+        log.exception("name-collision scan failed; continuing run")
+    finally:
+        ctx.run_profile.append(
+            ("name-collisions", time.monotonic() - _start, _fields)
+        )
+
+
 def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
     """Issue athenaeum#290/athenaeum#715 wiki-page dedup pass, then the post-phase deadline check.
 
@@ -7811,6 +7875,12 @@ def run(
     # phase — its install/removal timing relative to deadline arming (just
     # above) and the tier loop (which it wraps) is load-bearing and MUST NOT
     # shift; see that function's docstring.
+
+    # Phase: athenaeum#1170 nightly name-collision scan — a fully independent
+    # sibling of the wiki-dedup pass immediately below, called BEFORE it
+    # (deterministic/zero-cost, never folded into the expensive vector/LLM
+    # dedup pass; see _run_name_collision_phase's docstring).
+    _run_name_collision_phase(ctx)
 
     # Phase: athenaeum#290 wiki-page dedup pass (independent of the C1-C4 auto-memory
     # pipeline; runs on every mode) + the deadline check right after it.
