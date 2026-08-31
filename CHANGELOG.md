@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-knob batch selection: `librarian.batch.<knob>` (athenaeum#1175).**
+  Batch mode was GLOBAL — one flag for the whole run — but only two knobs are
+  ever batched (`classify` and `write`) and they shared it, so an operator
+  could not batch the expensive `write` knob while keeping `classify`
+  synchronous. `write` is ~99% of spend and is exactly where the 50% Batch API
+  discount pays; `classify` is cheap and is the knob whose latency an operator
+  most wants interactive. It was both or neither. Now:
+
+  ```yaml
+  librarian:
+    batch:
+      classify: false
+      write: true
+  ```
+
+  Under the existing `librarian:` parent, deliberately not a new `llm.batch` —
+  batch is a property of how the librarian run is executed, not of the LLM
+  routing layer, and it has to fall back to `librarian.batch_mode`. An absent
+  knob key resolves from `batch_mode`, so a config setting only `batch_mode`
+  behaves identically. A knob enabled here makes the run a batch run even with
+  `batch_mode` off; `--no-batch-mode` remains a hard off no yaml key can
+  defeat. Setting a NON-batchable knob to `true` refuses the run with a clear
+  error rather than being silently ignored. A knob resolved OFF takes the
+  SYNCHRONOUS path inside the batch transport (`tier2_classify` at assembly,
+  `tier3_create` / `tier3_merge` at finalize), so the two genuinely mix.
+
+  Consequently the claude-cli batch guard narrows from batch-CAPABLE knobs to
+  batch-ENABLED ones, which makes `llm.providers.classify: claude-cli` +
+  `librarian.batch.write: true` — subscription-path classification alongside a
+  discounted batched write — a legal install shape for the first time. A
+  claude-cli-routed knob that IS batched is still rejected loudly.
+
 - **Every way a pending batch handle can become un-collectible is now
   reconciled, and none of it is silent (athenaeum#1146).** The distinction the
   work turns on is routinely conflated and has OPPOSITE correct responses: a

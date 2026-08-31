@@ -106,8 +106,10 @@ from athenaeum.tiers import (
     resolve_address_named_classifications,
     stamp_merge_provenance,
     tier1_programmatic_match,
+    tier2_classify,
     tier2_reclassify_larger_budget,
     tier2_request_params,
+    tier3_create,
     tier3_create_params,
     tier3_entity_from_text,
     tier3_merge,
@@ -440,6 +442,19 @@ class _FileState:
         default_factory=list
     )
     sync_merges: list[EntityAction] = field(default_factory=list)
+    # Issue athenaeum#1175: tier-3 CREATES that take the synchronous path because
+    # the ``write`` knob is not batched this run. The merge counterpart
+    # (``sync_merges``) already existed for same-page groups; this is its
+    # create-side twin, and both run through the same finalize-time budget
+    # gate.
+    sync_creates: list[EntityAction] = field(default_factory=list)
+    # Issue athenaeum#1175: classifications produced SYNCHRONOUSLY because the
+    # ``classify`` knob is not batched this run. ``None`` means "this file's
+    # classifications come from the tier-2 batch response"; a list means they
+    # are already parsed and the batch-response path is skipped entirely
+    # (including its athenaeum#476 truncation retry, which ``tier2_classify``
+    # performs for itself).
+    classified: list[Any] | None = None
     created: list[WikiEntity] = field(default_factory=list)
     # Issue athenaeum#1126: Tier-4 escalations for declined address-shaped
     # classifications, built at classification time and flushed at finalize
@@ -717,6 +732,8 @@ def process_batch_run(
     deadline: float | None = None,
     cache_dir: Path | None = None,
     resume: _ResumedWork | None = None,
+    batch_classify: bool = True,
+    batch_write: bool = True,
 ) -> BatchRunResult:
     """Process the intake window through the Batch API phases (issue athenaeum#236).
 
@@ -764,6 +781,16 @@ def process_batch_run(
     :func:`athenaeum.batch_state.resolve_cache_dir`, which is what production
     wants and what keeps the submit side and a later run's collect side
     pointing at the same file.
+
+    Issue athenaeum#1175: *batch_classify* / *batch_write* select which knobs
+    this run actually batches. A knob resolved OFF takes the SYNCHRONOUS path
+    inside this same function — ``tier2_classify`` per file at assembly, or
+    ``tier3_create`` / ``tier3_merge`` per action at finalize — so the two can
+    be mixed. The combination that matters is ``write`` batched with
+    ``classify`` synchronous: ``write`` is nearly all the spend and is where a
+    50% discount pays, while ``classify`` is the knob whose latency an
+    operator most wants to keep interactive. Both ``True`` (every
+    pre-athenaeum#1175 caller) is today's behaviour, byte-for-byte.
 
     Issue athenaeum#1145: *resume* re-enters this pipeline mid-way with a
     previously-submitted batch's results (see :class:`_ResumedWork`). It is
@@ -842,26 +869,51 @@ def process_batch_run(
             # Empty content short-circuits without an API call, exactly
             # like tier2_classify's early return on the sync path.
             if raw.content.strip():
-                st.t2_id = f"t2-{i}"
-                # Each batched request counts as one api_call attempt,
-                # recorded at assembly time (athenaeum#220 budget semantics).
-                usage.api_calls += 1
                 matched_names = [name for name, _, _ in st.matched]
-                t2_raw_by_cid[st.t2_id] = raw
-                t2_requests.append(
-                    BatchRequest(
-                        custom_id=st.t2_id,
-                        params=tier2_request_params(
-                            raw,
-                            matched_names,
-                            valid_types,
-                            valid_tags,
-                            valid_access,
-                            wiki_root=wiki_root,
-                            config=config,
-                        ),
+                if not batch_classify:
+                    # Issue athenaeum#1175: the ``classify`` knob is not batched
+                    # this run. Call the SAME synchronous classifier the
+                    # non-batch loop uses — including its own athenaeum#472
+                    # repair and athenaeum#476 bigger-budget retries — rather
+                    # than reimplementing tier-2 semantics here. ``api_calls``
+                    # is NOT bumped by hand: ``tier2_classify`` records its
+                    # own attempt through ``add_tokens``, and double-counting
+                    # would eat the athenaeum#220 budget twice per file.
+                    sync_stats = Tier2ParseStats()
+                    st.classified = tier2_classify(
+                        raw,
+                        matched_names,
+                        valid_types,
+                        valid_tags,
+                        valid_access,
+                        AnthropicBatchClientBackend(client),
+                        wiki_root=wiki_root,
+                        usage=usage,
+                        config=config,
+                        stats=sync_stats,
                     )
-                )
+                    result.degraded += sync_stats.degraded
+                    result.truncated += sync_stats.truncated
+                else:
+                    st.t2_id = f"t2-{i}"
+                    # Each batched request counts as one api_call attempt,
+                    # recorded at assembly time (athenaeum#220 budget semantics).
+                    usage.api_calls += 1
+                    t2_raw_by_cid[st.t2_id] = raw
+                    t2_requests.append(
+                        BatchRequest(
+                            custom_id=st.t2_id,
+                            params=tier2_request_params(
+                                raw,
+                                matched_names,
+                                valid_types,
+                                valid_tags,
+                                valid_access,
+                                wiki_root=wiki_root,
+                                config=config,
+                            ),
+                        )
+                    )
         except Exception:
             log.exception("Failed to process %s", raw.ref)
             st.failed = True
@@ -938,7 +990,13 @@ def process_batch_run(
         if st.failed or st.done or st.deferred or st.in_flight:
             continue
         classified = []
-        if st.t2_id is not None:
+        if st.classified is not None:
+            # Issue athenaeum#1175: produced synchronously at assembly, already
+            # parsed and already through tier2_classify's own repair/retry
+            # ladder. The batch-response path below (and its athenaeum#476
+            # truncation retry) does not apply.
+            classified = st.classified
+        elif st.t2_id is not None:
             msg = t2_results.get(st.t2_id)
             if msg is None:
                 log.error(
@@ -1147,6 +1205,13 @@ def process_batch_run(
         try:
             for j, action in enumerate(st.actions):
                 if action.kind == "create":
+                    if not batch_write:
+                        # Issue athenaeum#1175: the ``write`` knob is not batched
+                        # this run — this create runs live at finalize,
+                        # through the same finalize-time budget gate the
+                        # same-page synchronous merges already use.
+                        st.sync_creates.append(action)
+                        continue
                     cid = f"t3-{i}-c{j}"
                     t3_raw_by_cid[cid] = st.raw
                     usage.api_calls += 1
@@ -1170,7 +1235,13 @@ def process_batch_run(
                             action.existing_uid,
                         )
                         continue
-                    if merge_uid_counts.get(action.existing_uid, 0) > 1:
+                    if not batch_write or merge_uid_counts.get(
+                        action.existing_uid, 0
+                    ) > 1:
+                        # Issue athenaeum#1175: an unbatched ``write`` knob routes
+                        # EVERY merge down the path same-page groups already
+                        # take, so there is one synchronous merge
+                        # implementation, not two.
                         st.sync_merges.append(action)
                         continue
                     text = existing_path.read_text(encoding="utf-8")
@@ -1196,7 +1267,7 @@ def process_batch_run(
                     st.merge_ids.append(
                         (cid, action, existing_path, meta, existing_body)
                     )
-            if len(t3_requests) > requests_mark or st.sync_merges:
+            if len(t3_requests) > requests_mark or st.sync_merges or st.sync_creates:
                 phase2_spent = True
         except Exception:
             log.exception("Failed to process %s", st.raw.ref)
@@ -1236,7 +1307,7 @@ def process_batch_run(
         and not st.done
         and not st.deferred
         and not st.in_flight
-        and (st.create_ids or st.merge_ids or st.sync_merges)
+        and (st.create_ids or st.merge_ids or st.sync_merges or st.sync_creates)
     ]
     if t3_ceiling is not None and t3_pending:
         log.error(
@@ -1315,7 +1386,8 @@ def process_batch_run(
         # run redoes them). As at phase-2 assembly, the first file to run
         # sync merges proceeds even at the cap (guaranteed progress,
         # one-file overshoot — mirroring the sync loop).
-        if st.sync_merges and sync_merges_started and usage.api_calls >= max_api_calls:
+        _sync_work = st.sync_merges or st.sync_creates
+        if _sync_work and sync_merges_started and usage.api_calls >= max_api_calls:
             log.warning(
                 "API call budget exhausted (%d/%d) before synchronous "
                 "merges — deferring %s",
@@ -1394,8 +1466,22 @@ def process_batch_run(
                     )
                     updated_uids.append(action.existing_uid or "")
 
-            if st.sync_merges:
+            if st.sync_merges or st.sync_creates:
                 sync_merges_started = True
+            # Issue athenaeum#1175: unbatched tier-3 creates, live at finalize.
+            # Ordered before the merges so a file's creates and merges execute
+            # in the same relative order the batched path applies them in.
+            for action in st.sync_creates:
+                new_entities.append(
+                    tier3_create(
+                        action,
+                        st.raw.ref,
+                        AnthropicBatchClientBackend(effective_write_client),
+                        wiki_root=wiki_root,
+                        usage=usage,
+                        config=config,
+                    )
+                )
             for action in st.sync_merges:
                 existing_path = index.get_by_uid(action.existing_uid or "")
                 if not existing_path or not existing_path.exists():
@@ -1852,6 +1938,8 @@ def collect_pending_batches(
     deadline: float | None = None,
     cache_dir: Path | None = None,
     now: "datetime | None" = None,
+    batch_classify: bool = True,
+    batch_write: bool = True,
 ) -> BatchCollectResult:
     """Collect every outstanding athenaeum#1143 handle, oldest first.
 
@@ -2057,6 +2145,11 @@ def collect_pending_batches(
             deadline=deadline,
             cache_dir=effective_cache_dir,
             resume=resumed,
+            # Issue athenaeum#1175: a collected classify handle that pipelines
+            # into tier-3 must honour THIS run's per-knob selection, not the
+            # selection the submitting run happened to have.
+            batch_classify=batch_classify,
+            batch_write=batch_write,
         )
 
         out.created += applied.created

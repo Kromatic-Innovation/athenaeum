@@ -2472,6 +2472,78 @@ def librarian_batch_mode(config: dict[str, object] | None = None) -> bool:
     return False
 
 
+#: The knobs the Batch API transport actually batches (issue athenaeum#1175).
+#: Determined by reading ``batch.py``, not guessed: ``process_batch_run`` calls
+#: ``execute_batch(..., knob=...)`` exactly twice — ``classify`` for the tier-2
+#: batch and ``write`` for the tier-3 batch. Mirrors
+#: :data:`athenaeum.batch_state.KNOBS`, which names the same two for the same
+#: reason. Making a THIRD knob batchable is deliberately out of scope here;
+#: the point of this tuple is that a config naming any other knob is a
+#: mistake the operator gets told about rather than a silent no-op.
+BATCHABLE_KNOBS = ("classify", "write")
+
+
+def _librarian_batch_section(config: dict[str, object] | None) -> dict[str, object]:
+    """The raw ``librarian.batch`` mapping, or ``{}``.
+
+    Under the EXISTING ``librarian:`` parent — deliberately not a new
+    ``llm.batch``. Batch is a property of how the librarian run is executed,
+    not of the LLM routing layer, and putting it under ``llm.`` would separate
+    it from ``librarian.batch_mode``, which it must fall back to.
+    """
+    if not isinstance(config, dict):
+        return {}
+    cfg = config.get("librarian")
+    if not isinstance(cfg, dict):
+        return {}
+    section = cfg.get("batch")
+    return section if isinstance(section, dict) else {}
+
+
+def librarian_batch_knob(
+    config: dict[str, object] | None, knob: str, *, default: bool
+) -> bool:
+    """Whether *knob* is batched this run (issue athenaeum#1175).
+
+    Batch mode used to be GLOBAL — one flag for the whole run — but only two
+    knobs are ever batched, and they shared it. The consequence: an operator
+    could not batch the expensive ``write`` knob while keeping ``classify``
+    synchronous. ``write`` is the overwhelming majority of spend and exactly
+    where a 50% Batch API discount pays; ``classify`` is cheap and is the knob
+    whose latency an operator most wants to keep interactive. It was both or
+    neither.
+
+    Resolution: an explicit ``librarian.batch.<knob>`` boolean wins; absent
+    one, *default* — the run-level batch-mode value the caller already
+    resolved from ``--batch-mode`` / ``ATHENAEUM_BATCH_MODE`` /
+    ``librarian.batch_mode``. So a config that sets only ``batch_mode``
+    behaves exactly as it did before this key existed.
+    """
+    raw = _librarian_batch_section(config).get(knob)
+    return raw if isinstance(raw, bool) else default
+
+
+def unbatchable_knobs_enabled(config: dict[str, object] | None) -> list[str]:
+    """Knobs set ``librarian.batch.<knob>: true`` that CANNOT be batched.
+
+    Returned so the caller can refuse the run loudly. Enabling batching for a
+    knob no transport batches is a config ERROR, not a silent no-op: the
+    operator has stated an intent the system will not honour, and finding that
+    out from a spend report weeks later is the expensive way to learn it.
+
+    A knob set to ``false`` is not reported. It states an accurate fact —
+    that knob is not batched — and refusing it would break a config that
+    merely spells out the status quo.
+    """
+    return sorted(
+        knob
+        for knob, value in _librarian_batch_section(config).items()
+        if isinstance(knob, str)
+        and knob not in BATCHABLE_KNOBS
+        and value is True
+    )
+
+
 def librarian_run_type(config: dict[str, object] | None = None) -> str:
     """Resolve the ``run_type`` ledger-attribution tag from env > default (athenaeum#1136).
 
@@ -3353,6 +3425,15 @@ class RunContext:
     # them), but they were drained by it, so ``files_processed_count`` counts
     # them — otherwise a collect-only run reads as having done nothing.
     collected_refs: list[str] = field(default_factory=list)
+    # Issue athenaeum#1175: per-knob batch selection, resolved by
+    # ``_resolve_run_config`` from ``librarian.batch.<knob>`` falling back to
+    # the run-level ``batch_mode``. ``batch_mode`` itself becomes the OR of the
+    # two — "is this a batch run at all" — so an operator who enables ONLY
+    # ``librarian.batch.write`` gets a batch run without also setting the
+    # global flag. Both default True so a RunContext built directly (tests,
+    # in-process callers) behaves exactly as it did before per-knob selection.
+    batch_classify: bool = True
+    batch_write: bool = True
     # Issue athenaeum#1146 AC7: every pending-batch reconciliation outcome this run
     # reached, counted by reason (``athenaeum.batch.RECONCILE_REASONS``). None
     # of them is silent: the map is rendered in the run summary and exported
@@ -3809,8 +3890,54 @@ def _resolve_run_config(ctx: RunContext) -> int | None:
 
     # Issue athenaeum#236: resolve the Batch API opt-in the same way (explicit arg >
     # env > yaml > default off).
-    if ctx.batch_mode is None:
-        ctx.batch_mode = librarian_batch_mode(ctx.config)
+    #
+    # Issue athenaeum#1175: then resolve it PER KNOB. Only two knobs are ever
+    # batched and they used to share one flag, so an operator could not batch
+    # the expensive ``write`` knob while keeping ``classify`` synchronous —
+    # which is the one combination worth having, since ``write`` is nearly all
+    # the spend and ``classify`` is the knob whose latency stays visible.
+    #
+    # ``--no-batch-mode`` remains a HARD off: its documented contract is
+    # "forces the synchronous path even when env/yaml turn batch mode on", and
+    # a yaml per-knob key must not be able to defeat an explicit CLI refusal.
+    # Every other case treats the run-level value as the per-knob DEFAULT, so a
+    # config that sets only ``batch_mode`` resolves byte-identically to before.
+    _explicit_batch_mode = ctx.batch_mode
+    if _explicit_batch_mode is False:
+        ctx.batch_classify = False
+        ctx.batch_write = False
+    else:
+        _batch_default = (
+            _explicit_batch_mode
+            if _explicit_batch_mode is not None
+            else librarian_batch_mode(ctx.config)
+        )
+        ctx.batch_classify = librarian_batch_knob(
+            ctx.config, "classify", default=_batch_default
+        )
+        ctx.batch_write = librarian_batch_knob(
+            ctx.config, "write", default=_batch_default
+        )
+    # "Is this a batch run at all" is now the OR: enabling only
+    # ``librarian.batch.write`` must be enough to reach the batch transport.
+    ctx.batch_mode = ctx.batch_classify or ctx.batch_write
+
+    # A knob no transport batches, set to ``true``, is a config ERROR rather
+    # than a silent no-op — the operator has stated an intent the system will
+    # not honour, and a spend report weeks later is the expensive way to find
+    # that out.
+    _unbatchable = unbatchable_knobs_enabled(ctx.config)
+    if _unbatchable:
+        log.error(
+            "librarian.batch.%s: true — that knob is not batchable. Only %s "
+            "are submitted through the Messages Batch API (see "
+            "athenaeum.librarian.BATCHABLE_KNOBS); enabling batching for any "
+            "other knob would be silently ignored, so it is refused instead. "
+            "Remove the key, or set it to false.",
+            ", librarian.batch.".join(_unbatchable),
+            " and ".join(BATCHABLE_KNOBS),
+        )
+        return 1
 
     # Issue athenaeum#1136: resolve which kind of caller this run declares
     # itself as (explicit arg > env > default RUN_TYPE_LIBRARIAN — no yaml,
@@ -3838,15 +3965,34 @@ def _resolve_run_config(ctx: RunContext) -> int | None:
     # opaque transport error. A config with no ``llm.providers.classify``/
     # ``.write`` key resolves both to ``ctx.provider`` and behaves
     # byte-identically to the pre-athenaeum#786 single-provider check (AC6).
-    _batch_knobs = ("classify", "write")
+    #
+    # Issue athenaeum#1175: narrowed from batch-CAPABLE knobs to batch-ENABLED
+    # ones. Rejecting a ``claude-cli``-routed knob that this run is not going
+    # to batch refuses a legal and useful shape — subscription-path
+    # classification alongside a discounted batched write:
+    #
+    #     llm:
+    #       providers:
+    #         classify: claude-cli
+    #     librarian:
+    #       batch:
+    #         write: true
+    #
+    # The guard still fires for any knob that IS batched on an incompatible
+    # provider, which is the failure it exists to catch.
+    _batch_enabled = {
+        "classify": ctx.batch_classify,
+        "write": ctx.batch_write,
+    }
     _batch_incompatible_knobs = [
         knob
-        for knob in _batch_knobs
-        if not capabilities_for_knob(
+        for knob in BATCHABLE_KNOBS
+        if _batch_enabled[knob]
+        and not capabilities_for_knob(
             ctx.config, knob, default=ctx.provider
         ).supports_batches
     ]
-    if ctx.batch_mode and _batch_incompatible_knobs:
+    if _batch_incompatible_knobs:
         log.error(
             "batch mode (ATHENAEUM_BATCH_MODE / librarian.batch_mode / "
             "--batch-mode) is incompatible with the claude-cli provider on "
@@ -4765,6 +4911,8 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
         max_api_calls=ctx.max_api_calls,
         provider=ctx.provider,
         write_client=ctx.write_client,
+        batch_classify=ctx.batch_classify,
+        batch_write=ctx.batch_write,
         # Issue athenaeum#1144: a collect that pipelines into a new tier-3 batch
         # is bounded by the same wall-clock budget the submit path is.
         deadline=(
@@ -5027,6 +5175,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # ``write`` knob client — ``None`` falls back to
                         # *client* (the ``classify`` client) unchanged.
                         write_client=write_client,
+                        # Issue athenaeum#1175: per-knob batch selection. A knob
+                        # resolved OFF takes the synchronous path inside the
+                        # batch transport, so the two can be mixed.
+                        batch_classify=ctx.batch_classify,
+                        batch_write=ctx.batch_write,
                         # Issue athenaeum#1144: the run's wall-clock deadline, so the
                         # batch poll stops at the earlier of batch-end or the
                         # remaining window instead of blocking on the module's
