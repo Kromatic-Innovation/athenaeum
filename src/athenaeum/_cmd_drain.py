@@ -195,6 +195,12 @@ def cmd_drain(args: argparse.Namespace) -> int:
             max_usd=args.max_usd,
             max_files=args.max_files,
             config=config,
+            # Issue athenaeum#1230: an unbounded (max_runtime=0), block-polling
+            # batch drain is the run-lock holder most likely to actually
+            # exceed break_stale_after's 6h default — see run_drain's
+            # docstring. One lock is held across every window of the whole
+            # drain, so it must heartbeat.
+            heartbeat=lock.heartbeat,
         )
     finally:
         lock.release()

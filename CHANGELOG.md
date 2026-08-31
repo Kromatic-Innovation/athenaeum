@@ -33,6 +33,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`athenaeum ingest` held the run lock without heartbeating, so
+  `break_stale_after` could break a healthy long run (athenaeum#1230).** Only
+  `librarian.py` refreshed the lock's heartbeat; the ingest path did not, so
+  `heartbeat_age_seconds` equalled its total wall time — a long-running,
+  correctly-progressing ingest looked progressively more "wedged" the longer
+  it ran, and a contending `acquire` could auto-break it under
+  `break_stale_after` (default 6h). Fixed by threading `lock.heartbeat` into
+  `ingest()`/`session_end()` exactly like `athenaeum run`'s athenaeum#526
+  (H10) precedent — both already forward `**run_kwargs` into `run()`, which
+  ticks the heartbeat at phase/per-file boundaries. A full sweep of every
+  `RunLock` acquisition site in `src/athenaeum/` (recorded in
+  `athenaeum.runlock`'s module docstring) found two more holders with the
+  same latent gap and fixed both: `athenaeum drain` (an explicitly unbounded,
+  batch-mode drain that block-polls the Anthropic Batch API for potentially
+  hours, with one lock held across the whole multi-window loop) and
+  `athenaeum merges recompare --apply` (an unbounded-proposal-count,
+  per-pair LLM classify loop that already received the caller's lock but
+  never refreshed it). Every other acquisition site was audited and found
+  correctly bounded (deterministic, or capped well under the 6h default) —
+  see the docstring table for the full per-site reasoning. Regression tests:
+  `tests/test_runlock.py::TestIngestPathHeartbeatWiring`,
+  `tests/test_runlock.py::TestIngestPathLongRunSurvivesContendedBreak`,
+  `tests/test_recompare.py::TestApplyHeartbeatsTheLock`, and
+  `tests/test_drain.py::TestRunDrainLoop::test_heartbeat_is_threaded_into_every_window`.
+
 - **`athenaeum surface-divergence --json`'s `diverged` field could contradict
   its own exit code (athenaeum#1111).** The wrapped library modules'
   `report_as_dict` reports `diverged` as true whenever EITHER direction of
