@@ -11,16 +11,27 @@ storage mechanics) and the store-contract work it depends on are **not**
 touched or depended on here; this module builds its own test fixtures rather
 than waiting for or wrapping either.
 
-**No production caller is migrated onto this module in this slice.** This
-mirrors the precedent :mod:`athenaeum.sensitivity` set for exactly this
+**No production caller was migrated onto this module in THIS slice (athenaeum#985).**
+This mirrored the precedent :mod:`athenaeum.sensitivity` set for exactly this
 shape of split (its own docstring: *"No production module imports this one
 yet as of S1a/S1b ... that was slice S3"*) — the classification/taint logic
-ships fully implemented and fully tested, but wiring it into a live write
-path (`remember()`, the librarian compile, an actual erasure execution
-against real off-corpus storage) is store-dependent, athenaeum#984-and-later
-territory. Every function below has direct unit-test coverage exercising a
-real read/write round trip, which is the "consumed, not dark" bar this
-repo's own precedent sets for a slice in this position.
+shipped fully implemented and fully tested, with wiring into a live write
+path deferred as store-dependent, athenaeum#984-and-later territory. Every
+function below has direct unit-test coverage exercising a real read/write
+round trip, which is the "consumed, not dark" bar this repo's own precedent
+sets for a slice in this position.
+
+**That S3 migration is athenaeum#1116**, mirroring how :mod:`athenaeum.sensitivity`'s
+own S3 (athenaeum#992) migrated S1a/S1b onto live callers. As of athenaeum#1116:
+:mod:`athenaeum.merge` calls :func:`classify_inference_taint` at both compiled-page
+write sites; :mod:`athenaeum.answers` calls :func:`classify_by_provenance` /
+:func:`off_corpus_recall_source` on its re-ingestion path; and
+:mod:`athenaeum.decay_sweep` calls :func:`reconcile_bucket_daily_with_pack`
+(gated on an explicit ``data_class`` frontmatter field — see that function's
+docstring). All three route to :mod:`athenaeum.off_corpus` when it is
+configured, and log a structured warning naming the taint and the page when
+it is not (a reversible default — no deployment breaks for lack of an
+off-corpus surface).
 
 This module covers:
 
@@ -565,28 +576,27 @@ def reconcile_bucket_daily_with_pack(
     :data:`UNKNOWN_JURISDICTION`, since ``bucket:`` carries no jurisdiction
     signal of its own — see the note below).
 
-    **This function does not change what :mod:`athenaeum.decay_sweep` does.**
-    §8.8 is explicit that landing a policy pack is what flips the mapping
-    from aspirational to authoritative, and this athenaeum#985 PR is the
-    first time a policy pack exists at all — but wiring
-    ``decay_sweep.apply_sweep`` to defer to it is a live-behavior change this
-    PR does not make (the brief's DoD requires the nightly librarian run stay
-    behaviourally unchanged with every new key at its default, and
-    ``decay_sweep.py`` imports nothing from this module —
-    ``tests/test_erasure.py::test_decay_sweep_does_not_import_erasure``
-    pins that). This function exists so the mapping is COMPUTABLE and
-    TESTED now, ready for the slice that wires it, rather than re-derived
-    ad hoc later.
+    **Wired into** :mod:`athenaeum.decay_sweep` **by issue athenaeum#1116.** This
+    athenaeum#985 PR shipped the mapping COMPUTABLE and TESTED but did not wire
+    it — ``decay_sweep.py`` imported nothing from this module then. athenaeum#1116
+    is that wiring slice; see :func:`athenaeum.decay_sweep.build_sweep_report`.
 
     Because ``bucket:``-driven expiry never carried a jurisdiction, this
     reconciliation always evaluates at :data:`UNKNOWN_JURISDICTION`, which
     means it always resolves to :data:`UNKNOWN_JURISDICTION_ACTION`
     (``store-off-corpus``) rather than a ``delete-after`` rule from the pack
-    table — a real behavior difference from today's git-archival sweep that
-    a future wiring slice must reconcile explicitly (most likely by having
-    the wiring caller supply the SUBJECT's jurisdiction when one is known,
-    the same "packs key on the subject's jurisdiction where it is known" AC9
-    already requires), not by this function guessing one.
+    table — a real behavior difference from a plain git-archival sweep, which
+    is why athenaeum#1116's wiring gates this function's call on a page's
+    frontmatter carrying an explicit ``data_class`` (no shipped write path
+    stamps one, so the gate does not fire on any corpus produced by shipped
+    code as of that issue) rather than calling it for every ``bucket: daily``
+    page unconditionally — the latter would silently stop archiving EVERY
+    daily-bucket page (PII or not) the moment any pack is active, which is
+    always true by default. A period-bearing pack action
+    (``delete-after``/``retain-until``) is deliberately NOT enforced by that
+    wiring either — this function's own docstring above already establishes
+    that ``period`` is opaque and unparsed; date arithmetic against it is a
+    still-later slice's job, not this one's.
     """
     return classify_retention(
         memory_class=memory_class,
