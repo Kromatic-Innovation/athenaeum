@@ -246,7 +246,7 @@ Rules:
 - **Constant:** `athenaeum.tiers.MERGE_TEMPLATE`
 - **Source:** `src/athenaeum/tiers.py:2051`
 - **Model knob:** `write` &middot; **max_tokens:** `6144`
-- **sha256:** `ad1952ef0c47d6d0c1631b518ce1a4d15e10b7e9a752db34af6f8b8c1b07db95`
+- **sha256:** `3bde09a7e8537f05c7ab447271f6012485d5f4d77d03b0f1ed6163a214254f90`
 
 ```text
 ## Existing page content
@@ -256,7 +256,7 @@ Rules:
 {observations}
 
 ## Instructions
-Return a JSON object of anchored edit operations that fold the new
+{scoping_note}Return a JSON object of anchored edit operations that fold the new
 observation into the existing page body, per the system instructions, e.g.:
 {{"ops": [{{"op": "insert_after", "anchor": "<verbatim snippet>", "text": "..."}}]}}
 Copy every anchor VERBATIM from the existing body above; each anchor must

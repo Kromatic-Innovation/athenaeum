@@ -1425,6 +1425,97 @@ class TestMidAssemblyFailure:
         assert remaining == ["20240411T120000Z-aabbccd1.md"]
 
 
+class TestSectionScopedMergeBothTransports:
+    """Issue athenaeum#1181, priority #2: ``batch.py`` calls
+    ``tier3_merge_params`` DIRECTLY to build a batched patch-mode request —
+    it never goes through ``tier3_merge``. A change made only in the
+    synchronous path silently would not apply to batch mode; that exact
+    divergence was a real defect in a sibling issue that landed the same
+    day as this one. Proves the batch-assembled request is section-scoped
+    identically to the synchronous transport, AND that batch assembly now
+    records ``merge_echoed_chars`` (issue athenaeum#1184) — it never called
+    ``record_merge_echo`` for its own patch-mode request before this issue.
+    """
+
+    def test_batch_assembled_merge_is_section_scoped_and_echo_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _seed_root(
+            tmp_path,
+            "bt1",
+            ["Acme Corp support line moved to a toll-free number.\n"],
+            with_acme=True,
+        )
+        # Overwrite the seeded single-heading Acme page with a realistic
+        # multi-section one -- nothing to scope by otherwise.
+        (root / "wiki" / "acme1234-acme-corp.md").write_text(
+            textwrap.dedent(
+                """\
+                ---
+                uid: acme1234
+                type: company
+                name: Acme Corp
+                access: internal
+                created: '2024-01-01'
+                updated: '2024-01-01'
+                ---
+
+                # Acme Corp
+
+                ## Engineering
+
+                - Uses Kubernetes for deployment.[^1]
+                - Ships weekly.[^1]
+
+                ## Contacts
+
+                - Reach support at help@acme.example.[^1]
+                - Front desk: 555-0100.[^1]
+                """
+            ),
+            encoding="utf-8",
+        )
+        _clean_env(monkeypatch)
+        client = _FakeClient(_scripted_responder)  # sync allowed; merge batches here
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        _patch_uids(monkeypatch)
+
+        import athenaeum.batch as batch_mod
+
+        real_merge_params = batch_mod.tier3_merge_params
+        captured: list[dict[str, Any]] = []
+
+        def spy(action: Any, existing_body: str, source_ref: str, **kw: Any) -> Any:
+            params = real_merge_params(action, existing_body, source_ref, **kw)
+            captured.append({"kwargs": kw, "params": params})
+            return params
+
+        monkeypatch.setattr(batch_mod, "tier3_merge_params", spy)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+        )
+        assert rc == 0
+        assert len(captured) == 1, "expected exactly one batched merge request"
+
+        sent = captured[0]["params"]["messages"][0]["content"]
+        # Section-scoped: Contacts' own content is present, Engineering's
+        # is not -- the SAME scoping tier3_merge_params gives the
+        # synchronous transport also reaches batch assembly.
+        assert "Front desk: 555-0100" in sent
+        assert "Uses Kubernetes" not in sent
+
+        # Issue athenaeum#1184: batch assembly must now thread usage through
+        # and record the echo, matching the synchronous transport.
+        usage_obj = captured[0]["kwargs"].get("usage")
+        assert usage_obj is not None
+        assert usage_obj.merge_calls >= 1
+        assert usage_obj.merge_echoed_chars > 0
+
+
 # ---------------------------------------------------------------------------
 # Usage accounting + 50% batch discount
 # ---------------------------------------------------------------------------
