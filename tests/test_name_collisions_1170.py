@@ -29,6 +29,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from athenaeum.decisions import list_pending_decisions
 from athenaeum.librarian import _run_name_collision_phase, _run_wiki_dedup_phase
 from athenaeum.models import EntityIndex, parse_frontmatter
@@ -256,6 +258,101 @@ class TestCanonicalPageAndClassify:
         )
         collision = scan_name_collisions(wiki)[0]
         assert classify_collision(collision) == "unambiguous"
+
+
+# ---------------------------------------------------------------------------
+# Fail-safe frontmatter re-read (issue athenaeum#1170 code review, addendum):
+# a page whose frontmatter cannot be RE-READ during classification must
+# never be treated as "genuinely has no frontmatter" (which would let it
+# slip through as unambiguous and get folded away / git rm'd unread).
+# ---------------------------------------------------------------------------
+
+
+class TestFrontmatterReadFailureIsFailSafe:
+    def test_unreadable_non_canonical_page_is_ambiguous_and_survives_automerge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The window is narrow -- CollisionPage.body came from a
+        successful read during the scan -- so this simulates a read that
+        succeeds ONCE (the scan) and fails on the RE-read
+        (classify_collision's _page_frontmatter(other)). Pre-fix, this
+        page's other_meta degraded to {}, its loop over other_meta.items()
+        never ran, and (with an empty body) the collision was classified
+        unambiguous -- so with auto_merge=True this page would be folded
+        away and git rm'd WITHOUT its content ever being compared."""
+        wiki = tmp_path / "wiki"
+        canonical_path = _write_page(
+            wiki, "acme.md", uid="u1", name="Acme", type_="company",
+            body="Acme is a widget company.",
+        )
+        dup_path = _write_page(
+            wiki, "acme-dup.md", uid="u2", name="Acme", type_="company", body=""
+        )
+        init_git_repo(wiki)
+
+        original_read_text = Path.read_text
+        call_counts: dict[Path, int] = {}
+
+        def _flaky_read_text(self: Path, *args: object, **kwargs: object) -> str:
+            if self == dup_path:
+                call_counts[self] = call_counts.get(self, 0) + 1
+                if call_counts[self] > 1:
+                    raise OSError("simulated re-read failure")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", _flaky_read_text)
+
+        result = resolve_name_collisions(wiki, auto_merge=True, dry_run=False)
+
+        assert result["collisions"] == 1
+        assert result["ambiguous"] == 1
+        assert result["merged"] == 0
+        # Neither page was touched -- specifically, the page whose
+        # frontmatter could not be re-read is still on disk, not folded
+        # away sight-unseen.
+        assert canonical_path.exists()
+        assert dup_path.exists()
+
+    def test_page_frontmatter_returns_none_on_read_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unit-level pin: the sentinel is None (distinguishable from a
+        genuinely empty frontmatter dict), not {}."""
+        from athenaeum.name_collisions import CollisionPage, _page_frontmatter
+
+        path = tmp_path / "acme.md"
+        path.write_text("---\nname: Acme\n---\nbody\n", encoding="utf-8")
+        page = CollisionPage(path=path, uid="u1", name="Acme", type="company", body="body")
+
+        monkeypatch.setattr(
+            Path, "read_text", lambda self, *a, **k: (_ for _ in ()).throw(OSError("boom"))
+        )
+        assert _page_frontmatter(page) is None
+
+    def test_unreadable_canonical_page_frontmatter_is_ambiguous(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The same fail-safe applies to the CANONICAL page's re-read, not
+        just the non-canonical one."""
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki, "acme.md", uid="u1", name="Acme", type_="company",
+            body="Acme is a widget company.",
+        )
+        _write_page(wiki, "acme-dup.md", uid="u2", name="Acme", type_="company", body="")
+        collision = scan_name_collisions(wiki)[0]
+        canonical = canonical_page(collision)
+        assert canonical.path.name == "acme.md"
+
+        original_read_text = Path.read_text
+
+        def _flaky_read_text(self: Path, *args: object, **kwargs: object) -> str:
+            if self == canonical.path:
+                raise OSError("boom")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", _flaky_read_text)
+        assert classify_collision(collision) == "ambiguous"
 
 
 # ---------------------------------------------------------------------------
