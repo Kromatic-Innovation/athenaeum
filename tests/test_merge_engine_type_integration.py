@@ -228,10 +228,43 @@ def _fake_embed_factory(mapping: dict[str, list[float]]):
     return _fake_embed
 
 
+def _fake_comparator_client(relation: str = "equivalent"):
+    import json
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    response = MagicMock()
+    response.content = [
+        MagicMock(
+            text=json.dumps(
+                {
+                    "content_relation": relation,
+                    "conflicting_passages": [],
+                    "predicate_a": "a-predicate",
+                    "predicate_b": "b-predicate",
+                    "rationale": "test rationale",
+                }
+            )
+        )
+    ]
+    client.messages.create.return_value = response
+    return client
+
+
+_COMPARATOR_CONFIG = {"librarian": {"comparator_enabled": True}}
+
+
 class TestProposeWikiPageMergesCrossClassRouting:
-    def test_cross_class_cluster_zero_merge_proposals_cite_emitted(
+    """Issue athenaeum#715 cut-over: ``propose_wiki_page_merges`` no longer
+    generates a cite proposal for a rejected cross-class pair (that
+    machinery — :func:`build_cite_proposal` — was tied to the retired
+    write-a-merge-proposal flow); it now just SKIPS the pair before any
+    comparator call, per that function's own module docstring."""
+
+    def test_cross_class_pair_skipped_zero_comparator_calls(
         self, tmp_path: Path
     ) -> None:
+        from athenaeum.runlock import RunLock
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
         wiki_root = tmp_path / "wiki"
@@ -248,26 +281,30 @@ class TestProposeWikiPageMergesCrossClassRouting:
             body=_BODY_GUIDELINE,
         )
 
-        proposals = propose_wiki_page_merges(
-            tmp_path,
-            config={},
-            threshold=0.8,
-            embedding_provider=_fake_embed_factory(_CROSS_CLASS_TEXT_TO_VEC),
-        )
+        client = _fake_comparator_client()
+        lock = RunLock(tmp_path)
+        with lock:
+            results = propose_wiki_page_merges(
+                tmp_path,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed_factory(_CROSS_CLASS_TEXT_TO_VEC),
+                client=client,
+                lock=lock,
+            )
 
-        assert len(proposals) == 1
-        assert proposals[0]["action"] == "propose_cite"
-        assert "rejection" in proposals[0]
-        assert proposals[0]["rejection"]["reason"] == CROSS_CLASS_REJECTED
-
+        assert results == []
+        assert client.messages.create.call_count == 0
         # Zero merge proposals: no block ever written to _pending_merges.md.
         merges_path = wiki_root / "_pending_merges.md"
         assert not merges_path.exists()
 
-    def test_same_class_cluster_produces_normal_merge_proposal(
+    def test_same_class_cluster_produces_a_decided_verdict(
         self, tmp_path: Path
     ) -> None:
-        """Regression guard: athenaeum#421's gates + normal merge behavior unaffected."""
+        """Regression guard: a same-class cluster is unaffected by the
+        cross-class precheck and reaches the comparator normally."""
+        from athenaeum.runlock import RunLock
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
         wiki_root = tmp_path / "wiki"
@@ -275,25 +312,29 @@ class TestProposeWikiPageMergesCrossClassRouting:
         _write_page(wiki_root, "venture-b.md", memory_class="fact", body=_BODY_B)
         _write_page(wiki_root, "venture-c.md", memory_class="fact", body=_BODY_C)
 
-        proposals = propose_wiki_page_merges(
-            tmp_path,
-            config={},
-            threshold=0.8,
-            embedding_provider=_fake_embed_factory(_SAME_CLASS_TEXT_TO_VEC),
-        )
+        client = _fake_comparator_client()
+        lock = RunLock(tmp_path)
+        with lock:
+            results = propose_wiki_page_merges(
+                tmp_path,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed_factory(_SAME_CLASS_TEXT_TO_VEC),
+                client=client,
+                lock=lock,
+            )
 
-        assert len(proposals) == 1
-        assert "action" not in proposals[0]  # normal merge-proposal shape
-        assert len(proposals[0]["sources"]) == 3
-
+        assert results
+        assert all(r["verdict"] == "duplicate" for r in results)
         merges_path = wiki_root / "_pending_merges.md"
-        assert merges_path.is_file()
-        text = merges_path.read_text(encoding="utf-8")
-        assert text.count("## [") == 1
+        assert not merges_path.exists()
 
-    def test_untyped_cluster_still_merges_no_regression(self, tmp_path: Path) -> None:
-        """Legacy/untyped pages (no memory_class at all) must keep merging
-        exactly as before athenaeum#433 — the conservative untyped policy."""
+    def test_untyped_cluster_still_compared_no_regression(self, tmp_path: Path) -> None:
+        """Legacy/untyped pages (no memory_class at all) must keep reaching
+        the comparator exactly as before athenaeum#433 — the conservative
+        untyped policy: an untyped page never itself triggers the
+        cross-class precheck."""
+        from athenaeum.runlock import RunLock
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
         wiki_root = tmp_path / "wiki"
@@ -301,17 +342,21 @@ class TestProposeWikiPageMergesCrossClassRouting:
         _write_page(wiki_root, "venture-b.md", body=_BODY_B)
         _write_page(wiki_root, "venture-c.md", body=_BODY_C)
 
-        proposals = propose_wiki_page_merges(
-            tmp_path,
-            config={},
-            threshold=0.8,
-            embedding_provider=_fake_embed_factory(_SAME_CLASS_TEXT_TO_VEC),
-        )
+        client = _fake_comparator_client()
+        lock = RunLock(tmp_path)
+        with lock:
+            results = propose_wiki_page_merges(
+                tmp_path,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed_factory(_SAME_CLASS_TEXT_TO_VEC),
+                client=client,
+                lock=lock,
+            )
 
-        assert len(proposals) == 1
-        assert "action" not in proposals[0]
+        assert results
         merges_path = wiki_root / "_pending_merges.md"
-        assert merges_path.is_file()
+        assert not merges_path.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -355,17 +400,21 @@ class TestRejectionLogging:
             body=_BODY_GUIDELINE,
         )
 
-        with caplog.at_level(logging.INFO, logger="athenaeum.wiki_dedupe"):
+        from athenaeum.runlock import RunLock
+
+        lock = RunLock(tmp_path)
+        with caplog.at_level(logging.INFO, logger="athenaeum.wiki_dedupe"), lock:
             propose_wiki_page_merges(
                 tmp_path,
-                config={},
+                config=_COMPARATOR_CONFIG,
                 threshold=0.8,
                 embedding_provider=_fake_embed_factory(_CROSS_CLASS_TEXT_TO_VEC),
+                client=_fake_comparator_client(),
+                lock=lock,
             )
 
         assert any(
-            "cross-class cluster rejected" in record.message
-            for record in caplog.records
+            "cross-class pair skipped" in record.message for record in caplog.records
         )
 
 

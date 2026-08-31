@@ -3771,21 +3771,22 @@ def resolve_comparator_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve the five-verdict comparator opt-in (issue athenaeum#715). DEFAULT OFF.
 
     Gates the comparator subsystem (:mod:`athenaeum.comparator`): with this
-    off, nothing changes for any existing operator — the comparator is not
-    called from any pipeline phase in athenaeum#715 (that wiring is an explicit,
-    separate, future cut-over step; see that issue's Scope-boundaries
-    section), so this knob currently has no live reader in ``src/`` and
-    exists purely so the future wiring step has a documented,
-    default-off gate to check, exactly mirroring how
-    :mod:`athenaeum.verdicts` never reads
-    :func:`resolve_verdict_ledger_enabled` itself — the gate belongs to
-    whichever CALLER decides whether to invoke the subsystem, not to the
-    subsystem being gated. Mirrors :func:`resolve_verdict_ledger_enabled`'s
-    shape exactly: env ``ATHENAEUM_COMPARATOR_ENABLED``
-    (``1``/``true``/``yes``/``on``, case-insensitive) > yaml
-    ``librarian.comparator_enabled`` > default ``False``. No seed in
-    ``_DEFAULTS`` (issue athenaeum#231). Non-bool yaml values and unrecognized env
-    strings fall through to off.
+    off, nothing changes for any existing operator. As of athenaeum#715's
+    cut-over, this IS a live pipeline gate:
+    :func:`athenaeum.wiki_dedupe.propose_wiki_page_merges` (called from
+    :func:`athenaeum.librarian._run_wiki_dedup_phase` every run) checks this
+    first and returns immediately when it is off — the wiki-page dedup pass
+    is otherwise a no-op, old algorithm and new both, since the old
+    confidence/suppression-gate algorithm that pass used to run
+    unconditionally was DELETED (not merely branched around) as part of the
+    cut-over; there is exactly one implementation, gated by this one knob.
+    ``athenaeum merges recompare`` (:mod:`athenaeum._cmd_merges`) remains
+    the other live reader, unchanged. Mirrors
+    :func:`resolve_verdict_ledger_enabled`'s shape exactly: env
+    ``ATHENAEUM_COMPARATOR_ENABLED`` (``1``/``true``/``yes``/``on``,
+    case-insensitive) > yaml ``librarian.comparator_enabled`` > default
+    ``False``. No seed in ``_DEFAULTS`` (issue athenaeum#231). Non-bool yaml
+    values and unrecognized env strings fall through to off.
     """
     env = os.environ.get("ATHENAEUM_COMPARATOR_ENABLED")
     if env is not None:

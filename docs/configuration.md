@@ -1957,15 +1957,21 @@ falling through to exactly one LLM judgement (Gate 2, `content_relation`)
 only when Gate 1 cannot settle the pair. See that module's docstring for the
 full algorithm.
 
-**Still landed dark (athenaeum#715 AC).** The comparator is not called from
-any *nightly* pipeline entry point — that cut-over (replacing, not
-paralleling, the existing merge and contradiction paths) is the remaining
-step on athenaeum#715, and the issue is explicit that the old paths must be
-**removed rather than left running alongside** the new one. Until then
+**Partial cut-over (athenaeum#715 AC).** The wiki-page dedup pass
+(`athenaeum.wiki_dedupe.propose_wiki_page_merges`, called every run from
+`librarian.py`) is wired to the comparator: its own old duplicate-detection
+algorithm was DELETED (not left running alongside it), and every candidate
+pair it clusters is now decided by the comparator and enacted via
+`athenaeum.verdict_effects`. The separate C1-C4 auto-memory compile
+pipeline's intra-cluster contradiction detector (`athenaeum.merge`) is
+**still the old path, unchanged** — that piece of the cut-over remains a
+follow-up (see the athenaeum#715 issue for the precise scope). Until it lands,
 `ATHENAEUM_COMPARATOR_ENABLED` gates the comparator subsystem and everything
-built on it. Its one live reader today is the explicit, opt-in
-`athenaeum merges recompare` command below, which refuses to run when the
-gate is off rather than silently doing nothing.
+built on it. Its live readers today are: the explicit, opt-in
+`athenaeum merges recompare` command below (refuses to run when the gate is
+off), and the wiki-page dedup pass above (silently returns no results when
+the gate is off — the pass itself is a no-op, not merely the comparator
+half of it).
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|

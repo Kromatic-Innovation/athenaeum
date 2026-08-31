@@ -206,22 +206,55 @@ def _write_wiki_page(wiki_root: Path, filename: str, body: str) -> Path:
     return path
 
 
+_COMPARATOR_CONFIG = {
+    "librarian": {"comparator_enabled": True, "heartbeat_interval": 0}
+}
+
+
+def _fake_comparator_client() -> MagicMock:
+    import json
+
+    client = MagicMock()
+    response = MagicMock()
+    response.content = [
+        MagicMock(
+            text=json.dumps(
+                {
+                    "content_relation": "equivalent",
+                    "conflicting_passages": [],
+                    "predicate_a": "a-predicate",
+                    "predicate_b": "b-predicate",
+                    "rationale": "test rationale",
+                }
+            )
+        )
+    ]
+    client.messages.create.return_value = response
+    return client
+
+
 class TestWikiDedupeHeartbeat:
     def test_propose_wiki_page_merges_emits_start_and_done(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
+        from athenaeum.runlock import RunLock
+
         caplog.set_level(logging.INFO, logger="athenaeum")
         wiki_root = tmp_path / "wiki"
         _write_wiki_page(wiki_root, "venture-a.md", _BODY_A)
         _write_wiki_page(wiki_root, "venture-b.md", _BODY_B)
 
-        proposals = propose_wiki_page_merges(
-            tmp_path,
-            config={"librarian": {"heartbeat_interval": 0}},
-            threshold=0.8,
-            embedding_provider=_fake_embed,
-        )
-        assert len(proposals) == 1
+        lock = RunLock(tmp_path)
+        with lock:
+            results = propose_wiki_page_merges(
+                tmp_path,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=_fake_comparator_client(),
+                lock=lock,
+            )
+        assert len(results) == 1
 
         lines = _heartbeat_lines(caplog)
         dedupe_lines = [line for line in lines if "phase=wiki-dedupe" in line]
@@ -235,13 +268,14 @@ class TestWikiDedupeHeartbeat:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir(parents=True)
 
-        proposals = propose_wiki_page_merges(
+        results = propose_wiki_page_merges(
             tmp_path,
-            config={"librarian": {"heartbeat_interval": 0}},
+            config=_COMPARATOR_CONFIG,
             threshold=0.8,
             embedding_provider=_fake_embed,
+            client=_fake_comparator_client(),
         )
-        assert proposals == []
+        assert results == []
 
         lines = _heartbeat_lines(caplog)
         dedupe_lines = [line for line in lines if "phase=wiki-dedupe" in line]
@@ -250,6 +284,29 @@ class TestWikiDedupeHeartbeat:
         done_line = next(line for line in dedupe_lines if "status=done" in line)
         assert "done=0" in done_line
         assert "total=0" in done_line
+
+    def test_flag_off_emits_no_heartbeat_at_all(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Issue athenaeum#715: with the (default-off) comparator flag off, this
+        pass is a complete no-op — there is nothing to heartbeat, unlike the
+        flag-on/zero-candidates case above which still runs the phase."""
+        caplog.set_level(logging.INFO, logger="athenaeum")
+        wiki_root = tmp_path / "wiki"
+        _write_wiki_page(wiki_root, "venture-a.md", _BODY_A)
+        _write_wiki_page(wiki_root, "venture-b.md", _BODY_B)
+
+        results = propose_wiki_page_merges(
+            tmp_path,
+            config={"librarian": {"heartbeat_interval": 0}},
+            threshold=0.8,
+            embedding_provider=_fake_embed,
+        )
+        assert results == []
+
+        lines = _heartbeat_lines(caplog)
+        dedupe_lines = [line for line in lines if "phase=wiki-dedupe" in line]
+        assert dedupe_lines == []
 
 
 # ---------------------------------------------------------------------------

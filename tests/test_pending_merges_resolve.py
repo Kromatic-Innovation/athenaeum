@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import (
     resolve_merge,
@@ -800,4 +802,68 @@ def test_pre_421_block_without_write_kind_parses_as_create_merged(
     )
     parsed = parse_pending_merges(merges)
     assert len(parsed) == 1
+    assert parsed[0].write_kind == "create-merged"
+
+
+def test_block_with_confidence_line_parses_it(tmp_path: Path) -> None:
+    """Issue athenaeum#715 cut-over: the ~430 live proposals written by the now-
+    retired old detector all carry a ``**Confidence**:`` line — the grammar
+    must keep reading it (read-and-ignore is the documented migration
+    strategy; no live-store rewrite is required or performed)."""
+    from athenaeum.pending_merges import parse_pending_merges
+
+    merges = tmp_path / "_pending_merges.md"
+    merges.write_text(
+        "# Pending Merges\n\n"
+        '## [2026-01-01] Merge: "legacy-topic"\n'
+        "- [ ] Approve this merge? Sources: a.md, b.md\n\n"
+        "**Rationale**: r\n"
+        "**Write kind**: create-merged\n"
+        "**Sources**:\n"
+        "- a.md\n"
+        "- b.md\n"
+        "**Confidence**: 0.84\n"
+        "**Draft**:\n"
+        "```markdown\n"
+        "body\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    parsed = parse_pending_merges(merges)
+    assert len(parsed) == 1
+    assert parsed[0].confidence == pytest.approx(0.84)
+
+
+def test_post_cutover_block_without_confidence_line_parses_cleanly(
+    tmp_path: Path,
+) -> None:
+    """Issue athenaeum#715 cut-over: the comparator's ``duplicate`` verdict never
+    writes to ``_pending_merges.md`` at all (it writes fold evidence — see
+    ``athenaeum.verdict_effects``), so no NEW block will ever carry a
+    ``**Confidence**:`` line going forward. A hand-authored or otherwise
+    Confidence-less block (e.g. via ``athenaeum merges propose-fold``) must
+    still parse cleanly with no line to read — the grammar tolerates the
+    field being present (legacy data, above) OR absent (everything from now
+    on), never requiring a live-store rewrite either way."""
+    from athenaeum.pending_merges import parse_pending_merges
+
+    merges = tmp_path / "_pending_merges.md"
+    merges.write_text(
+        "# Pending Merges\n\n"
+        '## [2026-01-01] Merge: "post-cutover-topic"\n'
+        "- [ ] Approve this merge? Sources: a.md, b.md\n\n"
+        "**Rationale**: r\n"
+        "**Write kind**: create-merged\n"
+        "**Sources**:\n"
+        "- a.md\n"
+        "- b.md\n"
+        "**Draft**:\n"
+        "```markdown\n"
+        "body\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    parsed = parse_pending_merges(merges)
+    assert len(parsed) == 1
+    assert parsed[0].confidence == 0.0
     assert parsed[0].write_kind == "create-merged"

@@ -22,6 +22,7 @@ public ``run()`` entry point.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -756,6 +757,41 @@ class TestRunWikiDedupPhase:
             result = _run_wiki_dedup_phase(ctx)
         assert result is None  # swallowed, run continues
         assert len(ctx.run_profile) == 1
+
+    def test_provider_misconfig_degrades_instead_of_aborting_the_phase(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Seer finding on PR athenaeum#1227: with the comparator ENABLED and a
+        misconfigured provider, ``build_llm_client``'s ``ProviderConfigError``
+        used to unwind to the phase's generic ``except Exception``, aborting
+        the pass wholesale — including the deterministic Gate 1 work, which
+        needs no LLM at all — and logging a misleading "wiki-page dedup pass
+        failed". The CLI sibling (``_cmd_curate._cmd_dedupe_wiki_pages``)
+        degrades instead of aborting; this phase must match it.
+        """
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root)
+        ctx.config = {"librarian": {"comparator_enabled": True}}
+        with (
+            patch(
+                "athenaeum.librarian.build_llm_client",
+                side_effect=ProviderConfigError("unknown LLM provider 'gpt-9000'"),
+            ),
+            patch("athenaeum.wiki_dedupe.propose_wiki_page_merges") as mock_dedup,
+            caplog.at_level(logging.WARNING),
+        ):
+            result = _run_wiki_dedup_phase(ctx)
+
+        # The pass still ran, in degraded (Gate-1-only) mode.
+        mock_dedup.assert_called_once()
+        assert mock_dedup.call_args.kwargs["client"] is None
+        assert result is None
+        assert len(ctx.run_profile) == 1
+
+        # ...and it did NOT report itself as a dedup failure.
+        assert "wiki-page dedup pass failed" not in caplog.text
+        assert "LLM provider misconfigured" in caplog.text
 
     def test_deadline_already_exceeded_stops_run_after_dedup(
         self, tmp_path: Path
