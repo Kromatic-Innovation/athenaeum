@@ -2921,3 +2921,233 @@ class TestHandleReconciliation:
         assert out.created == 1
         assert list((root / "wiki").glob("*widgetkeeps*"))
         assert batch_state.load(cache_dir) == {}
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1175 — per-knob batch selection, at the TRANSPORT.
+#
+# Accepting a config the transport then cannot honour would be worse than
+# refusing it, so the guard-narrowing AC is only meaningful if a mixed run
+# actually works. These pin that: an unbatched knob takes the SYNCHRONOUS path
+# inside the same function, so the two can genuinely be mixed.
+# ---------------------------------------------------------------------------
+
+
+class TestPerKnobBatchTransport:
+    def _run_mixed(
+        self,
+        tmp_path: Path,
+        name: str,
+        content: str,
+        *,
+        batch_classify: bool,
+        batch_write: bool,
+    ) -> tuple[Path, _FakeClient, Any]:
+        root = _seed_root(tmp_path, name, [content])
+        client = _FakeClient(_scripted_responder, allow_sync=True)
+        result = process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=batch_classify,
+            batch_write=batch_write,
+        )
+        return root, client, result
+
+    def _batched_knobs(self, client: _FakeClient) -> set[str]:
+        """Which knobs actually reached the Batch API on *client*."""
+        return {
+            "classify"
+            if req["params"]["model"] == DEFAULT_CLASSIFY_MODEL
+            else "write"
+            for batch in client.batches.submitted
+            for req in batch
+        }
+
+    def test_write_batched_classify_synchronous(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The motivating combination: discount the expensive knob only."""
+        _patch_uids(monkeypatch)
+        root, client, result = self._run_mixed(
+            tmp_path,
+            "p1",
+            "Standalone fact about WidgetMixedA gadget.\n",
+            batch_classify=False,
+            batch_write=True,
+        )
+
+        assert result.created == 1
+        assert list((root / "wiki").glob("*widgetmixeda*"))
+        # tier-2 went through the SYNCHRONOUS messages.create...
+        assert [c["model"] for c in client.sync_calls] == [DEFAULT_CLASSIFY_MODEL]
+        # ...and only the tier-3 write batch reached the Batch API.
+        assert self._batched_knobs(client) == {"write"}
+
+    def test_classify_batched_write_synchronous(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The mirror image, so an accepted config is never a broken one."""
+        _patch_uids(monkeypatch)
+        root, client, result = self._run_mixed(
+            tmp_path,
+            "p2",
+            "Standalone fact about WidgetMixedB gadget.\n",
+            batch_classify=True,
+            batch_write=False,
+        )
+
+        assert result.created == 1
+        assert list((root / "wiki").glob("*widgetmixedb*"))
+        assert self._batched_knobs(client) == {"classify"}
+        # The tier-3 create ran live, on the write knob's model.
+        assert [c["model"] for c in client.sync_calls] != []
+        assert DEFAULT_CLASSIFY_MODEL not in [c["model"] for c in client.sync_calls]
+
+    def test_both_knobs_batched_is_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pre-athenaeum#1175 default: two batches, no synchronous calls."""
+        _patch_uids(monkeypatch)
+        root, client, result = self._run_mixed(
+            tmp_path,
+            "p3",
+            "Standalone fact about WidgetBoth gadget.\n",
+            batch_classify=True,
+            batch_write=True,
+        )
+
+        assert result.created == 1
+        assert client.sync_calls == []
+        assert self._batched_knobs(client) == {"classify", "write"}
+        assert len(client.batches.submitted) == 2
+
+    def test_an_unbatched_write_merge_updates_the_page_synchronously(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unbatched merge routes down the path same-page groups already take.
+
+        One synchronous merge implementation, not two.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "p4", ["Acme Corp shipped a thing.\n"], with_acme=True
+        )
+        client = _FakeClient(_scripted_responder, allow_sync=True)
+
+        result = process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=True,
+            batch_write=False,
+        )
+
+        assert result.updated == 1
+        body = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+        assert "Original body line." in body
+        assert "Merged note from" in body
+        assert self._batched_knobs(client) == {"classify"}
+
+    def test_a_synchronous_classify_still_counts_one_api_call_per_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The athenaeum#220 budget must not be charged twice for one call.
+
+        The batch path bumps ``api_calls`` by hand at assembly because
+        ``add_batch_tokens`` does not; the synchronous path's ``add_tokens``
+        already does. Doing both would eat the budget at double rate on a
+        mixed run.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "p5", ["Standalone fact about WidgetBudget gadget.\n"]
+        )
+        client = _FakeClient(_scripted_responder, allow_sync=True)
+        usage = TokenUsage()
+
+        process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=False,
+            batch_write=True,
+        )
+
+        # One synchronous classify + one batched tier-3 create = 2 attempts.
+        assert usage.api_calls == 2
+
+    def test_a_run_defaults_to_batching_both_knobs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC: a caller that passes neither flag is byte-identical to before."""
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "p6", ["Standalone fact about WidgetDefault gadget.\n"]
+        )
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+
+        process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+        )
+
+        assert len(client.batches.submitted) == 2
+
+    def test_run_level_write_only_batching_reaches_the_transport(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end: ``librarian.batch.write: true`` alone is a batch run."""
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "p7", ["Standalone fact about WidgetE2E gadget.\n"]
+        )
+        (root / "athenaeum.yaml").write_text(
+            "librarian:\n  batch:\n    write: true\n", encoding="utf-8"
+        )
+        _clean_env(monkeypatch)
+        client = _FakeClient(_scripted_responder, allow_sync=True)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+        )
+
+        assert rc == 0
+        assert list((root / "wiki").glob("*widgete2e*"))
+        # Batch mode was never set globally, yet the write knob batched.
+        assert self._batched_knobs(client) == {"write"}
