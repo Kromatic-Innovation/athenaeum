@@ -43,11 +43,21 @@ fi
 # Rule names with active suppressions this run, parsed from the linter's own
 # "SUPPRESSED [rule-name]: file:line ..." lines -- same file+rule-name-only
 # discipline as the linter itself, never the matched content.
-mapfile -t SUPPRESSED_NOW < <(grep '^SUPPRESSED \[' "$LINT_OUTPUT" \
+# NB: read-loop rather than `mapfile`/`readarray` -- those are bash 4.0+
+# builtins, and stock macOS ships bash 3.2.57. This script runs from
+# .githooks/pre-push, so a bash-4-only builtin here means every macOS
+# contributor's push dies with "mapfile: command not found" (athenaeum#1104).
+SUPPRESSED_NOW=()
+while IFS= read -r rule; do
+  if [ -n "$rule" ]; then SUPPRESSED_NOW+=("$rule"); fi
+done < <(grep '^SUPPRESSED \[' "$LINT_OUTPUT" \
     | sed -E 's/^SUPPRESSED \[([a-zA-Z-]+)\].*/\1/' | sort -u)
 
 ALLOWLIST_FILE="$ROOT/.public-safe-lint-suppression-allowlist"
-mapfile -t ALLOWED < <(grep -vE '^[[:space:]]*(#|$)' "$ALLOWLIST_FILE" 2>/dev/null \
+ALLOWED=()
+while IFS= read -r allowed_rule; do
+  if [ -n "$allowed_rule" ]; then ALLOWED+=("$allowed_rule"); fi
+done < <(grep -vE '^[[:space:]]*(#|$)' "$ALLOWLIST_FILE" 2>/dev/null \
     | sed -E 's/[[:space:]]+$//')
 
 UNAPPROVED=()
