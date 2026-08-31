@@ -33,12 +33,15 @@ import pytest
 
 from athenaeum.pii_restore import (
     _RETRO_FRAGMENT_RE,
+    GIT_HISTORY_UNAVAILABLE_REASON,
     MARKER,
     ApplyResult,
+    GitHistoryUnavailableError,
     PiiRestoreSafetyError,
     Restoration,
     RestorePlan,
     _classify_or_refuse,
+    _history_with_paths,
     _is_excluded_path,
     apply_restore_plan,
     assert_excluded_population_unchanged,
@@ -406,6 +409,65 @@ def test_reshaped_page_reported_as_honest_residue(fixture_repo: Path) -> None:
     assert not any(
         r.hit.page_relpath == "wiki/reshaped-page.md" for r in plan.restorations
     )
+
+
+# --------------------------------------------------------------------------- #
+# athenaeum#1228: a missing/unreachable git repository must fail loudly, not
+# collapse into the SAME bucket as a genuine "page created after migration".
+# --------------------------------------------------------------------------- #
+
+
+def test_history_with_paths_raises_when_git_itself_fails(tmp_path: Path) -> None:
+    """AC5: a non-zero ``git log`` exit must raise, never collapse into the
+    same empty list a genuinely-empty-but-successful history returns."""
+    non_repo = tmp_path / "not-a-repo"
+    non_repo.mkdir()
+    with pytest.raises(GitHistoryUnavailableError):
+        _history_with_paths(non_repo, "wiki/page.md")
+
+
+def test_build_restore_plan_reports_git_history_unavailable_not_false_residue(
+    tmp_path: Path,
+) -> None:
+    """AC1-AC3: a knowledge root that is not a git repository at all must
+    land every marker in the DISTINCT ``git-history-unavailable`` bucket,
+    never in ``no-pre-image:page-created-after-migration`` -- and the plan
+    must expose a non-zero unavailable count so a caller (the CLI) can
+    refuse to report ``TOTAL RESTORABLE`` as a corpus fact."""
+    root = tmp_path / "knowledge"
+    wiki = root / "wiki"
+    contacts = root / "excluded"
+    wiki.mkdir(parents=True)
+    contacts.mkdir(parents=True)
+    (wiki / "page-one.md").write_text(f"---\nuid: 1\n---\nEmail: {MARKER}\n")
+    (wiki / "page-two.md").write_text(f"---\nuid: 2\n---\nPhone: {MARKER}\n")
+    # Deliberately no `git init` -- root is not a repository at all, mirroring
+    # a lane container's /knowledge mount (wiki/ + raw/, no .git).
+
+    plan = build_restore_plan(root, wiki, contacts)
+
+    assert plan.git_history_unavailable_count() == 2
+    assert plan.restorations == []
+    assert all(e.reason == GIT_HISTORY_UNAVAILABLE_REASON for e in plan.residue)
+    assert not any(
+        e.reason == "no-pre-image:page-created-after-migration" for e in plan.residue
+    )
+
+
+def test_reshaped_page_still_lands_in_legit_bucket_with_real_git_history(
+    fixture_repo: Path,
+) -> None:
+    """AC4 regression guard: proves the git-unavailable fix did not simply
+    widen the loud-failure path over the LEGITIMATE
+    no-pre-image:page-created-after-migration bucket -- a real fixture git
+    repo with a genuine post-migration page must still land there, with
+    zero git-history-unavailable residue anywhere in the plan."""
+    wiki_root, contacts_root = _roots(fixture_repo)
+    plan = build_restore_plan(fixture_repo, wiki_root, contacts_root)
+    assert plan.git_history_unavailable_count() == 0
+    matches = [e for e in plan.residue if e.hit.page_relpath == "wiki/reshaped-page.md"]
+    assert len(matches) == 1
+    assert matches[0].reason == "no-pre-image:page-created-after-migration"
 
 
 def test_retro_filename_resolved_by_history_lookup_after_rotation(fixture_repo: Path) -> None:
