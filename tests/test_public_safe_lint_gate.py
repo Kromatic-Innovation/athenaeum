@@ -51,7 +51,9 @@ def _clean_git_env() -> dict[str, str]:
     return {
         k: v
         for k, v in os.environ.items()
-        if k != "GIT_CONFIG_COUNT" and not k.startswith("GIT_CONFIG_KEY_") and not k.startswith("GIT_CONFIG_VALUE_")
+        if k != "GIT_CONFIG_COUNT"
+        and not k.startswith("GIT_CONFIG_KEY_")
+        and not k.startswith("GIT_CONFIG_VALUE_")
     }
 
 
@@ -109,9 +111,7 @@ def test_gate_fails_on_unapproved_suppression(tmp_path: Path) -> None:
     (tmp_path / "f.txt").write_text(
         f"{_ATTRIBUTION_PREFIX} {_ATTRIBUTION_INITIALS} on the approach\n"
     )
-    (tmp_path / ".public-safe-lintignore").write_text(
-        "personal-attribution-agreed-with f.txt\n"
-    )
+    (tmp_path / ".public-safe-lintignore").write_text("personal-attribution-agreed-with f.txt\n")
     # Deliberately no .public-safe-lint-suppression-allowlist: asserted
     # suppressed-rule count is 0, so any active suppression must fail.
 
@@ -137,9 +137,7 @@ def test_gate_passes_on_approved_suppression(tmp_path: Path) -> None:
     (tmp_path / "f.txt").write_text(
         f"{_ATTRIBUTION_PREFIX} {_ATTRIBUTION_INITIALS} on the approach\n"
     )
-    (tmp_path / ".public-safe-lintignore").write_text(
-        "personal-attribution-agreed-with f.txt\n"
-    )
+    (tmp_path / ".public-safe-lintignore").write_text("personal-attribution-agreed-with f.txt\n")
     (tmp_path / ".public-safe-lint-suppression-allowlist").write_text(
         "personal-attribution-agreed-with\n"
     )
@@ -178,11 +176,17 @@ def bare_repo_and_clone(tmp_path: Path) -> tuple[Path, Path]:
     env = _clean_git_env()
     remote = tmp_path / "remote.git"
     work = tmp_path / "work"
-    subprocess.run(["git", "init", "--bare", "-q", "-b", "develop", str(remote)], check=True, env=env)
+    subprocess.run(
+        ["git", "init", "--bare", "-q", "-b", "develop", str(remote)], check=True, env=env
+    )
     subprocess.run(["git", "init", "-q", "-b", "develop", str(work)], check=True, env=env)
-    subprocess.run(["git", "-C", str(work), "config", "user.email", "t@example.com"], check=True, env=env)
+    subprocess.run(
+        ["git", "-C", str(work), "config", "user.email", "t@example.com"], check=True, env=env
+    )
     subprocess.run(["git", "-C", str(work), "config", "user.name", "Test"], check=True, env=env)
-    subprocess.run(["git", "-C", str(work), "remote", "add", "origin", str(remote)], check=True, env=env)
+    subprocess.run(
+        ["git", "-C", str(work), "remote", "add", "origin", str(remote)], check=True, env=env
+    )
 
     # Bring in the real, current scripts under test.
     (work / "scripts").mkdir()
@@ -195,12 +199,16 @@ def bare_repo_and_clone(tmp_path: Path) -> tuple[Path, Path]:
     (work / ".githooks").mkdir()
     (work / ".githooks" / "pre-push").write_bytes(PRE_PUSH_HOOK.read_bytes())
     (work / ".githooks" / "pre-push").chmod(0o755)
-    subprocess.run(["git", "-C", str(work), "config", "core.hooksPath", ".githooks"], check=True, env=env)
+    subprocess.run(
+        ["git", "-C", str(work), "config", "core.hooksPath", ".githooks"], check=True, env=env
+    )
 
     (work / "README.md").write_text("hello\n")
     subprocess.run(["git", "-C", str(work), "add", "-A"], check=True, env=env)
     subprocess.run(["git", "-C", str(work), "commit", "-q", "-m", "init"], check=True, env=env)
-    subprocess.run(["git", "-C", str(work), "push", "-q", "-u", "origin", "develop"], check=True, env=env)
+    subprocess.run(
+        ["git", "-C", str(work), "push", "-q", "-u", "origin", "develop"], check=True, env=env
+    )
 
     return remote, work
 
