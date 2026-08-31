@@ -446,7 +446,7 @@ def test_gate_runs_under_system_bash_3_2(tmp_path: Path) -> None:
 
     supp = tmp_path / "supp"
     supp.mkdir()
-    (supp / "notes.md").write_text("see issue #4321 for details\n")
+    (supp / "notes.md").write_text(f"see issue {_HASH}{_ISSUE_DIGITS_B} for details\n")
     (supp / ".public-safe-lintignore").write_text("bare-issue-ref\tnotes.md\n")
     (supp / ".public-safe-lint-suppression-allowlist").write_text("bare-issue-ref\n")
     nonempty = subprocess.run(
