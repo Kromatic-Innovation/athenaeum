@@ -13,7 +13,15 @@ Structure mirrors the issue's acceptance criteria:
   any output form; identifiers are opaque handles only.
 - ``TestNumbersAreReDerived`` — the counts come from the store passed in, and
   no figure from athenaeum#849/#853 is hard-coded anywhere.
-- ``TestCli`` — the shipped surface takes a store root as a parameter.
+
+The ``athenaeum bounce-divergence`` CLI subcommand these module functions
+once backed was removed by issue athenaeum#1111 (superseded by ``athenaeum
+surface-divergence --field bounced`` — see ``tests/test_surface_divergence.py``
+for its CLI-level coverage); the former ``TestCli`` class and the
+``--verbose``-flag test that imported the deleted ``_cmd_bounce_divergence``
+module were removed with it. The module functions exercised below
+(``compute_divergence``, ``render_report``, ``report_as_dict``, etc.) remain
+in place — ``athenaeum.surface_divergence`` still wraps them unchanged.
 
 All fixtures are synthetic and built in ``tmp_path``; nothing reads a live
 store. No count quoted in athenaeum#849 or athenaeum#853 is asserted here as an
@@ -26,8 +34,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from athenaeum.bounce_divergence import (
     SurfaceStatus,
     compute_divergence,
@@ -37,7 +43,6 @@ from athenaeum.bounce_divergence import (
     render_report,
     report_as_dict,
 )
-from athenaeum.cli import main
 from athenaeum.pii import mark_bounced
 
 ADDRESS = "alex@example.org"
@@ -310,17 +315,10 @@ class TestOutputIsPublicSafe:
         assert handle == opaque_handle("ALEX@Example.org")  # case-normalized
         assert handle != opaque_handle(SECOND_ADDRESS)
 
-    def test_no_verbose_mode_exists_to_leak_detail(self) -> None:
-        # The criterion allows a --verbose that is documented private-only, or
-        # none at all. This ships none: there is no flag that emits detail.
-        import argparse
-
-        from athenaeum._cmd_bounce_divergence import add_bounce_divergence_subparser
-
-        parser = argparse.ArgumentParser()
-        add_bounce_divergence_subparser(parser.add_subparsers())
-        with pytest.raises(SystemExit):
-            parser.parse_args(["bounce-divergence", "--verbose"])
+    # The former test_no_verbose_mode_exists_to_leak_detail asserted this at
+    # the CLI-flag level via the now-deleted `_cmd_bounce_divergence` module
+    # (issue athenaeum#1111 removed the `bounce-divergence` subcommand); the
+    # module itself never grew a verbose/detail mode, so nothing regresses.
 
 
 class TestNumbersAreReDerived:
@@ -351,113 +349,3 @@ class TestNumbersAreReDerived:
         assert compute_divergence(second / "wiki", second / "contacts").wiki.count == 0
 
 
-class TestCli:
-    """The shipped surface takes a store root as a parameter."""
-
-    def test_reports_a_populated_store(self, tmp_path: Path, capsys) -> None:
-        contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
-        _person_record(contacts_root)
-        _wiki_page(wiki_root, bounced="MailboxDoesNotExist")
-        _mark(contacts_root)
-
-        rc = main(
-            [
-                "bounce-divergence",
-                "--path",
-                str(tmp_path),
-                "--wiki-root",
-                str(wiki_root),
-                "--contacts-root",
-                str(contacts_root),
-            ]
-        )
-
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "wiki `bounced:` pages: 1" in out
-        assert "contacts-surface records: 1" in out
-        assert ADDRESS not in out
-
-    def test_clean_zero_store_exits_zero(self, tmp_path: Path, capsys) -> None:
-        (tmp_path / "wiki").mkdir()
-        (tmp_path / "contacts").mkdir()
-
-        rc = main(
-            [
-                "bounce-divergence",
-                "--path",
-                str(tmp_path),
-                "--wiki-root",
-                str(tmp_path / "wiki"),
-                "--contacts-root",
-                str(tmp_path / "contacts"),
-            ]
-        )
-
-        assert rc == 0
-        assert "neither holds a bounce fact" in capsys.readouterr().out
-
-    def test_unreadable_surface_exits_nonzero(self, tmp_path: Path, capsys) -> None:
-        (tmp_path / "contacts").mkdir()
-
-        rc = main(
-            [
-                "bounce-divergence",
-                "--path",
-                str(tmp_path),
-                "--wiki-root",
-                str(tmp_path / "gone"),
-                "--contacts-root",
-                str(tmp_path / "contacts"),
-            ]
-        )
-
-        assert rc == 2  # distinct from both 0 (clean) and 1 (generic error)
-        assert "NOT READ" in capsys.readouterr().out
-
-    def test_json_output(self, tmp_path: Path, capsys) -> None:
-        contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
-        _person_record(contacts_root)
-        _wiki_page(wiki_root, bounced="MailboxDoesNotExist")
-        _mark(contacts_root)
-
-        rc = main(
-            [
-                "bounce-divergence",
-                "--path",
-                str(tmp_path),
-                "--wiki-root",
-                str(wiki_root),
-                "--contacts-root",
-                str(contacts_root),
-                "--json",
-            ]
-        )
-
-        assert rc == 0
-        payload = json.loads(capsys.readouterr().out)
-        assert payload["complete"] is True
-        assert payload["wiki"]["count"] == 1
-        assert payload["contacts"]["count"] == 1
-        assert payload["wiki"]["status"] == "read"
-
-    def test_report_writes_to_neither_surface(self, tmp_path: Path) -> None:
-        contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
-        person = _person_record(contacts_root)
-        page = _wiki_page(wiki_root, bounced="MailboxDoesNotExist")
-        _mark(contacts_root)
-        before = (person.read_text(encoding="utf-8"), page.read_text(encoding="utf-8"))
-
-        main(
-            [
-                "bounce-divergence",
-                "--path",
-                str(tmp_path),
-                "--wiki-root",
-                str(wiki_root),
-                "--contacts-root",
-                str(contacts_root),
-            ]
-        )
-
-        assert (person.read_text(encoding="utf-8"), page.read_text(encoding="utf-8")) == before

@@ -15,7 +15,11 @@ Structure follows the issue's own acceptance criteria:
   only entry; `do_not_email` tolerates neither direction.
 - ``TestCli`` — ``athenaeum surface-divergence``'s exit-code contract: 0
   clean, 2 unreadable, 3 diverged-beyond-allowance, and ``--report-only``
-  preserving the pre-athenaeum#963 exit-0-unless-unreadable contract.
+  preserving the pre-athenaeum#963 exit-0-unless-unreadable contract. Also
+  the anti-recurrence coverage for issue athenaeum#1111's AC4 (the JSON
+  ``diverged`` field can no longer contradict the exit code) and, since
+  athenaeum#1111 removed ``bounce-divergence`` / ``do-not-email-divergence``,
+  the sole remaining CLI-level coverage for both fields' exit codes.
 - ``TestUnregisteredField`` — the check refuses to guess at an unregistered
   field's allowance.
 - ``TestInstalledCli`` — reachable from a FRESH, non-editable install via
@@ -430,6 +434,80 @@ class TestCli:
         payload = json.loads(capsys.readouterr().out)
         assert payload["complete"] is True
         assert payload["diverged"] is False
+
+    def test_json_diverged_do_not_email_wiki_only_mark_matches_exit_code(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """Anti-recurrence test for issue athenaeum#1111's AC4.
+
+        A wiki-only ``do_not_email`` mark is the design's TOLERATED steady
+        state (athenaeum#1039) — ``rc == 0`` — but the wrapped module's own
+        ``diverged`` property is ``True`` here (it is purely descriptive of
+        BOTH directions, unnarrowed). Before athenaeum#1111's fix, this
+        command's JSON echoed that unnarrowed ``True`` verbatim alongside
+        exit 0 — the exact contradiction the issue reports live ("both
+        commands report `diverged: true` in JSON while exiting 0"). A
+        consumer reading either signal must now get the SAME answer.
+        """
+        contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
+        _dne_wiki_page(wiki_root, marked=True)
+        contacts_root.mkdir()
+
+        rc = main(
+            [
+                "surface-divergence",
+                "--field",
+                "do_not_email",
+                "--path",
+                str(tmp_path),
+                "--wiki-root",
+                str(wiki_root),
+                "--contacts-root",
+                str(contacts_root),
+                "--json",
+            ]
+        )
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        # The underlying module's own (unnarrowed) property really is True
+        # for this fixture — proving the test exercises the contradiction
+        # this fix closes, not a case where the two were never going to
+        # differ.
+        report = get_field("do_not_email").compute(wiki_root, contacts_root, None)
+        assert report.diverged is True
+        assert payload["diverged"] is False  # matches rc == 0, not report.diverged
+
+    def test_json_diverged_bounced_wiki_only_entry_matches_exit_code(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """Same anti-recurrence test as above, for the `bounced` field's own
+        tolerated direction (the documented evidence-class asymmetry,
+        docs/bounce-surface-convergence.md)."""
+        contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
+        contacts_root.mkdir()
+        _bounce_wiki_page(wiki_root, bounced="MailboxDoesNotExist")
+
+        rc = main(
+            [
+                "surface-divergence",
+                "--field",
+                "bounced",
+                "--path",
+                str(tmp_path),
+                "--wiki-root",
+                str(wiki_root),
+                "--contacts-root",
+                str(contacts_root),
+                "--json",
+            ]
+        )
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        report = get_field("bounced").compute(wiki_root, contacts_root, None)
+        assert report.diverged is True
+        assert payload["diverged"] is False  # matches rc == 0, not report.diverged
 
     def test_invalid_field_choice_is_rejected_by_argparse(self, tmp_path: Path) -> None:
         with pytest.raises(SystemExit):

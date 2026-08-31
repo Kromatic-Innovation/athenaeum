@@ -74,15 +74,11 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_authority import add_authority_subparser
     from athenaeum._cmd_axiom import add_axiom_subparser
     from athenaeum._cmd_bounce_contract import add_bounce_contract_subparser
-    from athenaeum._cmd_bounce_divergence import add_bounce_divergence_subparser
     from athenaeum._cmd_calibration import add_calibration_subparser
     from athenaeum._cmd_curate import add_curate_subparsers
     from athenaeum._cmd_decay import add_decay_subparser
     from athenaeum._cmd_decisions import add_decisions_subparser
     from athenaeum._cmd_dimensions import add_dimensions_subparser
-    from athenaeum._cmd_do_not_email_divergence import (
-        add_do_not_email_divergence_subparser,
-    )
     from athenaeum._cmd_drain import add_drain_subparser
     from athenaeum._cmd_enumerate import add_enumerate_subparser
     from athenaeum._cmd_explain_routing import add_explain_routing_subparser
@@ -135,9 +131,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_calibration_subparser(subparsers)  # calibration
     add_outbound_subparser(subparsers)  # outbound-lint
     add_bounce_contract_subparser(subparsers)  # bounce-contract
-    add_bounce_divergence_subparser(subparsers)  # bounce-divergence
-    add_do_not_email_divergence_subparser(subparsers)  # do-not-email-divergence
     add_surface_divergence_subparser(subparsers)  # surface-divergence
+    # bounce-divergence / do-not-email-divergence removed (issue athenaeum#1111):
+    # surface-divergence --field {bounced,do_not_email} replaced both;
+    # the removed pair had zero remaining callers (see the issue for the
+    # verified caller audit, including the cron-fleet correction).
     add_drain_subparser(subparsers)  # drain
     add_storage_subparser(subparsers)  # storage
     add_push_metrics_subparser(subparsers)  # push-metrics
