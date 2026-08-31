@@ -166,6 +166,15 @@ class PendingMerge:
     # the human-readable twin of the provenance ledger's ``auto_applied``
     # field (:func:`athenaeum.provenance.build_merge_provenance_record`).
     auto_applied: bool = False
+    # Issue athenaeum#1142: which embedder (``athenaeum.clusters.EMBEDDER_*``)
+    # produced this cluster's vectors, when the caller supplied one (today,
+    # only :mod:`athenaeum.wiki_dedupe`'s write path does). ``""`` for a
+    # proposal written without this field — pre-athenaeum#1142 blocks, and any
+    # caller (e.g. the raw-intake C3 write path in :mod:`athenaeum.merge`)
+    # that does not pass ``embedder=`` to :func:`write_pending_merge` — so a
+    # pre-existing block still parses without a KeyError and without
+    # fabricating an embedder value nobody recorded.
+    embedder: str = ""
 
 
 WRITE_KINDS = ("create-merged", "fold-into-existing")
@@ -258,6 +267,7 @@ def render_block(
     confidence: float,
     created_at: str | None = None,
     write_kind: str = "create-merged",
+    embedder: str | None = None,
 ) -> str:
     """Render one pending-merge block as markdown.
 
@@ -265,6 +275,14 @@ def render_block(
     classification decided at proposal time — ``create-merged`` (the target
     slug is free) or ``fold-into-existing`` (a wiki page already owns the
     slug). It is CLASSIFICATION only; the fold WRITE path is athenaeum#425.
+
+    Issue athenaeum#1142: ``embedder`` — when a caller supplies one (the same
+    value :mod:`athenaeum.clusters` stamps on a formed ``Cluster`` and athenaeum#1032
+    already logs) — is rendered as its own ``**Embedder**:`` line. ``None``
+    (the default) omits the line entirely, so a caller that never passes it
+    (every pre-athenaeum#1142 call site, and the raw-intake C3 write path in
+    :mod:`athenaeum.merge`, which is out of this issue's scope) renders a
+    byte-identical block to before this change.
     """
     today = created_at or date.today().isoformat()
     target_escaped = _escape_quotes(merge_target_name)
@@ -275,8 +293,10 @@ def render_block(
         "",
         f"**Rationale**: {rationale or '(none provided)'}",
         f"**Write kind**: {write_kind}",
-        "**Sources**:",
     ]
+    if embedder:
+        parts.append(f"**Embedder**: {embedder}")
+    parts.append("**Sources**:")
     for src in sources:
         parts.append(f"- {src}")
     parts.append(f"**Confidence**: {confidence:.2f}")
@@ -361,6 +381,7 @@ def _parse_block(block_text: str) -> PendingMerge | None:
     note = ""
     write_kind = "create-merged"
     auto_applied = False
+    embedder = ""
 
     in_sources = False
     in_draft = False
@@ -425,6 +446,10 @@ def _parse_block(block_text: str) -> PendingMerge | None:
             in_sources = False
             auto_applied = s.removeprefix("**Auto-applied**:").strip().lower() == "true"
             continue
+        if s.startswith("**Embedder**:"):
+            in_sources = False
+            embedder = s.removeprefix("**Embedder**:").strip()
+            continue
         if in_sources and s.startswith("- "):
             sources.append(s[2:].strip())
             continue
@@ -453,6 +478,7 @@ def _parse_block(block_text: str) -> PendingMerge | None:
         note=note,
         write_kind=write_kind,
         auto_applied=auto_applied,
+        embedder=embedder,
     )
 
 
@@ -474,6 +500,7 @@ def write_pending_merge(
     confidence: float,
     created_at: str | None = None,
     write_kind: str | None = None,
+    embedder: str | None = None,
 ) -> str:
     """Append one merge-proposal block to ``_pending_merges.md``.
 
@@ -484,6 +511,12 @@ def write_pending_merge(
 
     Issue athenaeum#421: ``write_kind`` carries the slug-collision
     classification (``create-merged`` | ``fold-into-existing``).
+
+    Issue athenaeum#1142: ``embedder`` — when supplied — is rendered as a
+    ``**Embedder**:`` line (see :func:`render_block`). ``None`` (the
+    default) omits it, so a caller that doesn't pass it (e.g. the
+    raw-intake C3 write path in :mod:`athenaeum.merge`) writes a
+    byte-identical block to before this parameter existed.
 
     Issue athenaeum#748: ``write_kind`` is DERIVED here, not trusted from the
     caller. The classification is computed from whether the target slug
@@ -524,6 +557,7 @@ def write_pending_merge(
         confidence=confidence,
         created_at=created_at,
         write_kind=write_kind,
+        embedder=embedder,
     )
     block_id = _make_id(sources, merge_target_name)
 
@@ -624,6 +658,7 @@ def list_pending_merges(
                 "confidence": pm.confidence,
                 "created_at": pm.created_at,
                 "write_kind": pm.write_kind,
+                "embedder": pm.embedder,
             }
         )
     return out
