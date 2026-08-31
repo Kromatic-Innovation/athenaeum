@@ -225,6 +225,22 @@ class TestRunPreconditions:
         ):
             assert _run_preconditions(ctx) == 1
 
+    def test_bad_rule_proposals_provider_config_returns_1_not_traceback(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#1174: ``rule_proposals`` is excluded from
+        ``_LIBRARIAN_ROUTED_KNOBS`` (it is independently routed, mirroring
+        ``topic``) but, unlike every routed knob, previously had NO preflight
+        validation at all -- a bad ``llm.providers.rule_proposals`` value
+        raised an uncaught ``ProviderConfigError`` the first time
+        ``_run_rule_proposal_phase`` actually resolved it, instead of
+        failing cleanly here. Uses the REAL ``resolve_provider`` (not
+        mocked) so this exercises the actual validation path, not just the
+        ``except`` clause's plumbing."""
+        ctx = _make_ctx(tmp_path)
+        ctx.config = {"llm": {"providers": {"rule_proposals": "not-a-real-provider"}}}
+        assert _run_preconditions(ctx) == 1
+
     def test_preflight_failure_returns_1(self, tmp_path: Path) -> None:
         ctx = _make_ctx(tmp_path)
         with (

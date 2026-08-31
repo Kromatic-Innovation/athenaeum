@@ -766,13 +766,14 @@ Constraints and semantics:
 ### Per-knob provider routing (athenaeum#786)
 
 `llm.provider` / `ATHENAEUM_LLM_PROVIDER` above set the **global default**
-provider. Each of the six model knobs (`classify`, `write`, `resolve`,
-`topic`, `reasoning_t1`, `reasoning_t2` — the single source of truth is
-`prompt_registry._META_ROWS`) can override that default independently:
+provider. Each of the seven model knobs (`classify`, `write`, `resolve`,
+`topic`, `reasoning_t1`, `reasoning_t2`, `rule_proposals` — the single
+source of truth is `prompt_registry._META_ROWS`) can override that default
+independently:
 
 | Override | Env var | YAML key |
 |---|---|---|
-| Per-knob provider | `ATHENAEUM_<KNOB>_LLM_PROVIDER` — the six concrete names: `ATHENAEUM_CLASSIFY_LLM_PROVIDER`, `ATHENAEUM_WRITE_LLM_PROVIDER`, `ATHENAEUM_RESOLVE_LLM_PROVIDER`, `ATHENAEUM_TOPIC_LLM_PROVIDER`, `ATHENAEUM_REASONING_T1_LLM_PROVIDER`, `ATHENAEUM_REASONING_T2_LLM_PROVIDER` | `llm.providers.<knob>` |
+| Per-knob provider | `ATHENAEUM_<KNOB>_LLM_PROVIDER` — the seven concrete names: `ATHENAEUM_CLASSIFY_LLM_PROVIDER`, `ATHENAEUM_WRITE_LLM_PROVIDER`, `ATHENAEUM_RESOLVE_LLM_PROVIDER`, `ATHENAEUM_TOPIC_LLM_PROVIDER`, `ATHENAEUM_REASONING_T1_LLM_PROVIDER`, `ATHENAEUM_REASONING_T2_LLM_PROVIDER`, `ATHENAEUM_RULE_PROPOSALS_LLM_PROVIDER` | `llm.providers.<knob>` |
 
 Precedence, per knob: `ATHENAEUM_<KNOB>_LLM_PROVIDER` env > `llm.providers.<knob>`
 yaml > the global default (`ATHENAEUM_LLM_PROVIDER` env > `llm.provider` yaml >
@@ -800,6 +801,11 @@ Every one of `classify` / `write` / `resolve` / `topic` / `reasoning_t1` /
   the `athenaeum ingest-answers` / `athenaeum reresolve-questions` CLI
   commands each resolve their own provider independently and construct
   their own client (issue athenaeum#786) — unchanged by athenaeum#841.
+  `rule_proposals` (`athenaeum.rule_proposals`, the default-off
+  drafting phase, issue athenaeum#1063) is routed the same way — its own
+  provider/client, resolved and validated at startup preflight
+  independently of this pipeline (issue athenaeum#1174) — also unchanged by
+  athenaeum#841.
 - `classify`, `write`, `resolve` (within an `athenaeum run` librarian run —
   distinct from the `resolve` knob's CLI-command path above, wired
   separately), `reasoning_t1`, and `reasoning_t2` are now each threaded
