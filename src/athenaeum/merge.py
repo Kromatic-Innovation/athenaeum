@@ -1715,8 +1715,14 @@ def merge_clusters_to_wiki(
             ``resolve_calls``, ``chunks_run``, ``pairs_added_via_similarity``,
             ``entries_merged`` (``len(entries)``), and ``escalations_written``
             (``len(escalations)``) — so the run-level profile summary (athenaeum#464)
-            can thread these counters up without recomputing them. Purely
-            additive; ``None`` (every pre-athenaeum#464 caller) is byte-identical.
+            can thread these counters up without recomputing them. Issue
+            athenaeum#1177 (AC4) additionally sets ``haiku_calls_succeeded`` and
+            ``resolve_calls_succeeded`` — the SUBSET of ``haiku_calls`` /
+            ``resolve_calls`` (attempted) whose response actually landed
+            (tokens recorded), so a run where every attempt errored reports
+            that disagreement explicitly rather than only ever exposing the
+            attempted count under a name a reader could mistake for results.
+            Purely additive; ``None`` (every pre-athenaeum#464 caller) is byte-identical.
             Issue athenaeum#909 additionally sets ``c4_swept_full`` (``bool``) — whether
             this call's EFFECTIVE ``only_cluster_ids`` (after ``c4_since``
             scoping below, if it engaged) ended up ``None``, i.e. a true
@@ -1923,6 +1929,17 @@ def merge_clusters_to_wiki(
     similarity_threshold = resolve_similarity_threshold(resolved_config)
 
     haiku_calls = 0
+    # Issue athenaeum#1177 (AC4): ATTEMPTED (``haiku_calls`` above, unchanged)
+    # vs SUCCEEDED, tracked separately so a run where the detector's calls
+    # all errored (e.g. credits exhausted) cannot report ``detector_haiku``
+    # as if it reflected real detections when the token ledger recorded
+    # zero tokens for every one of them. Incremented via
+    # ``usage.succeeded_calls`` (bumped only when a REAL response's tokens
+    # were recorded, see ``TokenUsage.add_tokens``) diffed immediately
+    # around each ``detect_contradictions`` call, rather than threading a
+    # new return value through it — keeps that function's contract
+    # unchanged.
+    haiku_calls_succeeded = 0
     pairs_added_via_similarity = 0
     chunks_run = 0
 
@@ -2297,13 +2314,19 @@ def merge_clusters_to_wiki(
     # block stays byte-identical to the pre-athenaeum#126 format.
     resolve_budget = resolve_max_per_run(resolved_config)
     resolve_calls = 0
+    # Issue athenaeum#1177 (AC4): attempted (``resolve_calls`` above) vs
+    # succeeded, mirroring ``haiku_calls_succeeded`` below -- see its
+    # comment for why this is a before/after diff on
+    # ``usage.succeeded_calls`` rather than a new ``propose_resolution``
+    # return value.
+    resolve_calls_succeeded = 0
     resolve_budget_exhausted_logged = False
 
     def _maybe_propose(
         result: ContradictionResult,
         members: list[AutoMemoryFile],
     ) -> ResolutionProposal | MergeProposal | None:
-        nonlocal resolve_calls, resolve_budget_exhausted_logged
+        nonlocal resolve_calls, resolve_calls_succeeded, resolve_budget_exhausted_logged
         if not result.detected:
             return None
         # Issue athenaeum#249: a pair already settled as not_a_conflict (auto or human)
@@ -2343,9 +2366,18 @@ def merge_clusters_to_wiki(
         # can now differ.
         if usage is not None and resolve_client is not None:
             usage.api_calls += 1
-        return propose_resolution(
+            # Issue athenaeum#1177: also record it on the run-level attempted-vs-
+            # succeeded counter (see TokenUsage.record_attempt's docstring) —
+            # additive to, not a replacement for, this call site's own
+            # ``api_calls``/``resolve_calls`` accounting above.
+            usage.record_attempt()
+        _succeeded_before = usage.succeeded_calls if usage is not None else 0
+        proposal = propose_resolution(
             result, members, resolve_client, usage=usage, wiki_root=wiki_root
         )
+        if usage is not None and usage.succeeded_calls > _succeeded_before:
+            resolve_calls_succeeded += 1
+        return proposal
 
     # Issue athenaeum#462: FIRST WRITE — persist the deterministic C3 merge output to
     # disk BEFORE C4 detection runs. Until this change the page write loop sat
@@ -2544,9 +2576,15 @@ def merge_clusters_to_wiki(
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
+                # Issue athenaeum#1177: run-level attempted counter, additive to
+                # the api_calls/haiku_calls accounting above.
+                usage.record_attempt()
+            _succeeded_before = usage.succeeded_calls if usage is not None else 0
             result = detect_contradictions(
                 filtered, client, config=resolved_config, usage=usage, wiki_root=wiki_root
             )
+            if usage is not None and usage.succeeded_calls > _succeeded_before:
+                haiku_calls_succeeded += 1
             # Issue athenaeum#569 (H6): capture the detector's transient give-up BEFORE
             # any downgrade reassigns `result`, so a cluster whose detection was
             # cut short by an overload window is re-queued next run.
@@ -2717,9 +2755,15 @@ def merge_clusters_to_wiki(
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
+                # Issue athenaeum#1177: run-level attempted counter, additive to
+                # the api_calls/haiku_calls accounting above.
+                usage.record_attempt()
+            _succeeded_before = usage.succeeded_calls if usage is not None else 0
             result = detect_contradictions(
                 pair, client, config=resolved_config, usage=usage, wiki_root=wiki_root
             )
+            if usage is not None and usage.succeeded_calls > _succeeded_before:
+                haiku_calls_succeeded += 1
             if result.detected:
                 pairs_added_via_similarity += 1
                 # Synthesize a thin escalation entry; we don't have a
@@ -2758,7 +2802,13 @@ def merge_clusters_to_wiki(
             out_stats.update(
                 {
                     "haiku_calls": haiku_calls,
+                    # Issue athenaeum#1177 (AC4): attempted-vs-succeeded split, so a
+                    # run where the detector's calls all errored cannot
+                    # report "20 detections" that the token ledger shows
+                    # zero tokens for.
+                    "haiku_calls_succeeded": haiku_calls_succeeded,
                     "resolve_calls": resolve_calls,
+                    "resolve_calls_succeeded": resolve_calls_succeeded,
                     "chunks_run": chunks_run,
                     "pairs_added_via_similarity": pairs_added_via_similarity,
                     "entries_merged": len(entries),
@@ -2791,7 +2841,10 @@ def merge_clusters_to_wiki(
         out_stats.update(
             {
                 "haiku_calls": haiku_calls,
+                # Issue athenaeum#1177 (AC4): see the dry-run branch above's comment.
+                "haiku_calls_succeeded": haiku_calls_succeeded,
                 "resolve_calls": resolve_calls,
+                "resolve_calls_succeeded": resolve_calls_succeeded,
                 "chunks_run": chunks_run,
                 "pairs_added_via_similarity": pairs_added_via_similarity,
                 "entries_merged": len(entries),
