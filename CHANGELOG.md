@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Batch spend reservation and settlement — `ceiling_tripped` is no longer
+  blind to committed in-flight cost (athenaeum#1147).**
+  `TokenUsage.add_batch_tokens` fires at COLLECT, so under the async
+  submit/collect split the submitting run's `usage` never saw the cost of the
+  batch it had just submitted — cost that is already committed server-side and
+  cannot be halted. A new append-only `batch_reservations.jsonl` (same seam,
+  versioning and torn-trailing-line tolerance as `spend.jsonl`) records the
+  three moments that must not be collapsed: a `reserved` record at SUBMIT
+  (batch id, knob, estimated tokens, estimated USD, and the submit run's
+  accounting day); a `settled` record at COLLECT that supersedes it with the
+  actuals, the collect run's day, and the estimate-vs-actual delta; and, at
+  CHECK time, `spend.ceiling_tripped` counting outstanding
+  reserved-but-unsettled commitments toward both the per-run and the per-day
+  dollar figures. Reservations are priced at the **50%-discounted batch rate**
+  through the one existing pricing site — pricing them synchronously would
+  trip the ceiling roughly 2x too early and defeat the point of batching. A
+  reservation is ALWAYS closed: a batch whose every request came back
+  `expired` settles to **zero** (the API documents an expired request as not
+  billed), and a handle retired uncollected (athenaeum#1146: past retention,
+  unretrievable, no applicable context) settles at its **estimate** — the
+  batch ran and was billed, so zero would under-report and leaving it open
+  would leak a permanent phantom charge. `athenaeum spend` now reports
+  committed-but-unbilled batches in both its text and `--json` output. The
+  athenaeum#483 pre-submit ceiling checks at the tier-2 and tier-3 phase
+  boundaries are preserved, not replaced — they simply now see in-flight
+  commitments as well as the run's own accrual.
+
 - **Per-knob batch selection: `librarian.batch.<knob>` (athenaeum#1175).**
   Batch mode was GLOBAL — one flag for the whole run — but only two knobs are
   ever batched (`classify` and `write`) and they shared it, so an operator
