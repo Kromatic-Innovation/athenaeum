@@ -37,6 +37,8 @@ from athenaeum.tiers import (
     apply_merge_ops,
     parse_merge_ops_response,
     parse_tier2_entities,
+    resolve_type_gate_allowed_types,
+    resolve_type_gate_excluded_keys,
     strip_planning_preamble,
     tier1_programmatic_match,
     tier2_classify,
@@ -264,6 +266,183 @@ class TestTier1:
         matched = tier1_programmatic_match(raw, index)
         ai_matches = [n for n, _, _ in matched if n == "ai"]
         assert len(ai_matches) == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1169: type gate for Tier-1 programmatic matching
+# ---------------------------------------------------------------------------
+
+
+def _type_gate_wiki(tmp_path: Path) -> Path:
+    """A wiki with one `company`, one `project`, and one UNTYPED page --
+    each name distinct and multi-word so the mention-density/junk gates
+    never interfere with what the type gate itself is being tested for."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    (wiki / "co.md").write_text(
+        "---\nuid: co1\ntype: company\nname: Widget Traders\n---\n\nA company.\n"
+    )
+    (wiki / "proj.md").write_text(
+        "---\nuid: pr1\ntype: project\nname: Rocket Launcher\n---\n\nA project.\n"
+    )
+    (wiki / "untyped.md").write_text("---\nname: Silent Harbor\n---\n\nNo type field.\n")
+    return wiki
+
+
+_TYPE_GATE_CONTENT = (
+    "Notes: talked to Widget Traders about the Rocket Launcher timeline, "
+    "then visited Silent Harbor for lunch."
+)
+
+
+class TestTier1TypeGate:
+    def test_default_no_configuration_matches_everything(self, tmp_path: Path) -> None:
+        """No allowed_types/excluded_keys and no config: byte-identical to
+        pre-athenaeum#1169 behavior -- every key that would have matched still
+        matches, typed or untyped."""
+        index = EntityIndex(_type_gate_wiki(tmp_path))
+        raw = _make_raw(_TYPE_GATE_CONTENT)
+        names = {n for n, _, _ in tier1_programmatic_match(raw, index)}
+        assert names == {"widget traders", "rocket launcher", "silent harbor"}
+
+    def test_allowed_types_suppresses_other_types(self, tmp_path: Path) -> None:
+        """Explicit allowed_types={'company'} drops the project match but
+        keeps the company match."""
+        index = EntityIndex(_type_gate_wiki(tmp_path))
+        raw = _make_raw(_TYPE_GATE_CONTENT)
+        names = {
+            n
+            for n, _, _ in tier1_programmatic_match(raw, index, allowed_types={"company"})
+        }
+        assert "widget traders" in names
+        assert "rocket launcher" not in names
+
+    def test_allowed_types_admits_configured_type(self, tmp_path: Path) -> None:
+        """The flip side of the suppression test: a key whose type IS in the
+        allow-list is not dropped."""
+        index = EntityIndex(_type_gate_wiki(tmp_path))
+        raw = _make_raw(_TYPE_GATE_CONTENT)
+        names = {
+            n
+            for n, _, _ in tier1_programmatic_match(raw, index, allowed_types={"project"})
+        }
+        assert "rocket launcher" in names
+
+    def test_untyped_page_kept_even_with_allowed_types_configured(
+        self, tmp_path: Path
+    ) -> None:
+        """Binding decision (issue athenaeum#1169): an untyped page is always
+        matchable, even when an allow-list is configured and the page's type
+        (there isn't one) is not in it."""
+        index = EntityIndex(_type_gate_wiki(tmp_path))
+        raw = _make_raw(_TYPE_GATE_CONTENT)
+        names = {
+            n
+            for n, _, _ in tier1_programmatic_match(raw, index, allowed_types={"company"})
+        }
+        assert "silent harbor" in names
+
+    def test_excluded_keys_suppresses_specific_key(self, tmp_path: Path) -> None:
+        """excluded_keys drops one specific key regardless of type -- the
+        mechanism the issue's CORRECTION needs to express "exclude this
+        particular inert key" rather than a whole type."""
+        index = EntityIndex(_type_gate_wiki(tmp_path))
+        raw = _make_raw(_TYPE_GATE_CONTENT)
+        names = {
+            n
+            for n, _, _ in tier1_programmatic_match(
+                raw, index, excluded_keys={"widget traders"}
+            )
+        }
+        assert "widget traders" not in names
+        # Unrelated keys are unaffected.
+        assert "rocket launcher" in names
+        assert "silent harbor" in names
+
+    def test_excluded_keys_wins_over_allowed_types(self, tmp_path: Path) -> None:
+        """A key can be excluded even when its own type IS in the allow-list --
+        excluded_keys is a strictly stronger veto."""
+        index = EntityIndex(_type_gate_wiki(tmp_path))
+        raw = _make_raw(_TYPE_GATE_CONTENT)
+        names = {
+            n
+            for n, _, _ in tier1_programmatic_match(
+                raw,
+                index,
+                allowed_types={"company"},
+                excluded_keys={"widget traders"},
+            )
+        }
+        assert "widget traders" not in names
+
+    def test_suppressed_counts_report_what_each_gate_removed(self, tmp_path: Path) -> None:
+        """The optional `suppressed` accumulator lets a caller (e.g. a
+        host-side measurement run against the live corpus, issue athenaeum#1169 AC4)
+        see how many candidate matches each half of the gate removed."""
+        index = EntityIndex(_type_gate_wiki(tmp_path))
+        raw = _make_raw(_TYPE_GATE_CONTENT)
+        suppressed: dict[str, int] = {}
+        tier1_programmatic_match(
+            raw,
+            index,
+            allowed_types={"company"},
+            excluded_keys={"rocket launcher"},
+            suppressed=suppressed,
+        )
+        # "rocket launcher" is caught by excluded_keys (checked first);
+        # nothing else is dropped by the type gate since the only other
+        # non-company, non-excluded key is "silent harbor", which is untyped
+        # and therefore always kept.
+        assert suppressed == {"excluded_key": 1}
+
+    def test_config_wires_allowed_types_and_excluded_keys(self, tmp_path: Path) -> None:
+        """librarian.type_gate_allowed_types / type_gate_excluded_keys in
+        config, mirroring the librarian.junk_match_* / mention_density_*
+        knob idiom, take effect with no explicit kwargs passed."""
+        index = EntityIndex(_type_gate_wiki(tmp_path))
+        raw = _make_raw(_TYPE_GATE_CONTENT)
+        cfg = {
+            "librarian": {
+                "type_gate_allowed_types": ["project"],
+                "type_gate_excluded_keys": ["silent harbor"],
+            }
+        }
+        names = {n for n, _, _ in tier1_programmatic_match(raw, index, config=cfg)}
+        assert names == {"rocket launcher"}
+
+    def test_explicit_kwarg_takes_precedence_over_config(self, tmp_path: Path) -> None:
+        index = EntityIndex(_type_gate_wiki(tmp_path))
+        raw = _make_raw(_TYPE_GATE_CONTENT)
+        cfg = {"librarian": {"type_gate_allowed_types": ["project"]}}
+        names = {
+            n
+            for n, _, _ in tier1_programmatic_match(
+                raw, index, config=cfg, allowed_types={"company"}
+            )
+        }
+        # Explicit kwarg (company) wins over config (project).
+        assert "widget traders" in names
+        assert "rocket launcher" not in names
+
+    def test_resolve_type_gate_allowed_types_default_none(self) -> None:
+        assert resolve_type_gate_allowed_types(None) is None
+        assert resolve_type_gate_allowed_types({}) is None
+        assert resolve_type_gate_allowed_types({"librarian": {}}) is None
+        empty_cfg = {"librarian": {"type_gate_allowed_types": []}}
+        assert resolve_type_gate_allowed_types(empty_cfg) is None
+
+    def test_resolve_type_gate_allowed_types_from_config(self) -> None:
+        cfg = {"librarian": {"type_gate_allowed_types": ["concept", "principle"]}}
+        assert resolve_type_gate_allowed_types(cfg) == {"concept", "principle"}
+
+    def test_resolve_type_gate_excluded_keys_default_none(self) -> None:
+        assert resolve_type_gate_excluded_keys(None) is None
+        empty_cfg = {"librarian": {"type_gate_excluded_keys": []}}
+        assert resolve_type_gate_excluded_keys(empty_cfg) is None
+
+    def test_resolve_type_gate_excluded_keys_from_config_lowercases(self) -> None:
+        cfg = {"librarian": {"type_gate_excluded_keys": ["Widget Traders"]}}
+        assert resolve_type_gate_excluded_keys(cfg) == {"widget traders"}
 
 
 # ---------------------------------------------------------------------------
