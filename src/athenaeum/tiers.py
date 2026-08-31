@@ -3244,6 +3244,220 @@ def stamp_merge_provenance(
     meta["field_sources"] = fs
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1182: page-size invariant
+# ---------------------------------------------------------------------------
+#
+# Atomic pages must not be merged into indefinitely. Corpus shape (23,534
+# pages, non-`_`-prefixed *.md, re-measured 2026-08-30): median 1,544 bytes,
+# p75 1,751, p90 2,061, p99 8,468 -- only 84 pages (0.36%) exceed the
+# 20,000-char merge-input window (:data:`_MAX_EXISTING_BODY_CHARS`, above).
+# That shape is an atomic-page corpus with 84 anomalies, not a corpus with a
+# legitimate large-document tail, so the threshold below is picked from the
+# DISTRIBUTION, not from the model's context window: well under 20,000 AND
+# comfortably above p99, so it catches genuine unbounded-accretion anomalies
+# without false-positiving on the ordinary corpus. 10,000 sits ~18% above
+# p99 (8,468 -> some headroom for ordinary variance in the top percentile)
+# and at exactly half of the 20,000 merge-input window, so a future change
+# to the window does not have to chase this threshold, or vice versa.
+DEFAULT_PAGE_SIZE_THRESHOLD_CHARS = 10_000
+
+# The action an over-threshold page routes to instead of another merge.
+# Only "review" ships implemented (orchestrator decision, issue athenaeum#1182):
+# split and log-demotion are destructive restructurings of durable operator
+# data and must not run unattended on a first landing. Both are RESERVED
+# here -- a recognized config value that resolves cleanly and then raises
+# NotImplementedError at dispatch time (see check_page_size_gate) rather
+# than either silently falling back to "review" (hiding the operator's
+# explicit choice) or a KeyError one yaml typo away from indistinguishable
+# from a real "review" -- so enabling them later is a follow-up, not a
+# rebuild of the gate itself.
+VALID_OVERSIZE_PAGE_ACTIONS = ("review", "split", "log_demote")
+DEFAULT_OVERSIZE_PAGE_ACTION = "review"
+
+
+def resolve_page_size_threshold_chars(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.page_size_threshold_chars`` (issue athenaeum#1182).
+
+    Mirrors :func:`resolve_mention_density_min_occurrences`'s validation
+    contract exactly: must be ``>= 1`` (bool rejected as an int subclass, so
+    ``page_size_threshold_chars: yes`` in yaml cannot silently become a
+    threshold of 1); non-numeric, non-positive, missing, or bool values fall
+    back to :data:`DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("page_size_threshold_chars")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+                return raw
+    return DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
+
+
+def resolve_oversize_page_action(config: dict[str, Any] | None = None) -> str:
+    """Resolve ``librarian.oversize_page_action`` (issue athenaeum#1182).
+
+    One of :data:`VALID_OVERSIZE_PAGE_ACTIONS`. Any other value (unknown
+    string, wrong type, missing key/section) falls back to
+    :data:`DEFAULT_OVERSIZE_PAGE_ACTION` (``"review"``) -- the only action
+    that is safe to run unattended; see :func:`check_page_size_gate`.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("oversize_page_action")
+            if isinstance(raw, str) and raw in VALID_OVERSIZE_PAGE_ACTIONS:
+                return raw
+    return DEFAULT_OVERSIZE_PAGE_ACTION
+
+
+def check_page_size_gate(
+    action: EntityAction,
+    existing_body: str,
+    source_ref: str,
+    config: dict[str, Any] | None,
+) -> EscalationItem | None:
+    """Enforce the page-size invariant BEFORE a merge is dispatched (issue athenaeum#1182).
+
+    Called by every tier-3 merge-dispatch site with the target page's
+    CURRENT on-disk body, before the merge prompt is built or any model call
+    is made -- so an over-threshold page never pays for (or risks) a merge
+    call at all. ``existing_body`` is the frontmatter-stripped body, exactly
+    what :func:`tier3_merge` / :func:`tier3_merge_params` would echo into the
+    merge prompt.
+
+    Returns ``None`` when the page is at or under
+    :func:`resolve_page_size_threshold_chars` -- the caller proceeds with the
+    merge exactly as before, byte-for-byte unchanged from pre-athenaeum#1182
+    behaviour.
+
+    Returns an :class:`~athenaeum.models.EscalationItem`
+    (``conflict_type="oversize_page"``) when the page is over threshold and
+    the configured action is ``"review"`` (the shipped default). The caller
+    MUST NOT dispatch the merge and MUST NOT modify the page; instead it
+    appends the returned item to its escalations so
+    :func:`tier4_escalate` surfaces the page (and the observation that would
+    have been merged) in ``_pending_questions.md`` rather than losing it.
+
+    Raises :class:`NotImplementedError` when ``librarian.oversize_page_action``
+    is explicitly set to ``"split"`` or ``"log_demote"`` (both currently
+    RESERVED, not implemented) -- naming the page and the requested action,
+    rather than silently substituting ``"review"`` for an operator's
+    explicit-but-not-yet-buildable choice.
+    """
+    threshold = resolve_page_size_threshold_chars(config)
+    if len(existing_body) <= threshold:
+        return None
+
+    configured_action = resolve_oversize_page_action(config)
+    if configured_action == "review":
+        log.info(
+            "T3 merge suppressed by page-size gate (issue athenaeum#1182): "
+            "page=%s source=%s existing_body_chars=%d threshold=%d action=review",
+            action.name,
+            source_ref,
+            len(existing_body),
+            threshold,
+        )
+        return EscalationItem(
+            raw_ref=source_ref,
+            entity_name=action.name,
+            conflict_type="oversize_page",
+            description=(
+                f"Page {action.name!r} is {len(existing_body)} chars, over "
+                f"the {threshold}-char page-size threshold (issue "
+                "athenaeum#1182). Merging another observation into it was "
+                "suppressed and the page was left unmodified. This page has "
+                "likely outgrown the atomic-page form and should be split "
+                "or demoted to a log (~/knowledge/logs/) by an operator -- "
+                "automatic split/log-demotion are reserved, not yet "
+                f"implemented. The new observation from {source_ref} "
+                f"follows so it is not lost:\n\n{action.observations[:2000]}"
+            ),
+        )
+
+    raise NotImplementedError(
+        f"librarian.oversize_page_action={configured_action!r} is reserved "
+        "but not yet implemented (issue athenaeum#1182) -- page="
+        f"{action.name!r} source={source_ref!r} is over the page-size "
+        "threshold and would route here. Set librarian.oversize_page_action "
+        'to "review" (the default) until split/log-demotion ship.'
+    )
+
+
+@dataclass
+class OversizePage:
+    """One wiki page over the page-size threshold (issue athenaeum#1182 AC3)."""
+
+    path: Path
+    chars: int
+    entity_type: str
+
+
+def enumerate_oversize_pages(
+    wiki_root: Path,
+    config: dict[str, Any] | None = None,
+    threshold: int | None = None,
+) -> list[OversizePage]:
+    """Read-only enumeration of pages over the page-size threshold (issue athenaeum#1182 AC3).
+
+    A non-mutating, dry-run-shaped listing for whoever runs it against the
+    live ``~/knowledge`` corpus this lane has no access to (see the issue's
+    own "criterion you cannot discharge" note -- the 84 pages it names
+    cannot be enumerated or dispositioned from inside a dev container with
+    no corpus, so this ships the ONE-COMMAND job instead of a fabricated
+    list). No wiki write, no reindex, no LLM call -- pure read.
+
+    Walk mirrors :meth:`~athenaeum.models.EntityIndex._load` exactly
+    (``wiki_root.glob("*.md")``, ``_``-prefixed files skipped -- issue
+    athenaeum#1182 explicitly keeps that exclusion unchanged, since the
+    genuinely huge ``_``-prefixed files are already correctly excluded from
+    the entity index and never merged into) and the filing lane's own
+    corpus methodology (non-underscore ``*.md`` only). A file that fails to
+    read/decode is skipped, matching ``EntityIndex._load``'s fail-open
+    behaviour, rather than raising and aborting the whole enumeration.
+
+    Measures a page's BODY (frontmatter stripped via
+    :func:`~athenaeum.models.parse_frontmatter`), not the raw file's byte
+    count, so a page's size here is exactly what
+    :func:`check_page_size_gate` would measure for that same page.
+    ``entity_type`` is the page's ``type:`` frontmatter field, or ``""``
+    when absent (the issue's own table records 9 of the 84 oversized pages
+    carrying no ``type:`` at all).
+
+    ``threshold`` defaults to :func:`resolve_page_size_threshold_chars`
+    (``config``'s ``librarian.page_size_threshold_chars``, or the built-in
+    default) so this reports the SAME threshold the live gate enforces
+    unless the caller deliberately asks for a different cut. Results are
+    sorted by ``chars`` descending -- the largest anomalies first.
+    """
+    resolved_threshold = (
+        threshold
+        if threshold is not None
+        else resolve_page_size_threshold_chars(config)
+    )
+    results: list[OversizePage] = []
+    for fpath in sorted(wiki_root.glob("*.md")):
+        if fpath.name.startswith("_"):
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, body = parse_frontmatter(text)
+        if len(body) > resolved_threshold:
+            raw_type = meta.get("type") if meta else None
+            results.append(
+                OversizePage(
+                    path=fpath,
+                    chars=len(body),
+                    entity_type=str(raw_type) if raw_type else "",
+                )
+            )
+    results.sort(key=lambda p: p.chars, reverse=True)
+    return results
+
+
 def tier3_derive_actions(
     raw: RawFile,
     actions: list[EntityAction],
@@ -3369,6 +3583,20 @@ def tier3_derive_actions(
 
                 text = existing_path.read_text(encoding="utf-8")
                 meta, existing_body = parse_frontmatter(text)
+
+                # Issue athenaeum#1182: page-size invariant, enforced BEFORE the
+                # merge prompt is built or any model call is made — see
+                # check_page_size_gate's docstring for the full contract. An
+                # over-threshold page is never merged into; the escalation
+                # (when the shipped "review" action fires) carries the
+                # would-be observation so it is not lost, and the page is
+                # left byte-for-byte unmodified.
+                oversize_escalation = check_page_size_gate(
+                    action, existing_body, raw.ref, config
+                )
+                if oversize_escalation is not None:
+                    escalations.append(oversize_escalation)
+                    continue
 
                 updated_body, esc = tier3_merge(
                     action,
