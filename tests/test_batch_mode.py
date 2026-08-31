@@ -27,6 +27,7 @@ import logging
 import re
 import subprocess
 import textwrap
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,10 +37,13 @@ import anthropic as anthropic_mod
 import pytest
 
 import athenaeum.models as models_mod
+from athenaeum import batch_state
 from athenaeum.batch import (
+    BATCH_MAX_REQUESTS,
     BATCH_POLL_INTERVAL_SECONDS,
     BatchExecutionError,
     BatchRequest,
+    BatchRunResult,
     execute_batch,
     process_batch_run,
 )
@@ -1379,7 +1383,7 @@ class TestBatchUsageAccounting:
             usage=usage,
             sleep=lambda s: None,
         )
-        assert out["a"].content[0].text == "ok"
+        assert out.results["a"].content[0].text == "ok"
         assert usage.input_tokens == 100
         assert usage.output_tokens == 50
         assert usage.batch_input_tokens == 100
@@ -1441,7 +1445,11 @@ class TestBatchPolling:
             client, _one_request(), description="test", sleep=sleeps.append
         )
         assert sleeps == [BATCH_POLL_INTERVAL_SECONDS] * 3
-        assert out["a"].content[0].text == "ok"
+        assert out.results["a"].content[0].text == "ok"
+        # athenaeum#1144: a batch that ENDED is not in flight, and the outcome
+        # carries the batch id either way.
+        assert out.in_flight is False
+        assert out.batch_id == "msgbatch_1"
 
     def test_timeout_cancels_and_raises(self) -> None:
         client = _FakeClient(lambda params: "ok", allow_sync=False, never_end=True)
@@ -1457,7 +1465,10 @@ class TestBatchPolling:
 
     def test_empty_request_list_submits_nothing(self) -> None:
         client = _FakeClient(lambda params: "ok", allow_sync=False)
-        assert execute_batch(client, [], description="test") == {}
+        empty = execute_batch(client, [], description="test")
+        assert empty.results == {}
+        assert empty.in_flight is False
+        assert empty.batch_id == ""
         assert client.batches.submitted == []
 
 
@@ -1533,3 +1544,398 @@ class TestBatchTruncationRetry:
         # And the file RECOVERED: the WidgetTrunc page was written, not dropped.
         pages = list((root / "wiki").glob("*.md"))
         assert any("WidgetTrunc" in p.read_text(encoding="utf-8") for p in pages)
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1144 — the run deadline threaded into the batch poll: a BOUNDED
+# WAIT that spills to a handle instead of cancelling.
+#
+# The failure this closes: ``execute_batch`` polled against the module's 24h
+# ``BATCH_POLL_TIMEOUT_SECONDS`` inside a bounded nightly window, and on
+# timeout it CANCELLED the batch -- destroying work that is already paid for
+# server-side. With a deadline the poll stops at the earlier of batch-end or
+# the remaining run budget; if the deadline wins, the batch is left running,
+# an athenaeum#1143 handle is recorded over its raw files, and those refs come back
+# as ``in_flight`` -- neither ``failed`` (which would re-bill them) nor
+# ``deferred`` (which would claim nothing was submitted).
+#
+# AC6: every test here drives the poll through the injectable ``sleep``. None
+# waits on real time.
+# ---------------------------------------------------------------------------
+
+
+class TestBatchDeadlineSpill:
+    def test_deadline_spill_leaves_batch_running_and_reports_in_flight(self) -> None:
+        """AC2 + AC3: the poll stops at the deadline; no cancel, no raise."""
+        client = _FakeClient(_scripted_responder, allow_sync=False, never_end=True)
+        sleeps: list[float] = []
+
+        out = execute_batch(
+            client,
+            _one_request(),
+            description="test",
+            sleep=sleeps.append,
+            # Budget of ~70s against a 30s poll cadence: waited walks
+            # 0 -> 30 -> 60 -> 90 and spills on the 90 pass. Driven entirely
+            # by the injected sleep -- no real time passes.
+            deadline=time.monotonic() + 70.0,
+        )
+
+        assert out.in_flight is True
+        assert out.batch_id == "msgbatch_1"
+        assert out.results == {}
+        # AC3, the whole point: the batch is committed server-side and is the
+        # artifact the handle exists to preserve.
+        assert client.batches.cancelled == []
+        assert sleeps == [BATCH_POLL_INTERVAL_SECONDS] * 3
+
+    def test_already_expired_deadline_spills_without_polling(self) -> None:
+        """A deadline already in the past spills on the first pass."""
+        client = _FakeClient(_scripted_responder, allow_sync=False, never_end=True)
+        sleeps: list[float] = []
+
+        out = execute_batch(
+            client,
+            _one_request(),
+            description="test",
+            sleep=sleeps.append,
+            deadline=time.monotonic() - 5.0,
+        )
+
+        assert out.in_flight is True
+        assert sleeps == []
+        assert client.batches.cancelled == []
+
+    def test_batch_ending_inside_the_window_is_collected_unchanged(self) -> None:
+        """AC2: a batch that ends in time continues synchronously, as today."""
+        client = _FakeClient(lambda params: "ok", allow_sync=False, polls_until_end=3)
+        sleeps: list[float] = []
+
+        out = execute_batch(
+            client,
+            _one_request(),
+            description="test",
+            sleep=sleeps.append,
+            deadline=time.monotonic() + 10_000.0,
+        )
+
+        assert out.in_flight is False
+        assert out.results["a"].content[0].text == "ok"
+        assert sleeps == [BATCH_POLL_INTERVAL_SECONDS] * 3
+
+    def test_no_deadline_preserves_the_timeout_cancel_path(self) -> None:
+        """AC2: ``timeout`` semantics are untouched when no deadline is given.
+
+        The complement of the spill: with no deadline, a batch that never ends
+        still hits the module timeout, is cancelled best-effort, and raises --
+        exactly the pre-athenaeum#1144 behaviour.
+        """
+        client = _FakeClient(lambda params: "ok", allow_sync=False, never_end=True)
+
+        with pytest.raises(BatchExecutionError):
+            execute_batch(
+                client,
+                _one_request(),
+                description="test",
+                sleep=lambda s: None,
+                timeout=BATCH_POLL_INTERVAL_SECONDS * 2.5,
+                deadline=None,
+            )
+
+        assert client.batches.cancelled == ["msgbatch_1"]
+
+    def test_deadline_beats_a_later_timeout(self) -> None:
+        """Both bounds armed: the EARLIER one wins, and it is the deadline."""
+        client = _FakeClient(lambda params: "ok", allow_sync=False, never_end=True)
+
+        out = execute_batch(
+            client,
+            _one_request(),
+            description="test",
+            sleep=lambda s: None,
+            timeout=10_000.0,
+            deadline=time.monotonic() + 40.0,
+        )
+
+        assert out.in_flight is True
+        assert client.batches.cancelled == []
+
+
+class TestBatchAssemblyLimits:
+    """AC7: a batch past the documented API limits is refused locally."""
+
+    def test_request_count_over_the_limit_is_refused_before_submit(self) -> None:
+        client = _FakeClient(lambda params: "ok", allow_sync=False)
+        requests = [
+            BatchRequest(
+                custom_id=f"c{i}",
+                params={
+                    "model": "m",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "x"}],
+                },
+            )
+            for i in range(BATCH_MAX_REQUESTS + 1)
+        ]
+
+        with pytest.raises(BatchExecutionError) as exc:
+            execute_batch(client, requests, description="huge", sleep=lambda s: None)
+
+        assert str(BATCH_MAX_REQUESTS) in str(exc.value)
+        # Refused at ASSEMBLY: nothing reached the API, so there is no 400 to
+        # interpret and no server-side cost.
+        assert client.batches.submitted == []
+
+    def test_payload_bytes_over_the_limit_are_refused_before_submit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Shrink the byte cap rather than building a 256 MB payload in a unit
+        # test -- the predicate under test is the comparison, not the constant.
+        monkeypatch.setattr("athenaeum.batch.BATCH_MAX_PAYLOAD_BYTES", 512)
+        client = _FakeClient(lambda params: "ok", allow_sync=False)
+        requests = [
+            BatchRequest(
+                custom_id="big",
+                params={
+                    "model": "m",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "x" * 2048}],
+                },
+            )
+        ]
+
+        with pytest.raises(BatchExecutionError) as exc:
+            execute_batch(client, requests, description="fat", sleep=lambda s: None)
+
+        assert "exceeding the Batch API limit" in str(exc.value)
+        assert client.batches.submitted == []
+
+    def test_a_batch_inside_the_limits_submits_normally(self) -> None:
+        client = _FakeClient(lambda params: "ok", allow_sync=False)
+        out = execute_batch(client, _one_request(), description="fine", sleep=lambda s: None)
+        assert out.in_flight is False
+        assert len(client.batches.submitted) == 1
+
+
+class TestProcessBatchRunDeadlineSpill:
+    """AC4 + AC5: the spill persists a handle and books in-flight refs."""
+
+    def test_tier2_spill_records_a_classify_handle_and_keeps_raw_on_disk(
+        self, tmp_path: Path
+    ) -> None:
+        contents = ["Standalone fact about WidgetSpill gadget.\n"]
+        root = _seed_root(tmp_path, "k", contents)
+        raw_files = discover_raw_files(root / "raw")
+        index = EntityIndex(root / "wiki")
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        client = _FakeClient(_scripted_responder, allow_sync=False, never_end=True)
+
+        result = process_batch_run(
+            raw_files,
+            index,
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            deadline=time.monotonic() - 1.0,
+            cache_dir=cache_dir,
+        )
+
+        ref = raw_files[0].ref
+        # AC5: in-flight is its OWN bucket. Not failed (that would re-bill the
+        # same classify call next run), not deferred (that would claim nothing
+        # was submitted).
+        assert result.in_flight_refs == [ref]
+        assert result.failed_refs == []
+        assert result.deferred_refs == []
+        assert result.created == 0
+        assert result.in_flight_batch_ids == ["msgbatch_1"]
+
+        # AC4: the athenaeum#1143 handle is on disk with the batch id, the knob, and
+        # the ref map -- everything a later run needs to collect it.
+        handles = batch_state.load(cache_dir)
+        assert list(handles) == ["msgbatch_1"]
+        handle = handles["msgbatch_1"]
+        assert handle.knob == "classify"
+        assert [rec.ref for rec in handle.refs.values()] == [ref]
+
+        # Nothing was written and the raw file is untouched -- it is what the
+        # later collect applies the result TO.
+        assert raw_files[0].path.exists()
+        assert not list((root / "wiki").glob("*widget*"))
+        # And the second phase never ran: only the tier-2 batch was submitted.
+        assert len(client.batches.submitted) == 1
+
+    def test_tier3_spill_records_a_write_handle(self, tmp_path: Path) -> None:
+        """The tier-3 batch spills on its own: classify landed, write did not."""
+        contents = ["Standalone fact about WidgetWrite gadget.\n"]
+        root = _seed_root(tmp_path, "k", contents)
+        raw_files = discover_raw_files(root / "raw")
+        index = EntityIndex(root / "wiki")
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        # Two clients so the phases can end differently: classify ends at
+        # create, write never does.
+        classify_client = _FakeClient(_scripted_responder, allow_sync=False)
+        write_client = _FakeClient(_scripted_responder, allow_sync=False, never_end=True)
+
+        result = process_batch_run(
+            raw_files,
+            index,
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            deadline=time.monotonic() - 1.0,
+            cache_dir=cache_dir,
+        )
+
+        assert result.in_flight_refs == [raw_files[0].ref]
+        assert result.created == 0
+        assert raw_files[0].path.exists()
+
+        handles = batch_state.load(cache_dir)
+        assert [h.knob for h in handles.values()] == ["write"]
+        # The tier-2 batch DID complete and was collected -- only the write
+        # batch spilled.
+        assert len(classify_client.batches.submitted) == 1
+        assert len(write_client.batches.submitted) == 1
+
+    def test_no_deadline_preserves_todays_behaviour_exactly(self, tmp_path: Path) -> None:
+        """AC1: ``deadline=None`` records no handle and books no in-flight refs."""
+        contents = ["Standalone fact about WidgetPlain gadget.\n"]
+        root = _seed_root(tmp_path, "k", contents)
+        raw_files = discover_raw_files(root / "raw")
+        index = EntityIndex(root / "wiki")
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+
+        result = process_batch_run(
+            raw_files,
+            index,
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            cache_dir=cache_dir,
+        )
+
+        assert result.created == 1
+        assert result.in_flight_refs == []
+        assert result.in_flight_batch_ids == []
+        assert batch_state.load(cache_dir) == {}
+        assert not raw_files[0].path.exists()
+
+
+class TestLibrarianDeadlineThreading:
+    """AC1, AC5, AC8 at the ``run()`` seam."""
+
+    def _spilling_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[dict[str, Any], dict[str, Any], Path, int]:
+        contents = ["Standalone fact about WidgetThread gadget.\n"]
+        root = _seed_root(tmp_path, "k", contents)
+        _clean_env(monkeypatch)
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        _patch_uids(monkeypatch)
+
+        captured: dict[str, Any] = {}
+        raw_path = next((root / "raw" / "sessions").glob("*.md"))
+
+        def fake_process_batch_run(*args: Any, **kwargs: Any) -> BatchRunResult:
+            captured.update(kwargs)
+            captured["raw_files"] = list(args[0])
+            return BatchRunResult(in_flight_refs=[args[0][0].ref])
+
+        monkeypatch.setattr("athenaeum.batch.process_batch_run", fake_process_batch_run)
+
+        stats: dict[str, Any] = {}
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+            out_run_stats=stats,
+        )
+        return captured, stats, raw_path, rc
+
+    def test_batch_branch_passes_a_deadline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1: the librarian's batch branch threads its wall-clock deadline."""
+        captured, _stats, _raw, _rc = self._spilling_run(tmp_path, monkeypatch)
+
+        assert "deadline" in captured
+        # A real run always arms an internal deadline (athenaeum#396's default), so
+        # the batch poll is bounded rather than falling through to the 24h
+        # module constant.
+        assert isinstance(captured["deadline"], float)
+        assert captured["deadline"] > time.monotonic()
+
+    def test_in_flight_refs_are_reported_and_the_raw_file_survives(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC5: in-flight refs reach the run stats; AC8: nothing is consumed."""
+        _captured, stats, raw_path, _rc = self._spilling_run(tmp_path, monkeypatch)
+
+        assert stats["in_flight_refs"], "expected the spilled refs on the run stats"
+        assert stats["deferred_refs"] == []
+        assert stats["failed_files"] == []
+        assert raw_path.exists()
+
+    def test_spilled_run_reports_a_distinguishable_reason(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """AC8: a spill is not a healthy zero-compile run, and says so.
+
+        A run that compiled nothing because its batch is still in flight
+        renders ``reason=batch-in-flight`` with an ``in_flight=`` count --
+        distinct from the ``reason=completed`` a genuinely idle run renders,
+        and distinct from the ``budget``/``deadline`` early-stop vocabulary
+        the athenaeum#1135 zero-progress refusal keys on.
+        """
+        caplog.set_level(logging.INFO, logger="athenaeum")
+        _captured, _stats, _raw, rc = self._spilling_run(tmp_path, monkeypatch)
+
+        summary = [
+            rec.getMessage()
+            for rec in caplog.records
+            if rec.getMessage().startswith("librarian-run-summary")
+        ]
+        assert summary, "expected a run-summary line"
+        assert "reason=batch-in-flight" in summary[-1]
+        assert "in_flight=1" in summary[-1]
+        # Deliberately OUTSIDE the early-stop vocabulary: work in flight is
+        # progress, so the zero-progress refusal must not fire.
+        assert rc != EXIT_LIBRARIAN_REFUSAL
+
+    def test_zero_yield_alarm_does_not_fire_on_a_spilled_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC8: spent calls whose results are still coming are not wasted."""
+        _captured, stats, _raw, _rc = self._spilling_run(tmp_path, monkeypatch)
+
+        assert stats.get("zero_yield") is not True

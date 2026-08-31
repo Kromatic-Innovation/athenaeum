@@ -68,6 +68,7 @@ now a one-way edge (no cycle).
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -76,7 +77,7 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 
 import anthropic
 
-from athenaeum import spend
+from athenaeum import batch_state, spend
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.intake import tier0_passthrough
@@ -126,6 +127,15 @@ log = logging.getLogger(__name__)
 BATCH_POLL_INTERVAL_SECONDS: float = 30.0
 BATCH_POLL_TIMEOUT_SECONDS: float = 24 * 60 * 60.0
 
+# Documented Messages Batch API submission limits (issue athenaeum#1144 AC7).
+# A batch that breaches either is refused at ASSEMBLY with a clear, local
+# error rather than being submitted and coming back as an opaque 400 — the
+# refusal maps onto the same per-file failure path an unsubmittable batch
+# already takes, so the raw files stay on disk and the next run retries them
+# in smaller cohorts.
+BATCH_MAX_REQUESTS: int = 100_000
+BATCH_MAX_PAYLOAD_BYTES: int = 256 * 1024 * 1024
+
 
 class BatchExecutionError(Exception):
     """A batch could not be submitted, polled to completion, or collected.
@@ -144,6 +154,29 @@ class BatchRequest:
     params: dict[str, Any]
 
 
+@dataclass
+class BatchOutcome:
+    """What one :func:`execute_batch` call produced (issue athenaeum#1144 AC3).
+
+    Three distinguishable shapes, and the caller MUST tell them apart:
+
+    - **collected** — ``in_flight`` is ``False`` and ``results`` maps every
+      ``custom_id`` to its ``Message`` (or ``None`` for a per-request
+      ``errored`` / ``canceled`` / ``expired`` result). This is today's
+      behaviour, byte-for-byte.
+    - **in flight** — ``in_flight`` is ``True``: the run's wall-clock
+      deadline arrived before the batch ended. ``results`` is empty and
+      ``batch_id`` names the batch, which is still running server-side and
+      already paid for. The batch is deliberately NOT cancelled.
+    - **nothing submitted** — no requests were passed; ``batch_id`` is ``""``
+      and ``results`` is empty.
+    """
+
+    batch_id: str = ""
+    results: dict[str, Any] = field(default_factory=dict)
+    in_flight: bool = False
+
+
 def execute_batch(
     client: anthropic.Anthropic,
     requests: list[BatchRequest],
@@ -154,10 +187,12 @@ def execute_batch(
     sleep: Callable[[float], None] = time.sleep,
     poll_interval: float = BATCH_POLL_INTERVAL_SECONDS,
     timeout: float = BATCH_POLL_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    """Submit *requests*, poll to completion, return ``{custom_id: Message}``.
+    deadline: float | None = None,
+) -> BatchOutcome:
+    """Submit *requests*, poll to completion, return a :class:`BatchOutcome`.
 
-    A ``None`` value marks a per-request ``errored`` / ``canceled`` /
+    ``outcome.results`` maps ``{custom_id: Message}``. A ``None`` value marks
+    a per-request ``errored`` / ``canceled`` /
     ``expired`` result — callers map those onto the existing per-file
     failure path. Token usage from succeeded results lands in *usage* via
     :meth:`TokenUsage.add_batch_tokens` (``api_calls`` attempts are counted
@@ -176,11 +211,30 @@ def execute_batch(
     path instead of escaping as a run-fatal traceback — or when the batch
     does not end within *timeout* (best-effort cancel on timeout).
     ``sleep`` is injectable so tests don't wait.
+
+    *deadline* (issue athenaeum#1144) is the run's wall-clock deadline as an
+    absolute :func:`time.monotonic` instant — ``RunContext.entity_deadline``
+    when the athenaeum#440 entity share is armed, else ``RunContext.run_deadline``.
+    When supplied, the poll loop stops at the EARLIER of batch-end or that
+    deadline, and a deadline arriving first SPILLS: the batch is left running
+    (**never** cancelled — it is already paid for server-side and is the whole
+    point of the athenaeum#1138 handle) and an ``in_flight`` outcome carrying the
+    batch id comes back instead of a raised
+    :class:`BatchExecutionError`. ``None`` (every pre-athenaeum#1144 caller)
+    preserves today's *timeout*-only semantics exactly.
+
+    The deadline is converted ONCE at entry into a remaining-seconds budget
+    and then measured against the same ``waited`` accumulator the *timeout*
+    check already uses, rather than re-reading ``time.monotonic()`` each pass.
+    That keeps both bounds on one clock — the injectable ``sleep`` — so a test
+    can drive either path deterministically without waiting on real time
+    (AC6).
     """
     if not requests:
-        return {}
+        return BatchOutcome()
 
     payload = [{"custom_id": r.custom_id, "params": r.params} for r in requests]
+    _refuse_oversized_batch(payload, description=description)
     try:
         batch = with_retry(
             lambda: client.messages.batches.create(
@@ -200,8 +254,26 @@ def execute_batch(
     )
 
     waited = 0.0
+    # Remaining wall-clock budget for THIS poll, snapshotted at entry (see the
+    # docstring). ``None`` when no deadline was supplied; clamped at 0 so an
+    # already-expired deadline spills on the first pass instead of polling once.
+    deadline_budget = (
+        max(0.0, deadline - time.monotonic()) if deadline is not None else None
+    )
     status = getattr(batch, "processing_status", "in_progress")
     while status != "ended":
+        if deadline_budget is not None and waited >= deadline_budget:
+            # Issue athenaeum#1144 AC3: do NOT cancel and do NOT raise. The batch is
+            # committed server-side; cancelling would destroy work the caller
+            # is about to persist a handle for.
+            log.warning(
+                "batch %s still in flight at the run deadline after %.0fs "
+                "(%s) — leaving it running and spilling to a handle",
+                batch.id,
+                waited,
+                description,
+            )
+            return BatchOutcome(batch_id=batch.id, in_flight=True)
         if waited >= timeout:
             try:
                 client.messages.batches.cancel(batch.id)
@@ -265,7 +337,40 @@ def execute_batch(
         raise BatchExecutionError(
             f"batch results failed ({description}): {exc}"
         ) from exc
-    return results
+    return BatchOutcome(batch_id=batch.id, results=results)
+
+
+def _refuse_oversized_batch(
+    payload: list[dict[str, Any]], *, description: str
+) -> None:
+    """Refuse a batch that breaches the documented API limits (AC7).
+
+    The Batch API caps a submission at :data:`BATCH_MAX_REQUESTS` requests and
+    :data:`BATCH_MAX_PAYLOAD_BYTES` of serialized payload. Breaching either
+    returns a 400 whose text is about the wire format rather than about the
+    cohort that produced it. Checking locally names the actual numbers, and
+    raises the same :class:`BatchExecutionError` an unsubmittable batch
+    already raises — so the caller's existing per-file failure path applies
+    unchanged (raw files stay on disk, the next run retries them).
+    """
+    count = len(payload)
+    if count > BATCH_MAX_REQUESTS:
+        raise BatchExecutionError(
+            f"batch refused before submit ({description}): {count} requests "
+            f"exceeds the Batch API limit of {BATCH_MAX_REQUESTS}"
+        )
+    try:
+        size = len(json.dumps(payload, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        # A payload that cannot be serialized locally is not a size problem;
+        # let the SDK produce its own error rather than inventing one here.
+        return
+    if size > BATCH_MAX_PAYLOAD_BYTES:
+        raise BatchExecutionError(
+            f"batch refused before submit ({description}): payload is "
+            f"{size} bytes, exceeding the Batch API limit of "
+            f"{BATCH_MAX_PAYLOAD_BYTES}"
+        )
 
 
 class _BatchItemError(Exception):
@@ -301,6 +406,13 @@ class _FileState:
     # finalize-time sync merges defers this file (athenaeum#220): raw stays on
     # disk, ref goes to the deferred manifest, nothing is written.
     deferred: bool = False
+    # Issue athenaeum#1144: this file's batch was still running at the run's
+    # wall-clock deadline. Distinct from ``deferred`` (never submitted, no
+    # spend) and from ``failed`` (submitted and lost): the work is submitted,
+    # PAID FOR, and recoverable from the athenaeum#1143 handle by a later run's
+    # collect pass. Raw stays on disk, nothing is written, and a lease keeps
+    # the next run from resubmitting it.
+    in_flight: bool = False
 
 
 @dataclass
@@ -326,6 +438,62 @@ class BatchRunResult:
     truncated: int = 0
     failed_refs: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
+    #: Issue athenaeum#1144: files whose batch was still in flight when the run's
+    #: wall-clock deadline arrived. Kept SEPARATE from ``failed_refs`` (which
+    #: means "retry from scratch next run") and from ``deferred_refs`` (which
+    #: means "never submitted, no spend"): this cohort is submitted and billed,
+    #: and a later run collects it from the recorded handle rather than
+    #: redoing it. Conflating the three would either double-bill the cohort or
+    #: report committed spend as wasted.
+    in_flight_refs: list[str] = field(default_factory=list)
+    #: Batch ids left running at the deadline, in submit order — the handles
+    #: recorded for them.
+    in_flight_batch_ids: list[str] = field(default_factory=list)
+
+
+def _spill_to_handle(
+    outcome: BatchOutcome,
+    raw_by_cid: dict[str, RawFile],
+    *,
+    knob: str,
+    cache_dir: Path,
+    config: dict[str, object] | None,
+    result: BatchRunResult,
+) -> None:
+    """Persist an athenaeum#1143 handle for a batch left running at the deadline.
+
+    Records the handle (which also takes the lease over the raw files, so the
+    next run's claim loop does not resubmit them) and books the affected refs
+    onto ``result.in_flight_refs``. Recording is best-effort in the same sense
+    the rest of :mod:`athenaeum.batch_state` is fail-open: a store that cannot
+    be written must not turn a successfully-submitted batch into a crashed
+    run. It IS logged loudly, because the consequence — the next run
+    rediscovering and resubmitting the same cohort at full price — is exactly
+    the silent double-bill athenaeum#1143 exists to prevent.
+    """
+    result.in_flight_batch_ids.append(outcome.batch_id)
+    try:
+        batch_state.record_handle(
+            cache_dir,
+            batch_id=outcome.batch_id,
+            knob=knob,
+            refs=raw_by_cid,
+            config=cast("dict[str, Any] | None", config),
+        )
+    except Exception:  # a marker store must never wedge a run
+        log.exception(
+            "could not record the pending-batch handle for %s (%s) — the next "
+            "run may rediscover and RESUBMIT this cohort at full price",
+            outcome.batch_id,
+            knob,
+        )
+    log.warning(
+        "batch %s (%s) left in flight at the run deadline: %d file(s) "
+        "leased for collection by a later run",
+        outcome.batch_id,
+        knob,
+        len({raw.ref for raw in raw_by_cid.values()}),
+    )
 
 
 def process_batch_run(
@@ -343,6 +511,8 @@ def process_batch_run(
     provider: str = "api",
     sleep: Callable[[float], None] = time.sleep,
     write_client: "anthropic.Anthropic | None" = None,
+    deadline: float | None = None,
+    cache_dir: Path | None = None,
 ) -> BatchRunResult:
     """Process the intake window through the Batch API phases (issue athenaeum#236).
 
@@ -374,14 +544,37 @@ def process_batch_run(
     instead of the whole run. *provider* selects the ceiling UNIT (dollars
     for the metered ``api`` path — always the case in batch mode, which is
     Anthropic-endpoint-only; tokens for ``claude-cli``).
+
+    Issue athenaeum#1144: *deadline* is the run's wall-clock deadline as an
+    absolute :func:`time.monotonic` instant, threaded down into
+    :func:`execute_batch`. This is a BOUNDED WAIT, not submit-and-exit: when
+    the batch ends inside the window the run continues synchronously into the
+    next phase exactly as before, byte-for-byte. Only when the window runs out
+    does the run persist an athenaeum#1143 handle for the still-running batch, mark
+    that batch's files ``in_flight`` (NOT ``failed``, NOT ``deferred``), and
+    return — so a later run collects work that is already paid for instead of
+    resubmitting or discarding it. ``None`` preserves today's behaviour
+    exactly: no deadline, no handle, no in-flight refs.
+
+    *cache_dir* is where the handle store lives; ``None`` resolves it via
+    :func:`athenaeum.batch_state.resolve_cache_dir`, which is what production
+    wants and what keeps the submit side and a later run's collect side
+    pointing at the same file.
     """
     effective_write_client = write_client if write_client is not None else client
+    effective_cache_dir = (
+        cache_dir if cache_dir is not None else batch_state.resolve_cache_dir()
+    )
     from athenaeum.config import load_config, resolve_owner
 
     owner = resolve_owner(config)
     result = BatchRunResult()
     states: list[_FileState] = []
     t2_requests: list[BatchRequest] = []
+    # ``custom_id -> RawFile`` for each phase, so a deadline spill can record
+    # the athenaeum#1143 handle's ref map without re-deriving it from the request ids.
+    t2_raw_by_cid: dict[str, RawFile] = {}
+    t3_raw_by_cid: dict[str, RawFile] = {}
 
     # --- Tier 0/1 + phase-1 assembly (budget gate per file, athenaeum#220) ---
     for i, raw in enumerate(raw_files):
@@ -434,6 +627,7 @@ def process_batch_run(
                 # recorded at assembly time (athenaeum#220 budget semantics).
                 usage.api_calls += 1
                 matched_names = [name for name, _, _ in st.matched]
+                t2_raw_by_cid[st.t2_id] = raw
                 t2_requests.append(
                     BatchRequest(
                         custom_id=st.t2_id,
@@ -473,21 +667,41 @@ def process_batch_run(
             st.deferred = True
     elif t2_requests:
         try:
-            t2_results = execute_batch(
+            t2_outcome = execute_batch(
                 client,
                 t2_requests,
                 description="tier2_classify",
                 usage=usage,
                 knob="classify",
                 sleep=sleep,
+                deadline=deadline,
             )
         except BatchExecutionError as exc:
             log.error("Tier-2 batch failed (%s) — affected files retried next run", exc)
+        else:
+            if t2_outcome.in_flight:
+                # Issue athenaeum#1144: the classify batch is still running and paid
+                # for. Every file with a request in it goes in-flight — not
+                # failed (which would retry, and re-bill, the same work) and
+                # not deferred (which would claim nothing was submitted).
+                _spill_to_handle(
+                    t2_outcome,
+                    t2_raw_by_cid,
+                    knob="classify",
+                    cache_dir=effective_cache_dir,
+                    config=config,
+                    result=result,
+                )
+                for st in states:
+                    if st.t2_id is not None and not st.failed and not st.done:
+                        st.in_flight = True
+            else:
+                t2_results = t2_outcome.results
 
     # Parse classifications and build per-file actions (same shape as
     # process_one: creates from tier-2, updates from tier-1 matches).
     for st in states:
-        if st.failed or st.done or st.deferred:
+        if st.failed or st.done or st.deferred or st.in_flight:
             continue
         classified = []
         if st.t2_id is not None:
@@ -657,7 +871,7 @@ def process_batch_run(
     # in intake order during finalization below.
     merge_uid_counts: dict[str, int] = {}
     for st in states:
-        if st.failed or st.done or st.deferred:
+        if st.failed or st.done or st.deferred or st.in_flight:
             continue
         for action in st.actions:
             if action.kind == "update" and action.existing_uid:
@@ -678,7 +892,7 @@ def process_batch_run(
     # re-classifies it.
     phase2_spent = False
     for i, st in enumerate(states):
-        if st.failed or st.done or st.deferred:
+        if st.failed or st.done or st.deferred or st.in_flight:
             continue
         if phase2_spent and usage.api_calls >= max_api_calls:
             log.warning(
@@ -700,6 +914,7 @@ def process_batch_run(
             for j, action in enumerate(st.actions):
                 if action.kind == "create":
                     cid = f"t3-{i}-c{j}"
+                    t3_raw_by_cid[cid] = st.raw
                     usage.api_calls += 1
                     t3_requests.append(
                         BatchRequest(
@@ -734,6 +949,7 @@ def process_batch_run(
                         st.sync_merges.append(action)
                         continue
                     cid = f"t3-{i}-m{j}"
+                    t3_raw_by_cid[cid] = st.raw
                     usage.api_calls += 1
                     t3_requests.append(
                         BatchRequest(
@@ -753,6 +969,8 @@ def process_batch_run(
             # Drop this file's already-appended requests and restore their
             # attempt counts — they are never submitted, so they must not
             # consume budget or batch spend.
+            for dropped in t3_requests[requests_mark:]:
+                t3_raw_by_cid.pop(dropped.custom_id, None)
             del t3_requests[requests_mark:]
             usage.api_calls = calls_mark
             st.failed = True
@@ -774,6 +992,7 @@ def process_batch_run(
         if not st.failed
         and not st.done
         and not st.deferred
+        and not st.in_flight
         and (st.create_ids or st.merge_ids or st.sync_merges)
     ]
     if t3_ceiling is not None and t3_pending:
@@ -787,16 +1006,36 @@ def process_batch_run(
             st.deferred = True
     elif t3_requests:
         try:
-            t3_results = execute_batch(
+            t3_outcome = execute_batch(
                 effective_write_client,
                 t3_requests,
                 description="tier3_write",
                 usage=usage,
                 knob="write",
                 sleep=sleep,
+                deadline=deadline,
             )
         except BatchExecutionError as exc:
             log.error("Tier-3 batch failed (%s) — affected files retried next run", exc)
+        else:
+            if t3_outcome.in_flight:
+                # Issue athenaeum#1144: same spill as tier-2. A file whose tier-3
+                # requests are in this batch cannot finalize — its
+                # write-only-when-all-calls-succeeded guarantee is unmet — so
+                # it goes in-flight rather than being half-written.
+                _spill_to_handle(
+                    t3_outcome,
+                    t3_raw_by_cid,
+                    knob="write",
+                    cache_dir=effective_cache_dir,
+                    config=config,
+                    result=result,
+                )
+                for st in states:
+                    if st.create_ids or st.merge_ids:
+                        st.in_flight = True
+            else:
+                t3_results = t3_outcome.results
 
     # --- Finalize per file, in intake order ---
     # All of a file's calls must have succeeded before anything is written
@@ -809,6 +1048,12 @@ def process_batch_run(
     for st in states:
         if st.failed:
             result.failed_refs.append(st.raw.ref)
+            continue
+        if st.in_flight:
+            # Issue athenaeum#1144: submitted, billed, and recoverable from the
+            # recorded handle. Write nothing and unlink nothing — the raw file
+            # is what a later run's collect pass applies the result TO.
+            result.in_flight_refs.append(st.raw.ref)
             continue
         if st.deferred:
             deferred_now.append(st.raw.ref)

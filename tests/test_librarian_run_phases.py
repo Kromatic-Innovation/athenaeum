@@ -163,6 +163,10 @@ class TestRunContext:
             # Issue athenaeum#898: quarantined files exported as machine-detectable
             # run state, mirroring stuck_files above (empty here — none set).
             "quarantined_files": [],
+            # Issue athenaeum#1144: batch refs left running at the run deadline,
+            # exported the same way (empty here — the batch transport is not
+            # exercised by this unit test).
+            "in_flight_refs": [],
             # Issue athenaeum#669: the entity-share yield (athenaeum#440) as
             # machine-detectable state.
             "entity_budget_tripped": True,
