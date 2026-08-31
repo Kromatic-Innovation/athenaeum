@@ -1230,6 +1230,13 @@ def _apply_tier3_results(
 
     result.updated.extend(updated_uids)
     result.escalated.extend(escalations)
+    # Issue athenaeum#1182: derived from the escalations just folded in above,
+    # by conflict_type — see ProcessingResult.oversize_suppressed's docstring
+    # for why this is derived rather than an independent counter threaded
+    # through tier3_derive_actions's return tuple.
+    result.oversize_suppressed += sum(
+        1 for _e in escalations if _e.conflict_type == "oversize_page"
+    )
 
     # --- Tier 4: Escalation ---
     if escalations:
@@ -3530,6 +3537,14 @@ class RunContext:
     total_matched: int = 0
     total_files_acted: int = 0
 
+    # Issue athenaeum#1182: page-size-invariant suppressions, summed across the
+    # synchronous entity loop the same way total_degraded/total_truncated
+    # are above. Best-effort over the synchronous path only, matching
+    # total_matched's documented scope — the batch-API transport
+    # (``ctx.batch_mode``, off by default) has no equivalent per-file
+    # aggregation point wired here and leaves this at 0.
+    total_oversize_suppressed: int = 0
+
     def deadline_exceeded(self) -> bool:
         return self.run_deadline is not None and time.monotonic() >= self.run_deadline
 
@@ -5633,6 +5648,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # above (a double predating this issue has no ``matched``
                         # attribute).
                         ctx.total_matched += getattr(result, "matched", 0)
+                        # Issue athenaeum#1182: same getattr-tolerance rationale as
+                        # degraded/truncated/matched above.
+                        ctx.total_oversize_suppressed += getattr(
+                            result, "oversize_suppressed", 0
+                        )
                         if result.created or result.updated:
                             ctx.total_files_acted += 1
 
@@ -5857,6 +5877,16 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # separately from a parse ``degraded`` so the two are
                     # never conflated in the summary either.
                     **({"truncated": ctx.total_truncated} if ctx.total_truncated else {}),
+                    # athenaeum#1182: pages the page-size invariant suppressed a
+                    # merge into this run (routed to "review" escalation
+                    # instead, page left unmodified). Only rendered when
+                    # non-zero, mirroring the degraded/truncated convention
+                    # immediately above.
+                    **(
+                        {"oversize_suppressed": ctx.total_oversize_suppressed}
+                        if ctx.total_oversize_suppressed
+                        else {}
+                    ),
                     # athenaeum#663: files skipped/surfaced as stuck this run. Only
                     # rendered when non-zero, so a clean run's summary line is
                     # unchanged, but a permanent no-progress loop shows "stuck=N".
