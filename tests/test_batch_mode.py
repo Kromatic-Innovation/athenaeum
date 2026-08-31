@@ -28,12 +28,13 @@ import re
 import subprocess
 import textwrap
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
 import anthropic as anthropic_mod
+import httpx
 import pytest
 
 import athenaeum.models as models_mod
@@ -41,6 +42,7 @@ from athenaeum import batch_state
 from athenaeum.batch import (
     BATCH_MAX_REQUESTS,
     BATCH_POLL_INTERVAL_SECONDS,
+    BATCH_RETENTION_DAYS,
     BatchExecutionError,
     BatchRequest,
     BatchRunResult,
@@ -103,6 +105,7 @@ class _FakeBatches:
         polls_until_end: int = 1,
         never_end: bool = False,
         fail_marker: str | None = None,
+        expire_marker: str | None = None,
         create_error: Exception | None = None,
         truncate_marker: str | None = None,
     ) -> None:
@@ -110,6 +113,11 @@ class _FakeBatches:
         self._polls_until_end = polls_until_end
         self._never_end = never_end
         self._fail_marker = fail_marker
+        # athenaeum#1146: a request whose content carries this marker comes back
+        # ``expired`` — the per-request terminal that is NOT billed and must
+        # take the ordinary per-file failure path, never the keep-the-handle
+        # path a batch-level "still in flight" takes.
+        self._expire_marker = expire_marker
         self._create_error = create_error
         # Issue athenaeum#476: a request whose content contains this marker is returned
         # from the batch TRUNCATED (unterminated array + stop_reason
@@ -163,6 +171,11 @@ class _FakeBatches:
                         type="errored",
                         error=SimpleNamespace(type="invalid_request"),
                     ),
+                )
+            elif self._expire_marker and self._expire_marker in user_msg:
+                yield SimpleNamespace(
+                    custom_id=req["custom_id"],
+                    result=SimpleNamespace(type="expired"),
                 )
             elif self._truncate_marker and self._truncate_marker in user_msg:
                 # athenaeum#476: an unterminated array cut off at the output budget.
@@ -2006,6 +2019,33 @@ def _spill_a_classify_batch(
     return root, cache_dir, client, usage, raw_files
 
 
+def _collect(
+    root: Path,
+    cache_dir: Path,
+    client: _FakeClient,
+    usage: TokenUsage,
+    *,
+    write_client: _FakeClient | None = None,
+    now: datetime | None = None,
+) -> Any:
+    """Run one collect pass over *cache_dir*'s handles against *root*."""
+    return collect_pending_batches(
+        EntityIndex(root / "wiki"),
+        root / "wiki",
+        client,
+        FALLBACK_TYPES,
+        FALLBACK_TAGS,
+        FALLBACK_ACCESS,
+        usage=usage,
+        config=None,
+        max_api_calls=100,
+        write_client=write_client,
+        sleep=lambda s: None,
+        cache_dir=cache_dir,
+        now=now,
+    )
+
+
 class TestCollectPendingBatches:
     def test_collect_applies_a_classify_handle_end_to_end(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2526,4 +2566,358 @@ class TestCollectOrderingAndIndexFreshness:
         assert raw_files[0].path.exists()
         # The handle still retires: its results are consumed, and leaving the
         # lease on would strand the file it just declined to write.
+        assert batch_state.load(cache_dir) == {}
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1146 — reconciling every way a pending handle can become
+# un-collectible.
+#
+# The distinction the whole issue turns on, routinely conflated and with
+# OPPOSITE correct responses:
+#
+#   batch processing_status != "ended"   -> in flight, PAID FOR. Keep the
+#                                          handle, extend the lease, do not
+#                                          resubmit.
+#   per-request result.type == "expired" -> that request never reached the
+#                                          model and is NOT billed. Ordinary
+#                                          per-file failure path; raw stays.
+#
+# Treating the first as the second resubmits work already paid for and
+# running. Treating the second as the first strands files forever.
+# ---------------------------------------------------------------------------
+
+
+class TestHandleReconciliation:
+    def test_in_flight_batch_keeps_the_handle_and_extends_the_lease(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1. Keeping WITHOUT extending is a resubmit decision in disguise."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r1", ["Standalone fact about WidgetInflight gadget.\n"]
+        )
+        client.batches._never_end = True
+        before = next(iter(batch_state.load(cache_dir).values())).leased_until
+        submitted_before = len(client.batches.submitted)
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation == {"in-flight": 1}
+        assert out.kept_handles and out.retired_handles == []
+        # Nothing resubmitted: the work is in flight and already billed.
+        assert len(client.batches.submitted) == submitted_before
+        after = next(iter(batch_state.load(cache_dir).values())).leased_until
+        assert after is not None and before is not None
+        assert after >= before
+        assert raw_files[0].path.exists()
+
+    def test_a_per_request_expired_result_takes_the_per_file_failure_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2: NOT billed, NOT in flight — raw stays, ref fails, lease freed.
+
+        The opposite case from a batch that has not ended, and the one most
+        easily conflated with it.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "r2", ["Standalone fact about WidgetExpired gadget.\n"]
+        )
+        cache_dir = tmp_path / "r2-cache"
+        cache_dir.mkdir()
+        client = _FakeClient(
+            _scripted_responder,
+            allow_sync=False,
+            never_end=True,
+            expire_marker="WidgetExpired",
+        )
+        raw_files = discover_raw_files(root / "raw")
+
+        process_batch_run(
+            raw_files,
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            deadline=time.monotonic() - 1.0,
+            cache_dir=cache_dir,
+        )
+        client.batches._never_end = False
+
+        out = _collect(root, cache_dir, client, TokenUsage())
+
+        assert out.reconciliation.get("request-expired") == 1
+        # Handle-level: NOT kept. The batch ended; only the request expired.
+        assert out.kept_handles == []
+        assert out.retired_handles
+        assert out.failed_refs == [raw_files[0].ref]
+        assert raw_files[0].path.exists()
+        assert batch_state.load(cache_dir) == {}
+
+    def test_a_404_on_retrieve_retires_the_handle_and_records_the_waste(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3 + AC8: unretrievable → retired, refs released, waste recorded."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r3", ["Standalone fact about WidgetGone404 gadget.\n"]
+        )
+
+        def gone(batch_id: str) -> Any:
+            raise anthropic_mod.NotFoundError(
+                "no such batch",
+                response=httpx.Response(
+                    404, request=httpx.Request("GET", "https://api.anthropic.com")
+                ),
+                body=None,
+            )
+
+        client.batches.retrieve = gone  # type: ignore[method-assign]
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation == {"unretrievable": 1}
+        assert out.retired_handles and out.kept_handles == []
+        assert batch_state.load(cache_dir) == {}
+        # The raw file survives and becomes claimable again.
+        assert raw_files[0].path.exists()
+        # AC8: the wasted spend is visible after the fact.
+        ledger = batch_state.read_reconcile_ledger(root / "wiki", cache_dir=cache_dir)
+        assert [r["reason"] for r in ledger] == ["unretrievable"]
+        assert ledger[0]["refs"] == [raw_files[0].ref]
+        assert ledger[0]["knob"] == "classify"
+
+    def test_a_transient_retrieve_failure_never_retires_a_live_batch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3's guard: only an authoritative 404 retires. Everything else waits.
+
+        Retiring on a timeout would discard a batch that is running and paid
+        for, and the SDK does not distinguish the two for us — so the test is
+        narrow and the default is to keep.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r4", ["Standalone fact about WidgetFlaky gadget.\n"]
+        )
+
+        def flaky(batch_id: str) -> Any:
+            raise anthropic_mod.APIConnectionError(
+                request=httpx.Request("GET", "https://api.anthropic.com")
+            )
+
+        client.batches.retrieve = flaky  # type: ignore[method-assign]
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation == {"retrieve-error": 1}
+        assert out.kept_handles and out.retired_handles == []
+        assert list(batch_state.load(cache_dir)) == out.kept_handles
+        assert batch_state.read_reconcile_ledger(
+            root / "wiki", cache_dir=cache_dir
+        ) == []
+
+    def test_a_handle_past_the_retention_window_retires_without_a_retrieve(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3: past retention is decidable locally, so it decides locally."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r5", ["Standalone fact about WidgetOld gadget.\n"]
+        )
+        retrieves: list[str] = []
+        real_retrieve = client.batches.retrieve
+
+        def traced(batch_id: str) -> Any:
+            retrieves.append(batch_id)
+            return real_retrieve(batch_id)
+
+        client.batches.retrieve = traced  # type: ignore[method-assign]
+
+        out = _collect(
+            root,
+            cache_dir,
+            client,
+            usage,
+            now=datetime.now(timezone.utc)
+            + timedelta(days=BATCH_RETENTION_DAYS + 1),
+        )
+
+        assert out.reconciliation == {"retention-expired": 1}
+        assert retrieves == [], "an expired handle must not need the network"
+        assert batch_state.load(cache_dir) == {}
+        assert raw_files[0].path.exists()
+        ledger = batch_state.read_reconcile_ledger(root / "wiki", cache_dir=cache_dir)
+        assert [r["reason"] for r in ledger] == ["retention-expired"]
+
+    def test_a_mutated_raw_file_never_has_a_stale_result_applied(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC5, the case most likely to be missed.
+
+        The handle still looks completely valid: the batch ended, the results
+        are there, the file is on disk. But the file's BYTES changed, so the
+        classification describes content that no longer exists — applying it
+        would write a classification of the old text onto the new.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r6", ["Standalone fact about WidgetMutant gadget.\n"]
+        )
+        raw_files[0].path.write_text(
+            "Something else entirely about WidgetOther.\n", encoding="utf-8"
+        )
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation.get("raw-mutated") == 1
+        assert out.created == 0
+        assert out.collected_refs == []
+        assert out.failed_refs == [raw_files[0].ref]
+        # Nothing written from the stale classification...
+        assert not list((root / "wiki").glob("*widgetmutant*"))
+        # ...and the file is re-claimed from scratch next run.
+        assert raw_files[0].path.exists()
+        assert batch_state.load(cache_dir) == {}
+
+    def test_a_missing_raw_file_is_dropped_and_the_handle_still_retires(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r7", ["Standalone fact about WidgetVanish gadget.\n"]
+        )
+        raw_files[0].path.unlink()
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation.get("raw-missing") == 1
+        assert out.created == 0
+        assert batch_state.load(cache_dir) == {}
+
+    def test_an_expired_lease_does_not_stop_a_retrievable_batch_collecting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC6: retention beats lease expiry when both apply.
+
+        The lease exists to stop a RECLAIM, not to gate a collect. A batch
+        whose results are still retrievable is still worth collecting however
+        long its lease has been dead.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r8", ["Standalone fact about WidgetStale gadget.\n"]
+        )
+        # Expire the lease the way the claim loop's own sweep does.
+        released = batch_state.release_expired_leases(
+            cache_dir, now=datetime.now(timezone.utc) + timedelta(days=365)
+        )
+        assert released
+        assert next(iter(batch_state.load(cache_dir).values())).leased_until is None
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.created == 1
+        assert out.collected_refs == [raw_files[0].ref]
+        assert out.reconciliation.get("collected") == 1
+        assert batch_state.load(cache_dir) == {}
+
+    def test_a_write_handle_with_no_usable_context_retires_and_is_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC7 + AC8: a handle that cannot be applied is never silent."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "r9", ["Standalone fact about WidgetNoCtx gadget.\n"]
+        )
+        # A pre-athenaeum#1145 shaped handle: a write knob with no work document.
+        stored = batch_state.load(cache_dir)
+        old = next(iter(stored.values()))
+        batch_state.record_handle(
+            cache_dir,
+            batch_id=old.batch_id,
+            knob="write",
+            refs=old.refs,
+            config=None,
+        )
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation == {"no-context": 1}
+        assert batch_state.load(cache_dir) == {}
+        assert raw_files[0].path.exists()
+        ledger = batch_state.read_reconcile_ledger(root / "wiki", cache_dir=cache_dir)
+        assert [r["reason"] for r in ledger] == ["no-context"]
+
+    def test_reconciliation_reaches_the_run_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """AC7: no outcome is silent — the tally rides the run-summary line."""
+        _patch_uids(monkeypatch)
+        caplog.set_level(logging.INFO, logger="athenaeum")
+        root, cache_dir, client, _usage, _raws = _spill_a_classify_batch(
+            tmp_path, "r10", ["Standalone fact about WidgetSummary gadget.\n"]
+        )
+        client.batches._never_end = True
+        monkeypatch.setattr(batch_state, "resolve_cache_dir", lambda: cache_dir)
+        _clean_env(monkeypatch)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+
+        stats: dict[str, Any] = {}
+        run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+            out_run_stats=stats,
+        )
+
+        assert stats["batch_reconciliation"] == {"in-flight": 1}
+        summary = [
+            rec.getMessage()
+            for rec in caplog.records
+            if rec.getMessage().startswith("librarian-run-summary")
+        ]
+        assert summary and "reconciled=in-flight:1" in summary[-1]
+
+    def test_one_vanished_ref_does_not_stop_its_siblings_collecting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4: the handle retires cleanly FOR THE REMAINING REFS.
+
+        A single un-applicable ref must not cost the rest of its cohort the
+        work they already paid for.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path,
+            "r11",
+            [
+                "Standalone fact about WidgetKeeps gadget.\n",
+                "Standalone fact about WidgetLoses gadget.\n",
+            ],
+        )
+        assert len(raw_files) == 2
+        loser = next(
+            r for r in raw_files if "WidgetLoses" in r.path.read_text(encoding="utf-8")
+        )
+        keeper = next(r for r in raw_files if r is not loser)
+        loser.path.unlink()
+
+        out = _collect(root, cache_dir, client, usage)
+
+        assert out.reconciliation.get("raw-missing") == 1
+        assert out.reconciliation.get("collected") == 1
+        assert out.collected_refs == [keeper.ref]
+        assert out.failed_refs == [loser.ref]
+        assert out.created == 1
+        assert list((root / "wiki").glob("*widgetkeeps*"))
         assert batch_state.load(cache_dir) == {}

@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every way a pending batch handle can become un-collectible is now
+  reconciled, and none of it is silent (athenaeum#1146).** The distinction the
+  work turns on is routinely conflated and has OPPOSITE correct responses: a
+  batch whose `processing_status` is not `ended` is in flight and already paid
+  for — its handle is kept, its **lease extended**, and its refs are not
+  resubmitted; a per-request `result.type == "expired"` means that request
+  never reached the model and is not billed — it takes the ordinary per-file
+  failure path, raw stays on disk, retried next run. Treating the first as the
+  second resubmits work already running; treating the second as the first
+  strands files forever. Also covered: a handle past the Batch API's 29-day
+  retention window retires without needing the network; a `retrieve` that
+  404s retires, while any other failure (timeout, connection error, 5xx)
+  KEEPS the handle, because retiring on a transient failure would discard a
+  live batch; a leased raw file that is missing, or whose content hash
+  differs from the one recorded at claim time, has its result discarded
+  rather than applied to content that no longer exists — while its siblings
+  in the same handle still collect; and a handle whose lease has expired but
+  whose batch is still retrievable is COLLECTED, since the lease exists to
+  stop a re-claim, not to gate a collect. Every outcome is counted and
+  rendered in the run summary as `reconciled=<reason>:<count>,…` and exported
+  as `batch_reconciliation` run state. A handle retired UNCOLLECTED appends a
+  record to a new append-only `batch_reconcile.jsonl` ledger (same seam and
+  torn-trailing-line tolerance as `spend.jsonl`), so wasted batch spend is
+  visible after the fact rather than merely accepted.
+
 - **Collect-only adoption path: a run can apply a PRIOR run's batch, before
   it claims anything of its own (athenaeum#1145).** `athenaeum.batch`
   gains `collect_pending_batches`, run at the start of the entity phase —
