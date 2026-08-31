@@ -688,6 +688,91 @@ class TestBatchSyncEquivalence:
         assert any("## Entity to create" in m for m in msgs)
         assert any("## Existing page content" in m for m in msgs)
 
+    def test_preamble_only_sibling_create_is_skipped_not_file_aborted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#1171 gate-review must-fix.
+
+        One raw file's tier-2 classify yields TWO new-entity creates.
+        WidgetPreambleOnly's tier-3 create response is ENTIRELY planning
+        preamble (see ``strip_planning_preamble``); WidgetGood's is a normal
+        page. The rejection must be scoped to WidgetPreambleOnly alone: the
+        raw file is still fully processed (rc == 0, the file is consumed,
+        NOT retried/stuck), and WidgetGood still lands as a wiki page — the
+        sync and batch transports must agree on this.
+        """
+
+        def responder(params: dict[str, Any]) -> str:
+            user_msg = params["messages"][0]["content"]
+            if params["model"] == DEFAULT_CLASSIFY_MODEL:
+                return json.dumps(
+                    [
+                        {
+                            "name": "WidgetGood",
+                            "entity_type": "concept",
+                            "tags": [],
+                            "access": "internal",
+                            "observations": "Facts about WidgetGood.",
+                        },
+                        {
+                            "name": "WidgetPreambleOnly",
+                            "entity_type": "concept",
+                            "tags": [],
+                            "access": "internal",
+                            "observations": "Facts about WidgetPreambleOnly.",
+                        },
+                    ]
+                )
+            if "## Entity to create" in user_msg:
+                name = re.search(r"^Name: (.+)$", user_msg, re.MULTILINE).group(1)
+                if name == "WidgetPreambleOnly":
+                    return (
+                        "Looking at the new observation, I need to think "
+                        "about how best to phrase this."
+                    )
+                return f"# {name}\n\nFacts about {name}.\n\n[^1]: src"
+            raise AssertionError(f"unrecognized request: {user_msg[:120]}")
+
+        contents = ["One session mentions both WidgetGood and WidgetPreambleOnly.\n"]
+        root_sync = _seed_root(tmp_path, "sync", contents)
+        root_batch = _seed_root(tmp_path, "batch", contents)
+        _clean_env(monkeypatch)
+        _freeze_recorded_at(monkeypatch)
+
+        sync_client = _FakeClient(responder)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: sync_client)
+        _patch_uids(monkeypatch)
+        rc_sync = run(
+            raw_root=root_sync / "raw",
+            wiki_root=root_sync / "wiki",
+            knowledge_root=root_sync,
+        )
+
+        batch_client = _FakeClient(responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: batch_client)
+        _patch_uids(monkeypatch)
+        rc_batch = run(
+            raw_root=root_batch / "raw",
+            wiki_root=root_batch / "wiki",
+            knowledge_root=root_batch,
+            batch_mode=True,
+        )
+
+        # Both transports agree: clean run, not a failure.
+        assert rc_sync == 0
+        assert rc_batch == 0
+
+        for root in (root_sync, root_batch):
+            names = " ".join(_wiki_snapshot(root))
+            assert "widgetgood" in names
+            assert "widgetpreambleonly" not in names
+            # The raw file was fully consumed -- NOT preserved for retry
+            # (the old, wrong behavior aborted the whole file and left it
+            # on disk).
+            assert not list((root / "raw" / "sessions").glob("*.md"))
+
+        assert _wiki_snapshot(root_batch) == _wiki_snapshot(root_sync)
+
     def test_escalate_protocol_through_batch_transport(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

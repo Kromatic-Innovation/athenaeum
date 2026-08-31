@@ -2083,6 +2083,20 @@ class TokenUsage:
     # athenaeum#1167 measured but nothing before this issue tracked per run.
     merge_calls: int = 0
     merge_echoed_chars: int = 0
+    # Tier-3 create-path preamble guard (issue athenaeum#1171). A create
+    # response can open with first-person planning/meta-commentary (e.g.
+    # "Looking at the new observation, I need to...") that must never reach
+    # a persisted page body — see ``athenaeum.tiers.strip_planning_preamble``.
+    # ``preamble_stripped`` counts creates where such a leading preamble was
+    # detected and removed, WITH substantive content surviving underneath
+    # (the common case). ``preamble_rejected`` counts creates where the
+    # preamble was the entire response — stripping it left nothing
+    # substantive, so the create was rejected outright (see
+    # ``athenaeum.tiers.PreambleOnlyResponseError``) rather than persist an
+    # empty page. Additive across a run, same convention as ``merge_calls``
+    # above; rendered in ``librarian-run-summary`` only when non-zero.
+    preamble_stripped: int = 0
+    preamble_rejected: int = 0
 
     def record_merge_echo(self, echoed_chars: int) -> None:
         """Record one Tier-3 merge LLM call's echoed-existing-page char count.
