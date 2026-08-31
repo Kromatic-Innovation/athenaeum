@@ -127,8 +127,8 @@ shallower node of two hierarchy coordinates -- never the intersection or
 either side alone. ``tests/test_comparator.py``'s widening tests assert the
 widened bound is never tighter than either input on both edges.
 
-**Landing dark, then a partial cut-over (issue athenaeum#715 AC).** Through PRs
-#1128/#1131 this module was not called from any pipeline entry point at all.
+**Landing dark, then a partial cut-over (issue athenaeum#715 AC).** Through
+PRs athenaeum#1128/athenaeum#1131 this module was not called from any pipeline entry point at all.
 The cut-over PR wires ONE pipeline phase to it:
 :func:`athenaeum.wiki_dedupe.propose_wiki_page_merges` (the wiki-page dedup
 pass, called every run from

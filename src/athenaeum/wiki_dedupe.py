@@ -20,7 +20,7 @@ similarity suppression gates, a deterministic-concatenation draft body
 (``merge.synthesize_body``), and a direct write to
 ``wiki/_pending_merges.md`` (``pending_merges.write_pending_merge``) —
 entirely independent of, and running in PARALLEL with, the five-verdict
-comparator once it landed (PRs #1128/#1131). Issue athenaeum#715's own AC
+comparator once it landed (PRs athenaeum#1128/athenaeum#1131). Issue athenaeum#715's own AC
 forbids exactly that shape ("the old paths are removed, not left in
 parallel"). That old algorithm is DELETED, not merely gated: clustering is
 kept (candidate generation — "similarity's only job is proposing pairs"),
