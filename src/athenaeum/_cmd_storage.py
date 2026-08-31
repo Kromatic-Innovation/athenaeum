@@ -323,13 +323,47 @@ def _apply_plan(plan: PiiMigrationPlan) -> None:
     Excluded record is written BEFORE the origin is scrubbed so a crash between
     the two writes leaves the archival copy safely on disk (never the reverse —
     a scrubbed origin with no excluded record would lose the contact data). The
-    excluded path is deterministic (``page_path.name``), so a re-run overwrites
-    the same record and scrubs the still-dirty origin: idempotent, no
-    double-write. Both writes are atomic (temp-file + rename).
+    excluded path is deterministic (``page_path.name``), so a re-run MERGES
+    into the same record (issue athenaeum#1108 — ``plan.excluded_page_text`` is
+    already the merged text by the time it reaches here) and scrubs the
+    still-dirty origin: idempotent, no double-write, no dropped prior data.
+    Both writes are atomic (temp-file + rename). Callers must not invoke this
+    when ``plan.excluded_record_conflicts`` is non-empty — that is refused
+    upstream in ``_cmd_storage_migrate_pii_single``/``_bulk`` before this runs.
     """
     plan.excluded_page_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(plan.excluded_page_path, plan.excluded_page_text or "")
     atomic_write_text(plan.page_path, plan.rewritten_page_text or "")
+
+
+def _print_excluded_record_conflicts(plan: PiiMigrationPlan, *, refusing: bool) -> None:
+    """Print each scalar-identity disagreement between the plan and the record on disk.
+
+    Never silent (issue athenaeum#1108, AC1): both the dry-run preview and the
+    apply-time refusal route through this so a conflict is always visible
+    before it could otherwise be mistaken for a clean merge.
+    """
+    fields = ", ".join(c.field for c in plan.excluded_record_conflicts)
+    if refusing:
+        print(
+            f"error: refusing to --apply: the excluded contact record at "
+            f"{plan.excluded_page_path} already disagrees with this run on "
+            f"{fields}. Resolve by hand, then re-run:",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[DRY RUN] WARNING: excluded record at {plan.excluded_page_path} "
+            f"already disagrees with this run on {fields}; --apply would refuse "
+            "until resolved:",
+            file=sys.stderr,
+        )
+    for conflict in plan.excluded_record_conflicts:
+        print(
+            f"  {conflict.field}: existing={conflict.existing_value!r} "
+            f"new={conflict.new_value!r}",
+            file=sys.stderr,
+        )
 
 
 def _post_apply_index_step(
@@ -515,20 +549,30 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
             _post_apply_index_step(args, knowledge_root, config)
         return 0
 
+    # athenaeum#1108: a record already at plan.excluded_page_path means this run
+    # MERGES rather than creates — label the preview/summary accordingly so
+    # dry-run review reflects what --apply will actually do (AC3).
+    record_label = "merged into existing" if plan.excluded_record_existed else "new"
     summary = (
         f"emails={plan.emails or '[]'} phones={plan.phones or '[]'}\n"
         f"  origin page (rewritten, durable identifiers only): {plan.page_path}\n"
-        f"  excluded contact record (new):                     {plan.excluded_page_path}"
+        f"  excluded contact record ({record_label}):                     {plan.excluded_page_path}"
     )
 
     if not args.apply:
         print(f"[DRY RUN] would migrate PII off {page_path}:", file=sys.stderr)
+        if plan.excluded_record_conflicts:
+            _print_excluded_record_conflicts(plan, refusing=False)
         print(summary)
         print("\n--- rewritten origin page ---")
         sys.stdout.write(plan.rewritten_page_text or "")
-        print("\n--- new excluded contact record ---")
+        print(f"\n--- {record_label} excluded contact record ---")
         sys.stdout.write(plan.excluded_page_text or "")
         return 0
+
+    if plan.excluded_record_conflicts:
+        _print_excluded_record_conflicts(plan, refusing=True)
+        return 1
 
     _apply_plan(plan)
     print(f"migrated PII off {page_path}\n{summary}")
@@ -601,6 +645,8 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
     total_emails = 0
     total_phones = 0
     name_pii_excluded = 0
+    conflicted = 0
+    conflicted_pages: list[tuple[Path, tuple]] = []
     for i, page_path in enumerate(pages, start=1):
         try:
             plan = plan_pii_migration(page_path, config, knowledge_root)
@@ -610,12 +656,22 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
         if plan.name_field_pii:
             name_pii_excluded += 1
         if plan.changed:
-            affected += 1
-            records += 1
-            total_emails += len(plan.emails)
-            total_phones += len(plan.phones)
-            if args.apply:
-                _apply_plan(plan)
+            if plan.excluded_record_conflicts:
+                # athenaeum#1108: the bulk path shares plan_pii_migration/_apply_plan
+                # with the single-page path, so it shares the same merge logic —
+                # and the same refusal to silently resolve a scalar-identity
+                # disagreement. Unlike the single-page CLI this must not abort
+                # the whole run (bulk is the unattended path): skip only this
+                # page (neither write touches disk), count it, and keep going.
+                conflicted += 1
+                conflicted_pages.append((page_path, plan.excluded_record_conflicts))
+            else:
+                affected += 1
+                records += 1
+                total_emails += len(plan.emails)
+                total_phones += len(plan.phones)
+                if args.apply:
+                    _apply_plan(plan)
         if i % _PROGRESS_EVERY == 0 or i == total:
             verb = "migrated" if args.apply else "would migrate"
             print(
@@ -641,6 +697,23 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
             "this population too (issue athenaeum#505)."
         )
 
+    if conflicted:
+        # Surfaced, never silently resolved (issue athenaeum#1108, AC1): these pages
+        # were NOT migrated — neither the excluded record nor the origin page
+        # was touched — because the record already on disk disagrees with this
+        # run on a scalar identity field. A human must reconcile, then re-run
+        # (the bulk path is resumable by construction, so a re-run only
+        # revisits pages still carrying contact data).
+        print(
+            f"NOTE: {conflicted} page(s) already have an excluded contact "
+            "record that disagrees with this run on a scalar identity field "
+            "(uid/name/contact_of) and were NOT migrated — resolve by hand, "
+            "then re-run:"
+        )
+        for page_path, conflicts in conflicted_pages:
+            fields = ", ".join(c.field for c in conflicts)
+            print(f"  {page_path.name}: conflicting field(s): {fields}")
+
     rename_report: NameEmailRenameReport | None = None
     if getattr(args, "rename_name_email", False):
         # athenaeum#505's name-is-an-email carve-out, scoped to the same target set as
@@ -652,7 +725,7 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
         print("re-run with --apply to write the changes.")
     if args.apply and (affected or (rename_report and rename_report.renamed)):
         _post_apply_index_step(args, knowledge_root, config)
-    return 0
+    return 1 if conflicted else 0
 
 
 def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:

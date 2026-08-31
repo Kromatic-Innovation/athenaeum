@@ -205,6 +205,102 @@ class TestPlanPiiMigration:
 
 
 # ---------------------------------------------------------------------------
+# Re-migration merge semantics (issue athenaeum#1108) — plan_pii_migration must
+# MERGE into an excluded record that already exists rather than overwrite it.
+# ---------------------------------------------------------------------------
+
+
+class TestPlanPiiMigrationReMigration:
+    def test_no_prior_record_is_reported_as_new_not_merged(self, tmp_path: Path) -> None:
+        root = _seed_knowledge_root(tmp_path)
+        page = root / "wiki" / "jane.md"
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+
+        assert plan.excluded_record_existed is False
+        assert plan.excluded_record_conflicts == ()
+
+    def test_second_migration_unions_a_new_email_pre_existing_value_survives(
+        self, tmp_path: Path
+    ) -> None:
+        # Models the AC2 regression: an excluded record from an earlier
+        # migration already holds jane@example.com; a later pass finds a
+        # SECOND, different email on the (still-live) origin page. The two
+        # are plural facts about the same entity, not a disagreement — both
+        # must survive on the excluded record.
+        root = _seed_knowledge_root(tmp_path)
+        excluded_root = surface_root_for_class("pii", EXCLUDED_CONFIG, root)
+        excluded_root.mkdir(parents=True)
+        (excluded_root / "jane.md").write_text(
+            "---\n"
+            'uid: "12345"\n'
+            "name: Jane Springer — contact record\n"
+            "contact_of: Jane Springer\n"
+            "pii: true\n"
+            "emails:\n"
+            "  - jane@example.com\n"
+            "phones:\n"
+            '  - "+1-555-0100"\n'
+            "---\n"
+            "Archival contact data.\n",
+            encoding="utf-8",
+        )
+        page = root / "wiki" / "jane.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace(
+                "Jane leads widgets.",
+                "Also reachable at jane.alt@example.com.",
+            ),
+            encoding="utf-8",
+        )
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+
+        assert plan.excluded_record_existed is True
+        assert plan.excluded_record_conflicts == ()
+        meta, _body = parse_frontmatter(plan.excluded_page_text or "")
+        assert meta["emails"] == ["jane@example.com", "jane.alt@example.com"]
+        assert meta["phones"] == ["+1-555-0100"]  # pre-existing phone survives too
+
+    def test_second_migration_surfaces_conflict_on_differing_uid(
+        self, tmp_path: Path
+    ) -> None:
+        # A record already on disk with a DIFFERENT uid than this run would
+        # write is a genuine identity disagreement (issue athenaeum#1108, AC1) —
+        # it must be reported, and the existing value must NOT be silently
+        # replaced.
+        root = _seed_knowledge_root(tmp_path)
+        excluded_root = surface_root_for_class("pii", EXCLUDED_CONFIG, root)
+        excluded_root.mkdir(parents=True)
+        (excluded_root / "jane.md").write_text(
+            "---\n"
+            'uid: "99999"\n'
+            "name: Jane Springer — contact record\n"
+            "contact_of: Jane Springer\n"
+            "pii: true\n"
+            "emails:\n"
+            "  - jane@example.com\n"
+            "---\n"
+            "Archival contact data.\n",
+            encoding="utf-8",
+        )
+        page = root / "wiki" / "jane.md"
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+
+        assert plan.excluded_record_existed is True
+        assert len(plan.excluded_record_conflicts) == 1
+        conflict = plan.excluded_record_conflicts[0]
+        assert conflict.field == "uid"
+        assert conflict.existing_value == "99999"
+        assert conflict.new_value == "12345"
+        # The merge preview keeps the ON-DISK value rather than silently
+        # adopting the new one — a conflict is surfaced, not resolved.
+        meta, _body = parse_frontmatter(plan.excluded_page_text or "")
+        assert meta["uid"] == "99999"
+
+
+# ---------------------------------------------------------------------------
 # CLI — athenaeum storage migrate-pii
 # ---------------------------------------------------------------------------
 
@@ -252,6 +348,105 @@ class TestStorageMigratePiiCLI:
         capsys.readouterr()
         assert main(argv) == 0  # second run: no contact data left
         assert "nothing to migrate" in capsys.readouterr().out
+
+    def test_apply_re_migration_with_new_value_both_survive(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        # AC2 regression test: migrate a page, then migrate it again after a
+        # DIFFERENT value shows up (e.g. a second address found on a later
+        # pass) — both the original and the new value must survive on the
+        # excluded record. Before the fix, the second --apply overwrote the
+        # record wholesale and the first email was silently lost.
+        root = _seed_knowledge_root(tmp_path)
+        page = root / "wiki" / "jane.md"
+        argv = ["storage", "migrate-pii", "--path", str(root), "--page", str(page), "--apply"]
+
+        assert main(argv) == 0
+        capsys.readouterr()
+
+        # A later pass discovers a second, different email on the live page —
+        # models a corpus edit between migrations, not a re-run of the exact
+        # same input.
+        page.write_text(
+            page.read_text(encoding="utf-8").rstrip("\n")
+            + " Also reachable at jane.alt@example.com.\n",
+            encoding="utf-8",
+        )
+
+        rc = main(argv)
+
+        assert rc == 0
+        excluded_page = surface_root_for_class("pii", EXCLUDED_CONFIG, root) / "jane.md"
+        meta, _body = parse_frontmatter(excluded_page.read_text(encoding="utf-8"))
+        assert meta["emails"] == ["jane@example.com", "jane.alt@example.com"]
+        assert meta["phones"] == ["+1-555-0100"]  # from the first migration, not re-found
+
+    def test_dry_run_previews_merged_record_when_one_already_exists(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        # AC3: dry-run must preview the MERGE result, not a "new record" that
+        # would in fact replace what's on disk once --apply runs.
+        root = _seed_knowledge_root(tmp_path)
+        page = root / "wiki" / "jane.md"
+        argv_apply = [
+            "storage", "migrate-pii", "--path", str(root), "--page", str(page), "--apply",
+        ]
+        assert main(argv_apply) == 0
+        capsys.readouterr()
+
+        page.write_text(
+            page.read_text(encoding="utf-8").rstrip("\n")
+            + " Also reachable at jane.alt@example.com.\n",
+            encoding="utf-8",
+        )
+        excluded_page = surface_root_for_class("pii", EXCLUDED_CONFIG, root) / "jane.md"
+        before = excluded_page.read_text(encoding="utf-8")
+
+        rc = main(["storage", "migrate-pii", "--path", str(root), "--page", str(page)])
+
+        assert rc == 0
+        assert excluded_page.read_text(encoding="utf-8") == before  # dry-run: no write
+        out = capsys.readouterr().out
+        assert "merged into existing" in out
+        assert "jane@example.com" in out  # pre-existing value shown
+        assert "jane.alt@example.com" in out  # new value shown
+
+    def test_apply_refuses_on_excluded_record_conflict_and_leaves_files_untouched(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        # AC1: a genuine conflict (differing uid) must be surfaced, never
+        # silently resolved by picking a winner — --apply refuses outright and
+        # touches neither the excluded record nor the origin page.
+        root = _seed_knowledge_root(tmp_path)
+        excluded_root = surface_root_for_class("pii", EXCLUDED_CONFIG, root)
+        excluded_root.mkdir(parents=True)
+        conflicting_record = (
+            "---\n"
+            'uid: "99999"\n'
+            "name: Jane Springer — contact record\n"
+            "contact_of: Jane Springer\n"
+            "pii: true\n"
+            "emails:\n"
+            "  - jane@example.com\n"
+            "---\n"
+            "Archival contact data.\n"
+        )
+        (excluded_root / "jane.md").write_text(conflicting_record, encoding="utf-8")
+        page = root / "wiki" / "jane.md"
+        before_page = page.read_text(encoding="utf-8")
+
+        rc = main(
+            ["storage", "migrate-pii", "--path", str(root), "--page", str(page), "--apply"]
+        )
+
+        assert rc == 1
+        assert page.read_text(encoding="utf-8") == before_page  # origin untouched
+        assert (excluded_root / "jane.md").read_text(encoding="utf-8") == conflicting_record
+        err = capsys.readouterr().err
+        assert "refusing to --apply" in err
+        assert "uid" in err
+        assert "99999" in err
+        assert "12345" in err
 
     def test_apply_refused_when_pii_not_mapped_to_excluded(
         self, tmp_path: Path, capsys
@@ -433,6 +628,68 @@ class TestBulkMigrateCLI:
             origin = (root / "wiki" / f"person{i}.md").read_text(encoding="utf-8")
             assert "jane@example.com" not in origin
             assert (excluded_root / f"person{i}.md").is_file()
+
+    def test_all_apply_re_migration_merges_new_value_both_survive(
+        self, tmp_path: Path
+    ) -> None:
+        # AC2/AC1 for the bulk path: it shares plan_pii_migration/_apply_plan
+        # with the single-page path, so a re-run over a page whose excluded
+        # record already exists must MERGE, not overwrite.
+        root = _seed_bulk_root(tmp_path, n_dirty=1)
+        argv = ["storage", "migrate-pii", "--path", str(root), "--all", "--apply"]
+        assert main(argv) == 0
+
+        page = root / "wiki" / "person0.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").rstrip("\n")
+            + " Also reachable at person0.alt@example.com.\n",
+            encoding="utf-8",
+        )
+
+        rc = main(argv)
+
+        assert rc == 0
+        excluded_page = surface_root_for_class("pii", EXCLUDED_CONFIG, root) / "person0.md"
+        meta, _body = parse_frontmatter(excluded_page.read_text(encoding="utf-8"))
+        assert meta["emails"] == ["jane@example.com", "person0.alt@example.com"]
+
+    def test_all_apply_skips_conflicting_page_and_still_migrates_the_rest(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        # A conflicting page must not halt the unattended bulk run (issue
+        # athenaeum#1108): it is skipped and reported, while every other dirty
+        # page is still migrated.
+        root = _seed_bulk_root(tmp_path, n_dirty=2)
+        excluded_root = surface_root_for_class("pii", EXCLUDED_CONFIG, root)
+        excluded_root.mkdir(parents=True)
+        (excluded_root / "person0.md").write_text(
+            "---\n"
+            "uid: mismatched-uid\n"
+            "name: Jane Springer — contact record\n"
+            "contact_of: Jane Springer\n"
+            "pii: true\n"
+            "emails:\n"
+            "  - jane@example.com\n"
+            "---\n"
+            "Archival contact data.\n",
+            encoding="utf-8",
+        )
+        person0_before = (root / "wiki" / "person0.md").read_text(encoding="utf-8")
+
+        rc = main(["storage", "migrate-pii", "--path", str(root), "--all", "--apply"])
+
+        assert rc == 1  # non-zero: a conflict needs manual resolution
+        # The conflicting page is untouched on both surfaces...
+        assert (root / "wiki" / "person0.md").read_text(encoding="utf-8") == person0_before
+        # ...while the other dirty page still migrated normally.
+        excluded_person1 = excluded_root / "person1.md"
+        assert excluded_person1.is_file()
+        assert "jane@example.com" not in (root / "wiki" / "person1.md").read_text(
+            encoding="utf-8"
+        )
+        out = capsys.readouterr().out
+        assert "person0.md" in out
+        assert "conflicting field(s): uid" in out
 
     def test_all_apply_refused_when_pii_not_mapped(
         self, tmp_path: Path, capsys
