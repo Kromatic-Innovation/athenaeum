@@ -44,6 +44,7 @@ from athenaeum.batch import (
     BatchExecutionError,
     BatchRequest,
     BatchRunResult,
+    collect_pending_batches,
     execute_batch,
     process_batch_run,
 )
@@ -58,7 +59,7 @@ from athenaeum.librarian import (
 )
 from athenaeum.models import EntityIndex, TokenUsage
 from athenaeum.schemas import KNOWN_TYPES
-from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
+from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL, tier1_programmatic_match
 
 # Issue athenaeum#964: ``librarian.FALLBACK_TYPES`` was consolidated into the
 # one ``schemas.KNOWN_TYPES`` definition (drift fix -- see librarian.py's
@@ -1939,3 +1940,590 @@ class TestLibrarianDeadlineThreading:
         _captured, stats, _raw, _rc = self._spilling_run(tmp_path, monkeypatch)
 
         assert stats.get("zero_yield") is not True
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1145 — the collect-only adoption path.
+#
+# A run whose only work is collecting a PRIOR run's batch is a valid and
+# useful run. Every test here seeds the handle store the way production does:
+# by actually spilling a batch through athenaeum#1144's deadline path, then
+# flipping the fake batch to `ended` and collecting it. That round trip is the
+# point — a handle written by the submit side has to be readable by the
+# collect side, and a test that hand-writes the store would not prove it.
+# ---------------------------------------------------------------------------
+
+
+def _index_names(index: EntityIndex) -> list[str]:
+    """Every name/alias key the index currently holds."""
+    return [key for key, _value in index.items()]
+
+
+def _write_extra_raw(root: Path, content: str) -> Path:
+    """Drop one more raw intake file into an already-seeded root."""
+    sessions = root / "raw" / "sessions"
+    existing = sorted(sessions.glob("*.md"))
+    n = len(existing)
+    path = sessions / f"2026-01-0{n + 2}T00-00-00Z-extra{n:03d}.md"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _spill_a_classify_batch(
+    tmp_path: Path,
+    name: str,
+    contents: list[str],
+    *,
+    with_acme: bool = False,
+) -> tuple[Path, Path, _FakeClient, TokenUsage, list[Any]]:
+    """Submit a tier-2 batch and spill it at the deadline. Returns the pieces."""
+    root = _seed_root(tmp_path, name, contents, with_acme=with_acme)
+    cache_dir = tmp_path / f"{name}-cache"
+    cache_dir.mkdir()
+    client = _FakeClient(_scripted_responder, allow_sync=False, never_end=True)
+    raw_files = discover_raw_files(root / "raw")
+    usage = TokenUsage()
+
+    spilled = process_batch_run(
+        raw_files,
+        EntityIndex(root / "wiki"),
+        root / "wiki",
+        client,
+        FALLBACK_TYPES,
+        FALLBACK_TAGS,
+        FALLBACK_ACCESS,
+        usage=usage,
+        config=None,
+        max_api_calls=100,
+        sleep=lambda s: None,
+        deadline=time.monotonic() - 1.0,
+        cache_dir=cache_dir,
+    )
+    assert spilled.in_flight_refs, "expected the submit to spill to a handle"
+    # The batch is "still running" as far as the store is concerned; flip the
+    # fake so the next retrieve reports it ended.
+    client.batches._never_end = False
+    return root, cache_dir, client, usage, raw_files
+
+
+class TestCollectPendingBatches:
+    def test_collect_applies_a_classify_handle_end_to_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2 + AC3 + AC7: results land through finalize; handle retires."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "c1", ["Standalone fact about WidgetCollect gadget.\n"]
+        )
+        index = EntityIndex(root / "wiki")
+
+        out = collect_pending_batches(
+            index,
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        # AC7: the collected tier-2 handle pipelined straight into a NEW tier-3
+        # batch in this same run, and that batch was collected too.
+        assert out.created == 1
+        assert out.collected_refs == [raw_files[0].ref]
+        assert out.failed_refs == []
+        # AC2: applied through the normal finalize path — the page exists and
+        # the raw file was consumed, exactly as a within-run batch would.
+        assert list((root / "wiki").glob("*widgetcollect*"))
+        assert not raw_files[0].path.exists()
+        # AC3: the handle is retired and its lease with it, in one store write.
+        assert batch_state.load(cache_dir) == {}
+        assert out.retired_handles and out.kept_handles == []
+
+    def test_collect_books_usage_with_the_handles_knob_and_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC5: token usage lands via add_batch_tokens, per knob AND per model.
+
+        The submitting run's request payloads are gone by collect time, so the
+        athenaeum#247 per-model attribution can only come from the handle — which
+        is why athenaeum#1145 records each request's model on its ref record.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, _submit_usage, _raws = _spill_a_classify_batch(
+            tmp_path, "c2", ["Standalone fact about WidgetUsage gadget.\n"]
+        )
+        handle = next(iter(batch_state.load(cache_dir).values()))
+        assert handle.knob == "classify"
+        assert [r.model for r in handle.refs.values()] == [DEFAULT_CLASSIFY_MODEL]
+
+        usage = TokenUsage()
+        collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        # Booked at the batch (50%-discounted) counters, not the sync ones.
+        assert usage.batch_input_tokens > 0
+        assert usage.per_knob["classify"]["batch_input_tokens"] > 0
+        assert usage.per_model[DEFAULT_CLASSIFY_MODEL]["batch_input_tokens"] > 0
+
+    def test_collect_applies_a_write_handle_from_its_stored_context(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A tier-3 spill collects too — its application context rides the handle.
+
+        The per-request context for a tier-3 batch (which entity to create,
+        which page to merge into, the body the merge ops were anchored
+        against) exists nowhere but the handle once the submitting run exits.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "c3", ["Standalone fact about WidgetWriteCollect gadget.\n"]
+        )
+        cache_dir = tmp_path / "c3-cache"
+        cache_dir.mkdir()
+        classify_client = _FakeClient(_scripted_responder, allow_sync=False)
+        write_client = _FakeClient(
+            _scripted_responder, allow_sync=False, never_end=True
+        )
+        raw_files = discover_raw_files(root / "raw")
+        usage = TokenUsage()
+
+        spilled = process_batch_run(
+            raw_files,
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            deadline=time.monotonic() - 1.0,
+            cache_dir=cache_dir,
+        )
+        assert spilled.in_flight_refs == [raw_files[0].ref]
+        handle = next(iter(batch_state.load(cache_dir).values()))
+        assert handle.knob == "write"
+        assert handle.work is not None and handle.work["files"]
+
+        write_client.batches._never_end = False
+        out = collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        assert out.created == 1
+        assert out.collected_refs == [raw_files[0].ref]
+        assert list((root / "wiki").glob("*widgetwritecollect*"))
+        assert not raw_files[0].path.exists()
+        assert batch_state.load(cache_dir) == {}
+
+    def test_collected_merge_updates_the_existing_page(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A spilled tier-3 MERGE applies its anchored ops on collect."""
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path,
+            "c4",
+            ["Acme Corp shipped a thing.\n"],
+            with_acme=True,
+        )
+        cache_dir = tmp_path / "c4-cache"
+        cache_dir.mkdir()
+        classify_client = _FakeClient(_scripted_responder, allow_sync=False)
+        write_client = _FakeClient(
+            _scripted_responder, allow_sync=False, never_end=True
+        )
+        raw_files = discover_raw_files(root / "raw")
+        usage = TokenUsage()
+        page = root / "wiki" / "acme1234-acme-corp.md"
+
+        process_batch_run(
+            raw_files,
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            deadline=time.monotonic() - 1.0,
+            cache_dir=cache_dir,
+        )
+        handle = next(iter(batch_state.load(cache_dir).values()))
+        merges = next(iter(handle.work["files"].values()))["merges"]
+        assert merges, "expected a batched merge in the spilled handle"
+        assert "Original body line." in next(iter(merges.values()))["existing_body"]
+
+        write_client.batches._never_end = False
+        out = collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        assert out.updated == 1
+        body = page.read_text(encoding="utf-8")
+        assert "Original body line." in body
+        assert "Merged note from" in body
+        assert batch_state.load(cache_dir) == {}
+
+    def test_a_batch_that_has_not_ended_keeps_its_handle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Still in flight: keep the handle, keep the lease, do NOT resubmit."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "c5", ["Standalone fact about WidgetPending gadget.\n"]
+        )
+        client.batches._never_end = True  # still running at collect time
+        submitted_before = len(client.batches.submitted)
+
+        out = collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        assert out.kept_handles and out.retired_handles == []
+        assert out.in_flight_refs == [raw_files[0].ref]
+        assert out.created == 0
+        # Nothing was resubmitted — the work is already paid for.
+        assert len(client.batches.submitted) == submitted_before
+        assert list(batch_state.load(cache_dir)) == out.kept_handles
+        assert raw_files[0].path.exists()
+
+    def test_a_leased_raw_file_that_vanished_is_dropped_not_applied(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A result whose raw file is gone cannot finalize, so it is dropped."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "c6", ["Standalone fact about WidgetGone gadget.\n"]
+        )
+        raw_files[0].path.unlink()
+
+        out = collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        assert out.created == 0
+        assert out.failed_refs == [raw_files[0].ref]
+        # The handle still retires — nothing is left holding a lease over a
+        # file that no longer exists.
+        assert batch_state.load(cache_dir) == {}
+
+    def test_no_handles_is_a_no_op(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "empty-cache"
+        cache_dir.mkdir()
+        root = _seed_root(tmp_path, "c7", [])
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+
+        out = collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            cache_dir=cache_dir,
+        )
+
+        assert out.collected_refs == []
+        assert client.batches.submitted == []
+
+
+class TestCollectOrderingAndIndexFreshness:
+    def test_collected_creations_are_tier1_matchable_by_the_next_claim(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC6: a collected tier-2 handle's creations are in the index first.
+
+        Collect runs before the claim loop, so a fresh ``EntityIndex`` built
+        for the new cohort reads the pages the collect just wrote — which is
+        what lets this run's ``tier1_programmatic_match`` match an entity this
+        run created, rather than deferring it a further run.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, usage, _raws = _spill_a_classify_batch(
+            tmp_path, "o1", ["Standalone fact about WidgetFresh gadget.\n"]
+        )
+        collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        # The index the claim loop would build next sees the created page...
+        fresh_index = EntityIndex(root / "wiki")
+        assert "widgetfresh" in _index_names(fresh_index)
+        # ...and a newly-claimed file naming it tier-1 matches, rather than
+        # paying for a tier-2 classify to rediscover it.
+        later = _seed_root(tmp_path, "o1-later", ["More on WidgetFresh gadget.\n"])
+        later_raw = discover_raw_files(later / "raw")[0]
+        matched = tier1_programmatic_match(later_raw, fresh_index, config=None)
+        assert [name for name, _uid, _path in matched] == ["widgetfresh"]
+
+    def test_collect_precedes_the_claim_loop_and_any_new_submit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1: asserted by CALL SEQUENCE, not by reading the code.
+
+        The three events must occur in this order: the collect's ``retrieve``
+        of the outstanding batch, the claim loop's ``discover_raw_files``, and
+        the new cohort's ``batches.create``.
+        """
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, _usage, _raws = _spill_a_classify_batch(
+            tmp_path, "o2", ["Standalone fact about WidgetOrder gadget.\n"]
+        )
+        # A second, unleased file for this run to claim and submit.
+        _write_extra_raw(root, "Standalone fact about WidgetSecond gadget.\n")
+
+        sequence: list[str] = []
+        real_retrieve = client.batches.retrieve
+        real_create = client.batches.create
+
+        def traced_retrieve(batch_id: str) -> Any:
+            sequence.append("collect-retrieve")
+            return real_retrieve(batch_id)
+
+        def traced_create(*, requests: list[dict[str, Any]]) -> Any:
+            # Distinguish the NEW COHORT's classify submit from the collect's
+            # own pipelined tier-3 submit: both are submissions, but only the
+            # first is the "new submit" the ordering has to come before. The
+            # collect's tier-3 submit happening BEFORE the claim is athenaeum#1145
+            # AC7 working, not a violation of AC1.
+            model = requests[0]["params"]["model"]
+            sequence.append(
+                "submit-classify"
+                if model == DEFAULT_CLASSIFY_MODEL
+                else "submit-write"
+            )
+            return real_create(requests=requests)
+
+        client.batches.retrieve = traced_retrieve  # type: ignore[method-assign]
+        client.batches.create = traced_create  # type: ignore[method-assign]
+
+        import athenaeum.librarian as lib_mod
+
+        real_discover = lib_mod.discover_raw_files
+
+        def traced_discover(*args: Any, **kwargs: Any) -> Any:
+            sequence.append("claim")
+            return real_discover(*args, **kwargs)
+
+        monkeypatch.setattr(lib_mod, "discover_raw_files", traced_discover)
+        monkeypatch.setattr(
+            batch_state, "resolve_cache_dir", lambda: cache_dir
+        )
+        _clean_env(monkeypatch)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+
+        run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+        )
+
+        # Collect first, then claim, then the new cohort's classify submit.
+        assert sequence.index("collect-retrieve") < sequence.index("claim")
+        assert sequence.index("claim") < sequence.index("submit-classify")
+        # AC7: the collected classify handle pipelined into its tier-3 submit
+        # within this same run — before the claim, since the collect owns the
+        # whole phase.
+        assert sequence.index("submit-write") < sequence.index("claim")
+
+    def test_a_collect_only_run_succeeds_and_reports_progress(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4: collecting a prior batch is the whole of a valid run."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, _usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "o3", ["Standalone fact about WidgetOnly gadget.\n"]
+        )
+        monkeypatch.setattr(batch_state, "resolve_cache_dir", lambda: cache_dir)
+        _clean_env(monkeypatch)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+
+        stats: dict[str, Any] = {}
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+            out_run_stats=stats,
+        )
+
+        assert rc == 0
+        assert stats["collected_refs"] == [raw_files[0].ref]
+        assert list((root / "wiki").glob("*widgetonly*"))
+        # Collected work is progress: the zero-yield alarm must not fire on a
+        # run that drained a file, even though it claimed none.
+        assert stats.get("zero_yield") is not True
+
+    def test_dry_run_collects_nothing_and_retires_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC8."""
+        _patch_uids(monkeypatch)
+        root, cache_dir, client, _usage, raw_files = _spill_a_classify_batch(
+            tmp_path, "o4", ["Standalone fact about WidgetDry gadget.\n"]
+        )
+        before = batch_state.load(cache_dir)
+        monkeypatch.setattr(batch_state, "resolve_cache_dir", lambda: cache_dir)
+        _clean_env(monkeypatch)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+
+        run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+            dry_run=True,
+        )
+
+        assert batch_state.load(cache_dir) == before
+        assert raw_files[0].path.exists()
+        assert not list((root / "wiki").glob("*widgetdry*"))
+
+    def test_a_collected_file_with_a_failed_request_writes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2: the all-or-nothing guarantee survives the across-run split.
+
+        The collect path does not get its own write path, so the per-file
+        "every call succeeded before anything is written" rule is the SAME
+        code — a file with one errored request writes nothing, keeps its raw,
+        and is retried next run.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "c8", ["Standalone fact about WidgetBad gadget.\n"]
+        )
+        cache_dir = tmp_path / "c8-cache"
+        cache_dir.mkdir()
+        classify_client = _FakeClient(_scripted_responder, allow_sync=False)
+        # The tier-3 create for WidgetBad comes back errored on collect.
+        write_client = _FakeClient(
+            _scripted_responder,
+            allow_sync=False,
+            never_end=True,
+            fail_marker="WidgetBad",
+        )
+        raw_files = discover_raw_files(root / "raw")
+
+        process_batch_run(
+            raw_files,
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            deadline=time.monotonic() - 1.0,
+            cache_dir=cache_dir,
+        )
+        write_client.batches._never_end = False
+
+        out = collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        assert out.created == 0
+        assert out.failed_refs == [raw_files[0].ref]
+        assert out.collected_refs == []
+        # Nothing written, raw preserved for a fresh claim next run.
+        assert not list((root / "wiki").glob("*widgetbad*"))
+        assert raw_files[0].path.exists()
+        # The handle still retires: its results are consumed, and leaving the
+        # lease on would strand the file it just declined to write.
+        assert batch_state.load(cache_dir) == {}
