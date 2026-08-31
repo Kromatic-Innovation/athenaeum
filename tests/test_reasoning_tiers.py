@@ -613,6 +613,7 @@ class TestInertModelKnobWarning:
 
     def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ATHENAEUM_REASONING_TIER_AUDITING_ENABLED", raising=False)
+        monkeypatch.delenv("ATHENAEUM_REASONING_TIER_T2_AUTO_APPLY_ENABLED", raising=False)
         monkeypatch.delenv("ATHENAEUM_REASONING_T1_MODEL", raising=False)
         monkeypatch.delenv("ATHENAEUM_REASONING_T2_MODEL", raising=False)
 
@@ -638,7 +639,23 @@ class TestInertModelKnobWarning:
         assert len(caplog.records) == 1
         msg = caplog.records[0].getMessage()
         assert "ATHENAEUM_REASONING_T2_MODEL" in msg
-        assert "ATHENAEUM_REASONING_TIER_AUDITING_ENABLED" in msg
+        # Issue athenaeum#1200: T2's own opt-in, not T1's combined-flag name.
+        assert "ATHENAEUM_REASONING_TIER_T2_AUTO_APPLY_ENABLED" in msg
+
+    def test_t2_env_knob_silent_when_t1_flag_on_but_t2_flag_off(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Issue athenaeum#1200's own regression case: before the split, T1's
+        combined flag being on silenced this warning for T2 as well, which
+        would now be WRONG — T1 on no longer implies T2 armed, so the T2
+        model knob genuinely still has no effect and must still warn."""
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("ATHENAEUM_REASONING_TIER_AUDITING_ENABLED", "1")
+        monkeypatch.setenv("ATHENAEUM_REASONING_T2_MODEL", "claude-custom-t2")
+        with caplog.at_level("WARNING", logger="athenaeum.reasoning_tiers"):
+            get_t2_model(None)
+        assert len(caplog.records) == 1
+        assert "ATHENAEUM_REASONING_TIER_T2_AUTO_APPLY_ENABLED" in caplog.records[0].getMessage()
 
     def test_yaml_knob_warns_when_auditing_disabled(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -664,6 +681,9 @@ class TestInertModelKnobWarning:
     ) -> None:
         self._clear_env(monkeypatch)
         monkeypatch.setenv("ATHENAEUM_REASONING_TIER_AUDITING_ENABLED", "1")
+        # Issue athenaeum#1200: T2's own flag, independent of T1's above —
+        # both must be armed for BOTH model knobs to be non-inert here.
+        monkeypatch.setenv("ATHENAEUM_REASONING_TIER_T2_AUTO_APPLY_ENABLED", "1")
         monkeypatch.setenv("ATHENAEUM_REASONING_T1_MODEL", "claude-custom-t1")
         monkeypatch.setenv("ATHENAEUM_REASONING_T2_MODEL", "claude-custom-t2")
         with caplog.at_level("WARNING", logger="athenaeum.reasoning_tiers"):
