@@ -966,7 +966,11 @@ def tier0_passthrough(
         render_frontmatter(meta) + "\n" + body,
     )
     if target_registry is not None:
-        target_registry.register(PersonRegistryEntry(uid=uid, path=out_path, name=name))
+        target_registry.register(
+            PersonRegistryEntry(
+                uid=uid, path=out_path, name=name, aliases=tuple(entity.aliases)
+            )
+        )
     else:
         index.register(entity)
     return entity

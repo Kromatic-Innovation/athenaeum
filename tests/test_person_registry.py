@@ -308,6 +308,33 @@ class TestAC3TierZeroNoLLM:
         assert index.get_by_uid("person1a") is None
         assert index.lookup("Alice Zhang") is None
 
+    def test_tier0_passthrough_new_person_alias_resolvable_same_run(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for a Sentry review finding on this PR: a NEW person
+        created with aliases must be alias-resolvable in the SAME run's
+        in-memory registry, not only after a later run rebuilds it from
+        disk (PersonRegistry.register() previously indexed only the
+        primary name)."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        registry_root = tmp_path / "registry"
+        index = EntityIndex(wiki)
+        registry = PersonRegistry(registry_root)
+
+        raw = _make_raw(
+            "---\nuid: person1a\ntype: person\nname: Alice Zhang\n"
+            "aliases:\n  - AZ\n  - Ali\n---\n\n# Alice Zhang\n\nProduct lead.\n"
+        )
+        entity = tier0_passthrough(raw, index, wiki, ["person"], person_registry=registry)
+        assert entity is not None
+
+        # Same in-memory registry object, no reload from disk -- proves the
+        # register() call itself indexed the aliases, not a later _load().
+        assert registry.lookup("AZ") is not None
+        assert registry.lookup("AZ").uid == "person1a"
+        assert registry.lookup("Ali") is not None
+
     def test_tier0_passthrough_default_unwired_is_byte_identical(
         self, tmp_path: Path
     ) -> None:

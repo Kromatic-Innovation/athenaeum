@@ -78,11 +78,18 @@ PERSON_TYPE = "person"
 
 
 class PersonRegistryEntry(NamedTuple):
-    """One indexed person page: identity + on-disk location."""
+    """One indexed person page: identity + on-disk location.
+
+    *aliases* defaults to ``()`` so every pre-existing positional/keyword
+    construction (this module's own ``_load``, every caller before this
+    field existed) stays valid — only :meth:`PersonRegistry.register`
+    reads it, and only when a caller actually populates it.
+    """
 
     uid: str
     path: Path
     name: str
+    aliases: tuple[str, ...] = ()
 
 
 class PersonRegistry:
@@ -125,16 +132,17 @@ class PersonRegistry:
                 continue
             assert isinstance(uid_raw, str)
             assert isinstance(name_raw, str)
-            entry = PersonRegistryEntry(uid=uid_raw, path=fpath, name=name_raw)
-            self._by_uid[uid_raw] = entry
-            self._by_name[name_raw.lower()] = entry
-
             aliases_raw = meta.get("aliases", [])
             assert isinstance(aliases_raw, Iterable)
-            for alias in aliases_raw:
-                if alias:
-                    assert isinstance(alias, str)
-                    self._by_name[alias.lower()] = entry
+            aliases = tuple(alias for alias in aliases_raw if alias)
+            for alias in aliases:
+                assert isinstance(alias, str)
+
+            entry = PersonRegistryEntry(uid=uid_raw, path=fpath, name=name_raw, aliases=aliases)
+            self._by_uid[uid_raw] = entry
+            self._by_name[name_raw.lower()] = entry
+            for alias in aliases:
+                self._by_name[alias.lower()] = entry
 
     def lookup(self, name: str) -> PersonRegistryEntry | None:
         """Look up a person by name or alias (case-insensitive)."""
@@ -149,10 +157,20 @@ class PersonRegistry:
 
         Mirrors :meth:`athenaeum.models.EntityIndex.register` — called after
         a tier-0 write so a later raw file in the same run's batch can match
-        against the record that was just created.
+        against the record that was just created. Issue athenaeum#1183 (Sentry
+        review finding): *entry.aliases* is indexed too, not just
+        *entry.name* — a caller that constructs *entry* without aliases
+        (the pre-existing default, ``()``) is unaffected; the gap this
+        closes is a NEW person created via :func:`athenaeum.intake.
+        tier0_passthrough` with aliases in the SAME run whose alias lookup
+        would otherwise only start working on the NEXT run, once
+        :meth:`_load` re-reads the page from disk.
         """
         self._by_uid[entry.uid] = entry
         self._by_name[entry.name.lower()] = entry
+        for alias in entry.aliases:
+            if alias:
+                self._by_name[alias.lower()] = entry
 
     def __len__(self) -> int:
         return len(self._by_uid)
