@@ -36,7 +36,7 @@ EXIT_PII_FOUND = 2
 # the phone axis (issue athenaeum#1273 measured 100,533 such matches).
 _MACHINE_LOG_FIXTURE = (
     '{"at": "2026-08-23T23:16:08Z", "disposition": "no-match", '
-    '"key_fingerprint": "4f53cda18c2baa0c1234567890123", "tier": null}\n'
+    '"key_fingerprint": "aaaaaaaaaaaaaaaa", "tier": null}\n'
     '{"note": "contact 17884567890123 for details"}\n'
 )
 
