@@ -246,7 +246,7 @@ class TestCleanRunSummary:
                     [
                         {
                             "name": "Alice Zhang",
-                            "entity_type": "person",
+                            "entity_type": "company",
                             "tags": ["active"],
                             "access": "internal",
                             "observations": "Product leader.",
@@ -389,7 +389,7 @@ class TestEconomicsWiring:
                     [
                         {
                             "name": "Alice Zhang",
-                            "entity_type": "person",
+                            "entity_type": "company",
                             "tags": ["active"],
                             "access": "internal",
                             "observations": "Product leader.",
@@ -951,7 +951,7 @@ class TestNoBehaviorChange:
                     [
                         {
                             "name": "Alice Zhang",
-                            "entity_type": "person",
+                            "entity_type": "company",
                             "tags": ["active"],
                             "access": "internal",
                             "observations": "Product leader.",

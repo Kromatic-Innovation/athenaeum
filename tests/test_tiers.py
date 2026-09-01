@@ -812,7 +812,7 @@ class TestTier3Create:
         action = EntityAction(
             kind="create",
             name="Test Entity",
-            entity_type="person",
+            entity_type="company",
             tags=[],
             access="internal",
             existing_uid=None,
@@ -841,7 +841,7 @@ class TestTier3Create:
         action = EntityAction(
             kind="create",
             name="Test",
-            entity_type="person",
+            entity_type="company",
             tags=[],
             access="internal",
             existing_uid=None,
@@ -864,7 +864,7 @@ class TestTier3Create:
         action = EntityAction(
             kind="create",
             name="Alice Zhang",
-            entity_type="person",
+            entity_type="company",
             tags=["active", "client"],
             access="internal",
             existing_uid=None,
@@ -877,7 +877,7 @@ class TestTier3Create:
         entity = tier3_create(action, "sessions/raw.md", client)
         assert entity is not None
         assert entity.name == "Alice Zhang"
-        assert entity.type == "person"
+        assert entity.type == "company"
         assert entity.access == "internal"
         assert entity.tags == ["active", "client"]
         assert len(entity.uid) == 8
@@ -889,7 +889,7 @@ class TestTier3Create:
         action = EntityAction(
             kind="create",
             name="Test",
-            entity_type="person",
+            entity_type="company",
             tags=[],
             access="internal",
             existing_uid=None,
@@ -1042,7 +1042,7 @@ class TestTier3CreatePreambleGuard:
         return EntityAction(
             kind="create",
             name="Alice Zhang",
-            entity_type="person",
+            entity_type="company",
             tags=["active"],
             access="internal",
             existing_uid=None,
@@ -1194,7 +1194,7 @@ class TestTier3Merge:
         action = EntityAction(
             kind="update",
             name="Test",
-            entity_type="person",
+            entity_type="company",
             tags=[],
             access="",
             existing_uid="uid12345",
@@ -1321,7 +1321,7 @@ class TestTier3Merge:
         action = EntityAction(
             kind="update",
             name="Test",
-            entity_type="person",
+            entity_type="company",
             tags=[],
             access="",
             existing_uid="uid12345",
@@ -1340,7 +1340,7 @@ class TestTier3Merge:
         action = EntityAction(
             kind="update",
             name="Test",
-            entity_type="person",
+            entity_type="company",
             tags=[],
             access="",
             existing_uid="uid12345",
@@ -2868,7 +2868,7 @@ class TestTier3Write:
             EntityAction(
                 kind="create",
                 name="Alice Zhang",
-                entity_type="person",
+                entity_type="company",
                 tags=["active"],
                 access="internal",
                 existing_uid=None,
@@ -2937,7 +2937,7 @@ class TestTier3Write:
             EntityAction(
                 kind="create",
                 name="Unknown Person",
-                entity_type="person",
+                entity_type="company",
                 tags=[],
                 access="internal",
                 existing_uid=None,
@@ -2975,7 +2975,7 @@ class TestTier3Write:
             EntityAction(
                 kind="create",
                 name="Crash Entity",
-                entity_type="person",
+                entity_type="company",
                 tags=[],
                 access="internal",
                 existing_uid=None,
@@ -3056,7 +3056,7 @@ class TestTier3DeriveActionsBudget:
             EntityAction(
                 kind="create",
                 name=f"Person {i}",
-                entity_type="person",
+                entity_type="company",
                 tags=[],
                 access="internal",
                 existing_uid=None,
@@ -3107,7 +3107,7 @@ class TestTier3DeriveActionsBudget:
             EntityAction(
                 kind="create",
                 name=f"Person {i}",
-                entity_type="person",
+                entity_type="company",
                 tags=[],
                 access="internal",
                 existing_uid=None,
@@ -3176,7 +3176,7 @@ class TestTier3DeriveActionsBudget:
             EntityAction(
                 kind="create",
                 name="New Person",
-                entity_type="person",
+                entity_type="company",
                 tags=[],
                 access="internal",
                 existing_uid=None,
@@ -3242,7 +3242,7 @@ class TestTier3DeriveActionsBudget:
             EntityAction(
                 kind="create",
                 name="Alice Zhang",
-                entity_type="person",
+                entity_type="company",
                 tags=[],
                 access="internal",
                 existing_uid=None,
@@ -3272,7 +3272,7 @@ class TestTier3Provenance:
         action = EntityAction(
             kind="create",
             name="Bob Test",
-            entity_type="person",
+            entity_type="company",
             tags=[],
             access="internal",
             existing_uid=None,
@@ -3288,7 +3288,7 @@ class TestTier3Provenance:
         action = EntityAction(
             kind="create",
             name="Carol",
-            entity_type="person",
+            entity_type="company",
             tags=[],
             access="internal",
             existing_uid=None,
@@ -4119,7 +4119,7 @@ class TestEntityLLMCallTiming:
         action = EntityAction(
             kind="create",
             name="Test Entity",
-            entity_type="person",
+            entity_type="company",
             tags=[],
             access="internal",
             existing_uid=None,

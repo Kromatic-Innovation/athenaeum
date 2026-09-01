@@ -84,6 +84,7 @@ from athenaeum.models import (
     slugify,
     validity_bound_str,
 )
+from athenaeum.person_registry import PERSON_TYPE, PersonRegistry, PersonRegistryEntry
 from athenaeum.schemas import validate_wiki_meta
 
 log = logging.getLogger(__name__)
@@ -837,6 +838,8 @@ def tier0_passthrough(
     wiki_root: Path,
     valid_types: list[str],
     dry_run: bool = False,
+    *,
+    person_registry: "PersonRegistry | None" = None,
 ) -> WikiEntity | None:
     """Promote a pre-structured raw-intake file to wiki/ verbatim.
 
@@ -859,6 +862,21 @@ def tier0_passthrough(
     Tier 1/2/3). Eligibility gate: frontmatter parses, ``uid``/``type``/
     ``name`` are non-empty, ``type`` is in the schema's allowlist, and the
     uid is not already present in the index (idempotent re-runs).
+
+    *person_registry* (issue athenaeum#1183, keyword-only, ``None`` default):
+    when supplied AND the raw declares ``type: person``, this passthrough
+    targets :class:`~athenaeum.person_registry.PersonRegistry` instead of
+    the general *wiki_root*/*index* — the new person page is written under
+    ``person_registry.root`` (which defaults to *wiki_root* itself, see
+    :func:`athenaeum.config.resolve_person_registry_root`, so an unmigrated
+    corpus sees byte-identical placement) and registered into *that*
+    registry rather than *index*, so it never gains a NAME-keyed entry in
+    *index* (:meth:`~athenaeum.models.EntityIndex.register` also guards this
+    independently — see its docstring). ``None`` (every pre-athenaeum#1183
+    caller) leaves a ``type: person`` raw on the ORIGINAL *wiki_root*/*index*
+    path, byte-for-byte unchanged. No LLM client is imported by this
+    function or by :mod:`athenaeum.person_registry`, so this branch cannot
+    make a provider call regardless of *person_registry*.
     """
     meta, body = parse_frontmatter(raw.content)
     if not meta:
@@ -870,8 +888,16 @@ def tier0_passthrough(
         return None
     if etype not in valid_types:
         return None
-    if index.get_by_uid(uid) is not None:
-        return None
+
+    target_registry = person_registry if etype == PERSON_TYPE else None
+    if target_registry is not None:
+        if target_registry.get_by_uid(uid) is not None:
+            return None
+        target_root = target_registry.root
+    else:
+        if index.get_by_uid(uid) is not None:
+            return None
+        target_root = wiki_root
 
     today = date.today().isoformat()
     if not meta.get("created"):
@@ -879,7 +905,7 @@ def tier0_passthrough(
     meta["updated"] = today
 
     filename = f"{uid}-{slugify(name)}.md"
-    out_path = wiki_root / filename
+    out_path = target_root / filename
     if out_path.exists():
         # Filename collision with a different uid would be a real bug,
         # but a same-uid existing file is already covered by the index
@@ -939,5 +965,64 @@ def tier0_passthrough(
         out_path,
         render_frontmatter(meta) + "\n" + body,
     )
-    index.register(entity)
+    if target_registry is not None:
+        target_registry.register(
+            PersonRegistryEntry(
+                uid=uid, path=out_path, name=name, aliases=tuple(entity.aliases)
+            )
+        )
+    else:
+        index.register(entity)
     return entity
+
+
+def attribute_person_observation(
+    raw: RawFile,
+    entry: PersonRegistryEntry,
+    *,
+    dry_run: bool = False,
+) -> bool:
+    """Attribute a raw observation to a person-registry record it was
+    resolved against, LLM-free (issue athenaeum#1183 AC2).
+
+    Companion to :func:`athenaeum.identity_resolution.resolve_person_mention`:
+    once that function resolves a raw-text mention to a
+    :class:`~athenaeum.person_registry.PersonRegistryEntry` — because the
+    mentioned person has no :class:`~athenaeum.models.EntityIndex` entry for
+    :func:`athenaeum.tiers.tier1_programmatic_match` to attribute through —
+    this is the no-LLM write that records the observation on the matched
+    record: *raw*'s body is prepended, as a dated bullet, immediately under
+    the page's ``## Notes`` heading (most-recent-first; the heading is
+    created, at the end of the body, if the page does not have one yet).
+    Never a full-page LLM rewrite — this function does not import an LLM
+    client/provider module at all, so no call chain through it can reach
+    one.
+
+    Returns ``True`` when the page was (or, under *dry_run*, would be)
+    changed; ``False`` when *raw* carries no observation body to attribute
+    (an empty/whitespace-only raw is a no-op, not an error).
+    """
+    _, raw_body = parse_frontmatter(raw.content)
+    observation = raw_body.strip()
+    if not observation:
+        return False
+
+    text = entry.path.read_text(encoding="utf-8")
+    meta, body = parse_frontmatter(text)
+    today = date.today().isoformat()
+    bullet = f"- {today}: {observation}"
+
+    heading = "## Notes"
+    if heading in body:
+        new_body = body.replace(heading, f"{heading}\n\n{bullet}", 1)
+    else:
+        new_body = body.rstrip("\n") + f"\n\n{heading}\n\n{bullet}\n"
+
+    meta["updated"] = today
+    validate_wiki_meta(meta)
+
+    if dry_run:
+        return True
+
+    atomic_write_text(entry.path, render_frontmatter(meta) + "\n" + new_body)
+    return True

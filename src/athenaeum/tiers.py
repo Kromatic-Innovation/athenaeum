@@ -2700,6 +2700,34 @@ def strip_planning_preamble(body: str) -> tuple[str, bool]:
     return remainder, True
 
 
+class PersonNeverLLMRewriteError(RuntimeError):
+    """Raised when a ``type: person`` target would reach a tier-3 full-page
+    LLM rewrite entry point (issue athenaeum#1183 AC4).
+
+    ``type: person`` pages are demoted to the consult-only
+    :class:`athenaeum.person_registry.PersonRegistry` — they are matched by
+    intake via :func:`athenaeum.identity_resolution.resolve_person_mention`
+    and field-updated via the tier-0 no-LLM path
+    (:func:`athenaeum.intake.tier0_passthrough`,
+    :func:`athenaeum.librarian.tier0_handle_upsert`), never merged or
+    authored by an LLM. Raised BEFORE any client call — every guarded
+    function below checks ``action.entity_type`` first — so this is
+    defense-in-depth against a person :class:`~athenaeum.models.EntityAction`
+    ever reaching an LLM call, even if the upstream tier1/tier2 routing that
+    is SUPPOSED to keep a person target out of Tier 3 entirely has a bug.
+    """
+
+
+def _refuse_person_rewrite(action: EntityAction, entry_point: str) -> None:
+    """Shared guard body for every tier-3 full-page-rewrite entry point."""
+    if (action.entity_type or "").strip().lower() == "person":
+        raise PersonNeverLLMRewriteError(
+            f"{entry_point}: refusing a type: person target ({action.name!r}) — "
+            "person records are demoted to the consult-only registry and must "
+            "never receive a full-page LLM rewrite (issue athenaeum#1183)"
+        )
+
+
 def tier3_create(
     action: EntityAction,
     source_ref: str,
@@ -2708,7 +2736,14 @@ def tier3_create(
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
 ) -> WikiEntity:
-    """Use a capable LLM to create a new entity page."""
+    """Use a capable LLM to create a new entity page.
+
+    Raises :class:`PersonNeverLLMRewriteError` before any client call when
+    ``action.entity_type`` is ``person`` (issue athenaeum#1183 AC4) — a person
+    record is never LLM-authored; it is created via
+    :func:`athenaeum.intake.tier0_passthrough`'s registry branch instead.
+    """
+    _refuse_person_rewrite(action, "tier3_create")
     params = tier3_create_params(action, source_ref, wiki_root=wiki_root, config=config)
 
     response = _timed_llm_call(
@@ -3540,8 +3575,14 @@ def tier3_merge(
     unparseable / truncated / unapplicable response, retries ONCE via the
     full-echo fallback so the result is never worse than the status quo.
 
+    Raises :class:`PersonNeverLLMRewriteError` before any client call when
+    ``action.entity_type`` is ``person`` (issue athenaeum#1183 AC4) — a person
+    record is never LLM-merged; it accepts structured field updates only,
+    via the tier-0 no-LLM path.
+
     Returns (updated_body, escalation_item).
     """
+    _refuse_person_rewrite(action, "tier3_merge")
     # Anchor safety (issue athenaeum#562 / audit M20): a body that would break the
     # <existing_page> fence cannot use the patch path — go straight to the
     # anchor-free full-echo fallback instead.
@@ -3619,7 +3660,14 @@ def tier3_merge_full(
     same "leave the existing page unchanged pending human review" posture —
     so an input-side truncation and an output-side truncation fail the same
     way instead of one being silent.
+
+    Raises :class:`PersonNeverLLMRewriteError` before any client call when
+    ``action.entity_type`` is ``person`` (issue athenaeum#1183 AC4) — same
+    guarantee as :func:`tier3_merge`, checked independently here since this
+    function is also called directly by the batch transport, not only via
+    :func:`tier3_merge`'s fallback.
     """
+    _refuse_person_rewrite(action, "tier3_merge_full")
     if _existing_body_truncated(existing_body):
         log.warning(
             "%s page=%s source=%s cause=input-truncated existing_body_chars=%d "
@@ -4391,7 +4439,14 @@ def tier3_write(
     which action failed; the exception object and type are otherwise unchanged.
 
     Returns (new_entities, updated_uids, escalation_items).
+
+    Raises :class:`PersonNeverLLMRewriteError` before any client call when
+    ANY action in *actions* targets ``type: person`` (issue athenaeum#1183 AC4)
+    — checked for the whole batch up front, so a person action can never
+    slip through alongside other actions in the same raw file's action set.
     """
+    for _action in actions:
+        _refuse_person_rewrite(_action, "tier3_write")
     new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
         raw, actions, index, wiki_root, client, usage=usage, config=config
     )

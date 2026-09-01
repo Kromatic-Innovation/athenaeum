@@ -90,7 +90,8 @@ if TYPE_CHECKING:
     # Annotation-only, mirroring the lazy-import convention every module in
     # this read path already follows (`mcp_server.py`, `_cmd_query.py`) — the
     # real import stays local to each function that needs it.
-    from athenaeum.models import EntityIndex
+    from athenaeum.models import EntityIndex, RawFile
+    from athenaeum.person_registry import PersonRegistry, PersonRegistryEntry
     from athenaeum.pii import (
         DoNotEmailState,
         ExcludedRecordIndex,
@@ -731,3 +732,123 @@ def resolve_handle_query(
         excluded_index=excluded_index,
         entity_index=entity_index,
     )
+
+
+def resolve_person_mention(
+    mention: str,
+    *,
+    wiki_root: Path,
+    entity_index: "EntityIndex",
+    knowledge_root: Path | None = None,
+    config: dict[str, Any] | None = None,
+    registry: "PersonRegistry | None" = None,
+) -> "PersonRegistryEntry | None":
+    """Resolve a raw-text person MENTION through the consult-only person
+    registry (issue athenaeum#1183 AC2).
+
+    This is the intake-time counterpart to :func:`resolve_handle_query`
+    above: that function resolves a `recall` QUERY that looks like a handle
+    (an email address, a ``registry.json`` value) to person FACTS. This
+    function resolves a plain-text NAME/ALIAS mention encountered during
+    intake against the consult-only person registry directly. It never
+    inspects handle-shape at all — an ordinary name is exactly what it
+    expects.
+
+    **Precedence against *entity_index* — a NON-person collision only.**
+    :meth:`~athenaeum.models.EntityIndex.lookup` is a single, ADDRESSED
+    name/alias lookup that deliberately KEEPS finding a `type: person` page
+    exactly as before athenaeum#1183 (see
+    :data:`athenaeum.models.DEMOTED_NAME_MATCH_TYPES`'s docstring) — so on
+    today's UNMIGRATED corpus, *entity_index* finding *mention* is the
+    ORDINARY case, not a reason to defer. This function only declines to a
+    hit whose type is something OTHER than ``person`` — a genuine name
+    collision with a different entity (the operator's own worked example:
+    a `type: project` repo and a `type: person` sharing a name), where that
+    other entity is authoritative and this function must not silently
+    shadow it with a person hit instead. A `person`-typed hit, or no hit at
+    all, both fall through to the registry consult below — this is what
+    makes the consult ENGAGE on today's corpus rather than only after
+    athenaeum#1247's relocation (which merely removes the entity_index hit
+    entirely, an already-handled case: no hit -> straight to the registry).
+
+    *registry* lets a caller thread an already-built
+    :class:`~athenaeum.person_registry.PersonRegistry` (the O(corpus) scan
+    cost paid once per run, mirroring *entity_index* itself). ``None`` (the
+    default) builds one from :func:`athenaeum.config.resolve_person_registry_root`
+    — *knowledge_root* is required in that case (``wiki_root.parent`` when
+    the caller has no other knowledge root at hand, matching the convention
+    :func:`athenaeum.librarian.process_one` already uses for
+    ``route_sensitive_values``).
+
+    Returns the matched :class:`~athenaeum.person_registry.PersonRegistryEntry`,
+    or ``None`` when *mention* belongs to a different, non-person entity, or
+    matches nothing in either index.
+    """
+    hit = entity_index.lookup(mention)
+    if hit is not None and hit.type != "person":
+        return None
+
+    if registry is None:
+        from athenaeum.config import resolve_person_registry_root
+        from athenaeum.person_registry import PersonRegistry as _PersonRegistry
+
+        root = resolve_person_registry_root(
+            knowledge_root if knowledge_root is not None else wiki_root.parent,
+            config,
+        )
+        registry = _PersonRegistry(root)
+
+    return registry.lookup(mention)
+
+
+def match_person_mentions(
+    raw: "RawFile",
+    wiki_root: Path,
+    entity_index: "EntityIndex",
+    registry: "PersonRegistry",
+) -> list["PersonRegistryEntry"]:
+    """Find every person-registry name/alias mentioned in *raw*'s content,
+    word-boundary matched (issue athenaeum#1183 AC2).
+
+    The person-specific analogue of
+    :func:`athenaeum.tiers.tier1_programmatic_match`, scoped to the (much
+    smaller) person-registry key set rather than the general entity index —
+    athenaeum#1183 withholds `type: person` from that index's matching
+    surface entirely (see :data:`athenaeum.models.DEMOTED_NAME_MATCH_TYPES`),
+    so tier1 itself can never find one. Deliberately does NOT apply tier1's
+    junk-name / mention-density gates: those are tuned for the general
+    wiki's broad, sometimes-noisy vocabulary; the person registry is a
+    small, curated set of real names an operator's CRM already knows about,
+    where that tuning does not earn its keep.
+
+    Each word-boundary hit is re-verified through :func:`resolve_person_mention`
+    (the single source of truth for the "a same-named non-person entity is
+    authoritative" precedence rule), so a collision with a differently-typed
+    page is silently excluded here exactly as it would be from a single
+    lookup — this function does not duplicate that rule, it reuses it.
+
+    Returns matched entries in registry-key order, deduplicated by uid (a
+    name and one of its own aliases both matching yields the entry once).
+    """
+    content_lower = raw.content.lower()
+    seen_uids: set[str] = set()
+    hits: list[PersonRegistryEntry] = []
+    for name_key, entry in registry.items():
+        if len(name_key) < 3 or entry.uid in seen_uids:
+            continue
+        if name_key not in content_lower:
+            continue
+        pattern = re.compile(r"\b" + re.escape(name_key) + r"\b", re.IGNORECASE)
+        if not pattern.search(raw.content):
+            continue
+        resolved = resolve_person_mention(
+            name_key,
+            wiki_root=wiki_root,
+            entity_index=entity_index,
+            registry=registry,
+        )
+        if resolved is None:
+            continue
+        seen_uids.add(resolved.uid)
+        hits.append(resolved)
+    return hits
