@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from athenaeum._cli_shared import _iso_date
+from athenaeum._cli_shared import EXIT_INTERNAL_ERROR, EXIT_NOT_FOUND, _iso_date
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, resolve_cache_dir
 
 if TYPE_CHECKING:
@@ -60,6 +60,17 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
         help="One-call read of a SINGLE entity's page by uid, for any entity "
         "class, with an explicit --include-excluded flag (default off). The "
         "generic form of `person`; prints the same JSON object shape.",
+        description="One-call read of a SINGLE entity's page by uid, for any "
+        "entity class, with an explicit --include-excluded flag (default "
+        "off). The generic form of `person`; prints the same JSON object "
+        "shape.\n\n"
+        "Exit codes (issue athenaeum#1270): 0 on success. 1 (EXIT_NOT_FOUND) "
+        "when uid does not resolve to any page. 70 (EXIT_INTERNAL_ERROR) when "
+        "uid DOES resolve but the read or JSON serialization fails (e.g. an "
+        "unserializable frontmatter value) — distinct from 1 so a caller "
+        "cannot mistake 'this entity exists but the read broke' for 'this "
+        "entity does not exist'.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     entity_parser.add_argument(
         "--uid",
@@ -541,7 +552,13 @@ def cmd_entity(args: argparse.Namespace) -> int:
     itself is resolved by uid whatever its type. It defaults to ``person`` so
     the command is useful without knowing the mapping.
 
-    An unknown uid prints an error to stderr and returns exit code 1.
+    Exit codes (issue athenaeum#1270): 0 on success; ``EXIT_NOT_FOUND`` (1) when
+    the uid does not resolve to a page at all; ``EXIT_INTERNAL_ERROR`` (70) when
+    the uid DOES resolve but something else in the read/serialize path fails
+    (e.g. an unserializable frontmatter value) — distinct codes so a caller
+    keying off the exit status (``google-contact-sync``'s ``read_person()`` is
+    one) can tell "this person doesn't exist" from "this person exists but the
+    read broke" instead of collapsing both to the same signal.
     """
     return _read_entity_to_stdout(
         args.path,
@@ -585,14 +602,31 @@ def _read_entity_to_stdout(
     )
     if result is None:
         print(f"Error: no {not_found_label} found for uid={uid!r}", file=sys.stderr)
-        return 1
+        return EXIT_NOT_FOUND
 
-    # Issue athenaeum#1110: `result.to_dict()["frontmatter"]` is the page's
-    # RAW parsed frontmatter, which can carry a `datetime.date`/`datetime`
-    # value straight from a bare YAML date — coerce it to ISO-8601 the same
-    # way the MCP `entity`-equivalent tool's mirror of this call does (issue
-    # athenaeum#1002), rather than letting `json.dumps` raise on it.
-    print(json.dumps(result.to_dict(), indent=2, default=json_date_default))
+    # Issue athenaeum#1270: the uid resolved (we're past the not-found check
+    # above), so ANY failure from here on is "found it, then something broke"
+    # — not "unknown uid". Keep that a distinct, non-1 exit code so a caller
+    # keying off the exit status cannot mistake the two. The `json.dumps`
+    # TypeError this issue was filed for (an unserializable frontmatter date,
+    # issue athenaeum#1110) is the case on record, but the try/except is not
+    # narrowed to that one exception type: the whole point is that the NEXT
+    # unserializable type, or any other read-path failure, must not collapse
+    # back to the same exit code as "not found".
+    try:
+        # Issue athenaeum#1110: `result.to_dict()["frontmatter"]` is the page's
+        # RAW parsed frontmatter, which can carry a `datetime.date`/`datetime`
+        # value straight from a bare YAML date — coerce it to ISO-8601 the same
+        # way the MCP `entity`-equivalent tool's mirror of this call does (issue
+        # athenaeum#1002), rather than letting `json.dumps` raise on it.
+        payload = json.dumps(result.to_dict(), indent=2, default=json_date_default)
+    except Exception as exc:  # noqa: BLE001 — deliberately broad, see docstring above
+        print(
+            f"Error: internal error reading {not_found_label} uid={uid!r}: {exc}",
+            file=sys.stderr,
+        )
+        return EXIT_INTERNAL_ERROR
+    print(payload)
     return 0
 
 

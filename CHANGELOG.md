@@ -71,6 +71,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`athenaeum entity`'s exit code `1` now means ONLY "uid not found"; a new
+  code `70` covers everything else that can go wrong after the uid resolves
+  (issue athenaeum#1270).** Before this change, an uncaught exception past
+  the uid lookup (e.g. the `json.dumps` `TypeError` on a `date`-typed
+  frontmatter value fixed independently in athenaeum#1110) fell through to
+  Python's default uncaught-exception exit status, which is ALSO `1` — the
+  same code "no page for this uid" already returned. A caller keying off
+  the exit status alone could not tell an existing-but-broken record from a
+  genuinely absent one; `google-contact-sync`'s `read_person()` is exactly
+  such a caller, mapping every nonzero exit that isn't argparse's
+  `invalid choice` to "unknown uid." **Anyone scripting against
+  `athenaeum entity`'s exit code should update to treat `1` and `70`
+  distinctly** — `1` (`EXIT_NOT_FOUND`) still means "no such uid," while `70`
+  (`EXIT_INTERNAL_ERROR`, BSD `sysexits.h`'s `EX_SOFTWARE`) is new and means
+  "the uid exists but the read/serialize path failed." Both constants are
+  defined in `src/athenaeum/_cli_shared.py` next to the existing
+  `EXIT_LOCK_HELD`; documented in `athenaeum entity --help` and
+  `docs/exit-codes.md`.
+
 - **The unprompted-recall `UserPromptSubmit` hook now enforces the same
   `hot`-tier filter and `push_budget.tokens_per_turn` budget as the
   prompted `recall` path (athenaeum#1120).** `examples/claude-code/user-prompt-recall.sh`
