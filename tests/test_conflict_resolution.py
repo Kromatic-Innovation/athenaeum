@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -1018,11 +1018,40 @@ class TestDisjointValidityDetectorShortCircuit:
         caplog,
     ) -> None:
         """Case (a): A.valid_until < B.valid_from → NO detector LLM call, no
-        pending question, and a logged ``disjoint-validity`` rationale."""
+        pending question, and a logged ``disjoint-validity`` rationale.
+
+        Issue athenaeum#1170 code review (2026-09-01, not part of athenaeum#1170
+        itself — a pre-existing repo-wide date-literal time bomb this PR's CI
+        run happened to be the first build to surface): the ORIGINAL fixture
+        hardcoded absolute literals ``a_valid_until="2026-08-31"`` /
+        ``b_valid_from="2026-09-01"``. ``models.is_inactive_memory`` /
+        ``valid_until_expired`` treat a member's ``valid_until`` as expired
+        (and therefore excluded from the compile entirely — see
+        ``models.py``'s docstring note on why the disjoint-validity
+        short-circuit needs BOTH members still live) once ``date.today() >
+        valid_until``. The moment the real UTC date rolled past
+        2026-08-31, member A's absolute literal stopped being "still valid"
+        and the cluster collapsed to a single live member before merge.py's
+        pairwise pre-filter ever ran, taking the ``declared-pruned-to-
+        singleton`` path (merge.py:2651) instead of ``disjoint-validity``
+        (merge.py:2666).
+
+        The property under test is purely relational (A's window ends
+        before B's begins) and independent of what day it is, so the dates
+        are now derived from ``date.today()`` rather than hardcoded — A's
+        ``valid_until`` is always tomorrow (always live, on any day the
+        suite runs) and B's ``valid_from`` is the day after that, preserving
+        the ORIGINAL literals' exact one-day consecutive gap (Aug 31 ->
+        Sep 1) that keeps the pair disjoint under the sibling test's
+        documented inclusive-boundary semantics (same-day windows overlap;
+        consecutive days do not).
+        """
+        a_valid_until = date.today() + timedelta(days=1)
+        b_valid_from = a_valid_until + timedelta(days=1)
         root = _two_member_validity_root(
             tmp_path,
-            a_valid_until="2026-08-31",
-            b_valid_from="2026-09-01",
+            a_valid_until=a_valid_until.isoformat(),
+            b_valid_from=b_valid_from.isoformat(),
         )
         fake_client = MagicMock()
         with caplog.at_level(logging.INFO, logger="athenaeum.merge"):
@@ -1049,11 +1078,24 @@ class TestDisjointValidityDetectorShortCircuit:
         tmp_path: Path,
     ) -> None:
         """Case (b): overlapping windows behave exactly as today — the
-        detector runs (``messages.create`` IS called)."""
+        detector runs (``messages.create`` IS called).
+
+        Issue athenaeum#1170 code review sweep (2026-09-01): the original
+        ``a_valid_until="2026-09-30"`` literal was a 29-day-fused instance
+        of the SAME time-bomb fixed above in
+        ``test_disjoint_two_member_cluster_skips_detector`` -- once real
+        time passed 2026-09-30, member A would go inactive
+        (``models.is_inactive_memory``) and this test would start failing
+        for the same reason. Derived from ``date.today()`` instead; the
+        exact offsets don't matter here (unlike the disjoint case) since
+        the only property under test is that the windows OVERLAP.
+        """
+        a_valid_until = date.today() + timedelta(days=30)
+        b_valid_from = date.today() - timedelta(days=30)
         root = _two_member_validity_root(
             tmp_path,
-            a_valid_until="2026-09-30",
-            b_valid_from="2026-08-01",
+            a_valid_until=a_valid_until.isoformat(),
+            b_valid_from=b_valid_from.isoformat(),
         )
         fake_client = MagicMock()
         response = MagicMock()
