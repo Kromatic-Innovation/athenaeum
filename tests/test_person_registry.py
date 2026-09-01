@@ -18,11 +18,20 @@ Covers all four acceptance criteria:
    / ``tier3_create`` refuse a ``type: person`` target before any provider
    call.
 
+``TestProductionRoundTrip`` drives an ordinary free-text raw file mentioning
+an EXISTING ``type: person`` page through the real ``athenaeum.librarian.run()``
+dispatch cascade (not just ``process_one`` directly) and proves the mention
+resolves, the observation is captured durably, zero provider calls are made,
+and the file never lands on the stuck-file ledger.
+
 All fixtures are synthetic — no client data lives in this public repo.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -179,17 +188,38 @@ class TestAC2RegistryConsult:
         assert entry is not None
         assert entry.uid == "person1a"
 
-    def test_resolve_person_mention_defers_when_entity_index_already_has_it(
+    def test_resolve_person_mention_engages_on_an_unmigrated_corpus(
         self, tmp_path: Path
     ) -> None:
         """On an UNMIGRATED corpus the person page still lives under
-        wiki_root — entity_index.lookup already finds it (AC1's backward
-        compat), so this function correctly returns None rather than a
-        second, redundant hit."""
+        wiki_root, so entity_index.lookup ALSO finds it (AC1's backward
+        compat) -- that is the ORDINARY case, not a reason to defer. Only a
+        hit belonging to a DIFFERENT (non-person) entity should defer; a
+        person-typed hit must not shadow the registry consult, or it would
+        never engage on today's corpus at all."""
         wiki = tmp_path / "wiki"
         _write_person(wiki, uid="person1a", name="Alice Zhang")
         index = EntityIndex(wiki)
         registry = PersonRegistry(wiki)
+
+        entry = resolve_person_mention(
+            "Alice Zhang", wiki_root=wiki, entity_index=index, registry=registry
+        )
+        assert entry is not None
+        assert entry.uid == "person1a"
+
+    def test_resolve_person_mention_defers_to_a_same_named_non_person_entity(
+        self, tmp_path: Path
+    ) -> None:
+        """A genuine collision -- a differently-typed page sharing the same
+        name -- is authoritative; the person registry must not silently
+        shadow it."""
+        wiki = tmp_path / "wiki"
+        _write_company(wiki, uid="company1", name="Alice Zhang")
+        registry_root = tmp_path / "registry"
+        _write_person(registry_root, uid="person1a", name="Alice Zhang")
+        index = EntityIndex(wiki)
+        registry = PersonRegistry(registry_root)
 
         entry = resolve_person_mention(
             "Alice Zhang", wiki_root=wiki, entity_index=index, registry=registry
@@ -504,3 +534,135 @@ class TestAC4NeverTier3Rewrite:
         with pytest.raises(PersonNeverLLMRewriteError):
             tier3_write(raw, actions, index, wiki, client)
         assert client.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Production round-trip — the real dispatch cascade, not process_one directly
+# ---------------------------------------------------------------------------
+
+
+class TestProductionRoundTrip:
+    """An ordinary free-text raw file mentioning an EXISTING `type: person`
+    page, driven through the real `athenaeum.librarian.run()` pipeline
+    (issue athenaeum#1183 AC2/AC3, required before merge per Occam).
+
+    Before `resolve_person_mention` / `attribute_person_observation` were
+    wired into `process_one`'s dispatch cascade, this exact scenario was
+    broken: `EntityIndex.items()` withholds `type: person` (AC1), so
+    `tier1_programmatic_match` never matches the mention; tier2 then
+    classifies it as a NEW entity (no `existing_uid`); tier3_create raises
+    `PersonNeverLLMRewriteError`; the run's generic per-file exception
+    handler catches it, logs it, and moves on -- the observation is lost
+    forever and the file is stuck on this corpus permanently. This class
+    proves that no longer happens.
+    """
+
+    def _seed_knowledge_root(self, tmp_path: Path) -> Path:
+        root = tmp_path / "knowledge"
+        root.mkdir()
+
+        wiki = root / "wiki"
+        (wiki / "_schema").mkdir(parents=True)
+        (wiki / "_schema" / "types.md").write_text(
+            "# Types\n\n| Type |\n|------|\n| person |\n| company |\n"
+        )
+        (wiki / "_schema" / "tags.md").write_text(
+            "# Tags\n\n| Tag |\n|-----|\n| active |\n"
+        )
+        (wiki / "_schema" / "access-levels.md").write_text(
+            "# Access\n\n| Level |\n|-------|\n| internal |\n"
+        )
+
+        # An EXISTING person page -- the on-disk shape an UNMIGRATED corpus
+        # has today: still physically under wiki/, same as every other
+        # entity page, exactly what athenaeum#1183 does NOT change.
+        _write_person(
+            wiki,
+            uid="person1a",
+            name="Alice Zhang",
+            body="# Alice Zhang\n\n## Notes\n\n- 2026-01-01: Joined as product lead.\n",
+        )
+
+        sessions = root / "raw" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / ".gitkeep").write_text("")
+
+        subprocess.run(["git", "init", "-q", "-b", "test-branch"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
+        )
+        subprocess.run(["git", "config", "user.name", "Test Runner"], cwd=root, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=root, check=True)
+
+        # Dropped post-commit so it is an uncommitted change when run() takes
+        # its pre-processing snapshot -- ordinary, unstructured free-text
+        # prose (no frontmatter at all), mentioning the EXISTING person by
+        # name. This is the shape that broke before this fix.
+        (sessions / "20240410T120000Z-aabbccdd.md").write_text(
+            "Caught up with Alice Zhang today -- she's now running the "
+            "platform team and shipped the new onboarding flow.\n"
+        )
+        return root
+
+    def test_ordinary_mention_of_existing_person_round_trips_with_no_llm(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import run
+
+        root = self._seed_knowledge_root(tmp_path)
+        person_page = root / "wiki" / "person1a-alice-zhang.md"
+        before = person_page.read_text(encoding="utf-8")
+
+        # A client that RECORDS any call made to it (via Mock's own call
+        # tracking, asserted below) rather than raising -- if the mention is
+        # not intercepted by the tier-0 registry consult, tier2_classify is
+        # the very next thing that would call this, and letting it return a
+        # harmless canned response keeps the rest of the run's error
+        # handling from masking the real signal.
+        classify_response = MagicMock()
+        classify_response.content = [MagicMock(text=json.dumps([]))]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = classify_response
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        caplog.set_level(logging.INFO, logger="athenaeum")
+
+        exit_code = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=10,
+        )
+
+        # (b) zero provider calls.
+        mock_client.messages.create.assert_not_called()
+
+        # (a) the observation is captured/attributed somewhere durable: the
+        # EXISTING person page's body, on disk.
+        after = person_page.read_text(encoding="utf-8")
+        assert after != before
+        assert "platform team" in after
+        assert "Joined as product lead" in after  # prior note not clobbered
+
+        # (c) PersonNeverLLMRewriteError did not fire, and the file did not
+        # land on the failed-files / stuck-file ledger.
+        assert exit_code == 0
+        joined_log = "\n".join(rec.message for rec in caplog.records)
+        assert "PersonNeverLLMRewriteError" not in joined_log
+        assert "entity-file-failure" not in joined_log
+        assert "Failed files" not in joined_log
+        stuck_ledger = root / "wiki" / "_stuck_files.json"
+        if stuck_ledger.exists():
+            assert "20240410T120000Z-aabbccdd" not in stuck_ledger.read_text(
+                encoding="utf-8"
+            )
+
+        # The raw file was consumed (retire-on-success semantics), not left
+        # to be reprocessed identically forever.
+        assert not (root / "raw" / "sessions" / "20240410T120000Z-aabbccdd.md").exists()

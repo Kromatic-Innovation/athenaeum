@@ -143,11 +143,13 @@ from athenaeum.delta import (
     compute_affected_clusters,
     splice_cluster_report,
 )
+from athenaeum.identity_resolution import match_person_mentions
 from athenaeum.ingestion_gate import check_ingestion_gate
 from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE re-exported for back-compat
     _AUTO_MEMORY_SKIP_NAMES,
     AUTO_MEMORY_FILE_RE,
     RAW_FILE_RE,
+    attribute_person_observation,
     discover_auto_memory_files,
     discover_raw_files,
     tier0_passthrough,
@@ -1683,6 +1685,40 @@ def process_one(
                 dne_entity.filename,
             )
         return result
+
+    # --- Tier 0 (person-registry consult): resolve + attribute a mention of
+    # an EXISTING type: person record via the consult-only registry,
+    # LLM-free (issue athenaeum#1183 AC2/AC3). Runs before Tier 1 because
+    # Tier 1 (tier1_programmatic_match) no longer matches person names at
+    # all -- DEMOTED_NAME_MATCH_TYPES withholds them from
+    # EntityIndex.items() entirely -- so without this step an ordinary
+    # free-text mention of a known person would fall through to Tier 2/3,
+    # which would try to CREATE it as a new entity and hit
+    # tier3_create's PersonNeverLLMRewriteError guard (issue athenaeum#1183
+    # AC4) instead of ever attributing the observation anywhere.
+    #
+    # Early-returns on a match, exactly like the tier-0 steps above --
+    # deliberately, not incidentally: this is what lets the process_one-level
+    # round-trip test assert ZERO provider calls for an ordinary raw file
+    # that mentions a known person. The trade-off this accepts (same one the
+    # do-not-email/handle-upsert steps above already accept for their own
+    # shapes) is that any OTHER, non-person entity also mentioned in the
+    # SAME raw file is not tier1/2/3-processed on this run -- a raw file
+    # this deterministic path claims is claimed whole.
+    if person_registry is not None:
+        person_hits = match_person_mentions(raw, wiki_root, index, person_registry)
+        attributed_uids = [
+            hit.uid
+            for hit in person_hits
+            if attribute_person_observation(raw, hit, dry_run=dry_run)
+        ]
+        if attributed_uids:
+            log.info(
+                "  T0 person-registry consult: attributed observation to %s",
+                attributed_uids,
+            )
+            result.updated.extend(attributed_uids)
+            return result
 
     # --- Tier 1: Programmatic matching ---
     # Issue athenaeum#662: pass config so junk-name matches (here/get/main/reach/lane a
