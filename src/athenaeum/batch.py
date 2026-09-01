@@ -1450,8 +1450,10 @@ def process_batch_run(
         # athenaeum#1126 address gate above and BEFORE actions are built, so a
         # rejected/escalated name never reaches a tier-3 create action (batch
         # request or sync-create) on this transport either.
+        # Issue athenaeum#1170: `index` (already a local parameter here) is
+        # threaded through, symmetric with the sync transport above.
         name_gate_outcome = gate_create_name_classifications(
-            classified, st.raw.ref, st.raw.content, config
+            classified, st.raw.ref, st.raw.content, config, index=index
         )
         classified = name_gate_outcome.kept
         st.address_escalations.extend(name_gate_outcome.escalations)

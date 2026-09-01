@@ -2068,6 +2068,55 @@ default `1024`; `ATHENAEUM_COMPARATOR_CONTENT_RELATION_THINKING`, default
 (`ATHENAEUM_CLASSIFY_MODEL`) rather than adding a fourth model dial — the
 same sharing `athenaeum.contradictions`'s detector already does.
 
+## Name-collision detection and auto-merge (athenaeum#1170)
+
+A nightly, deterministic, EXACT-`name:`-match scan over `wiki/*.md` — no
+LLM, no vectors, no network — that groups pages by `(name, type)` (so a
+`type: project` page and a `type: person` page may legitimately share a
+name) and reports every group with more than one page. Runs as its own
+phase in `athenaeum run` (`_run_name_collision_phase`), a fully independent
+sibling of the five-verdict comparator's wiki-page dedup pass above: that
+pass is expensive (vector/LLM-based) and under repair, while this detector
+costs nothing, so a failure in either must never suppress the other's
+metric.
+
+Every collision — ambiguous or unambiguous — writes one proposal block to
+`wiki/_pending_merges.md`, reusing the SAME fold/write machinery the
+comparator's merge queue uses (`write_pending_merge` / `resolve_merge`);
+this feature adds no new merge executor. An ambiguous collision (anything
+this detector cannot confidently reduce — two pages with distinct content,
+or a group whose resolved type is unknown) always queues for human review
+via the unified decision queue (`athenaeum decisions` /
+`list_pending_decisions`). Only an UNAMBIGUOUS collision (exactly one
+substantive page; every other page's content is empty or a subset of the
+canonical page's, and its frontmatter adds nothing new) is even eligible
+for auto-merge, and only when the knob below is enabled.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Name-collision scan | — | `librarian.name_collision_scan` | `true` (**on**) | The detector itself. Deterministic and effectively free, so it ships on; set `false` as an operator escape hatch. See [`resolve_name_collision_scan_enabled`](../src/athenaeum/config.py). |
+| Name-collision auto-merge | — | `librarian.name_collision_automerge` | `false` (**off**) | Whether the UNAMBIGUOUS subset the scan finds is auto-resolved via `resolve_merge(auto_applied=True)` — the same non-human-approve marker (issue athenaeum#602) the comparator's own T2 auto-finalize path uses. An ambiguous collision is never auto-merged regardless of this flag. See [`resolve_name_collision_automerge_enabled`](../src/athenaeum/config.py). |
+
+```yaml
+librarian:
+  name_collision_scan: true
+  name_collision_automerge: false
+```
+
+**Why auto-merge defaults OFF, specifically:** issue athenaeum#1170 was
+deliberately split from a *separate*, one-time destructive repair sweep
+over name collisions ALREADY PRESENT in the operator's live corpus — issue
+athenaeum#1246, which is `~operator`-gated and BLOCKED BY this issue.
+Shipping auto-merge on by default here would make the very next nightly
+`athenaeum run` perform exactly that unattended sweep, defeating the split
+athenaeum#1170 → athenaeum#1246 was meant to create. An operator who
+explicitly sets `name_collision_automerge: true` gets auto-merge of the
+unambiguous subset only — every auto-merge is reversible via `git
+revert`/`git show` by construction (the same `fold-into-existing` write
+path issue athenaeum#947 already made recoverable), and the absorbed
+page's name survives as an `aliases:` entry on the canonical page so old
+references still resolve.
+
 ## Off-corpus store (athenaeum#984) — off by default
 
 An indexable, purgeable surface for erasure-class content: its own FTS5 +

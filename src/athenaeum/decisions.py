@@ -190,15 +190,31 @@ def merge_to_rich(pm: PendingMerge) -> dict:
 
     Carries per-source ``title`` + ``gist`` and a phrased ``question`` so the
     output is decidable without opening the raw wiki files (issue athenaeum#401).
+
+    Issue athenaeum#1170 code review: the phrased ``question`` uses
+    ``pm.display_name or pm.merge_target_name`` — never bare
+    ``merge_target_name`` — so a proposal whose ``merge_target_name`` is a
+    machine-shaped value (e.g. :mod:`athenaeum.name_collisions` deliberately
+    passes the canonical page's FILENAME STEM there, for correct
+    fold-target derivation against an entity-template ``<uid>-<slug>.md``
+    page) still asks a decidable, human-readable question — this module's
+    own founding complaint (see module docstring) is exactly a proposal
+    "shown as `merge_target_name=28e56467-…`" being undecidable.
+    ``pm.display_name`` is ``""`` for every pre-athenaeum#1170 block, so this
+    falls through to the unchanged ``merge_target_name`` behavior there.
+    ``merge_target_name`` itself (the dict key below) is UNCHANGED — still
+    the mechanical slug-derivation value, not the display one — so a
+    caller resolving/approving by that field is unaffected.
     """
     source_infos = [source_info(s) for s in pm.sources]
+    display = pm.display_name or pm.merge_target_name
     return {
         "id": pm.id,
         "merge_target_name": pm.merge_target_name,
         "created_at": pm.created_at,
         "confidence": pm.confidence,
         "rationale": pm.rationale,
-        "question": _merge_question(pm.merge_target_name, source_infos),
+        "question": _merge_question(display, source_infos),
         "sources": source_infos,
     }
 
