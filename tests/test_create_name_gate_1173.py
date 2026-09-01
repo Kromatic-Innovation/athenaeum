@@ -27,7 +27,17 @@ One test class per rejection class (issue athenaeum#1173 AC6):
 - ``TestSyncTransportWiring`` — end to end through
   :func:`athenaeum.librarian.process_one`: an escalated name never becomes
   a page, its sibling create still lands, and the raw file's run completes
-  normally (not wedged — no exception, no stuck-file retry).
+  normally (not wedged — no exception, no stuck-file retry). Also covers
+  athenaeum#1170's create-path collision outcomes (disambiguate / escalate)
+  through this same call.
+- ``TestBatchTransportWiring`` — the athenaeum#1170 collision-disambiguation
+  outcome through the OTHER transport, :func:`athenaeum.batch.process_batch_run`,
+  proving the two call sites stay symmetric.
+- ``TestFullRunDisambiguatesAcrossRuns`` — the same athenaeum#1170 disambiguation,
+  end to end through TWO SEPARATE :func:`athenaeum.librarian.run` invocations
+  (not a single ``process_one``/``process_batch_run`` call): a second run's
+  Tier-2 classification proposing a name an earlier run already created
+  must disambiguate, never mint a duplicate page.
 """
 
 from __future__ import annotations
@@ -41,6 +51,7 @@ from athenaeum.librarian import process_one
 from athenaeum.models import ClassifiedEntity, EntityIndex, RawFile, TokenUsage
 from athenaeum.tiers import (
     DEFAULT_CREATE_NAME_ESCALATE_MAX_CHARS,
+    CreateNameCollisionError,
     CreateNameEscalatedError,
     CreateNameRejectedError,
     gate_create_name_classifications,
@@ -52,10 +63,16 @@ VALID_TYPES = ["person", "company", "concept", "reference"]
 VALID_ACCESS = ["open", "internal", "confidential", "personal"]
 
 
-def _classified(name: str, *, is_new: bool = True, observations: str = "") -> ClassifiedEntity:
+def _classified(
+    name: str,
+    *,
+    is_new: bool = True,
+    observations: str = "",
+    entity_type: str = "concept",
+) -> ClassifiedEntity:
     return ClassifiedEntity(
         name=name,
-        entity_type="concept",
+        entity_type=entity_type,
         tags=[],
         access="internal",
         is_new=is_new,
@@ -69,6 +86,32 @@ def _raw(raw_dir: Path, content: str, filename: str = "note.md") -> RawFile:
     path = raw_dir / filename
     path.write_text(content, encoding="utf-8")
     return RawFile(path=path, source=raw_dir.name, timestamp="", uuid8="")
+
+
+def _write_page(
+    wiki: Path,
+    filename: str,
+    *,
+    uid: str,
+    name: str,
+    type_: str | None = None,
+    aliases: list[str] | None = None,
+    body: str = "Some content.\n",
+) -> Path:
+    """Write a minimal wiki page with frontmatter (issue athenaeum#1170 fixtures)."""
+    wiki.mkdir(parents=True, exist_ok=True)
+    lines = ["---", f"uid: {uid}", f"name: {name}"]
+    if type_ is not None:
+        lines.append(f"type: {type_}")
+    if aliases:
+        lines.append("aliases:")
+        lines.extend(f"  - {a}" for a in aliases)
+    lines.append("---")
+    lines.append("")
+    lines.append(body)
+    path = wiki / filename
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +183,88 @@ class TestValidateCreateName:
         is shape-only, not a word-list membership test."""
         for name in ("Amazon", "Ford", "Gap", "Box", "Docker", "Oracle"):
             validate_create_name(name)  # must not raise for any of these
+
+
+# ---------------------------------------------------------------------------
+# validate_create_name — uniqueness check (issue athenaeum#1170, AC1)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateCreateNameUniqueness:
+    def test_no_index_supplied_skips_the_check_entirely(self) -> None:
+        """Byte-identical-behavior guard: with `index=None` (every
+        pre-athenaeum#1170 caller), a name that WOULD collide if an index were
+        supplied must still pass, since the check never runs."""
+        validate_create_name("WidgetCo")  # must not raise — no index given
+
+    def test_no_collision_passes(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="company")
+        index = EntityIndex(wiki)
+        validate_create_name("WidgetCo", index=index, entity_type="company")
+
+    def test_same_type_collision_raises(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="company")
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError) as exc_info:
+            validate_create_name("Acme", index=index, entity_type="company")
+        assert exc_info.value.existing_uid == "u1"
+        assert exc_info.value.existing_type == "company"
+
+    def test_alias_collision_raises(self, tmp_path: Path) -> None:
+        """An alias hit is a genuine reachability collision, same as a
+        primary-name hit."""
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki, "acme.md", uid="u1", name="Acme Corp", type_="company",
+            aliases=["Acme"],
+        )
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError):
+            validate_create_name("Acme", index=index, entity_type="company")
+
+    def test_unknown_existing_type_still_raises_with_none_type(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme")  # no type: at all
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError) as exc_info:
+            validate_create_name("Acme", index=index, entity_type="company")
+        assert exc_info.value.existing_type is None
+
+    def test_different_type_is_allowed_through_unchanged(self, tmp_path: Path) -> None:
+        """The operator's worked example: a `type: project` repo and a
+        `type: person` sharing a name must NOT collide."""
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki, "tristankromer-project.md", uid="u1",
+            name="tristankromer", type_="project",
+        )
+        index = EntityIndex(wiki)
+        validate_create_name("tristankromer", index=index, entity_type="person")
+
+    def test_type_comparison_is_case_insensitive_and_stripped(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="Company")
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError):
+            validate_create_name("Acme", index=index, entity_type=" company ")
+
+    def test_no_entity_type_declared_treats_as_same_type_collision(
+        self, tmp_path: Path
+    ) -> None:
+        """`entity_type` falsy (e.g. an update-only classification's default
+        `""`) never triggers the different-type exemption — collision still
+        raises."""
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="company")
+        index = EntityIndex(wiki)
+        with pytest.raises(CreateNameCollisionError):
+            validate_create_name("Acme", index=index, entity_type=None)
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +343,85 @@ class TestGateCreateNameClassifications:
         assert outcome.rejected == ("#453",)
         assert len(outcome.escalations) == 1
         assert outcome.escalations[0].entity_name == "ready"
+
+
+# ---------------------------------------------------------------------------
+# gate_create_name_classifications — uniqueness wiring (issue athenaeum#1170, AC1)
+# ---------------------------------------------------------------------------
+
+
+class TestGateCreateNameClassificationsCollision:
+    def test_same_type_collision_is_disambiguated_to_an_update(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="company")
+        index = EntityIndex(wiki)
+        c = _classified("Acme", entity_type="company", observations="New fact.")
+        outcome = gate_create_name_classifications(
+            [c], "raw/ref.md", "New fact.", index=index
+        )
+        assert outcome.rejected == ()
+        assert outcome.escalations == ()
+        assert outcome.disambiguated == ("Acme",)
+        assert len(outcome.kept) == 1
+        kept = outcome.kept[0]
+        assert kept.is_new is False
+        assert kept.existing_uid == "u1"
+        assert kept.name == "Acme"
+        assert kept.observations == "New fact."
+
+    def test_unknown_type_collision_is_escalated_not_disambiguated(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme")  # no type:
+        index = EntityIndex(wiki)
+        c = _classified("Acme", entity_type="company", observations="New fact.")
+        outcome = gate_create_name_classifications(
+            [c], "raw/ref.md", "New fact.", index=index
+        )
+        assert outcome.kept == []
+        assert outcome.rejected == ()
+        assert outcome.disambiguated == ()
+        assert len(outcome.escalations) == 1
+        item = outcome.escalations[0]
+        assert item.entity_name == "Acme"
+        assert item.conflict_type == "name_collision"
+        assert "New fact." in item.description
+
+    def test_different_type_collision_is_allowed_through_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki, "tristankromer-project.md", uid="u1",
+            name="tristankromer", type_="project",
+        )
+        index = EntityIndex(wiki)
+        c = _classified("tristankromer", entity_type="person")
+        outcome = gate_create_name_classifications([c], "raw/ref.md", "", index=index)
+        assert outcome.kept == [c]
+        assert outcome.rejected == ()
+        assert outcome.escalations == ()
+        assert outcome.disambiguated == ()
+
+    def test_no_collision_kept_unchanged(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="company")
+        index = EntityIndex(wiki)
+        c = _classified("WidgetCo", entity_type="company")
+        outcome = gate_create_name_classifications([c], "raw/ref.md", "", index=index)
+        assert outcome.kept == [c]
+        assert outcome.disambiguated == ()
+
+    def test_no_index_supplied_is_byte_identical(self, tmp_path: Path) -> None:
+        """Default `index=None`: the athenaeum#1173-era call shape is unaffected
+        even for a name that WOULD collide if an index were supplied."""
+        c = _classified("Acme", entity_type="company")
+        outcome = gate_create_name_classifications([c], "raw/ref.md", "")
+        assert outcome.kept == [c]
+        assert outcome.disambiguated == ()
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +534,201 @@ class TestSyncTransportWiring:
         assert result.escalated == []
         assert list(wiki.glob("*.md")) == []
 
+    def test_colliding_create_disambiguates_to_an_update_no_new_page(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1 end-to-end (issue athenaeum#1170): a create for a name that
+        already indexes to a SAME-TYPE existing page must be rewritten to an
+        update against that page's uid, never mint a second, colliding page."""
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="company")
+        raw = _raw(
+            knowledge / "raw" / "producer",
+            "Acme announced a new product line today.\n",
+        )
+
+        def _fake_tier2_classify(*_args: object, **_kwargs: object) -> list[ClassifiedEntity]:
+            return [
+                _classified(
+                    "Acme",
+                    entity_type="company",
+                    observations="Acme announced a new product line today.",
+                )
+            ]
+
+        monkeypatch.setattr("athenaeum.librarian.tier2_classify", _fake_tier2_classify)
+
+        def _fake_tier3_merge(action, existing_body, source_ref, client, **_kwargs):
+            return existing_body + "\n\nNew product line announced.\n", None
+
+        monkeypatch.setattr("athenaeum.tiers.tier3_merge", _fake_tier3_merge)
+
+        classify_client = MagicMock()
+        classify_client.messages.create.side_effect = AssertionError(
+            "tier2_classify is monkeypatched — the real classify client must never be called"
+        )
+        write_client = MagicMock()
+        write_client.messages.create.side_effect = AssertionError(
+            "tier3_merge is monkeypatched — the real write client must never be called"
+        )
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            classify_client,
+            valid_types=VALID_TYPES,
+            valid_tags=[],
+            valid_access=VALID_ACCESS,
+            write_client=write_client,
+        )
+
+        # No new page was minted — still exactly the one pre-existing page.
+        page_names = sorted(p.stem for p in wiki.glob("*.md") if not p.name.startswith("_"))
+        assert page_names == ["acme"]
+        assert result.created == []
+        assert result.updated == ["u1"]
+        assert result.escalated == []
+        assert "New product line announced." in (wiki / "acme.md").read_text(encoding="utf-8")
+
+    def test_unknown_type_collision_escalates_no_page_created(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1 end-to-end: a create colliding with an existing page whose
+        type cannot be confirmed is escalated, not silently folded in and
+        not minted as a duplicate."""
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        _write_page(wiki, "acme.md", uid="u1", name="Acme")  # no type: at all
+        raw = _raw(
+            knowledge / "raw" / "producer",
+            "Acme announced a new product line today.\n",
+        )
+
+        def _fake_tier2_classify(*_args: object, **_kwargs: object) -> list[ClassifiedEntity]:
+            return [
+                _classified(
+                    "Acme",
+                    entity_type="company",
+                    observations="Acme announced a new product line today.",
+                )
+            ]
+
+        monkeypatch.setattr("athenaeum.librarian.tier2_classify", _fake_tier2_classify)
+
+        classify_client = MagicMock()
+        classify_client.messages.create.side_effect = AssertionError(
+            "tier2_classify is monkeypatched — the real classify client must never be called"
+        )
+        write_client = MagicMock()
+        write_client.messages.create.side_effect = AssertionError(
+            "No actions survive the name gate here — tier-3 must never be called"
+        )
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            classify_client,
+            valid_types=VALID_TYPES,
+            valid_tags=[],
+            valid_access=VALID_ACCESS,
+            write_client=write_client,
+        )
+
+        assert result.created == []
+        assert result.updated == []
+        assert len(result.escalated) == 1
+        assert result.escalated[0].entity_name == "Acme"
+        assert result.escalated[0].conflict_type == "name_collision"
+
+        page_names = sorted(p.stem for p in wiki.glob("*.md") if not p.name.startswith("_"))
+        assert page_names == ["acme"]  # unchanged, byte-for-byte
+        pending = (wiki / "_pending_questions.md").read_text(encoding="utf-8")
+        assert "Acme" in pending
+
+
+# ---------------------------------------------------------------------------
+# Batch-transport wiring — athenaeum.batch.process_batch_run (issue athenaeum#1170
+# code review "nit": the sync transport (TestSyncTransportWiring above) had a
+# collision end-to-end test; the batch transport's symmetric `index=index`
+# wiring (see batch.py's own "same call as the sync transport" comment) did
+# not. One minimal test, mirroring the sync one, so the two call sites stay
+# provably symmetric rather than merely commented as such.
+# ---------------------------------------------------------------------------
+
+
+class TestBatchTransportWiring:
+    def test_colliding_create_disambiguates_to_an_update_no_new_page(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.batch import process_batch_run
+
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "acme1234-acme-corp.md").write_text(
+            "---\nuid: acme1234\nname: Acme\ntype: company\n---\n\nAcme is a company.\n",
+            encoding="utf-8",
+        )
+        raw = _raw(
+            knowledge / "raw" / "producer",
+            "Acme announced a new product line today.\n",
+        )
+
+        def _fake_tier2_classify(*_args: object, **_kwargs: object) -> list[ClassifiedEntity]:
+            return [
+                _classified(
+                    "Acme",
+                    entity_type="company",
+                    observations="Acme announced a new product line today.",
+                )
+            ]
+
+        monkeypatch.setattr("athenaeum.batch.tier2_classify", _fake_tier2_classify)
+
+        def _fake_tier3_merge(action, existing_body, source_ref, client, **_kwargs):
+            return existing_body + "\n\nNew product line announced.\n", None
+
+        monkeypatch.setattr("athenaeum.batch.tier3_merge", _fake_tier3_merge)
+
+        classify_client = MagicMock()
+        classify_client.messages.create.side_effect = AssertionError(
+            "tier2_classify is monkeypatched — the real classify client must never be called"
+        )
+        write_client = MagicMock()
+        write_client.messages.create.side_effect = AssertionError(
+            "tier3_merge is monkeypatched — the real write client must never be called"
+        )
+
+        result = process_batch_run(
+            [raw],
+            EntityIndex(wiki),
+            wiki,
+            classify_client,
+            valid_types=VALID_TYPES,
+            valid_tags=[],
+            valid_access=VALID_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            batch_classify=False,
+            batch_write=False,
+        )
+
+        # No new page was minted -- still exactly the one pre-existing page --
+        # same "disambiguate, don't duplicate" outcome as the sync transport.
+        page_names = sorted(p.stem for p in wiki.glob("*.md") if not p.name.startswith("_"))
+        assert page_names == ["acme1234-acme-corp"]
+        assert result.created == 0
+        assert result.updated == 1
+        assert result.escalated == 0
+        assert "New product line announced." in (
+            wiki / "acme1234-acme-corp.md"
+        ).read_text(encoding="utf-8")
+
 
 # ---------------------------------------------------------------------------
 # Config idiom (librarian.create_name_escalate_max_chars)
@@ -356,3 +755,143 @@ class TestResolveCreateNameEscalateMaxChars:
     def test_non_positive_value_falls_back_to_default(self) -> None:
         config = {"librarian": {"create_name_escalate_max_chars": 0}}
         assert resolve_create_name_escalate_max_chars(config) == 7
+
+
+# ---------------------------------------------------------------------------
+# Full librarian.run() coverage: disambiguation across TWO SEPARATE runs
+# (issue athenaeum#1170 code review, item 5). TestSyncTransportWiring /
+# TestBatchTransportWiring above prove disambiguation within a single
+# process_one / process_batch_run call; this proves the same behavior
+# end-to-end through the real run() orchestration across two independent
+# invocations — the shape that actually surfaces in production (a nightly
+# run re-classifying a name a PRIOR night's run already minted). This exact
+# interaction was found missing coverage when it surfaced, entangled with
+# an unrelated wall-clock bound, in
+# tests/test_librarian_quarantine.py::test_wall_clock_bound_full_cycle_to_quarantine_and_release
+# (PR athenaeum#1249 code review) — this test isolates the SAME behavior
+# without that bound's machinery.
+# ---------------------------------------------------------------------------
+
+
+class TestFullRunDisambiguatesAcrossRuns:
+    def test_second_run_over_already_created_entity_disambiguates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json
+        import subprocess
+
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import run
+
+        root = tmp_path / "knowledge"
+        wiki = root / "wiki"
+        wiki.mkdir(parents=True)
+        sessions = root / "raw" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / ".gitkeep").write_text("")
+        subprocess.run(["git", "init", "-q", "-b", "test-branch"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
+        )
+        subprocess.run(["git", "config", "user.name", "Test Runner"], cwd=root, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=root, check=True)
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        classify_response = MagicMock()
+        classify_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    [
+                        {
+                            "name": "Acme",
+                            "entity_type": "company",
+                            "tags": [],
+                            "access": "internal",
+                            "observations": "A fact about Acme.",
+                        }
+                    ]
+                )
+            )
+        ]
+        create_response = MagicMock()
+        create_response.content = [MagicMock(text="# Acme\n\nA fact about Acme.\n")]
+        # Run 2's merge is a valid anchored-ops patch response (unlike the
+        # wall-clock test's fallback-forcing fixture) -- a single call
+        # suffices, since disambiguation this time does not need to be
+        # entangled with the patch-then-fallback mechanic.
+        merge_response = MagicMock()
+        merge_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    {"ops": [{"op": "append_section", "text": "A second fact about Acme."}]}
+                )
+            )
+        ]
+
+        run_number = {"n": 0}
+
+        def _fake_anthropic(**_kwargs: object) -> MagicMock:
+            run_number["n"] += 1
+            responses = iter(
+                [classify_response, create_response]
+                if run_number["n"] == 1
+                else [classify_response, merge_response]
+            )
+            client = MagicMock()
+            client.messages.create.side_effect = lambda **p: next(responses)
+            return client
+
+        monkeypatch.setattr(anthropic_mod, "Anthropic", _fake_anthropic)
+
+        # Run 1: Tier-2 (mocked) proposes "Acme" -- no existing page, so it
+        # creates one. Raw content deliberately avoids the literal string
+        # "Acme" so Tier-1's programmatic index-key match never independently
+        # fires -- only the mocked Tier-2 classification drives this.
+        (sessions / "20240101T000000Z-aaaaaaa1.md").write_text(
+            "A note about widgets.\n", encoding="utf-8"
+        )
+        run(
+            raw_root=root / "raw",
+            wiki_root=wiki,
+            knowledge_root=root,
+            max_api_calls=100,
+            max_runtime=0,
+        )
+
+        pages_after_run1 = sorted(
+            p for p in wiki.glob("*.md") if not p.name.startswith("_")
+        )
+        assert len(pages_after_run1) == 1
+        assert pages_after_run1[0].name.endswith("acme.md")
+
+        # Run 2: a second, unrelated raw file. Tier-1 still has no reason to
+        # match it (its text mentions widgets, not "Acme"), but the mocked
+        # Tier-2 classify response ALWAYS proposes "Acme" again, is_new=True
+        # -- simulating exactly the shape that, pre-athenaeum#1170, minted a
+        # colliding duplicate page. The athenaeum#1170 create-path gate must
+        # disambiguate this into an update against run 1's page instead.
+        (sessions / "20240102T000000Z-aaaaaaa2.md").write_text(
+            "Another note about widgets.\n", encoding="utf-8"
+        )
+        run(
+            raw_root=root / "raw",
+            wiki_root=wiki,
+            knowledge_root=root,
+            max_api_calls=100,
+            max_runtime=0,
+        )
+
+        pages_after_run2 = sorted(
+            p for p in wiki.glob("*.md") if not p.name.startswith("_")
+        )
+        # Still exactly ONE page -- no duplicate "Acme" page was minted --
+        # and it is the SAME file run 1 created, now carrying run 2's merge.
+        assert len(pages_after_run2) == 1
+        assert pages_after_run2[0] == pages_after_run1[0]
+        assert "A second fact about Acme." in pages_after_run2[0].read_text(
+            encoding="utf-8"
+        )

@@ -778,6 +778,93 @@ def test_write_kind_defaults_to_create_merged(tmp_path: Path) -> None:
     assert parse_pending_merges(merges)[0].write_kind == "create-merged"
 
 
+def test_display_name_omitted_renders_byte_identical_block() -> None:
+    """Issue athenaeum#1170 code review: display_name=None (the default, and
+    every pre-athenaeum#1170 caller) must render byte-identically to before
+    the parameter existed."""
+    from athenaeum.pending_merges import render_block
+
+    kwargs = dict(
+        merge_target_name="acme",
+        sources=["a.md"],
+        rationale="r",
+        draft_merged_body="body",
+        confidence=0.9,
+    )
+    assert render_block(**kwargs) == render_block(display_name=None, **kwargs)
+    assert "**Display name**" not in render_block(**kwargs)
+
+
+def test_display_name_round_trips(tmp_path: Path) -> None:
+    """Issue athenaeum#1170 code review: display_name persists and round-trips
+    through the parser, independent of merge_target_name."""
+    from athenaeum.pending_merges import parse_pending_merges
+
+    merges = tmp_path / "_pending_merges.md"
+    write_pending_merge(
+        merges,
+        merge_target_name="47f5ac89-john-sechrest",
+        display_name="John Sechrest",
+        sources=["a.md", "b.md"],
+        rationale="r",
+        draft_merged_body="body",
+        confidence=0.9,
+    )
+    parsed = parse_pending_merges(merges)
+    assert len(parsed) == 1
+    assert parsed[0].merge_target_name == "47f5ac89-john-sechrest"
+    assert parsed[0].display_name == "John Sechrest"
+
+
+def test_display_name_defaults_to_empty_string(tmp_path: Path) -> None:
+    """Issue athenaeum#1170 code review: a block written without display_name
+    (every pre-athenaeum#1170 block) parses with the empty-string default,
+    never None -- so merge_to_rich's `pm.display_name or pm.merge_target_name`
+    fallback triggers correctly."""
+    from athenaeum.pending_merges import parse_pending_merges
+
+    merges = tmp_path / "_pending_merges.md"
+    write_pending_merge(
+        merges,
+        merge_target_name="fresh-topic",
+        sources=["a.md", "b.md"],
+        rationale="r",
+        draft_merged_body="body",
+        confidence=0.9,
+    )
+    assert parse_pending_merges(merges)[0].display_name == ""
+
+
+def test_display_name_overrides_the_phrased_question(tmp_path: Path) -> None:
+    """Issue athenaeum#1170 code review: merge_to_rich's phrased `question`
+    (decisions.py's whole reason for existing -- "a proposal shown as
+    merge_target_name=28e56467-... is undecidable") must use display_name,
+    never the bare merge_target_name, when the two differ. Proves the fix
+    at the source: a caller passing a machine-shaped merge_target_name
+    (the exact shape athenaeum.name_collisions passes for an
+    entity-template canonical page) still asks a human-readable question."""
+    from athenaeum.decisions import merge_to_rich
+    from athenaeum.pending_merges import parse_pending_merges
+
+    merges = tmp_path / "_pending_merges.md"
+    write_pending_merge(
+        merges,
+        merge_target_name="47f5ac89-john-sechrest",
+        display_name="John Sechrest",
+        sources=["a.md", "b.md"],
+        rationale="r",
+        draft_merged_body="body",
+        confidence=0.9,
+    )
+    pm = parse_pending_merges(merges)[0]
+    rich = merge_to_rich(pm)
+    assert "John Sechrest" in rich["question"]
+    assert "47f5ac89-john-sechrest" not in rich["question"]
+    # merge_target_name itself (the dict key, distinct from the phrased
+    # question) is UNCHANGED -- still the mechanical slug-derivation value.
+    assert rich["merge_target_name"] == "47f5ac89-john-sechrest"
+
+
 def test_pre_421_block_without_write_kind_parses_as_create_merged(
     tmp_path: Path,
 ) -> None:

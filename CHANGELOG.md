@@ -92,6 +92,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Wiki-page name-collision detection and repair, split into a create-path
+  gate and a nightly deterministic scan (athenaeum#1170).**
+  - **Create-path uniqueness gate (AC1).** `tiers.validate_create_name` gains
+    an opt-in `index`/`entity_type` uniqueness check at the seam
+    athenaeum#1173 explicitly reserved for it. `gate_create_name_classifications`
+    (wired into both transports, `librarian.process_one` and
+    `batch.process_batch_run`) now produces a THIRD outcome alongside
+    reject/escalate: a same-type collision **disambiguates** the create into
+    an update against the existing page (`is_new=False`, `existing_uid` set
+    via `dataclasses.replace`) instead of minting a duplicate; an
+    unknown-type collision **escalates** for human review (folding into a
+    page whose type cannot be confirmed is not a safe disambiguation); a
+    **different-type** collision passes through unchanged — a `type:
+    project` page and a `type: person` page may legitimately share a name
+    (the operator's worked example: the `tristankromer` repo vs. the
+    person), so a scan that ignored type would wrongly pair them.
+  - **Nightly name-collision scan, its own phase (AC2).** New module
+    `athenaeum.name_collisions`: a deterministic, zero-cost, exact
+    `name:`-match scan over `wiki/*.md` — no LLM, no vectors, no network —
+    grouped by `(name, type)` with the same type-scoping carve-out as the
+    create-path gate. `librarian._run_name_collision_phase` runs it as a
+    FULLY INDEPENDENT sibling of the five-verdict comparator's wiki-page
+    dedup pass, called immediately BEFORE it, with its own `run_profile`
+    entry — deliberately never folded into `wiki_dedupe`, which is
+    expensive (vector/LLM-based) and under repair; a failure in either
+    phase must never suppress the other's metric.
+  - **Resolution reuses the existing decision-queue and fold machinery
+    (AC3-AC6) — no new merge executor.** Every collision, ambiguous or
+    unambiguous, writes one proposal block via
+    `pending_merges.write_pending_merge` (idempotent on the source-set +
+    target-name id, so re-scanning an unchanged corpus never duplicates a
+    proposal). An ambiguous collision (two or more pages with genuinely
+    distinct content, or a group whose resolved type is unknown) stops
+    there and surfaces through the unified decision queue
+    (`decisions.list_pending_decisions`) with no new queue plumbing. An
+    unambiguous collision (exactly one substantive page; every other adds
+    nothing) is, only when auto-merge is enabled, resolved immediately via
+    `pending_merges.resolve_merge(auto_applied=True)` — the same
+    non-human-approve marker (athenaeum#602) the comparator's own T2
+    auto-finalize path uses — which lands as two discrete, `git
+    revert`/`git show`-recoverable commits and unions the absorbed page's
+    name into the canonical page's `aliases:` so old references still
+    resolve via `EntityIndex.lookup`. The proposal's merge-target slug is
+    derived from the canonical page's own FILENAME STEM (not its `name:`
+    value), so this resolves correctly whether the canonical page is a
+    bare-slug "compiled" page or an entity-template `<uid>-<slug>.md` page
+    — the shape every tier-3-created page actually uses.
+  - **`librarian.name_collision_scan` (default `true`, the scan is free) and
+    `librarian.name_collision_automerge` (default `false`) — new config
+    knobs, documented in `docs/configuration.md`.** Auto-merge ships OFF
+    deliberately: athenaeum#1170 was split from a separate, one-time
+    destructive repair sweep over collisions ALREADY PRESENT in the
+    operator's live corpus — issue athenaeum#1246, `~operator`-gated and
+    BLOCKED BY this issue. Shipping auto-merge on by default would make the
+    very next nightly `athenaeum run` perform exactly that unattended
+    sweep, defeating the split. An operator who explicitly enables it gets
+    auto-merge of the unambiguous subset only, with every merge reversible
+    via git by construction.
+
 - **`athenaeum.erasure` (athenaeum#985) wired into the production write and
   recall paths (athenaeum#1116) — S3 of the athenaeum#985 slice, mirroring
   `athenaeum.sensitivity`'s S1a/S1b -> S3 migration (athenaeum#992).**
