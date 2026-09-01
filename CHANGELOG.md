@@ -38,6 +38,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root itself, so an unmigrated corpus degrades sanely) lets the one-time
   physical relocation of person pages in a live corpus — issue athenaeum#1247,
   blocked by this one — repoint the registry without a code change.
+- **Write-knob (Tier-3 CREATE/MERGE) model-tier comparison eval
+  (athenaeum#1139).** The `write` knob is ~99.2% of athenaeum's metered
+  spend and is pinned to `claude-sonnet-5`, with nothing measuring whether
+  that tier is necessary. Adds `tests/evals/tier_compare.py` (runner +
+  scorer + comparison-table generator) and
+  `tests/evals/test_write_tier_compare.py` (`pytest.mark.eval`, live), which
+  replay a new committed corpus
+  (`tests/evals/data/write_tier_compare/cases.yaml` — a simple create, a
+  multi-entity create, a merge into a small page, and a merge into a page
+  exceeding the 16KB `page_flag_bytes` threshold) against every model in
+  `CANDIDATE_MODELS` (`claude-sonnet-5`, `claude-haiku-4-5`), scoring
+  expected-content fidelity, frontmatter schema validity, existing-content
+  preservation on merge (the "silent deletion" failure mode), and
+  prompt-injection-leak resistance, and recording per-model tokens/cost/
+  wall-clock. Extends the existing `tests/evals/` harness rather than
+  standing alone — `evals.yml` already picks the new test up with zero
+  workflow changes. The corpus non-empty/coverage guard
+  (`assert_corpus_covers_required_kinds`, `EmptyCorpusError`) is proven by
+  a dedicated offline test (`test_write_tier_compare_stub.py`, unmarked, no
+  credential needed) against both the real committed corpus and a
+  synthesized empty/under-covered one — athenaeum#551 precedent (fixtures
+  silently went empty, tests skipped unconditionally) is the reason this
+  guard exists and is tested directly rather than assumed. The full
+  runner/scorer pipeline is additionally proven end-to-end against a
+  `FakeLLMClient` stub (no live API access) in the same file; no
+  `ANTHROPIC_API_KEY` was available to produce a real comparison table in
+  this environment, so a STUB-labelled table
+  (`tests/evals/data/write_tier_compare/comparison_table.md`) is committed
+  showing the generator's shape, and the real run is tracked as a
+  follow-up.
 
 ### Changed
 
