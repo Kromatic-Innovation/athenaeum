@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`type: person` wiki pages are demoted from general wiki entities to a
+  new consult-only person registry (athenaeum#1183).** A CRM-imported contact
+  record is not a wiki entity — treating it as one let a person page be
+  raw-text matched by Tier 1 and, from there, folded into a full-page Tier 3
+  LLM rewrite: the correctness and PII-blast-radius problem this closes.
+  This is demotion, not deletion — nothing is deleted and every person page
+  stays queryable. Four pieces, all covered by synthetic-fixture tests:
+  (1) `EntityIndex.items()` — the raw-text matching surface
+  `tier1_programmatic_match` walks — now withholds `type: person` keys
+  (`athenaeum.models.DEMOTED_NAME_MATCH_TYPES`); every ADDRESSED lookup
+  (`.lookup()`, `.get_by_uid()`) is unaffected, so `athenaeum.corrections`,
+  the Tier-3 create-name collision check, and an unmigrated corpus all keep
+  working exactly as before. (2) a new `athenaeum.person_registry` module —
+  deliberately NOT the source-handle registry compiled by
+  `athenaeum.registry` (`registry.json`, entity uid -> external adapter
+  handles, unrelated) — provides a consult-only `PersonRegistry` index, and
+  `athenaeum.identity_resolution.resolve_person_mention` consults it when
+  the ordinary entity index has no entry for a mention. (3) the tier-0
+  no-LLM paths (`athenaeum.intake.tier0_passthrough`,
+  `athenaeum.librarian.tier0_handle_upsert`) grow an optional
+  `person_registry=` parameter so a structured field update lands on a
+  registry person record, never through an LLM call — wired live into
+  `athenaeum.librarian.process_one`. (4) `athenaeum.tiers.tier3_merge` /
+  `tier3_merge_full` / `tier3_write` / `tier3_create` now raise
+  `PersonNeverLLMRewriteError` before any provider call when the target is
+  `type: person`. New config knob `person_registry.root` (default: the wiki
+  root itself, so an unmigrated corpus degrades sanely) lets the one-time
+  physical relocation of person pages in a live corpus — issue athenaeum#1247,
+  blocked by this one — repoint the registry without a code change.
+
 ### Changed
 
 - **The unprompted-recall `UserPromptSubmit` hook now enforces the same
