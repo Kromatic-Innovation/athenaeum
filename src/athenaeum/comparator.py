@@ -210,6 +210,30 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Issue athenaeum#1245: one-time WARNING flag + running count for Gate 2
+# ("content_relation") being unavailable this run -- see
+# ``_content_relation_unavailable``, ``begin_content_relation_unavailable_tracking``,
+# and ``flush_content_relation_unavailable_warning`` below. Process-global state,
+# same storage discipline as :data:`athenaeum.wiki_dedupe._WIKI_FALLBACK_WARNED`
+# (issue athenaeum#1032) -- but UNLIKE that one-shot-per-process flag, this pair is
+# explicitly reset by ``begin_content_relation_unavailable_tracking`` at the start
+# of each of the three peer comparison passes (QA review of athenaeum#1245's PR,
+# finding 2), so each pass reports its OWN occurrence count even if more than one
+# runs in the same interpreter -- a genuine (if not yet reachable) risk once
+# ``comparator_instruments.run_sibling_widening`` gets a caller, or an orchestrator
+# ever batches these passes together. A per-call accumulator threaded through
+# ``content_relation`` / ``compare_pages`` / ``record_comparison`` was considered
+# and rejected: those are heavily-used, widely-tested public functions (dry-run
+# and ledgered call sites in ``wiki_dedupe``, ``recompare``, plus their own direct
+# test coverage), and all three real callers of this tracking run synchronously,
+# single-threaded, one at a time -- there is no concurrency hazard a reset-at-pass
+# -start can't already cover, so paying for a signature change across three public
+# functions bought nothing a reset doesn't already fix. Tests reset explicitly via
+# ``monkeypatch`` too, mirroring ``wiki_dedupe``'s own warn-once test, for
+# cases that want a clean slate without going through a full pass boundary.
+_CONTENT_RELATION_UNAVAILABLE_COUNT = 0
+_CONTENT_RELATION_UNAVAILABLE_WARNED = False
+
 # ---------------------------------------------------------------------------
 # Verdict / comparator-version constants
 # ---------------------------------------------------------------------------
@@ -608,14 +632,25 @@ def content_relation(
     fallback in this repo (:func:`athenaeum.contradictions.detect_contradictions`'s
     identical posture) -- returns :attr:`ContentRelation.UNAVAILABLE`
     deterministically rather than fabricating a verdict (module docstring,
-    "Offline / LLM-unavailable Gate 2")."""
+    "Offline / LLM-unavailable Gate 2").
+
+    Issue athenaeum#1245: this (and the two other ``llm-unavailable`` returns below --
+    exhausted retries, and a call that raised) used to WARNING-log unconditionally,
+    once per pair, with no pair key -- 11,815 identical, unattributable lines per
+    nightly run on the live corpus once the comparator is enabled, since the
+    unavailable-client condition is uniform across an entire run. Each now routes
+    through :func:`_content_relation_unavailable`, which logs the pair-keyed detail
+    at DEBUG and tracks a running count; call
+    :func:`flush_content_relation_unavailable_warning` once at the end of a run to
+    emit a single summarizing WARNING, following
+    :func:`athenaeum.wiki_dedupe._warn_wiki_fallback_engaged_once`'s pattern
+    (issue athenaeum#1032) rather than inventing a second mechanism."""
     if client is None:
-        log.warning(
-            "comparator: no LLM client (ANTHROPIC_API_KEY unset?); "
-            "content_relation is unavailable for this pair"
-        )
-        return ContentRelationResult(
-            relation=ContentRelation.UNAVAILABLE, rationale="llm-unavailable"
+        return _content_relation_unavailable(
+            page_a,
+            page_b,
+            rationale="llm-unavailable",
+            detail="no LLM client (ANTHROPIC_API_KEY unset?)",
         )
 
     model = resolve_model(
@@ -649,14 +684,18 @@ def content_relation(
             description="comparator_content_relation",
         )
     except TransientAPIError as exc:
-        log.warning("comparator: Gate 2 gave up after transient-error retries (%s)", exc)
-        return ContentRelationResult(
-            relation=ContentRelation.UNAVAILABLE, rationale="llm-unavailable"
+        return _content_relation_unavailable(
+            page_a,
+            page_b,
+            rationale="llm-unavailable",
+            detail=f"Gate 2 gave up after transient-error retries ({exc})",
         )
     except Exception as exc:  # noqa: BLE001 -- a comparator call must never crash the caller
-        log.warning("comparator: Gate 2 call failed (%s)", exc)
-        return ContentRelationResult(
-            relation=ContentRelation.UNAVAILABLE, rationale="llm-unavailable"
+        return _content_relation_unavailable(
+            page_a,
+            page_b,
+            rationale="llm-unavailable",
+            detail=f"Gate 2 call failed ({exc})",
         )
 
     input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
@@ -678,6 +717,84 @@ def content_relation(
             relation=ContentRelation.UNAVAILABLE, rationale="detector-malformed-response"
         )
     return _parse_content_relation_response(text)
+
+
+def _content_relation_unavailable(
+    page_a: ComparatorPage, page_b: ComparatorPage, *, rationale: str, detail: str
+) -> ContentRelationResult:
+    """Issue athenaeum#1245: the shared exit for every ``content_relation`` path
+    that reaches no Gate-2 verdict because the LLM itself is unavailable this run
+    (no client configured, retries exhausted, or the call raised -- all three
+    already returned the same ``rationale="llm-unavailable"`` before this issue,
+    so they share one running-count/warn-once bucket rather than three).
+
+    Logs the pair-keyed *detail* at DEBUG (AC2: any surviving per-pair emission
+    carries the pair key and is DEBUG, not WARNING) and increments the run's
+    unavailable-pair count; the actual summarizing WARNING is deferred to
+    :func:`flush_content_relation_unavailable_warning`, which a caller invokes once
+    after its comparison loop finishes -- unlike
+    :func:`athenaeum.wiki_dedupe._warn_wiki_fallback_engaged_once` (issue
+    athenaeum#1032), which already knows its affected-count at the moment it fires,
+    this condition is discovered one pair at a time, so the count is only known once
+    the run's loop is done."""
+    global _CONTENT_RELATION_UNAVAILABLE_COUNT
+    _CONTENT_RELATION_UNAVAILABLE_COUNT += 1
+    pair_key = make_pair_key(page_a.id, page_b.id)
+    log.debug("comparator: Gate 2 unavailable for pair %s (%s)", pair_key, detail)
+    return ContentRelationResult(relation=ContentRelation.UNAVAILABLE, rationale=rationale)
+
+
+def begin_content_relation_unavailable_tracking() -> None:
+    """Issue athenaeum#1245 (QA review finding 2): reset the run-scoped
+    occurrence count and warn-once latch. Call this ONCE at the start of a
+    comparison pass, before its loop begins -- pairs with
+    :func:`flush_content_relation_unavailable_warning`, called once at the end of
+    the same pass (ideally in a ``finally``, so a mid-loop exception still gets a
+    summary of whatever was accumulated before the failure -- QA finding 1).
+
+    Without this reset, the module-global count/latch is a single process-lifetime
+    one-shot: if a second peer pass (``wiki_dedupe.propose_wiki_page_merges``,
+    ``recompare``'s pass, ``comparator_instruments.run_sibling_widening``) ever ran
+    in the same interpreter after a first one already flushed, the second pass's
+    occurrences would silently accumulate into an already-``True`` latch and NEVER
+    warn -- permanently swallowed, not merely delayed. Calling this first makes
+    each pass self-contained: its own count, its own one-time warning, regardless
+    of what any earlier pass in this process already did."""
+    global _CONTENT_RELATION_UNAVAILABLE_COUNT, _CONTENT_RELATION_UNAVAILABLE_WARNED
+    _CONTENT_RELATION_UNAVAILABLE_COUNT = 0
+    _CONTENT_RELATION_UNAVAILABLE_WARNED = False
+
+
+def flush_content_relation_unavailable_warning() -> None:
+    """Issue athenaeum#1245: emit ONE run-scoped WARNING, if ``content_relation``
+    reached its ``llm-unavailable`` exit at least once this pass, naming the total
+    count of affected pairs -- summarizing what used to be one identical,
+    unattributable WARNING per pair (11,815 of them per nightly run on the live
+    corpus). No-ops if the condition never fired this pass, or if this pass
+    already warned once (mirrors
+    :func:`athenaeum.wiki_dedupe._warn_wiki_fallback_engaged_once`'s one-shot
+    discipline, issue athenaeum#1032 -- scoped to a pass, not a whole process,
+    by pairing with :func:`begin_content_relation_unavailable_tracking`).
+
+    Callers with a comparison loop over multiple pairs (the wiki-page dedup pass,
+    the recompare pass, the sibling-widening instrument) call
+    :func:`begin_content_relation_unavailable_tracking` once before their loop,
+    then call this once after their loop completes -- in a ``finally`` so a
+    mid-loop exception still gets a summary of the partial pass (QA finding 1) --
+    see each call site for why the count can only be known once the loop is done,
+    unlike the wiki-dedupe fallback's single batched fallback call, which already
+    knows its affected-count at the moment it fires."""
+    global _CONTENT_RELATION_UNAVAILABLE_WARNED
+    if _CONTENT_RELATION_UNAVAILABLE_COUNT == 0 or _CONTENT_RELATION_UNAVAILABLE_WARNED:
+        return
+    _CONTENT_RELATION_UNAVAILABLE_WARNED = True
+    log.warning(
+        "comparator: Gate 2 (content_relation) was unavailable for %d pair(s) this "
+        "pass -- no LLM client, exhausted retries, or a failed call; no verdict was "
+        "reached for any of them (see DEBUG logging for per-pair detail, issue "
+        "athenaeum#1245)",
+        _CONTENT_RELATION_UNAVAILABLE_COUNT,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -953,8 +1070,10 @@ __all__ = [
     "CompareOutcome",
     "ContentRelation",
     "ContentRelationResult",
+    "begin_content_relation_unavailable_tracking",
     "compare_pages",
     "content_relation",
+    "flush_content_relation_unavailable_warning",
     "gate1_separator_relations",
     "page_from_path",
     "page_from_text",
