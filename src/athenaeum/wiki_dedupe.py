@@ -128,7 +128,11 @@ from athenaeum.clusters import (
     cluster_auto_memory_files,
     resolve_cluster_threshold,
 )
-from athenaeum.comparator import page_from_path, record_comparison
+from athenaeum.comparator import (
+    flush_content_relation_unavailable_warning,
+    page_from_path,
+    record_comparison,
+)
 from athenaeum.config import load_config, resolve_comparator_enabled, resolve_heartbeat_interval
 from athenaeum.merge_type_gate import cross_class_precheck
 from athenaeum.models import AutoMemoryFile, TokenUsage, parse_frontmatter, validity_bound_str
@@ -670,5 +674,9 @@ def propose_wiki_page_merges(
                 record["pair"],
             )
 
+    # Issue athenaeum#1245: summarize (rather than lose) every content_relation
+    # "no LLM client / call failed" occurrence this pass into ONE WARNING with the
+    # affected-pair count, instead of one unattributable WARNING per pair.
+    flush_content_relation_unavailable_warning()
     heartbeat.done()
     return results

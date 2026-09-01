@@ -34,6 +34,7 @@ from athenaeum.comparator import (
     ContentRelationResult,
     compare_pages,
     content_relation,
+    flush_content_relation_unavailable_warning,
     gate1_separator_relations,
     page_from_path,
     page_from_text,
@@ -42,7 +43,7 @@ from athenaeum.comparator import (
 from athenaeum.config import resolve_comparator_enabled
 from athenaeum.dimensions import DEFAULT_REGISTRY, VALID_TIME
 from athenaeum.runlock import RunLock
-from athenaeum.verdicts import get_verdict_status, lookup_pair
+from athenaeum.verdicts import get_verdict_status, lookup_pair, make_pair_key
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -820,6 +821,109 @@ class TestOfflineGate2NeverFabricatesAVerdict:
         page_b = _page("beta", body="y")
         outcome = compare_pages(page_a, page_b, client=client)
         assert outcome.verdict is None
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1245 — content_relation's llm-unavailable exits warn ONCE per
+# run (not once per pair), with the surviving per-pair emission at DEBUG and
+# pair-keyed. Before this issue, `client=None` alone produced 11,815 identical,
+# unattributable WARNING lines per nightly run on the live corpus.
+# ---------------------------------------------------------------------------
+
+
+class TestContentRelationUnavailableWarnsOnce:
+    def test_client_none_across_multiple_pairs_warns_once_with_count(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import logging
+
+        # The one-time-warning flag (and its running count) is process-global
+        # module state -- reset it so an earlier test's occurrence can't mask
+        # this assertion, mirroring athenaeum.wiki_dedupe's own warn-once test
+        # for `_WIKI_FALLBACK_WARNED` (issue athenaeum#1032).
+        monkeypatch.setattr(comparator_mod, "_CONTENT_RELATION_UNAVAILABLE_COUNT", 0)
+        monkeypatch.setattr(comparator_mod, "_CONTENT_RELATION_UNAVAILABLE_WARNED", False)
+
+        pairs = [
+            (_page("alpha", body="x"), _page("beta", body="y")),
+            (_page("gamma", body="p"), _page("delta", body="q")),
+            (_page("epsilon", body="m"), _page("zeta", body="n")),
+        ]
+
+        caplog.set_level(logging.DEBUG, logger="athenaeum.comparator")
+        for page_a, page_b in pairs:
+            result = content_relation(page_a, page_b, client=None)
+            assert result.relation == ContentRelation.UNAVAILABLE
+            assert result.rationale == "llm-unavailable"
+
+        # AC1: no WARNING is emitted per pair -- only DEBUG -- until flushed.
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+        # AC2: each per-pair DEBUG line survives and carries its pair key.
+        debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+        assert len(debug_records) == len(pairs)
+        for (page_a, page_b), record in zip(pairs, debug_records):
+            assert make_pair_key(page_a.id, page_b.id) in record.getMessage()
+
+        caplog.clear()
+        flush_content_relation_unavailable_warning()
+
+        # AC1: exactly ONE WARNING, and it states the total affected-pair count
+        # -- the information that used to be spread over one line per pair
+        # (3 here, 11,815 on the live corpus) is summarized, not lost.
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert str(len(pairs)) in warnings[0].getMessage()
+
+        caplog.clear()
+        flush_content_relation_unavailable_warning()
+        assert not caplog.records  # one-time -- no repeat WARNING on a second flush
+
+    def test_flush_is_a_noop_when_condition_never_fired(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import logging
+
+        monkeypatch.setattr(comparator_mod, "_CONTENT_RELATION_UNAVAILABLE_COUNT", 0)
+        monkeypatch.setattr(comparator_mod, "_CONTENT_RELATION_UNAVAILABLE_WARNED", False)
+
+        caplog.set_level(logging.DEBUG, logger="athenaeum.comparator")
+        flush_content_relation_unavailable_warning()
+        assert not caplog.records
+
+    def test_call_that_raises_shares_the_same_warn_once_bucket_as_client_none(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4 audit finding: ``Gate 2 call failed`` (the generic-exception exit,
+        line ~657 pre-fix) shared `client is None`'s exact WARNING-per-pair,
+        no-pair-key shape and its `rationale="llm-unavailable"` -- an API outage
+        or bad credentials floods the log identically to a missing client. Folded
+        into the SAME warn-once bucket rather than a second one."""
+        import logging
+
+        monkeypatch.setattr(comparator_mod, "_CONTENT_RELATION_UNAVAILABLE_COUNT", 0)
+        monkeypatch.setattr(comparator_mod, "_CONTENT_RELATION_UNAVAILABLE_WARNED", False)
+
+        client = MagicMock()
+        client.messages.create.side_effect = RuntimeError("connection refused")
+        page_a = _page("alpha", body="x")
+        page_b = _page("beta", body="y")
+
+        caplog.set_level(logging.DEBUG, logger="athenaeum.comparator")
+        result = content_relation(page_a, page_b, client=client)
+        assert result.relation == ContentRelation.UNAVAILABLE
+        assert result.rationale == "llm-unavailable"
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+        # A subsequent client=None occurrence joins the SAME count/bucket.
+        result2 = content_relation(page_a, page_b, client=None)
+        assert result2.relation == ContentRelation.UNAVAILABLE
+
+        caplog.clear()
+        flush_content_relation_unavailable_warning()
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "2" in warnings[0].getMessage()
 
 
 # ---------------------------------------------------------------------------
