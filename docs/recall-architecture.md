@@ -20,13 +20,75 @@ How the UserPromptSubmit hook surfaces wiki context — the hybrid FTS5 + vector
 2. **Query-topic extraction (optional, LLM).** `athenaeum query-topics "$PROMPT" --timeout 3` calls a cheap Haiku classifier that returns a JSON array of substantive topics, ignoring meta-instructions like "quote verbatim" or "don't call tools". On any failure (missing CLI, missing API key, timeout, bad JSON), the hook falls back silently to a regex + stopword extractor.
 
 3. **Hybrid search.**
-   - **FTS5** (`wiki-index.db`) — lowercased-and-phrase-quoted OR query, top 3 by BM25 rank, excluding session-seen filenames.
+   - **FTS5** (`wiki-index.db`) — lowercased-and-phrase-quoted OR query, top 3 by BM25 rank, excluding session-seen filenames, `AND memory_tier = 'hot'` (issue athenaeum#1120 — see "Hot-tier filter + push-token budget" below).
    - **Vector** (`wiki-vectors/`, runs when `SEARCH_BACKEND=vector`) — embeds the *concatenated topics* (not the raw prompt; meta-instructions drift the embedding), queries chromadb, returns top 3.
    - **Merge** — FTS5 first, then vector, dedupe by filename, cap at 3.
 
-4. **Session dedup.** `/tmp/knowledge-seen-${SESSION_ID}` accumulates already-surfaced filenames across turns.
+4. **Enforce the push-token budget (issue athenaeum#1120).** An `awk` pass
+   over the merged, deduped, rank-ordered candidates greedily packs them
+   into `PUSH_TOKEN_BUDGET` tokens (same `1200` default and env-over-yaml
+   precedence as `athenaeum.config.resolve_push_token_budget`), skipping —
+   never truncating — a candidate that would exceed it. See "Hot-tier
+   filter + push-token budget" below for the full seam.
 
-5. **Emit.** `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"..."}}`. A flat `{"additionalContext":...}` payload is silently ignored by Claude Code.
+5. **Session dedup.** `/tmp/knowledge-seen-${SESSION_ID}` accumulates already-surfaced filenames across turns.
+
+6. **Emit.** `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"..."}}`. A flat `{"additionalContext":...}` payload is silently ignored by Claude Code.
+
+## Hot-tier filter + push-token budget (issue athenaeum#1120)
+
+Before this issue, `user-prompt-recall.sh` queried FTS5 directly and never
+called `recall_search` — so unprompted recall never saw the `hot`-tier
+filter or the `push_budget.tokens_per_turn` budget that issue athenaeum#718 /
+PR athenaeum#1117 built for the *prompted* path. `push_budget.tokens_per_turn` was a
+real, tested dial nothing unprompted actually turned.
+
+**Seam decision: index-carried tier verdict + shell-native budget
+enforcement, not a thin-CLI wrapper.** Measured on a representative box:
+`sqlite3 :memory: "select 1;"` costs 1-3ms and bare `python3` startup
+~12ms, but `import athenaeum.mcp_server` (what `recall_search` needs) costs
+~360-400ms warm and ~1090ms cold, and `athenaeum --help` (full CLI dispatch)
+~385-450ms. A thin-CLI-wrapper seam would therefore cost ~360-450ms on
+EVERY turn of EVERY session — an ~8-10x regression against this hook's
+documented `<50ms` FTS5-only contract. Rejected on that measurement.
+
+**Duplication is minimized deliberately, and stated plainly rather than
+hidden:**
+
+- The tier model is NOT reimplemented in shell. `athenaeum.memory_tiers.resolve_tier`
+  runs once, at index-build time (`athenaeum.search.FTS5Backend._row_for`),
+  and its verdict is stored in the FTS5 index (`memory_tier UNINDEXED`
+  column, schema version bumped 3 -> 4); the hook just reads that column
+  with `WHERE memory_tier = 'hot'`. This is the SAME established pattern
+  `audience` (athenaeum#312, schema v2) and `type` (athenaeum#964, schema v3)
+  already use so shell/SQL can filter without Python.
+- The ONLY duplicated surface is (a) the greedy budget-accumulation loop
+  and (b) the token estimator, `athenaeum.push_metrics.estimate_tokens` =
+  `max(0, len(text) // 4)` — a single arithmetic expression, expressed in
+  `awk` as `int(length(block) / 4)`.
+- **Coordinate fit is a no-op for this surface, which is why no
+  `push_score` reimplementation is needed.** The hook has a `session_id`,
+  not a scope coordinate, so `scope_relation` is `None` for every
+  candidate — neutral weight for all — so `push_score` ranking degenerates
+  exactly to relevance order, i.e. the FTS5 `rank` ordering the hook
+  already sorts by. The shell loop therefore only needs to replicate the
+  budget-packing behavior of `athenaeum.memory_tiers.select_for_push`, not
+  its ranking.
+
+**Legacy-DB safety.** A DB built by an older athenaeum predates the
+`memory_tier` column; selecting it would raise `sqlite3.OperationalError`,
+which the hook's own `2>/dev/null || echo ""` would otherwise swallow into
+a silent zero-recall until the index happens to be rebuilt. The hook
+probes `PRAGMA table_info(wiki)` for the column first and falls back to
+the pre-athenaeum#1120 unfiltered query when it's absent, so an un-rebuilt index
+degrades to pre-athenaeum#1120 behavior instead of to nothing.
+
+**`session-start-recall.sh` was also checked for this gap and is
+unaffected (AC2).** It writes stderr diagnostics only and emits no
+`hookSpecificOutput`/`additionalContext` at all, so it is not an
+unprompted-push path — it is the writer for the `memory_tier`-carrying
+index and for `PUSH_TOKEN_BUDGET` in `config.env`, both of which
+`user-prompt-recall.sh` reads.
 
 ## Why hybrid — and why both layers are load-bearing
 
