@@ -4364,3 +4364,36 @@ def resolve_authority_grant_implications(
         if members:
             implications[grant.strip()] = members
     return implications
+
+
+def resolve_person_registry_root(knowledge_root: Path, config: dict[str, Any] | None) -> Path:
+    """Resolve the on-disk root :class:`athenaeum.person_registry.PersonRegistry`
+    scans for ``type: person`` pages (issue athenaeum#1183).
+
+    Default: ``<knowledge_root>/wiki`` — the SAME directory
+    :class:`athenaeum.models.EntityIndex` already scans. This is deliberate
+    backward compatibility: athenaeum#1183 demotes ``type: person`` pages out of
+    the general entity-index NAME keys (see
+    :data:`athenaeum.models.DEMOTED_NAME_MATCH_TYPES`), but does not itself
+    move a single file — the one-time physical relocation of person pages in
+    a live corpus is issue athenaeum#1247 (blocked by athenaeum#1183). Until that
+    relocation runs, every person page still lives under ``wiki/``, so this
+    resolver has to keep pointing there for :class:`~athenaeum.person_registry.PersonRegistry`
+    to find anything on an unmigrated corpus. Once athenaeum#1247 physically moves
+    person pages elsewhere, set ``person_registry.root`` (relative paths
+    resolve against *knowledge_root*; an absolute path is used as-is) to
+    repoint this WITHOUT a code change.
+
+    No env override: unlike a run-level budget knob, this is a structural
+    corpus-layout fact an operator sets once (if ever), not a per-invocation
+    dial — mirrors :func:`resolve_authority_grant_implications`'s yaml-only
+    posture for the same reason.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("person_registry")
+        if isinstance(cfg, dict):
+            raw = cfg.get("root")
+            if isinstance(raw, str) and raw.strip():
+                candidate = Path(raw).expanduser()
+                return candidate if candidate.is_absolute() else knowledge_root / candidate
+    return knowledge_root / "wiki"

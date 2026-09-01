@@ -200,7 +200,7 @@ class TestTier3CreateNoConflictByConstruction:
         action = EntityAction(
             kind="create",
             name="Alice",
-            entity_type="person",
+            entity_type="company",
             tags=["active"],
             access="internal",
             existing_uid=None,
@@ -303,7 +303,7 @@ class TestTier3WriteAtomicity:
             EntityAction(
                 kind="update",
                 name="Alice",
-                entity_type="person",
+                entity_type="company",
                 tags=[],
                 access="",
                 existing_uid="uid1aaaa",
@@ -312,7 +312,7 @@ class TestTier3WriteAtomicity:
             EntityAction(
                 kind="update",
                 name="Bob",
-                entity_type="person",
+                entity_type="company",
                 tags=[],
                 access="",
                 existing_uid="uid2bbbb",

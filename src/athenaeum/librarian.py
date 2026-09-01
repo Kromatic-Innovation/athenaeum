@@ -121,6 +121,7 @@ from athenaeum.config import (
     resolve_live_delta_enabled,
     resolve_memory_tier_sweep_enabled,
     resolve_model_rates,
+    resolve_person_registry_root,
     resolve_pull_before_run,
     resolve_push_after_run,
     resolve_push_branch,
@@ -142,11 +143,13 @@ from athenaeum.delta import (
     compute_affected_clusters,
     splice_cluster_report,
 )
+from athenaeum.identity_resolution import match_person_mentions
 from athenaeum.ingestion_gate import check_ingestion_gate
 from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE re-exported for back-compat
     _AUTO_MEMORY_SKIP_NAMES,
     AUTO_MEMORY_FILE_RE,
     RAW_FILE_RE,
+    attribute_person_observation,
     discover_auto_memory_files,
     discover_raw_files,
     tier0_passthrough,
@@ -184,6 +187,7 @@ from athenaeum.never_ingest import (
     check_and_refuse,
     filter_never_ingest,
 )
+from athenaeum.person_registry import PERSON_TYPE, PersonRegistry
 from athenaeum.pii import (
     DoNotEmailFact,
     ExcludedRecordIndex,
@@ -860,9 +864,23 @@ def tier0_handle_upsert(
     wiki_root: Path,
     valid_types: list[str],
     dry_run: bool = False,
+    *,
+    person_registry: "PersonRegistry | None" = None,
 ) -> tuple[WikiEntity, bool] | None:
     """Deterministically merge a pre-structured seed's source-handle keys onto
     an EXISTING entity page, LLM-free (issue athenaeum#486).
+
+    *person_registry* (issue athenaeum#1183, keyword-only, ``None`` default):
+    when supplied AND the seed declares ``type: person``, entity resolution
+    below (both the uid-declared and the name/alias-fallback branch) resolves
+    against :class:`~athenaeum.person_registry.PersonRegistry` instead of
+    *index* — a person page is demoted out of *index*'s name/alias keys by
+    athenaeum#1183 (see :data:`athenaeum.models.DEMOTED_NAME_MATCH_TYPES`), so
+    ``index.lookup(name)`` can no longer find one. The merge/write mechanics
+    below this resolution step are UNCHANGED either way: they operate on
+    whatever ``existing_path`` was resolved to, on disk, exactly as before.
+    ``None`` (every pre-athenaeum#1183 caller) leaves a ``type: person`` seed on
+    the original *index*-resolved path, byte-for-byte unchanged.
 
     athenaeum#454 seeds source handles (athenaeum#453's schema) by writing raw intake that carries
     ``uid``/``type``/``name`` plus the source-handle frontmatter keys. When the
@@ -924,8 +942,14 @@ def tier0_handle_upsert(
         # Not a handle seed — leave it to the LLM tiers unchanged.
         return None
 
+    target_registry = person_registry if etype == PERSON_TYPE else None
+
     if uid:
-        existing_path = index.get_by_uid(uid)
+        if target_registry is not None:
+            _entry = target_registry.get_by_uid(uid)
+            existing_path = _entry.path if _entry is not None else None
+        else:
+            existing_path = index.get_by_uid(uid)
         if existing_path is None or not existing_path.exists():
             # New entity — tier0_passthrough owns it; nothing to upsert onto.
             return None
@@ -937,39 +961,64 @@ def tier0_handle_upsert(
         # into the page BODY as prose, silently losing the athenaeum#453 schema. Resolve
         # the EXISTING entity deterministically by name/alias and upsert onto it,
         # exactly as the uid-bearing path does.
-        resolved = index.lookup(name)
-        if resolved is None:
-            # Names no existing entity — this deterministic path only UPSERTS
-            # onto an existing page (creating a new entity is tier0_passthrough's
-            # job, which requires a uid). Fail LOUDLY rather than let the handle
-            # block degrade to prose downstream (the actual athenaeum#692 defect).
-            log.warning(
-                "  T0 handle-upsert: seed for %r (%s) carries source handles "
-                "%s but names no existing entity and declares no uid — not "
-                "placed as frontmatter; fix the seed's name/uid",
-                name,
-                etype,
-                sorted(incoming),
-            )
-            return None
-        resolved_uid, existing_path = resolved.uid, resolved.path
-        if (
-            not resolved_uid
-            or not existing_path.exists()
-            or not index.has_entity_format(existing_path)
-        ):
-            # Matched a name-only (non-entity-format) page — no uid to key on and
-            # not a source-handle target. Surface it, then leave it unchanged.
-            log.warning(
-                "  T0 handle-upsert: seed for %r (%s) matched a non-entity page "
-                "%s — source handles %s not placed; fix the seed's name/uid",
-                name,
-                etype,
-                existing_path.name,
-                sorted(incoming),
-            )
-            return None
-        uid = resolved_uid
+        if target_registry is not None:
+            registry_resolved = target_registry.lookup(name)
+            if registry_resolved is None or not registry_resolved.uid:
+                log.warning(
+                    "  T0 handle-upsert: seed for %r (%s) carries source handles "
+                    "%s but names no existing person-registry entry and declares "
+                    "no uid — not placed as frontmatter; fix the seed's name/uid",
+                    name,
+                    etype,
+                    sorted(incoming),
+                )
+                return None
+            uid, existing_path = registry_resolved.uid, registry_resolved.path
+            if not existing_path.exists():
+                log.warning(
+                    "  T0 handle-upsert: seed for %r (%s) matched person-registry "
+                    "entry %s, but that page no longer exists on disk — source "
+                    "handles %s not placed",
+                    name,
+                    etype,
+                    existing_path.name,
+                    sorted(incoming),
+                )
+                return None
+        else:
+            resolved = index.lookup(name)
+            if resolved is None:
+                # Names no existing entity — this deterministic path only UPSERTS
+                # onto an existing page (creating a new entity is tier0_passthrough's
+                # job, which requires a uid). Fail LOUDLY rather than let the handle
+                # block degrade to prose downstream (the actual athenaeum#692 defect).
+                log.warning(
+                    "  T0 handle-upsert: seed for %r (%s) carries source handles "
+                    "%s but names no existing entity and declares no uid — not "
+                    "placed as frontmatter; fix the seed's name/uid",
+                    name,
+                    etype,
+                    sorted(incoming),
+                )
+                return None
+            resolved_uid, existing_path = resolved.uid, resolved.path
+            if (
+                not resolved_uid
+                or not existing_path.exists()
+                or not index.has_entity_format(existing_path)
+            ):
+                # Matched a name-only (non-entity-format) page — no uid to key on and
+                # not a source-handle target. Surface it, then leave it unchanged.
+                log.warning(
+                    "  T0 handle-upsert: seed for %r (%s) matched a non-entity page "
+                    "%s — source handles %s not placed; fix the seed's name/uid",
+                    name,
+                    etype,
+                    existing_path.name,
+                    sorted(incoming),
+                )
+                return None
+            uid = resolved_uid
 
     existing_meta, existing_body = parse_frontmatter(existing_path.read_text(encoding="utf-8"))
     if not existing_meta:
@@ -1412,6 +1461,7 @@ def process_one(
     started_at_file: float | None = None,
     write_client: LLMBackend | None = None,
     never_ingest_manifest: AuthorityManifest | None = None,
+    person_registry: PersonRegistry | None = None,
 ) -> ProcessingResult:
     """Process a single raw file through all tiers.
 
@@ -1555,6 +1605,7 @@ def process_one(
         wiki_root,
         valid_types,
         dry_run=dry_run,
+        person_registry=person_registry,
     )
     if passthrough is not None:
         log.info(
@@ -1576,6 +1627,7 @@ def process_one(
         wiki_root,
         valid_types,
         dry_run=dry_run,
+        person_registry=person_registry,
     )
     if upsert is not None:
         entity, changed = upsert
@@ -1633,6 +1685,40 @@ def process_one(
                 dne_entity.filename,
             )
         return result
+
+    # --- Tier 0 (person-registry consult): resolve + attribute a mention of
+    # an EXISTING type: person record via the consult-only registry,
+    # LLM-free (issue athenaeum#1183 AC2/AC3). Runs before Tier 1 because
+    # Tier 1 (tier1_programmatic_match) no longer matches person names at
+    # all -- DEMOTED_NAME_MATCH_TYPES withholds them from
+    # EntityIndex.items() entirely -- so without this step an ordinary
+    # free-text mention of a known person would fall through to Tier 2/3,
+    # which would try to CREATE it as a new entity and hit
+    # tier3_create's PersonNeverLLMRewriteError guard (issue athenaeum#1183
+    # AC4) instead of ever attributing the observation anywhere.
+    #
+    # Early-returns on a match, exactly like the tier-0 steps above --
+    # deliberately, not incidentally: this is what lets the process_one-level
+    # round-trip test assert ZERO provider calls for an ordinary raw file
+    # that mentions a known person. The trade-off this accepts (same one the
+    # do-not-email/handle-upsert steps above already accept for their own
+    # shapes) is that any OTHER, non-person entity also mentioned in the
+    # SAME raw file is not tier1/2/3-processed on this run -- a raw file
+    # this deterministic path claims is claimed whole.
+    if person_registry is not None:
+        person_hits = match_person_mentions(raw, wiki_root, index, person_registry)
+        attributed_uids = [
+            hit.uid
+            for hit in person_hits
+            if attribute_person_observation(raw, hit, dry_run=dry_run)
+        ]
+        if attributed_uids:
+            log.info(
+                "  T0 person-registry consult: attributed observation to %s",
+                attributed_uids,
+            )
+            result.updated.extend(attributed_uids)
+            return result
 
     # --- Tier 1: Programmatic matching ---
     # Issue athenaeum#662: pass config so junk-name matches (here/get/main/reach/lane a
@@ -5689,6 +5775,18 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             index = EntityIndex(ctx.wiki_root)
             log.info("Loaded %d wiki entries into index", len(index))
 
+            # Issue athenaeum#1183: built once per run, mirroring `index` above —
+            # threaded into `process_one` -> `tier0_passthrough`/
+            # `tier0_handle_upsert` so a `type: person` raw is written to and
+            # resolved against this registry instead of the general
+            # wiki_root/index. Defaults to `ctx.wiki_root` itself (see
+            # `resolve_person_registry_root`), so this is a no-op relocation
+            # on a corpus that has not yet undergone athenaeum#1247's physical move.
+            person_registry = PersonRegistry(
+                resolve_person_registry_root(ctx.knowledge_root, ctx.config)
+            )
+            log.info("Loaded %d person-registry entries", len(person_registry))
+
             # Issue athenaeum#841: two knob-routed clients, not one shared client —
             # ``classify_client`` serves tier2_classify (and, via
             # ``_stamp_unclassified_claim_kinds``/the C4 detector elsewhere
@@ -6122,6 +6220,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 # unchanged.
                                 write_client=write_client,
                                 never_ingest_manifest=never_ingest_manifest,
+                                person_registry=person_registry,
                             )
                         except RawFileTooLargeError as exc:
                             # Issue athenaeum#898: the per-file BYTE bound (checked by

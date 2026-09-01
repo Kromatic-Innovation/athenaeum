@@ -1590,7 +1590,7 @@ class TestRunIntegration:
                     [
                         {
                             "name": "Alice Zhang",
-                            "entity_type": "person",
+                            "entity_type": "company",
                             "tags": ["active"],
                             "access": "internal",
                             "observations": "Product leader.",

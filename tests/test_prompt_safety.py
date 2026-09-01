@@ -98,7 +98,7 @@ def _merge_action(observations: str) -> EntityAction:
     return EntityAction(
         kind="update",
         name="Alice",
-        entity_type="person",
+        entity_type="company",
         tags=[],
         access="",
         existing_uid="uid12345",

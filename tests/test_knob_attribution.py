@@ -76,7 +76,7 @@ class TestWriteKnob:
         action = EntityAction(
             kind="create",
             name="Test Entity",
-            entity_type="person",
+            entity_type="company",
             tags=[],
             access="internal",
             existing_uid=None,

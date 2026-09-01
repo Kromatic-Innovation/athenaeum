@@ -2551,6 +2551,34 @@ is yours to evaluate. Native multi-provider support is tracked in
 [#234](https://github.com/Kromatic-Innovation/athenaeum/issues/234) — if you
 want it, register your use case there.
 
+## Person registry (athenaeum#1183)
+
+`type: person` wiki pages — overwhelmingly CRM-imported contact records —
+are demoted out of the general wiki-entity NAME/ALIAS matching surface
+(`EntityIndex.items()`, what `tier1_programmatic_match` walks) into a
+consult-only person registry: intake still resolves and attributes person
+mentions against it (`athenaeum.identity_resolution.resolve_person_mention`),
+a person record still accepts structured field updates via the tier-0
+no-LLM paths, but it never receives a full-page LLM rewrite
+(`athenaeum.tiers.PersonNeverLLMRewriteError`). Demotion only — nothing is
+deleted, and every ADDRESSED lookup (`.lookup()` by name, `.get_by_uid()`)
+is unaffected, so `athenaeum.corrections` and the Tier-3 create-name
+collision check keep finding a person page exactly as before.
+
+**Not the source-handle registry.** `athenaeum.registry` compiles an
+unrelated `registry.json` (entity uid -> external adapter handles); this is
+a different module and a different config namespace by design, so the two
+cannot be confused.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Person-registry root | — | `person_registry.root` | the wiki root itself (`<knowledge_root>/wiki`) | Where `PersonRegistry` scans for `type: person` pages. Relative paths resolve against `knowledge_root`; an absolute path is used as-is. The default is deliberate backward compatibility: person pages still physically live under `wiki/` until issue athenaeum#1247's one-time relocation runs (BLOCKED BY athenaeum#1183), so pointing here by default is what makes an unmigrated corpus resolve correctly. Set this once athenaeum#1247 physically moves person pages elsewhere — a config change, not a code change. See [`resolve_person_registry_root`](../src/athenaeum/config.py). |
+
+```yaml
+person_registry:
+  root: wiki   # default; repoint after athenaeum#1247's relocation, e.g. "registry"
+```
+
 ## Example `athenaeum.yaml`
 
 ```yaml
