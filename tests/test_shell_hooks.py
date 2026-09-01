@@ -598,6 +598,117 @@ conn.close()
         context = payload["hookSpecificOutput"]["additionalContext"]
         assert "Legacy Recall Target" in context
 
+    def test_vector_backend_hot_tier_filter_drops_non_hot_hit(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1120 (orchestrator review finding) -- the FTS5
+        branch enforces `memory_tier = 'hot'` INSIDE its own SQL, but the
+        vector branch merged `VECTOR_RESULTS` straight in with no
+        equivalent check: under `SEARCH_BACKEND=vector` a warm/cold page
+        could bypass the filter entirely -- a dial that looks enforced but
+        silently isn't on that deployed path. This drives the REAL hook
+        end-to-end with a vector hit and proves the shell-side post-filter
+        (a bounded lookup into the SAME `wiki-index.db` verdict, keyed on
+        the <=3 filenames the vector backend actually returned) drops a
+        non-hot hit and lets a hot one through.
+
+        chromadb's real embedder can't run in this container (the ONNX
+        weights host is blocked), so `query_vector_index` is stubbed via
+        `ATHENAEUM_SRC` pointing at a fake `src/athenaeum/search.py` that
+        returns a fixed row -- the hook's own inline python snippet
+        already supports loading an arbitrary `search.py` by path (its
+        `importlib.util.spec_from_file_location` branch), so no real
+        embedding is needed to prove the SHELL-SIDE filter works.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "hot-vectester.md").write_text(
+            "---\n"
+            "name: Vectester Hot Page\n"
+            "tags: [vectester]\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Unrelated body text, not matched by the probe query below.\n"
+        )
+        (wiki / "warm-vectester.md").write_text(
+            "---\n"
+            "name: Vectester Warm Page\n"
+            "tags: [vectester]\n"
+            "memory_tier: warm\n"
+            "---\n\n"
+            "Unrelated body text, not matched by the probe query below.\n"
+        )
+        self._seed_index(hook_env)
+
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        (cache_dir / "wiki-vectors").mkdir(parents=True, exist_ok=True)
+        config_env = cache_dir / "config.env"
+        config_env.write_text(
+            config_env.read_text().replace(
+                "SEARCH_BACKEND=fts5", "SEARCH_BACKEND=vector"
+            )
+        )
+
+        # Fake search.py module: query_vector_index ignores the query text
+        # entirely and returns a FIXED row -- deterministic, no embedder.
+        fake_pkg = tmp_path / "fake-vector-src" / "src" / "athenaeum"
+        fake_pkg.mkdir(parents=True)
+        vector_env = dict(hook_env)
+        vector_env["ATHENAEUM_SRC"] = str(fake_pkg.parent.parent)
+
+        def _set_stub_hit(filename: str, name: str) -> None:
+            (fake_pkg / "search.py").write_text(
+                "def query_vector_index(query, cache_dir, n=3, exclude=None):\n"
+                "    exclude = exclude or set()\n"
+                f"    hits = [({filename!r}, {name!r}, 0.9)]\n"
+                "    return [h for h in hits if h[0] not in exclude][:n]\n"
+            )
+
+        # A prompt whose terms appear in neither page's body/frontmatter --
+        # isolates the assertion to the vector path; FTS5 contributes
+        # nothing, so a leak can only come from the vector branch.
+        probe_prompt = "zzznonmatchingzzz term completely unrelated content"
+
+        _set_stub_hit("warm-vectester.md", "Vectester Warm Page")
+        warm_result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert warm_result.returncode == 0, f"stderr: {warm_result.stderr}"
+        assert warm_result.stdout == "", (
+            "a warm-tier vector hit must be dropped by the shell-side "
+            f"post-filter, not surfaced -- got: {warm_result.stdout!r}"
+        )
+
+        # Positive control: same stub, hot page instead -- proves the
+        # filter isn't a no-op that happens to eat every vector hit.
+        _set_stub_hit("hot-vectester.md", "Vectester Hot Page")
+        hot_result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert hot_result.returncode == 0, f"stderr: {hot_result.stderr}"
+        assert hot_result.stdout, "expected a hot-tier vector hit to surface"
+        payload = json.loads(hot_result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        assert "Vectester Hot Page" in context
+
 
 class TestPreCompactSave:
     def test_emits_system_message_json(self, tmp_path: Path) -> None:
