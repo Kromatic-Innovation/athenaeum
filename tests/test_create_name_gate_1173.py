@@ -27,7 +27,17 @@ One test class per rejection class (issue athenaeum#1173 AC6):
 - ``TestSyncTransportWiring`` — end to end through
   :func:`athenaeum.librarian.process_one`: an escalated name never becomes
   a page, its sibling create still lands, and the raw file's run completes
-  normally (not wedged — no exception, no stuck-file retry).
+  normally (not wedged — no exception, no stuck-file retry). Also covers
+  athenaeum#1170's create-path collision outcomes (disambiguate / escalate)
+  through this same call.
+- ``TestBatchTransportWiring`` — the athenaeum#1170 collision-disambiguation
+  outcome through the OTHER transport, :func:`athenaeum.batch.process_batch_run`,
+  proving the two call sites stay symmetric.
+- ``TestFullRunDisambiguatesAcrossRuns`` — the same athenaeum#1170 disambiguation,
+  end to end through TWO SEPARATE :func:`athenaeum.librarian.run` invocations
+  (not a single ``process_one``/``process_batch_run`` call): a second run's
+  Tier-2 classification proposing a name an earlier run already created
+  must disambiguate, never mint a duplicate page.
 """
 
 from __future__ import annotations
@@ -745,3 +755,143 @@ class TestResolveCreateNameEscalateMaxChars:
     def test_non_positive_value_falls_back_to_default(self) -> None:
         config = {"librarian": {"create_name_escalate_max_chars": 0}}
         assert resolve_create_name_escalate_max_chars(config) == 7
+
+
+# ---------------------------------------------------------------------------
+# Full librarian.run() coverage: disambiguation across TWO SEPARATE runs
+# (issue athenaeum#1170 code review, item 5). TestSyncTransportWiring /
+# TestBatchTransportWiring above prove disambiguation within a single
+# process_one / process_batch_run call; this proves the same behavior
+# end-to-end through the real run() orchestration across two independent
+# invocations — the shape that actually surfaces in production (a nightly
+# run re-classifying a name a PRIOR night's run already minted). This exact
+# interaction was found missing coverage when it surfaced, entangled with
+# an unrelated wall-clock bound, in
+# tests/test_librarian_quarantine.py::test_wall_clock_bound_full_cycle_to_quarantine_and_release
+# (PR athenaeum#1249 code review) — this test isolates the SAME behavior
+# without that bound's machinery.
+# ---------------------------------------------------------------------------
+
+
+class TestFullRunDisambiguatesAcrossRuns:
+    def test_second_run_over_already_created_entity_disambiguates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json
+        import subprocess
+
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import run
+
+        root = tmp_path / "knowledge"
+        wiki = root / "wiki"
+        wiki.mkdir(parents=True)
+        sessions = root / "raw" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / ".gitkeep").write_text("")
+        subprocess.run(["git", "init", "-q", "-b", "test-branch"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
+        )
+        subprocess.run(["git", "config", "user.name", "Test Runner"], cwd=root, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=root, check=True)
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        classify_response = MagicMock()
+        classify_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    [
+                        {
+                            "name": "Acme",
+                            "entity_type": "company",
+                            "tags": [],
+                            "access": "internal",
+                            "observations": "A fact about Acme.",
+                        }
+                    ]
+                )
+            )
+        ]
+        create_response = MagicMock()
+        create_response.content = [MagicMock(text="# Acme\n\nA fact about Acme.\n")]
+        # Run 2's merge is a valid anchored-ops patch response (unlike the
+        # wall-clock test's fallback-forcing fixture) -- a single call
+        # suffices, since disambiguation this time does not need to be
+        # entangled with the patch-then-fallback mechanic.
+        merge_response = MagicMock()
+        merge_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    {"ops": [{"op": "append_section", "text": "A second fact about Acme."}]}
+                )
+            )
+        ]
+
+        run_number = {"n": 0}
+
+        def _fake_anthropic(**_kwargs: object) -> MagicMock:
+            run_number["n"] += 1
+            responses = iter(
+                [classify_response, create_response]
+                if run_number["n"] == 1
+                else [classify_response, merge_response]
+            )
+            client = MagicMock()
+            client.messages.create.side_effect = lambda **p: next(responses)
+            return client
+
+        monkeypatch.setattr(anthropic_mod, "Anthropic", _fake_anthropic)
+
+        # Run 1: Tier-2 (mocked) proposes "Acme" -- no existing page, so it
+        # creates one. Raw content deliberately avoids the literal string
+        # "Acme" so Tier-1's programmatic index-key match never independently
+        # fires -- only the mocked Tier-2 classification drives this.
+        (sessions / "20240101T000000Z-aaaaaaa1.md").write_text(
+            "A note about widgets.\n", encoding="utf-8"
+        )
+        run(
+            raw_root=root / "raw",
+            wiki_root=wiki,
+            knowledge_root=root,
+            max_api_calls=100,
+            max_runtime=0,
+        )
+
+        pages_after_run1 = sorted(
+            p for p in wiki.glob("*.md") if not p.name.startswith("_")
+        )
+        assert len(pages_after_run1) == 1
+        assert pages_after_run1[0].name.endswith("acme.md")
+
+        # Run 2: a second, unrelated raw file. Tier-1 still has no reason to
+        # match it (its text mentions widgets, not "Acme"), but the mocked
+        # Tier-2 classify response ALWAYS proposes "Acme" again, is_new=True
+        # -- simulating exactly the shape that, pre-athenaeum#1170, minted a
+        # colliding duplicate page. The athenaeum#1170 create-path gate must
+        # disambiguate this into an update against run 1's page instead.
+        (sessions / "20240102T000000Z-aaaaaaa2.md").write_text(
+            "Another note about widgets.\n", encoding="utf-8"
+        )
+        run(
+            raw_root=root / "raw",
+            wiki_root=wiki,
+            knowledge_root=root,
+            max_api_calls=100,
+            max_runtime=0,
+        )
+
+        pages_after_run2 = sorted(
+            p for p in wiki.glob("*.md") if not p.name.startswith("_")
+        )
+        # Still exactly ONE page -- no duplicate "Acme" page was minted --
+        # and it is the SAME file run 1 created, now carrying run 2's merge.
+        assert len(pages_after_run2) == 1
+        assert pages_after_run2[0] == pages_after_run1[0]
+        assert "A second fact about Acme." in pages_after_run2[0].read_text(
+            encoding="utf-8"
+        )
