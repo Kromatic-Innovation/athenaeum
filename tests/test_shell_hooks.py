@@ -76,11 +76,18 @@ def hook_env(tmp_path: Path) -> dict[str, str]:
     wiki = knowledge / "wiki"
     wiki.mkdir(parents=True)
 
+    # `memory_tier: hot` (issue athenaeum#1120): user-prompt-recall.sh now
+    # filters `WHERE memory_tier = 'hot'`, and an explicit pin resolves
+    # ahead of the (warm) class-default `resolve_tier` would otherwise
+    # assign an untyped page. Without this, every existing consumer of
+    # this shared fixture that asserts a page surfaces through the
+    # unprompted-recall hook would regress to a false negative.
     (wiki / "lean-startup.md").write_text(
         "---\n"
         "name: Lean Startup\n"
         "tags: [methodology]\n"
         "description: Build-measure-learn methodology\n"
+        "memory_tier: hot\n"
         "---\n\n"
         "The Lean Startup methodology emphasizes rapid iteration and customer feedback.\n"
     )
@@ -89,6 +96,7 @@ def hook_env(tmp_path: Path) -> dict[str, str]:
         "name: Customer Development\n"
         "tags: [methodology]\n"
         "description: Steve Blank's four-step framework\n"
+        "memory_tier: hot\n"
         "---\n\n"
         "Customer Development is Steve Blank's framework for startup discovery.\n"
     )
@@ -382,6 +390,324 @@ class TestUserPromptRecall:
         assert "Traceback" not in stderr
         assert "syntax error" not in stderr.lower()
         assert "command not found" not in stderr.lower()
+
+    def test_hot_tier_page_surfaces_non_hot_page_excluded(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """Issue athenaeum#1120 AC3 — drives a REAL hook invocation end to
+        end (not `memory_tiers.select_for_push` in isolation): a `hot`-tier
+        page and a `warm`-tier page both match the same query via a real
+        index build (`athenaeum.search.FTS5Backend`, schema v4). Only the
+        hot page's `memory_tier = 'hot'` predicate in the hook's own SQL
+        may let it through.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "hot-widgetronic.md").write_text(
+            "---\n"
+            "name: Widgetronic Hot Page\n"
+            "tags: [widgetronic]\n"
+            "description: A hot-tier page about widgetronic devices\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "This page discusses widgetronic devices extensively for testing.\n"
+        )
+        (wiki / "warm-widgetronic.md").write_text(
+            "---\n"
+            "name: Widgetronic Warm Page\n"
+            "tags: [widgetronic]\n"
+            "description: A warm-tier page about widgetronic devices\n"
+            "memory_tier: warm\n"
+            "---\n\n"
+            "This page also discusses widgetronic devices extensively for testing.\n"
+        )
+        self._seed_index(hook_env)
+
+        stdin_payload = json.dumps(
+            {
+                "prompt": "tell me about widgetronic devices",
+                "session_id": f"test-{uuid.uuid4().hex}",
+            }
+        )
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=stdin_payload,
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "expected hookSpecificOutput JSON on stdout"
+
+        payload = json.loads(result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        assert "Widgetronic Hot Page" in context
+        assert "Widgetronic Warm Page" not in context
+
+    def test_push_token_budget_discriminates_tiny_vs_generous(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """Issue athenaeum#1120 AC4 — a tiny `ATHENAEUM_PUSH_TOKEN_BUDGET`
+        must be unable to afford even one entry, while a generous budget on
+        the same candidate lets it through. Both assertions are required —
+        a test that only checks the generous side can't fail on a budget
+        that was never wired up at all.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "hot-budgettest.md").write_text(
+            "---\n"
+            "name: Budgettest Hot Page\n"
+            "tags: [budgettest]\n"
+            "description: A hot-tier page about budgettest devices\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "This page discusses budgettest devices extensively for testing.\n"
+        )
+        self._seed_index(hook_env)
+
+        tiny_env = dict(hook_env)
+        tiny_env["ATHENAEUM_PUSH_TOKEN_BUDGET"] = "1"
+        tiny_payload = json.dumps(
+            {
+                "prompt": "tell me about budgettest devices",
+                "session_id": f"test-{uuid.uuid4().hex}",
+            }
+        )
+        tiny_result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=tiny_payload,
+            env=tiny_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert tiny_result.returncode == 0, f"stderr: {tiny_result.stderr}"
+        assert tiny_result.stdout == "", (
+            "a 1-token budget must not be able to afford any entry — "
+            f"got: {tiny_result.stdout!r}"
+        )
+
+        generous_env = dict(hook_env)
+        generous_env["ATHENAEUM_PUSH_TOKEN_BUDGET"] = "10000"
+        generous_payload = json.dumps(
+            {
+                "prompt": "tell me about budgettest devices",
+                "session_id": f"test-{uuid.uuid4().hex}",
+            }
+        )
+        generous_result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=generous_payload,
+            env=generous_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert generous_result.returncode == 0, f"stderr: {generous_result.stderr}"
+        assert generous_result.stdout, "expected output with a generous budget"
+        payload = json.loads(generous_result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        assert "Budgettest Hot Page" in context
+
+    def test_legacy_db_without_memory_tier_column_degrades_to_unfiltered(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1120 — a DB built by an older athenaeum predates
+        the `memory_tier` column (schema v4). Selecting a column that
+        doesn't exist would raise `sqlite3.OperationalError`, which the
+        hook's own `2>/dev/null || echo ""` would otherwise swallow into a
+        SILENT ZERO RECALL. The hook must probe for the column and fall
+        back to the pre-athenaeum#1120 unfiltered query instead, so an un-rebuilt
+        legacy index still surfaces results.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        db_path = cache_dir / "wiki-index.db"
+
+        # Build a pre-athenaeum#1120 (schema v3) shaped DB directly: `audience` and
+        # `type` present, no `memory_tier` column — what an un-rebuilt
+        # index from an older athenaeum install looks like.
+        build_script = """
+import sqlite3, sys
+
+conn = sqlite3.connect(sys.argv[1])
+conn.execute(
+    'CREATE VIRTUAL TABLE wiki USING fts5'
+    '(filename, name, tags, aliases, description, audience UNINDEXED, '
+    'type UNINDEXED, '
+    'tokenize="porter unicode61")'
+)
+conn.execute(
+    "INSERT INTO wiki VALUES (?,?,?,?,?,?,?)",
+    (
+        "legacy-page.md",
+        "Legacy Recall Target",
+        "legacytierprobe",
+        "",
+        "A legacy page about legacytierprobe widgets",
+        "",
+        "person",
+    ),
+)
+conn.commit()
+conn.close()
+"""
+        subprocess.run(
+            [hook_env["ATHENAEUM_PYTHON"], "-c", build_script, str(db_path)],
+            check=True,
+            timeout=10,
+        )
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\nSEARCH_BACKEND=fts5\n"
+        )
+
+        stdin_payload = json.dumps(
+            {
+                "prompt": "tell me about legacytierprobe widgets",
+                "session_id": f"test-{uuid.uuid4().hex}",
+            }
+        )
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=stdin_payload,
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, (
+            "a legacy (pre-memory_tier) DB must degrade to the unfiltered "
+            "query, not silently return zero recall"
+        )
+        payload = json.loads(result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        assert "Legacy Recall Target" in context
+
+    def test_vector_backend_hot_tier_filter_drops_non_hot_hit(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1120 (orchestrator review finding) -- the FTS5
+        branch enforces `memory_tier = 'hot'` INSIDE its own SQL, but the
+        vector branch merged `VECTOR_RESULTS` straight in with no
+        equivalent check: under `SEARCH_BACKEND=vector` a warm/cold page
+        could bypass the filter entirely -- a dial that looks enforced but
+        silently isn't on that deployed path. This drives the REAL hook
+        end-to-end with a vector hit and proves the shell-side post-filter
+        (a bounded lookup into the SAME `wiki-index.db` verdict, keyed on
+        the <=3 filenames the vector backend actually returned) drops a
+        non-hot hit and lets a hot one through.
+
+        chromadb's real embedder can't run in this container (the ONNX
+        weights host is blocked), so `query_vector_index` is stubbed via
+        `ATHENAEUM_SRC` pointing at a fake `src/athenaeum/search.py` that
+        returns a fixed row -- the hook's own inline python snippet
+        already supports loading an arbitrary `search.py` by path (its
+        `importlib.util.spec_from_file_location` branch), so no real
+        embedding is needed to prove the SHELL-SIDE filter works.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "hot-vectester.md").write_text(
+            "---\n"
+            "name: Vectester Hot Page\n"
+            "tags: [vectester]\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Unrelated body text, not matched by the probe query below.\n"
+        )
+        (wiki / "warm-vectester.md").write_text(
+            "---\n"
+            "name: Vectester Warm Page\n"
+            "tags: [vectester]\n"
+            "memory_tier: warm\n"
+            "---\n\n"
+            "Unrelated body text, not matched by the probe query below.\n"
+        )
+        self._seed_index(hook_env)
+
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        (cache_dir / "wiki-vectors").mkdir(parents=True, exist_ok=True)
+        config_env = cache_dir / "config.env"
+        config_env.write_text(
+            config_env.read_text().replace(
+                "SEARCH_BACKEND=fts5", "SEARCH_BACKEND=vector"
+            )
+        )
+
+        # Fake search.py module: query_vector_index ignores the query text
+        # entirely and returns a FIXED row -- deterministic, no embedder.
+        fake_pkg = tmp_path / "fake-vector-src" / "src" / "athenaeum"
+        fake_pkg.mkdir(parents=True)
+        vector_env = dict(hook_env)
+        vector_env["ATHENAEUM_SRC"] = str(fake_pkg.parent.parent)
+
+        def _set_stub_hit(filename: str, name: str) -> None:
+            (fake_pkg / "search.py").write_text(
+                "def query_vector_index(query, cache_dir, n=3, exclude=None):\n"
+                "    exclude = exclude or set()\n"
+                f"    hits = [({filename!r}, {name!r}, 0.9)]\n"
+                "    return [h for h in hits if h[0] not in exclude][:n]\n"
+            )
+
+        # A prompt whose terms appear in neither page's body/frontmatter --
+        # isolates the assertion to the vector path; FTS5 contributes
+        # nothing, so a leak can only come from the vector branch.
+        probe_prompt = "zzznonmatchingzzz term completely unrelated content"
+
+        _set_stub_hit("warm-vectester.md", "Vectester Warm Page")
+        warm_result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert warm_result.returncode == 0, f"stderr: {warm_result.stderr}"
+        assert warm_result.stdout == "", (
+            "a warm-tier vector hit must be dropped by the shell-side "
+            f"post-filter, not surfaced -- got: {warm_result.stdout!r}"
+        )
+
+        # Positive control: same stub, hot page instead -- proves the
+        # filter isn't a no-op that happens to eat every vector hit.
+        _set_stub_hit("hot-vectester.md", "Vectester Hot Page")
+        hot_result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert hot_result.returncode == 0, f"stderr: {hot_result.stderr}"
+        assert hot_result.stdout, "expected a hot-tier vector hit to surface"
+        payload = json.loads(hot_result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        assert "Vectester Hot Page" in context
 
 
 class TestPreCompactSave:

@@ -1059,9 +1059,9 @@ class TestFTS5Incremental:
         rows_built = {"n": 0}
         orig_row = FTS5Backend._row_for
 
-        def counting_row(name, path, text, meta):  # type: ignore[no-untyped-def]
+        def counting_row(name, path, text, meta, **kwargs):  # type: ignore[no-untyped-def]
             rows_built["n"] += 1
-            return orig_row(name, path, text, meta)
+            return orig_row(name, path, text, meta, **kwargs)
 
         monkeypatch.setattr(FTS5Backend, "_row_for", staticmethod(counting_row))
 
@@ -1542,9 +1542,9 @@ class TestStatPreFilter:
         rows_built = {"n": 0}
         orig_row = FTS5Backend._row_for
 
-        def counting_row(name, path, text, meta):  # type: ignore[no-untyped-def]
+        def counting_row(name, path, text, meta, **kwargs):  # type: ignore[no-untyped-def]
             rows_built["n"] += 1
-            return orig_row(name, path, text, meta)
+            return orig_row(name, path, text, meta, **kwargs)
 
         monkeypatch.setattr(FTS5Backend, "_row_for", staticmethod(counting_row))
         count = FTS5Backend().build_index(wiki_with_pages, cache)
@@ -1768,9 +1768,9 @@ class TestFullReHashBackstopFTS5:
         rows_built = {"n": 0}
         orig_row = FTS5Backend._row_for
 
-        def counting_row(name, path, text, meta):  # type: ignore[no-untyped-def]
+        def counting_row(name, path, text, meta, **kwargs):  # type: ignore[no-untyped-def]
             rows_built["n"] += 1
-            return orig_row(name, path, text, meta)
+            return orig_row(name, path, text, meta, **kwargs)
 
         monkeypatch.setattr(FTS5Backend, "_row_for", staticmethod(counting_row))
         count = FTS5Backend().build_index(wiki_with_pages, cache)

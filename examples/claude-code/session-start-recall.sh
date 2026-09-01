@@ -12,6 +12,14 @@
 #    currently not supported".
 # 4. Builds the configured search index (FTS5 and/or vector).
 #
+# Issue athenaeum#1120 (AC2 — checked, unaffected): this hook writes
+# stderr diagnostics only and emits no `hookSpecificOutput`/
+# `additionalContext` at all, so it is not an unprompted-push path — it has
+# no `hot`-tier gap and no push-budget gap to route. It IS the writer for
+# the `memory_tier`-carrying FTS5 index (`athenaeum.search.build_fts5_index`,
+# schema v4) and for `PUSH_TOKEN_BUDGET` in config.env, both of which
+# `user-prompt-recall.sh` (the actual unprompted-push hook) reads.
+#
 # Configure in ~/.claude/settings.json:
 #   "hooks": {
 #     "SessionStart": [{
@@ -86,6 +94,23 @@ with open(env_path, 'w') as f:
     if isinstance(cfg.get('vector'), dict):
         provider = cfg['vector'].get('provider', 'chromadb')
     f.write(f'VECTOR_PROVIDER={provider}\n')
+    # Issue athenaeum#1120: cache the yaml-configured push-per-turn budget so
+    # the per-turn hook can enforce it without a Python import. Deliberately
+    # the hook-local name PUSH_TOKEN_BUDGET, NOT ATHENAEUM_PUSH_TOKEN_BUDGET
+    # — this file is sourced under \`set -a\` (auto-export) by both hooks, so
+    # writing the library's own env-var name here would inject a resolved
+    # value into every child process and silently shadow
+    # athenaeum.config.resolve_push_token_budget's own env>yaml precedence
+    # for anything downstream (e.g. the MCP server's unprompted-recall path).
+    # Only the yaml value is resolved here — env override is applied at
+    # per-turn-hook runtime, not baked in at session start.
+    tokens_per_turn = 1200
+    push_budget_cfg = cfg.get('push_budget')
+    if isinstance(push_budget_cfg, dict):
+        raw = push_budget_cfg.get('tokens_per_turn')
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+            tokens_per_turn = raw
+    f.write(f'PUSH_TOKEN_BUDGET={tokens_per_turn}\n')
 " "$KNOWLEDGE_ROOT" "$CONFIG_ENV" 2>/dev/null; then
   _read_config_ok=true
 fi
@@ -95,24 +120,38 @@ if [ "$_read_config_ok" = false ]; then
   _auto_recall="true"
   _search_backend="fts5"
   _vector_provider="chromadb"
+  # Issue athenaeum#1120: same yaml-only resolution as the python path above
+  # — env override happens at per-turn-hook runtime, not here.
+  _push_budget="1200"
   if [ -f "$CONFIG_YAML" ]; then
     _in_vector=false
+    _in_push_budget=false
     while IFS= read -r line; do
       line="${line%%#*}"
       case "$line" in
-        auto_recall:*)    _auto_recall="$(echo "${line#auto_recall:}" | tr -d ' ')"; _in_vector=false ;;
-        search_backend:*) _search_backend="$(echo "${line#search_backend:}" | tr -d ' ')"; _in_vector=false ;;
-        vector:*)         _in_vector=true ;;
+        auto_recall:*)    _auto_recall="$(echo "${line#auto_recall:}" | tr -d ' ')"; _in_vector=false; _in_push_budget=false ;;
+        search_backend:*) _search_backend="$(echo "${line#search_backend:}" | tr -d ' ')"; _in_vector=false; _in_push_budget=false ;;
+        vector:*)         _in_vector=true; _in_push_budget=false ;;
+        push_budget:*)    _in_push_budget=true; _in_vector=false ;;
         "  provider:"*|"    provider:"*)
           [ "$_in_vector" = true ] && _vector_provider="$(echo "${line#*provider:}" | tr -d ' ')" ;;
-        *) case "$line" in "  "*|"	"*) ;; ?*) _in_vector=false ;; esac ;;
+        "  tokens_per_turn:"*|"    tokens_per_turn:"*)
+          [ "$_in_push_budget" = true ] && _push_budget="$(echo "${line#*tokens_per_turn:}" | tr -d ' ')" ;;
+        *) case "$line" in "  "*|"	"*) ;; ?*) _in_vector=false; _in_push_budget=false ;; esac ;;
       esac
     done < "$CONFIG_YAML"
   fi
+  # Guard against a non-numeric/<=0 yaml value, same fallthrough
+  # athenaeum.config.resolve_push_token_budget applies.
+  case "$_push_budget" in
+    ''|*[!0-9]*) _push_budget="1200" ;;
+    0) _push_budget="1200" ;;
+  esac
   {
     echo "AUTO_RECALL=${_auto_recall}"
     echo "SEARCH_BACKEND=${_search_backend}"
     echo "VECTOR_PROVIDER=${_vector_provider}"
+    echo "PUSH_TOKEN_BUDGET=${_push_budget}"
   } > "$CONFIG_ENV"
 fi
 

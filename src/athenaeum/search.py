@@ -963,22 +963,30 @@ class FTS5Backend:
     # incremental build and turn every audience-filtered query into a silent
     # ``OperationalError`` → empty recall. Version 2 == the ``audience``-aware
     # shape (athenaeum#312); version 3 == the ``type``-aware shape (issue athenaeum#964,
-    # AC amendment 1) — an unchanged page's stat-matched incremental scan never
-    # re-reads its frontmatter, so without this bump a contract change ("type
-    # is now filterable") would silently serve the old (missing) column value
-    # for every page an ordinary incremental build leaves untouched.
-    _SCHEMA_VERSION = 3
+    # AC amendment 1); version 4 == the ``memory_tier``-aware shape (issue
+    # athenaeum#1120) — the index-carried tier verdict the unprompted-recall
+    # shell hook filters on directly (``memory_tiers.resolve_tier`` runs once
+    # here, at build time, so the hook never has to reimplement tier
+    # resolution in shell). Exactly like the version-2/version-3 bumps above,
+    # an unchanged page's stat-matched incremental scan never re-reads its
+    # frontmatter, so without this bump a contract change ("tier is now
+    # filterable") would silently serve the old (missing) column value — i.e.
+    # NULL, which never equals ``'hot'`` — for every page an ordinary
+    # incremental build leaves untouched, turning tier-filtered recall
+    # silently empty for exactly the pages that hadn't changed.
+    _SCHEMA_VERSION = 4
 
-    # SQL fragments shared by the full and incremental build paths. ``type`` is
-    # UNINDEXED (out of the BM25 term space, exact-matched via WHERE) — same
-    # storage shape ``audience`` already uses (issue athenaeum#964).
+    # SQL fragments shared by the full and incremental build paths. ``type``
+    # and ``memory_tier`` are both UNINDEXED (out of the BM25 term space,
+    # exact-matched via WHERE) — same storage shape ``audience`` established
+    # (issue athenaeum#312) and ``type`` followed (issue athenaeum#964).
     _CREATE_SQL = (
         "CREATE VIRTUAL TABLE IF NOT EXISTS wiki USING fts5"
         "(filename, name, tags, aliases, description, audience UNINDEXED, "
-        "type UNINDEXED, "
+        "type UNINDEXED, memory_tier UNINDEXED, "
         'tokenize="porter unicode61")'
     )
-    _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?,?)"
+    _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?,?,?)"
 
     @staticmethod
     def _db_schema_version(db_path: Path) -> int:
@@ -1009,8 +1017,13 @@ class FTS5Backend:
 
     @staticmethod
     def _row_for(
-        indexed_name: str, path: Path, text: str, meta: dict[str, Any]
-    ) -> tuple[str, str, str, str, str, str, str]:
+        indexed_name: str,
+        path: Path,
+        text: str,
+        meta: dict[str, Any],
+        *,
+        config: dict[str, Any] | None = None,
+    ) -> tuple[str, str, str, str, str, str, str, str]:
         """Build the FTS5 row tuple for one page."""
         name, tags, aliases, description = _extract_frontmatter_fields(text)
         if not name:
@@ -1027,7 +1040,27 @@ class FTS5Backend:
         # either the top-level or nested ``metadata:`` shape is found the
         # same way regardless of which scanner produced ``meta``.
         page_type = resolve_page_type(meta)
-        return (indexed_name, name, tags, aliases, description, audience, page_type)
+        # Issue athenaeum#1120: resolve the retrieval-cost tier ONCE here, at
+        # index-build time, and store the verdict so the unprompted-recall
+        # shell hook can filter ``WHERE memory_tier = 'hot'`` directly instead
+        # of reimplementing ``memory_tiers.resolve_tier``'s cascade in shell.
+        # Function-local import: ``athenaeum.memory_tiers`` is an L4
+        # domain/pipeline module and this module's docstring states L3 never
+        # imports L4 at module scope (mirrors the pattern ``resolve_tier``
+        # itself already uses for its own ``athenaeum.storage`` import).
+        from athenaeum.memory_tiers import resolve_tier
+
+        memory_tier = resolve_tier(meta, config=config)
+        return (
+            indexed_name,
+            name,
+            tags,
+            aliases,
+            description,
+            audience,
+            page_type,
+            memory_tier,
+        )
 
     def build_index(
         self,
@@ -1153,7 +1186,7 @@ class FTS5Backend:
                 conn.execute(self._CREATE_SQL)
                 self._stamp_schema_version(conn)  # issue athenaeum#530 (M7)
                 rows = [
-                    self._row_for(name, path, text, meta)
+                    self._row_for(name, path, text, meta, config=config)
                     for name, path, _h, text, meta, _s in current
                 ]
                 conn.executemany(self._INSERT_SQL, rows)
@@ -1185,7 +1218,7 @@ class FTS5Backend:
             reindex = set(added) | set(changed)
             if reindex:
                 rows = [
-                    self._row_for(name, path, text, meta)
+                    self._row_for(name, path, text, meta, config=config)
                     for name, path, _h, text, meta, _s in current
                     if name in reindex
                 ]

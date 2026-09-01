@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The unprompted-recall `UserPromptSubmit` hook now enforces the same
+  `hot`-tier filter and `push_budget.tokens_per_turn` budget as the
+  prompted `recall` path (athenaeum#1120).** `examples/claude-code/user-prompt-recall.sh`
+  queried the FTS5 index directly and never called `recall_search`, so it
+  never saw the `hot`-tier filter or the token budget that athenaeum#718 /
+  PR athenaeum#1117 built — `push_budget.tokens_per_turn` was a real, tested dial
+  nothing unprompted actually turned. Fixed with an index-carried tier
+  verdict plus shell-native budget enforcement rather than a thin-CLI
+  wrapper: measured on-box, `import athenaeum.mcp_server` costs
+  ~360-450ms warm (~1090ms cold) against this hook's `<50ms` FTS5-only
+  contract, an 8-10x regression on every turn of every session. Instead,
+  `athenaeum.memory_tiers.resolve_tier` now runs ONCE at index-build time
+  (`athenaeum.search.FTS5Backend._row_for`, FTS5 schema bumped 3 -> 4) and
+  stores its verdict in a new `memory_tier UNINDEXED` column — the same
+  pattern `audience` (athenaeum#312) and `type` (athenaeum#964) already
+  established so shell/SQL can filter without Python. The hook adds
+  `AND memory_tier = 'hot'` to its SQL and a small `awk` pass that greedily
+  packs candidates into the token budget in rank order, skipping (never
+  truncating) an entry that would exceed it — mirroring
+  `memory_tiers.select_for_push`. The tier model itself is NOT
+  reimplemented in shell; only the budget-accumulation loop and
+  `push_metrics.estimate_tokens`'s `len(text)//4` formula are duplicated,
+  as a single arithmetic expression. `session-start-recall.sh` now also
+  caches the resolved budget as `PUSH_TOKEN_BUDGET` in `config.env`
+  (deliberately not the library's own `ATHENAEUM_PUSH_TOKEN_BUDGET` name,
+  since `config.env` is sourced under `set -a` and would otherwise shadow
+  the library's own env-over-yaml precedence for every child process). A
+  DB built by an older athenaeum (no `memory_tier` column) is detected via
+  a `PRAGMA table_info` probe and falls back to the pre-athenaeum#1120 unfiltered
+  query rather than raising `OperationalError` into a silent zero-recall.
+
 - **Wiki-page dedup cut over to the five-verdict comparator; its own old
   duplicate-detection algorithm is retired, not run alongside it
   (athenaeum#715).** `athenaeum.wiki_dedupe.propose_wiki_page_merges` used to
