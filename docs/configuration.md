@@ -2209,6 +2209,48 @@ incrementally in the same call — the manifest add/changed/removed delta
 caller observes the record gone from content AND from federated recall
 after one call, with no separate reindex step to remember.
 
+## PII scan exclusion — machine-generated audit logs (athenaeum#1273)
+
+`athenaeum storage lint-pii` walks every file under `wiki/` (and, separately,
+`raw/`) for an inline email/phone. A handful of files under `wiki/` are
+machine-generated audit logs whose content the shape-rule engine regenerates
+wholesale on a schedule — `_shape_rule_dispositions.jsonl` is the confirmed
+case: a 341+ MB, ~1.49M-record log of epoch-millisecond timestamps. Running
+the scan over it made the command itself unusable (two full runs killed at
+68 and 106 minutes) and made a clean exit structurally unreachable: the real
+detectors misread its timestamps as 100,533 phone-axis matches (2,583
+distinct values), and because the file regenerates nightly with fresh
+timestamps, no PII allowlist entry (issue athenaeum#936) can ever
+stay valid against it — today's allowlist is stale tomorrow by construction.
+
+The fix is a filename-only exclusion, not an allowlist entry: the file is
+never opened in the first place, and every excluded path is printed to
+stderr (and listed under `lint-pii --json`'s `excluded` key) — a silent skip
+inside a PII scanner would be its own hazard.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| PII scan exclude (extra) | — (yaml-only) | `storage.pii_scan_exclude` | `[]` | Operator-supplied ADDITIONAL filenames (matched by name, not full path) to exclude from `lint-pii`, on top of the shipped default. See [`resolve_pii_scan_exclude`](../src/athenaeum/config.py). |
+
+The shipped default — `_shape_rule_dispositions.jsonl` only — lives in code
+as [`athenaeum.pii.DEFAULT_PII_SCAN_EXCLUDE_FILENAMES`](../src/athenaeum/pii.py)
+rather than `athenaeum.yaml`, so an unconfigured install is still protected
+(no seed in `_DEFAULTS`, issue athenaeum#231). `storage.pii_scan_exclude` is
+ADDITIVE — it can only add to that default, never remove from it:
+
+```yaml
+storage:
+  pii_scan_exclude:
+    - _some_other_machine_log.jsonl
+```
+
+`_corrections_applied.jsonl` and `_shape_rules_applied.jsonl` were checked
+while fixing this issue and are NOT in the shipped default: both are small
+run-summary logs (~104KB/23 lines and ~16KB/89 lines on the live corpus, not
+per-record like `_shape_rule_dispositions.jsonl`) with no observed email
+matches on the live corpus. An operator who later finds either noisy can add
+it via the key above without a code change.
+
 ## Dimension registry (athenaeum#714)
 
 Root of the memory-model v6 dimension chain (child of epic athenaeum#709;
