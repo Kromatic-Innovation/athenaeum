@@ -4,7 +4,10 @@
 same code through `IngestResult.exit_code` / `SessionEndResult.exit_code`)
 returns one of the codes below. This is the canonical reference — other docs
 ([configuration.md](configuration.md)) link here instead of restating the
-table.
+table. `athenaeum entity` has its own, separate exit-code contract — see
+"`athenaeum entity`" further down — documented here rather than in a second
+file so a caller checking one command's codes doesn't miss that another
+command's `1` means something else.
 
 | Code | Name | Meaning | Resumable? |
 |---|---|---|---|
@@ -102,6 +105,47 @@ change-gated reindex step (`should_reindex`, also guarded by
 not change. Neither path narrows what it reports beyond the exit code
 itself; `IngestResult`/`SessionEndResult`'s other fields (`compiled`,
 `new_or_changed`, etc.) are computed exactly as before.
+
+## `athenaeum entity`
+
+A separate command family from `run()`'s cascade above — its own small
+integer space, not a continuation of the table at the top of this doc.
+
+| Code | Name | Meaning |
+|---|---|---|
+| `0` | — | The uid resolved to a page; the record printed to stdout (redaction markers in place of withheld fields unless `--include-excluded`). |
+| `1` | `EXIT_NOT_FOUND` | The uid does not resolve to any page. |
+| `70` | `EXIT_INTERNAL_ERROR` | The uid DID resolve, but something else in the read/serialize path failed (e.g. an unserializable frontmatter value) before a full record could be printed. |
+
+### Why `1` and `70` are two different codes (issue athenaeum#1270)
+
+Before this issue, `_read_entity_to_stdout` (`src/athenaeum/_cmd_query.py`)
+had no `try`/`except` around its `json.dumps(result.to_dict(), ...)` call. A
+page whose frontmatter carried a raw `datetime.date`/`datetime` value (a bare
+YAML date, unquoted) made that call raise `TypeError: Object of type date is
+not JSON serializable`, which propagated uncaught out of `main()` and exited
+`1` — the exact SAME code the "no page for this uid" branch already
+returned. A caller keying off the exit status alone (`google-contact-sync`'s
+`read_person()` maps every nonzero exit that isn't argparse's `invalid
+choice` to "unknown uid") could not tell an existing-but-broken record from a
+genuinely absent one; a person who exists but holds a `date` value read as
+not existing, silently.
+
+The `TypeError` itself is fixed independently (issue athenaeum#1110 — a
+`default=` handler coercing `date`/`datetime` to ISO-8601). Fixing only that
+would leave the collision itself in place: the next unserializable type, or
+any other read-path failure past the not-found check, would reproduce this
+exact bug. `_read_entity_to_stdout` now wraps everything past the not-found
+check in `try`/`except Exception`, returning `EXIT_INTERNAL_ERROR` (`70`,
+BSD `sysexits.h`'s `EX_SOFTWARE`) instead of letting it fall through to
+Python's default uncaught-exception exit status. `EXIT_NOT_FOUND` (`1`) and
+`EXIT_INTERNAL_ERROR` (`70`) are both defined in `src/athenaeum/_cli_shared.py`
+next to `EXIT_LOCK_HELD`.
+
+This table's `1` is unrelated to the `run()` table's `1` above (`run()`'s
+`1` means "a file failed processing") — each command family owns its own
+small-integer contract; nothing here is a claim that the two `1`s share
+meaning across commands.
 
 ## Consumers
 
