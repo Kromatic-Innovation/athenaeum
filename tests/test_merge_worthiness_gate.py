@@ -20,7 +20,14 @@ This suite covers:
     proving the suppression is REAL (no LLM call) and that the knob being
     off leaves behaviour byte-identical to before this gate existed (AC6);
   - a held-out fixture set of known-good merges that must NEVER be
-    suppressed (AC4).
+    suppressed (AC4), including the coincidental-short-line and
+    seam-stitch shapes named in QA round 2;
+  - the two false-suppression regressions QA round 2 reproduced directly
+    against ``_merge_worthiness_fully_contained`` (a coincidental match on
+    short/generic units; a match stitched across a line boundary the page
+    deliberately drew), and the two conservative fixes that close them
+    (per-line containment; a minimum verifiable-unit length that FAILS a
+    too-short unit rather than excluding it from the check).
 
 No LLM, no network.
 """
@@ -40,6 +47,7 @@ from athenaeum.config import resolve_merge_worthiness_gate_enabled
 from athenaeum.models import EntityAction, EntityIndex, RawFile
 from athenaeum.tiers import (
     _MAX_EXISTING_BODY_CHARS,
+    _MERGE_WORTHINESS_MIN_UNIT_CHARS,
     _merge_worthiness_fully_contained,
     _normalize_for_containment,
     check_merge_worthiness_gate,
@@ -141,8 +149,10 @@ class TestNormalizeForContainment:
 
 class TestMergeWorthinessFullyContained:
     def test_full_containment(self) -> None:
-        body = "Acme Corp is a fintech startup.\nFounded in 2019.\n"
-        obs = "Acme Corp is a fintech startup.\nFounded in 2019."
+        # Both lines are >= _MERGE_WORTHINESS_MIN_UNIT_CHARS normalized
+        # chars, so this exercises real containment, not the length gate.
+        body = "Acme Corp is a fintech startup.\nThe company was founded back in 2019.\n"
+        obs = "Acme Corp is a fintech startup.\nThe company was founded back in 2019."
         assert _merge_worthiness_fully_contained(obs, body) is True
 
     def test_partial_novelty_one_absent_line_fails_whole_check(self) -> None:
@@ -151,7 +161,10 @@ class TestMergeWorthinessFullyContained:
         assert _merge_worthiness_fully_contained(obs, body) is False
 
     def test_empty_body_never_contains_nonempty_observations(self) -> None:
-        assert _merge_worthiness_fully_contained("New fact.", "") is False
+        # Long enough to isolate "empty body" as the reason, not shortness.
+        assert (
+            _merge_worthiness_fully_contained("This is a brand-new fact worth noting.", "") is False
+        )
 
     def test_vacuous_observations_returns_true(self) -> None:
         """An empty observation carries no fact to lose (boundary 7)."""
@@ -207,6 +220,104 @@ class TestMergeWorthinessFullyContained:
 
 
 # ---------------------------------------------------------------------------
+# QA round 2 (post-d8939d1): two reproduced false-suppression defects and
+# their conservative fixes.
+#
+# (1a) Short/generic units matched by coincidence -- fixed by
+#      _MERGE_WORTHINESS_MIN_UNIT_CHARS: a unit shorter than that FAILS the
+#      check (dispatches the merge) rather than being excluded from it.
+# (1b) Whitespace-collapse stitched a match across a line boundary the page
+#      deliberately drew -- fixed by checking containment against a single
+#      normalized body LINE, never the whole body flattened into one
+#      string.
+# ---------------------------------------------------------------------------
+
+
+class TestQARound2FalseSuppressionRegressions:
+    def test_1a_short_generic_units_no_longer_coincidentally_match(self) -> None:
+        """Verbatim reproduction from QA round 2: three short, generic
+        units ("2023", "50", "Austin") each happen to appear somewhere in
+        an ordinary ~350-char page, but none is >= 24 normalized chars, so
+        none is VERIFIABLE evidence of containment -- the whole check must
+        fail (dispatch), not silently treat coincidence as coverage."""
+        body = (
+            "Acme Corp is a fintech startup founded in 2019. It reported revenue "
+            "growth in 2023, driven by international expansion. Employee count "
+            "reached 50 by year end. The main office is located in Austin, with "
+            "a satellite office opened later. The founder previously worked at a bank."
+        )
+        obs = "2023\n50\nAustin"
+        assert _merge_worthiness_fully_contained(obs, body) is False
+
+    def test_1b_a_match_stitched_across_a_line_boundary_is_not_contained(self) -> None:
+        """Reconstruction of QA round 2's second reproduction. The page
+        draws a real boundary between two unrelated claims (a genuine line
+        break -- a blank line, a list item, or, as here, two separate
+        observation lines merged onto the page as two separate lines): one
+        line says the report was filed on time, a DIFFERENT line says the
+        deadline was missed. The unit under test is only a contiguous
+        substring of the OLD flattened whole-body string, stitched across
+        that boundary via whitespace-collapse -- it is not a substring of
+        either line alone, so per-line containment must reject it."""
+        body = "Filed the Q1 report on time.\nMissed the Q1 deadline for the follow-up."
+        obs = "time. Missed the Q1 deadline"
+        assert _merge_worthiness_fully_contained(obs, body) is False
+
+    def test_fix_a_boundary_unit_spans_two_body_lines_is_not_contained(self) -> None:
+        """Dedicated Fix A boundary test (distinct fixture from the 1b
+        regression above): an observation unit whose text exists in the
+        body ONLY by spanning two lines must return False, even though it
+        WOULD be a contiguous substring of the old flattened whole-body
+        string."""
+        body = (
+            "The office lease was renewed last month.\n"
+            "Expansion plans were also announced for next year."
+        )
+        obs = "last month. Expansion plans were also announced"
+        assert _merge_worthiness_fully_contained(obs, body) is False
+
+    def test_fix_a_does_not_affect_a_single_line_markdown_paragraph(self) -> None:
+        """Regression guard for Fix A's own stated safety property: an
+        ordinary markdown paragraph is stored as ONE line, so a unit fully
+        contained within that one line is unaffected by the line-boundary
+        restriction."""
+        body = "Acme Corp is a fintech startup based in Austin, founded in 2019."
+        obs = "a fintech startup based in Austin, founded in 2019."
+        assert _merge_worthiness_fully_contained(obs, body) is True
+
+    def test_fix_b_direction_long_contained_line_plus_short_novel_line(self) -> None:
+        """THE decisive test for Fix B's direction (QA round 2's own
+        framing): an observation of one long line that IS contained plus
+        one short line that is NOT on the page must return False. If the
+        short unit were EXCLUDED from the check (the dangerous direction
+        the module docstring warns against) rather than made to FAIL it,
+        this would wrongly return True and silently destroy the novel
+        short fact."""
+        long_line = "This is a sufficiently long observation line already on the page verbatim."
+        body = long_line
+        obs = long_line + "\nBrand new short fact"
+        assert _merge_worthiness_fully_contained(obs, body) is False
+
+    def test_unit_at_exact_min_length_threshold_is_verifiable(self) -> None:
+        """Boundary, no off-by-one: a unit whose NORMALIZED length is
+        exactly _MERGE_WORTHINESS_MIN_UNIT_CHARS is treated as verifiable
+        (checked for containment normally, and found here)."""
+        unit = "x" * _MERGE_WORTHINESS_MIN_UNIT_CHARS
+        assert len(unit) == _MERGE_WORTHINESS_MIN_UNIT_CHARS
+        assert _merge_worthiness_fully_contained(unit, unit) is True
+
+    def test_unit_one_under_min_length_threshold_is_unverifiable_even_when_present(
+        self,
+    ) -> None:
+        """Boundary, no off-by-one: a unit one char SHORT of the threshold
+        is NOT verifiable -- the check fails even though the unit is
+        genuinely, literally present in the body."""
+        unit = "x" * (_MERGE_WORTHINESS_MIN_UNIT_CHARS - 1)
+        assert len(unit) == _MERGE_WORTHINESS_MIN_UNIT_CHARS - 1
+        assert _merge_worthiness_fully_contained(unit, unit) is False
+
+
+# ---------------------------------------------------------------------------
 # check_merge_worthiness_gate
 # ---------------------------------------------------------------------------
 
@@ -215,22 +326,35 @@ class TestCheckMergeWorthinessGate:
     def test_full_containment_returns_true(self) -> None:
         action = _update_action(observations="Acme Corp is a fintech startup.")
         existing_body = "Acme Corp is a fintech startup. Founded 2019."
-        assert check_merge_worthiness_gate(action, existing_body, "ref", None) is True
+        assert check_merge_worthiness_gate(action, existing_body, "ref") is True
 
     def test_partial_novelty_returns_false(self) -> None:
-        action = _update_action(observations="Acme Corp is a fintech startup.\nRaised a Series B.")
+        # Second line is >= 24 normalized chars and genuinely absent, so
+        # this exercises real novelty, not the length gate.
+        action = _update_action(
+            observations="Acme Corp is a fintech startup.\nRaised a Series B funding round."
+        )
         existing_body = "Acme Corp is a fintech startup."
-        assert check_merge_worthiness_gate(action, existing_body, "ref", None) is False
+        assert check_merge_worthiness_gate(action, existing_body, "ref") is False
 
     def test_empty_new_page_returns_false(self) -> None:
-        action = _update_action(observations="Something new.")
-        assert check_merge_worthiness_gate(action, "", "ref", None) is False
+        # Long enough to isolate "empty page" as the reason, not shortness.
+        action = _update_action(observations="Something completely new happened here.")
+        assert check_merge_worthiness_gate(action, "", "ref") is False
 
     def test_no_client_parameter_at_all(self) -> None:
         """AC5(a): the function signature cannot accept a client --
         architecturally cannot make an LLM call."""
         params = inspect.signature(check_merge_worthiness_gate).parameters
         assert "client" not in params
+
+    def test_no_config_parameter_at_all(self) -> None:
+        """QA round 2 (Fix C): this gate resolves no knobs of its own --
+        enablement is decided at the call site -- so a ``config`` parameter
+        would have nothing to do, unlike ``check_page_size_gate``, which
+        genuinely resolves two of its own knobs."""
+        params = inspect.signature(check_merge_worthiness_gate).parameters
+        assert "config" not in params
 
     def test_reads_only_the_truncated_window_not_full_body(self) -> None:
         """The decisive test for boundary 5: a fact whose ONLY occurrence
@@ -240,13 +364,17 @@ class TestCheckMergeWorthinessGate:
         padding = "y" * _MAX_EXISTING_BODY_CHARS
         existing_body = padding + fact_line
         action = _update_action(observations=fact_line)
-        assert check_merge_worthiness_gate(action, existing_body, "ref", None) is False
+        assert check_merge_worthiness_gate(action, existing_body, "ref") is False
 
     def test_fires_info_log_with_expected_fields(self, caplog: pytest.LogCaptureFixture) -> None:
-        action = _update_action(name="Acme Corp", observations="Fintech startup.")
-        existing_body = "Fintech startup. Founded 2019."
+        # >= 24 normalized chars, so this exercises the log path via real
+        # containment, not the length gate.
+        action = _update_action(
+            name="Acme Corp", observations="A fintech startup founded in Austin."
+        )
+        existing_body = "A fintech startup founded in Austin. Founded 2019."
         with caplog.at_level(logging.INFO, logger="athenaeum.tiers"):
-            result = check_merge_worthiness_gate(action, existing_body, "sessions/x.md", None)
+            result = check_merge_worthiness_gate(action, existing_body, "sessions/x.md")
         assert result is True
         [record] = [r for r in caplog.records if "merge-worthiness gate" in r.message]
         assert record.levelno == logging.INFO
@@ -257,7 +385,7 @@ class TestCheckMergeWorthinessGate:
     def test_no_log_when_gate_does_not_fire(self, caplog: pytest.LogCaptureFixture) -> None:
         action = _update_action(observations="Something completely absent.")
         with caplog.at_level(logging.INFO, logger="athenaeum.tiers"):
-            result = check_merge_worthiness_gate(action, "unrelated body", "ref", None)
+            result = check_merge_worthiness_gate(action, "unrelated body", "ref")
         assert result is False
         assert not [r for r in caplog.records if "merge-worthiness gate" in r.message]
 
@@ -467,6 +595,32 @@ _KNOWN_GOOD_MERGES: list[tuple[str, str]] = [
         "Customer churn dropped to 2.1% this quarter after the onboarding redesign.",
         "Customer churn was a known problem last year.",
     ),
+    # QA round 2 -- coincidental-short-line shape: every observation line
+    # is short/generic enough that it could coincidentally appear on any
+    # ordinary page; none is >= _MERGE_WORTHINESS_MIN_UNIT_CHARS, so none
+    # is verifiable evidence, and the merge must dispatch.
+    (
+        "2024\n42\nDenver",
+        "The company was founded in 2024. It has 42 employees, based in Denver, and growing fast.",
+    ),
+    (
+        "Q3\n$5M\nTrue",
+        "Q3 results are in. The company raised $5M. True north for the "
+        "team remains customer retention.",
+    ),
+    # QA round 2 -- seam-stitch shape: the observation is only a
+    # contiguous substring of the page once two DIFFERENT lines are
+    # flattened together; it is not a substring of either line alone, so
+    # the merge must dispatch.
+    (
+        "on time. Missed the deadline for the report",
+        "Filed the annual report right on time.\nMissed the deadline for the quarterly filing.",
+    ),
+    (
+        "for the launch. The rollout was delayed by two weeks",
+        "The team finished all prep work for the launch.\n"
+        "The rollout was delayed by two weeks due to a vendor issue.",
+    ),
 ]
 
 
@@ -474,13 +628,12 @@ class TestKnownGoodMergesNeverSuppressed:
     @pytest.mark.parametrize("observations,existing_body", _KNOWN_GOOD_MERGES)
     def test_never_suppressed(self, observations: str, existing_body: str) -> None:
         action = _update_action(observations=observations)
-        assert check_merge_worthiness_gate(action, existing_body, "ref", None) is False
+        assert check_merge_worthiness_gate(action, existing_body, "ref") is False
 
     def test_zero_suppressions_across_whole_set(self) -> None:
         suppressed = [
             (obs, body)
             for obs, body in _KNOWN_GOOD_MERGES
-            if check_merge_worthiness_gate(_update_action(observations=obs), body, "ref", None)
-            is True
+            if check_merge_worthiness_gate(_update_action(observations=obs), body, "ref") is True
         ]
         assert suppressed == []
