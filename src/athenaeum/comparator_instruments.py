@@ -138,6 +138,7 @@ from athenaeum.comparator import (
     VERDICT_DISTINCT,
     ComparatorPage,
     ContentRelation,
+    begin_content_relation_unavailable_tracking,
     content_relation,
     flush_content_relation_unavailable_warning,
 )
@@ -593,34 +594,41 @@ def run_sibling_widening(
     skipped_over_budget = 0
     proposals: list[WideningProposal] = []
 
-    for candidate in candidates:
-        pair_key = make_pair_key(candidate.page_a_id, candidate.page_b_id)
-        status = get_verdict_status(wiki_root, pair_key)
-        if status["decided"] and status["fresh"]:
-            continue
+    # Issue athenaeum#1245 (QA review finding 2): reset this pass's own
+    # content_relation-unavailable count/latch before the loop starts, so this
+    # pass reports its OWN occurrences even if an earlier pass already flushed
+    # in this same process.
+    begin_content_relation_unavailable_tracking()
+    try:
+        for candidate in candidates:
+            pair_key = make_pair_key(candidate.page_a_id, candidate.page_b_id)
+            status = get_verdict_status(wiki_root, pair_key)
+            if status["decided"] and status["fresh"]:
+                continue
 
-        if spent >= budget:
-            skipped_over_budget += 1
-            continue
+            if spent >= budget:
+                skipped_over_budget += 1
+                continue
 
-        page_a, page_b = page_lookup[(candidate.page_a_id, candidate.page_b_id)]
-        result = content_relation(page_a, page_b, client, config=config, usage=usage)
-        spent += 1
+            page_a, page_b = page_lookup[(candidate.page_a_id, candidate.page_b_id)]
+            result = content_relation(page_a, page_b, client, config=config, usage=usage)
+            spent += 1
 
-        if result.relation == ContentRelation.EQUIVALENT:
-            proposals.append(
-                WideningProposal(
-                    page_a_id=candidate.page_a_id,
-                    page_b_id=candidate.page_b_id,
-                    scopes=[candidate.scope_a, candidate.scope_b],
-                    rationale=result.rationale,
+            if result.relation == ContentRelation.EQUIVALENT:
+                proposals.append(
+                    WideningProposal(
+                        page_a_id=candidate.page_a_id,
+                        page_b_id=candidate.page_b_id,
+                        scopes=[candidate.scope_a, candidate.scope_b],
+                        rationale=result.rationale,
+                    )
                 )
-            )
-
-    # Issue athenaeum#1245: summarize any content_relation "LLM unavailable"
-    # occurrences from this sibling-widening pass into ONE WARNING with the
-    # affected-pair count, rather than one unattributable WARNING per pair.
-    flush_content_relation_unavailable_warning()
+    finally:
+        # Issue athenaeum#1245 (QA review finding 1): in a `finally` so a
+        # mid-loop exception still gets a summary WARNING of whatever this
+        # partial pass accumulated, instead of silently discarding the count
+        # along with the exception.
+        flush_content_relation_unavailable_warning()
 
     return {
         "budget": budget,

@@ -129,6 +129,7 @@ from athenaeum.clusters import (
     resolve_cluster_threshold,
 )
 from athenaeum.comparator import (
+    begin_content_relation_unavailable_tracking,
     flush_content_relation_unavailable_warning,
     page_from_path,
     record_comparison,
@@ -577,106 +578,113 @@ def propose_wiki_page_merges(
 
     results: list[dict[str, Any]] = []
 
-    for cluster in clusters:
-        heartbeat.tick(cluster.cluster_id)
-        members = [
-            by_relpath[relpath]
-            for relpath in cluster.member_paths
-            if relpath in by_relpath
-        ]
-        if len(members) < 2:
-            continue
-
-        for am_a, am_b in combinations(members, 2):
-            path_a, path_b = am_a.path.resolve(), am_b.path.resolve()
-            sources = [str(path_a), str(path_b)]
-
-            # Issue athenaeum#433: type-compatibility precheck, kept as a
-            # pre-comparator filter (see module docstring) since the
-            # comparator's own MEMORY_CLASS dimension is not yet ENFORCED.
-            # A cross-class pair is skipped entirely — no proposal, no
-            # ledger entry, no LLM call.
-            rejection = cross_class_precheck(sources)
-            if rejection is not None:
-                log.info(
-                    "wiki-page dedup: cross-class pair skipped (%s): %s / %s",
-                    rejection.reason,
-                    path_a,
-                    path_b,
-                )
+    # Issue athenaeum#1245 (QA review finding 2): reset this pass's own
+    # content_relation-unavailable count/latch before the loop starts, so this
+    # pass reports its OWN occurrences even if an earlier pass already flushed
+    # in this same process.
+    begin_content_relation_unavailable_tracking()
+    try:
+        for cluster in clusters:
+            heartbeat.tick(cluster.cluster_id)
+            members = [
+                by_relpath[relpath]
+                for relpath in cluster.member_paths
+                if relpath in by_relpath
+            ]
+            if len(members) < 2:
                 continue
 
-            try:
-                page_a = page_from_path(path_a)
-                page_b = page_from_path(path_b)
-            except (OSError, UnicodeDecodeError) as exc:
-                log.warning(
-                    "wiki-page dedup: could not read pair for comparison "
-                    "(%s / %s): %s",
-                    path_a,
-                    path_b,
-                    exc,
-                )
-                continue
+            for am_a, am_b in combinations(members, 2):
+                path_a, path_b = am_a.path.resolve(), am_b.path.resolve()
+                sources = [str(path_a), str(path_b)]
 
-            if dry_run:
-                from athenaeum.comparator import compare_pages
-
-                dry_outcome = compare_pages(
-                    page_a, page_b, client=client, config=resolved_config, usage=usage
-                )
-                if dry_outcome.verdict is not None:
-                    results.append(
-                        {
-                            "pair": "|".join(sorted((page_a.id, page_b.id))),
-                            "verdict": dry_outcome.verdict,
-                            "sources": sources,
-                        }
+                # Issue athenaeum#433: type-compatibility precheck, kept as a
+                # pre-comparator filter (see module docstring) since the
+                # comparator's own MEMORY_CLASS dimension is not yet ENFORCED.
+                # A cross-class pair is skipped entirely — no proposal, no
+                # ledger entry, no LLM call.
+                rejection = cross_class_precheck(sources)
+                if rejection is not None:
+                    log.info(
+                        "wiki-page dedup: cross-class pair skipped (%s): %s / %s",
+                        rejection.reason,
+                        path_a,
+                        path_b,
                     )
-                continue
+                    continue
 
-            assert lock is not None  # guarded above
-            record = record_comparison(
-                wiki_root,
-                page_a,
-                page_b,
-                client=client,
-                config=resolved_config,
-                usage=usage,
-                lock=lock,
-            )
-            if not record["ok"] or record.get("skipped") == "fresh":
-                continue
-            outcome = record.get("outcome")
-            if outcome is None:
-                continue
-            effect = apply_verdict_effect(
-                page_a,
-                page_b,
-                outcome,
-                wiki_root=wiki_root,
-                path_a=path_a,
-                path_b=path_b,
-                config=resolved_config,
-            )
-            results.append(
-                {
-                    "pair": record["pair"],
-                    "verdict": record["verdict"],
-                    "action": effect.action,
-                    "sources": sources,
-                }
-            )
-            log.info(
-                "wiki-page dedup: comparator verdict=%s action=%s for %s",
-                record["verdict"],
-                effect.action,
-                record["pair"],
-            )
+                try:
+                    page_a = page_from_path(path_a)
+                    page_b = page_from_path(path_b)
+                except (OSError, UnicodeDecodeError) as exc:
+                    log.warning(
+                        "wiki-page dedup: could not read pair for comparison "
+                        "(%s / %s): %s",
+                        path_a,
+                        path_b,
+                        exc,
+                    )
+                    continue
 
-    # Issue athenaeum#1245: summarize (rather than lose) every content_relation
-    # "no LLM client / call failed" occurrence this pass into ONE WARNING with the
-    # affected-pair count, instead of one unattributable WARNING per pair.
-    flush_content_relation_unavailable_warning()
-    heartbeat.done()
+                if dry_run:
+                    from athenaeum.comparator import compare_pages
+
+                    dry_outcome = compare_pages(
+                        page_a, page_b, client=client, config=resolved_config, usage=usage
+                    )
+                    if dry_outcome.verdict is not None:
+                        results.append(
+                            {
+                                "pair": "|".join(sorted((page_a.id, page_b.id))),
+                                "verdict": dry_outcome.verdict,
+                                "sources": sources,
+                            }
+                        )
+                    continue
+
+                assert lock is not None  # guarded above
+                record = record_comparison(
+                    wiki_root,
+                    page_a,
+                    page_b,
+                    client=client,
+                    config=resolved_config,
+                    usage=usage,
+                    lock=lock,
+                )
+                if not record["ok"] or record.get("skipped") == "fresh":
+                    continue
+                outcome = record.get("outcome")
+                if outcome is None:
+                    continue
+                effect = apply_verdict_effect(
+                    page_a,
+                    page_b,
+                    outcome,
+                    wiki_root=wiki_root,
+                    path_a=path_a,
+                    path_b=path_b,
+                    config=resolved_config,
+                )
+                results.append(
+                    {
+                        "pair": record["pair"],
+                        "verdict": record["verdict"],
+                        "action": effect.action,
+                        "sources": sources,
+                    }
+                )
+                log.info(
+                    "wiki-page dedup: comparator verdict=%s action=%s for %s",
+                    record["verdict"],
+                    effect.action,
+                    record["pair"],
+                )
+    finally:
+        # Issue athenaeum#1245 (QA review finding 1): in a `finally` so a
+        # mid-loop exception (e.g. record_comparison's ledger I/O) still gets a
+        # summary WARNING of whatever this partial pass accumulated, instead of
+        # silently discarding the count along with the exception.
+        flush_content_relation_unavailable_warning()
+        heartbeat.done()
     return results
