@@ -3913,6 +3913,24 @@ def check_page_size_gate(
 # containment, and every ambiguous choice below resolves toward dispatching
 # the merge, never toward suppressing it.
 
+# Minimum normalized-char length an observation unit must have to count as
+# VERIFIABLE evidence of containment (issue athenaeum#1172, QA round 2). A short
+# unit ("2023", "50", "Austin") is cheap to satisfy by coincidence on any
+# ordinary page -- it stays IN the AND-check (excluding it would be the
+# dangerous "assumed covered" direction the module docstring above warns
+# against), but a unit shorter than this is instead treated as NOT
+# VERIFIABLE, which fails the whole check and dispatches the merge. This is
+# the safe direction: failing on a short unit only ever dispatches MORE
+# merges, never suppresses one it shouldn't. 24 is a deliberate, conservative
+# starting value with no corpus measurement behind it -- the repo's nearest
+# precedent, DEFAULT_MENTION_DENSITY_SPECIFICITY_CHARS = 8 (this module,
+# above), is a per-name-key threshold and too permissive for a whole-line
+# containment unit. Tuning this against the live corpus is athenaeum#1251's job,
+# not this issue's -- this stays a plain module constant, not a second
+# config knob, since there is no operator-facing tradeoff to expose until
+# there is measured data to tune it against.
+_MERGE_WORTHINESS_MIN_UNIT_CHARS = 24
+
 
 def _normalize_for_containment(text: str) -> str:
     """Normalize text for exact-substring containment matching (issue athenaeum#1172).
@@ -3933,14 +3951,36 @@ def _merge_worthiness_fully_contained(observations: str, body_window: str) -> bo
     Decomposition unit is the non-blank LINE of ``observations``
     (``.splitlines()``, dropping lines that are blank after ``.strip()``) --
     no sentence/word/shingle splitting. There is deliberately no
-    minimum-length or boilerplate filter on candidate units: excluding a
-    unit would turn "not verified" into "assumed covered", the dangerous
-    direction under the AC4 asymmetry.
+    minimum-length or boilerplate EXCLUSION filter on candidate units:
+    excluding a unit would turn "not verified" into "assumed covered", the
+    dangerous direction under the AC4 asymmetry -- see
+    :data:`_MERGE_WORTHINESS_MIN_UNIT_CHARS` for the (non-excluding) way a
+    short unit is instead handled.
 
     Containment is an exact contiguous substring match after
-    :func:`_normalize_for_containment` -- no fuzzy matching, no stemming, no
-    reordering. Every unit must independently pass (AND over units); one
-    absent unit is enough to fail the whole check.
+    :func:`_normalize_for_containment`, checked against a **single**
+    normalized line of ``body_window`` at a time -- never the whole body
+    flattened into one string (issue athenaeum#1172, QA round 2). Flattening
+    would let ``_normalize_for_containment``'s whitespace-collapse stitch a
+    unit's match together across a boundary the page deliberately drew (a
+    blank line, a heading, a list item) -- e.g. an observation reading
+    "...on time. Missed the deadline" matching across two unrelated
+    sentences that merely happen to sit next to each other once every
+    newline collapses to a space. Requiring containment within one
+    normalized body LINE preserves that boundary; an ordinary markdown
+    paragraph is one line, so normal prose pages are unaffected.
+
+    A unit whose normalized length is below
+    :data:`_MERGE_WORTHINESS_MIN_UNIT_CHARS` is NOT excluded from the
+    check -- it is treated as **not verifiable as contained**, which fails
+    it (and therefore the whole AND-check) regardless of whether it
+    happens to appear in the window. A short unit is cheap to satisfy by
+    coincidence on any ordinary page, so its presence cannot count as
+    evidence; failing it only ever dispatches more merges, never suppresses
+    one it shouldn't (the safe direction).
+
+    Every unit must independently pass (AND over units); one absent or
+    unverifiable unit is enough to fail the whole check.
 
     Vacuous case: if ``observations`` decomposes to zero non-blank units,
     this returns ``True`` (contained) -- an empty observation carries no
@@ -3955,9 +3995,17 @@ def _merge_worthiness_fully_contained(observations: str, body_window: str) -> bo
     if not units:
         return True
 
-    normalized_window = _normalize_for_containment(body_window)
+    normalized_body_lines = [
+        normalized
+        for normalized in (_normalize_for_containment(line) for line in body_window.splitlines())
+        if normalized
+    ]
+
     for unit in units:
-        if _normalize_for_containment(unit) not in normalized_window:
+        normalized_unit = _normalize_for_containment(unit)
+        if len(normalized_unit) < _MERGE_WORTHINESS_MIN_UNIT_CHARS:
+            return False
+        if not any(normalized_unit in body_line for body_line in normalized_body_lines):
             return False
     return True
 
@@ -3966,7 +4014,6 @@ def check_merge_worthiness_gate(
     action: EntityAction,
     existing_body: str,
     source_ref: str,
-    config: dict[str, Any] | None,
 ) -> bool:
     """Deterministic, zero-LLM merge-worthiness containment gate (issue athenaeum#1172).
 
@@ -3975,6 +4022,13 @@ def check_merge_worthiness_gate(
     caller MUST suppress the merge (no LLM call, no write) when this
     returns ``True``. Returns ``False`` otherwise, meaning the merge
     proceeds exactly as before this gate existed.
+
+    Takes no ``config`` -- unlike :func:`check_page_size_gate`, which
+    resolves two of its own knobs internally, this gate resolves nothing:
+    whether it runs at all is already decided by the caller via
+    :func:`~athenaeum.config.resolve_merge_worthiness_gate_enabled` at the
+    call site, so a ``config`` parameter here would have nothing to do
+    (issue athenaeum#1172, QA round 2).
 
     Deliberately returns ``bool``, not an
     :class:`~athenaeum.models.EscalationItem` -- unlike
@@ -4235,7 +4289,7 @@ def tier3_derive_actions(
                 # escalate -- see check_merge_worthiness_gate's docstring).
                 if resolve_merge_worthiness_gate_enabled(
                     config
-                ) and check_merge_worthiness_gate(action, existing_body, raw.ref, config):
+                ) and check_merge_worthiness_gate(action, existing_body, raw.ref):
                     continue
 
                 updated_body, esc = tier3_merge(
