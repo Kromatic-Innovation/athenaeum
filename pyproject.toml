@@ -52,7 +52,7 @@ vector = [
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
-    "ruff==0.16.0",
+    "ruff==0.16.5",
     "fastmcp>=2.0.0,<4.0",
     # athenaeum#1066: emits `::error file=...,line=...::` workflow commands for
     # each failing test under `GITHUB_ACTIONS=true`, which GitHub turns into
@@ -75,7 +75,7 @@ types = [
     # pinned like ruff so results are deterministic run-to-run. mypy IS now a
     # required check — see the ci.yml `types` job (wired into `CI Required`)
     # and [tool.mypy]. The backlog athenaeum#550 sized has been cleared.
-    "mypy==2.3.0",
+    "mypy==2.3.1",
 ]
 bench = [
     # Optional: pytest-benchmark is only needed to run tests/benchmarks/
