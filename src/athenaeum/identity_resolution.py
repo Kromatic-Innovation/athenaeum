@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     # this read path already follows (`mcp_server.py`, `_cmd_query.py`) — the
     # real import stays local to each function that needs it.
     from athenaeum.models import EntityIndex
+    from athenaeum.person_registry import PersonRegistry, PersonRegistryEntry
     from athenaeum.pii import (
         DoNotEmailState,
         ExcludedRecordIndex,
@@ -731,3 +732,76 @@ def resolve_handle_query(
         excluded_index=excluded_index,
         entity_index=entity_index,
     )
+
+
+def resolve_person_mention(
+    mention: str,
+    *,
+    wiki_root: Path,
+    entity_index: "EntityIndex",
+    knowledge_root: Path | None = None,
+    config: dict[str, Any] | None = None,
+    registry: "PersonRegistry | None" = None,
+) -> "PersonRegistryEntry | None":
+    """Resolve a raw-text person MENTION through the consult-only person
+    registry, but only when the ordinary entity index has no entry for it
+    (issue athenaeum#1183 AC2).
+
+    This is the intake-time counterpart to :func:`resolve_handle_query`
+    above: that function resolves a `recall` QUERY that looks like a handle
+    (an email address, a ``registry.json`` value) to person FACTS. This
+    function resolves a plain-text NAME/ALIAS mention encountered during
+    intake against the consult-only person registry directly. It never
+    inspects handle-shape at all — an ordinary name is exactly what it
+    expects.
+
+    **Why check *entity_index* at all, if athenaeum#1183 only withholds `person`
+    from :meth:`~athenaeum.models.EntityIndex.items` (the raw-text MATCHING
+    surface :func:`athenaeum.tiers.tier1_programmatic_match` walks), not
+    from :meth:`~athenaeum.models.EntityIndex.lookup`?** Because
+    :meth:`~athenaeum.models.EntityIndex.lookup` — a single, ADDRESSED
+    name/alias lookup — deliberately KEEPS finding a `type: person` page
+    exactly as before this issue, for every consumer that already
+    name-addresses one (:func:`athenaeum.corrections.resolve_target`, the
+    tier-0 handle-upsert fallback, tier-3's create-name collision check).
+    So on an UNMIGRATED corpus (person pages still physically under the same
+    *wiki_root* `entity_index` scans — the default, see
+    :func:`athenaeum.config.resolve_person_registry_root`), *entity_index*
+    already finds an existing person page and this function correctly
+    returns ``None`` (nothing new to attribute through — the ordinary path
+    already works). The person-registry consult below only pays off once
+    athenaeum#1247 physically relocates person pages OUT of *wiki_root* — at
+    that point *entity_index* (scoped to *wiki_root*) genuinely has no entry
+    for a relocated person, while :class:`~athenaeum.person_registry.PersonRegistry`
+    (pointed at the new root) still does. This is exactly the "only when
+    that person has no entity-index entry" case the issue describes, and
+    exactly the seam athenaeum#1247 needs — checked here so the caller never
+    has to arrange it itself, and so a synthetic fixture can exercise the
+    post-relocation shape today without waiting for athenaeum#1247 to land.
+
+    *registry* lets a caller thread an already-built
+    :class:`~athenaeum.person_registry.PersonRegistry` (the O(corpus) scan
+    cost paid once per run, mirroring *entity_index* itself). ``None`` (the
+    default) builds one from :func:`athenaeum.config.resolve_person_registry_root`
+    — *knowledge_root* is required in that case (``wiki_root.parent`` when
+    the caller has no other knowledge root at hand, matching the convention
+    :func:`athenaeum.librarian.process_one` already uses for
+    ``route_sensitive_values``).
+
+    Returns the matched :class:`~athenaeum.person_registry.PersonRegistryEntry`,
+    or ``None`` when neither index has anything for *mention*.
+    """
+    if entity_index.lookup(mention) is not None:
+        return None
+
+    if registry is None:
+        from athenaeum.config import resolve_person_registry_root
+        from athenaeum.person_registry import PersonRegistry as _PersonRegistry
+
+        root = resolve_person_registry_root(
+            knowledge_root if knowledge_root is not None else wiki_root.parent,
+            config,
+        )
+        registry = _PersonRegistry(root)
+
+    return registry.lookup(mention)
