@@ -1012,7 +1012,71 @@ class CorpusPiiFinding:
     phones: list[str]
 
 
-def iter_corpus_files(wiki_root: Path, *, exclude: Iterable[Path] = ()) -> list[Path]:
+#: Filenames of machine-generated audit logs excluded from the PII scan by
+#: default (issue athenaeum#1273). ``_shape_rule_dispositions.jsonl`` is the
+#: confirmed offender: a 341+ MB, ~1.49M-record log the shape-rule engine
+#: regenerates every nightly run (:mod:`athenaeum.config`'s
+#: ``resolve_rule_proposals_threshold`` docstring already names it as this
+#: engine's own bookkeeping). Measured live: 0 email-axis matches, 100,533
+#: phone-axis matches / 2,583 distinct values, every one an epoch-millisecond
+#: timestamp or a lane/date-concatenated id — never a phone number. An
+#: allowlist entry (athenaeum#936) cannot absorb these: the file regenerates
+#: nightly with fresh timestamps, so the distinct-value set never stabilises
+#: and today's allowlist is stale tomorrow by construction — the right fix is
+#: to not scan a machine audit log for PII at all, not to adjudicate its
+#: output one timestamp at a time. Also makes the CLI itself unusable: two
+#: full runs were killed at 68 and 106 minutes against this one file; scanning
+#: with only it excluded completes in 7.6s. ``_corrections_applied.jsonl`` and
+#: ``_shape_rules_applied.jsonl`` were checked and are NOT included here —
+#: both are small run-summary logs (~104KB/23 lines and ~16KB/89 lines on the
+#: live corpus, not per-record like the file above) with no observed email
+#: matches; an operator who later finds them noisy can add them via
+#: ``storage.pii_scan_exclude`` (:func:`athenaeum.config.resolve_pii_scan_exclude`)
+#: without a code change.
+DEFAULT_PII_SCAN_EXCLUDE_FILENAMES: frozenset[str] = frozenset(
+    {"_shape_rule_dispositions.jsonl"}
+)
+
+
+def resolve_pii_scan_exclude_filenames(config: dict[str, Any] | None) -> frozenset[str]:
+    """Resolve the full active PII-scan filename exclusion set (issue athenaeum#1273).
+
+    Union of :data:`DEFAULT_PII_SCAN_EXCLUDE_FILENAMES` (the known
+    machine-generated audit logs, shipped so every install is protected with
+    no config) and the operator's ``storage.pii_scan_exclude`` additions
+    (:func:`athenaeum.config.resolve_pii_scan_exclude`) — additive, mirroring
+    :func:`athenaeum.config.resolve_google_contact_keys`'s shape: the code
+    default is never something an operator config can silently drop, only add
+    to. Matched by filename only (:func:`iter_corpus_files`'s ``exclude_names``),
+    not full path, so the same exclusion applies wherever a file by that name
+    turns up under the scanned root.
+    """
+    from athenaeum.config import resolve_pii_scan_exclude
+
+    extra = resolve_pii_scan_exclude(config)
+    return DEFAULT_PII_SCAN_EXCLUDE_FILENAMES | {n.strip() for n in extra if n and n.strip()}
+
+
+def scan_excluded_by_name(root: Path, exclude_names: Collection[str]) -> list[Path]:
+    """Return files under *root* skipped from the PII scan by filename exclusion.
+
+    Reporting-only companion to :func:`iter_corpus_files`'s ``exclude_names``
+    (issue athenaeum#1273): a silent skip inside a PII scanner is its own
+    hazard, so ``lint-pii`` calls this to print exactly what it left out and
+    why rather than the exclusion happening invisibly. Missing root or an
+    empty *exclude_names* yields ``[]``.
+    """
+    if not root.is_dir() or not exclude_names:
+        return []
+    return sorted(p for p in root.rglob("*") if p.is_file() and p.name in exclude_names)
+
+
+def iter_corpus_files(
+    wiki_root: Path,
+    *,
+    exclude: Iterable[Path] = (),
+    exclude_names: Collection[str] = (),
+) -> list[Path]:
     """Return every regular file under *wiki_root*, recursively, sorted.
 
     Unlike the entity-page scans (:func:`athenaeum.storage_migrate.iter_entity_pages`,
@@ -1023,13 +1087,20 @@ def iter_corpus_files(wiki_root: Path, *, exclude: Iterable[Path] = ()) -> list[
     files, ``.bak`` backups and anything else living in the corpus are all in
     scope. Missing root yields ``[]`` (never raises).
 
-    *exclude* is the ONE narrow escape hatch (athenaeum#936): the adjudicated
-    allowlist (:func:`load_pii_allowlist`) is by construction a file containing
-    one verbatim contact value per entry, so scanning it would make every
-    adjudicated value a fresh finding and put exit 0 permanently out of reach.
-    Paths are compared after ``resolve()`` so a relative/symlinked spelling of
-    the same file still matches. Nothing else is ever excluded — the sweep's
-    completeness is the whole point of athenaeum#495.
+    *exclude* is the ONE narrow escape hatch athenaeum#936 originally added: the
+    adjudicated allowlist (:func:`load_pii_allowlist`) is by construction a
+    file containing one verbatim contact value per entry, so scanning it would
+    make every adjudicated value a fresh finding and put exit 0 permanently out
+    of reach. Paths are compared after ``resolve()`` so a relative/symlinked
+    spelling of the same file still matches.
+
+    *exclude_names* is the SECOND escape hatch (issue athenaeum#1273): a
+    filename-only exclusion (matched against ``p.name``, not the full
+    resolved path) for machine-generated audit logs that regenerate under a
+    stable name but unstable content — see
+    :func:`resolve_pii_scan_exclude_filenames`. Nothing else is ever
+    excluded — completeness over everything not named here is still the whole
+    point of athenaeum#495.
     """
     if not wiki_root.is_dir():
         return []
@@ -1039,9 +1110,12 @@ def iter_corpus_files(wiki_root: Path, *, exclude: Iterable[Path] = ()) -> list[
             skip.add(p.resolve())
         except OSError:  # pragma: no cover - defensive (unresolvable path)
             continue
+    names_skip = set(exclude_names)
     out: list[Path] = []
     for p in sorted(wiki_root.rglob("*")):
         if not p.is_file():
+            continue
+        if p.name in names_skip:
             continue
         try:
             resolved = p.resolve()
@@ -1053,7 +1127,12 @@ def iter_corpus_files(wiki_root: Path, *, exclude: Iterable[Path] = ()) -> list[
     return out
 
 
-def scan_corpus_pii(wiki_root: Path, *, exclude: Iterable[Path] = ()) -> list[CorpusPiiFinding]:
+def scan_corpus_pii(
+    wiki_root: Path,
+    *,
+    exclude: Iterable[Path] = (),
+    exclude_names: Collection[str] = (),
+) -> list[CorpusPiiFinding]:
     """Scan every file under *wiki_root* for inline email/phone tokens.
 
     Returns one :class:`CorpusPiiFinding` per file that carries any
@@ -1062,11 +1141,13 @@ def scan_corpus_pii(wiki_root: Path, *, exclude: Iterable[Path] = ()) -> list[Co
     treated as findings — the lint is about text-visible contact data, not
     byte-level scanning. A clean corpus returns ``[]``.
 
-    *exclude* is forwarded to :func:`iter_corpus_files` — see its docstring for
-    why the adjudicated allowlist must not scan itself (athenaeum#936).
+    *exclude* and *exclude_names* are forwarded to :func:`iter_corpus_files` —
+    see its docstring for why the adjudicated allowlist must not scan itself
+    (athenaeum#936) and why a machine-generated audit log is excluded by name
+    (athenaeum#1273).
     """
     findings: list[CorpusPiiFinding] = []
-    for path in iter_corpus_files(wiki_root, exclude=exclude):
+    for path in iter_corpus_files(wiki_root, exclude=exclude, exclude_names=exclude_names):
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -4169,6 +4250,9 @@ __all__ = [
     "has_inline_contact_fields",
     "lint_inline_contact_fields",
     "CorpusPiiFinding",
+    "DEFAULT_PII_SCAN_EXCLUDE_FILENAMES",
+    "resolve_pii_scan_exclude_filenames",
+    "scan_excluded_by_name",
     "iter_corpus_files",
     "scan_corpus_pii",
     "default_observation_log_path",

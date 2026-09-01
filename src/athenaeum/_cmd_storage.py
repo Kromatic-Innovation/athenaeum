@@ -56,7 +56,9 @@ from athenaeum.pii import (
     adjudicate_corpus_pii,
     is_pii_class_excluded,
     load_pii_allowlist,
+    resolve_pii_scan_exclude_filenames,
     scan_corpus_pii,
+    scan_excluded_by_name,
 )
 from athenaeum.sensitivity_lint import (
     SensitivityMappingLintResult,
@@ -758,23 +760,55 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
     an operator — and this epic's definition of done — can CITE raw
     retention instead of it going unmeasured; it is reporting, not mutation,
     and carries no allowlist/adjudication of its own.
+
+    issue athenaeum#1273 additionally excludes known machine-generated audit
+    logs (default: :data:`athenaeum.pii.DEFAULT_PII_SCAN_EXCLUDE_FILENAMES`,
+    operator-extendable via ``storage.pii_scan_exclude`` —
+    :func:`athenaeum.config.resolve_pii_scan_exclude`) from BOTH the wiki and
+    raw scans, by filename. Unlike the allowlist, this is not adjudication:
+    ``_shape_rule_dispositions.jsonl`` regenerates nightly with fresh
+    timestamps that a phone-shaped detector misreads by the hundred
+    thousand, so no allowlist entry could ever stay valid, and running the
+    real detectors over it made the command itself unusable (two runs killed
+    at 68 and 106 minutes). Every excluded path is printed to stderr (and
+    listed under the JSON payload's ``excluded`` key) — a silent skip inside
+    a PII scanner is its own hazard.
     """
     knowledge_root = _resolve_knowledge_root(args)
     wiki_root = knowledge_root / "wiki"
     raw_root = knowledge_root / "raw"
+    config = load_config(knowledge_root)
     allowlist_path = getattr(args, "allowlist", None) or (
         wiki_root / PII_ALLOWLIST_FILENAME
     )
     entries, errors = load_pii_allowlist(allowlist_path)
+    # Machine-generated audit logs (issue athenaeum#1273): a filename-only
+    # exclusion for logs like _shape_rule_dispositions.jsonl that regenerate
+    # nightly under a stable name but unstable content, so no allowlist entry
+    # could ever absorb their findings. Reported below rather than skipped
+    # silently.
+    scan_exclude_names = resolve_pii_scan_exclude_filenames(config)
+    excluded_wiki_paths = scan_excluded_by_name(wiki_root, scan_exclude_names)
+    excluded_raw_paths = scan_excluded_by_name(raw_root, scan_exclude_names)
+    for excluded_path in excluded_wiki_paths + excluded_raw_paths:
+        print(
+            f"excluded from PII scan (machine-generated audit log, issue "
+            f"athenaeum#1273): {excluded_path}",
+            file=sys.stderr,
+        )
     # Self-exclusion: scanning the allowlist would make every adjudicated value
     # a fresh finding and put exit 0 permanently out of reach.
-    findings = scan_corpus_pii(wiki_root, exclude=[allowlist_path])
+    findings = scan_corpus_pii(
+        wiki_root, exclude=[allowlist_path], exclude_names=scan_exclude_names
+    )
     result = adjudicate_corpus_pii(findings, entries, errors=errors)
     # raw/ is scanned with the same self-exclusion (defensive: the allowlist
     # is conventionally under wiki/, but an operator-supplied --allowlist
     # could in principle point elsewhere) and NO adjudication — it is a raw
     # count, not a second gate.
-    raw_findings = scan_corpus_pii(raw_root, exclude=[allowlist_path])
+    raw_findings = scan_corpus_pii(
+        raw_root, exclude=[allowlist_path], exclude_names=scan_exclude_names
+    )
 
     for err in result.errors:
         print(f"warning: allowlist entry ignored -- {err}", file=sys.stderr)
@@ -809,7 +843,13 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
         # the two surfaces stay distinguishable rather than summed. No known
         # consumer besides this repo's own test suite depends on the prior
         # bare-list shape (grepped at filing time).
-        payload = {"wiki": wiki_payload, "raw": raw_payload}
+        payload = {
+            "wiki": wiki_payload,
+            "raw": raw_payload,
+            # issue athenaeum#1273: machine-generated audit logs skipped by
+            # filename, reported rather than silently dropped.
+            "excluded": [str(p) for p in excluded_wiki_paths + excluded_raw_paths],
+        }
         sys.stdout.write(json.dumps(payload) + "\n")
         return 0 if result.is_clean else EXIT_PII_FOUND
 

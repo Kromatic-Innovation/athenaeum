@@ -3333,6 +3333,42 @@ def resolve_excluded_read_mapping(config: dict[str, Any] | None) -> dict[str, st
     return mapping
 
 
+def resolve_pii_scan_exclude(config: dict[str, Any] | None) -> list[str]:
+    """Resolve ``storage.pii_scan_exclude`` — extra PII-scan filename exclusions (athenaeum#1273).
+
+    ``storage lint-pii`` walks every file under ``wiki/`` (and, separately,
+    ``raw/``) looking for inline emails/phones. A handful of files are
+    machine-generated audit logs whose content is regenerated wholesale on a
+    schedule — ``_shape_rule_dispositions.jsonl`` is the confirmed case: a
+    341+ MB log of epoch-millisecond timestamps that the phone-axis detector
+    misreads by the hundred-thousand, and whose distinct-value set never
+    stabilises (fresh timestamps nightly), so no allowlist entry can ever
+    absorb it. This is the OPERATOR'S list of ADDITIONAL filenames (matched
+    by name only, not full path) to exclude beyond the shipped default —
+    mirrors :func:`resolve_google_contact_keys`'s shape exactly: the code
+    default (:data:`athenaeum.pii.DEFAULT_PII_SCAN_EXCLUDE_FILENAMES`) is
+    additive and lives there, not here, so an unconfigured base still
+    protects itself with no seed in ``_DEFAULTS`` (issue athenaeum#231).
+    Returns an empty list when unset. Non-string entries and blank entries
+    are dropped defensively.
+
+    ::
+
+        storage:
+          pii_scan_exclude:
+            - _some_other_machine_log.jsonl
+    """
+    if not isinstance(config, dict):
+        return []
+    storage_cfg = config.get("storage") or {}
+    if not isinstance(storage_cfg, dict):
+        return []
+    raw = storage_cfg.get("pii_scan_exclude")
+    if not isinstance(raw, list):
+        return []
+    return [n.strip() for n in raw if isinstance(n, str) and n.strip()]
+
+
 def resolve_excluded_fields_config(
     config: dict[str, Any] | None,
 ) -> dict[str, tuple[str, ...]]:
