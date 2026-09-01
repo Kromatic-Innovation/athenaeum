@@ -71,6 +71,7 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     DEFAULT_CLASSIFY_MODEL,
     resolve_heartbeat_interval,
+    resolve_merge_worthiness_gate_enabled,
     resolve_model,
 )
 from athenaeum.fingerprint import (
@@ -3897,6 +3898,119 @@ def check_page_size_gate(
     )
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1172: merge-worthiness containment gate
+# ---------------------------------------------------------------------------
+#
+# Deterministic, zero-LLM check: does this raw file say anything new about
+# this entity? If every fact the file offers is already on the entity's
+# page, the merge is pure cost -- a full-page echo that changes nothing.
+#
+# The AC4 asymmetry governs every judgment call here: a FALSE SUPPRESSION
+# permanently destroys a fact (raw files are unlinked after processing --
+# there is no re-derivation path), while a FALSE PASS merely costs one
+# merge call. So this predicate suppresses only on overwhelming evidence of
+# containment, and every ambiguous choice below resolves toward dispatching
+# the merge, never toward suppressing it.
+
+
+def _normalize_for_containment(text: str) -> str:
+    """Normalize text for exact-substring containment matching (issue athenaeum#1172).
+
+    Casefold, then collapse all whitespace runs to single spaces and strip.
+    Nothing else -- no markdown-syntax stripping, no footnote-marker
+    handling. A unit that fails containment only because of formatting
+    differences is dispatched to the merge, which is the safe direction per
+    the AC4 asymmetry: a false suppression is unrecoverable, a false pass
+    costs one merge call.
+    """
+    return " ".join(text.casefold().split())
+
+
+def _merge_worthiness_fully_contained(observations: str, body_window: str) -> bool:
+    """Decide whether every fact in ``observations`` is already in ``body_window``.
+
+    Decomposition unit is the non-blank LINE of ``observations``
+    (``.splitlines()``, dropping lines that are blank after ``.strip()``) --
+    no sentence/word/shingle splitting. There is deliberately no
+    minimum-length or boilerplate filter on candidate units: excluding a
+    unit would turn "not verified" into "assumed covered", the dangerous
+    direction under the AC4 asymmetry.
+
+    Containment is an exact contiguous substring match after
+    :func:`_normalize_for_containment` -- no fuzzy matching, no stemming, no
+    reordering. Every unit must independently pass (AND over units); one
+    absent unit is enough to fail the whole check.
+
+    Vacuous case: if ``observations`` decomposes to zero non-blank units,
+    this returns ``True`` (contained) -- an empty observation carries no
+    fact to lose, so there is nothing for a false suppression to destroy.
+
+    ``body_window`` is expected to already be the caller's truncated
+    (``_MAX_EXISTING_BODY_CHARS``-capped) existing-body window -- this
+    function does no truncation itself.
+    """
+    units = [line.strip() for line in observations.splitlines()]
+    units = [line for line in units if line]
+    if not units:
+        return True
+
+    normalized_window = _normalize_for_containment(body_window)
+    for unit in units:
+        if _normalize_for_containment(unit) not in normalized_window:
+            return False
+    return True
+
+
+def check_merge_worthiness_gate(
+    action: EntityAction,
+    existing_body: str,
+    source_ref: str,
+    config: dict[str, Any] | None,
+) -> bool:
+    """Deterministic, zero-LLM merge-worthiness containment gate (issue athenaeum#1172).
+
+    Returns ``True`` when every fact ``action.observations`` offers about
+    the target entity is already present on that entity's page -- the
+    caller MUST suppress the merge (no LLM call, no write) when this
+    returns ``True``. Returns ``False`` otherwise, meaning the merge
+    proceeds exactly as before this gate existed.
+
+    Deliberately returns ``bool``, not an
+    :class:`~athenaeum.models.EscalationItem` -- unlike
+    :func:`check_page_size_gate`, which escalates because content is being
+    DROPPED, this gate only fires when the content is already present, so
+    there is nothing to escalate and no observation to lose.
+
+    Reads ``existing_body[:_MAX_EXISTING_BODY_CHARS]``, never the full
+    body -- the highest-stakes decision in this gate's design. The full
+    body is a strict superset of what any merge path can act on (see
+    :data:`_MAX_EXISTING_BODY_CHARS`'s own docstring), so judging
+    containment against it would be MORE permissive for suppression than
+    what the merge itself would ever see, risking a false suppression
+    against content the merge could not have used anyway. This function
+    does not replicate ``_select_merge_section``'s section-selection
+    heuristic -- it checks the whole truncated window.
+
+    Logs one INFO line (not DEBUG) when the gate fires, mirroring the
+    athenaeum#1168 rationale: raw files are unlinked after processing, so this
+    log line is the only durable trail a false suppression would leave.
+    """
+    body_window = existing_body[:_MAX_EXISTING_BODY_CHARS]
+    contained = _merge_worthiness_fully_contained(action.observations, body_window)
+    if contained:
+        log.info(
+            "T3 merge suppressed by merge-worthiness gate (issue athenaeum#1172): "
+            "page=%s source=%s observation_chars=%d existing_body_chars=%d window=%d",
+            action.name,
+            source_ref,
+            len(action.observations),
+            len(existing_body),
+            _MAX_EXISTING_BODY_CHARS,
+        )
+    return contained
+
+
 @dataclass
 class OversizePage:
     """One wiki page over the page-size threshold (issue athenaeum#1182 AC3)."""
@@ -4108,6 +4222,20 @@ def tier3_derive_actions(
                 )
                 if oversize_escalation is not None:
                     escalations.append(oversize_escalation)
+                    continue
+
+                # Issue athenaeum#1172: the deterministic merge-worthiness
+                # containment gate. Checked at the CALL SITE (mirroring how
+                # merge.py gates the reasoning-tier screen) so a disabled
+                # knob (the shipped default) costs one bool call and
+                # nothing else -- no log line, no state mutation. When
+                # armed and every fact this raw file offers about the
+                # entity is already on its page, the merge is suppressed:
+                # no LLM call, no write, no escalation (there is nothing to
+                # escalate -- see check_merge_worthiness_gate's docstring).
+                if resolve_merge_worthiness_gate_enabled(
+                    config
+                ) and check_merge_worthiness_gate(action, existing_body, raw.ref, config):
                     continue
 
                 updated_body, esc = tier3_merge(

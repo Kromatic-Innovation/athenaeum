@@ -1006,6 +1006,40 @@ def resolve_reasoning_tier_auditing_enabled(config: dict[str, Any] | None) -> bo
     return False
 
 
+def resolve_merge_worthiness_gate_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve ``librarian.merge_worthiness_gate_enabled`` (issue athenaeum#1172). DEFAULT OFF.
+
+    Gates the deterministic, zero-LLM merge-worthiness containment check in
+    :func:`athenaeum.tiers.check_merge_worthiness_gate`: when armed, a
+    Tier-3 update whose raw file offers no fact absent from the target
+    entity's existing page is suppressed before the merge prompt is built
+    or any model call is made. Checked at the call site in
+    :func:`athenaeum.tiers.tier3_derive_actions` (mirroring how
+    :func:`athenaeum.merge.merge_clusters_to_wiki` gates the reasoning-tier
+    screen) so a disabled knob costs one bool call and nothing else.
+
+    Mirrors :func:`resolve_reasoning_tier_auditing_enabled`'s precedence
+    contract exactly: env ``ATHENAEUM_MERGE_WORTHINESS_GATE_ENABLED``
+    (``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+    ``librarian.merge_worthiness_gate_enabled`` (bool only; non-bool falls
+    through) > default ``False``. No seed in ``_DEFAULTS``. Default OFF is
+    deliberate: a false suppression permanently destroys a fact (raw files
+    are unlinked after processing, with no re-derivation path), so the gate
+    stays opt-in until an operator turns it on — production merge behavior
+    is byte-identical to today until then.
+    """
+    env = os.environ.get("ATHENAEUM_MERGE_WORTHINESS_GATE_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("merge_worthiness_gate_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
 def resolve_reasoning_tier_t2_auto_apply_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve T2's unreviewed-auto-apply opt-in (issue athenaeum#1200). DEFAULT OFF.
 
