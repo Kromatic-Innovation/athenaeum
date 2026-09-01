@@ -51,6 +51,10 @@ LAYER_BACKFILL = "backfill"
 # fills in).
 LAYER_CLASSIFY = "classify"
 LAYER_MERGE = "merge"
+# Issue athenaeum#1139: the write-knob MODEL-TIER COMPARISON layer. Unlike every
+# layer above (which exercises ONE fixed model), this one replays the same
+# corpus once per athenaeum#1139 candidate model — see tests/evals/tier_compare.py.
+LAYER_WRITE_TIER_COMPARE = "write_tier_compare"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EVAL_DATA_ROOT = REPO_ROOT / "tests" / "evals" / "data"
@@ -509,6 +513,7 @@ class EvalSession:
                         LAYER_BACKFILL,
                         LAYER_CLASSIFY,
                         LAYER_MERGE,
+                        LAYER_WRITE_TIER_COMPARE,
                     )
                 )
                 if total
