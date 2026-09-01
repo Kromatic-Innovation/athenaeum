@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 if TYPE_CHECKING:
-    from collections.abc import ItemsView, Iterator, Mapping
+    from collections.abc import Iterator, Mapping
 
 import yaml
 
@@ -2755,6 +2755,27 @@ class IndexEntry(NamedTuple):
     type: str | None = None
 
 
+#: Page types withheld from :meth:`EntityIndex.items` — the raw-text
+#: MENTION-matching surface :func:`athenaeum.tiers.tier1_programmatic_match`
+#: walks (issue athenaeum#1183). ``type: person`` pages are CRM-imported
+#: contact records, not wiki entities that a raw observation should be
+#: fuzzy-matched against by name. Every OTHER read/write path —
+#: :meth:`EntityIndex.lookup` (name/alias, one specific name at a time),
+#: :meth:`EntityIndex.get_by_uid`, :meth:`EntityIndex.has_entity_format`,
+#: ``__iter__``/``__len__`` — is UNAFFECTED and keeps finding a person page
+#: exactly as before: those back structured, no-LLM, name-or-uid-ADDRESSED
+#: operations (:func:`athenaeum.corrections.resolve_target`,
+#: :func:`athenaeum.tiers.validate_create_name`'s collision check, the
+#: uid-less fallback in :func:`athenaeum.librarian.tier0_handle_upsert`,
+#: :mod:`athenaeum.pii`'s excluded-read join, the handle-shaped-query
+#: resolver in :mod:`athenaeum.identity_resolution`), which this issue does
+#: not change — only raw-text mention MATCHING does. Person mentions instead
+#: resolve via the consult-only :class:`athenaeum.person_registry.PersonRegistry`
+#: (see that module and :func:`athenaeum.identity_resolution.resolve_person_mention`).
+#: Demotion only — nothing here deletes a page or a field.
+DEMOTED_NAME_MATCH_TYPES: frozenset[str] = frozenset({"person"})
+
+
 class EntityIndex:
     """In-memory index of all wiki entities for name/alias lookup."""
 
@@ -2855,14 +2876,34 @@ class EntityIndex:
         """Number of unique name/alias keys indexed."""
         return len(self._by_name)
 
-    def items(self) -> "ItemsView[str, IndexEntry]":
-        """Iterate over ``(name_or_alias_key, IndexEntry(uid, path, type))`` pairs.
+    def items(self) -> "Iterator[tuple[str, IndexEntry]]":
+        """Iterate over ``(name_or_alias_key, IndexEntry(uid, path, type))``
+        pairs for every key eligible for NAME/ALIAS matching.
 
         Replaces direct access to ``_by_name`` from callers that need to
-        walk the index (e.g. tier-based scans). Returns a live view — do
-        not mutate the index mid-iteration.
+        walk the index (e.g. tier-based scans) — :func:`athenaeum.tiers.
+        tier1_programmatic_match` is, deliberately, the ONLY caller (see its
+        module-level import). Issue athenaeum#1183: a
+        :data:`DEMOTED_NAME_MATCH_TYPES` entry (``person``) is withheld HERE,
+        at the sole matching call site, rather than at storage time — so
+        :meth:`lookup` (used by :func:`athenaeum.corrections.resolve_target`,
+        :func:`athenaeum.tiers.validate_create_name`'s collision check, and
+        the uid-less fallback in :func:`athenaeum.librarian.tier0_handle_upsert`)
+        keeps finding a person page by name/alias exactly as before —
+        those are structured, no-LLM, name-addressed operations this issue
+        does not change; only raw-text MENTION matching does. Returns a
+        generator, not a live view of ``_by_name`` — do not mutate the index
+        while iterating.
         """
-        return self._by_name.items()
+        for key, entry in self._by_name.items():
+            # getattr, not `entry.type`: a handful of existing tests poke
+            # `_by_name` directly with a bare (pre-athenaeum#1169) 2-tuple that
+            # carries no `.type` at all — `getattr(..., None)` degrades that
+            # to "not a demoted type" (unfiltered, the pre-athenaeum#1183
+            # behaviour) instead of raising AttributeError.
+            if getattr(entry, "type", None) in DEMOTED_NAME_MATCH_TYPES:
+                continue
+            yield key, entry
 
     def __iter__(self) -> "Iterator[str]":
         """Iterate over indexed name/alias keys."""
