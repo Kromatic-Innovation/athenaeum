@@ -613,7 +613,7 @@ _KNOWN_GOOD_MERGES: list[tuple[str, str]] = [
     # flattened together; it is not a substring of either line alone, so
     # the merge must dispatch.
     (
-        "on time. Missed the deadline for the report",
+        "on time. Missed the deadline for the quarterly filing",
         "Filed the annual report right on time.\nMissed the deadline for the quarterly filing.",
     ),
     (
