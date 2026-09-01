@@ -66,6 +66,27 @@ def _positive_int(value: str) -> int:
 #: from the generic error (1) and dry-run-found (2) codes some commands use.
 EXIT_LOCK_HELD = 75
 
+#: Exit code for "the requested uid/resource does not exist" (issue athenaeum#1270).
+#: This is the existing generic-error code (1), named here so a caller can key
+#: off the constant instead of the bare literal, and so it reads as a
+#: deliberate, stable contract rather than argparse's incidental default.
+#: MUST stay distinct from :data:`EXIT_INTERNAL_ERROR` below — see that
+#: constant's docstring for why the distinction is load-bearing.
+EXIT_NOT_FOUND = 1
+
+#: Exit code for "the lookup succeeded but something else inside the command
+#: failed" (issue athenaeum#1270) — e.g. a page whose frontmatter holds a
+#: value the JSON encoder chokes on. Before this constant existed, an
+#: uncaught exception fell through to Python's default uncaught-exception
+#: exit status, which is ALSO 1 — identical to :data:`EXIT_NOT_FOUND`. That
+#: collapse is the defect: a caller keying off the exit code (e.g.
+#: ``google-contact-sync``'s ``read_person()``, which maps every nonzero exit
+#: that isn't argparse's "invalid choice" to "unknown uid") could not tell an
+#: existing-but-broken record from a genuinely absent one. 70 is BSD
+#: sysexits.h's ``EX_SOFTWARE`` ("an internal software error"); chosen over an
+#: adjacent small integer so it reads as intentional, not incremented.
+EXIT_INTERNAL_ERROR = 70
+
 
 def _add_lock_args(parser: argparse.ArgumentParser) -> None:
     """Add the shared run-lock ``--wait`` / ``--force`` flags (issue athenaeum#309).
