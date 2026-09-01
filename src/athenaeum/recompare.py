@@ -67,6 +67,7 @@ from athenaeum.comparator import (
     VERDICT_SPECIALIZATION,
     VERDICT_UNDERDETERMINED,
     ComparatorPage,
+    begin_content_relation_unavailable_tracking,
     flush_content_relation_unavailable_warning,
     page_from_path,
     record_comparison,
@@ -295,106 +296,113 @@ def recompare_pending_merges(
     skipped_fresh = 0
     skipped_missing = 0
 
-    for proposal in unresolved:
-        # Issue athenaeum#1230: an --apply recompare over a large backlog is a
-        # per-PAIR LLM classify loop (up to MAX_PAIRS_PER_PROPOSAL pairs per
-        # proposal, no cap on the number of proposals) with the SAME shape as
-        # the ingest-path gap this issue fixes elsewhere — the run lock this
-        # function was already handed (for the verdict-ledger single-appender
-        # contract) is never refreshed, so its heartbeat age grows with total
-        # wall time. Tick it once per proposal (not per pair — cheap enough
-        # that no separate interval/throttle is worth the complexity here).
-        if apply and lock is not None:
-            lock.heartbeat()
-        notes: list[str] = []
-        paths: list[Path] = []
-        for source in proposal.sources:
-            resolved = resolve_source_path(source, wiki_root)
-            if resolved is None:
-                skipped_missing += 1
-                notes.append(f"source not found: {source}")
-                continue
-            paths.append(resolved)
+    # Issue athenaeum#1245 (QA review finding 2): reset this pass's own
+    # content_relation-unavailable count/latch before the loop starts, so this
+    # pass reports its OWN occurrences even if an earlier pass already flushed
+    # in this same process.
+    begin_content_relation_unavailable_tracking()
+    try:
+        for proposal in unresolved:
+            # Issue athenaeum#1230: an --apply recompare over a large backlog is a
+            # per-PAIR LLM classify loop (up to MAX_PAIRS_PER_PROPOSAL pairs per
+            # proposal, no cap on the number of proposals) with the SAME shape as
+            # the ingest-path gap this issue fixes elsewhere — the run lock this
+            # function was already handed (for the verdict-ledger single-appender
+            # contract) is never refreshed, so its heartbeat age grows with total
+            # wall time. Tick it once per proposal (not per pair — cheap enough
+            # that no separate interval/throttle is worth the complexity here).
+            if apply and lock is not None:
+                lock.heartbeat()
+            notes: list[str] = []
+            paths: list[Path] = []
+            for source in proposal.sources:
+                resolved = resolve_source_path(source, wiki_root)
+                if resolved is None:
+                    skipped_missing += 1
+                    notes.append(f"source not found: {source}")
+                    continue
+                paths.append(resolved)
 
-        hazard_reasons = identify_pii_hazards(paths)
-        is_hazard = bool(hazard_reasons)
+            hazard_reasons = identify_pii_hazards(paths)
+            is_hazard = bool(hazard_reasons)
 
-        pair_verdicts: dict[str, str | None] = {}
-        if len(paths) < 2:
-            notes.append("fewer than two readable sources -- nothing to compare")
-        elif is_hazard:
-            # athenaeum#715: never approved, never auto-applied, and not
-            # ledgered either -- record_comparison would refuse the pair on
-            # the same signal, so spending an LLM call to be refused is pure
-            # cost. The proposal is reported and routed to a human.
-            notes.append("PII hazard -- not compared, routed to a human")
-        else:
-            pages = [page_from_path(path) for path in paths]
-            pairs = list(combinations(pages, 2))
-            if len(pairs) > MAX_PAIRS_PER_PROPOSAL:
-                notes.append(
-                    f"{len(pairs) - MAX_PAIRS_PER_PROPOSAL} of {len(pairs)} pairs "
-                    f"skipped over the {MAX_PAIRS_PER_PROPOSAL}-pair cap"
-                )
-                pairs = pairs[:MAX_PAIRS_PER_PROPOSAL]
-            for page_a, page_b in pairs:
-                key = _pair_key(page_a, page_b)
-                if apply and lock is not None:
-                    outcome = record_comparison(
-                        wiki_root,
-                        page_a,
-                        page_b,
-                        client=client,
-                        config=config,
-                        usage=usage,
-                        lock=lock,
-                        registry=registry,
+            pair_verdicts: dict[str, str | None] = {}
+            if len(paths) < 2:
+                notes.append("fewer than two readable sources -- nothing to compare")
+            elif is_hazard:
+                # athenaeum#715: never approved, never auto-applied, and not
+                # ledgered either -- record_comparison would refuse the pair on
+                # the same signal, so spending an LLM call to be refused is pure
+                # cost. The proposal is reported and routed to a human.
+                notes.append("PII hazard -- not compared, routed to a human")
+            else:
+                pages = [page_from_path(path) for path in paths]
+                pairs = list(combinations(pages, 2))
+                if len(pairs) > MAX_PAIRS_PER_PROPOSAL:
+                    notes.append(
+                        f"{len(pairs) - MAX_PAIRS_PER_PROPOSAL} of {len(pairs)} pairs "
+                        f"skipped over the {MAX_PAIRS_PER_PROPOSAL}-pair cap"
                     )
-                    if outcome.get("skipped") == "fresh":
-                        skipped_fresh += 1
+                    pairs = pairs[:MAX_PAIRS_PER_PROPOSAL]
+                for page_a, page_b in pairs:
+                    key = _pair_key(page_a, page_b)
+                    if apply and lock is not None:
+                        outcome = record_comparison(
+                            wiki_root,
+                            page_a,
+                            page_b,
+                            client=client,
+                            config=config,
+                            usage=usage,
+                            lock=lock,
+                            registry=registry,
+                        )
+                        if outcome.get("skipped") == "fresh":
+                            skipped_fresh += 1
+                        else:
+                            compared += 1
+                        pair_verdicts[key] = outcome.get("verdict")
                     else:
+                        from athenaeum.comparator import compare_pages
+
+                        dry = compare_pages(
+                            page_a,
+                            page_b,
+                            client=client,
+                            config=config,
+                            usage=usage,
+                            registry=registry,
+                        )
                         compared += 1
-                    pair_verdicts[key] = outcome.get("verdict")
-                else:
-                    from athenaeum.comparator import compare_pages
+                        pair_verdicts[key] = dry.verdict
 
-                    dry = compare_pages(
-                        page_a,
-                        page_b,
-                        client=client,
-                        config=config,
-                        usage=usage,
-                        registry=registry,
-                    )
-                    compared += 1
-                    pair_verdicts[key] = dry.verdict
-
-        aggregate = aggregate_verdict(pair_verdicts)
-        # athenaeum#715: "If the re-run's verdict for either is `duplicate`, it
-        # still routes to a human." That is unconditional here rather than a
-        # branch on the verdict: a hazardous proposal is never compared at
-        # all, so its aggregate is always None and there is no duplicate
-        # verdict to special-case. Routing is decided by the hazard alone.
-        route = ROUTE_HUMAN if is_hazard else ROUTE_LEDGER
-        results.append(
-            ProposalRecompare(
-                proposal_id=proposal.id,
-                merge_target_name=proposal.merge_target_name,
-                sources=list(proposal.sources),
-                pii_hazard=is_hazard,
-                pii_hazard_reasons=hazard_reasons,
-                pair_verdicts=pair_verdicts,
-                aggregate=aggregate,
-                route=route,
-                stored_confidence=proposal.confidence,
-                notes=notes,
+            aggregate = aggregate_verdict(pair_verdicts)
+            # athenaeum#715: "If the re-run's verdict for either is `duplicate`, it
+            # still routes to a human." That is unconditional here rather than a
+            # branch on the verdict: a hazardous proposal is never compared at
+            # all, so its aggregate is always None and there is no duplicate
+            # verdict to special-case. Routing is decided by the hazard alone.
+            route = ROUTE_HUMAN if is_hazard else ROUTE_LEDGER
+            results.append(
+                ProposalRecompare(
+                    proposal_id=proposal.id,
+                    merge_target_name=proposal.merge_target_name,
+                    sources=list(proposal.sources),
+                    pii_hazard=is_hazard,
+                    pii_hazard_reasons=hazard_reasons,
+                    pair_verdicts=pair_verdicts,
+                    aggregate=aggregate,
+                    route=route,
+                    stored_confidence=proposal.confidence,
+                    notes=notes,
+                )
             )
-        )
-
-    # Issue athenaeum#1245: summarize any content_relation "LLM unavailable"
-    # occurrences from this recompare pass into ONE WARNING with the affected-pair
-    # count, rather than one unattributable WARNING per pair.
-    flush_content_relation_unavailable_warning()
+    finally:
+        # Issue athenaeum#1245 (QA review finding 1): in a `finally` so a
+        # mid-loop exception (e.g. record_comparison's ledger I/O) still gets a
+        # summary WARNING of whatever this partial pass accumulated, instead of
+        # silently discarding the count along with the exception.
+        flush_content_relation_unavailable_warning()
 
     return RecompareResult(
         applied=apply,
