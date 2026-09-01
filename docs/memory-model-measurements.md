@@ -33,6 +33,40 @@ subcommand's own `--help` for the full flag list.
 
 ## Push-precision and coverage baseline
 
+### Snapshot 2026-09-01T00:26:53.483533Z
+
+Reproduce with: `athenaeum push-metrics baseline`
+
+- window_start: (instrument-enabled)
+- window_end: 2026-09-01T00:26:53.483533Z
+- sessions: 75
+- push_records: 177
+- reference_records: 9
+- precision: 0.7831
+- coverage_miss_rate: not measurable — push records retain only a query hash by design (athenaeum#711), so relevance is not recoverable and no miss rate can be computed; `athenaeum push-metrics coverage-audit` reports the structural facts that ARE derivable (candidate-pool size, tier/scope concentration, window-mate filter removal) plus policy-set bounds, never a measured rate (athenaeum#1036)
+- excluded_sessions: none
+- excluded_push_records: 0
+- excluded_reference_records: 0
+- athenaeum_version: 0.19.38
+- git_sha: 351fc2efc04c
+
+> **Read this snapshot with care — it does not support a before/after comparison with the
+> 2026-08-20 baseline below.** Two reasons, both structural rather than incidental:
+>
+> 1. **`reference_records: 9`.** The precision figure is roughly 7 of 9 determinations. That is far
+>    too thin to distinguish a real ranking change from noise; a single determination moves it by
+>    ~11 points. Do not read `0.8710 -> 0.7831` as a measured regression from PR athenaeum#1117's
+>    ranking change.
+> 2. **Both windows start at `(instrument-enabled)`,** so they are cumulative and overlapping, not
+>    disjoint. The later window is a superset of the earlier one, which is also why
+>    `push_records` can fall (221 -> 177) while `sessions` rises (65 -> 75) — the push-record
+>    ledger rotates, the session count does not.
+>
+> The blocker is the reference-determination ledger, not the ranking code. A comparison worth
+> making needs an order of magnitude more determinations, and a windowed rather than cumulative
+> baseline. Recorded here per athenaeum#1119 so athenaeum#718's closing condition is discharged
+> with an honest figure rather than a flattering one.
+
 ### Snapshot 2026-08-20T00:09:51.592236Z
 
 Reproduce with: `athenaeum push-metrics baseline`
