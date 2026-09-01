@@ -25,6 +25,7 @@ All Anthropic calls are mocked/never reached; no live API, no network.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -530,7 +531,26 @@ def test_wall_clock_bound_full_cycle_to_quarantine_and_release(
     the loop the earlier version of this test left open (it asserted only
     one recorded violation, never a full crossing). Per athenaeum#994, the
     single completed action ("Slow Entity") lands as durable partial
-    progress on the run that trips the bound, rather than being discarded."""
+    progress on the run that trips the bound, rather than being discarded.
+
+    Issue athenaeum#1170 interaction (found by CI on PR athenaeum#1249, not
+    caught locally): run 2 re-derives Tier-2 classification for the SAME
+    raw file, which proposes "Slow Entity" as a fresh CREATE again — but
+    run 1 already created that page. Pre-athenaeum#1170 this was a second,
+    redundant CREATE; the athenaeum#1170 create-path uniqueness gate now
+    correctly DISAMBIGUATES it into an UPDATE against the existing page
+    instead of minting a second "Slow Entity" page — the collision this
+    issue exists to prevent. That changes which LLM call shape run 2 needs
+    (a merge, not a create) and how many calls it takes (merge patch-mode
+    is attempted first; the canned patch-attempt response here is plain
+    markdown, not anchored-ops JSON, so it deterministically fails to
+    parse and falls back to full-echo — one extra call beyond run 1's
+    two). This is the feature working correctly, not a fixture bug in the
+    sense of "make it go away" — but the response budget below now needs a
+    THIRD canned response for run 2's fallback call, and the test pins the
+    disambiguation explicitly (assertions below) so this is a documented,
+    deliberate coverage addition rather than a silently-absorbed one.
+    """
     root = _seed_knowledge_root(tmp_path, n_files=1)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
     monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
@@ -567,11 +587,34 @@ def test_wall_clock_bound_full_cycle_to_quarantine_and_release(
             )
         )
     ]
+    # Run 1 consumes exactly this one response for the Tier-3 CREATE call
+    # (call #2 overall: #1 is the classify call above).
     create_response = MagicMock()
     create_response.content = [MagicMock(text="# Slow Entity\n\nObservation.\n")]
+    # Run 2 needs THREE responses, not two (issue athenaeum#1170): call #1 is
+    # the same classify response (still proposes "Slow Entity", is_new=True
+    # -- Tier-2 has no memory of run 1). The athenaeum#1170 gate then
+    # disambiguates that into an UPDATE against run 1's page, so call #2 is
+    # a Tier-3 MERGE patch-mode attempt, not a create -- it reuses
+    # `create_response`'s plain-markdown text, which is not anchored-ops
+    # JSON, so it deterministically fails to parse and falls back to
+    # full-echo mode (issue athenaeum#469), consuming call #3:
+    # `merge_full_response`, whose plain-text body becomes the new page
+    # content directly (parse_tier3_merge's contract for a non-ESCALATE,
+    # non-truncated response).
+    merge_full_response = MagicMock()
+    merge_full_response.content = [
+        MagicMock(text="# Slow Entity\n\nObservation.\n\nSecond-run merged note.\n")
+    ]
 
     def _slow_client() -> MagicMock:
-        responses = iter([classify_response, create_response])
+        # 3 responses so BOTH runs' response budgets are satisfied from one
+        # shared list: run 1 consumes items 1-2 (classify, create) and
+        # leaves item 3 unused; run 2 consumes all three (classify,
+        # failed-patch-attempt, full-echo fallback). Each run gets a FRESH
+        # iterator (a fresh client is built each `run()` call), so run 1
+        # never exhausts run 2's budget.
+        responses = iter([classify_response, create_response, merge_full_response])
 
         def _side_effect(**kwargs):
             clock["n"] += 20.0  # exceeds the 10s bound on the very first call
@@ -611,9 +654,12 @@ def test_wall_clock_bound_full_cycle_to_quarantine_and_release(
 
     # Run 2: the raw file is re-derived from scratch and crosses the
     # threshold — quarantined. The partial progress from run 1 stays landed
-    # regardless.
+    # regardless. Per athenaeum#1170, Tier-2 proposing "Slow Entity" again
+    # is now DISAMBIGUATED into an update against run 1's page rather than
+    # minting a duplicate — pinned explicitly below.
     caplog.clear()
-    stats2 = _run()
+    with caplog.at_level(logging.INFO):
+        stats2 = _run()
     assert len(stats2["quarantined_files"]) == 1
     quarantined = stats2["quarantined_files"][0]
     assert quarantined["bound"] == "wall_clock"
@@ -621,6 +667,18 @@ def test_wall_clock_bound_full_cycle_to_quarantine_and_release(
     assert QUARANTINE_FILE_PREFIX in caplog.text
     assert not raw_file.exists()
     assert _load_quarantine_candidates(root / "wiki") == {}
+
+    # Issue athenaeum#1170 pin: run 2 disambiguated, it did not duplicate.
+    # Still exactly ONE entity page (no second "slow-entity" page minted),
+    # its content reflects the MERGE from run 2's full-echo fallback (proof
+    # the action was an UPDATE, not a fresh overwrite), and the gate's own
+    # disambiguation log line fired.
+    pages2 = _entity_pages(root / "wiki")
+    assert len(pages2) == 1
+    assert pages2[0].name.endswith("slow-entity.md")
+    assert pages2[0] == pages1[0]
+    assert "Second-run merged note." in pages2[0].read_text(encoding="utf-8")
+    assert "tier3-create-name-disambiguated" in caplog.text
 
     # AC 6: released -> back in the discovery set.
     pending = list_pending_quarantine(root / "wiki")
