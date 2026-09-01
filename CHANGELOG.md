@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`storage lint-pii` no longer scans machine-generated audit logs under
+  `wiki/` (athenaeum#1273).** `_shape_rule_dispositions.jsonl` — a 341+ MB,
+  ~1.49M-record log the shape-rule engine regenerates every nightly run —
+  made the command itself unusable (two full runs killed at 68 and 106
+  minutes against a ~7-10 minute baseline) and made a clean exit
+  structurally unreachable: the real detectors misread its epoch-millisecond
+  timestamps as 100,533 phone-axis matches (2,583 distinct values), and
+  because the file regenerates nightly with fresh timestamps, no allowlist
+  entry (athenaeum#936) could ever stay valid against it. Fixed with a
+  filename-based, operator-configurable scan exclusion —
+  `storage.pii_scan_exclude` (`athenaeum.config.resolve_pii_scan_exclude`),
+  additive on top of a shipped default
+  (`athenaeum.pii.DEFAULT_PII_SCAN_EXCLUDE_FILENAMES`) containing only the
+  confirmed offender — consulted by `iter_corpus_files` / `scan_corpus_pii`
+  via a new `exclude_names` parameter. `lint-pii` prints every excluded path
+  to stderr and lists it under the JSON payload's new `excluded` key, so the
+  exclusion is never silent. `_corrections_applied.jsonl` and
+  `_shape_rules_applied.jsonl` were checked (not just assumed) and left out
+  of the default: both are small run-summary logs, not per-record like the
+  file above, with no observed email matches on the live corpus. Verified
+  against the live `~/knowledge` corpus by calling the patched
+  `scan_corpus_pii`/`iter_corpus_files` directly (a full CLI run wasn't
+  reproduced on purpose, per the issue's own "don't burn another 100 minutes
+  re-proving a known failure"): the `wiki/` scan the exclusion covers now
+  runs in ~9-12s including allowlist adjudication (`iter_corpus_files` 1.2s
+  + `scan_corpus_pii` 8.2s + adjudication <0.01s over 24k files), down from
+  the 68/106-minute kills that kept exit 0 permanently out of reach.
+  Adjudicating against the current 516-entry allowlist, `wiki/`'s unexplained
+  residue is now 190 findings (was 100,533+ before this fix, dominated by
+  one file) — a small, stable, genuinely adjudicable set, so `exit 0` is now
+  reachable given a complete allowlist for what remains (it was not,
+  structurally, before). `raw/` (a separate, non-gating surface per
+  athenaeum#1049) is unaffected by this change either way and remains slow
+  independently of it — a 47 MB `raw/athenaeum-437-phase2/lint-pii-*.json`
+  (a prior scan's own JSON output, now itself sitting in `raw/`) looks like
+  the same problem class one layer over; flagged for a follow-up issue,
+  deliberately not fixed here since `raw/` was out of this issue's scope.
+  See `docs/configuration.md` → "PII scan exclusion — machine-generated audit
+  logs". Unblocks athenaeum#437's acceptance criterion, which was
+  structurally unreachable while this file was in scope.
+
 ### Added
 
 - **`type: person` wiki pages are demoted from general wiki entities to a
