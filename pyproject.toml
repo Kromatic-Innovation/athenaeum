@@ -34,7 +34,7 @@ dependencies = [
     # Last tested against anthropic 0.109.2 (2026-06-18). The range stays
     # open to <1.0; record the tested minor here so a CI run that resolves a
     # newer-than-tested 0.x is visible at a glance against this baseline.
-    "anthropic>=0.39.0,<1.0",
+    "anthropic>=0.39.0,<2.0",
     "pydantic>=2.0,<3.0",
 ]
 
