@@ -71,6 +71,7 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     DEFAULT_CLASSIFY_MODEL,
     resolve_heartbeat_interval,
+    resolve_merge_worthiness_gate_enabled,
     resolve_model,
 )
 from athenaeum.fingerprint import (
@@ -3897,6 +3898,173 @@ def check_page_size_gate(
     )
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1172: merge-worthiness containment gate
+# ---------------------------------------------------------------------------
+#
+# Deterministic, zero-LLM check: does this raw file say anything new about
+# this entity? If every fact the file offers is already on the entity's
+# page, the merge is pure cost -- a full-page echo that changes nothing.
+#
+# The AC4 asymmetry governs every judgment call here: a FALSE SUPPRESSION
+# permanently destroys a fact (raw files are unlinked after processing --
+# there is no re-derivation path), while a FALSE PASS merely costs one
+# merge call. So this predicate suppresses only on overwhelming evidence of
+# containment, and every ambiguous choice below resolves toward dispatching
+# the merge, never toward suppressing it.
+
+# Minimum normalized-char length an observation unit must have to count as
+# VERIFIABLE evidence of containment (issue athenaeum#1172, QA round 2). A short
+# unit ("2023", "50", "Austin") is cheap to satisfy by coincidence on any
+# ordinary page -- it stays IN the AND-check (excluding it would be the
+# dangerous "assumed covered" direction the module docstring above warns
+# against), but a unit shorter than this is instead treated as NOT
+# VERIFIABLE, which fails the whole check and dispatches the merge. This is
+# the safe direction: failing on a short unit only ever dispatches MORE
+# merges, never suppresses one it shouldn't. 24 is a deliberate, conservative
+# starting value with no corpus measurement behind it -- the repo's nearest
+# precedent, DEFAULT_MENTION_DENSITY_SPECIFICITY_CHARS = 8 (this module,
+# above), is a per-name-key threshold and too permissive for a whole-line
+# containment unit. Tuning this against the live corpus is athenaeum#1251's job,
+# not this issue's -- this stays a plain module constant, not a second
+# config knob, since there is no operator-facing tradeoff to expose until
+# there is measured data to tune it against.
+_MERGE_WORTHINESS_MIN_UNIT_CHARS = 24
+
+
+def _normalize_for_containment(text: str) -> str:
+    """Normalize text for exact-substring containment matching (issue athenaeum#1172).
+
+    Casefold, then collapse all whitespace runs to single spaces and strip.
+    Nothing else -- no markdown-syntax stripping, no footnote-marker
+    handling. A unit that fails containment only because of formatting
+    differences is dispatched to the merge, which is the safe direction per
+    the AC4 asymmetry: a false suppression is unrecoverable, a false pass
+    costs one merge call.
+    """
+    return " ".join(text.casefold().split())
+
+
+def _merge_worthiness_fully_contained(observations: str, body_window: str) -> bool:
+    """Decide whether every fact in ``observations`` is already in ``body_window``.
+
+    Decomposition unit is the non-blank LINE of ``observations``
+    (``.splitlines()``, dropping lines that are blank after ``.strip()``) --
+    no sentence/word/shingle splitting. There is deliberately no
+    minimum-length or boilerplate EXCLUSION filter on candidate units:
+    excluding a unit would turn "not verified" into "assumed covered", the
+    dangerous direction under the AC4 asymmetry -- see
+    :data:`_MERGE_WORTHINESS_MIN_UNIT_CHARS` for the (non-excluding) way a
+    short unit is instead handled.
+
+    Containment is an exact contiguous substring match after
+    :func:`_normalize_for_containment`, checked against a **single**
+    normalized line of ``body_window`` at a time -- never the whole body
+    flattened into one string (issue athenaeum#1172, QA round 2). Flattening
+    would let ``_normalize_for_containment``'s whitespace-collapse stitch a
+    unit's match together across a boundary the page deliberately drew (a
+    blank line, a heading, a list item) -- e.g. an observation reading
+    "...on time. Missed the deadline" matching across two unrelated
+    sentences that merely happen to sit next to each other once every
+    newline collapses to a space. Requiring containment within one
+    normalized body LINE preserves that boundary; an ordinary markdown
+    paragraph is one line, so normal prose pages are unaffected.
+
+    A unit whose normalized length is below
+    :data:`_MERGE_WORTHINESS_MIN_UNIT_CHARS` is NOT excluded from the
+    check -- it is treated as **not verifiable as contained**, which fails
+    it (and therefore the whole AND-check) regardless of whether it
+    happens to appear in the window. A short unit is cheap to satisfy by
+    coincidence on any ordinary page, so its presence cannot count as
+    evidence; failing it only ever dispatches more merges, never suppresses
+    one it shouldn't (the safe direction).
+
+    Every unit must independently pass (AND over units); one absent or
+    unverifiable unit is enough to fail the whole check.
+
+    Vacuous case: if ``observations`` decomposes to zero non-blank units,
+    this returns ``True`` (contained) -- an empty observation carries no
+    fact to lose, so there is nothing for a false suppression to destroy.
+
+    ``body_window`` is expected to already be the caller's truncated
+    (``_MAX_EXISTING_BODY_CHARS``-capped) existing-body window -- this
+    function does no truncation itself.
+    """
+    units = [line.strip() for line in observations.splitlines()]
+    units = [line for line in units if line]
+    if not units:
+        return True
+
+    normalized_body_lines = [
+        normalized
+        for normalized in (_normalize_for_containment(line) for line in body_window.splitlines())
+        if normalized
+    ]
+
+    for unit in units:
+        normalized_unit = _normalize_for_containment(unit)
+        if len(normalized_unit) < _MERGE_WORTHINESS_MIN_UNIT_CHARS:
+            return False
+        if not any(normalized_unit in body_line for body_line in normalized_body_lines):
+            return False
+    return True
+
+
+def check_merge_worthiness_gate(
+    action: EntityAction,
+    existing_body: str,
+    source_ref: str,
+) -> bool:
+    """Deterministic, zero-LLM merge-worthiness containment gate (issue athenaeum#1172).
+
+    Returns ``True`` when every fact ``action.observations`` offers about
+    the target entity is already present on that entity's page -- the
+    caller MUST suppress the merge (no LLM call, no write) when this
+    returns ``True``. Returns ``False`` otherwise, meaning the merge
+    proceeds exactly as before this gate existed.
+
+    Takes no ``config`` -- unlike :func:`check_page_size_gate`, which
+    resolves two of its own knobs internally, this gate resolves nothing:
+    whether it runs at all is already decided by the caller via
+    :func:`~athenaeum.config.resolve_merge_worthiness_gate_enabled` at the
+    call site, so a ``config`` parameter here would have nothing to do
+    (issue athenaeum#1172, QA round 2).
+
+    Deliberately returns ``bool``, not an
+    :class:`~athenaeum.models.EscalationItem` -- unlike
+    :func:`check_page_size_gate`, which escalates because content is being
+    DROPPED, this gate only fires when the content is already present, so
+    there is nothing to escalate and no observation to lose.
+
+    Reads ``existing_body[:_MAX_EXISTING_BODY_CHARS]``, never the full
+    body -- the highest-stakes decision in this gate's design. The full
+    body is a strict superset of what any merge path can act on (see
+    :data:`_MAX_EXISTING_BODY_CHARS`'s own docstring), so judging
+    containment against it would be MORE permissive for suppression than
+    what the merge itself would ever see, risking a false suppression
+    against content the merge could not have used anyway. This function
+    does not replicate ``_select_merge_section``'s section-selection
+    heuristic -- it checks the whole truncated window.
+
+    Logs one INFO line (not DEBUG) when the gate fires, mirroring the
+    athenaeum#1168 rationale: raw files are unlinked after processing, so this
+    log line is the only durable trail a false suppression would leave.
+    """
+    body_window = existing_body[:_MAX_EXISTING_BODY_CHARS]
+    contained = _merge_worthiness_fully_contained(action.observations, body_window)
+    if contained:
+        log.info(
+            "T3 merge suppressed by merge-worthiness gate (issue athenaeum#1172): "
+            "page=%s source=%s observation_chars=%d existing_body_chars=%d window=%d",
+            action.name,
+            source_ref,
+            len(action.observations),
+            len(existing_body),
+            _MAX_EXISTING_BODY_CHARS,
+        )
+    return contained
+
+
 @dataclass
 class OversizePage:
     """One wiki page over the page-size threshold (issue athenaeum#1182 AC3)."""
@@ -4108,6 +4276,20 @@ def tier3_derive_actions(
                 )
                 if oversize_escalation is not None:
                     escalations.append(oversize_escalation)
+                    continue
+
+                # Issue athenaeum#1172: the deterministic merge-worthiness
+                # containment gate. Checked at the CALL SITE (mirroring how
+                # merge.py gates the reasoning-tier screen) so a disabled
+                # knob (the shipped default) costs one bool call and
+                # nothing else -- no log line, no state mutation. When
+                # armed and every fact this raw file offers about the
+                # entity is already on its page, the merge is suppressed:
+                # no LLM call, no write, no escalation (there is nothing to
+                # escalate -- see check_merge_worthiness_gate's docstring).
+                if resolve_merge_worthiness_gate_enabled(
+                    config
+                ) and check_merge_worthiness_gate(action, existing_body, raw.ref):
                     continue
 
                 updated_body, esc = tier3_merge(
