@@ -33,6 +33,7 @@ from pathlib import Path
 import pytest
 
 from athenaeum import pii
+from athenaeum._cli_shared import EXIT_INTERNAL_ERROR, EXIT_NOT_FOUND
 from athenaeum._cmd_query import cmd_entity, cmd_recall
 from athenaeum.mcp_server import entity_read
 
@@ -490,7 +491,40 @@ class TestCliEntityCommand:
         rc = cmd_entity(_entity_args(corpus, "nobody"))
 
         assert rc == 1
+        assert rc == EXIT_NOT_FOUND
         assert "no entity found" in capsys.readouterr().err
+
+    def test_a_read_path_failure_after_the_uid_resolves_gets_a_different_code(
+        self,
+        corpus: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue athenaeum#1270: before this fix, ANY exception raised after
+        the uid resolved (e.g. the ``json.dumps`` ``TypeError`` on an
+        unserializable frontmatter value, issue athenaeum#1002 /
+        athenaeum#1110) propagated uncaught and fell through to Python's
+        default uncaught-exception exit status — which is ALSO `1`, identical
+        to "uid not found". This forces that class of failure via a
+        monkeypatched ``json.dumps`` (deliberately not the now-fixed date
+        case — the whole point is that this must not be special-cased to
+        dates) and pins that it now returns a DIFFERENT, non-1 code from the
+        unknown-uid case above.
+        """
+        import athenaeum._cmd_query as query_mod
+
+        def _boom(*_args: object, **_kwargs: object) -> str:
+            raise TypeError("Object of type Sentinel is not JSON serializable")
+
+        monkeypatch.setattr(query_mod.json, "dumps", _boom)
+
+        rc = cmd_entity(_entity_args(corpus, "alex"))
+
+        assert rc == EXIT_INTERNAL_ERROR
+        assert rc != EXIT_NOT_FOUND
+        err = capsys.readouterr().err
+        assert "alex" in err
+        assert "internal error" in err
 
 
 def _subcommand_flags(name: str) -> set[str]:
