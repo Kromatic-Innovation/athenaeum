@@ -167,6 +167,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`comparator.content_relation` no longer floods the log with one unattributable
+  WARNING per unsettled pair when no LLM client is available (athenaeum#1245).**
+  On the live corpus this was 11,815 identical, pair-key-less WARNING lines per
+  nightly run once `comparator_enabled` is flipped on with no
+  `ANTHROPIC_API_KEY` — enough volume to push diagnostically useful log lines
+  out via rotation before anyone reads them (the failure mode athenaeum#1142
+  was filed to end). Two other exits sharing the exact same
+  `rationale="llm-unavailable"` outcome — exhausted transient-error retries,
+  and a Gate 2 call that raised — had the identical per-pair/no-key/WARNING
+  shape (an AC4 audit finding: an API outage or bad credentials would flood
+  the log identically to a missing client) and are fixed the same way. All
+  three now route through `comparator._content_relation_unavailable`, which
+  logs the pair-keyed detail at DEBUG and tracks a running count; callers with
+  a comparison loop (`wiki_dedupe.propose_wiki_page_merges`,
+  `recompare`'s pass, `comparator_instruments.run_sibling_widening`) call the
+  new `comparator.flush_content_relation_unavailable_warning` once after their
+  loop finishes, emitting a single WARNING naming the total affected-pair
+  count — following `wiki_dedupe._warn_wiki_fallback_engaged_once`'s existing
+  warn-once pattern (athenaeum#1032) rather than a second mechanism. Two other
+  per-pair WARNINGs in `comparator.py` (malformed/no-JSON Gate 2 responses)
+  were read-audited and deliberately left as-is: a different failure family
+  (the model responded, but its content was unusable, not that Gate 2 was
+  unavailable) with no evidence of run-invariant recurrence in this
+  deployment, unlike the client-unavailable case.
+
 - **The push-boundary public-safe-lint gate no longer dies on stock macOS
   bash 3.2 (athenaeum#1104).** `scripts/public-safe-lint-gate.sh` used
   `mapfile -t` at two call sites; `mapfile` is a bash 4.0 builtin and stock
