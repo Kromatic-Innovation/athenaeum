@@ -67,6 +67,7 @@ from athenaeum.comparator import (
     VERDICT_SPECIALIZATION,
     VERDICT_UNDERDETERMINED,
     ComparatorPage,
+    flush_content_relation_unavailable_warning,
     page_from_path,
     record_comparison,
 )
@@ -389,6 +390,11 @@ def recompare_pending_merges(
                 notes=notes,
             )
         )
+
+    # Issue athenaeum#1245: summarize any content_relation "LLM unavailable"
+    # occurrences from this recompare pass into ONE WARNING with the affected-pair
+    # count, rather than one unattributable WARNING per pair.
+    flush_content_relation_unavailable_warning()
 
     return RecompareResult(
         applied=apply,

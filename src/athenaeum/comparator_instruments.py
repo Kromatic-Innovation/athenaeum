@@ -139,6 +139,7 @@ from athenaeum.comparator import (
     ComparatorPage,
     ContentRelation,
     content_relation,
+    flush_content_relation_unavailable_warning,
 )
 from athenaeum.config import (
     resolve_compatible_recheck_days,
@@ -615,6 +616,11 @@ def run_sibling_widening(
                     rationale=result.rationale,
                 )
             )
+
+    # Issue athenaeum#1245: summarize any content_relation "LLM unavailable"
+    # occurrences from this sibling-widening pass into ONE WARNING with the
+    # affected-pair count, rather than one unattributable WARNING per pair.
+    flush_content_relation_unavailable_warning()
 
     return {
         "budget": budget,
