@@ -2390,6 +2390,29 @@ non-overlapping vocabularies.
 | Automatic tier sweep enabled | `ATHENAEUM_MEMORY_TIER_SWEEP_ENABLED` | `librarian.memory_tier_sweep_enabled` | `false` | When `true`, the nightly `athenaeum run` scans the wiki and applies automatic hot<->warm `memory_tier:` movement (class-default/age/precision demotion, promote-on-use) — see `athenaeum.memory_tiers.run_tier_sweep`. Off (the default): the phase returns immediately, no page is scanned or written, and the nightly run is byte-identical to this issue not existing. `axiom`-class pages are NEVER touched by this sweep regardless of this setting — the only path to demoting an axiom's tier is `athenaeum.memory_tiers.demote_axiom_tier`, which requires a human-supplied reason and records into the `_axiom_governance.jsonl` ledger. |
 | Tier-movement demote-after window | `ATHENAEUM_MEMORY_TIER_DEMOTE_AFTER_DAYS` | `memory_tiers.demote_after_days` | `60` | Shared threshold for two of the sweep's three demotion triggers: a hot claim with no usage record at all past this many days, or a hot claim pushed but never referenced whose last push is older than this many days. The third trigger (class-default: `superseded_by`/`deprecated`) ignores this knob and is unconditional. Only consulted when the sweep itself is enabled. |
 
+**`PUSH_TOKEN_BUDGET` in `config.env` (issue athenaeum#1120).** The push
+token budget above governs the *prompted* `recall_search(...,
+unprompted=True)` Python path. The shell-native `UserPromptSubmit` hook
+(`examples/claude-code/user-prompt-recall.sh`) enforces the identical
+budget without paying for a Python import: `session-start-recall.sh`
+resolves `push_budget.tokens_per_turn` (same `1200` default) once per
+session and caches it as `PUSH_TOKEN_BUDGET` in
+`~/.cache/athenaeum/config.env`; the per-turn hook reads it as
+`${ATHENAEUM_PUSH_TOKEN_BUDGET:-${PUSH_TOKEN_BUDGET:-1200}}` — env override
+first (same precedence as `resolve_push_token_budget`), then the cached
+yaml value, then the same `1200` fallback. This is deliberately a
+*different* variable name than the library's own
+`ATHENAEUM_PUSH_TOKEN_BUDGET`: `config.env` is sourced under `set -a`
+(auto-export), so writing the library's env-var name there would inject a
+resolved value into every child process and silently shadow the library's
+own env-over-yaml precedence for anything downstream (e.g. the MCP
+server's own unprompted-recall path). The hook also gains a `memory_tier
+= 'hot'` predicate on its FTS5 query, reading the tier verdict
+`athenaeum.memory_tiers.resolve_tier` now stores at index-build time (FTS5
+schema version 4, see `athenaeum.search.FTS5Backend._SCHEMA_VERSION`) —
+see `docs/recall-architecture.md` for the full seam rationale and its
+duplication trade-off.
+
 ```yaml
 push_budget:
   tokens_per_turn: 1200   # the one push-budget dial (issue athenaeum#718)
