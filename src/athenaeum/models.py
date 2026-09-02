@@ -1704,6 +1704,41 @@ class EscalationItem:
     members: list[str] = field(default_factory=list)
 
 
+# Conflict taxonomy (moved from athenaeum.contradictions, issue athenaeum#1253, step S0 of the
+# athenaeum#715 phase-4 plan) -- the categories the wiki/review queue consumers branch on.
+# ``factual`` vs ``prescriptive`` are the original two; ``stance`` (issue athenaeum#327)
+# routes an EVALUATIVE (opinion) pair to the resolver's opinion-attribution short-circuit
+# instead of a precedence winner. "Principled" contradictions from Tier 3 stay in the
+# tiers.py escalation path; this taxonomy is auto-memory-specific.
+ConflictType = Literal["factual", "prescriptive", "stance"]
+
+
+@dataclass
+class ContradictionResult:
+    """Outcome of one cluster's contradiction check.
+
+    Cross-cutting shape (issue athenaeum#1253): originally defined in
+    :mod:`athenaeum.contradictions` (the C4 detector), moved here so
+    :attr:`MergedWikiEntry.contradiction <athenaeum.merge.MergedWikiEntry.contradiction>`
+    and the resolver (:mod:`athenaeum.resolutions`) can reach the type without
+    depending on the detector module surviving. Re-exported from
+    :mod:`athenaeum.contradictions` for back-compat -- no behaviour change.
+    """
+
+    detected: bool
+    conflict_type: ConflictType | None = None
+    members_involved: list[str] = field(default_factory=list)
+    conflicting_passages: list[str] = field(default_factory=list)
+    rationale: str = ""
+    # Issue athenaeum#569 (H6): True when this verdict is a fail-open degrade caused by
+    # the detector call giving up AFTER its transient-error retries (a 429/529/
+    # connection blip that outlived `with_retry`), NOT a genuine "no
+    # contradiction". merge.py marks such clusters detection-incomplete so the
+    # next run's delta set re-examines them regardless of file changes. Defaults
+    # False, so a normal not-detected / detected verdict never re-queues.
+    incomplete: bool = False
+
+
 # Per-model rate table (issue athenaeum#247). Maps a model-id PREFIX to its
 # (input, output) price in USD per million tokens. Matched by LONGEST
 # prefix so dated ids (``claude-haiku-4-5-20251001``) resolve to the
