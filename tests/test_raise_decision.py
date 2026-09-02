@@ -319,3 +319,196 @@ class TestResolveThroughExistingPath:
 
         # Both are now closed; list_unanswered no longer surfaces either.
         assert list_unanswered(pending) == []
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1290: the "confirmation" decision type — an agent-raiseable
+# "implemented X without Y, confirm?" flag, extending raise_decision /
+# raise_pending_question (per AC1: extend the existing tool, since it exists
+# but did not carry the required structured fields) rather than adding a
+# parallel type or storage mechanism.
+# ---------------------------------------------------------------------------
+
+
+_CONFIRMATION_KWARGS = {
+    "raiser": "dijkstra-lane-1290",
+    "repo": "Kromatic-Innovation/athenaeum",
+    "issue_ref": "1290",
+    "narrowed_scope": "only scalar fields",
+    "implemented_behavior": "extended raise_decision with a kind param",
+    "alternative": "a brand new raise_confirmation tool",
+}
+
+
+class TestConfirmationValidation:
+    def test_rejects_unknown_kind(self, tmp_path: Path) -> None:
+        pending = tmp_path / "wiki" / "_pending_questions.md"
+        pending.parent.mkdir(parents=True)
+        result = raise_pending_question(pending, "Q?", "C", kind="bogus")
+        assert result["ok"] is False
+        assert result["error_code"] == "invalid_kind"
+        assert not pending.exists()
+
+    @pytest.mark.parametrize("missing_field", list(_CONFIRMATION_KWARGS))
+    def test_rejects_missing_confirmation_field(
+        self, tmp_path: Path, missing_field: str
+    ) -> None:
+        pending = tmp_path / "wiki" / "_pending_questions.md"
+        pending.parent.mkdir(parents=True)
+        kwargs = dict(_CONFIRMATION_KWARGS)
+        kwargs[missing_field] = "   "  # whitespace-only, same as empty
+        result = raise_pending_question(pending, "", "", kind="confirmation", **kwargs)
+        assert result["ok"] is False
+        assert result["error_code"] == "missing_confirmation_field"
+        assert not pending.exists()
+
+    def test_plain_question_kind_is_byte_for_byte_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        """Omitting `kind` (or passing "question") behaves exactly as before athenaeum#1290."""
+        pending_a = tmp_path / "a.md"
+        pending_b = tmp_path / "b.md"
+        r_default = raise_pending_question(
+            pending_a, "Q?", "C", now=datetime(2026, 9, 1, tzinfo=timezone.utc)
+        )
+        r_explicit = raise_pending_question(
+            pending_b,
+            "Q?",
+            "C",
+            kind="question",
+            now=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        )
+        assert r_default["raw_block"] == r_explicit["raw_block"]
+        assert r_default["decision_id"] == r_explicit["decision_id"]
+
+
+class TestConfirmationRaiseAndSurface:
+    def test_happy_path_carries_all_required_fields(self, tmp_path: Path) -> None:
+        pending = tmp_path / "wiki" / "_pending_questions.md"
+        pending.parent.mkdir(parents=True)
+        result = raise_pending_question(
+            pending,
+            "",  # auto-phrased — not a required confirmation field
+            "",
+            kind="confirmation",
+            now=datetime(2026, 9, 2, 9, 50, tzinfo=timezone.utc),
+            **_CONFIRMATION_KWARGS,
+        )
+        assert result["ok"] is True
+        assert result["decision_id"]
+
+        pq = parse_pending_questions(pending)[0]
+        assert pq.decision_kind == "confirmation"
+        assert pq.raiser == _CONFIRMATION_KWARGS["raiser"]
+        assert pq.repo == _CONFIRMATION_KWARGS["repo"]
+        assert pq.issue_ref == _CONFIRMATION_KWARGS["issue_ref"]
+        assert pq.narrowed_scope == _CONFIRMATION_KWARGS["narrowed_scope"]
+        assert pq.implemented_behavior == _CONFIRMATION_KWARGS["implemented_behavior"]
+        assert pq.alternative == _CONFIRMATION_KWARGS["alternative"]
+        assert pq.raised_at == "2026-09-02T09:50:00Z"
+        assert pq.raised_by == "agent"
+        # question/context were auto-phrased, never left blank on disk.
+        assert pq.question.strip()
+        assert pq.description.strip()
+
+    def test_explicit_question_and_context_are_preserved(self, tmp_path: Path) -> None:
+        pending = tmp_path / "wiki" / "_pending_questions.md"
+        pending.parent.mkdir(parents=True)
+        result = raise_pending_question(
+            pending,
+            "Should the narrower reading stand?",
+            "Full standalone context for a later reader.",
+            kind="confirmation",
+            **_CONFIRMATION_KWARGS,
+        )
+        assert result["ok"] is True
+        pq = parse_pending_questions(pending)[0]
+        assert pq.question == "Should the narrower reading stand?"
+        assert pq.description == "Full standalone context for a later reader."
+
+    def test_list_pending_decisions_tags_type_confirmation(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        pending = wiki / "_pending_questions.md"
+        raise_pending_question(pending, "", "", kind="confirmation", **_CONFIRMATION_KWARGS)
+
+        decisions = list_pending_decisions(wiki)
+        assert len(decisions) == 1
+        item = decisions[0]
+        assert item["type"] == "confirmation"
+        assert item["confidence"] is None
+        payload = item["payload"]
+        assert payload["raiser"] == _CONFIRMATION_KWARGS["raiser"]
+        assert payload["repo"] == _CONFIRMATION_KWARGS["repo"]
+        assert payload["issue_ref"] == _CONFIRMATION_KWARGS["issue_ref"]
+        assert payload["narrowed_scope"] == _CONFIRMATION_KWARGS["narrowed_scope"]
+        assert (
+            payload["implemented_behavior"]
+            == _CONFIRMATION_KWARGS["implemented_behavior"]
+        )
+        assert payload["alternative"] == _CONFIRMATION_KWARGS["alternative"]
+        assert payload["raised_at"]
+
+    def test_confirmation_and_plain_question_coexist_distinguishably(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        pending = wiki / "_pending_questions.md"
+        pending.write_text(_DETECTOR_BLOCK, encoding="utf-8")
+        raise_pending_question(pending, "Agent flag?", "standalone context")
+        raise_pending_question(
+            pending, "", "", kind="confirmation", **_CONFIRMATION_KWARGS
+        )
+
+        decisions = list_pending_decisions(wiki)
+        by_type = {}
+        for d in decisions:
+            by_type.setdefault(d["type"], []).append(d)
+        assert len(by_type["question"]) == 2  # detector + plain agent-raised
+        assert len(by_type["confirmation"]) == 1
+
+
+class TestConfirmationResolvesThroughExistingPath:
+    def test_resolve_question_tool_resolves_a_confirmation_item(
+        self, tmp_path: Path
+    ) -> None:
+        server = _server(tmp_path)
+        raised = _call(
+            server,
+            "raise_decision",
+            lambda fn: fn(kind="confirmation", **_CONFIRMATION_KWARGS),
+        )
+        assert raised["ok"] is True
+        decision_id = raised["decision_id"]
+
+        decisions = _call(server, "list_pending_decisions", lambda fn: fn())
+        item = next(d for d in decisions if d["id"] == decision_id)
+        assert item["type"] == "confirmation"
+
+        res = _call(
+            server,
+            "resolve_question",
+            lambda fn: fn(decision_id, "Confirmed — extension approach is correct."),
+        )
+        assert res["ok"] is True
+        assert res["deferred"] is True
+
+        pending = tmp_path / "wiki" / "_pending_questions.md"
+        raw_root = tmp_path / "raw"
+        assert any(pq["id"] == decision_id for pq in list_unanswered(pending))
+
+        report = apply_decision_answers(wiki_root=tmp_path / "wiki", raw_root=raw_root)
+        assert report.applied == 1
+        assert list_unanswered(pending) == []
+
+        resolved = parse_pending_questions(pending)[0]
+        assert resolved.answered is True
+        assert resolved.decision_kind == "confirmation"
+        assert resolved.raiser == _CONFIRMATION_KWARGS["raiser"]
+
+        # And it's gone from the unified pending-decisions view.
+        decisions_after = _call(server, "list_pending_decisions", lambda fn: fn())
+        assert all(d["id"] != decision_id for d in decisions_after)
