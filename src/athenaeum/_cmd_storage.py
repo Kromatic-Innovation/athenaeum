@@ -47,8 +47,12 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    from athenaeum.runlock import RunLock
+
+from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
 from athenaeum.pending_merges_pii import scrub_pending_merges
@@ -60,6 +64,11 @@ from athenaeum.pii import (
     resolve_pii_scan_exclude_filenames,
     scan_corpus_pii,
     scan_excluded_by_name,
+)
+from athenaeum.rules import (
+    DispositionPruneMismatchError,
+    default_shape_rule_dispositions_path,
+    prune_shape_rule_dispositions_to_positive,
 )
 from athenaeum.sensitivity_lint import (
     SensitivityMappingLintResult,
@@ -304,6 +313,34 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Emit machine-readable JSON findings instead of plain text.",
     )
 
+    prune_p = s_sub.add_parser(
+        "prune-dispositions",
+        help=(
+            "One-time prune of wiki/_shape_rule_dispositions.jsonl to its "
+            "positive-disposition records only (issue athenaeum#1274 AC3/AC4). "
+            "Dry-run by default: reports the disposition histogram and "
+            "projected size. --apply writes."
+        ),
+    )
+    prune_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge root (default: ~/knowledge).",
+    )
+    prune_p.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Write the pruned ledger (atomic replace). Without this flag the "
+            "command is a dry-run that prints the histogram and projected "
+            "size and writes nothing. Refuses to write (exit 1, nothing "
+            "written) if a re-parse of the constructed output does not "
+            "carry exactly the positive-row count the scan pass promised."
+        ),
+    )
+    _add_lock_args(prune_p)
+
 
 def cmd_storage(args: argparse.Namespace) -> int:
     sub = getattr(args, "storage_target", None)
@@ -313,8 +350,11 @@ def cmd_storage(args: argparse.Namespace) -> int:
         return _cmd_storage_lint_pii(args)
     if sub == "lint-mapping":
         return _cmd_storage_lint_mapping(args)
+    if sub == "prune-dispositions":
+        return _cmd_storage_prune_dispositions(args)
     print(
-        "usage: athenaeum storage {migrate-pii,lint-pii,lint-mapping} [...]",
+        "usage: athenaeum storage {migrate-pii,lint-pii,lint-mapping,"
+        "prune-dispositions} [...]",
         file=sys.stderr,
     )
     return 2
@@ -1027,3 +1067,110 @@ def _cmd_storage_lint_mapping(args: argparse.Namespace) -> int:
             print(f"  [{f.kind}] {f.detail}")
 
     return 0 if result.is_clean else EXIT_MAPPING_ISSUES
+
+
+def _human_bytes(n: int) -> str:
+    """Render *n* bytes as a short human-readable size (binary units).
+
+    Local, tiny, and deliberately not shared with any other module — this
+    command's report is the only caller, and pulling in a general-purpose
+    formatter for one call site would be more machinery than the job needs.
+    """
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{n} B"
+        size /= 1024
+    return f"{n} B"  # pragma: no cover - unreachable, loop always returns
+
+
+def _cmd_storage_prune_dispositions(args: argparse.Namespace) -> int:
+    """``athenaeum storage prune-dispositions`` (issue athenaeum#1274 AC3/AC4).
+
+    Dry-run by default: reports the disposition histogram, positive-record
+    count, and projected post-prune size with no write. ``--apply`` writes
+    atomically via :func:`athenaeum.rules.prune_shape_rule_dispositions_to_positive`,
+    guarded by the single-machine run lock (issue athenaeum#309) — the same
+    guard every other mutating ``storage``/librarian command acquires, so a
+    prune can never race the nightly's own concurrent appends to this same
+    file (the exact hazard athenaeum#1274's own proposal names).
+
+    Exit codes:
+        0 - dry-run report printed, or ``--apply`` succeeded (including the
+            no-op case where there was nothing to prune).
+        1 - ledger missing, or the prune's own count-mismatch guard fired
+            (:class:`athenaeum.rules.DispositionPruneMismatchError` —
+            nothing was written).
+        75 - the run lock is held by another process (``--apply`` only;
+            :data:`athenaeum._cli_shared.EXIT_LOCK_HELD`).
+    """
+    knowledge_root = _resolve_knowledge_root(args)
+    wiki_root = knowledge_root / "wiki"
+    path = default_shape_rule_dispositions_path(wiki_root)
+    if not path.is_file():
+        print(f"no disposition ledger found at {path}; nothing to prune.")
+        return 0
+
+    mode = "APPLY" if args.apply else "DRY RUN"
+    lock: "RunLock | None" = None
+    if args.apply:
+        cfg = load_config(knowledge_root)
+        acquired = _acquire_or_exit(knowledge_root, args, cfg)
+        if isinstance(acquired, int):
+            return acquired
+        lock = acquired
+    try:
+        try:
+            report = prune_shape_rule_dispositions_to_positive(wiki_root, apply=args.apply)
+        except DispositionPruneMismatchError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+        print(f"=== disposition prune ({mode}) ===")
+        print(f"  ledger:            {path}")
+        print(f"  total records:     {report.total_records}")
+        print(
+            f"  no-match:          {report.no_match_count} "
+            f"({_pct(report.no_match_count, report.total_records)})"
+        )
+        print(
+            f"  positive records:  {report.positive_count} "
+            f"({_pct(report.positive_count, report.total_records)})"
+        )
+        for disposition in sorted(report.histogram):
+            print(f"    {disposition}: {report.histogram[disposition]}")
+        if report.malformed_lines:
+            print(f"    <malformed, kept>: {report.malformed_lines}")
+        print(
+            f"  current size:      {report.current_bytes} B "
+            f"({_human_bytes(report.current_bytes)})"
+        )
+        size_label = ("new size" if report.applied else "projected size") + ":"
+        print(
+            f"  {size_label.ljust(19)}{report.projected_bytes} B "
+            f"({_human_bytes(report.projected_bytes)})"
+        )
+        print(f"  rows dropped:      {report.rows_dropped}")
+
+        if not args.apply:
+            if report.rows_dropped:
+                print(f"\n  [DRY RUN] would drop {report.rows_dropped} no-match row(s).")
+                print("  Re-run with --apply to write.")
+            else:
+                print("\n  [DRY RUN] nothing to prune.")
+            return 0
+
+        if report.applied:
+            print(f"\n  pruned {report.rows_dropped} no-match row(s); ledger rewritten.")
+        else:
+            print("\n  nothing to prune; ledger left unchanged.")
+        return 0
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _pct(part: int, whole: int) -> str:
+    if whole == 0:
+        return "0.0%"
+    return f"{100.0 * part / whole:.1f}%"
