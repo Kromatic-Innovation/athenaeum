@@ -2943,6 +2943,24 @@ _MERGE_SCOPING_NOTE = (
     "content.\n\n"
 )
 
+# Issue athenaeum#1282: the counterpart note for a page with NO markdown
+# headings at all -- see :func:`_narrow_headingless_body`. There is no
+# section outline to offer (nothing to build one FROM), so this note omits
+# every heading-specific phrase in _MERGE_SCOPING_NOTE above ("section",
+# "outline", "heading not shown") rather than reusing it verbatim and
+# describing structure that was never sent.
+_MERGE_HEADINGLESS_SCOPING_NOTE = (
+    "Note: the page content above is not the whole page — this page has "
+    "no markdown headings to scope by, so it is the portion of the page "
+    "most relevant to the new observation below. Content elsewhere on the "
+    "page may have been omitted, marked \u2018[\u2026 omitted \u2026]\u2019. Only "
+    "dedupe against content you can actually see above, and never copy an "
+    "anchor that spans an omission marker. If nothing shown needs to "
+    "change, or the observation may belong elsewhere on the page, use "
+    '"append_section" (no anchor needed) instead of guessing at unseen '
+    "content.\n\n"
+)
+
 
 # The heading OUTLINE needs its own budget. On the real corpus it is not
 # always "lightweight": the largest oversized entity page carries 876
@@ -3036,6 +3054,86 @@ def _narrow_section(section_text: str, obs_tokens: set[str], budget: int) -> str
     return f"{heading_line}{lead}" + "\n\n".join(paras[lo : hi + 1]) + tail
 
 
+def _narrow_headingless_body(body: str, obs_tokens: set[str], budget: int) -> str:
+    """Trim a heading-less *body* to *budget* chars (issue athenaeum#1282).
+
+    :func:`_select_merge_section`'s heading-based scoping is a structural
+    no-op on a body with zero markdown headings (:func:`_split_into_sections`
+    returns ``[]`` -- nothing to scope BY), which left the pre-athenaeum#1282
+    behavior whole-page echo for that cohort even when the page is oversized.
+    This is the fallback cut that does not depend on headings: it splits the
+    body into blank-line-delimited paragraph blocks -- the structural unit
+    real prose uses whether or not it carries heading markup -- and keeps
+    the contiguous run of paragraphs around the best-matching one that fits,
+    with :data:`_MERGE_SECTION_ELISION` marking each cut. Mirrors
+    :func:`_narrow_section`'s contiguous-window strategy exactly, minus the
+    "always keep the heading line" step this body has no heading line for.
+
+    A body with no blank line anywhere (a genuinely unstructured wall of
+    text, e.g. one fact per single-newline-terminated line, no `\\n\\n`
+    breaks) falls back to splitting on single newlines instead, so the
+    window still anchors on the relevant LINE rather than an arbitrary
+    character offset. Only when even that yields a single unsplittable
+    block bigger than *budget* on its own is it hard-truncated -- matching
+    :func:`_narrow_section`'s own last-resort behavior for the same shape.
+
+    "What the merge needs" here means: the paragraph/line that shares the
+    most vocabulary with the incoming observation (:func:`_match_tokens`
+    overlap, same heuristic :func:`_select_merge_section` uses to pick a
+    section), plus as much contiguous surrounding content as fits in the
+    budget -- so a merge is never handed less than it has room for. Anchor
+    safety does not depend on this choice, for the same reason it does not
+    depend on section selection: :func:`apply_merge_ops` independently
+    requires every anchor to match exactly once against the full,
+    untruncated body the caller already holds (see
+    :func:`_select_merge_section`'s docstring).
+    """
+    if len(body) <= budget:
+        return body
+
+    sep_str = "\n\n"
+    paras = body.split(sep_str)
+    if len(paras) == 1:
+        sep_str = "\n"
+        paras = body.split(sep_str)
+
+    # Highest-overlap block anchors the window; with nothing to match on,
+    # the LAST block does, mirroring _narrow_section's own no-match rule
+    # (the most recently accumulated content is the likeliest attach point).
+    if obs_tokens:
+        best = max(range(len(paras)), key=lambda i: len(obs_tokens & _match_tokens(paras[i])))
+    else:
+        best = len(paras) - 1
+
+    sep = len(_MERGE_SECTION_ELISION)
+    if len(paras[best]) + 2 * sep > budget:
+        return paras[best][:budget]
+
+    lo = hi = best
+    # Reserve room for both potential elision markers up front (mirrors
+    # _narrow_section's own "+ 2 * sep" reservation) so the growth loop
+    # below can never approve a window that only overflows once `lead`/
+    # `tail` are actually appended after the loop.
+    total = len(paras[best]) + 2 * sep
+    step = len(sep_str)
+    while True:
+        grew = False
+        if lo > 0 and total + len(paras[lo - 1]) + step <= budget:
+            lo -= 1
+            total += len(paras[lo]) + step
+            grew = True
+        if hi < len(paras) - 1 and total + len(paras[hi + 1]) + step <= budget:
+            hi += 1
+            total += len(paras[hi]) + step
+            grew = True
+        if not grew:
+            break
+
+    lead = _MERGE_SECTION_ELISION if lo > 0 else ""
+    tail = _MERGE_SECTION_ELISION.rstrip("\n") if hi < len(paras) - 1 else ""
+    return f"{lead}" + sep_str.join(paras[lo : hi + 1]) + tail
+
+
 def _select_merge_section(
     existing_body: str,
     action: EntityAction,
@@ -3047,13 +3145,27 @@ def _select_merge_section(
     byte-identical to pre-athenaeum#1181 behavior — when:
 
     - section-scoping is disabled (:func:`resolve_section_scoped_merge_enabled`);
-    - *existing_body* has fewer than two markdown-heading sections
-      (:func:`_split_into_sections`) — nothing to scope by. This also covers
-      every typical freshly-created entity page (the schema's "3-10 lines,
-      one ``# Entity Name`` heading" shape), which only develops the
-      multi-``##``-section structure section-scoping targets once a page
-      has accumulated enough merges to reach the oversized end of the
-      corpus.
+    - *existing_body* has exactly one markdown-heading section
+      (:func:`_split_into_sections`) — nothing to scope BY, since the single
+      section already IS the whole body. This covers every typical
+      freshly-created entity page (the schema's "3-10 lines, one
+      ``# Entity Name`` heading" shape), which only develops the
+      multi-``##``-section structure heading-based scoping targets once a
+      page has accumulated enough merges to reach the oversized end of the
+      corpus;
+    - *existing_body* is heading-less (zero sections) AND already fits the
+      send window on its own — same "nothing to gain" logic, one narrower
+      case: see the next paragraph for when it does NOT fit.
+
+    *existing_body* with ZERO markdown headings at all (issue athenaeum#1182's
+    "the no-heading cohort is athenaeum#1282's job" residual) gets a DIFFERENT
+    fallback instead of the whole-page echo above, once it is over the send
+    window: :func:`_narrow_headingless_body` scopes to the paragraph
+    block(s) around whatever most overlaps *action.observations*, the same
+    relevance heuristic used for headed sections below, just applied to
+    blank-line-delimited paragraphs instead of ``#``-delimited sections
+    (there is no heading outline to prepend either, since there is nothing
+    to build one from). ``was_scoped`` is ``True`` in that case too.
 
     Otherwise, selection is driven by *action.observations* — the incoming
     content the merge is actually about — never by position: each section
@@ -3088,6 +3200,28 @@ def _select_merge_section(
     if not resolve_section_scoped_merge_enabled(config):
         return existing_body, False
     sections = _split_into_sections(existing_body)
+
+    if not sections:
+        # Issue athenaeum#1282: zero markdown headings means the heading-based
+        # scoping below is a structural no-op — there is nothing to scope
+        # BY, which pre-athenaeum#1282 fell through to whole-page echo for
+        # every heading-less page, oversized or not. A body that already
+        # fits the send window gains nothing from scoping (mirrors the
+        # "nothing to gain" logic below), so only apply the paragraph-block
+        # fallback once it would otherwise be truncated/whole-page-echoed.
+        if len(existing_body) <= _MAX_EXISTING_BODY_CHARS:
+            return existing_body, False
+        obs_tokens = _match_tokens(action.observations) - _match_tokens(action.name)
+        candidate = _narrow_headingless_body(
+            existing_body, obs_tokens, _MAX_EXISTING_BODY_CHARS
+        )
+        # Same fence-forging guard as the headed path below — selection can
+        # reach content from anywhere in the body, past what
+        # existing_body_needs_full_echo's window-bounded scan checked.
+        if contains_tag(candidate, _EXISTING_PAGE_TAG):
+            return existing_body, False
+        return candidate, True
+
     if len(sections) < 2:
         return existing_body, False
 
@@ -3169,6 +3303,11 @@ def tier3_merge_params(
       directly, never through :func:`tier3_merge`).
     """
     scoped_body, was_scoped = _select_merge_section(existing_body, action, config=config)
+    # Computed once and reused below for both the log line's section count
+    # and (issue athenaeum#1282) which scoping note applies -- an empty list
+    # means _select_merge_section, when it scoped at all, took the
+    # heading-less paragraph-block fallback rather than heading selection.
+    existing_sections = _split_into_sections(existing_body)
 
     if _existing_body_truncated(scoped_body):
         log.warning(
@@ -3188,16 +3327,17 @@ def tier3_merge_params(
     if was_scoped:
         log.info(
             "%s page=%s source=%s sent_chars=%d full_body_chars=%d sections=%d — "
-            "patch-mode dedup sees only the selected section; an observation "
-            "re-confirming content in an unsent section may land as a spurious "
-            "near-duplicate (athenaeum#1181). Anchored ops still apply against "
-            "the full body, so no content is at risk.",
+            "patch-mode dedup sees only the selected section%s; an observation "
+            "re-confirming content in an unsent portion may land as a spurious "
+            "near-duplicate (athenaeum#1181, athenaeum#1282). Anchored ops still apply "
+            "against the full body, so no content is at risk.",
             MERGE_SECTION_SCOPED_LOG_PREFIX,
             action.name,
             source_ref,
             len(scoped_body),
             len(existing_body),
-            len(_split_into_sections(existing_body)),
+            len(existing_sections),
+            "" if existing_sections else " (heading-less paragraph fallback)",
         )
 
     if usage is not None:
@@ -3220,7 +3360,11 @@ def tier3_merge_params(
             max_chars=_MAX_EXISTING_BODY_CHARS,
             defang=False,
         ),
-        scoping_note=_MERGE_SCOPING_NOTE if was_scoped else "",
+        scoping_note=(
+            (_MERGE_SCOPING_NOTE if existing_sections else _MERGE_HEADINGLESS_SCOPING_NOTE)
+            if was_scoped
+            else ""
+        ),
         source_ref=source_ref,
         observations=fence_untrusted(
             action.observations, tag="user_document", max_chars=3000
