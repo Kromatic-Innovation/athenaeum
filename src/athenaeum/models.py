@@ -2674,6 +2674,21 @@ class ProcessingResult:
     #: was actually escalated. Surfaced as ``oversize_suppressed=N`` in the
     #: run summary, mirroring the degraded/truncated convention above.
     oversize_suppressed: int = 0
+    #: Count of oversize pages ``librarian.oversize_page_action: split``
+    #: actually split into a hub + linked atomic pages this run (issue
+    #: athenaeum#1248 — ``EscalationItem.conflict_type == "oversize_split"``).
+    #: Derived from ``escalated`` exactly like ``oversize_suppressed`` above,
+    #: and deliberately DISJOINT from it: a page that was split is never
+    #: also counted as ``oversize_suppressed`` (that conflict_type is
+    #: ``review``'s alone), so the two counters partition the gate's fired
+    #: outcomes rather than double-counting. Surfaced as ``oversize_split=N``.
+    oversize_split: int = 0
+    #: Count of oversize pages ``librarian.oversize_page_action: log_demote``
+    #: actually moved into the preserved-log area this run (issue
+    #: athenaeum#1248 — ``EscalationItem.conflict_type ==
+    #: "oversize_log_demote"``). Same derivation/disjointness contract as
+    #: ``oversize_split`` above. Surfaced as ``oversize_log_demoted=N``.
+    oversize_log_demoted: int = 0
     #: Count of NEW entity writes this file's Tier-3 create phase produced
     #: whose ``type`` was outside declared ∪ ``KNOWN_TYPES`` and was
     #: therefore REFUSED by the write-boundary guard (issue athenaeum#1196,
