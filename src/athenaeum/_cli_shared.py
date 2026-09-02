@@ -129,6 +129,7 @@ def _acquire_or_exit(
     """
     from athenaeum.config import (
         resolve_lock_break_stale_after,
+        resolve_lock_heartbeat_interval,
         resolve_lock_timeout,
         resolve_lock_warn_stale_after,
     )
@@ -143,6 +144,9 @@ def _acquire_or_exit(
         force=getattr(args, "force", False),
         break_stale_after=resolve_lock_break_stale_after(config),
         warn_stale_after=resolve_lock_warn_stale_after(config),
+        # Issue athenaeum#1271: guaranteed background heartbeat-bump interval,
+        # independent of caller progress.
+        heartbeat_interval=resolve_lock_heartbeat_interval(config),
     )
     try:
         lock.acquire()

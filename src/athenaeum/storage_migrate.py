@@ -48,6 +48,19 @@ compiled patterns :mod:`athenaeum.pii` defines, rather than importing
 by name. :data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS` is still consumed
 directly, since that is identity/field policy, not detection.
 
+A detected token is never migrated when it carries an entry in
+``wiki/_pii-allowlist.yml`` — the same adjudicated allowlist ``lint-pii``
+already consults (issue athenaeum#1275, unblocking the athenaeum#936 artifact from
+being overridden by the migrator it exists to police). Matching is EXACT
+value equality only, via the shared :func:`athenaeum.pii.load_pii_allowlist`
+reader — no case-folding, no substring/fuzzy matching — so this module and
+``lint-pii`` can never disagree about which token is adjudicated. Callers
+resolve the allowlist file (a missing file means nothing has been
+adjudicated yet; a file that exists but fails to parse is refused rather
+than silently treated as empty) and pass a ``{value: reason}`` mapping in;
+this module stays a pure transform and never reads the allowlist file
+itself.
+
 Layering: L4 domain/pipeline module. May import L3 services (``models``,
 ``pii``, ``storage``) freely. Factoring rule: this module is a PURE
 transform — it reads a page and returns the two would-be file texts; it never
@@ -58,7 +71,7 @@ writes to disk. Applying a plan (dry-run vs. ``--apply``) is the L5 CLI's job
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -68,6 +81,7 @@ from athenaeum.pii import (
     DURABLE_IDENTIFIER_FIELDS,
     PII_ENTITY_CLASS,
     PII_FLAG,
+    PiiAllowlistEntry,
     is_pii_class_excluded,
     is_service_address,
     name_field_holds_pii,
@@ -172,6 +186,15 @@ class PiiMigrationPlan:
     #: scalar identity field. The CLI refuses to ``--apply`` a conflicted plan
     #: (issue athenaeum#1108, AC1: surfaced, never silently resolved).
     excluded_record_conflicts: tuple[ExcludedRecordConflict, ...] = ()
+    #: Detected email/phone tokens that were NOT migrated because they carry
+    #: an adjudicated entry in the allowlist (issue athenaeum#1275) — exact-value
+    #: matches only, deduped by value across the whole page (frontmatter +
+    #: body), in first-seen order. A value here is left byte-identical
+    #: wherever it appeared: never redacted inline, never dropped from
+    #: frontmatter, never added to the excluded contact record. Reported so a
+    #: skip is never silent (the same principle as athenaeum#1273's exclusion
+    #: reporting) — the CLI prints these in both dry-run and ``--apply``.
+    skipped_allowlisted: tuple[PiiAllowlistEntry, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -187,6 +210,47 @@ def _dedupe_preserving_order(values: list[str]) -> list[str]:
     return seen
 
 
+def _dedupe_allowlist_entries(
+    entries: list[PiiAllowlistEntry],
+) -> tuple[PiiAllowlistEntry, ...]:
+    """Dedupe skipped-allowlist entries by value, first-seen order, page-wide."""
+    seen: set[str] = set()
+    out: list[PiiAllowlistEntry] = []
+    for e in entries:
+        if e.value in seen:
+            continue
+        seen.add(e.value)
+        out.append(e)
+    return tuple(out)
+
+
+def _split_allowlisted(
+    tokens: list[str], allowlist: Mapping[str, str]
+) -> tuple[list[str], list[PiiAllowlistEntry]]:
+    """Split detected *tokens* into (migratable, skipped) against *allowlist*.
+
+    *allowlist* is a ``{value: reason}`` mapping built from the adjudicated
+    allowlist (issue athenaeum#1275) — matching is EXACT value equality only, no
+    case-folding, no substring/fuzzy matching, mirroring
+    :func:`athenaeum.pii.adjudicate_corpus_pii`'s matching semantics exactly
+    so this module and ``lint-pii`` can never disagree about which token
+    counts as adjudicated. A skipped token is returned with its reason
+    (never migrated, never redacted, left byte-identical) so the caller can
+    report it — a silent skip in a PII tool is its own hazard.
+    """
+    if not allowlist:
+        return tokens, []
+    migratable: list[str] = []
+    skipped: list[PiiAllowlistEntry] = []
+    for t in tokens:
+        reason = allowlist.get(t)
+        if reason is not None:
+            skipped.append(PiiAllowlistEntry(value=t, reason=reason))
+        else:
+            migratable.append(t)
+    return migratable, skipped
+
+
 def _redact_inline_tokens(body: str, tokens: list[str]) -> str:
     """Replace each raw inline contact token in *body* with the redaction marker.
 
@@ -200,31 +264,47 @@ def _redact_inline_tokens(body: str, tokens: list[str]) -> str:
     return new_body
 
 
-def _migratable_emails(text: str, config: dict[str, Any] | None) -> list[str]:
-    """Email-shaped tokens in *text* that are genuine contact data.
+def _migratable_emails(
+    text: str,
+    config: dict[str, Any] | None,
+    allowlist: Mapping[str, str] | None = None,
+) -> tuple[list[str], list[PiiAllowlistEntry]]:
+    """Email-shaped tokens in *text* that are genuine contact data, split against *allowlist*.
 
     Filters out service identifiers (``git@github.com``, Google Calendar group
     addresses, …) via :func:`~athenaeum.pii.is_service_address` (issue athenaeum#507): a
     naïve sweep that migrated those would damage the page (a broken clone URL /
     calendar ref) while archiving no real PII. Order and dedup follow
     :func:`_classified_values`, which mirrors :func:`~athenaeum.pii.find_inline_emails`'s
-    contract exactly.
+    contract exactly. Remaining candidates are then split via
+    :func:`_split_allowlisted` (issue athenaeum#1275): an adjudicated value is
+    returned separately, never as migratable.
     """
-    return [e for e in _classified_values(text, "email", config) if not is_service_address(e)]
+    candidates = [
+        e for e in _classified_values(text, "email", config) if not is_service_address(e)
+    ]
+    return _split_allowlisted(candidates, allowlist or {})
 
 
 def _migrate_str_value(
-    value: str, config: dict[str, Any] | None
-) -> tuple[str | None, list[str], list[str]]:
+    value: str,
+    config: dict[str, Any] | None,
+    allowlist: Mapping[str, str] | None = None,
+) -> tuple[str | None, list[str], list[str], list[PiiAllowlistEntry]]:
     """Extract contact tokens from one frontmatter string value.
 
-    Returns ``(new_value, emails, phones)``:
+    Returns ``(new_value, emails, phones, skipped)``:
 
-    * ``emails`` / ``phones`` — the contact tokens detected in *value*
-      (service identifiers excluded — see :func:`_migratable_emails`).
-    * ``new_value`` — the value with those tokens handled:
+    * ``emails`` / ``phones`` — the contact tokens MIGRATED from *value*
+      (service identifiers excluded — see :func:`_migratable_emails` — and
+      allowlisted values excluded — see :func:`_split_allowlisted`, issue
+      athenaeum#1275).
+    * ``skipped`` — tokens that were PII-shaped but carry an allowlist entry;
+      left in *new_value* byte-identical, never redacted or dropped.
+    * ``new_value`` — the value with the migrated tokens handled:
       - no migratable PII → *value* unchanged (a bare ``git@github.com`` service
-        address is left byte-identical, not redacted).
+        address, or a value whose only token is allowlisted, is left
+        byte-identical, not redacted).
       - the value is ENTIRELY contact data (a bare ``foo@bar.com`` alias, or a
         scalar that is just the address) → ``None``, signalling the caller to
         DROP this list entry / frontmatter key (nothing archival is lost — the
@@ -235,23 +315,26 @@ def _migrate_str_value(
         in place with :data:`INLINE_REDACTION_MARKER`, keeping the non-PII
         context so the field stays meaningful.
     """
-    emails = _migratable_emails(value, config)
-    phones = _classified_values(value, "phone", config)
+    emails, skipped_emails = _migratable_emails(value, config, allowlist)
+    raw_phones = _classified_values(value, "phone", config)
+    phones, skipped_phones = _split_allowlisted(raw_phones, allowlist or {})
+    skipped = skipped_emails + skipped_phones
     if not (emails or phones):
-        return value, [], []
+        return value, [], [], skipped
     redacted = _redact_inline_tokens(value, emails + phones)
     # If nothing but the marker(s)/whitespace survives, the value WAS pure
     # contact data — drop it rather than leave a content-free marker behind.
     residual = redacted.replace(INLINE_REDACTION_MARKER, "").strip()
     if not residual:
-        return None, emails, phones
-    return redacted, emails, phones
+        return None, emails, phones, skipped
+    return redacted, emails, phones, skipped
 
 
 def _migrate_value(
     value: Any,
     config: dict[str, Any] | None,
-) -> tuple[Any, list[str], list[str]]:
+    allowlist: Mapping[str, str] | None = None,
+) -> tuple[Any, list[str], list[str], list[PiiAllowlistEntry]]:
     """Recursively migrate one frontmatter value of arbitrary nesting depth.
 
     The athenaeum#502 sweep scanned only the TOP level of each frontmatter value: a
@@ -264,30 +347,36 @@ def _migrate_value(
     rewrite targets the exact leaf — e.g. ``sources[].claim`` — rather than
     replacing a whole structure).
 
-    Returns ``(new_value, emails, phones)``. ``new_value is None`` signals the
-    caller to DROP this leaf — a list entry or dict key whose value was ENTIRELY
-    contact data (a bare ``foo@bar.com``) — exactly the scalar contract in
-    :func:`_migrate_str_value`; an emptied container is likewise dropped, mirror-
-    ing the top-level "drop a key whose every entry was contact data" rule. Non-
-    string, non-container scalars (int/bool/date) are returned unchanged.
-    Nested dicts honour :data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS` too, so
-    a durable identifier nested inside a structure is preserved verbatim.
+    Returns ``(new_value, emails, phones, skipped)``. ``new_value is None``
+    signals the caller to DROP this leaf — a list entry or dict key whose
+    value was ENTIRELY contact data (a bare ``foo@bar.com``) — exactly the
+    scalar contract in :func:`_migrate_str_value`; an emptied container is
+    likewise dropped, mirroring the top-level "drop a key whose every entry
+    was contact data" rule. Non-string, non-container scalars (int/bool/date)
+    are returned unchanged. Nested dicts honour
+    :data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS` too, so a durable
+    identifier nested inside a structure is preserved verbatim. *allowlist*
+    (issue athenaeum#1275) is threaded to every leaf unchanged — an adjudicated
+    value anywhere in the structure is collected in ``skipped`` and left out
+    of both ``emails``/``phones`` and the drop/redact decision.
     """
     if isinstance(value, str):
-        return _migrate_str_value(value, config)
+        return _migrate_str_value(value, config, allowlist)
 
     emails: list[str] = []
     phones: list[str] = []
+    skipped: list[PiiAllowlistEntry] = []
 
     if isinstance(value, list):
         new_list: list[Any] = []
         for item in value:
-            new_item, em, ph = _migrate_value(item, config)
+            new_item, em, ph, sk = _migrate_value(item, config, allowlist)
             emails += em
             phones += ph
+            skipped += sk
             if new_item is not None:
                 new_list.append(new_item)
-        return (new_list if new_list else None), emails, phones
+        return (new_list if new_list else None), emails, phones, skipped
 
     if isinstance(value, dict):
         new_dict: dict[Any, Any] = {}
@@ -295,20 +384,22 @@ def _migrate_value(
             if key in DURABLE_IDENTIFIER_FIELDS:
                 new_dict[key] = item
                 continue
-            new_item, em, ph = _migrate_value(item, config)
+            new_item, em, ph, sk = _migrate_value(item, config, allowlist)
             emails += em
             phones += ph
+            skipped += sk
             if new_item is not None:
                 new_dict[key] = new_item
-        return (new_dict if new_dict else None), emails, phones
+        return (new_dict if new_dict else None), emails, phones, skipped
 
-    return value, [], []  # non-string scalar (int/bool/date/None): keep verbatim
+    return value, [], [], []  # non-string scalar (int/bool/date/None): keep verbatim
 
 
 def _migrate_frontmatter(
     meta: dict[str, Any],
     config: dict[str, Any] | None,
-) -> tuple[dict[str, Any], list[str], list[str]]:
+    allowlist: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any], list[str], list[str], list[PiiAllowlistEntry]]:
     """Rewrite frontmatter, extracting contact data from every non-durable field.
 
     Detector-driven (issue athenaeum#502): scans EVERY frontmatter value — not just
@@ -324,22 +415,26 @@ def _migrate_frontmatter(
     entry was an email); scalar values keep their non-PII context; service
     identifiers (``git@github.com``, calendar group addresses) are left in place.
 
-    Returns ``(new_meta, emails, phones)`` — the rewritten frontmatter dict
-    (key order preserved) and the deduped-later contact tokens pulled out of it.
+    Returns ``(new_meta, emails, phones, skipped)`` — the rewritten
+    frontmatter dict (key order preserved), the deduped-later contact tokens
+    pulled out of it, and any allowlisted values found but left in place
+    (issue athenaeum#1275).
     """
     new_meta: dict[str, Any] = {}
     emails: list[str] = []
     phones: list[str] = []
+    skipped: list[PiiAllowlistEntry] = []
     for key, value in meta.items():
         if key in DURABLE_IDENTIFIER_FIELDS:
             new_meta[key] = value
             continue
-        new_value, em, ph = _migrate_value(value, config)
+        new_value, em, ph, sk = _migrate_value(value, config, allowlist)
         emails += em
         phones += ph
+        skipped += sk
         if new_value is not None:
             new_meta[key] = new_value
-    return new_meta, emails, phones
+    return new_meta, emails, phones, skipped
 
 
 def _build_excluded_record(
@@ -460,6 +555,7 @@ def plan_pii_migration(
     page_path: Path,
     config: dict[str, Any] | None,
     knowledge_root: Path,
+    allowlist: Mapping[str, str] | None = None,
 ) -> PiiMigrationPlan:
     """Compute the migration for one entity page — pure, writes nothing.
 
@@ -469,6 +565,15 @@ def plan_pii_migration(
     fields dropped, inline tokens redacted). When the page carries no contact
     data the plan's :attr:`~PiiMigrationPlan.changed` is False and both texts
     are ``None`` (a no-op the CLI reports rather than writing an empty record).
+
+    *allowlist* (issue athenaeum#1275) is an optional ``{value: reason}`` mapping —
+    a detected token matching a key EXACTLY is never migrated (not redacted,
+    not dropped, not added to the excluded record) and is instead reported in
+    :attr:`~PiiMigrationPlan.skipped_allowlisted`. This function does not
+    resolve or read the allowlist file itself (that is the CLI's job, via
+    :func:`athenaeum.pii.load_pii_allowlist` — the same reader ``lint-pii``
+    uses); omitting *allowlist* preserves this function's pre-athenaeum#1275
+    behaviour exactly.
     """
     text = page_path.read_text(encoding="utf-8")
     meta, body = parse_frontmatter(text)
@@ -478,14 +583,18 @@ def plan_pii_migration(
     # Detector-driven frontmatter scan (athenaeum#502): pull contact tokens from EVERY
     # non-durable field, preserving durable identifiers and the name-is-an-email
     # carve-out. Then the body inline tokens.
-    new_meta, fm_emails, fm_phones = _migrate_frontmatter(meta, config)
+    new_meta, fm_emails, fm_phones, fm_skipped = _migrate_frontmatter(meta, config, allowlist)
     # Body: same service-identifier exclusion as the frontmatter path (athenaeum#507) —
     # a `git@github.com` in prose is left byte-identical, not redacted.
-    inline_emails = _migratable_emails(body, config)
-    inline_phones = _classified_values(body, "phone", config)
+    inline_emails, inline_skipped_emails = _migratable_emails(body, config, allowlist)
+    raw_inline_phones = _classified_values(body, "phone", config)
+    inline_phones, inline_skipped_phones = _split_allowlisted(raw_inline_phones, allowlist or {})
 
     emails = _dedupe_preserving_order(fm_emails + inline_emails)
     phones = _dedupe_preserving_order(fm_phones + inline_phones)
+    skipped_allowlisted = _dedupe_allowlist_entries(
+        fm_skipped + inline_skipped_emails + inline_skipped_phones
+    )
     name_field_pii = name_field_holds_pii(meta)
 
     excluded_root = surface_root_for_class(PII_ENTITY_CLASS, config, knowledge_root)
@@ -503,6 +612,7 @@ def plan_pii_migration(
             rewritten_page_text=None,
             excluded_page_text=None,
             name_field_pii=name_field_pii,
+            skipped_allowlisted=skipped_allowlisted,
         )
 
     # Rewrite origin: frontmatter with contact data stripped/redacted (durable
@@ -550,6 +660,7 @@ def plan_pii_migration(
         name_field_pii=name_field_pii,
         excluded_record_existed=excluded_record_existed,
         excluded_record_conflicts=excluded_record_conflicts,
+        skipped_allowlisted=skipped_allowlisted,
     )
 
 
