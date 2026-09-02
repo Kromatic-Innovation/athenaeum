@@ -875,3 +875,33 @@ class TestUsageThreading:
         assert usage.input_tokens == 0
         assert usage.cache_creation_input_tokens == 0
         assert usage.api_calls == 0
+
+    def test_resolver_tags_c4_contradiction_surface(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1289: the C4 resolver is the other half of the "C4
+        contradiction detector and resolver" declared surface (see
+        test_contradictions.py's sibling detector test) -- this call site
+        must always tag it, regardless of caller (the primary merge-phase
+        loop and the athenaeum#188 reresolve heal pass both reach here)."""
+        from athenaeum.models import SURFACE_C4_CONTRADICTION
+
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "Claim A.")
+        b = _write_am(scope, "b.md", "Claim B.")
+        payload = (
+            '{"recommended_winner": "a", "action": "keep_a", '
+            '"confidence": 0.9, "rationale": "r", '
+            '"source_precedence_used": []}'
+        )
+        client = _fake_client(payload)
+        client.messages.create.return_value.usage = MagicMock(
+            input_tokens=200,
+            output_tokens=40,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        usage = TokenUsage()
+        propose_resolution(_detected([a, b]), [a, b], client, usage=usage)
+        assert usage.per_surface[SURFACE_C4_CONTRADICTION]["input_tokens"] == 200
+        assert usage.per_surface[SURFACE_C4_CONTRADICTION]["output_tokens"] == 40
+        # Same knob-tagging as before -- surface is an independent addition.
+        assert usage.per_knob["resolve"]["input_tokens"] == 200
