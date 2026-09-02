@@ -3691,6 +3691,86 @@ def resolve_shape_rules_max_records_per_run(config: dict[str, Any] | None) -> in
     )
 
 
+def resolve_shape_rules_log_no_match(config: dict[str, Any] | None) -> bool:
+    """``librarian.shape_rules.log_no_match`` (default False). DEFAULT OFF.
+
+    Issue athenaeum#1274: whether the shape-rules pass writes a per-record
+    ``disposition: "no-match"`` row to ``wiki/_shape_rule_dispositions.jsonl``
+    for every candidate no rule claimed. On a real deployment those rows were
+    99.8% of a 341 MB ledger (1,485,942 of 1,488,689 rows over 9 days) --
+    a negative result, regenerated on every nightly pass and re-derivable at
+    any time by re-running the phase, sitting inside a git repo whose stated
+    value is being small and diffable.
+
+    **Default OFF is safe only because the sole consumer is also off by
+    default.** ``no-match`` rows carry ``tier: None``, which is exactly what
+    :func:`athenaeum.rule_proposals._grouped_deferred_rows` reads for
+    athenaeum#905's shape-frequency detector -- so these rows are NOT inert.
+    But that detector is reached only through
+    ``librarian._run_rule_proposal_phase``, itself gated on
+    :func:`resolve_rule_proposals_enabled` (also default False), which
+    returns before any disposition-ledger read when off. With both at their
+    defaults, suppressing the write loses nothing.
+
+    **An operator turning on ``librarian.rule_proposals.enabled`` must turn
+    this on too**, and must then wait
+    :func:`resolve_rule_proposals_window_days` (default 30 days) for the
+    detector to accumulate enough history to propose anything -- the ledger
+    holds no ``no-match`` history from the period this was off. That coupling
+    is deliberately NOT expressed as a derived default: every resolver in
+    this module resolves to a literal, and a config value whose default is
+    another config value would make "enable detection" quietly mean "wait a
+    month" with nothing in config to show for it.
+
+    Mirrors :func:`resolve_rule_proposals_enabled`'s shape: env
+    ``ATHENAEUM_SHAPE_RULES_LOG_NO_MATCH`` (``1``/``true``/``yes``/``on``,
+    case-insensitive) > yaml ``librarian.shape_rules.log_no_match`` > default
+    ``False``. Non-bool yaml values and unrecognized env strings fall through
+    to off.
+    """
+    env = os.environ.get("ATHENAEUM_SHAPE_RULES_LOG_NO_MATCH")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            sr_cfg = librarian_cfg.get("shape_rules")
+            if isinstance(sr_cfg, dict):
+                raw = sr_cfg.get("log_no_match")
+                if isinstance(raw, bool):
+                    return raw
+    return False
+
+
+def resolve_shape_rules_dispositions_retention_days(config: dict[str, Any] | None) -> int:
+    """``librarian.shape_rules.dispositions_retention_days`` (default 30).
+
+    How many days of ``wiki/_shape_rule_dispositions.jsonl`` rows
+    :func:`athenaeum.rules.prune_shape_rule_dispositions` keeps at the tail of
+    every shape-rules phase -- the ledger's retention policy, and what gives
+    it a bounded steady state instead of monotonic growth.
+
+    Issue athenaeum#1274 split this out of
+    :func:`resolve_rule_proposals_window_days`, which athenaeum#1229 had
+    doing double duty. Those are two different questions: ``window_days`` is
+    a READ window (how far back the athenaeum#905 detector counts), this is a
+    RETENTION policy (how much history the file physically carries). Coupled,
+    narrowing the detector's window silently deleted ledger history, and an
+    operator who disabled ``librarian.rule_proposals`` outright still had
+    retention governed by a key belonging to a phase they had turned off.
+    The default matches athenaeum#1229's effective behaviour (``window_days``
+    also defaults to 30), so this split is a no-op for existing deployments.
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_SHAPE_RULES_DISPOSITIONS_RETENTION_DAYS",
+        "librarian",
+        "shape_rules",
+        "dispositions_retention_days",
+        30,
+    )
+
+
 def resolve_shape_rules_runtime_share(config: dict[str, Any] | None) -> float:
     """``librarian.shape_rules.runtime_share`` (default 0.05).
 
