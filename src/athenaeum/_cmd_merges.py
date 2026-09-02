@@ -360,12 +360,22 @@ def _cmd_scrub_pii(args: argparse.Namespace) -> int:
     knowledge_root = (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     merges_path = knowledge_root / "wiki" / "_pending_merges.md"
     config = load_config(knowledge_root)
-    result = scrub_pending_merges(
-        merges_path,
-        allowlist_path=getattr(args, "allowlist", None),
-        apply=getattr(args, "apply", False),
-        config=config,
-    )
+    try:
+        result = scrub_pending_merges(
+            merges_path,
+            allowlist_path=getattr(args, "allowlist", None),
+            apply=getattr(args, "apply", False),
+            config=config,
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        # An unreadable/undecodable sidecar is an operator-fixable condition
+        # (permissions, a truncated write, a non-UTF-8 byte), not a bug — and
+        # this command's whole job is contact data, so it must fail LOUDLY and
+        # non-zero rather than traceback or, worse, report a reassuring
+        # "0 proposals carry contact data". Same handling as
+        # ``_cmd_storage._scrub_merge_sidecar``'s.
+        print(f"error: could not read {merges_path}: {exc}", file=sys.stderr)
+        return 1
 
     if args.json:
         sys.stdout.write(
