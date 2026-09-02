@@ -710,6 +710,145 @@ def read_run_summary_ledger(
 
 
 # ---------------------------------------------------------------------------
+# Embedder provenance (issue athenaeum#1279)
+# ---------------------------------------------------------------------------
+#
+# athenaeum#1032 recorded WHICH embedder produced a cluster's vectors on the
+# ``Cluster`` record itself, but nothing summarized it anywhere a lane or a
+# probe could read without re-deriving it from context, and the raw-intake
+# C2 cluster pass's chromadb-service ratio could (and did — see this issue's
+# motivation) collapse from ~98% to 0% over two days with every affected
+# cluster a harmless singleton, so nothing counted it and nothing could have
+# alerted on it. The ``auto-memory`` phase segment now carries
+# ``embed_chromadb`` / ``embed_fallback`` (see
+# :func:`athenaeum.clusters.cluster_auto_memory_files`'s
+# ``out_embedder_counts`` and :mod:`athenaeum.librarian`'s auto-memory phase
+# driver), which :func:`build_run_summary_ledger_record` copies into the
+# durable ledger like every other phase field — no new state file, same
+# "copy the profile's fields verbatim" convention every other reader in this
+# module relies on. This is the reader half: the LATEST run's counts, for
+# :func:`athenaeum.status.status`'s ``embedder_provenance`` field and for any
+# lane or probe that wants a one-call answer instead of parsing the ledger
+# itself.
+#
+# Documented surface for a lane-evidence probe (issue athenaeum#1279's scope
+# boundary — the probe registration itself lives in the hestia repo, not
+# here; this is the athenaeum-side half the probe would read):
+#
+#   - Python: ``athenaeum.status.status(knowledge_root)["embedder_provenance"]``
+#     — a documented field on the public ``StatusInfo`` TypedDict (see
+#     ``status.py``'s own "Public API" note on that class), shaped
+#     ``{"embed_chromadb": N, "embed_fallback": M, "fallback_ratio": R,
+#     "as_of": ts}``, or ``None`` if no run has ever clustered anything.
+#     ``athenaeum status`` (the CLI, no ``--json`` flag exists today) prints
+#     this as a human-readable line via ``status.format_status`` when
+#     present — see that function for the exact wording.
+#   - Durable ledger directly: ``<cache_dir>/run_summary.jsonl``, newest
+#     record whose ``phases.auto-memory`` dict has both ``embed_chromadb``
+#     and ``embed_fallback`` keys (ints). A TREND — this issue's 98%->0%
+#     incident — needs several TRAILING records, not just the newest one:
+#     read the ledger directly for that (one JSON object per line, oldest
+#     first).
+#   - Standing snapshot of the CURRENT cluster report (a complementary,
+#     coarser signal — per-CLUSTER not per-file, and reflects the last
+#     WHOLE-corpus or delta-affected slice rather than every run):
+#     :func:`athenaeum.status.status`'s ``cluster_embedder_snapshot`` field,
+#     tallying ``raw/_librarian-clusters.jsonl``'s ``embedder`` column.
+
+#: Field names on the ``auto-memory`` profile segment / ledger phase dict
+#: (issue athenaeum#1279) — see :func:`athenaeum.clusters.
+#: cluster_auto_memory_files`'s ``out_embedder_counts`` docstring for what
+#: they count (per-FILE, not per-cluster).
+EMBED_CHROMADB_FIELD = "embed_chromadb"
+EMBED_FALLBACK_FIELD = "embed_fallback"
+
+
+def embedder_counts_in_record(record: dict[str, Any]) -> "dict[str, int] | None":
+    """This record's auto-memory-phase embedder counts, or ``None``.
+
+    ``None`` means "cannot speak to it" — either this record predates issue
+    athenaeum#1279 (no ``auto-memory`` phase segment, or one without both
+    fields), or the auto-memory phase simply did not run this run at all
+    (e.g. an empty raw-intake corpus that short-circuits before the C2
+    cluster pass). Deliberately never collapsed to ``{"embed_chromadb": 0,
+    "embed_fallback": 0}`` in that case — that would misreport "confirmed
+    zero fallback" for a run that never clustered anything, the same
+    three-state discipline :func:`refusal_in_record` documents for the
+    identical reason (a false negative is worse than an honest "cannot
+    tell").
+    """
+    phases = record.get("phases")
+    if not isinstance(phases, dict):
+        return None
+    auto_memory = phases.get("auto-memory")
+    if not isinstance(auto_memory, dict):
+        return None
+    if (
+        EMBED_CHROMADB_FIELD not in auto_memory
+        or EMBED_FALLBACK_FIELD not in auto_memory
+    ):
+        return None
+    try:
+        chromadb_count = int(auto_memory[EMBED_CHROMADB_FIELD])
+        fallback_count = int(auto_memory[EMBED_FALLBACK_FIELD])
+    except (TypeError, ValueError):
+        return None
+    return {
+        EMBED_CHROMADB_FIELD: chromadb_count,
+        EMBED_FALLBACK_FIELD: fallback_count,
+    }
+
+
+def read_latest_embedder_counts(
+    *,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> "dict[str, Any] | None":
+    """The MOST RECENT run's embedder-provenance counts, best-effort.
+
+    Walks the ledger newest-first and returns the first record
+    :func:`embedder_counts_in_record` can actually read — so a run whose
+    auto-memory phase never ran (empty corpus, or a record predating this
+    issue) does not mask an earlier run's real counts behind a false zero.
+    Fail-open to ``None`` on any read error / missing ledger / no record
+    ever recorded counts, mirroring every other convenience reader in this
+    module (:func:`read_refusal_streak` above all) — :mod:`athenaeum.status`
+    is documented read-only/side-effect-free and depends on that.
+
+    Returns ``{"embed_chromadb": N, "embed_fallback": M, "fallback_ratio":
+    R, "as_of": ts}`` where ``R = M / (N + M)`` (``None`` when ``N + M ==
+    0`` — the phase ran but resolved zero files, e.g. an empty delta pool)
+    and ``ts`` is that record's ISO timestamp (``None`` if the record
+    somehow lacks one).
+    """
+    try:
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        history = read_run_summary_ledger(target)
+    except Exception as exc:  # noqa: BLE001 — observability must never raise
+        log.debug("run-summary: embedder-counts read skipped: %s", exc)
+        return None
+    for record in reversed(history):
+        counts = embedder_counts_in_record(record)
+        if counts is None:
+            continue
+        chromadb_count = counts[EMBED_CHROMADB_FIELD]
+        fallback_count = counts[EMBED_FALLBACK_FIELD]
+        total = chromadb_count + fallback_count
+        ratio = (fallback_count / total) if total > 0 else None
+        return {
+            EMBED_CHROMADB_FIELD: chromadb_count,
+            EMBED_FALLBACK_FIELD: fallback_count,
+            "fallback_ratio": ratio,
+            "as_of": record.get("ts"),
+        }
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Source-starvation streaks (issue athenaeum#1291 AC3)
 # ---------------------------------------------------------------------------
 #

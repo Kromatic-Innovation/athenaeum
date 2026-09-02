@@ -206,6 +206,116 @@ class TestStatus:
         info = status(root)
         assert info["verdict_ledger_duty_cycle"] == {"gate2": pytest.approx(1.0)}
 
+    def test_status_embedder_provenance_defaults_to_none(self, tmp_path: Path) -> None:
+        # Issue athenaeum#1279: no librarian run has ever finalized against this
+        # knowledge base -- no ``run_summary.jsonl`` cache-dir ledger exists,
+        # and the read side fails open to ``None`` rather than raising or
+        # reporting a false "zero fallback".
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        info = status(root)
+        assert info["embedder_provenance"] is None
+
+    def test_status_surfaces_latest_run_embedder_provenance(
+        self, tmp_path: Path
+    ) -> None:
+        # Issue athenaeum#1279: the most recent run's raw-intake (C2) cluster-
+        # pass embedder counts are surfaced in ``athenaeum status`` --
+        # exercised here via the SAME durable athenaeum#1102 ledger the
+        # finalize phase writes, without driving a full librarian run.
+        # Written under the CACHE dir (redirected to a per-test tmp dir by
+        # the ``_isolate_cache_dir`` autouse fixture), same discipline as
+        # the librarian-refusal test above.
+        from athenaeum.config import resolve_cache_dir
+        from athenaeum.run_summary_log import (
+            EMBED_CHROMADB_FIELD,
+            EMBED_FALLBACK_FIELD,
+            default_run_summary_ledger_path,
+            write_run_summary_record,
+        )
+
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        ledger_path = default_run_summary_ledger_path(resolve_cache_dir())
+        write_run_summary_record(
+            [
+                (
+                    "auto-memory",
+                    1.0,
+                    {EMBED_CHROMADB_FIELD: 0, EMBED_FALLBACK_FIELD: 71},
+                )
+            ],
+            ledger_path=ledger_path,
+        )
+
+        info = status(root)
+        provenance = info["embedder_provenance"]
+        assert provenance is not None
+        assert provenance[EMBED_CHROMADB_FIELD] == 0
+        assert provenance[EMBED_FALLBACK_FIELD] == 71
+        assert provenance["fallback_ratio"] == 1.0
+        assert provenance["as_of"] is not None
+
+    def test_status_cluster_embedder_snapshot_defaults_to_none(
+        self, tmp_path: Path
+    ) -> None:
+        # Issue athenaeum#1279: no cluster pass has ever run against this
+        # knowledge base -- no ``raw/_librarian-clusters.jsonl`` report
+        # exists yet.
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        info = status(root)
+        assert info["cluster_embedder_snapshot"] is None
+
+    def test_status_surfaces_current_cluster_report_embedder_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        # Issue athenaeum#1279: a standing tally of the CURRENT cluster
+        # report's ``embedder`` column -- exercised here via the same
+        # writer the C2 cluster pass calls, without driving a full
+        # librarian run. This is the "legible to a lane" fix athenaeum#1005
+        # needed and could not get: which embedder produced the vectors
+        # behind the corpus's recorded clusters, from a single read.
+        from athenaeum.clusters import (
+            EMBEDDER_CHROMADB_DEFAULT,
+            EMBEDDER_FALLBACK_HASHING,
+            Cluster,
+            resolve_cluster_output_path,
+            write_cluster_report,
+        )
+
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        clusters = [
+            Cluster(
+                cluster_id="c-1",
+                member_paths=["a.md"],
+                embedder=EMBEDDER_CHROMADB_DEFAULT,
+            ),
+            Cluster(
+                cluster_id="c-2",
+                member_paths=["b.md"],
+                embedder=EMBEDDER_CHROMADB_DEFAULT,
+            ),
+            Cluster(
+                cluster_id="c-3",
+                member_paths=["c.md"],
+                embedder=EMBEDDER_FALLBACK_HASHING,
+            ),
+        ]
+        output_path = resolve_cluster_output_path(root)
+        write_cluster_report(clusters, output_path)
+
+        info = status(root)
+        assert info["cluster_embedder_snapshot"] == {
+            EMBEDDER_CHROMADB_DEFAULT: 2,
+            EMBEDDER_FALLBACK_HASHING: 1,
+        }
+
     def test_format_status(self) -> None:
         info = {
             "raw_pending": 3,
@@ -335,6 +445,102 @@ class TestStatus:
         del info["verdict_ledger_duty_cycle"]
         output = format_status(info)  # type: ignore[arg-type]
         assert "Verdict ledger" not in output
+
+    def test_format_status_includes_embedder_provenance_line(self) -> None:
+        # Issue athenaeum#1279: shown whenever a run has ever recorded it --
+        # NOT gated on "only when alarming", unlike zero-yield/refusal above.
+        # A healthy run's ratio must be just as readable as an unhealthy one.
+        info = {
+            "raw_pending": 0,
+            "entity_count": 0,
+            "entities_by_type": {},
+            "last_commit_date": "",
+            "last_commit_message": "",
+            "pending_questions": 0,
+            "embedder_provenance": {
+                "embed_chromadb": 0,
+                "embed_fallback": 71,
+                "fallback_ratio": 1.0,
+                "as_of": "2026-08-25T00:00:00Z",
+            },
+        }
+        output = format_status(info)
+        assert "Embedder provenance" in output
+        assert "chromadb=0" in output
+        assert "fallback=71" in output
+        assert "fallback_ratio=100%" in output
+
+    def test_format_status_embedder_provenance_ratio_none_reads_as_n_a(self) -> None:
+        info = {
+            "raw_pending": 0,
+            "entity_count": 0,
+            "entities_by_type": {},
+            "last_commit_date": "",
+            "last_commit_message": "",
+            "pending_questions": 0,
+            "embedder_provenance": {
+                "embed_chromadb": 0,
+                "embed_fallback": 0,
+                "fallback_ratio": None,
+                "as_of": "2026-08-25T00:00:00Z",
+            },
+        }
+        output = format_status(info)
+        assert "fallback_ratio=n/a" in output
+
+    def test_format_status_omits_embedder_provenance_line_when_absent(self) -> None:
+        info = {
+            "raw_pending": 0,
+            "entity_count": 0,
+            "entities_by_type": {},
+            "last_commit_date": "",
+            "last_commit_message": "",
+            "pending_questions": 0,
+            "embedder_provenance": None,
+        }
+        output = format_status(info)  # type: ignore[arg-type]
+        assert "Embedder provenance" not in output
+
+        del info["embedder_provenance"]
+        output = format_status(info)  # type: ignore[arg-type]
+        assert "Embedder provenance" not in output
+
+    def test_format_status_includes_cluster_embedder_snapshot_line(self) -> None:
+        info = {
+            "raw_pending": 0,
+            "entity_count": 0,
+            "entities_by_type": {},
+            "last_commit_date": "",
+            "last_commit_message": "",
+            "pending_questions": 0,
+            "cluster_embedder_snapshot": {
+                "chromadb-default": 2,
+                "fallback-hashing": 1,
+            },
+        }
+        output = format_status(info)
+        assert "Cluster report embedder distribution:" in output
+        assert "chromadb-default=2" in output
+        assert "fallback-hashing=1" in output
+
+    def test_format_status_omits_cluster_embedder_snapshot_line_when_absent(
+        self,
+    ) -> None:
+        info = {
+            "raw_pending": 0,
+            "entity_count": 0,
+            "entities_by_type": {},
+            "last_commit_date": "",
+            "last_commit_message": "",
+            "pending_questions": 0,
+            "cluster_embedder_snapshot": None,
+        }
+        output = format_status(info)  # type: ignore[arg-type]
+        assert "Cluster report embedder" not in output
+
+        del info["cluster_embedder_snapshot"]
+        output = format_status(info)  # type: ignore[arg-type]
+        assert "Cluster report embedder" not in output
 
     def test_cli_status(self, tmp_path: Path) -> None:
         from athenaeum.cli import main
