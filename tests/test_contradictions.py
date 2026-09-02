@@ -435,6 +435,33 @@ class TestUsageThreading:
         assert usage.cache_read_input_tokens == 0
         assert usage.api_calls == 0
 
+    def test_detector_tags_c4_contradiction_surface(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1289: the C4 detector is one of the six declared
+        non-batched surfaces (batch.py's module docstring) -- this call site
+        must always tag it, regardless of caller."""
+        from athenaeum.models import SURFACE_C4_CONTRADICTION
+
+        scope = tmp_path / "scope"
+        m1 = _write_am(scope, "a.md", "X is true.")
+        m2 = _write_am(scope, "b.md", "X is false.")
+        client = _fake_client(
+            '{"detected": false, "conflict_type": null, '
+            '"members_involved": [], "conflicting_passages": [], '
+            '"rationale": ""}'
+        )
+        client.messages.create.return_value.usage = MagicMock(
+            input_tokens=120,
+            output_tokens=30,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        usage = TokenUsage()
+        detect_contradictions([m1, m2], client, usage=usage)
+        assert usage.per_surface[SURFACE_C4_CONTRADICTION]["input_tokens"] == 120
+        assert usage.per_surface[SURFACE_C4_CONTRADICTION]["output_tokens"] == 30
+        # Same knob-tagging as before -- surface is an independent addition.
+        assert usage.per_knob["classify"]["input_tokens"] == 120
+
 
 class TestDetectionIncomplete:
     """Issue athenaeum#569 (H6): a detector give-up AFTER transient-error retries flags

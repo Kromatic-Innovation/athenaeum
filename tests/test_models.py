@@ -971,6 +971,148 @@ class TestPerKnobAttribution:
         assert tagged.estimated_cost_usd == untagged.estimated_cost_usd
 
 
+class TestPerSurfaceAttribution:
+    """athenaeum#1289: per-surface attribution in ``TokenUsage.per_surface``.
+
+    Mirrors ``TestPerKnobAttribution`` -- ``surface=`` is an independent tag
+    alongside ``model=``/``knob=`` on the same accumulation methods, same
+    additive-subset bucket shape, opt-in only (untagged calls leave
+    ``per_surface`` alone; the "unattributed" remainder is a REPORTING-layer
+    concept computed by ``athenaeum.spend.tokens_by_surface``, not something
+    ``TokenUsage`` itself accumulates -- see that function's own tests).
+    """
+
+    def test_add_tags_surface_independently_of_model_and_knob(self) -> None:
+        from athenaeum.models import SURFACE_C4_CONTRADICTION, TokenUsage
+
+        usage = TokenUsage()
+        usage.add(
+            100, 50, 10, 20,
+            model="claude-opus-4-7",
+            knob="resolve",
+            surface=SURFACE_C4_CONTRADICTION,
+        )
+        assert usage.per_surface[SURFACE_C4_CONTRADICTION]["input_tokens"] == 100
+        assert usage.per_surface[SURFACE_C4_CONTRADICTION]["output_tokens"] == 50
+        assert (
+            usage.per_surface[SURFACE_C4_CONTRADICTION]["cache_creation_input_tokens"]
+            == 10
+        )
+        assert (
+            usage.per_surface[SURFACE_C4_CONTRADICTION]["cache_read_input_tokens"] == 20
+        )
+        # per_model / per_knob still tag independently -- no collision.
+        assert usage.per_model["claude-opus-4-7"]["input_tokens"] == 100
+        assert usage.per_knob["resolve"]["input_tokens"] == 100
+
+    def test_surface_accumulates_across_calls(self) -> None:
+        from athenaeum.models import SURFACE_TIER3_FULL_ECHO_FALLBACK, TokenUsage
+
+        usage = TokenUsage()
+        usage.add(100, 50, surface=SURFACE_TIER3_FULL_ECHO_FALLBACK)
+        usage.add(200, 75, surface=SURFACE_TIER3_FULL_ECHO_FALLBACK)
+        assert usage.per_surface[SURFACE_TIER3_FULL_ECHO_FALLBACK]["input_tokens"] == 300
+        assert usage.per_surface[SURFACE_TIER3_FULL_ECHO_FALLBACK]["output_tokens"] == 125
+
+    def test_untagged_surface_leaves_per_surface_empty(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(100, 50)
+        assert usage.per_surface == {}
+        # Scalar totals stay authoritative regardless of surface tagging.
+        assert usage.input_tokens == 100
+
+    def test_multiple_surfaces_stay_separate(self) -> None:
+        from athenaeum.models import (
+            SURFACE_SAME_PAGE_MULTI_MERGE,
+            SURFACE_TIER2_TRUNCATION_RETRY,
+            TokenUsage,
+        )
+
+        usage = TokenUsage()
+        usage.add(1_000, 100, surface=SURFACE_TIER2_TRUNCATION_RETRY)
+        usage.add(2_000, 200, surface=SURFACE_SAME_PAGE_MULTI_MERGE)
+        assert set(usage.per_surface) == {
+            SURFACE_TIER2_TRUNCATION_RETRY,
+            SURFACE_SAME_PAGE_MULTI_MERGE,
+        }
+        assert usage.per_surface[SURFACE_TIER2_TRUNCATION_RETRY]["input_tokens"] == 1_000
+        assert usage.per_surface[SURFACE_SAME_PAGE_MULTI_MERGE]["input_tokens"] == 2_000
+        # Additive-subset invariant: scalar totals are the authoritative sum.
+        assert usage.input_tokens == 3_000
+
+    def test_add_tokens_threads_surface(self) -> None:
+        """athenaeum#239-style attempt-uncounted accumulation also threads surface."""
+        from athenaeum.models import SURFACE_C4_CONTRADICTION, TokenUsage
+
+        usage = TokenUsage()
+        usage.add_tokens(1_000, 500, surface=SURFACE_C4_CONTRADICTION)
+        assert usage.api_calls == 0
+        assert usage.per_surface[SURFACE_C4_CONTRADICTION]["input_tokens"] == 1_000
+
+    def test_add_batch_tokens_threads_surface_without_double_counting(self) -> None:
+        """Mirrors per-model/per-knob's batch tagging (athenaeum#236) -- and,
+        distinctly from those, proves ``add_batch_tokens`` does NOT also tag
+        the surface a second time via its internal ``add_tokens`` delegation
+        (that inner call passes no surface, so only the explicit
+        ``_tag_surface(..., is_batch=True)`` below fires -- see
+        ``add_batch_tokens``'s docstring)."""
+        from athenaeum.models import SURFACE_SAME_PAGE_MULTI_MERGE, TokenUsage
+
+        usage = TokenUsage()
+        usage.add_batch_tokens(1_000, 500, surface=SURFACE_SAME_PAGE_MULTI_MERGE)
+        bucket = usage.per_surface[SURFACE_SAME_PAGE_MULTI_MERGE]
+        assert bucket["input_tokens"] == 1_000
+        assert bucket["batch_input_tokens"] == 1_000
+        # No double count: the surface's own input_tokens equals the total
+        # scalar input_tokens for this single call, not 2x it.
+        assert usage.input_tokens == 1_000
+
+    def test_surface_does_not_affect_cost_estimation(self) -> None:
+        """per_surface is a pure attribution breakdown -- it never feeds pricing."""
+        from athenaeum.models import SURFACE_C4_CONTRADICTION, TokenUsage
+
+        tagged = TokenUsage()
+        tagged.add(
+            1_000_000, 1_000_000, model="claude-opus-4-7", surface=SURFACE_C4_CONTRADICTION
+        )
+        untagged = TokenUsage()
+        untagged.add(1_000_000, 1_000_000, model="claude-opus-4-7")
+        assert tagged.estimated_cost_usd == untagged.estimated_cost_usd
+
+
+class TestZeroLLMCallSurfacesNeverAttribute:
+    """Issue athenaeum#1289: two of the six declared non-batched surfaces --
+    ``tier0_passthrough`` and ``tier1_programmatic_match`` -- are declared
+    zero-LLM-call by construction (batch.py's docstring: "zero LLM calls").
+    They correctly never appear as a key in ``TokenUsage.per_surface``
+    because there is no accumulation point to tag: neither function accepts
+    a ``usage``/``client`` parameter at all. This pins that contract so a
+    future change that gives either function a real LLM call site is
+    forced to also decide how to attribute it, rather than silently
+    spending tokens nothing tracks.
+    """
+
+    def test_tier0_passthrough_has_no_usage_or_client_parameter(self) -> None:
+        import inspect
+
+        from athenaeum.intake import tier0_passthrough
+
+        params = inspect.signature(tier0_passthrough).parameters
+        assert "usage" not in params
+        assert "client" not in params
+
+    def test_tier1_programmatic_match_has_no_usage_or_client_parameter(self) -> None:
+        import inspect
+
+        from athenaeum.tiers import tier1_programmatic_match
+
+        params = inspect.signature(tier1_programmatic_match).parameters
+        assert "usage" not in params
+        assert "client" not in params
+
+
 class TestCacheUsageCounts:
     """Direct unit coverage for ``cache_usage_counts`` (athenaeum#239 nit b)."""
 
