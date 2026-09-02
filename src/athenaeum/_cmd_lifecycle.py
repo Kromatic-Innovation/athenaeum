@@ -162,6 +162,13 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
         "reasoning_t1/reasoning_t2).",
     )
     spend_parser.add_argument(
+        "--by-surface",
+        action="store_true",
+        help="Break down per declared non-batched surface (C4 contradiction "
+        "detector/resolver, same-page multi-merge, the truncation retry, "
+        "the tier-3 full-echo fallback) plus an unattributed remainder.",
+    )
+    spend_parser.add_argument(
         "--reprice",
         action="store_true",
         help="Recompute historical rows from their per-model token attribution "
@@ -385,6 +392,7 @@ def cmd_spend(args: argparse.Namespace) -> int:
         by_model=args.by_model,
         by_provider=args.by_provider,
         by_knob=args.by_knob,
+        by_surface=args.by_surface,
     )
 
     # Issue athenaeum#1135 (AC2/6): an ADDITIONAL day-scoped figure alongside the
@@ -437,6 +445,7 @@ def cmd_spend(args: argparse.Namespace) -> int:
                 by_model=args.by_model,
                 by_provider=args.by_provider,
                 by_knob=args.by_knob,
+                by_surface=args.by_surface,
             )
         )
         budget_window_line = (
