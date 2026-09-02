@@ -256,6 +256,20 @@ is its own self-contained YAML file, not a config-table entry.
 | Dispositions retention | `ATHENAEUM_SHAPE_RULES_DISPOSITIONS_RETENTION_DAYS` | `librarian.shape_rules.dispositions_retention_days` | `30` | Days of `_shape_rule_dispositions.jsonl` history kept; older rows are pruned at the tail of every shape-rules phase, giving the ledger a bounded steady state. athenaeum#1274 split this out of `librarian.rule_proposals.window_days`, which athenaeum#1229 had doing double duty — a READ window and a RETENTION policy are different questions, and coupled, narrowing the detector's window silently deleted history. Same default, so the split changes no existing deployment's behaviour. A row with a missing or unparseable `at` is kept, never dropped. |
 | Phase runtime share | `ATHENAEUM_SHAPE_RULES_RUNTIME_SHARE` | `librarian.shape_rules.runtime_share` | `0.05` | Fraction of `librarian.max_runtime` this phase may spend, mirroring `librarian.corrections.runtime_share`'s mechanism exactly (own budget — an overrun in one deterministic phase never starves the other). Checked at FILE boundaries only (never mid-file). |
 
+**One-time prune of an already-oversized ledger** (issue athenaeum#1274 AC3/AC4). The
+retention/suppression knobs above only bound the ledger going FORWARD; they do not
+undo a pre-fix ledger that already grew large. `athenaeum storage prune-dispositions`
+(`--path <knowledge-root>`, dry-run by default, `--apply` to write) drops every
+`disposition: "no-match"` row and keeps everything else — `preserve`,
+`observed-preserve`, and any other/unrecognised disposition value are all treated as
+positive and kept (default-deny on deletion). It reports the disposition histogram,
+positive-record count, and projected post-prune size before writing, refuses to
+write if its own before/after positive-row recount ever disagrees, and (on `--apply`)
+acquires the same single-machine run lock (issue athenaeum#309) every other mutating
+librarian command does, so it can never race the nightly's own concurrent appends to
+this file. This is a live-store operation an operator runs once, deliberately — it is
+not wired into any automatic run.
+
 ### Rule proposals (`librarian.rule_proposals.*`, athenaeum#905 / athenaeum#1063)
 
 The librarian's rule-proposal detector/drafter (`athenaeum.rule_proposals`,
