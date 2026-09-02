@@ -338,6 +338,20 @@ class TestScrubPiiCli:
         assert rc == 0
         assert "0 proposals carry contact data" in capsys.readouterr().out
 
+    def test_unreadable_sidecar_fails_loudly(self, tmp_path, capsys) -> None:
+        """A command about contact data must never report a reassuring
+        "0 proposals carry contact data" when it could not read the file."""
+        root = _seed_root(tmp_path)
+        merges_path = root / "wiki" / "_pending_merges.md"
+        merges_path.write_bytes(b"# Pending Merges\n\n\xff\xfe not utf-8\n")
+
+        rc = main(["merges", "scrub-pii", "--path", str(root)])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "could not read" in captured.err
+        assert "0 proposals carry contact data" not in captured.out
+
     def test_missing_sidecar_is_not_an_error(self, tmp_path, capsys) -> None:
         root = _seed_root(tmp_path)
 
