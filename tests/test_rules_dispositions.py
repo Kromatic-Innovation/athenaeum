@@ -1355,6 +1355,15 @@ class TestNoMatchLogging:
         assert _disposition_rows(tmp_path) == []
         assert not default_shape_rule_dispositions_path(tmp_path / "wiki").exists()
 
+    def test_dry_run_reports_no_suppression(self, tmp_path: Path) -> None:
+        # A dry run writes NO disposition row of any kind (athenaeum#975,
+        # unchanged), so it must not claim athenaeum#1274 suppressed
+        # anything -- that would misreport why the ledger is empty.
+        _write_unmatched_record(tmp_path)
+        summary = _run(tmp_path, config=None, dry_run=True)
+        assert "no_match_rows_suppressed" not in summary
+        assert _disposition_rows(tmp_path) == []
+
     def test_empty_config_is_also_off(self, tmp_path: Path) -> None:
         # A real deployment passes a populated config dict, not None -- an
         # absent key must resolve the same way an absent config does.
