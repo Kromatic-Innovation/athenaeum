@@ -38,6 +38,20 @@ both sides import" shape as ``discover_raw_files`` above, and for the same
 reason: ``status.py`` importing ``librarian.py`` would reopen the
 ``{librarian, drain, status}`` cycle this docstring just finished describing
 the dissolution of.
+
+Issue athenaeum#1283's consecutive-refusal counter reads
+:mod:`athenaeum.run_summary_log` (a true L2 leaf per its OWN module
+docstring's layering note — it imports only ``config``/``store`` and
+explicitly never ``librarian``) at TOP level, for the identical reason: it is
+already the leaf both ``librarian.py`` (the writer) and this module (a
+reader) import, so no cycle opens. Verified against
+``tests/test_import_graph_acyclic.py``, which walks function-local imports
+too and pins the full-graph SCC baseline at ``[]`` — this module's existing
+function-local imports of ``athenaeum.drain_advisor`` and
+``athenaeum.verdicts`` a few lines down are NOT the same situation:
+``drain_advisor``/``verdicts`` are deferred because eager-importing them
+(or a module they transitively touch) would reopen a residual SCC; adding
+``run_summary_log`` at the top does not, so it is not deferred.
 """
 
 from __future__ import annotations
@@ -55,6 +69,7 @@ from athenaeum.config import (
 )
 from athenaeum.intake import discover_raw_files
 from athenaeum.models import parse_frontmatter
+from athenaeum.run_summary_log import read_refusal_streak
 from athenaeum.tiers import schema_fragment_state
 from athenaeum.zero_yield import load_state as load_zero_yield_state
 
@@ -100,6 +115,27 @@ class StatusInfo(TypedDict):
     # run has ever finalized). Read directly from :mod:`athenaeum.zero_yield`'s
     # sidecar, the same persisted state the librarian finalize phase writes.
     zero_yield_consecutive: int
+    # Issue athenaeum#1283: the persisted CONSECUTIVE athenaeum#1135 zero-progress-
+    # refusal count — how many runs in a row, up to and including the most
+    # recently finalized one, stopped early for a resource reason (budget/
+    # deadline/spend-ceiling) and committed zero files. Deliberately a
+    # SEPARATE counter from ``zero_yield_consecutive`` above, not merged into
+    # it: the athenaeum#899 zero-yield predicate requires ``api_calls > 0`` (or
+    # ``attempted_calls > 0``), which a spend-exhausted refusal that made
+    # ZERO calls never satisfies — that gap is the whole reason this issue
+    # exists. ``0`` when the most recent run was not a refusal (or no run has
+    # ever finalized, or the ledger predates athenaeum#1283 and cannot speak to
+    # it — see ``run_summary_log.refusal_in_record``). Read from the athenaeum#1102
+    # run-summary ledger via ``run_summary_log.read_refusal_streak``, the
+    # same durable record ``RunContext.emit_run_summary`` already writes —
+    # no new state file.
+    librarian_refusal_consecutive: int
+    # Issue athenaeum#1283: the most recent refusal's detail dict
+    # (``{"reason": <ctx.entity_exit_reason>, "files": 0}``), or ``None``
+    # when ``librarian_refusal_consecutive`` is 0. Carried alongside the
+    # count so a caller can name WHY (budget / deadline / spend-ceiling)
+    # without a second ledger read.
+    librarian_refusal_reason: dict[str, object] | None
     # Issue athenaeum#712: per-branch verdict-ledger duty cycle
     # (nights-in-wave / nights, target <=0.25 — reporting only, enforcing the
     # target is out of scope), or ``None`` when the ledger has never been
@@ -275,6 +311,16 @@ def status(knowledge_root: Path) -> StatusInfo:
     # and write sides always agree on the same file.
     zero_yield_consecutive = load_zero_yield_state(resolve_cache_dir())["consecutive"]
 
+    # Issue athenaeum#1283: the persisted consecutive athenaeum#1135 refusal count.
+    # Read-only, same discipline as the zero-yield read above: this module
+    # never writes the ledger (``RunContext.emit_run_summary`` does), and
+    # ``read_refusal_streak`` already fails open to ``(0, None)`` on a
+    # missing/corrupt ledger, so no additional try/except is needed here —
+    # matches the zero-yield read's own bare (no try/except) shape.
+    librarian_refusal_consecutive, librarian_refusal_reason = read_refusal_streak(
+        cache_dir=resolve_cache_dir()
+    )
+
     # Issue athenaeum#712: verdict-ledger duty-cycle report. Only computed when
     # the ledger has actually been materialized (flag-off / never-run leaves
     # this None, so status output is unaffected until an operator opts in via
@@ -307,6 +353,8 @@ def status(knowledge_root: Path) -> StatusInfo:
         "drain_advisory": drain_advisory,
         "schema_fragments": schema_fragments,
         "zero_yield_consecutive": zero_yield_consecutive,
+        "librarian_refusal_consecutive": librarian_refusal_consecutive,
+        "librarian_refusal_reason": librarian_refusal_reason,
         "verdict_ledger_duty_cycle": verdict_ledger_duty_cycle,
     }
 
@@ -339,6 +387,28 @@ def format_status(info: StatusInfo) -> str:
     if zero_yield_consecutive:
         lines.append(
             f"Zero-yield runs:      {zero_yield_consecutive} consecutive"
+        )
+
+    # Issue athenaeum#1283: the athenaeum#1135 zero-progress-refusal streak. Use
+    # ``.get`` so pre-athenaeum#1283 status dicts (missing the key) still format
+    # cleanly. Deliberately shown starting at a streak of 1 — unlike the
+    # zero-yield line above (which is itself an unconditional count once
+    # non-zero) and unlike the starvation WARNING's streak-of-3 threshold,
+    # this line's whole reason for existing is that a run that refused all
+    # work on an exhausted budget must NOT read as healthy even once; the
+    # issue's motivation is exactly a single such run reading as healthy.
+    # The prefix mirrors ``run_summary_log.REFUSAL_ALERT_PREFIX`` so a grep
+    # for that token also finds this line.
+    librarian_refusal_consecutive = info.get("librarian_refusal_consecutive", 0)
+    if librarian_refusal_consecutive:
+        _refusal_reason = info.get("librarian_refusal_reason") or {}
+        _reason_token = _refusal_reason.get("reason") if isinstance(
+            _refusal_reason, dict
+        ) else None
+        lines.append(
+            "librarian-run-refusal: "
+            f"{librarian_refusal_consecutive} consecutive run(s) refused to "
+            f"do any work (reason={_reason_token or 'unknown'}) — issue athenaeum#1283"
         )
 
     # Issue athenaeum#712: verdict-ledger duty cycle (nights-in-wave / nights,

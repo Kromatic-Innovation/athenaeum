@@ -3998,6 +3998,24 @@ class RunContext:
     zero_yield_tripped: bool | None = None
     zero_yield_consecutive: int | None = None
 
+    # Issue athenaeum#1283: the athenaeum#1135 zero-progress-refusal predicate's
+    # verdict for THIS run, computed ONCE in ``_run_finalize_phase`` (as soon
+    # as ``entity_exit_reason`` and ``files_processed_count`` are both final
+    # — the same point ``zero_yield_tripped`` above is evaluated) and stored
+    # here so every later consumer in the SAME run — the ``emit_run_summary``
+    # ledger write, the ``librarian-run-degraded`` marker line, and the
+    # ``EXIT_LIBRARIAN_REFUSAL`` exit-code check — reads this stored verdict
+    # rather than each re-deriving it from ``_librarian_run_refusal_tripped``.
+    # ``None`` (mirroring ``zero_yield_tripped``'s own ``None`` contract)
+    # means "not yet evaluated" — true for the whole run until finalize
+    # reaches that point, never coerced to ``False``, so a consumer can tell
+    # "evaluated, not a refusal" from "never evaluated". This is the
+    # persisted half of the athenaeum#1283 fix: athenaeum#1135 already computed this
+    # verdict correctly at run time but never made it outlive the run —
+    # ``status.py`` cannot read a value that was never durable, only ever a
+    # log line. See ``run_summary_log.REFUSAL_FIELD`` for the durable form.
+    librarian_refusal: bool | None = None
+
     # Issue athenaeum#1184: cost/matches-per-file regression instrumentation.
     # ``total_matched`` sums ``ProcessingResult.matched`` (Tier-1 fan-out) across
     # every file the SYNCHRONOUS entity loop processed to completion.
@@ -4099,6 +4117,12 @@ class RunContext:
             # or dry-run) is exported as-is rather than coerced to ``False``,
             # so a consumer can tell "not zero-yield" from "not evaluated".
             self.out_run_stats["zero_yield"] = self.zero_yield_tripped
+            # Issue athenaeum#1283: the athenaeum#1135 zero-progress-refusal verdict,
+            # exported alongside ``zero_yield`` right above for the same
+            # reason — machine-detectable without parsing the
+            # ``librarian-run-degraded`` WARNING text. ``None`` (not yet
+            # evaluated) is exported as-is, mirroring ``zero_yield`` again.
+            self.out_run_stats["librarian_refusal"] = self.librarian_refusal
             # Issue athenaeum#1184: machine-detectable alongside the other run-state
             # flags above, rather than requiring a consumer to parse the
             # run-summary line for the fan-out/acted-files counts.
@@ -4214,9 +4238,46 @@ class RunContext:
         # but wrapped anyway — same defensive posture as the two `try`
         # blocks above: this is pure observability and must never affect a
         # run's outcome.
+        # Issue athenaeum#1283: the athenaeum#1135 zero-progress-refusal verdict,
+        # already computed once in ``_run_finalize_phase`` and stored on
+        # ``self.librarian_refusal`` (see that field's docstring) — threaded
+        # into the SAME durable record the economics/alerts above populate,
+        # rather than a second ledger or a new state file, so a later run
+        # (and ``status.py``, between runs) can see "this run refused to do
+        # any work on an exhausted budget" from the ledger alone.
+        #
+        # THREE states, not two — this is the load-bearing distinction a
+        # first cut of this issue got wrong (the record collapsed "never
+        # evaluated" and "evaluated, not a refusal" into the same omitted
+        # key, which made ``refusal_in_record`` misread an unevaluated
+        # record as a confirmed-clean one). ``self.librarian_refusal`` is
+        # ``None`` whenever THIS ``emit_run_summary`` call happens before
+        # ``_run_finalize_phase`` ever sets it — the real, non-hypothetical
+        # case is :meth:`stop_on_deadline`, which calls ``emit_run_summary``
+        # and returns ``EXIT_GRACEFUL_PARTIAL`` straight to ``run()``'s
+        # caller for a deadline trip in a pre-entity phase, never reaching
+        # ``_run_finalize_phase`` at all (see that method's own comment); the
+        # ``cluster_only``/``merge_only`` early-exit paths share the same
+        # property. Only ``None`` omits the ``refusal`` key entirely (the
+        # honest "cannot speak" absence); both ``True`` and ``False`` write
+        # a record — ``{"tripped": True, "reason": ..., "files": 0}`` or
+        # ``{"tripped": False}`` — so the reader can tell "evaluated and
+        # clean" from "never evaluated" instead of inferring the former from
+        # mere key absence. See :func:`~athenaeum.run_summary_log.
+        # refusal_in_record` for the reader side of this contract.
+        refusal: "dict[str, Any] | None" = None
+        if self.librarian_refusal is not None:
+            refusal = (
+                {"tripped": True, "reason": self.entity_exit_reason, "files": 0}
+                if self.librarian_refusal
+                else {"tripped": False}
+            )
         try:
             write_run_summary_record(
-                self.run_profile, economics=economics, alerts=econ_alerts
+                self.run_profile,
+                economics=economics,
+                alerts=econ_alerts,
+                refusal=refusal,
             )
         except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
             log.debug("run-summary: durable ledger write skipped: %s", exc)
@@ -7530,6 +7591,24 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         - len(ctx.failed_files)
         - len(ctx.in_flight_refs),
     ) + len(ctx.collected_refs)
+
+    # Issue athenaeum#1283: evaluate the athenaeum#1135 zero-progress-refusal
+    # predicate ONCE, here — ``entity_exit_reason`` and ``files_processed_count``
+    # (just above) are both final at this point, the same point the athenaeum#899
+    # zero-yield predicate is evaluated a few lines below — and store the
+    # verdict on ``ctx`` so the ``emit_run_summary`` ledger write below, the
+    # ``librarian-run-degraded`` marker line, and the ``EXIT_LIBRARIAN_REFUSAL``
+    # exit-code check (both further down this function) all read this SAME
+    # stored verdict rather than each calling ``_librarian_run_refusal_tripped``
+    # again. Deliberately unconditional (not gated on ``ctx.dry_run`` the way
+    # the zero-yield block below is) — ``_librarian_run_refusal_tripped`` reads
+    # only ``entity_exit_reason``/``files_processed_count``, neither of which
+    # depends on whether raw files were actually unlinked this run, so the
+    # verdict is meaningful on a dry run too and this preserves the
+    # pre-athenaeum#1283 behavior of the (formerly marker-line-only) call site,
+    # which never checked ``dry_run`` either.
+    ctx.librarian_refusal = _librarian_run_refusal_tripped(ctx)
+
     if not ctx.dry_run:
         # Issue athenaeum#568 (H1): do NOT discard record_spend's return. When this run
         # actually spent budget and the ledger is enabled, a False return means
@@ -7786,7 +7865,12 @@ def _run_finalize_phase(ctx: RunContext) -> int:
     # a few hundred lines up). Deliberately never reused or overloaded; a
     # cron wrapper greps the FULL ``librarian-run-degraded`` token, not the
     # substring ``degraded``.
-    _librarian_refusal = _librarian_run_refusal_tripped(ctx)
+    # Issue athenaeum#1283: read the verdict ``_run_finalize_phase`` already
+    # stored on ``ctx`` (right after ``files_processed_count`` became final,
+    # well above this point and before ``emit_run_summary`` — see
+    # ``ctx.librarian_refusal``'s docstring) rather than calling
+    # ``_librarian_run_refusal_tripped`` a second time. Single verdict site.
+    _librarian_refusal = ctx.librarian_refusal
     if _librarian_refusal:
         _spend_window = _format_budget_window_spend(ctx)
         log.error(
