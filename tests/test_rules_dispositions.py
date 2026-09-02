@@ -31,10 +31,12 @@ from athenaeum.intake import discover_raw_files
 from athenaeum.intake_audit import discover_unclaimed_shape_rule_candidates
 from athenaeum.rules import (
     TERMINAL_DISPOSITIONS,
+    DispositionPruneMismatchError,
     ShapeRule,
     append_shape_rule_disposition_row,
     default_shape_rule_dispositions_path,
     prune_shape_rule_dispositions,
+    prune_shape_rule_dispositions_to_positive,
     record_key_fingerprint,
     run_shape_rule_phase,
 )
@@ -1114,7 +1116,12 @@ class TestDedupeAtWrite:
 
 
 def _seed_disposition_row(
-    wiki_root: Path, *, source_ref: str, at: datetime, key_fingerprint: str = "fp"
+    wiki_root: Path,
+    *,
+    source_ref: str,
+    at: datetime,
+    key_fingerprint: str = "fp",
+    disposition: str = "no-match",
 ) -> None:
     append_shape_rule_disposition_row(
         wiki_root,
@@ -1126,7 +1133,7 @@ def _seed_disposition_row(
             "key_fingerprint": key_fingerprint,
             "tier": None,
             "rule_id": None,
-            "disposition": "no-match",
+            "disposition": disposition,
         },
     )
 
@@ -1265,6 +1272,209 @@ class TestPruneShapeRuleDispositions:
         remaining_refs = {row["source_ref"] for row in _disposition_rows(tmp_path)}
         assert "s/ancient.jsonl" not in remaining_refs
         assert "unrelated-source/20260806T140211Z-9f3ac1d2.jsonl" in remaining_refs
+
+
+# ---------------------------------------------------------------------------
+# One-time positive-only prune (issue athenaeum#1274 AC3/AC4) -- the ONE-TIME
+# operation over the whole ledger regardless of age, distinct from
+# `TestPruneShapeRuleDispositions` above (the ONGOING age-based retention
+# pass, issue athenaeum#1229). See `prune_shape_rule_dispositions_to_positive`'s
+# docstring for why the two are complementary, not redundant.
+# ---------------------------------------------------------------------------
+
+
+class TestPruneShapeRuleDispositionsToPositive:
+    _NOW = datetime(2026, 8, 31, 0, 0, 0, tzinfo=timezone.utc)
+
+    def test_histogram_is_correct(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        for i in range(5):
+            _seed_disposition_row(
+                wiki_root, source_ref=f"s/nomatch-{i}", at=self._NOW, disposition="no-match"
+            )
+        _seed_disposition_row(
+            wiki_root, source_ref="s/p1", at=self._NOW, disposition="preserve"
+        )
+        _seed_disposition_row(
+            wiki_root, source_ref="s/p2", at=self._NOW, disposition="preserve"
+        )
+        _seed_disposition_row(
+            wiki_root, source_ref="s/op1", at=self._NOW, disposition="observed-preserve"
+        )
+
+        report = prune_shape_rule_dispositions_to_positive(wiki_root)
+
+        assert report.total_records == 8
+        assert report.no_match_count == 5
+        assert report.positive_count == 3
+        assert report.histogram == {"preserve": 2, "observed-preserve": 1}
+        assert report.malformed_lines == 0
+        assert report.rows_dropped == 5
+        assert report.applied is False
+
+    def test_positives_survive_prune_exactly(self, tmp_path: Path) -> None:
+        # Mirrors the issue's own AC4 shape (a large no-match population
+        # alongside a much smaller positive population) at a scale that
+        # keeps the test fast rather than the literal 2,747/1,488,689 from
+        # the real deployment.
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        for i in range(20):
+            _seed_disposition_row(
+                wiki_root, source_ref=f"s/nomatch-{i}", at=self._NOW, disposition="no-match"
+            )
+        expected_refs = set()
+        for i in range(10):
+            ref = f"s/preserve-{i}"
+            _seed_disposition_row(wiki_root, source_ref=ref, at=self._NOW, disposition="preserve")
+            expected_refs.add(ref)
+        for i in range(5):
+            ref = f"s/observed-preserve-{i}"
+            _seed_disposition_row(
+                wiki_root, source_ref=ref, at=self._NOW, disposition="observed-preserve"
+            )
+            expected_refs.add(ref)
+
+        report = prune_shape_rule_dispositions_to_positive(wiki_root, apply=True)
+
+        assert report.applied is True
+        assert report.positive_count == 15
+        assert report.rows_dropped == 20
+        remaining = _disposition_rows(tmp_path)
+        assert len(remaining) == 15
+        assert {row["source_ref"] for row in remaining} == expected_refs
+        assert all(row["disposition"] != "no-match" for row in remaining)
+
+    def test_unknown_disposition_is_kept(self, tmp_path: Path) -> None:
+        # Default-deny on deletion: a disposition this function has never
+        # seen (not "no-match", not "preserve"/"observed-preserve") is a
+        # POSITIVE, never dropped -- see the module note above
+        # `prune_shape_rule_dispositions_to_positive` for why (the ledger's
+        # only consumer reads every `tier is None` row, not only
+        # `no-match` ones).
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        _seed_disposition_row(wiki_root, source_ref="s/n1", at=self._NOW, disposition="no-match")
+        _seed_disposition_row(
+            wiki_root, source_ref="s/mystery", at=self._NOW, disposition="some-future-disposition"
+        )
+        _seed_disposition_row(
+            wiki_root, source_ref="s/ft", at=self._NOW, disposition="fallthrough"
+        )
+
+        report = prune_shape_rule_dispositions_to_positive(wiki_root, apply=True)
+
+        assert report.rows_dropped == 1
+        remaining_refs = {row["source_ref"] for row in _disposition_rows(tmp_path)}
+        assert remaining_refs == {"s/mystery", "s/ft"}
+        assert report.histogram == {"some-future-disposition": 1, "fallthrough": 1}
+
+    def test_malformed_line_does_not_lose_data(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        path = default_shape_rule_dispositions_path(wiki_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _seed_disposition_row(wiki_root, source_ref="s/n1", at=self._NOW, disposition="no-match")
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write('{"schema_version": 1, "source_ref": "s/truncated", "disposi\n')
+
+        report = prune_shape_rule_dispositions_to_positive(wiki_root, apply=True)
+
+        assert report.malformed_lines == 1
+        assert report.rows_dropped == 1
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        assert lines[0] == '{"schema_version": 1, "source_ref": "s/truncated", "disposi'
+
+    def test_row_with_missing_disposition_field_is_kept(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        path = default_shape_rule_dispositions_path(wiki_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"schema_version": 1, "source_ref": "s/no-disposition-field"}) + "\n",
+            encoding="utf-8",
+        )
+
+        report = prune_shape_rule_dispositions_to_positive(wiki_root)
+
+        assert report.histogram == {"<missing-disposition>": 1}
+        assert report.no_match_count == 0
+        assert report.positive_count == 1
+
+    def test_apply_is_required_to_mutate(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        _seed_disposition_row(wiki_root, source_ref="s/n1", at=self._NOW, disposition="no-match")
+        _seed_disposition_row(
+            wiki_root, source_ref="s/p1", at=self._NOW, disposition="preserve"
+        )
+        path = default_shape_rule_dispositions_path(wiki_root)
+        before = path.read_bytes()
+
+        report = prune_shape_rule_dispositions_to_positive(wiki_root, apply=False)
+
+        assert report.applied is False
+        assert report.rows_dropped == 1  # reported, but not written
+        assert path.read_bytes() == before
+
+    def test_missing_ledger_returns_empty_report(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        report = prune_shape_rule_dispositions_to_positive(wiki_root, apply=True)
+        assert report.total_records == 0
+        assert report.applied is False
+
+    def test_nothing_to_prune_leaves_file_untouched(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        _seed_disposition_row(
+            wiki_root, source_ref="s/p1", at=self._NOW, disposition="preserve"
+        )
+        path = default_shape_rule_dispositions_path(wiki_root)
+        before = path.read_bytes()
+
+        report = prune_shape_rule_dispositions_to_positive(wiki_root, apply=True)
+
+        assert report.rows_dropped == 0
+        assert report.applied is False
+        assert path.read_bytes() == before
+
+    def test_mismatch_guard_refuses_to_write(self, tmp_path: Path, monkeypatch) -> None:
+        # AC4 made mechanical: force the guard's independent re-parse of the
+        # constructed output to disagree with the scan pass, and confirm the
+        # prune refuses to write anything rather than trusting one
+        # bookkeeping pass. A genuine construction bug (a dropped or
+        # duplicated line) would produce exactly this kind of disagreement.
+        import athenaeum.rules as rules_module
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        _seed_disposition_row(wiki_root, source_ref="s/n1", at=self._NOW, disposition="no-match")
+        _seed_disposition_row(
+            wiki_root, source_ref="s/p1", at=self._NOW, disposition="preserve"
+        )
+        path = default_shape_rule_dispositions_path(wiki_root)
+        before = path.read_bytes()
+
+        original = rules_module._classify_disposition_ledger_text
+        calls = {"n": 0}
+
+        def _fake(text: str):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return original(text)
+            # Second call is the guard's re-parse of the constructed output
+            # -- lie about it disagreeing with the scan pass.
+            return [], {}, 0, 0
+
+        monkeypatch.setattr(rules_module, "_classify_disposition_ledger_text", _fake)
+
+        with pytest.raises(DispositionPruneMismatchError):
+            prune_shape_rule_dispositions_to_positive(wiki_root, apply=True)
+
+        assert path.read_bytes() == before  # nothing written
 
 
 # ---------------------------------------------------------------------------

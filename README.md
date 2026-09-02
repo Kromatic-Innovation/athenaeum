@@ -527,8 +527,8 @@ Each merge item is rendered as an answerable question — the source pages are
 named by their frontmatter `name:` (not the uuid-slug) with a one-line gist
 each — because cosine topic-similarity alone is not "should-merge" and misleads
 without the pages' own words. The merges half is also available on its own via
-`athenaeum merges {list,next,count,revalidate,recompare,provenance}` (the mirror of
-`athenaeum questions`, plus three merge-only modes):
+`athenaeum merges {list,next,count,revalidate,recompare,scrub-pii,provenance}` (the
+mirror of `athenaeum questions`, plus four merge-only modes):
 
 ```bash
 athenaeum merges list  [--limit N] [--json]        # all unresolved proposals
@@ -542,6 +542,14 @@ athenaeum merges recompare [--apply] [--limit N] [--json]
                                                     # --apply writes to the LEDGER only — it never
                                                     # approves, rejects, or archives a proposal, and
                                                     # PII-hazard proposals always route to a human.
+athenaeum merges scrub-pii [--apply] [--allowlist F] [--json]
+                                                    # redact contact data out of proposal BODIES in
+                                                    # place (athenaeum#1276). A proposal stores its
+                                                    # draft_merged_body verbatim, so migrating a
+                                                    # page's PII off-corpus used to leave a copy
+                                                    # here. Zero LLM cost, and it does NOT force the
+                                                    # merge decision — the proposal stays unresolved.
+                                                    # Dry-run by default.
 athenaeum merges provenance [--canonical-slug S] [--merge-id ID] [--json]
 ```
 
