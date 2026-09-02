@@ -12,7 +12,24 @@ Athenaeum accumulates two separate queues that need a human:
 This module builds ONE list that unifies both, each item tagged
 ``type: "question" | "merge"``, so any consumer (the ``decisions`` CLI, the
 ``merges`` CLI, a briefing sub-skill, or the ``list_pending_decisions`` MCP
-tool) gets the whole queue in one call with a common shape.
+tool) gets the whole queue in one call with a common shape. (Several more
+item types have since joined the union — ``retraction``, ``audit``,
+``quarantine``, ``proposed-rule``, and, as of issue athenaeum#1290,
+``confirmation`` — see each ``*_to_decision`` function below; this
+docstring's "two queues" framing predates them.)
+
+``confirmation`` (issue athenaeum#1290) is an AGENT-raiseable item — an
+agent that narrowed scope mid-build flags "implemented X without Y,
+confirm?" through ``raise_decision`` (MCP) or
+``athenaeum decisions raise-confirmation`` (CLI). Storage-wise it reuses the
+``question`` queue's own file (``_pending_questions.md``) and block grammar
+— see :func:`confirmation_to_decision` and
+:func:`athenaeum.answers.raise_pending_question`'s ``kind="confirmation"``
+path — so every existing question-queue mechanic (durability across a
+session, ``resolve_question`` for closing it, the ``ingest-answers``
+deferred-apply tick) already applies to it with zero special-casing; only
+the unified VIEW's ``type`` tag and payload shape differ from a plain
+question.
 
 The hard requirement from the issue's live-triage comment: a merge item MUST
 be expressed as **a question a human can actually answer**. A proposal shown
@@ -262,6 +279,52 @@ def merge_to_decision(
     }
 
 
+def confirmation_to_decision(pq: PendingQuestion) -> dict:
+    """Convert a confirmation-kind :class:`PendingQuestion` to a unified decision dict.
+
+    A ``type: "confirmation"`` item (issue athenaeum#1290): an agent narrowed
+    scope mid-build and raised "implemented X without Y, confirm?" through
+    ``raise_decision`` (MCP) or ``athenaeum decisions raise-confirmation``
+    (CLI). Storage-wise this is STILL a block in ``_pending_questions.md`` —
+    :func:`question_to_decision` dispatches here purely on
+    ``pq.decision_kind == "confirmation"``; nothing about resolution differs
+    (the existing ``resolve_question`` tool / ``athenaeum ingest-answers``
+    tick closes it exactly like any other question block, since both
+    operate on the raw block text, never on ``type``).
+
+    ``summary`` is a plainly-phrased confirm question — mirroring
+    :func:`_merge_question`'s "never show a raw score, phrase it as
+    something a human can answer" rule — built from the structured fields
+    rather than reusing ``pq.question`` verbatim, so a bare/generic question
+    string (as a default-generated one can be) never has to carry the whole
+    story alone.
+    """
+    summary = (
+        f'{pq.raiser} narrowed scope on {pq.repo}#{pq.issue_ref}: implemented '
+        f'"{pq.implemented_behavior}" instead of "{pq.alternative}" '
+        f"(scope narrowed: {pq.narrowed_scope}) — confirm?"
+    )
+    return {
+        "type": "confirmation",
+        "id": pq.id,
+        "created_at": pq.created_at,
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "raiser": pq.raiser,
+            "repo": pq.repo,
+            "issue_ref": pq.issue_ref,
+            "narrowed_scope": pq.narrowed_scope,
+            "implemented_behavior": pq.implemented_behavior,
+            "alternative": pq.alternative,
+            "raised_at": pq.raised_at,
+            "question": pq.question,
+            "context": pq.description,
+            "raised_by": pq.raised_by,
+        },
+    }
+
+
 def question_to_decision(pq: PendingQuestion, *, with_proposal: bool = False) -> dict:
     """Convert a :class:`PendingQuestion` to a unified decision dict.
 
@@ -271,7 +334,18 @@ def question_to_decision(pq: PendingQuestion, *, with_proposal: bool = False) ->
     ``raise_decision`` MCP tool (:func:`athenaeum.answers.raise_pending_question`)
     — the queue's provenance signal so an agent-raised item is never
     mistaken for a corpus-detected contradiction.
+
+    Issue athenaeum#1290: a block whose ``decision_kind`` is
+    ``"confirmation"`` is delegated to :func:`confirmation_to_decision`
+    instead — a DIFFERENT ``type`` in the unified view (``"confirmation"``,
+    not ``"question"``) with a richer, structured payload. This branch is the
+    ONLY change athenaeum#1290 makes here; an ordinary question's returned
+    dict (``decision_kind == "question"``, true for every pre-athenaeum#1290
+    block and every plain ``raise_decision`` call) is byte-for-byte
+    unchanged.
     """
+    if pq.decision_kind == "confirmation":
+        return confirmation_to_decision(pq)
     payload: dict = {
         "entity": pq.entity,
         "source": pq.source,
