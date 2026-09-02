@@ -204,11 +204,24 @@ def _json_default(value: object) -> str:
     are the same logical claim content; only YAML's implicit tag differed.
 
     ``datetime.datetime`` is a subclass of ``datetime.date``, so the single
-    ``isinstance`` check below covers both. Anything else PyYAML could in
-    principle hand back (there is no such scalar in the YAML 1.1 core
-    schema today, but frontmatter is open-ended per :func:`parse_frontmatter`)
-    falls back to ``str()`` so this stays a total function — content_hash
-    must never raise on a value ``json.dumps`` alone can't encode.
+    ``isinstance`` check below covers both. Anything else PyYAML can hand
+    back for an unencodable *value* — ``yaml.safe_load`` does construct
+    non-date exotics, e.g. ``set`` from ``!!set`` and ``bytes`` from
+    ``!!binary`` — falls back to ``str()`` instead of raising. That fallback
+    is NOT guaranteed stable across processes for unordered collection
+    types (a ``set``'s iteration order depends on ``PYTHONHASHSEED``), so it
+    keeps ``content_hash`` from raising but does not make it a total
+    *deterministic* function on every input; see athenaeum#1281 review F3
+    for a demonstrated cross-seed digest divergence on an unreachable-today
+    ``!!set`` value.
+
+    This ``default=`` hook only ever runs for dict *values* ``json.dumps``
+    rejects — ``sort_keys=True`` raises on a non-``str`` dict *key* before
+    the encoder ever calls ``default=``, so a frontmatter page with a date,
+    bool, or int key (including the YAML 1.1 Norway-case keys ``no:`` /
+    ``on:`` / ``yes:``) still raises ``TypeError`` exactly as it did before
+    this fix. ``content_hash`` is a total function over unencodable
+    *values*, not over arbitrary frontmatter.
     """
     if isinstance(value, date):
         return value.isoformat()
