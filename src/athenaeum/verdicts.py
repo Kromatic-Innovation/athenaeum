@@ -186,6 +186,48 @@ def _require_lock(lock: RunLock) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _json_default(value: object) -> str:
+    """Fallback encoder for frontmatter scalars ``json.dumps`` can't serialize.
+
+    PyYAML's implicit resolver loads UNQUOTED ISO-date/datetime frontmatter
+    (``created: 2026-08-25``) as :class:`datetime.date`/:class:`datetime.datetime`
+    objects, not ``str`` — ``json.dumps`` has no native encoding for those and
+    raises ``TypeError`` (issue athenaeum#1281; ~40% of the live wiki corpus
+    carries a bare date somewhere in frontmatter and failed to hash at all).
+
+    ``isoformat()`` keeps the encoding STABLE — same string every run, same
+    across Python versions, no locale/timezone-formatting variance — and, as
+    a bonus, makes a bare date and an explicitly-quoted date STRING of the
+    same value hash identically: ``json.dumps`` re-encodes whatever this
+    returns through its normal string path, so ``date(2026, 8, 25)`` and the
+    string ``"2026-08-25"`` land in the canonical payload the same way. Both
+    are the same logical claim content; only YAML's implicit tag differed.
+
+    ``datetime.datetime`` is a subclass of ``datetime.date``, so the single
+    ``isinstance`` check below covers both. Anything else PyYAML can hand
+    back for an unencodable *value* — ``yaml.safe_load`` does construct
+    non-date exotics, e.g. ``set`` from ``!!set`` and ``bytes`` from
+    ``!!binary`` — falls back to ``str()`` instead of raising. That fallback
+    is NOT guaranteed stable across processes for unordered collection
+    types (a ``set``'s iteration order depends on ``PYTHONHASHSEED``), so it
+    keeps ``content_hash`` from raising but does not make it a total
+    *deterministic* function on every input; see athenaeum#1281 review F3
+    for a demonstrated cross-seed digest divergence on an unreachable-today
+    ``!!set`` value.
+
+    This ``default=`` hook only ever runs for dict *values* ``json.dumps``
+    rejects — ``sort_keys=True`` raises on a non-``str`` dict *key* before
+    the encoder ever calls ``default=``, so a frontmatter page with a date,
+    bool, or int key (including the YAML 1.1 Norway-case keys ``no:`` /
+    ``on:`` / ``yes:``) still raises ``TypeError`` exactly as it did before
+    this fix. ``content_hash`` is a total function over unencodable
+    *values*, not over arbitrary frontmatter.
+    """
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
 def content_hash(page_text: str) -> str:
     """SHA-256 hash over a page's CLAIM CONTENT only.
 
@@ -197,12 +239,26 @@ def content_hash(page_text: str) -> str:
     This is the exact guard the issue's AC names: "writing system metadata
     to a page leaves its content hash unchanged" — see
     ``tests/test_verdicts.py::test_content_hash_excludes_system_metadata``.
+
+    Frontmatter scalars that ``json.dumps`` cannot natively encode (notably
+    unquoted ISO dates, which PyYAML loads as :class:`datetime.date` — issue
+    athenaeum#1281) are rendered via :func:`_json_default` instead of raising.
+    This ``default=`` hook is only ever CALLED for values the encoder would
+    otherwise reject, so pages whose frontmatter is already all
+    str/int/float/bool/None/list/dict (i.e. every page that hashed
+    successfully before this fix) take the exact same code path and produce
+    the exact same hash as before — see
+    ``tests/test_verdicts.py::test_content_hash_unchanged_for_existing_all_string_page``.
     """
     meta, body = parse_frontmatter(page_text)
     if not isinstance(meta, dict):
         meta = {}
     claim_meta = {k: v for k, v in meta.items() if k not in SYSTEM_METADATA_KEYS}
-    canonical = json.dumps(claim_meta, sort_keys=True, ensure_ascii=False) + "\n" + body
+    canonical = (
+        json.dumps(claim_meta, sort_keys=True, ensure_ascii=False, default=_json_default)
+        + "\n"
+        + body
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

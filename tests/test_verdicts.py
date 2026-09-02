@@ -115,6 +115,85 @@ class TestContentHash:
         b = "---\nname: alpha\ntype: reference\n---\nbody\n"
         assert content_hash(a) != content_hash(b)
 
+    def test_content_hash_unchanged_for_existing_all_string_page(self) -> None:
+        """Pins the hash of an all-str/int/float frontmatter page to a literal.
+
+        Computed against `content_hash` BEFORE issue athenaeum#1281's fix
+        (adding a ``default=`` fallback to the internal ``json.dumps`` call).
+        That fallback is only ever invoked for values the encoder would
+        otherwise reject, so any page whose frontmatter was already fully
+        JSON-native (as this one is) takes the identical code path today —
+        this must never change, or every already-recorded verdict in the
+        athenaeum#712 ledger keyed off the old hash silently invalidates.
+        """
+        page = "---\nname: alpha\ntype: feedback\n---\nsome claim text\n"
+        assert (
+            content_hash(page)
+            == "5a08ad7389f6519453d2e3a2b42179612ead8ab2667e0215a841b0b6a461d5c5"
+        )
+
+    def test_content_hash_unquoted_iso_date_does_not_raise(self) -> None:
+        """Issue athenaeum#1281: unquoted ISO-date frontmatter used to raise TypeError.
+
+        PyYAML parses an unquoted ``created: 2026-08-25`` as a
+        :class:`datetime.date`, which the old bare ``json.dumps(...)`` call
+        (no ``default=``) could not encode.
+
+        Pins the literal digest, not just ``isinstance``/``len`` — review
+        F1 on athenaeum#1301: a bare ``isinstance(h, str) and len(h) == 64``
+        assertion cannot see ``_json_default`` collapsing to
+        ``return str(value)`` (dropping ``isoformat()``), because for a
+        ``date`` value ``str(value) == value.isoformat()`` already. The
+        companion datetime test below is the one that actually catches that
+        mutant, since ``str(datetime)`` and ``datetime.isoformat()`` differ.
+        Mutation-verified: reverting ``_json_default`` to ``return
+        str(value)`` leaves this test green but reds
+        ``test_content_hash_unquoted_datetime_does_not_raise``.
+        """
+        page = "---\nname: alpha\ncreated: 2026-08-25\n---\nsome claim text\n"
+        h = content_hash(page)
+        assert h == "e55833fd0b2e1a938ae0b8096261e3d6327f70c24a7e55682b05f60819f1614e"
+
+    def test_content_hash_unquoted_datetime_does_not_raise(self) -> None:
+        """Same defect, ``datetime.datetime`` variant (full ISO timestamp).
+
+        Pins the literal digest (review F1 on athenaeum#1301). This is the
+        test that turns red under the ``_json_default`` mutant described
+        above: ``datetime.isoformat()`` gives ``2026-08-25T18:17:02+00:00``,
+        ``str(datetime)`` gives ``2026-08-25 18:17:02+00:00`` (space instead
+        of ``T``) — a silent hash change for every datetime-bearing page,
+        invalidating its athenaeum#712 ledger entries with nothing failing,
+        if that mutant ever landed as a "simplification". Mutation-verified
+        directly: applying the mutant reds this test; reverting it passes.
+        """
+        page = "---\nname: alpha\nupdated: 2026-08-25T18:17:02Z\n---\nbody\n"
+        h = content_hash(page)
+        assert h == "b6601956ee9f67b2eec6e66a6f1b0c1458561fe70b0b8f0efe45c3d1774e942a"
+
+    def test_content_hash_pure_within_one_process(self) -> None:
+        """Same logical page hashes identically on repeated calls in one process.
+
+        Renamed from ``test_content_hash_stable_across_runs`` (review F3 on
+        athenaeum#1301): two calls in the same interpreter share one
+        ``PYTHONHASHSEED``, so this checks in-process purity, not stability
+        *across* runs/processes. The ``str()`` catch-all in
+        ``_json_default`` is NOT guaranteed deterministic across processes
+        for unordered collection types (e.g. ``!!set``) — see that
+        function's docstring — but no such value is reachable in the live
+        corpus today, so there is nothing to pin here beyond purity.
+        """
+        page = "---\nname: alpha\ncreated: 2026-08-25\n---\nsome claim text\n"
+        assert content_hash(page) == content_hash(page)
+
+    def test_content_hash_unquoted_and_quoted_date_agree(self) -> None:
+        """A bare ISO date and the same value explicitly quoted are the same
+        claim content and hash identically — the YAML implicit tag is not
+        part of the logical content.
+        """
+        unquoted = "---\nname: alpha\ncreated: 2026-08-25\n---\nbody\n"
+        quoted = '---\nname: alpha\ncreated: "2026-08-25"\n---\nbody\n'
+        assert content_hash(unquoted) == content_hash(quoted)
+
 
 class TestMakePairKey:
     def test_order_independent(self) -> None:
