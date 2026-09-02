@@ -205,6 +205,27 @@ class TestTurnOrderRotates:
             history.append(_record(sorted(set(sources) - scheduled)))
         assert ever_scheduled == set(sources)
 
+    @pytest.mark.parametrize("n_sources", range(2, 13))
+    def test_the_ceil_bound_holds_across_every_window_width(
+        self, n_sources: int
+    ) -> None:
+        # AC1 as a swept property rather than one hand-picked case: for every
+        # source count 2..12 and every window width 1..n+2, every source is
+        # scheduled within ceil(n_sources / limit) runs.
+        sources = [f"s{i}" for i in range(n_sources)]
+        files = [_raw(s, f"f{j}.md") for s in sources for j in range(200)]
+        for limit in range(1, n_sources + 3):
+            history: list[dict] = []
+            ever_scheduled: set[str] = set()
+            for _ in range(-(-n_sources // limit)):
+                window = round_robin_by_source(
+                    files, limit, priority_sources=starvation_priority(history)
+                )
+                scheduled = {f.source for f in window}
+                ever_scheduled |= scheduled
+                history.append(_record(sorted(set(sources) - scheduled)))
+            assert ever_scheduled == set(sources), f"limit={limit}"
+
     def test_rotation_by_name_alone_would_not_bound_the_wait(self) -> None:
         # Why `starvation_priority` ages by streak rather than just handing
         # back last run's starved set: with a name-ordered head, a source can
