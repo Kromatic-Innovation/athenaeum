@@ -57,6 +57,59 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_cache_dir(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory holding the spend ledger "
+        "(default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum)",
+    )
+
+
+def _add_summary_log(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--summary-log",
+        type=Path,
+        default=None,
+        help="Path to a nightly log file containing 'librarian-run-summary' "
+        "lines, used to derive wall-clock/file. Omit to report wall-clock "
+        "figures as not-yet-measurable (no fabricated figure).",
+    )
+
+
+def _add_override_arg(
+    parser: argparse.ArgumentParser,
+    flag: str,
+    *,
+    arg_type: type,
+    quantity: str,
+    ac_ref: str,
+    rederive_from: str,
+    source_field: str,
+) -> None:
+    """Add one operator-supplied-override CLI flag (issue athenaeum#1285).
+
+    Every override in the ``measure`` family shares this exact shape: a
+    nullable value the operator may supply directly; when omitted, the
+    underlying artifact module (:mod:`athenaeum.backlog_price_sheet` /
+    :mod:`athenaeum.ordinary_night_table`) re-derives it and records the
+    provenance in ``<source_field>``; when supplied, the snapshot records
+    ``<source_field>=operator-supplied``. Declared once here instead of once
+    per subcommand.
+    """
+    parser.add_argument(
+        flag,
+        type=arg_type,
+        default=None,
+        help=(
+            f"Operator-supplied override for {quantity} (issue athenaeum#1095 "
+            f"{ac_ref}). Omit to re-derive it from {rederive_from} (default). "
+            f"When supplied, the snapshot records {source_field}=operator-supplied."
+        ),
+    )
+
+
 def _read_summary_log(path: Path | None) -> list:
     if path is None:
         return []
@@ -245,21 +298,8 @@ def add_measure_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Backlog price sheet with a decision-inflow sensitivity table.",
     )
     _add_common(price_p)
-    price_p.add_argument(
-        "--cache-dir",
-        type=Path,
-        default=None,
-        help="Cache directory holding the spend ledger "
-        "(default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum)",
-    )
-    price_p.add_argument(
-        "--summary-log",
-        type=Path,
-        default=None,
-        help="Path to a nightly log file containing 'librarian-run-summary' "
-        "lines, used to derive wall-clock/file. Omit to report wall-clock "
-        "figures as not-yet-measurable (no fabricated figure).",
-    )
+    _add_cache_dir(price_p)
+    _add_summary_log(price_p)
     price_p.add_argument(
         "--prefilter-excluded-fraction",
         type=float,
@@ -287,31 +327,32 @@ def add_measure_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Day count marking the 6-month horizon a sensitivity row can "
         "breach (default: 182).",
     )
-    price_p.add_argument(
+    _add_override_arg(
+        price_p,
         "--backlog-count",
-        type=int,
-        default=None,
-        help="Operator-supplied override for the backlog file count (issue "
-        "athenaeum#1095 AC3(a)). Omit to re-derive it from the live raw/ tree "
-        "(default). When supplied, the snapshot records "
-        "backlog_count_source=operator-supplied.",
+        arg_type=int,
+        quantity="the backlog file count",
+        ac_ref="AC3(a)",
+        rederive_from="the live raw/ tree",
+        source_field="backlog_count_source",
     )
-    price_p.add_argument(
+    _add_override_arg(
+        price_p,
         "--calls-per-file",
-        type=float,
-        default=None,
-        help="Operator-supplied override for calls/file (issue athenaeum#1095 "
-        "AC3(b)). Omit to re-derive it from the spend ledger (default). When "
-        "supplied, the snapshot records calls_per_file_source=operator-supplied.",
+        arg_type=float,
+        quantity="calls/file",
+        ac_ref="AC3(b)",
+        rederive_from="the spend ledger",
+        source_field="calls_per_file_source",
     )
-    price_p.add_argument(
+    _add_override_arg(
+        price_p,
         "--wall-clock-per-file-seconds",
-        type=float,
-        default=None,
-        help="Operator-supplied override for wall-clock/file (issue "
-        "athenaeum#1095 AC3(c)). Omit to re-derive it from --summary-log "
-        "(default). When supplied, the snapshot records "
-        "wall_clock_source=operator-supplied.",
+        arg_type=float,
+        quantity="wall-clock/file",
+        ac_ref="AC3(c)",
+        rederive_from="--summary-log",
+        source_field="wall_clock_source",
     )
     price_p.set_defaults(func=cmd_backlog_price)
 
@@ -321,13 +362,8 @@ def add_measure_subparser(subparsers: argparse._SubParsersAction) -> None:
         "comparator-regime assumptions vs the nightly call/wall-clock budgets.",
     )
     _add_common(night_p)
-    night_p.add_argument("--cache-dir", type=Path, default=None)
-    night_p.add_argument(
-        "--summary-log",
-        type=Path,
-        default=None,
-        help="Same as backlog-price's --summary-log.",
-    )
+    _add_cache_dir(night_p)
+    _add_summary_log(night_p)
     night_p.add_argument(
         "--intake-window-days",
         type=int,
@@ -355,31 +391,32 @@ def add_measure_subparser(subparsers: argparse._SubParsersAction) -> None:
     night_p.add_argument("--audit-sampling-seconds-per-night", type=float, default=0.0)
     night_p.add_argument("--nights-in-wave", type=int, default=None)
     night_p.add_argument("--total-nights", type=int, default=None)
-    night_p.add_argument(
+    _add_override_arg(
+        night_p,
         "--calls-per-file",
-        type=float,
-        default=None,
-        help="Operator-supplied override for calls/file (issue athenaeum#1095 "
-        "AC5). Omit to re-derive it from the spend ledger (default). When "
-        "supplied, the snapshot records calls_per_file_source=operator-supplied.",
+        arg_type=float,
+        quantity="calls/file",
+        ac_ref="AC5",
+        rederive_from="the spend ledger",
+        source_field="calls_per_file_source",
     )
-    night_p.add_argument(
+    _add_override_arg(
+        night_p,
         "--files-per-day",
-        type=float,
-        default=None,
-        help="Operator-supplied override for files/day of ordinary intake "
-        "(issue athenaeum#1095 AC5). Omit to re-derive it from the trailing "
-        "--intake-window-days scan of raw/ (default). When supplied, the "
-        "snapshot records files_per_day_source=operator-supplied.",
+        arg_type=float,
+        quantity="files/day of ordinary intake",
+        ac_ref="AC5",
+        rederive_from="the trailing --intake-window-days scan of raw/",
+        source_field="files_per_day_source",
     )
-    night_p.add_argument(
+    _add_override_arg(
+        night_p,
         "--wall-clock-per-file-seconds",
-        type=float,
-        default=None,
-        help="Operator-supplied override for wall-clock/file (issue "
-        "athenaeum#1095 AC5). Omit to re-derive it from --summary-log "
-        "(default). When supplied, the snapshot records "
-        "wall_clock_source=operator-supplied.",
+        arg_type=float,
+        quantity="wall-clock/file",
+        ac_ref="AC5",
+        rederive_from="--summary-log",
+        source_field="wall_clock_source",
     )
     night_p.set_defaults(func=cmd_ordinary_night)
 

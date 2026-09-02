@@ -1704,6 +1704,41 @@ class EscalationItem:
     members: list[str] = field(default_factory=list)
 
 
+# Conflict taxonomy (moved from athenaeum.contradictions, issue athenaeum#1253, step S0 of the
+# athenaeum#715 phase-4 plan) -- the categories the wiki/review queue consumers branch on.
+# ``factual`` vs ``prescriptive`` are the original two; ``stance`` (issue athenaeum#327)
+# routes an EVALUATIVE (opinion) pair to the resolver's opinion-attribution short-circuit
+# instead of a precedence winner. "Principled" contradictions from Tier 3 stay in the
+# tiers.py escalation path; this taxonomy is auto-memory-specific.
+ConflictType = Literal["factual", "prescriptive", "stance"]
+
+
+@dataclass
+class ContradictionResult:
+    """Outcome of one cluster's contradiction check.
+
+    Cross-cutting shape (issue athenaeum#1253): originally defined in
+    :mod:`athenaeum.contradictions` (the C4 detector), moved here so
+    :attr:`MergedWikiEntry.contradiction <athenaeum.merge.MergedWikiEntry.contradiction>`
+    and the resolver (:mod:`athenaeum.resolutions`) can reach the type without
+    depending on the detector module surviving. Re-exported from
+    :mod:`athenaeum.contradictions` for back-compat -- no behaviour change.
+    """
+
+    detected: bool
+    conflict_type: ConflictType | None = None
+    members_involved: list[str] = field(default_factory=list)
+    conflicting_passages: list[str] = field(default_factory=list)
+    rationale: str = ""
+    # Issue athenaeum#569 (H6): True when this verdict is a fail-open degrade caused by
+    # the detector call giving up AFTER its transient-error retries (a 429/529/
+    # connection blip that outlived `with_retry`), NOT a genuine "no
+    # contradiction". merge.py marks such clusters detection-incomplete so the
+    # next run's delta set re-examines them regardless of file changes. Defaults
+    # False, so a normal not-detected / detected verdict never re-queues.
+    incomplete: bool = False
+
+
 # Per-model rate table (issue athenaeum#247). Maps a model-id PREFIX to its
 # (input, output) price in USD per million tokens. Matched by LONGEST
 # prefix so dated ids (``claude-haiku-4-5-20251001``) resolve to the
@@ -2025,6 +2060,37 @@ def estimate_prompt_tokens(text: str) -> int:
     return int(len(text) / _CHARS_PER_TOKEN_LOWER_BOUND)
 
 
+#: The six non-batched surfaces ``batch.py``'s module docstring declares out
+#: of scope for the Batch API transport (issue athenaeum#1148's citation;
+#: this issue, athenaeum#1289, is the instrumentation it asked for). Each
+#: string is a value a call site passes as :meth:`TokenUsage.add`/
+#: :meth:`~TokenUsage.add_tokens`/:meth:`~TokenUsage.add_batch_tokens`'s
+#: ``surface=`` kwarg. "The C4 contradiction detector and resolver" is ONE
+#: bullet in the declared list (and therefore one surface tag here) even
+#: though the two calls resolve to different ``knob`` values (``classify``
+#: vs ``resolve``) — see ``contradictions.detect_contradictions`` and
+#: ``resolutions.propose_resolution``'s call sites for the two functions
+#: sharing this tag. ``tier0_passthrough`` and ``tier1_programmatic_match``
+#: are zero-LLM-call surfaces by construction (no ``usage`` accumulation
+#: point exists for either) and never appear as a key in
+#: :attr:`TokenUsage.per_surface` for that reason, not because they were
+#: skipped.
+SURFACE_TIER0_PASSTHROUGH = "tier0_passthrough"
+SURFACE_TIER1_PROGRAMMATIC_MATCH = "tier1_programmatic_match"
+SURFACE_C4_CONTRADICTION = "c4_contradiction"
+SURFACE_SAME_PAGE_MULTI_MERGE = "same_page_multi_merge"
+SURFACE_TIER2_TRUNCATION_RETRY = "tier2_truncation_retry"
+SURFACE_TIER3_FULL_ECHO_FALLBACK = "tier3_full_echo_fallback"
+#: Not one of the six declared surfaces — the reporting-layer bucket
+#: (:func:`athenaeum.spend.tokens_by_surface`) that makes every OTHER call
+#: site's spend (batched tier-2/tier-3, and every knob this issue does not
+#: attribute — reasoning tiers, topic, rule_proposals, the freetext-edit
+#: resolver path, the reresolve heal pass, etc.) visible as a named
+#: remainder rather than silently dropped. Never accumulated directly on
+#: :attr:`TokenUsage.per_surface` — see that function's docstring.
+SURFACE_UNATTRIBUTED = "unattributed"
+
+
 @dataclass
 class TokenUsage:
     """Accumulated API token usage for a pipeline run."""
@@ -2064,6 +2130,20 @@ class TokenUsage:
     # purely a WHERE-did-the-tokens-go breakdown for ``athenaeum spend
     # --by-knob``). Excluded from ``repr`` to keep run-summary logging concise.
     per_knob: dict[str, dict[str, int]] = field(default_factory=dict, repr=False)
+    # Per-surface attribution (issue athenaeum#1289). A SIBLING of ``per_knob``,
+    # not a reshape — same bucket shape, same additive-subset, opt-in-only
+    # pattern (only tagged when a call site passes ``surface=``; the scalar
+    # totals above stay authoritative). Keyed by one of the six
+    # ``SURFACE_*`` constants declared above :class:`TokenUsage` — the
+    # non-batched surfaces batch.py's module docstring enumerates. Unlike
+    # ``per_knob``/``per_model``, this dict does NOT need every call site in
+    # the codebase to tag it to be useful: ``athenaeum.spend.tokens_by_surface``
+    # computes an ``unattributed`` remainder (``usage.input_tokens`` minus the
+    # sum of every explicitly-tagged surface here) at report time, so the
+    # conservation property (named surfaces + unattributed == total input)
+    # holds without this dict itself needing to be exhaustive. Excluded from
+    # ``repr`` to keep run-summary logging concise.
+    per_surface: dict[str, dict[str, int]] = field(default_factory=dict, repr=False)
     # Subscription-covered flag (issue athenaeum#330). When the run is served by the
     # ``claude-cli`` provider, the operator's Claude Code SUBSCRIPTION pays for
     # the tokens — there is no per-token API bill. Token COUNTS still
@@ -2230,6 +2310,45 @@ class TokenUsage:
             bucket["batch_cache_creation_input_tokens"] += cache_creation_input_tokens
             bucket["batch_cache_read_input_tokens"] += cache_read_input_tokens
 
+    def _tag_surface(
+        self,
+        surface: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_creation_input_tokens: int,
+        cache_read_input_tokens: int,
+        *,
+        is_batch: bool,
+    ) -> None:
+        """Accumulate this call's counts into the per-surface subset (athenaeum#1289).
+
+        Same bucket shape and accumulation rule as :meth:`_tag_knob` /
+        :meth:`_tag_model` — kept as its own method for the same reason:
+        each call site tags model/knob/surface independently.
+        """
+        bucket = self.per_surface.setdefault(
+            surface,
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "batch_input_tokens": 0,
+                "batch_output_tokens": 0,
+                "batch_cache_creation_input_tokens": 0,
+                "batch_cache_read_input_tokens": 0,
+            },
+        )
+        bucket["input_tokens"] += input_tokens
+        bucket["output_tokens"] += output_tokens
+        bucket["cache_creation_input_tokens"] += cache_creation_input_tokens
+        bucket["cache_read_input_tokens"] += cache_read_input_tokens
+        if is_batch:
+            bucket["batch_input_tokens"] += input_tokens
+            bucket["batch_output_tokens"] += output_tokens
+            bucket["batch_cache_creation_input_tokens"] += cache_creation_input_tokens
+            bucket["batch_cache_read_input_tokens"] += cache_read_input_tokens
+
     def add(
         self,
         input_tokens: int,
@@ -2238,6 +2357,7 @@ class TokenUsage:
         cache_read_input_tokens: int = 0,
         model: str | None = None,
         knob: str | None = None,
+        surface: str | None = None,
     ) -> None:
         """Record tokens from one API call.
 
@@ -2251,6 +2371,12 @@ class TokenUsage:
         :func:`athenaeum.config.resolve_model`; when given, the counts are
         additionally attributed to that knob in :attr:`per_knob`, mirroring
         *model*'s ``per_model`` accumulation.
+
+        *surface* (issue athenaeum#1289) is one of the ``SURFACE_*`` constants
+        declared above this class; when given, the counts are additionally
+        attributed to that surface in :attr:`per_surface`, mirroring *knob*'s
+        accumulation. Independent of *model*/*knob* — a call site may pass
+        any subset of the three.
         """
         self.add_tokens(
             input_tokens,
@@ -2259,6 +2385,7 @@ class TokenUsage:
             cache_read_input_tokens,
             model=model,
             knob=knob,
+            surface=surface,
         )
         self.api_calls += 1
 
@@ -2270,6 +2397,7 @@ class TokenUsage:
         cache_read_input_tokens: int = 0,
         model: str | None = None,
         knob: str | None = None,
+        surface: str | None = None,
     ) -> None:
         """Accumulate token counters WITHOUT counting an API call (athenaeum#239).
 
@@ -2284,6 +2412,9 @@ class TokenUsage:
         model-knob for per-knob attribution (:attr:`per_knob`) — independent
         of *model*, exactly mirroring how the two kwargs already coexist at
         every real call site (both sourced from the same config resolution).
+        *surface* (issue athenaeum#1289) optionally tags one of the six declared
+        non-batched surfaces for per-surface attribution (:attr:`per_surface`)
+        — independent of *model*/*knob*, same opt-in pattern.
 
         Also bumps :attr:`succeeded_calls` (issue athenaeum#1177) — this
         method is called ONLY when a real response's counts are known
@@ -2316,6 +2447,15 @@ class TokenUsage:
                 cache_read_input_tokens,
                 is_batch=False,
             )
+        if surface:
+            self._tag_surface(
+                surface,
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                is_batch=False,
+            )
 
     def add_batch_tokens(
         self,
@@ -2325,6 +2465,7 @@ class TokenUsage:
         cache_read_input_tokens: int = 0,
         model: str | None = None,
         knob: str | None = None,
+        surface: str | None = None,
     ) -> None:
         """Accumulate token counters from a Batch API result (athenaeum#236).
 
@@ -2340,11 +2481,18 @@ class TokenUsage:
         batch share is attributed per model so the 50% discount composes
         with that model's rates. *knob* (issue athenaeum#781) optionally tags the
         model-knob; the batch share is attributed per knob the same way.
+        *surface* (issue athenaeum#1289) optionally tags one of the six declared
+        non-batched surfaces; the batch share is attributed per surface the
+        same way. (In practice a batched call and a "declared non-batched
+        surface" tag are mutually exclusive by construction — batch.py never
+        routes any of the six through this method — but the kwarg is threaded
+        through for the same reason *model*/*knob* are: symmetry, and so a
+        future batched surface is not a special case to add later.)
         """
-        # Accumulate into the scalar + per-model/per-knob counters once
-        # (untagged remainder stays blended); add_tokens with model=None/
-        # knob=None here so the batch share is tagged via _tag_model /
-        # _tag_knob below with is_batch=True.
+        # Accumulate into the scalar + per-model/per-knob/per-surface counters
+        # once (untagged remainder stays blended); add_tokens with
+        # model=None/knob=None/surface=None here so the batch share is tagged
+        # via _tag_model / _tag_knob / _tag_surface below with is_batch=True.
         self.add_tokens(
             input_tokens,
             output_tokens,
@@ -2367,6 +2515,15 @@ class TokenUsage:
         if knob:
             self._tag_knob(
                 knob,
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                is_batch=True,
+            )
+        if surface:
+            self._tag_surface(
+                surface,
                 input_tokens,
                 output_tokens,
                 cache_creation_input_tokens,
@@ -2674,6 +2831,21 @@ class ProcessingResult:
     #: was actually escalated. Surfaced as ``oversize_suppressed=N`` in the
     #: run summary, mirroring the degraded/truncated convention above.
     oversize_suppressed: int = 0
+    #: Count of oversize pages ``librarian.oversize_page_action: split``
+    #: actually split into a hub + linked atomic pages this run (issue
+    #: athenaeum#1248 — ``EscalationItem.conflict_type == "oversize_split"``).
+    #: Derived from ``escalated`` exactly like ``oversize_suppressed`` above,
+    #: and deliberately DISJOINT from it: a page that was split is never
+    #: also counted as ``oversize_suppressed`` (that conflict_type is
+    #: ``review``'s alone), so the two counters partition the gate's fired
+    #: outcomes rather than double-counting. Surfaced as ``oversize_split=N``.
+    oversize_split: int = 0
+    #: Count of oversize pages ``librarian.oversize_page_action: log_demote``
+    #: actually moved into the preserved-log area this run (issue
+    #: athenaeum#1248 — ``EscalationItem.conflict_type ==
+    #: "oversize_log_demote"``). Same derivation/disjointness contract as
+    #: ``oversize_split`` above. Surfaced as ``oversize_log_demoted=N``.
+    oversize_log_demoted: int = 0
     #: Count of NEW entity writes this file's Tier-3 create phase produced
     #: whose ``type`` was outside declared ∪ ``KNOWN_TYPES`` and was
     #: therefore REFUSED by the write-boundary guard (issue athenaeum#1196,
