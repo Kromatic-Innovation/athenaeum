@@ -1439,6 +1439,14 @@ def _apply_tier3_results(
     result.oversize_suppressed += sum(
         1 for _e in escalations if _e.conflict_type == "oversize_page"
     )
+    # Issue athenaeum#1248: same derivation, disjoint conflict_types — see
+    # ProcessingResult.oversize_split/oversize_log_demoted's docstrings.
+    result.oversize_split += sum(
+        1 for _e in escalations if _e.conflict_type == "oversize_split"
+    )
+    result.oversize_log_demoted += sum(
+        1 for _e in escalations if _e.conflict_type == "oversize_log_demote"
+    )
 
     # --- Tier 4: Escalation ---
     if escalations:
@@ -4103,6 +4111,12 @@ class RunContext:
     # sync_merges finalize fallback in athenaeum.batch), via
     # BatchRunResult.oversize_suppressed / BatchCollectResult.oversize_suppressed.
     total_oversize_suppressed: int = 0
+    #: Issue athenaeum#1248: same cross-transport threading as
+    #: total_oversize_suppressed above, for the split/log_demote
+    #: dispositions — see ProcessingResult.oversize_split/
+    #: oversize_log_demoted's docstrings.
+    total_oversize_split: int = 0
+    total_oversize_log_demoted: int = 0
 
     def deadline_exceeded(self) -> bool:
         return self.run_deadline is not None and time.monotonic() >= self.run_deadline
@@ -5872,6 +5886,8 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
     ctx.total_degraded += outcome.degraded
     ctx.total_truncated += outcome.truncated
     ctx.total_oversize_suppressed += outcome.oversize_suppressed  # issue athenaeum#1182
+    ctx.total_oversize_split += outcome.oversize_split  # issue athenaeum#1248
+    ctx.total_oversize_log_demoted += outcome.oversize_log_demoted  # issue athenaeum#1248
     ctx.total_type_rejected += outcome.type_rejected  # issue athenaeum#1196
     ctx.collected_refs = list(outcome.collected_refs)
     ctx.batch_reconciliation = dict(outcome.reconciliation)
@@ -6232,6 +6248,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.total_oversize_suppressed = (
                         outcome.oversize_suppressed
                     )  # issue athenaeum#1182
+                    ctx.total_oversize_split = outcome.oversize_split  # issue athenaeum#1248
+                    ctx.total_oversize_log_demoted = (
+                        outcome.oversize_log_demoted
+                    )  # issue athenaeum#1248
                     ctx.total_type_rejected = outcome.type_rejected  # issue athenaeum#1196
                     ctx.failed_files = outcome.failed_refs
                     ctx.deferred_refs = outcome.deferred_refs
@@ -6719,6 +6739,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         ctx.total_oversize_suppressed += getattr(
                             result, "oversize_suppressed", 0
                         )
+                        # Issue athenaeum#1248: same getattr-tolerance rationale.
+                        ctx.total_oversize_split += getattr(result, "oversize_split", 0)
+                        ctx.total_oversize_log_demoted += getattr(
+                            result, "oversize_log_demoted", 0
+                        )
                         if result.created or result.updated:
                             ctx.total_files_acted += 1
 
@@ -7033,6 +7058,23 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     **(
                         {"oversize_suppressed": ctx.total_oversize_suppressed}
                         if ctx.total_oversize_suppressed
+                        else {}
+                    ),
+                    # athenaeum#1248: oversize pages the gate actually SPLIT (into a
+                    # hub + linked atomic pages) or DEMOTED to a log this run —
+                    # kept as separate fields from oversize_suppressed above so
+                    # a run summary makes clear which disposition fired for
+                    # each page, never conflating "escalated for a human" with
+                    # "already restructured automatically". Only rendered when
+                    # non-zero, same convention.
+                    **(
+                        {"oversize_split": ctx.total_oversize_split}
+                        if ctx.total_oversize_split
+                        else {}
+                    ),
+                    **(
+                        {"oversize_log_demoted": ctx.total_oversize_log_demoted}
+                        if ctx.total_oversize_log_demoted
                         else {}
                     ),
                     # athenaeum#1171: tier-3 create responses whose leading
