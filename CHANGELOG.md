@@ -45,7 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (athenaeum#1322).** The entity segment gains `considered=` (candidates the
   scheduler saw, before any hold-out) and `window=` (slots actually filled),
   both unconditional, plus `caller_scoped=`, `pinned=`, `rr=`, `held_stuck=`
-  and `held_backoff=` when non-zero. `files=N` only ever said how many files a
+  and `held_backoff=` when non-zero. `held_stuck=`/`held_backoff=` are SUBSETS
+  of the existing `stuck=`/`backoff=` counts, not additions to them: `stuck=N`
+  remains every stuck file this run touched by either route, and `held_stuck=N`
+  says how many of those never reached the per-file loop because selection
+  held them out. Post-fix the two are normally equal; they diverge only when a
+  file crosses a threshold mid-run. `files=N` only ever said how many files a
   pass drained; from outside, "capped", "deferred", "skipped" and "broken" were
   indistinguishable, which is how a six-hour zero-throughput stall read as a
   healthy run in the durable athenaeum#1102 ledger. A pass that filled its

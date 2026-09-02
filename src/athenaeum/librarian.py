@@ -7241,9 +7241,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     **({"pinned": n_pinned} if n_pinned else {}),
                     **({"rr": n_round_robin} if n_round_robin else {}),
                     # athenaeum#1322: unworkable files held OUT of selection
-                    # (rather than skipped after winning a slot). Distinct from
-                    # `stuck=N` below, which counts every stuck file this run
-                    # touched by either route.
+                    # (rather than skipped after winning a slot). A SUBSET of
+                    # `stuck=N`/`backoff=N` below, never an addition to them --
+                    # those count every such file this run touched by EITHER
+                    # route, so an operator summing the two would double-count.
+                    # Post-fix the pairs are normally equal; they diverge only
+                    # when a file crosses a threshold mid-run.
                     **({"held_stuck": n_stuck_held} if n_stuck_held else {}),
                     **(
                         {"held_backoff": n_backoff_held}
