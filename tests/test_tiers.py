@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -2267,6 +2268,232 @@ class TestSectionScopedMerge:
         # The unheaded preamble contributes no outline entry, but is still a
         # selectable section.
         assert _build_section_outline(sections) == "- Alpha\n- Beta"
+
+
+def _build_headingless_oversized_page(*, needle: str, filler_paragraphs: int) -> str:
+    """A large entity page with NO markdown headings at all (issue athenaeum#1282
+    fixture) — the "1/82 of the real oversized cohort" residual left unmet by
+    heading-based section-scoping (issue athenaeum#1181). Blank-line-delimited
+    paragraphs, mirroring real unstructured prose, with *needle* buried in the
+    middle so a test can assert it survives scoping while the surrounding
+    filler is trimmed away.
+    """
+    paras = [
+        f"Routine background paragraph #{i} about ordinary day-to-day operations, "
+        "recorded via a prior merge with no particular significance."
+        for i in range(filler_paragraphs)
+    ]
+    mid = filler_paragraphs // 2
+    paras[mid] = needle
+    return "\n\n".join(paras)
+
+
+class TestHeadinglessSectionScopedMerge:
+    """Issue athenaeum#1282: the last athenaeum#1181 residual — a page with NO
+    markdown headings at all is a structural no-op for heading-based
+    section-scoping (:func:`_split_into_sections` returns ``[]``), which left
+    an oversized heading-less page whole-page echoed even after athenaeum#1181
+    shipped. This covers the paragraph-block fallback
+    (:func:`_narrow_headingless_body`) that closes it.
+    """
+
+    def test_oversized_headingless_page_is_scoped_and_retains_the_needed_content(
+        self,
+    ) -> None:
+        """AC: an oversized page with zero headings is no longer whole-page
+        echoed — the scoped input is bounded AND still carries the content
+        the merge actually needs."""
+        from athenaeum.tiers import _MAX_EXISTING_BODY_CHARS, tier3_merge_params
+
+        needle = "Renewal negotiated at the zarathustra pricing tier this quarter."
+        body = _build_headingless_oversized_page(needle=needle, filler_paragraphs=900)
+        assert len(body) > _MAX_EXISTING_BODY_CHARS
+        assert re.search(r"^#{1,6}[ \t]", body, re.MULTILINE) is None, (
+            "fixture must carry NO markdown heading, or this proves nothing"
+        )
+
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="public",
+            existing_uid="acme",
+            observations="Renewal on the zarathustra pricing tier.",
+        )
+
+        params = tier3_merge_params(action, body, "sessions/raw.md")
+        prompt = params["messages"][0]["content"]
+
+        assert needle in prompt, "the needed content was truncated away"
+        # Genuinely scoped, not the whole page: most filler paragraphs absent.
+        assert prompt.count("Routine background paragraph") < 900
+        assert "no markdown headings to scope by" in prompt
+
+    def test_headingless_body_under_the_window_is_left_unscoped(self) -> None:
+        """Regression guard: a small heading-less page (the common shape —
+        most entity pages carry a heading, but nothing requires one) is
+        NOT scoped — byte-identical to pre-athenaeum#1282 behavior. Scoping a
+        body that already fits the window would only ever remove content
+        for no benefit."""
+        from athenaeum.tiers import _select_merge_section
+
+        body = "Just a short unheaded paragraph or two.\n\nAnd a second one."
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="New fact about Acme.",
+        )
+        selected, was_scoped = _select_merge_section(body, action)
+        assert selected == body
+        assert was_scoped is False
+
+    def test_headingless_no_match_falls_back_to_the_last_paragraph_block(self) -> None:
+        """Mirrors the heading path's own no-match rule (and
+        ``test_empty_observations_still_select_a_section`` above): an
+        observation with nothing scoreable still gets real, recent content
+        to attach to (never an empty or arbitrary fence). Uses an EMPTY
+        observation, exactly like the heading-path test it mirrors, since
+        ``_match_tokens`` on a non-empty-but-wholly-unmatched observation
+        only guarantees SOME index scores highest (a tie at zero breaks to
+        the earliest paragraph, matching ``_narrow_section``'s own
+        documented tie behavior) — the LAST-block guarantee is specifically
+        the empty-``obs_tokens`` case."""
+        from athenaeum.tiers import _MAX_EXISTING_BODY_CHARS, _select_merge_section
+
+        paras = [f"para {i} " + ("filler word " * 40) for i in range(400)]
+        body = "\n\n".join(paras)
+        assert len(body) > _MAX_EXISTING_BODY_CHARS
+
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="",
+        )
+        selected, was_scoped = _select_merge_section(body, action)
+
+        assert was_scoped is True
+        assert len(selected) <= _MAX_EXISTING_BODY_CHARS
+        assert "para 399" in selected  # the LAST block, per the no-match rule
+
+    def test_headingless_body_with_no_blank_lines_falls_back_to_line_splitting(
+        self,
+    ) -> None:
+        """A genuinely unstructured wall of text (no ``\\n\\n`` breaks at all,
+        e.g. one fact per single-newline-terminated line) must still bound
+        the window and still anchor on the relevant LINE rather than an
+        arbitrary character offset."""
+        from athenaeum.tiers import _MAX_EXISTING_BODY_CHARS, _narrow_headingless_body
+
+        lines = [f"line {i}: routine note about ordinary operations." for i in range(3000)]
+        lines[1500] = "line 1500: the zarathustra renewal detail."
+        body = "\n".join(lines)
+        assert "\n\n" not in body
+        assert len(body) > _MAX_EXISTING_BODY_CHARS
+
+        out = _narrow_headingless_body(body, {"zarathustra"}, _MAX_EXISTING_BODY_CHARS)
+
+        assert len(out) <= _MAX_EXISTING_BODY_CHARS
+        assert "zarathustra" in out
+        assert "line 0:" not in out
+
+    def test_scoping_note_names_no_headings_not_an_outline(self) -> None:
+        """The prompt note for a heading-less page must not claim an outline
+        of headings was sent — there is none to send."""
+        from athenaeum.tiers import _MAX_EXISTING_BODY_CHARS, tier3_merge_params
+
+        body = _build_headingless_oversized_page(
+            needle="Needle paragraph about the renewal.", filler_paragraphs=900
+        )
+        assert len(body) > _MAX_EXISTING_BODY_CHARS
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="acme",
+            observations="Renewal update.",
+        )
+        params = tier3_merge_params(action, body, "sessions/raw.md")
+        prompt = params["messages"][0]["content"]
+        assert "[Page section outline" not in prompt
+        assert "append_section" in prompt
+
+    def test_with_headings_path_is_unaffected_by_the_headingless_fallback(self) -> None:
+        """Regression guard: a page that DOES have multiple heading-delimited
+        sections must still go through heading-based scoping (the outline +
+        selected-section shape), never the new paragraph-block fallback —
+        the two paths must stay mutually exclusive."""
+        from athenaeum.tiers import tier3_merge_params
+
+        body = _build_multi_section_page(filler_bullets=30)
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Contacts update: support line moved to a toll-free number.",
+        )
+        params = tier3_merge_params(action, body, "sessions/raw.md")
+        sent = params["messages"][0]["content"]
+
+        assert "Contact detail accumulated fact #0" in sent
+        assert "General background accumulated fact #0" not in sent
+        assert "[Page section outline" in sent
+        assert "no markdown headings to scope by" not in sent
+
+    def test_splice_back_leaves_the_full_body_intact_for_a_headingless_page(
+        self,
+    ) -> None:
+        """AC4-equivalent for the headingless path, driven through the real
+        ``tier3_merge`` pipeline: apply_merge_ops applies against the FULL,
+        untruncated body the caller holds — never the narrowed candidate —
+        so content the scoped prompt never saw survives the merge byte for
+        byte."""
+        needle = "Renewal negotiated at the zarathustra pricing tier."
+        body = _build_headingless_oversized_page(needle=needle, filler_paragraphs=900)
+        untouched_marker = "Routine background paragraph #0 about"
+        assert untouched_marker in body
+
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Renewal on the zarathustra pricing tier, confirmed again.",
+        )
+        ops_response = json.dumps(
+            {
+                "ops": [
+                    {
+                        "op": "replace",
+                        "anchor": needle,
+                        "text": f"{needle} Reconfirmed this quarter.[^999]",
+                    }
+                ]
+            }
+        )
+        client = _mock_client(ops_response)
+
+        updated_body, esc = tier3_merge(action, body, "sessions/raw.md", client)
+
+        assert esc is None
+        assert updated_body is not None
+        assert "Reconfirmed this quarter" in updated_body
+        assert untouched_marker in updated_body, "untargeted content was altered"
 
 
 class TestTier3MergePatchOps:
