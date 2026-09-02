@@ -26,6 +26,7 @@ from athenaeum.config import (
     resolve_reasoning_tier_t2_auto_apply_enabled,
     resolve_reindex_full_rehash_max_age_days,
     resolve_retire,
+    resolve_wiki_dedupe_min_body_chars,
     write_default_config,
 )
 
@@ -389,6 +390,55 @@ class TestResolveMinClusterCohesionScopes:
             )
             == 4
         )
+
+
+class TestResolveWikiDedupeMinBodyChars:
+    """Issue athenaeum#1252: eligibility floor for the wiki-dedupe pass.
+    Mirrors ``TestResolveMinClusterCohesion``'s coercion contract."""
+
+    def test_default_off(self) -> None:
+        assert resolve_wiki_dedupe_min_body_chars(None) == 0
+        assert resolve_wiki_dedupe_min_body_chars({}) == 0
+        assert resolve_wiki_dedupe_min_body_chars({"librarian": {}}) == 0
+
+    def test_yaml_value_wins(self) -> None:
+        assert (
+            resolve_wiki_dedupe_min_body_chars(
+                {"librarian": {"wiki_dedupe_min_body_chars": 300}}
+            )
+            == 300
+        )
+
+    def test_bool_falls_through_to_off(self) -> None:
+        # bool is an int subclass; `wiki_dedupe_min_body_chars: true` must
+        # not silently become a floor of 1.
+        cfg = {"librarian": {"wiki_dedupe_min_body_chars": True}}
+        assert resolve_wiki_dedupe_min_body_chars(cfg) == 0
+
+    def test_non_numeric_and_non_positive_fall_through(self) -> None:
+        assert (
+            resolve_wiki_dedupe_min_body_chars(
+                {"librarian": {"wiki_dedupe_min_body_chars": "x"}}
+            )
+            == 0
+        )
+        assert (
+            resolve_wiki_dedupe_min_body_chars(
+                {"librarian": {"wiki_dedupe_min_body_chars": 0}}
+            )
+            == 0
+        )
+        assert (
+            resolve_wiki_dedupe_min_body_chars(
+                {"librarian": {"wiki_dedupe_min_body_chars": -50}}
+            )
+            == 0
+        )
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "wiki_dedupe_min_body_chars" not in _DEFAULTS.get("librarian", {})
 
 
 class TestResolveReindexFullRehashMaxAgeDays:

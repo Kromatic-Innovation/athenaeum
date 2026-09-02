@@ -140,7 +140,8 @@ See [exit-codes.md](exit-codes.md) for the full `athenaeum run` exit-code table 
 | Batch API mode | `--batch-mode` / `--no-batch-mode` | `ATHENAEUM_BATCH_MODE` | `librarian.batch_mode` | off | Submit tier-2/tier-3 LLM calls via the [Anthropic Messages Batch API](https://platform.claude.com/docs/en/build-with-claude/batch-processing) at a 50% token discount (athenaeum#236). Latency-tolerant: most batches finish within an hour, 24h worst case — intended for the nightly run. Same-page tier-3 merges stay synchronous; the budget cap is enforced at batch-assembly time (re-checked per file at phase-2 assembly and before the synchronous merges). `--no-batch-mode` forces the synchronous path even when env/yaml turn batch mode on. |
 | Per-knob batch selection | — | — | `librarian.batch.<knob>` | falls back to `librarian.batch_mode` | Batch `classify` and `write` INDEPENDENTLY (athenaeum#1175). Only those two knobs are ever batched. `write` is nearly all the spend and is where the 50% discount pays; `classify` is cheap and is the knob whose latency stays visible, so `batch: {classify: false, write: true}` is the combination worth having — it was unreachable while one global flag governed both. An absent knob key falls back to the resolved `batch_mode`, so a config setting only `batch_mode` is unchanged. Setting a knob here turns the run into a batch run even with `batch_mode` off; `--no-batch-mode` remains a hard off that no yaml key can defeat. Setting a NON-batchable knob to `true` refuses the run — a config error, not a silent no-op. Deliberately under `librarian:`, not a new `llm.batch` parent. |
 | Pending-batch raw-file lease | — | `ATHENAEUM_BATCH_LEASE_SECONDS` | `librarian.batch_lease_seconds` | `259200` (72h) | Seconds a submitted-but-uncollected batch holds a **lease** over the raw intake files it was built from (athenaeum#1143). `discover_raw_files` has no in-flight concept and raw files are only unlinked on finalize success, so without the lease a run that submits a batch and exits leaves its intake on disk for the next run to rediscover and **resubmit at full price** — silently, looking exactly like normal progress. The handle (batch id, knob, `custom_id -> raw ref` map with a per-ref content hash) lives at `<cache_dir>/pending_batches.json`; the entity-phase claim loop skips a leased ref until its lease expires, and an expired lease is released automatically on the next claim pass so an abandoned batch cannot strand its intake forever. 72h is below the Batch API's 29-day result retention (prefer collecting over re-claiming) and above its 24h processing ceiling (do not abandon a slow batch mid-flight). `bool` / non-numeric values fall through to the default; `<= 0` disables leasing entirely. |
-| Cluster threshold | — | — | `librarian.cluster_threshold` | `0.55` | Cosine cutoff for auto-memory near-duplicate clustering (C2, athenaeum#196). Higher = tighter clusters. |
+| Cluster threshold | — | — | `librarian.cluster_threshold` | `0.55` | Cosine cutoff for auto-memory near-duplicate clustering (C2, athenaeum#196). Higher = tighter clusters. **Any cluster figure is meaningless without stating this value alongside it** — see "Wiki-page dedup: cluster figures require the threshold" below. |
+| Wiki-dedupe min body chars | — | — | `librarian.wiki_dedupe_min_body_chars` | `0` (**off**) | Eligibility floor for the wiki-dedupe pass (athenaeum#1252): a candidate page whose stripped body is shorter than this many characters is excluded from `discover_wiki_dedupe_candidates` entirely — never embedded, never clustered. Rationale: athenaeum#1140's chunk-and-mean-pool fix only dilutes a structurally uniform lede's weight in a page's pooled vector when there is a second chunk to average against it; a page short enough to fit in one chunk gets a mean-pool-of-one, a mathematical no-op versus the pre-athenaeum#1140 whole-page embed. DEFAULT OFF: whether short pages are actually driving a given corpus's over-clustering was not re-measured against a live embedder when this knob shipped (see the section below) — a non-zero default would silently change cluster/merge-proposal eligibility for every operator without that re-measurement. `bool` and non-int / `<= 0` yaml values fall through to off. See `resolve_wiki_dedupe_min_body_chars`. |
 | Cluster output | — | — | `librarian.cluster_output` | `raw/_librarian-clusters.jsonl` | Canonical cluster JSONL path, resolved relative to the knowledge root. Each run also writes a timestamped sibling. |
 | Rotation retention | — | `ATHENAEUM_ROTATION_RETENTION` | `librarian.rotation_retention` | `30` | Number of timestamped cluster-report rotations to keep; older ones are pruned after each run (athenaeum#311). Rotations are debugging artifacts, not recovery-critical (recovery is git-based). `0` (or negative) disables pruning (keep all). A prune failure is a non-fatal warning. |
 | Ephemeral scopes | — | — | `librarian.ephemeral_scopes` | `[]` | Glob patterns (matched against the auto-memory scope) whose raw intake is classified ephemeral and dropped before clustering (athenaeum#280), so operational/throwaway scopes never materialize a durable `wiki/auto-*.md` page. Default-empty (off). |
@@ -2070,6 +2071,56 @@ default `1024`; `ATHENAEUM_COMPARATOR_CONTENT_RELATION_THINKING`, default
 `disabled`). Gate 2 itself reuses the shared `classify` MODEL knob
 (`ATHENAEUM_CLASSIFY_MODEL`) rather than adding a fourth model dial — the
 same sharing `athenaeum.contradictions`'s detector already does.
+
+## Wiki-page dedup: cluster figures require the threshold (athenaeum#1252)
+
+**Any reported cluster count, cluster size, or "% of corpus clustered"
+figure for the wiki-dedupe pass is meaningless unless it is stated
+alongside the `librarian.cluster_threshold` value it was measured at.**
+This is not a hypothetical caution — it already happened once. During
+athenaeum#1252's residual-over-clustering investigation, a first
+re-measurement pass ran at threshold `0.85` (not the operator's actual
+configured value) and reported a 7-page maximum cluster — which would have
+read as "the over-clustering problem is resolved," the **opposite** of the
+conclusion the correctly-thresholded re-measurement supported (a 99-page
+largest cluster, 88% of eligible pages clustered, at the live threshold
+`0.55`).
+
+**Always resolve the live threshold before quoting, comparing, or
+re-measuring any cluster figure** — never assume `0.55` (the shipped
+*default*, `DEFAULT_CLUSTER_THRESHOLD` in `src/athenaeum/clusters.py`) is
+what a given deployment actually runs with:
+
+```console
+$ python -c "
+from pathlib import Path
+from athenaeum.clusters import resolve_cluster_threshold
+print(resolve_cluster_threshold(Path.home() / 'knowledge'))
+"
+```
+
+or, for a full threshold-aware cluster snapshot in one step, use the
+shadow-mode measurement command (see "Reproducing the measurement pack" in
+`docs/memory-model-measurements.md`):
+
+```console
+$ athenaeum measure shadow-linkage
+```
+
+Both read `librarian.cluster_threshold` from the SAME resolver
+(`athenaeum.clusters.resolve_cluster_threshold` — env has no override for
+this knob, yaml only, see the "Cluster threshold" row above) that
+`athenaeum.wiki_dedupe.propose_wiki_page_merges` and
+`athenaeum.merge`'s cluster pass both use in production. Two cluster
+figures are comparable ONLY when both name the threshold they were
+measured at AND that threshold is identical — a before/after comparison
+across a code change (e.g. athenaeum#1140's chunk-and-mean-pool fix) is
+only valid run against the SAME live-resolved threshold on both sides.
+
+See also `librarian.wiki_dedupe_min_body_chars` (below the cluster-tuning
+table above) — an athenaeum#1252 eligibility knob, default off, that
+excludes pages too short for the chunk-and-mean-pool fix to meaningfully
+dilute a structurally uniform lede.
 
 ## Name-collision detection and auto-merge (athenaeum#1170)
 
