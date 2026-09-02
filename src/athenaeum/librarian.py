@@ -3498,6 +3498,104 @@ def _apply_pending_batch_leases(ctx: "RunContext") -> None:
     ctx.raw_files = kept
 
 
+def _hold_out_unworkable_raw(ctx: "RunContext") -> tuple[int, int]:
+    """Drop ledger-stuck / in-backoff raw files BEFORE the window is filled (athenaeum#1322).
+
+    athenaeum#663 skips a stuck file INSIDE the per-file loop, and
+    athenaeum#1185 does the same for a file that has failed at least once and
+    is still inside its exponential backoff window. Both skips happen AFTER
+    the ``max_files`` window has already been filled, so an unworkable file
+    still CONSUMES a slot -- free of LLM cost, but not free of scheduling
+    cost.
+
+    Measured on the reference deployment 2026-09-02: 50 permanently-stuck
+    files (48 ``mural-board-summary`` + 2 ``claude-session``) filled the
+    entire 50-slot window on every run for six hours -- ``files=0 calls=0
+    stuck=50 reason=completed`` -- while 4,181 healthy ``relationship-stub``
+    records behind them never received a single slot.
+
+    Holding them out HERE keeps every athenaeum#663 / athenaeum#1185
+    guarantee (the file stays on disk, the ledger still keys on content hash,
+    a content edit still resets the count, the skip is still surfaced LOUDLY
+    on ``ctx.stuck_files`` / ``ctx.backoff_skipped_files``) while making the
+    window a window of *workable* files. The per-file guards stay exactly
+    where they are as a no-op safety net, so a file that crosses either
+    threshold mid-run is still caught.
+
+    Only files NAMED in the ledger are content-hashed, so this costs at most
+    ``len(ledger)`` reads -- never a hash of the whole backlog.
+
+    Returns ``(n_stuck, n_backoff)``. A dry run holds nothing out, mirroring
+    the ``not ctx.dry_run`` condition on both per-file guards.
+    """
+    if ctx.dry_run:
+        return (0, 0)
+    ledger = _load_stuck_ledger(ctx.wiki_root)
+    if not ledger:
+        return (0, 0)
+    threshold = librarian_stuck_file_threshold(ctx.config)
+    backoff_base = librarian_stuck_file_backoff_base_seconds(ctx.config)
+    now = ctx.now if ctx.now is not None else datetime.now(timezone.utc)
+    kept: list[RawFile] = []
+    n_stuck = 0
+    n_backoff = 0
+    for raw in ctx.raw_files:
+        entry = ledger.get(raw.ref)
+        if entry is None:
+            kept.append(raw)
+            continue
+        if entry.get("hash") != _stuck_content_hash(raw):
+            # Content changed since it last failed -- athenaeum#663's
+            # hash-keyed reset. Workable again.
+            kept.append(raw)
+            continue
+        failures = int(entry.get("failures", 0))
+        if failures >= threshold:
+            ctx.stuck_files.append(
+                {
+                    "ref": raw.ref,
+                    "failures": failures,
+                    "action": entry.get("last_action"),
+                    "error": entry.get("last_error"),
+                }
+            )
+            log.warning(
+                "%s: holding %s out of this run's intake window — failed %d "
+                "consecutive run(s) on action %s (%s); stuck, needs a human "
+                "(issues athenaeum#663, athenaeum#1322)",
+                STUCK_FILE_PREFIX,
+                raw.ref,
+                failures,
+                entry.get("last_action") or "unknown",
+                entry.get("last_error") or "unknown",
+            )
+            n_stuck += 1
+            continue
+        if failures > 0 and _stuck_backoff_window_open(
+            entry, base_seconds=backoff_base, now=now
+        ):
+            ctx.backoff_skipped_files.append(raw.ref)
+            log.info(
+                "librarian-stuck-file-backoff: holding %s out of this run's "
+                "intake window — %d consecutive failure(s), still within its "
+                "backoff window (issues athenaeum#1185, athenaeum#1322)",
+                raw.ref,
+                failures,
+            )
+            n_backoff += 1
+            continue
+        kept.append(raw)
+    if n_stuck or n_backoff:
+        log.info(
+            "Intake window: held %d stuck + %d in-backoff raw file(s) out of "
+            "selection so they cannot consume slots (issue athenaeum#1322)",
+            n_stuck,
+            n_backoff,
+        )
+    ctx.raw_files = kept
+    return (n_stuck, n_backoff)
+
+
 def _clear_stale_deferred_manifest(wiki_root: Path) -> None:
     """Remove a stale deferred-work manifest left by a budget-tripped run.
 
@@ -6017,6 +6115,16 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
     # full-page-echo fallback (a ~10x output-cost degrade) visible in the run
     # summary without a by-hand token-ratio calculation next time.
     _entity_phase_output_before = ctx.usage.output_tokens
+    # Issue athenaeum#1322: window COMPOSITION counters, bound BEFORE the
+    # `cluster_only` split (mirroring athenaeum#1295's `pending_by_source`
+    # rationale) so the phase-profile epilogue -- which runs unconditionally --
+    # can render "how this run's window was filled" on every path.
+    total_intake = 0
+    n_scoped = 0
+    n_pinned = 0
+    n_round_robin = 0
+    n_stuck_held = 0
+    n_backoff_held = 0
     if not ctx.cluster_only:
         # Issue athenaeum#1145: collect BEFORE claiming. A prior run's batch is
         # already paid for; applying it first books its cost into ``usage``
@@ -6028,6 +6136,16 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         # Issue athenaeum#1143: a raw file held by an in-flight batch's lease is
         # NOT claimable — re-claiming it would re-submit work already paid for.
         _apply_pending_batch_leases(ctx)
+        # Issue athenaeum#1322: a stuck (athenaeum#663) or in-backoff
+        # (athenaeum#1185) file is skipped inside the per-file loop below --
+        # i.e. AFTER it has already won a `max_files` slot. Hold those files
+        # out of the candidate set HERE so an unworkable file cannot consume
+        # a slot a workable one needed. See `_hold_out_unworkable_raw`.
+        # `considered` is the count BEFORE the hold-out, so a run whose whole
+        # candidate set was unworkable reads `considered=N window=0
+        # held_stuck=N` rather than a bare, unexplained `considered=0`.
+        total_intake = len(ctx.raw_files)
+        n_stuck_held, n_backoff_held = _hold_out_unworkable_raw(ctx)
         # Issue athenaeum#1295: bound here (empty), OUTSIDE the `if
         # ctx.raw_files` / `else` split below, so the stalled-sources
         # computation further down — which runs UNCONDITIONALLY alongside
@@ -6052,8 +6170,8 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                 _sweep_pending_batch_leases()
             log.info("No raw files to process. Nothing to do.")
         else:
-            total_intake = len(ctx.raw_files)
-            log.info("Found %d raw file(s) to process", total_intake)
+            n_candidates = len(ctx.raw_files)
+            log.info("Found %d raw file(s) to process", n_candidates)
 
             # Issue athenaeum#900: seed the selection with the caller's own new
             # files BEFORE the max_files truncation below, so a session-scoped
@@ -6068,18 +6186,18 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     "Caller-scoped compile: %d of %d raw file(s) named by the "
                     "caller compile ahead of the backlog",
                     n_scoped,
-                    total_intake,
+                    n_candidates,
                 )
 
             # Issue athenaeum#1291: per-source pending counts, snapshotted
             # BEFORE the window is filled, so "had pending intake and got zero
             # slots" is answerable below against the full discovered set.
             pending_by_source = Counter(raw.source for raw in ctx.raw_files)
-            if total_intake > ctx.max_files:
+            if n_candidates > ctx.max_files:
                 log.info(
                     "Budget cap: processing %d of %d files this run",
                     ctx.max_files,
-                    total_intake,
+                    n_candidates,
                 )
                 # Issue athenaeum#1291: fill the window ROUND-ROBIN across
                 # sources instead of head-truncating a list that discovery
@@ -6113,17 +6231,48 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                 # `combined_starvation_priority`'s docstring). Read from the
                 # athenaeum#1102 ledger the entity phase already writes
                 # (fail-open to `[]`), so no new state file.
-                pinned = ctx.raw_files[: min(n_scoped, ctx.max_files)]
+                # Issue athenaeum#1322: the caller-scoped prefix is pinned,
+                # but it is NOT exempt from fair scheduling WITHIN itself.
+                # Head-truncating it (`raw_files[:max_files]`) re-instated the
+                # exact pre-athenaeum#1291 behaviour whenever a caller named
+                # more files than the window: `discover_raw_files` groups by
+                # source name, so the head-50 was one alphabetically-early
+                # source and every later source starved indefinitely -- the
+                # very failure athenaeum#1291 fixed, reachable through a
+                # different door. `compile_changed` (athenaeum#900) derives
+                # the caller scope from a raw-tree hash snapshot, and a file
+                # that has never been compiled stays "new" forever, so on a
+                # backlogged corpus "the caller's own new files" grows to mean
+                # ESSENTIALLY THE WHOLE BACKLOG. Observed 2026-09-02:
+                # "Caller-scoped compile: 5969 of 5970 raw file(s)", window
+                # filled entirely from the two alphabetically-earliest
+                # sources, 4,181 `relationship-stub` records never scheduled.
+                #
+                # Round-robining the pinned partition costs athenaeum#900
+                # nothing in the case it was written for: a genuine
+                # session-scoped compile names FEWER files than the window,
+                # and `round_robin_by_source` short-circuits on
+                # `len(files) <= limit` by returning its input verbatim. The
+                # change bites only in the degenerate case, where the pin has
+                # stopped meaning "this session's writes" anyway.
+                _priority = read_combined_starvation_priority()
+                pinned = round_robin_by_source(
+                    ctx.raw_files[:n_scoped],
+                    min(n_scoped, ctx.max_files),
+                    priority_sources=_priority,
+                )
                 ctx.raw_files = pinned + round_robin_by_source(
                     ctx.raw_files[n_scoped:],
                     ctx.max_files - len(pinned),
-                    priority_sources=read_combined_starvation_priority(),
+                    priority_sources=_priority,
                 )
+                n_pinned = len(pinned)
+                n_round_robin = len(ctx.raw_files) - n_pinned
             # Files discovery found but the max_files window excluded from
             # this run entirely. Counted into the deferred manifest on a
             # budget trip so the manifest reports the TRUE backlog, not just
             # the in-window remainder.
-            ctx.beyond_window = total_intake - len(ctx.raw_files)
+            ctx.beyond_window = n_candidates - len(ctx.raw_files)
             # Issue athenaeum#1291 AC3: a source that HAD pending intake and
             # got zero slots this run. Recorded per run (and carried into the
             # durable athenaeum#1102 ledger via the entity profile segment
@@ -7006,6 +7155,20 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             _entity_exit_reason = manifest_reason
         elif _entity_attempted > 0 and _entity_calls == 0:
             _entity_exit_reason = f"all-calls-failed:{ctx.entity_last_failure_class or 'unknown'}"
+        elif (
+            ctx.processed_count == 0
+            and _entity_attempted == 0
+            and (ctx.stuck_files or ctx.backoff_skipped_files)
+        ):
+            # Issue athenaeum#1322: a pass that filled its window, skipped
+            # every slot as stuck/in-backoff, and attempted nothing is NOT
+            # "completed" -- that label made a six-hour zero-throughput stall
+            # read as a healthy run in the durable ledger. Deliberately NOT in
+            # `_LIBRARIAN_EARLY_STOP_REASONS`: this is not a RESOURCE stop, so
+            # it must not flip the athenaeum#1135 zero-progress refusal's exit
+            # code. It is a naming fix, and the `held_stuck=`/`stuck=` fields
+            # beside it carry the magnitude.
+            _entity_exit_reason = "all-slots-skipped"
         else:
             _entity_exit_reason = "completed"
         # Issue athenaeum#1135: mirror onto ``ctx`` (not just the local var / the
@@ -7054,6 +7217,42 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     "matched": ctx.total_matched,
                     "reason": _entity_exit_reason,
                     "out_tok_per_call": _entity_out_tok_per_call,
+                    # Issue athenaeum#1322: WINDOW COMPOSITION. `files=N` says
+                    # how many raw files this pass drained; it never said how
+                    # many it CONSIDERED, or how the window it drew from was
+                    # filled. Without that, "capped", "deferred", "skipped"
+                    # and "broken" are indistinguishable from the durable
+                    # ledger -- which is exactly how a six-hour zero-throughput
+                    # stall read as `files=0 ... reason=completed` on the
+                    # reference deployment while a healthy 4,181-record source
+                    # was never scheduled. Rendered unconditionally (unlike the
+                    # `stuck=N`-style fields below), because "the window was
+                    # not truncated" is itself the answer to "why did this pass
+                    # stop" on a clean run.
+                    "considered": total_intake,
+                    "window": len(ctx.raw_files),
+                    # How the window was filled: `pinned` is the athenaeum#900
+                    # caller-scoped share, `rr` the athenaeum#1291 round-robin
+                    # remainder. `caller_scoped` is the pre-truncation size of
+                    # the caller's own claim -- when it dwarfs `window`, the
+                    # caller has effectively named the whole backlog and the
+                    # pin is no longer scoping anything (athenaeum#1322).
+                    **({"caller_scoped": n_scoped} if n_scoped else {}),
+                    **({"pinned": n_pinned} if n_pinned else {}),
+                    **({"rr": n_round_robin} if n_round_robin else {}),
+                    # athenaeum#1322: unworkable files held OUT of selection
+                    # (rather than skipped after winning a slot). A SUBSET of
+                    # `stuck=N`/`backoff=N` below, never an addition to them --
+                    # those count every such file this run touched by EITHER
+                    # route, so an operator summing the two would double-count.
+                    # Post-fix the pairs are normally equal; they diverge only
+                    # when a file crosses a threshold mid-run.
+                    **({"held_stuck": n_stuck_held} if n_stuck_held else {}),
+                    **(
+                        {"held_backoff": n_backoff_held}
+                        if n_backoff_held
+                        else {}
+                    ),
                     # athenaeum#1291 AC3: sources with pending intake that got
                     # zero slots in this run's window, as one comma-joined
                     # token (the `reconciled` convention below). Rendered only
