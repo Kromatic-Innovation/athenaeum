@@ -2009,7 +2009,11 @@ def run_shape_rule_phase(
                     ),
                     existing_disposition_keys,
                 )
-            else:
+            elif not dry_run:
+                # Counted only on a real run. A dry run writes NO disposition
+                # row of any kind (athenaeum#975's own behaviour, unchanged),
+                # so attributing its silence to athenaeum#1274's suppression
+                # would misreport why the ledger is empty.
                 summary["no_match_rows_suppressed"] = (
                     summary.get("no_match_rows_suppressed", 0) + 1
                 )
