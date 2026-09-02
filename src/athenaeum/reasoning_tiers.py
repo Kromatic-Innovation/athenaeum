@@ -117,9 +117,12 @@ This is a SCHEMA-SHAPE-AND-PARSE-DIRECTION change only. Every structural
 guarantee this module already carried is unchanged and unweakened by the
 retrofit: :data:`ReasoningTierVerdict`'s two-member ``Literal`` (T1) and
 :func:`run_t2_tier`'s :func:`safe_class_violation` gate (T2) remain the
-enforcement points — see ``tests/test_reasoning_tiers.py`` /
-``tests/test_t2_reasoning_tier.py`` for the adversarial/directional/
-single-enforcement-point/negative-control tests this retrofit added.
+enforcement points — see ``tests/test_reasoning_tiers_m17_retrofit.py`` for
+the M17-retrofit-specific adversarial/directional/single-enforcement-point/
+negative-control tests (this is the load-bearing pointer: that is where the
+proof lives). The pre-existing, unmodified adversarial coverage this
+retrofit builds on top of is still in ``tests/test_reasoning_tiers.py`` /
+``tests/test_t2_reasoning_tier.py``.
 """
 
 from __future__ import annotations
