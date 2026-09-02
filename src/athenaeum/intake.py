@@ -730,13 +730,16 @@ def round_robin_by_source(
     ``raw/mural-board-summary/`` frozen across at least 8 consecutive runs
     while ``auto-memory`` alone exceeded the whole per-run budget.
 
-    Round-robin bounds the worst-case wait: every source with pending intake
-    reaches the head of its own queue within ``ceil(n_sources * k / limit)``
-    runs, regardless of any other source's backlog or of its own name's sort
-    position. That is the athenaeum#1291 AC1 guarantee, and it is the smallest
-    change to the existing shape (the alternatives the issue lists --
-    a per-source floor, or oldest-first across sources -- bound the wait
-    equally but reshape more of the path).
+    Round-robin bounds the worst-case wait. While ``limit`` is at least the
+    number of sources, every source gets at least one slot EVERY run. Below
+    that, *priority_sources* (see the turn-order bullet) rotates the head so
+    each source is scheduled within ``ceil(n_sources / limit)`` runs. Either
+    way the wait is bounded by the source COUNT alone -- never by any other
+    source's backlog, and never by its own name's sort position. That is the
+    athenaeum#1291 AC1 guarantee, and it is the smallest change to the
+    existing shape (the alternatives the issue lists -- a per-source floor,
+    or oldest-first across sources -- bound the wait equally but reshape more
+    of the path).
 
     Contract:
 
