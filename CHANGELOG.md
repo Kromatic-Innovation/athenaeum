@@ -45,6 +45,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing oversized ledger is not pruned retroactively, and the log's
   placement under `wiki/` is unchanged — both remain open on athenaeum#1274.
 
+- **Intake scheduling no longer starves a source indefinitely
+  (athenaeum#1291).** `discover_raw_files` returns its result grouped by
+  source directory in `sorted()` order, and the librarian's run loop filled
+  its `max_files` window by head-truncating that list. Because the list was
+  ordered by source NAME and cut from the HEAD, the window could only ever
+  advance past a source once that source's own backlog fell below the cap —
+  so a large, alphabetically-early, continuously-refilled source starved
+  every lexicographically later source forever. On the deployment that
+  surfaced it, ~2,200 records sat frozen in `raw/mural-board-summary/` across
+  at least 8 consecutive runs while `raw/auto-memory/` (79 files) alone
+  exceeded the entire 50-file per-run budget. The window is now filled
+  ROUND-ROBIN across sources (`athenaeum.intake.round_robin_by_source`),
+  with the turn order rotated each run by how long each source has been
+  waiting (`read_starvation_priority`, longest-starved first) so the bound
+  also holds when `max_files` is narrower than the source count. Worst-case
+  wait is now `ceil(n_sources / max_files)` runs regardless of sort position
+  or any other source's backlog; within-source ordering is preserved, the
+  athenaeum#900 caller-scoped prefix stays pinned at the head, and the per-run
+  budget semantics (`max_files`, `max_api_calls`, `max_runtime`) are unchanged —
+  this decides *which* files fill the window, never how many. Starvation is
+  also now observable rather than inferred: the entity phase records its
+  zero-slot sources on its run-summary segment (`starved=`), and
+  `emit_run_summary` computes a consecutive-run streak from the durable
+  athenaeum#1102 run-summary ledger (no new state file), naming any source
+  at or over `STARVATION_STREAK_THRESHOLD` runs in the summary head
+  (`starved_sources=<name>:<runs>`) and on a greppable
+  `librarian-source-starvation` WARNING. The previous `beyond_window` count
+  read as ordinary backpressure while describing a permanent stall.
 - **`storage lint-pii` no longer scans machine-generated audit logs under
   `wiki/` (athenaeum#1273).** `_shape_rule_dispositions.jsonl` — a 341+ MB,
   ~1.49M-record log the shape-rule engine regenerates every nightly run —

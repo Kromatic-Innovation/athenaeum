@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -661,3 +662,205 @@ def read_run_summary_ledger(
                 continue
         records.append(record)
     return records
+
+
+# ---------------------------------------------------------------------------
+# Source-starvation streaks (issue athenaeum#1291 AC3)
+# ---------------------------------------------------------------------------
+#
+# The scheduler change (``athenaeum.intake.round_robin_by_source``) bounds the
+# worst-case wait, but a bound is not a report: an operator still cannot see
+# that a specific source is going hungry, and the pre-athenaeum#1291 signal --
+# ``beyond_window`` ("plus N more beyond the max_files window", rendered by
+# ``librarian._write_deferred_manifest``) -- is a COUNT. It reads as ordinary
+# backpressure while potentially describing a permanent stall, because it never
+# says WHICH files, so it can never say that the SAME ones are excluded every
+# run.
+#
+# This computes the missing streak from the ledger athenaeum#1102 already
+# writes, rather than adding a second piece of persisted state. The entity
+# phase records its zero-slot sources for the run as the ``starved`` field on
+# its profile segment; ``build_run_summary_ledger_record`` copies every phase
+# field into the durable JSONL verbatim, so the field is already durable; and
+# the streak is then just "how many consecutive trailing records also name it".
+
+#: Entity-phase profile field naming this run's zero-slot sources, as one
+#: comma-joined token (the same convention the ``reconciled`` field uses).
+STARVATION_FIELD = "starved"
+
+#: K in "K consecutive runs with pending intake and zero slots" -- the streak
+#: at which a source is named in the run summary's head segment and a WARNING
+#: fires. Three is the smallest streak that is unambiguously not a one-off
+#: (one run is ordinary windowing; two could be two coincidentally busy runs).
+STARVATION_STREAK_THRESHOLD = 3
+
+#: Stable, greppable WARNING prefix -- mirrors :data:`REGRESSION_ALERT_PREFIX`
+#: above, so an operator's existing nightly log sweep catches this without a
+#: new channel to watch.
+STARVATION_ALERT_PREFIX = "librarian-source-starvation"
+
+
+def starved_sources_in_record(record: dict[str, Any]) -> set[str] | None:
+    """This run's zero-slot sources from one ledger *record*.
+
+    Returns ``None`` for a record whose entity phase never ran (a merge-only
+    or cluster-only run, or an early deadline trip). That is deliberately
+    distinct from ``set()`` ("the entity phase ran and starved nobody"):
+    :func:`starvation_streaks` must not let a run that could not possibly
+    schedule anything break a streak.
+    """
+    phases = record.get("phases")
+    if not isinstance(phases, dict):
+        return None
+    entity = phases.get("entity")
+    if not isinstance(entity, dict):
+        return None
+    token = entity.get(STARVATION_FIELD)
+    if not isinstance(token, str):
+        # The field is omitted entirely on a run that starved nobody (the
+        # "render only when non-empty" convention every optional entity field
+        # in the profile follows), so absence means an empty set, not None.
+        return set()
+    return {part.strip() for part in token.split(",") if part.strip()}
+
+
+def starvation_streaks(
+    starved_now: "Iterable[str]", history: "list[dict[str, Any]]"
+) -> dict[str, int]:
+    """Consecutive-run starvation streak per source, INCLUDING this run.
+
+    *history* is the ledger's records oldest-first (exactly what
+    :func:`read_run_summary_ledger` returns), read BEFORE this run's own
+    record is appended -- so a source starved for the first time this run
+    scores ``1``, and one starved on the two prior runs as well scores ``3``.
+
+    Records with no entity phase are skipped rather than counted as a
+    non-starving run (see :func:`starved_sources_in_record`).
+    """
+    prior = [
+        starved
+        for starved in (starved_sources_in_record(rec) for rec in history)
+        if starved is not None
+    ]
+    streaks: dict[str, int] = {}
+    for source in starved_now:
+        streak = 1
+        for entry in reversed(prior):
+            if source not in entry:
+                break
+            streak += 1
+        streaks[source] = streak
+    return streaks
+
+
+def read_starvation_streaks(
+    starved_now: "Iterable[str]",
+    *,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> dict[str, int]:
+    """:func:`starvation_streaks` against the durable ledger. Best-effort.
+
+    Mirrors :func:`build_economics_and_alerts`' fail-open contract exactly: a
+    missing or corrupt ledger reads as "no history", and no failure here may
+    ever raise into the run it is only observing. An empty *starved_now*
+    short-circuits without touching the filesystem.
+    """
+    sources = list(starved_now)
+    if not sources:
+        return {}
+    try:
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        history = read_run_summary_ledger(target)
+    except Exception as exc:  # noqa: BLE001 — observability must never raise
+        log.debug("run-summary: starvation history read skipped: %s", exc)
+        history = []
+    return starvation_streaks(sources, history)
+
+
+
+def starvation_priority(history: "list[dict[str, Any]]") -> list[str]:
+    """The next run's scheduling priority head: LONGEST-STARVED SOURCE FIRST.
+
+    This is what makes :func:`athenaeum.intake.round_robin_by_source`'s turn
+    order rotate across runs (issue athenaeum#1291 AC1). Round-robin alone
+    bounds the wait only while ``max_files`` is at least the number of
+    sources; below that a FIXED turn order starves the same trailing sources
+    on every run forever -- sort-position starvation again, merely at a
+    different threshold.
+
+    Rotation has to AGE, not just alternate. Feeding back the previous run's
+    zero-slot sources in name order is not enough: a source can keep losing
+    its turn to sources that were only starved once, and still wait
+    unboundedly (verified -- 5 sources, a window of 2, and the last source is
+    never scheduled). Ordering the head by DESCENDING consecutive-starvation
+    streak makes the wait strictly monotone: a source's rank rises every run
+    it is skipped, so it reaches the head within ``ceil(n_sources /
+    max_files)`` runs. Ties break by name, so the result is deterministic.
+
+    *history* is the ledger's records oldest-first
+    (:func:`read_run_summary_ledger`). Returns ``[]`` when the most recent
+    entity run starved nobody, or when there is no entity run to read --
+    both mean "no rotation needed", i.e. plain discovery-order turns.
+    """
+    index = None
+    for i in range(len(history) - 1, -1, -1):
+        if starved_sources_in_record(history[i]) is not None:
+            index = i
+            break
+    if index is None:
+        return []
+    previous = starved_sources_in_record(history[index]) or set()
+    if not previous:
+        return []
+    # Streaks as of THAT run, so `history[:index]` — the run itself supplies
+    # the +1 `starvation_streaks` always adds for "this run".
+    streaks = starvation_streaks(previous, history[:index])
+    return sorted(previous, key=lambda source: (-streaks[source], source))
+
+
+def previous_starved_sources(history: "list[dict[str, Any]]") -> list[str]:
+    """The most recent entity run's zero-slot sources, sorted by name.
+
+    Records with no entity phase (merge-only / cluster-only runs, early
+    deadline trips) are skipped rather than read as "nobody was starved" --
+    they scheduled nothing, so they are no evidence either way, the same
+    distinction :func:`starved_sources_in_record` draws for the streak
+    counter. :func:`starvation_priority` is the scheduling-order form of
+    this; use that one to drive the scheduler.
+    """
+    for record in reversed(history):
+        starved = starved_sources_in_record(record)
+        if starved is not None:
+            return sorted(starved)
+    return []
+
+
+def read_starvation_priority(
+    *,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> list[str]:
+    """:func:`starvation_priority` against the durable ledger. Best-effort.
+
+    Reuses the athenaeum#1102 run-summary ledger the entity phase already
+    writes, so the fair-scheduling rotation introduces no second piece of
+    persisted state. Fail-open like every other read in this module: a
+    missing or corrupt ledger reads as "no history" (``[]``, i.e. plain
+    discovery-order turns), and nothing here may raise into the run it is
+    only observing.
+    """
+    try:
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        return starvation_priority(read_run_summary_ledger(target))
+    except Exception as exc:  # noqa: BLE001 — observability must never raise
+        log.debug("run-summary: starvation priority read skipped: %s", exc)
+        return []

@@ -84,6 +84,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -152,6 +153,7 @@ from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE
     attribute_person_observation,
     discover_auto_memory_files,
     discover_raw_files,
+    round_robin_by_source,
     tier0_passthrough,
 )
 from athenaeum.intake_audit import (
@@ -213,7 +215,12 @@ from athenaeum.rules import run_shape_rule_phase
 from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home now
     REGRESSION_ALERT_PREFIX,
     RUN_SUMMARY_PREFIX,
+    STARVATION_ALERT_PREFIX,
+    STARVATION_FIELD,
+    STARVATION_STREAK_THRESHOLD,
     build_economics_and_alerts,
+    read_starvation_priority,
+    read_starvation_streaks,
     write_run_summary_record,
 )
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
@@ -3621,6 +3628,7 @@ def _render_run_summary(
     schema_fragments: "dict[str, tuple[str, bool]] | None" = None,
     prompt_manifest_hash: "str | None" = None,
     zero_yield_consecutive: "int | None" = None,
+    starved_streaks: "dict[str, int] | None" = None,
 ) -> str:
     """Render the accumulated per-phase *profile* into ONE greppable line.
 
@@ -3669,6 +3677,17 @@ def _render_run_summary(
     before finalize runs never evaluate the predicate, so it stays omitted
     there — same "omit on ``None``" contract as the two attribution fields
     above).
+
+    ``starved_streaks`` (issue athenaeum#1291 AC3) maps each source that got
+    ZERO slots in this run's ``max_files`` window to how many consecutive runs
+    that has now been true for, including this one. Only sources at or over
+    :data:`~athenaeum.run_summary_log.STARVATION_STREAK_THRESHOLD` are
+    rendered, as ``starved_sources=<name>:<runs>,...`` on the head segment:
+    one run with no slots is ordinary windowing, K in a row is a stall, and
+    naming it here is exactly what the pre-athenaeum#1291 ``beyond_window``
+    COUNT could not do. Omitted entirely when nothing meets the threshold, so
+    a healthy run's line is byte-unchanged. (This run's zero-slot sources,
+    streak or no streak, are on the entity segment's own ``starved=`` token.)
     """
     total_secs = sum(secs for _phase, secs, _fields in profile)
     head = f"{RUN_SUMMARY_PREFIX} total_secs={total_secs:.3f}"
@@ -3680,6 +3699,14 @@ def _render_run_summary(
         head += f" prompt_manifest={prompt_manifest_hash}"
     if zero_yield_consecutive is not None:
         head += f" zero_yield={zero_yield_consecutive}"
+    if starved_streaks:
+        flagged = [
+            f"{source}:{streak}"
+            for source, streak in sorted(starved_streaks.items())
+            if streak >= STARVATION_STREAK_THRESHOLD
+        ]
+        if flagged:
+            head += f" starved_sources={','.join(flagged)}"
     parts = [head]
     for phase, secs, fields in profile:
         tokens = " ".join(f"{k}={v}" for k, v in fields.items())
@@ -3987,6 +4014,15 @@ class RunContext:
     total_matched: int = 0
     total_files_acted: int = 0
 
+    # Issue athenaeum#1291 AC3: sources that had pending intake this run and
+    # received ZERO slots in the max_files window. Empty on every run where
+    # the whole discovered set fit (and on merge-only/cluster-only runs, whose
+    # entity phase never fills a window at all). Rendered into the entity
+    # profile segment, from which the durable athenaeum#1102 ledger carries it
+    # forward as the state `emit_run_summary` computes a consecutive-run
+    # streak over.
+    starved_sources: list[str] = field(default_factory=list)
+
     # Issue athenaeum#1182: page-size-invariant suppressions. UNLIKE
     # total_matched (documented as synchronous-only above), this counter
     # covers BOTH transports: the synchronous entity loop (summed the same
@@ -4068,6 +4104,10 @@ class RunContext:
             # run-summary line for the fan-out/acted-files counts.
             self.out_run_stats["matched"] = self.total_matched
             self.out_run_stats["files_acted"] = self.total_files_acted
+            # Issue athenaeum#1291 AC3: sources that got zero slots this run,
+            # machine-detectable alongside the other run-state lists above
+            # rather than only as a token in the run-summary line.
+            self.out_run_stats["starved_sources"] = list(self.starved_sources)
 
     def emit_run_summary(self) -> None:
         if self.summary_emitted:
@@ -4092,6 +4132,17 @@ class RunContext:
         except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
             log.debug("run-summary: prompt_manifest_hash skipped: %s", exc)
             manifest_hash = None
+        # Issue athenaeum#1291 AC3: how many CONSECUTIVE runs each of this
+        # run's zero-slot sources has been starved, computed against the
+        # durable athenaeum#1102 ledger BEFORE this run's own record is
+        # appended below (so the run is never counted against itself — the
+        # same ordering `build_economics_and_alerts` relies on). Wrapped like
+        # the two blocks above: pure observability, never affects an outcome.
+        starved_streaks: dict[str, int] = {}
+        try:
+            starved_streaks = read_starvation_streaks(self.starved_sources)
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: starvation streaks skipped: %s", exc)
         log.info(
             "%s",
             _render_run_summary(
@@ -4099,8 +4150,25 @@ class RunContext:
                 schema_fragments=frag_state,
                 prompt_manifest_hash=manifest_hash,
                 zero_yield_consecutive=self.zero_yield_consecutive,
+                starved_streaks=starved_streaks,
             ),
         )
+        # Surfaced on the SAME log.warning channel the zero-yield / stuck-file
+        # / economics-regression alarms already use, for the same reason: an
+        # operator's existing nightly log sweep catches it with no new channel
+        # to watch. This is the signal `beyond_window`'s bare count could not
+        # give — it names the source AND says the exclusion is not transient.
+        for source, streak in sorted(starved_streaks.items()):
+            if streak >= STARVATION_STREAK_THRESHOLD:
+                log.warning(
+                    "%s source=%s consecutive_runs=%d (threshold %d) — pending "
+                    "intake received zero slots in the max_files window on "
+                    "every one of those runs; issue athenaeum#1291",
+                    STARVATION_ALERT_PREFIX,
+                    source,
+                    streak,
+                    STARVATION_STREAK_THRESHOLD,
+                )
         # Issue athenaeum#1184: cost/matches-per-file regression economics,
         # computed from this run's counters and ratcheted against the
         # ledger's own trailing history BEFORE this run's record is
@@ -5755,18 +5823,71 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     total_intake,
                 )
 
+            # Issue athenaeum#1291: per-source pending counts, snapshotted
+            # BEFORE the window is filled, so "had pending intake and got zero
+            # slots" is answerable below against the full discovered set.
+            pending_by_source = Counter(raw.source for raw in ctx.raw_files)
             if total_intake > ctx.max_files:
                 log.info(
                     "Budget cap: processing %d of %d files this run",
                     ctx.max_files,
                     total_intake,
                 )
-                ctx.raw_files = ctx.raw_files[: ctx.max_files]
+                # Issue athenaeum#1291: fill the window ROUND-ROBIN across
+                # sources instead of head-truncating a list that discovery
+                # grouped by source name. Head-truncation could only advance
+                # past a source once that source's own backlog fell below the
+                # cap, so a large, alphabetically-early, continuously-refilled
+                # source starved every later source indefinitely.
+                #
+                # The athenaeum#900 caller-scoped prefix is NOT subject to the
+                # round-robin: those files are pinned at the head by contract
+                # (a session-scoped compile must compile what that session just
+                # wrote), so fair scheduling applies to the REMAINING budget
+                # only. `n_scoped` is clamped to the window because a caller
+                # naming more files than `max_files` still gets exactly
+                # `max_files` of them — the pre-athenaeum#1291 head-truncation
+                # behaviour for that case, unchanged.
+                #
+                # Round-robin alone bounds the wait only while the window is
+                # at least as wide as the number of sources; below that, a
+                # FIXED turn order starves the same trailing sources every
+                # run — sort-position starvation again, at a different
+                # threshold. So the turn order ROTATES, aged by how long each
+                # source has been waiting: `read_starvation_priority` returns
+                # the previous run's zero-slot sources longest-streak-first,
+                # which makes a skipped source's rank rise every run and
+                # bounds the worst-case wait at ceil(n_sources/max_files)
+                # runs. Read from the athenaeum#1102 ledger the entity phase
+                # already writes (fail-open to `[]`), so no new state file.
+                pinned = ctx.raw_files[: min(n_scoped, ctx.max_files)]
+                ctx.raw_files = pinned + round_robin_by_source(
+                    ctx.raw_files[n_scoped:],
+                    ctx.max_files - len(pinned),
+                    priority_sources=read_starvation_priority(),
+                )
             # Files discovery found but the max_files window excluded from
             # this run entirely. Counted into the deferred manifest on a
             # budget trip so the manifest reports the TRUE backlog, not just
             # the in-window remainder.
             ctx.beyond_window = total_intake - len(ctx.raw_files)
+            # Issue athenaeum#1291 AC3: a source that HAD pending intake and
+            # got zero slots this run. Recorded per run (and carried into the
+            # durable athenaeum#1102 ledger via the entity profile segment
+            # below) so `emit_run_summary` can turn it into a consecutive-run
+            # streak — the thing `beyond_window`'s bare count could never say.
+            selected_by_source = Counter(raw.source for raw in ctx.raw_files)
+            ctx.starved_sources = sorted(
+                source
+                for source in pending_by_source
+                if not selected_by_source.get(source)
+            )
+            if ctx.starved_sources:
+                log.info(
+                    "Intake window: %d source(s) received zero slots this run: %s",
+                    len(ctx.starved_sources),
+                    ", ".join(ctx.starved_sources),
+                )
 
             valid_types, valid_tags, valid_access = _resolve_schema_lists(
                 ctx.wiki_root
@@ -6637,6 +6758,20 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     "matched": ctx.total_matched,
                     "reason": _entity_exit_reason,
                     "out_tok_per_call": _entity_out_tok_per_call,
+                    # athenaeum#1291 AC3: sources with pending intake that got
+                    # zero slots in this run's window, as one comma-joined
+                    # token (the `reconciled` convention below). Rendered only
+                    # when non-empty, so a run that starved nobody has an
+                    # unchanged summary line — and, because the durable
+                    # athenaeum#1102 ledger copies every phase field through,
+                    # this IS the persisted state the consecutive-run streak
+                    # in `emit_run_summary` is computed from. No second state
+                    # file.
+                    **(
+                        {STARVATION_FIELD: ",".join(ctx.starved_sources)}
+                        if ctx.starved_sources
+                        else {}
+                    ),
                     # athenaeum#1144 AC5: files whose batch is still running, left for
                     # a later run to collect. Rendered only when non-zero so a
                     # clean run's summary line is unchanged, matching the
