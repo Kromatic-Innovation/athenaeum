@@ -1304,6 +1304,87 @@ observation log, not whether today's response is accepted. No new
 documented constant (`STRICT_CONTRACTS`), matching how `INSTRUMENTED_CONTRACTS`
 above is expressed.
 
+## Pending-decisions queue (`athenaeum decisions`, athenaeum#401 / athenaeum#912 / athenaeum#1290)
+
+`athenaeum decisions {list,next,count}` is the ONE "human decisions needed"
+list — see [`src/athenaeum/decisions.py`](../src/athenaeum/decisions.py) and
+the `list_pending_decisions` MCP tool. It unifies several item types, each
+tagged `type`, oldest-first: `question` (contradiction-detector escalations
+and plain agent-raised flags), `merge` (resolver merge proposals),
+`retraction`, `audit`, `quarantine`, `proposed-rule`, and — as of issue
+athenaeum#1290 — `confirmation`.
+
+### The `confirmation` decision type — consumer contract (athenaeum#1290)
+
+This is the seam cwc#2362's `good-morning` half is built against — a
+**stable contract**, not an incidental dump. An agent that narrows scope
+mid-build (implements X without covering Y) can raise a durable,
+non-blocking "confirm?" flag that survives the session, through either
+surface:
+
+- **MCP**: `raise_decision(question="", context="", kind="confirmation",
+  raiser=..., repo=..., issue_ref=..., narrowed_scope=...,
+  implemented_behavior=..., alternative=...)`. `question`/`context` are
+  optional for this `kind` — omitted, they are auto-phrased from the other
+  fields.
+- **CLI**: `athenaeum decisions raise-confirmation --raiser ... --repo ...
+  --issue-ref ... --narrowed-scope ... --implemented-behavior ...
+  --alternative ... [--question ...] [--context ...] [--json]`.
+
+Both call the SAME underlying function
+(`athenaeum.answers.raise_pending_question`, `kind="confirmation"`) and write
+to the SAME file the plain-question queue already uses
+(`wiki/_pending_questions.md`) — a confirmation is a question-queue block
+carrying extra metadata lines, never a second, parallel queue.
+
+**Where it shows up.** `list_pending_decisions` (MCP) and `athenaeum
+decisions {list,next,count}` (CLI) include it exactly like every other item:
+
+- `list` / `next`: an item with `"type": "confirmation"` and the payload
+  shape below. Ordering is the queue-wide rule — oldest `created_at` first,
+  interleaved with every other type, never a separate section.
+- `count`: the JSON payload's `confirmations` field is the pending
+  (unresolved) count, alongside the existing `questions` / `merges` /
+  `retractions` / `audits` fields. The plain-text rendering appends
+  `", N confirmations"` to the breakdown when `N > 0` (omitted at zero, like
+  `retractions`/`audits`).
+
+**Item shape** (`type: "confirmation"`):
+
+| Field | Type | What it carries |
+|---|---|---|
+| `type` | string | Always the literal `"confirmation"`. |
+| `id` | string | Opaque, stable id — pass to `resolve_question` (see below) to close it. |
+| `created_at` | string (`YYYY-MM-DD`) | Date-only, from the block header — used for queue ordering. |
+| `summary` | string | A plainly-phrased confirm question built from the fields below (e.g. `"<raiser> narrowed scope on <repo>#<issue_ref>: implemented \"<implemented_behavior>\" instead of \"<alternative>\" (scope narrowed: <narrowed_scope>) — confirm?"`) — render this directly, no client-side phrasing needed. |
+| `confidence` | `null` | Always `null` — there is no similarity score behind a confirmation, mirroring `retraction`/`audit`/`quarantine`. |
+| `payload.raiser` | string | Who/what narrowed scope (an agent name, a lane id, ...). |
+| `payload.repo` | string | The `owner/repo` the narrowing happened in. |
+| `payload.issue_ref` | string | The issue or PR the narrowing relates to. |
+| `payload.narrowed_scope` | string | What was NOT covered. |
+| `payload.implemented_behavior` | string | What was built instead. |
+| `payload.alternative` | string | The road not taken. |
+| `payload.raised_at` | string (ISO-8601 `Z`) | Full timestamp (finer-grained than `created_at`) — this is the AC's "a timestamp" field. |
+| `payload.question` / `payload.context` | string | The (possibly auto-phrased) checkbox question and standalone description text — present for completeness; a consumer should prefer `summary` for display. |
+| `payload.raised_by` | string | Always `"agent"` for a confirmation (there is no detector-raised confirmation). |
+
+**Resolution states.** A confirmation has exactly two states: **pending**
+(present in `list_pending_decisions` / `decisions list`) and **resolved**
+(absent from both — never a third "acknowledged" or "snoozed" state). Close
+one with the EXISTING `resolve_question` MCP tool — `resolve_question(id,
+answer)` — passing the `id` from the item above; there is no separate
+`resolve_confirmation` tool, because storage-wise a confirmation is a block
+in `_pending_questions.md` like any other and `resolve_question` operates on
+the raw block, never on the unified view's `type` tag. Resolution is
+DEFERRED (issue athenaeum#908): `resolve_question` records the answer
+immediately (`deferred: true` in its response) but the queue only reflects
+the closure after the next `athenaeum ingest-answers` tick applies it — a
+consumer polling `decisions count`/`list` right after calling
+`resolve_question` may still see the item until that tick runs. `answer`
+becomes the recorded outcome (free text — e.g. `"confirmed"` /
+`"overridden: use the broader reading"`); there is no fixed outcome
+vocabulary, unlike a merge's `approve`/`reject`.
+
 ## Contradiction detection and resolver
 
 Detection knobs live under the `contradiction:` yaml block; resolver behavior
