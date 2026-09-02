@@ -43,6 +43,7 @@ from athenaeum.librarian import (
     _run_intake_audit_phase,
     _run_memory_tier_sweep_phase,
     _run_preconditions,
+    _run_raw_retention_phase,
     _run_rule_proposal_phase,
     _run_wiki_dedup_phase,
     librarian_batch_knob,
@@ -889,6 +890,98 @@ class TestRunIntakeAuditPhase:
         assert ctx.intake_audit_summary is not None
         assert ctx.intake_audit_summary["unclaimed_files"] == 0
         assert not (ctx.wiki_root / "_pending_questions.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# _run_raw_retention_phase (issue athenaeum#1269 -- configurable per-file and
+# per-source-tree raw-intake size ceilings; detect and report only)
+# ---------------------------------------------------------------------------
+
+
+class TestRunRawRetentionPhase:
+    def test_no_thresholds_configured_reports_zero_summary(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = _make_ctx(tmp_path)
+        (ctx.raw_root / "mural").mkdir(parents=True)
+        (ctx.raw_root / "mural" / "big.json").write_bytes(b"x" * 5000)
+
+        _run_raw_retention_phase(ctx)
+
+        assert ctx.raw_retention_summary == {
+            "raw-oversize-file": 0,
+            "raw-oversize-source": 0,
+            "oversize_files": [],
+            "oversize_sources": [],
+        }
+
+    def test_per_source_aggregate_flagged_from_many_small_files(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = _make_ctx(tmp_path)
+        ctx.config = {
+            "librarian": {"raw_retention": {"max_source_bytes": 20_000}}
+        }
+        for i in range(30):
+            (ctx.raw_root / "mural").mkdir(parents=True, exist_ok=True)
+            (ctx.raw_root / "mural" / f"r{i}.json").write_bytes(b"x" * 1000)
+
+        _run_raw_retention_phase(ctx)
+
+        assert ctx.raw_retention_summary is not None
+        assert ctx.raw_retention_summary["raw-oversize-file"] == 0
+        assert ctx.raw_retention_summary["raw-oversize-source"] == 1
+        assert ctx.raw_retention_summary["oversize_sources"] == [
+            {"source": "mural", "bytes": 30_000}
+        ]
+
+    def test_per_file_oversize_flagged_and_named(self, tmp_path: Path) -> None:
+        ctx = _make_ctx(tmp_path)
+        ctx.config = {"librarian": {"raw_retention": {"max_file_bytes": 1000}}}
+        (ctx.raw_root / "sessions").mkdir(parents=True)
+        (ctx.raw_root / "sessions" / "huge.md").write_bytes(b"x" * 5000)
+
+        _run_raw_retention_phase(ctx)
+
+        assert ctx.raw_retention_summary is not None
+        assert ctx.raw_retention_summary["raw-oversize-file"] == 1
+        assert ctx.raw_retention_summary["oversize_files"] == [
+            {"path": "sessions/huge.md", "bytes": 5000}
+        ]
+
+    def test_no_raw_root_reports_zero_and_does_not_raise(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = _make_ctx(tmp_path)
+        ctx.config = {"librarian": {"raw_retention": {"max_file_bytes": 1}}}
+        # ctx.raw_root deliberately never created.
+
+        _run_raw_retention_phase(ctx)
+
+        assert ctx.raw_retention_summary is not None
+        assert ctx.raw_retention_summary["raw-oversize-file"] == 0
+
+    def test_never_moves_or_removes_the_oversize_file(self, tmp_path: Path) -> None:
+        ctx = _make_ctx(tmp_path)
+        ctx.config = {
+            "librarian": {
+                "raw_retention": {"max_file_bytes": 100, "max_source_bytes": 100}
+            }
+        }
+        fpath = ctx.raw_root / "mural" / "big.json"
+        fpath.parent.mkdir(parents=True)
+        fpath.write_bytes(b"x" * 5000)
+
+        _run_raw_retention_phase(ctx)
+
+        assert ctx.raw_retention_summary is not None
+        assert ctx.raw_retention_summary["raw-oversize-file"] == 1
+        assert ctx.raw_retention_summary["raw-oversize-source"] == 1
+        # Detect-and-report only: the file is untouched, nothing moved it,
+        # and no compiled-exempt row was written as a side effect.
+        assert fpath.exists()
+        assert fpath.stat().st_size == 5000
+        assert not (ctx.knowledge_root / "_compiled_exempt.jsonl").exists()
 
 
 # ---------------------------------------------------------------------------

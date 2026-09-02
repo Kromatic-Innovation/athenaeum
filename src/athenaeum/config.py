@@ -1414,6 +1414,87 @@ def resolve_reasoning_trigger_nightly_backstop_hours(
     return default
 
 
+# ---------------------------------------------------------------------------
+# Raw-intake retention limits (issue athenaeum#1269): configurable per-file and
+# per-source-tree aggregate size ceilings on `raw/<source>/`. The knowledge
+# root is a git repository -- its value is being small, diffable and
+# reviewable -- and neither ceiling is a shape-rule match key (`shape-
+# rules.md` §3 only matches `source`/`format`/`filename_glob`/
+# `key_fingerprint`/`fields`/`unclaimed`). Both resolvers below are
+# DEFAULT-NONE, no seed in ``_DEFAULTS`` (issue athenaeum#231): a fresh install
+# imposes no limit at all, and an operator opts in to either or both
+# independently. Crossing a threshold this arms is DETECTED AND REPORTED
+# ONLY by :func:`athenaeum.intake.check_raw_retention` -- it never blocks
+# intake, moves a file, or writes an exempt row.
+# ---------------------------------------------------------------------------
+
+
+def resolve_raw_retention_max_file_bytes(config: dict[str, Any] | None) -> int | None:
+    """Resolve the per-file raw-intake size ceiling in bytes (issue athenaeum#1269)
+    from ``librarian.raw_retention.max_file_bytes``.
+
+    A single file anywhere under `raw/<source>/` at or above this many bytes
+    is reported as an oversize file (`raw-oversize-file`, see
+    :func:`athenaeum.intake.check_raw_retention`) — the file is never
+    blocked, moved, or exempted, only named in the run summary. ``None``
+    (the default — key unset) DISABLES this check entirely, matching a
+    fresh install imposing no limit (issue athenaeum#231).
+
+    Precedence: ``ATHENAEUM_RAW_RETENTION_MAX_FILE_BYTES`` env >
+    ``librarian.raw_retention.max_file_bytes`` yaml > disabled. A malformed
+    env value WARNs and falls through (see :func:`_env_number`); ``bool``
+    (an ``int`` subclass) and non-int / non-positive values — env OR yaml —
+    fall through to disabled, same as an unset key.
+    """
+    value = _env_number("ATHENAEUM_RAW_RETENTION_MAX_FILE_BYTES", int)
+    if value is not None:
+        return value if value > 0 else None
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            retention_cfg = cfg.get("raw_retention")
+            if isinstance(retention_cfg, dict):
+                raw = retention_cfg.get("max_file_bytes")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                    return raw
+    return None
+
+
+def resolve_raw_retention_max_source_bytes(config: dict[str, Any] | None) -> int | None:
+    """Resolve the per-source aggregate raw-intake size ceiling in bytes
+    (issue athenaeum#1269) from ``librarian.raw_retention.max_source_bytes``.
+
+    The SUM of every file's on-disk size anywhere under one
+    `raw/<source>/` tree, at or above this many bytes, is reported as an
+    oversize source (`raw-oversize-source`, see
+    :func:`athenaeum.intake.check_raw_retention`) — nothing is blocked,
+    moved, or exempted. This is the dimension a per-file-only limit cannot
+    substitute for: it is what catches many individually-small files
+    aggregating past a ceiling (the corpus that motivated this issue was
+    943 MB across 2,247 files, ~420 KB average — a per-file threshold sized
+    for git hygiene would not have fired on a single one of them; see
+    `athenaeum-adapters#151`). ``None`` (the default — key unset) DISABLES
+    this check entirely (issue athenaeum#231).
+
+    Precedence: ``ATHENAEUM_RAW_RETENTION_MAX_SOURCE_BYTES`` env >
+    ``librarian.raw_retention.max_source_bytes`` yaml > disabled. Same
+    malformed-env / bool-rejection / non-positive-falls-through-to-disabled
+    contract as :func:`resolve_raw_retention_max_file_bytes`.
+    """
+    value = _env_number("ATHENAEUM_RAW_RETENTION_MAX_SOURCE_BYTES", int)
+    if value is not None:
+        return value if value > 0 else None
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            retention_cfg = cfg.get("raw_retention")
+            if isinstance(retention_cfg, dict):
+                raw = retention_cfg.get("max_source_bytes")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                    return raw
+    return None
+
+
 def resolve_drain_warn_days(config: dict[str, Any] | None) -> int:
     """Resolve the backlog-drain ETA warning threshold in days (issue athenaeum#470,
     default 3) from ``librarian.drain_warn_days``.
