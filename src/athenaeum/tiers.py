@@ -5407,7 +5407,7 @@ def reresolve_open_questions(
         return 0
 
     from athenaeum.answers import parse_pending_questions
-    from athenaeum.contradictions import ContradictionResult
+    from athenaeum.models import ContradictionResult
     from athenaeum.resolutions import (
         CORRECT_A_ACTION,
         CORRECT_B_ACTION,
