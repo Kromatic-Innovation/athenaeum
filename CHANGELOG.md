@@ -173,6 +173,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The `split` and `log_demote` oversize-page dispositions are implemented
+  (athenaeum#1248).** athenaeum#1182 shipped the page-size gate with only
+  `review` (escalate, leave the page unmodified) live; `split`/`log_demote`
+  were recognized `librarian.oversize_page_action` values that raised
+  `NotImplementedError` at dispatch. Both now run for real, in
+  `check_page_size_gate` (`src/athenaeum/tiers.py`), and `review` stays the
+  shipped default — neither new route ever runs unattended.
+  `split` decomposes an over-threshold page into one atomic child page per
+  top-level markdown section, leaving the original in place as a **hub**:
+  same `uid`/`name`/frontmatter, so every existing index key and
+  cross-reference into it keeps resolving, with a shrunk body linking to
+  each child. Content before the first heading has no heading to name a
+  child page after, so it stays on the hub verbatim — nothing is dropped.
+  A page with no markdown heading at all cannot be split (athenaeum#1282 is
+  the no-heading cohort's own follow-up) and falls back to `review`.
+  `log_demote` reuses `athenaeum.rules.preserve_raw_file` — the SAME move
+  the `preserve` shape-rule disposition already uses — to relocate the page
+  whole into `librarian.preserved_log_dir`, rather than building a second,
+  parallel demotion mechanism; with no `preserved_log_dir` configured it
+  falls back to `review`.
+  **Atomicity:** every write either completes or the page is left
+  byte-identical to before the call. `split` writes every child page first
+  and the hub last, and rolls back (deletes) any child already written if a
+  later write fails, so a mid-operation failure never leaves a partially
+  split page; `log_demote`'s underlying move never removes the source until
+  the destination write is confirmed. Either route degrading to `review` on
+  a failure (missing config, no heading, or a genuine `OSError`) is logged,
+  never a raised exception that could take a run down over one oversized
+  page.
+  Run-summary counters `oversize_split`/`oversize_log_demoted` are new and
+  disjoint from the existing `oversize_suppressed` (that one counts
+  `review` only), so a run makes clear which disposition actually fired for
+  each oversize page. Documented in `docs/configuration.md` alongside the
+  other `librarian.*` knobs. Unblocks athenaeum#1214 (the operator
+  disposition sweep), whose per-page dispositions are only executable once
+  all three actions exist.
 - **`type: person` wiki pages are demoted from general wiki entities to a
   new consult-only person registry (athenaeum#1183).** A CRM-imported contact
   record is not a wiki entity — treating it as one let a person page be

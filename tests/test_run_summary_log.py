@@ -10,6 +10,8 @@ import pytest
 
 from athenaeum.librarian import RUN_SUMMARY_PREFIX
 from athenaeum.run_summary_log import (
+    EMBED_CHROMADB_FIELD,
+    EMBED_FALLBACK_FIELD,
     REFUSAL_FIELD,
     REGRESSION_ALERT_RATIO,
     REGRESSION_MIN_SAMPLES,
@@ -18,11 +20,13 @@ from athenaeum.run_summary_log import (
     build_run_summary_ledger_record,
     compute_run_economics,
     default_run_summary_ledger_path,
+    embedder_counts_in_record,
     entity_phase_wall_clock_per_file,
     evaluate_regression_alerts,
     parse_run_summary_line,
     parse_run_summary_log,
     parse_run_summary_text,
+    read_latest_embedder_counts,
     read_refusal_streak,
     read_run_summary_ledger,
     refusal_in_record,
@@ -794,3 +798,187 @@ class TestDefaultRunSummaryLedgerPath:
         monkeypatch.setenv("HOME", str(tmp_path))
         path = default_run_summary_ledger_path(cache_dir=Path("~"))
         assert path == tmp_path / "run_summary.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# Embedder provenance (issue athenaeum#1279)
+# ---------------------------------------------------------------------------
+
+_EMBEDDER_PROFILE: "list[tuple[str, float, dict]]" = [
+    (
+        "auto-memory",
+        7.8,
+        {
+            "detector_haiku": 4,
+            "resolver_opus": 1,
+            EMBED_CHROMADB_FIELD: 96,
+            EMBED_FALLBACK_FIELD: 4,
+            "reason": "completed",
+        },
+    ),
+]
+
+_NO_CLUSTERING_PROFILE: "list[tuple[str, float, dict]]" = [
+    ("entity", 4.2, {"calls": 6, "created": 2, "reason": "completed"}),
+]
+
+_PRE_1279_AUTO_MEMORY_PROFILE: "list[tuple[str, float, dict]]" = [
+    (
+        "auto-memory",
+        7.8,
+        {"detector_haiku": 4, "resolver_opus": 1, "reason": "completed"},
+    ),
+]
+
+
+class TestEmbedderCountsInRecord:
+    def test_reads_both_fields_from_the_auto_memory_phase(self) -> None:
+        record = build_run_summary_ledger_record(_EMBEDDER_PROFILE)
+        assert embedder_counts_in_record(record) == {
+            EMBED_CHROMADB_FIELD: 96,
+            EMBED_FALLBACK_FIELD: 4,
+        }
+
+    def test_none_when_auto_memory_phase_never_ran(self) -> None:
+        # The phase this issue's fields live on didn't run this run at all
+        # (e.g. an empty raw-intake corpus) -- "cannot speak", not a false
+        # zero. Mirrors refusal_in_record's three-state discipline.
+        record = build_run_summary_ledger_record(_NO_CLUSTERING_PROFILE)
+        assert embedder_counts_in_record(record) is None
+
+    def test_none_for_a_pre_athenaeum_1279_record(self) -> None:
+        # An auto-memory phase segment that ran under the OLD code (before
+        # this issue added the two fields) must not be misread as a
+        # confirmed-zero-fallback run.
+        record = build_run_summary_ledger_record(_PRE_1279_AUTO_MEMORY_PROFILE)
+        assert embedder_counts_in_record(record) is None
+
+    def test_none_for_non_dict_phases(self) -> None:
+        assert embedder_counts_in_record({"v": 3}) is None
+        assert embedder_counts_in_record({"v": 3, "phases": "not-a-dict"}) is None
+
+    def test_none_for_non_dict_auto_memory_segment(self) -> None:
+        assert (
+            embedder_counts_in_record({"v": 3, "phases": {"auto-memory": "bad"}})
+            is None
+        )
+
+    def test_none_for_unparseable_counts(self) -> None:
+        record = {
+            "v": 3,
+            "phases": {
+                "auto-memory": {
+                    EMBED_CHROMADB_FIELD: "not-a-number",
+                    EMBED_FALLBACK_FIELD: 4,
+                }
+            },
+        }
+        assert embedder_counts_in_record(record) is None
+
+    def test_zero_fallback_is_a_real_confirmed_zero(self) -> None:
+        # Distinguish "confirmed clean" from "cannot speak" -- an ALL-chromadb
+        # run must read as a real, present {0} count, not None.
+        profile: "list[tuple[str, float, dict]]" = [
+            (
+                "auto-memory",
+                1.0,
+                {EMBED_CHROMADB_FIELD: 12, EMBED_FALLBACK_FIELD: 0},
+            )
+        ]
+        record = build_run_summary_ledger_record(profile)
+        assert embedder_counts_in_record(record) == {
+            EMBED_CHROMADB_FIELD: 12,
+            EMBED_FALLBACK_FIELD: 0,
+        }
+
+
+class TestReadLatestEmbedderCounts:
+    def test_reads_the_newest_record_and_computes_fallback_ratio(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = tmp_path / "run_summary.jsonl"
+        # Oldest first: a healthy run, then the incident this issue's
+        # motivation describes (chromadb service collapsed).
+        write_run_summary_record(
+            [
+                (
+                    "auto-memory",
+                    1.0,
+                    {EMBED_CHROMADB_FIELD: 104, EMBED_FALLBACK_FIELD: 2},
+                )
+            ],
+            ledger_path=ledger,
+            ts=datetime(2026, 8, 23, tzinfo=timezone.utc),
+        )
+        write_run_summary_record(
+            [
+                (
+                    "auto-memory",
+                    1.0,
+                    {EMBED_CHROMADB_FIELD: 0, EMBED_FALLBACK_FIELD: 71},
+                )
+            ],
+            ledger_path=ledger,
+            ts=datetime(2026, 8, 25, tzinfo=timezone.utc),
+        )
+        result = read_latest_embedder_counts(ledger_path=ledger)
+        assert result is not None
+        assert result[EMBED_CHROMADB_FIELD] == 0
+        assert result[EMBED_FALLBACK_FIELD] == 71
+        assert result["fallback_ratio"] == 1.0
+        assert result["as_of"] == "2026-08-25T00:00:00Z"
+
+    def test_skips_a_trailing_record_that_never_clustered_anything(
+        self, tmp_path: Path
+    ) -> None:
+        # The newest run's auto-memory phase never ran (empty corpus) --
+        # must not mask the last REAL count behind a false "no data".
+        ledger = tmp_path / "run_summary.jsonl"
+        write_run_summary_record(
+            [
+                (
+                    "auto-memory",
+                    1.0,
+                    {EMBED_CHROMADB_FIELD: 10, EMBED_FALLBACK_FIELD: 0},
+                )
+            ],
+            ledger_path=ledger,
+            ts=datetime(2026, 8, 30, tzinfo=timezone.utc),
+        )
+        write_run_summary_record(
+            _NO_CLUSTERING_PROFILE,
+            ledger_path=ledger,
+            ts=datetime(2026, 8, 31, tzinfo=timezone.utc),
+        )
+        result = read_latest_embedder_counts(ledger_path=ledger)
+        assert result is not None
+        assert result[EMBED_CHROMADB_FIELD] == 10
+        assert result["as_of"] == "2026-08-30T00:00:00Z"
+
+    def test_zero_plus_zero_ratio_is_none_not_a_zero_division(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = tmp_path / "run_summary.jsonl"
+        write_run_summary_record(
+            [
+                (
+                    "auto-memory",
+                    1.0,
+                    {EMBED_CHROMADB_FIELD: 0, EMBED_FALLBACK_FIELD: 0},
+                )
+            ],
+            ledger_path=ledger,
+        )
+        result = read_latest_embedder_counts(ledger_path=ledger)
+        assert result is not None
+        assert result["fallback_ratio"] is None
+
+    def test_missing_ledger_degrades_to_none(self, tmp_path: Path) -> None:
+        assert read_latest_embedder_counts(ledger_path=tmp_path / "absent.jsonl") is None
+
+    def test_no_record_ever_recorded_counts_degrades_to_none(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = tmp_path / "run_summary.jsonl"
+        write_run_summary_record(_PRE_1279_AUTO_MEMORY_PROFILE, ledger_path=ledger)
+        assert read_latest_embedder_counts(ledger_path=ledger) is None

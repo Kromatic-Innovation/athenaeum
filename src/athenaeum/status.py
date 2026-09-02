@@ -69,7 +69,7 @@ from athenaeum.config import (
 )
 from athenaeum.intake import discover_raw_files
 from athenaeum.models import parse_frontmatter
-from athenaeum.run_summary_log import read_refusal_streak
+from athenaeum.run_summary_log import read_latest_embedder_counts, read_refusal_streak
 from athenaeum.tiers import schema_fragment_state
 from athenaeum.zero_yield import load_state as load_zero_yield_state
 
@@ -143,6 +143,29 @@ class StatusInfo(TypedDict):
     # never touched it) — the common case, and the ONLY case while the flag
     # is off, so status output is unaffected until an operator opts in.
     verdict_ledger_duty_cycle: dict[str, float] | None
+    # Issue athenaeum#1279: the most recent run's raw-intake (C2) cluster-pass
+    # embedder provenance — ``{"embed_chromadb": N, "embed_fallback": M,
+    # "fallback_ratio": R, "as_of": ts}`` (``R`` is ``None`` when
+    # ``N + M == 0``), or ``None`` when no run in the durable run-summary
+    # ledger has ever recorded it (ledger predates this issue, or the
+    # auto-memory phase has never run). This is the "legible to a lane"
+    # fix athenaeum#1005 needed and could not get: which embedder produced
+    # the vectors behind the CURRENT run's clusters, from a single read,
+    # without re-deriving it from log prose. See
+    # :func:`athenaeum.run_summary_log.read_latest_embedder_counts` for the
+    # full contract and the documented probe-facing surface.
+    embedder_provenance: dict[str, object] | None
+    # Issue athenaeum#1279: a standing tally of the embedder distribution
+    # recorded on ``raw/_librarian-clusters.jsonl``'s CURRENT rows (the
+    # canonical cluster report — see :mod:`athenaeum.clusters`'s module
+    # docstring), as ``{EMBEDDER_*: count}``, or ``None`` when the report
+    # doesn't exist yet (no cluster pass has ever run). Complementary to
+    # ``embedder_provenance`` above: this is a snapshot of the LAST written
+    # report's standing state (per cluster, coarser), that field is a
+    # per-run, per-FILE trend signal — together they answer both "what does
+    # the corpus currently show" and "is this run's chromadb service
+    # healthy".
+    cluster_embedder_snapshot: dict[str, int] | None
 
 
 def scan_page_sizes(
@@ -341,6 +364,44 @@ def status(knowledge_root: Path) -> StatusInfo:
             exc,
         )
 
+    # Issue athenaeum#1279: most recent run's raw-intake cluster-pass embedder
+    # provenance, read from the durable run-summary ledger. Read-only, same
+    # fail-open discipline as the refusal-streak read above (and the same
+    # reason: this module never writes the ledger,
+    # ``RunContext.emit_run_summary`` does).
+    embedder_provenance = read_latest_embedder_counts(cache_dir=resolve_cache_dir())
+
+    # Issue athenaeum#1279: standing embedder-distribution snapshot of the
+    # CURRENT cluster report. Function-local import (mirrors the
+    # drain-advisor/verdicts imports above): ``merge.py`` does not import
+    # ``status``/``librarian``/``drain`` (checked against
+    # tests/test_import_graph_acyclic.py), so this cannot reopen the cycle
+    # this module's docstring documents dissolving, but importing it lazily
+    # here — rather than promoting it to the top-level import block — keeps
+    # this new, narrowly-scoped dependency isolated the same way the other
+    # best-effort sections are. Best-effort: a read hiccup must never break
+    # status, same discipline as every other advisory section here.
+    cluster_embedder_snapshot: dict[str, int] | None = None
+    try:
+        from athenaeum.clusters import resolve_cluster_output_path
+        from athenaeum.merge import read_cluster_rows
+
+        cluster_report_path = resolve_cluster_output_path(knowledge_root, config)
+        if cluster_report_path.is_file():
+            rows = read_cluster_rows(cluster_report_path)
+            snapshot: dict[str, int] = {}
+            for row in rows:
+                embedder = row.get("embedder")
+                if isinstance(embedder, str) and embedder:
+                    snapshot[embedder] = snapshot.get(embedder, 0) + 1
+            cluster_embedder_snapshot = snapshot
+    except Exception as exc:  # noqa: BLE001 — must never break status
+        log.debug(
+            "status: cluster embedder snapshot skipped (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+
     return {
         "raw_pending": raw_pending,
         "entity_count": entity_count,
@@ -356,6 +417,8 @@ def status(knowledge_root: Path) -> StatusInfo:
         "librarian_refusal_consecutive": librarian_refusal_consecutive,
         "librarian_refusal_reason": librarian_refusal_reason,
         "verdict_ledger_duty_cycle": verdict_ledger_duty_cycle,
+        "embedder_provenance": embedder_provenance,
+        "cluster_embedder_snapshot": cluster_embedder_snapshot,
     }
 
 
@@ -420,6 +483,35 @@ def format_status(info: StatusInfo) -> str:
         lines.append("Verdict ledger duty cycle:")
         for branch in sorted(verdict_duty_cycle):
             lines.append(f"  {branch}: {verdict_duty_cycle[branch]:.0%}")
+
+    # Issue athenaeum#1279: latest run's raw-intake (C2) cluster-pass embedder
+    # provenance. Shown whenever a run has ever recorded it (not gated on
+    # "only when the ratio is alarming") — the whole point of this field is
+    # legibility, not just alarming: a lane or operator asking "was the
+    # hashing fallback active" must be able to read the answer even on a
+    # perfectly healthy run.
+    embedder_provenance = info.get("embedder_provenance")
+    if embedder_provenance:
+        chromadb_n = embedder_provenance.get("embed_chromadb", 0)
+        fallback_n = embedder_provenance.get("embed_fallback", 0)
+        ratio = embedder_provenance.get("fallback_ratio")
+        ratio_str = f"{ratio:.0%}" if isinstance(ratio, (int, float)) else "n/a"
+        lines.append(
+            "Embedder provenance (latest run, raw-intake C2 pass): "
+            f"chromadb={chromadb_n} fallback={fallback_n} "
+            f"(fallback_ratio={ratio_str})"
+        )
+
+    # Issue athenaeum#1279: standing snapshot of the current cluster report's
+    # embedder distribution. Shown whenever the report exists (even an
+    # empty/all-chromadb one), same "legible, not just alarm-gated" reasoning
+    # as the line above.
+    cluster_snapshot = info.get("cluster_embedder_snapshot")
+    if cluster_snapshot is not None:
+        snapshot_str = ", ".join(
+            f"{name}={count}" for name, count in sorted(cluster_snapshot.items())
+        ) or "(no clusters recorded)"
+        lines.append(f"Cluster report embedder distribution: {snapshot_str}")
 
     # Issue athenaeum#310: oversized-page summary. Use ``.get`` so pre-athenaeum#310 status
     # dicts (missing these keys) still format cleanly.
