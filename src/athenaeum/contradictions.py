@@ -54,6 +54,7 @@ from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
+    SURFACE_C4_CONTRADICTION,
     AutoMemoryFile,
     TokenUsage,
     cache_usage_counts,
@@ -526,6 +527,12 @@ def detect_contradictions(
 
     input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
     if usage is not None:
+        # Issue athenaeum#1289: this IS the C4 contradiction detector — one of
+        # the six declared non-batched surfaces (batch.py's module
+        # docstring) — always tag it, regardless of caller (the primary
+        # merge-phase loop is the only current caller; see
+        # ``merge._maybe_propose``'s sibling ``propose_resolution`` tag for
+        # the resolver half of this same declared surface).
         usage.add_tokens(
             input_toks,
             output_toks,
@@ -533,6 +540,7 @@ def detect_contradictions(
             cache_read,
             model=detect_model,
             knob="classify",
+            surface=SURFACE_C4_CONTRADICTION,
         )
     log.debug(
         "contradictions: detector usage input=%d output=%d"
