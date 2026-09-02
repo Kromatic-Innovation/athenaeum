@@ -13,6 +13,11 @@ Scope (narrow — see issue athenaeum#198):
 - Output: a :class:`ContradictionResult` naming whether a contradiction
   was detected, the two members involved, the conflicting passages, a
   short rationale, and a conflict type (``factual`` or ``prescriptive``).
+  Issue athenaeum#1253 (S0 of the athenaeum#715 phase-4 plan) moved the dataclass itself
+  down to :mod:`athenaeum.models` (the cross-cutting-shape hub) so
+  consumers outside this detector do not depend on this module surviving;
+  it is re-exported here (the ``ContradictionResult`` name imported above)
+  for back-compat. No behaviour change.
 - LLM: reuses the existing Anthropic client pattern from
   :mod:`athenaeum.tiers` (Haiku by default, overridable via
   ``ATHENAEUM_CLASSIFY_MODEL``). NO new env vars; NO new provider.
@@ -45,9 +50,8 @@ module reached UP into the L4 ``tiers`` hub for it, forming the
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, cast
 
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
@@ -55,6 +59,7 @@ from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
     AutoMemoryFile,
+    ContradictionResult,
     TokenUsage,
     cache_usage_counts,
     coerce_source_type,
@@ -88,33 +93,6 @@ DEFAULT_CONTRADICTION_MODEL = DEFAULT_CLASSIFY_MODEL
 # a paragraph of context) while keeping the total prompt well under 1 page
 # even for 10-member clusters.
 PER_MEMBER_BODY_CHARS = 800
-
-# Conflict taxonomy -- the categories the wiki/review queue consumers branch
-# on. ``factual`` vs ``prescriptive`` are the original two; ``stance`` (issue
-# athenaeum#327) routes an EVALUATIVE (opinion) pair to the resolver's opinion-
-# attribution short-circuit instead of a precedence winner. "Principled"
-# contradictions from Tier 3 stay in the tiers.py escalation path; this module
-# is auto-memory-specific.
-ConflictType = Literal["factual", "prescriptive", "stance"]
-
-
-@dataclass
-class ContradictionResult:
-    """Outcome of one cluster's contradiction check."""
-
-    detected: bool
-    conflict_type: ConflictType | None = None
-    members_involved: list[str] = field(default_factory=list)
-    conflicting_passages: list[str] = field(default_factory=list)
-    rationale: str = ""
-    # Issue athenaeum#569 (H6): True when this verdict is a fail-open degrade caused by
-    # the detector call giving up AFTER its transient-error retries (a 429/529/
-    # connection blip that outlived `with_retry`), NOT a genuine "no
-    # contradiction". merge.py marks such clusters detection-incomplete so the
-    # next run's delta set re-examines them regardless of file changes. Defaults
-    # False, so a normal not-detected / detected verdict never re-queues.
-    incomplete: bool = False
-
 
 # Contradiction-detect output budget (issue athenaeum#575): a short JSON verdict.
 # Formerly a bare ``1024`` literal; named and resolved through the seam.
