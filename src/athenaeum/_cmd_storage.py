@@ -17,7 +17,10 @@ Two sub-commands:
   athenaeum#502 deliberately excluded: rename a confidently-nameable page (derived
   display name from the local-part), move the address off-corpus, and rewrite
   inbound wikilinks — an ambiguous local-part is left unrenamed and reported
-  as a residual count instead.
+  as a residual count instead. Consults the same adjudicated
+  ``wiki/_pii-allowlist.yml`` ``lint-pii`` reads (issue athenaeum#1275): a value with
+  an entry there is never migrated, and a skip is always reported (dry-run and
+  ``--apply`` agree on the skip set).
 - ``lint-pii`` — a corpus-wide PII gate: scan EVERY file under ``wiki/`` (not
   only entity pages — ``_``-prefixed queue/index/archive files and ``.bak``
   files included) for an inline email/phone and exit non-zero on any finding,
@@ -53,6 +56,7 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
 from athenaeum.pii import (
     PII_ALLOWLIST_FILENAME,
+    PiiAllowlistEntry,
     adjudicate_corpus_pii,
     is_pii_class_excluded,
     load_pii_allowlist,
@@ -484,6 +488,58 @@ def _cmd_storage_migrate_pii(args: argparse.Namespace) -> int:
     return _cmd_storage_migrate_pii_single(args)
 
 
+def _load_migrate_pii_allowlist(wiki_root: Path) -> dict[str, str] | None:
+    """Load the adjudicated allowlist ``migrate-pii`` must never override (issue athenaeum#1275).
+
+    Reuses :func:`athenaeum.pii.load_pii_allowlist` — the exact reader
+    ``lint-pii`` already uses for the same conventional path — so the two
+    commands can never disagree about what "adjudicated" means (one policy,
+    one source of truth; no second, parallel allowlist parser).
+
+    A MISSING file is not an error: it means nothing has been adjudicated
+    yet, so migrating everything is correct — exactly today's pre-athenaeum#1275
+    behaviour, and :func:`~athenaeum.pii.load_pii_allowlist`'s own documented
+    contract. A file that EXISTS but fails to load cleanly (malformed YAML,
+    or any entry missing its value/reason) is different: silently treating
+    that as "zero entries" would redact values the operator already
+    adjudicated as not-PII — the exact bug this issue fixes, just relocated
+    into the allowlist reader instead of its absence. So that case fails
+    loud — printed and refused — rather than silently-empty (unsafe: skips
+    protection) or allow-everything (unsafe the other way: would tolerate a
+    broken allowlist file forever).
+
+    Returns ``{value: reason}`` on success (possibly empty), or ``None`` if
+    the caller must abort (the errors are already printed to stderr).
+    """
+    allowlist_path = wiki_root / PII_ALLOWLIST_FILENAME
+    entries, errors = load_pii_allowlist(allowlist_path)
+    if errors:
+        for err in errors:
+            print(f"error: allowlist unreadable -- {err}", file=sys.stderr)
+        print(
+            f"error: refusing to run migrate-pii: {allowlist_path} exists but "
+            "did not load cleanly (see above). Treating that as \"nothing "
+            "adjudicated\" would redact values the operator already ruled are "
+            "not PII -- fix the allowlist, then re-run.",
+            file=sys.stderr,
+        )
+        return None
+    return {e.value: e.reason for e in entries}
+
+
+def _print_skipped_allowlisted(skipped: tuple[PiiAllowlistEntry, ...]) -> None:
+    """Print the per-page allowlist-skip report (issue athenaeum#1275, AC2).
+
+    Never silent: printed unconditionally when *skipped* is non-empty, in
+    BOTH the dry-run preview and the ``--apply`` path (the same call site
+    covers both — see :func:`_cmd_storage_migrate_pii_single` — so the two
+    modes agree on the skip set by construction, AC4).
+    """
+    print(f"Skipped {len(skipped)} allowlisted value(s) on this page, with reasons:")
+    for entry in skipped:
+        print(f"  {entry.value!r}: {entry.reason}")
+
+
 def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
     knowledge_root = _resolve_knowledge_root(args)
     page_path: Path = args.page
@@ -492,6 +548,15 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
         return 1
 
     config = load_config(knowledge_root)
+    wiki_root = knowledge_root / "wiki"
+
+    # issue athenaeum#1275: consult the adjudicated allowlist BEFORE planning
+    # anything, so a value the operator has already ruled is not PII is never
+    # migrated. See _load_migrate_pii_allowlist for the missing-vs-malformed
+    # distinction.
+    allowlist = _load_migrate_pii_allowlist(wiki_root)
+    if allowlist is None:
+        return 1
 
     # Safety gate: the excluded surface is only actually off-corpus when the
     # operator has mapped the ``pii`` class to an excluded-policy adapter.
@@ -523,7 +588,6 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
     # path the rename is about to invalidate would be reading a stale target.
     renamed_this_run = False
     if getattr(args, "rename_name_email", False):
-        wiki_root = knowledge_root / "wiki"
         rename_report = _run_rename_slice(
             args, wiki_root, config, knowledge_root, [page_path]
         )
@@ -541,7 +605,10 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
             renamed_this_run = True
             page_path = wiki_root / f"{rename_report.renames[-1][1]}.md"
 
-    plan = plan_pii_migration(page_path, config, knowledge_root)
+    plan = plan_pii_migration(page_path, config, knowledge_root, allowlist=allowlist)
+
+    if plan.skipped_allowlisted:
+        _print_skipped_allowlisted(plan.skipped_allowlisted)
 
     if not plan.changed:
         print(f"no archival contact data (emails/phones) found in {page_path}; nothing to migrate.")
@@ -602,6 +669,12 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
     wiki_root = knowledge_root / "wiki"
     config = load_config(knowledge_root)
 
+    # issue athenaeum#1275: same allowlist consultation as the single-page path —
+    # see _load_migrate_pii_allowlist for the missing-vs-malformed distinction.
+    allowlist = _load_migrate_pii_allowlist(wiki_root)
+    if allowlist is None:
+        return 1
+
     # Same safety gate as the single-page path: refuse to --apply (which would
     # write contact records) unless the operator has actually mapped ``pii`` to
     # an excluded surface — writing there otherwise leaks the PII back into the
@@ -649,12 +722,15 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
     name_pii_excluded = 0
     conflicted = 0
     conflicted_pages: list[tuple[Path, tuple]] = []
+    skipped_allowlisted_pages: list[tuple[Path, tuple[PiiAllowlistEntry, ...]]] = []
     for i, page_path in enumerate(pages, start=1):
         try:
-            plan = plan_pii_migration(page_path, config, knowledge_root)
+            plan = plan_pii_migration(page_path, config, knowledge_root, allowlist=allowlist)
         except (OSError, UnicodeDecodeError) as exc:
             print(f"[migrate-pii] skip {page_path}: {exc}", file=sys.stderr)
             continue
+        if plan.skipped_allowlisted:
+            skipped_allowlisted_pages.append((page_path, plan.skipped_allowlisted))
         if plan.name_field_pii:
             name_pii_excluded += 1
         if plan.changed:
@@ -715,6 +791,19 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
         for page_path, conflicts in conflicted_pages:
             fields = ", ".join(c.field for c in conflicts)
             print(f"  {page_path.name}: conflicting field(s): {fields}")
+
+    if skipped_allowlisted_pages:
+        # issue athenaeum#1275, AC2: never a silent skip. Printed unconditionally in
+        # both dry-run and --apply (this call site covers both), so the two
+        # modes agree on the skip set by construction (AC4).
+        total_skipped_allowlisted = sum(len(e) for _, e in skipped_allowlisted_pages)
+        print(
+            f"Skipped {total_skipped_allowlisted} allowlisted value(s) on "
+            f"{len(skipped_allowlisted_pages)} page(s), with reasons -- not migrated:"
+        )
+        for page_path, skip_entries in skipped_allowlisted_pages:
+            reasons = "; ".join(f"{e.value!r}: {e.reason}" for e in skip_entries)
+            print(f"  {page_path.name}: {reasons}")
 
     rename_report: NameEmailRenameReport | None = None
     if getattr(args, "rename_name_email", False):
