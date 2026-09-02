@@ -22,8 +22,10 @@ ultimate authority; the resolver is advisory.
 
 Scope (deliberate):
 
-- Input: a :class:`athenaeum.contradictions.ContradictionResult` carrying
-  the detector's verdict plus the same member list the detector saw.
+- Input: a :class:`athenaeum.models.ContradictionResult` (moved from
+  :mod:`athenaeum.contradictions` in issue athenaeum#1253; still re-exported
+  there for back-compat) carrying the detector's verdict plus the same
+  member list the detector saw.
 - Output: a :class:`ResolutionProposal` mirroring
   ``ContradictionResult``'s shape — small, JSON-serializable, no
   references to filesystem paths.
@@ -74,12 +76,12 @@ from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import _env_number
 from athenaeum.config import resolve_model as _resolve_model_knob
-from athenaeum.contradictions import ContradictionResult
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     OPINION_CLAIM_KIND,
     SURFACE_C4_CONTRADICTION,
     AutoMemoryFile,
+    ContradictionResult,
     TokenUsage,
     _coerce_iso_date,
     cache_usage_counts,
