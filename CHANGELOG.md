@@ -202,6 +202,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum storage prune-dispositions`: one-time prune of
+  `_shape_rule_dispositions.jsonl` to its positive-disposition records
+  (athenaeum#1274 AC3/AC4).** athenaeum#1293/athenaeum#1229 already stopped the ledger
+  growing without bound going forward (suppress-at-write + retention); this
+  closes the other half — collapsing an ALREADY-oversized pre-fix ledger
+  (341 MB / 1,488,689 rows on the deployment that motivated the issue, 99.8%
+  `no-match`) down to just its positives, as one auditable command instead of
+  a hand-rolled `jq` pipeline. Dry-run by default (reports the disposition
+  histogram, positive-record count, and projected post-prune size);
+  `--apply` writes atomically. Drops ONLY the literal `disposition:
+  "no-match"` value — `preserve`, `observed-preserve`, and any other or
+  unrecognised disposition (including a malformed/truncated line) are kept,
+  default-deny on deletion. Refuses to write if an independent re-parse of
+  the constructed output ever disagrees with the scan pass's positive-row
+  count, and (on `--apply`) acquires the single-machine run lock (issue
+  athenaeum#309) so it can never race the nightly's own concurrent appends to
+  this file. See `docs/configuration.md`'s shape-rules section.
 - **The `split` and `log_demote` oversize-page dispositions are implemented
   (athenaeum#1248).** athenaeum#1182 shipped the page-size gate with only
   `review` (escalate, leave the page unmodified) live; `split`/`log_demote`
