@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **M17 phase 2 — the per-contract strictness decision for the remaining four
+  LLM contracts (athenaeum#608).** athenaeum#570 shipped observe-only schema
+  validation specifically so the reject-vs-degrade question could be decided
+  from measurement rather than intuition, and athenaeum#1035 decided two of
+  the six contracts once their window was representative. The remaining four
+  are now decided from a 28-day window (2026-08-05T13:12Z to
+  2026-09-02T12:42Z, 16,411 records, 0 malformed) of the post-quarantine clean
+  ledger — the C4-downstream contracts that were starved of a denominator in
+  August now carry four figures of observations each. **The answer to
+  reject-vs-degrade is degrade, everywhere, and now by decision rather than
+  deferral:** `observe()` keeps its never-raise contract for every contract,
+  because the reject teeth already exist one layer down in each site's own
+  hand-rolled guard, and a second gate inside a logging side-channel would
+  duplicate them on the critical path of the knowledge-write pipeline. The
+  uniform-vs-per-contract question resolves to **per-contract**: `claim_kind`
+  (n=1,071, 0 mismatches) and `contradictions` (n=1,464, 0) tighten from
+  `extra="allow"` to `extra="forbid"`; `query_topics` (n=1,405, one wrong-type
+  element) is confirmed as-is, since a `RootModel[list[str]]` has no `extra=`
+  knob and the site already drops a non-string element; and `resolutions`
+  (n=89) is deliberately **deferred** on an under-sampled denominator rather
+  than decided, with its release bar stated in code and in
+  `docs/configuration.md`. Schema-shape only: no field became required or
+  optional, no `athenaeum.yaml` key or env var is introduced, and no reported
+  number or pipeline behavior changes — a tightened schema changes how a
+  *future* mismatch is classified in the observation log, never whether
+  today's response is accepted.
+
 - **Per-surface input-token attribution for the six declared non-batched
   surfaces (athenaeum#1289).** athenaeum#1148's investigation found that
   `TokenUsage.per_knob` (athenaeum#781) buckets by model knob only, and while
