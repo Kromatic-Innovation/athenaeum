@@ -191,6 +191,11 @@ class TestRunContext:
             # predicate is only evaluated by ``_run_finalize_phase``, which
             # this unit test never calls.
             "zero_yield": None,
+            # Issue athenaeum#1283: the athenaeum#1135 zero-progress-refusal verdict,
+            # exported the same way. ``None`` here for the same reason as
+            # ``zero_yield`` above — ``ctx.librarian_refusal`` is only set by
+            # ``_run_finalize_phase``.
+            "librarian_refusal": None,
             # Issue athenaeum#1184: fan-out (matches) and "produced actions"
             # (files_acted) exported the same way — both 0 here since this
             # unit test never runs the entity loop that would populate them.
