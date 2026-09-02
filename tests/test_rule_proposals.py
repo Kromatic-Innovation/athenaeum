@@ -819,7 +819,13 @@ class TestEndToEndWithShapeRulePhase:
             raw_root=tmp_path / "raw",
             wiki_root=tmp_path / "wiki",
             knowledge_root=tmp_path,
-            config=None,
+            # Issue athenaeum#1274 made `no-match` rows opt-in (default OFF).
+            # This detector is exactly their consumer, so an operator running
+            # it turns the flag on -- which is the configuration this
+            # end-to-end test has to exercise. See
+            # `resolve_shape_rules_log_no_match`'s docstring for why the
+            # dependency is documented rather than wired as a derived default.
+            config={"librarian": {"shape_rules": {"log_no_match": True}}},
         )
         freq = detect_shape_frequency(tmp_path / "wiki", config=_SMALL_CONFIG, now=None)
         key = ("orphan-export", record_key_fingerprint(widget))

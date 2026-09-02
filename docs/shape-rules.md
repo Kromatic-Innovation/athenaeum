@@ -618,9 +618,7 @@ complement — same `_`-prefixed, wiki-root, append-only-JSONL discipline
 (:func:`athenaeum.rules.append_shape_rule_disposition_row`,
 :func:`athenaeum.rules.default_shape_rule_dispositions_path`), so it can
 never become a claim or enter the embedded index. Every candidate the phase
-evaluates gets exactly one row, **including the ones no rule matched**
-(`rule_id: null`, `disposition: "no-match"`) — those are the shapes a
-frequency detector (athenaeum#905) actually needs to see:
+evaluates gets exactly one row:
 
 ```json
 {"schema_version":1,"at":"2026-08-15T03:00:00Z","source":"delivery-monitor","source_ref":"delivery-monitor/20260815T030000Z-9f3ac1d2.jsonl","key_fingerprint":"a5149e5b057b68f7","tier":0,"rule_id":"example-contact-bounce@1","disposition":"emit"}
@@ -645,6 +643,44 @@ Rows are written unless `dry_run` is set, mirroring the aggregate ledger's
 own dry-run behaviour. **Forward-only:** this ledger starts accumulating
 from the run it first ships in — no backfill of historical intake is
 attempted.
+
+#### `no-match` rows are opt-in (athenaeum#1274)
+
+The one exception to "every candidate gets a row": a candidate **no rule
+matched** (`rule_id: null`, `disposition: "no-match"`) is logged only when
+`librarian.shape_rules.log_no_match` is on, and it is **off by default**.
+
+Those rows are the shapes the athenaeum#905 frequency detector needs to see —
+but they were also 1,485,942 of 1,488,689 rows (99.8%) of a 341 MB ledger a
+real deployment accumulated in 9 days, inside a git repo whose stated value
+is being small and diffable. A `no-match` row is a negative result: it is
+regenerated on every nightly pass and re-derivable at any time by re-running
+the phase. Default-off is safe because the detector that reads them is
+reached only through `_run_rule_proposal_phase`, itself gated on
+`librarian.rule_proposals.enabled` (also default off), which returns before
+any disposition-ledger read.
+
+**If you enable `librarian.rule_proposals.enabled`, enable this too**, and
+expect the detector to need `librarian.rule_proposals.window_days` (default
+30) of fresh history first — nothing was recorded while this was off. The
+coupling is documented rather than wired as a derived default, so that
+"enable detection" never quietly means "wait a month" with nothing in config
+to show for it. When suppression is active the phase logs the count at INFO
+and reports it as `no_match_rows_suppressed` in its run summary.
+
+#### Retention (athenaeum#1229, re-keyed by athenaeum#1274)
+
+Rows older than `librarian.shape_rules.dispositions_retention_days` (default
+30) are pruned at the tail of every shape-rules phase
+(`prune_shape_rule_dispositions`), which — together with athenaeum#1229's
+dedupe-at-write — is what gives the ledger a bounded steady state instead of
+monotonic growth. athenaeum#1274 moved this off
+`librarian.rule_proposals.window_days`: a READ window and a RETENTION policy
+are different questions, and coupling them meant narrowing the detector's
+window silently deleted ledger history, while an operator who disabled
+`rule_proposals` outright still had retention governed by a key belonging to
+a phase they had turned off. A row whose `at` is missing or unparseable is
+kept, never dropped.
 
 ---
 
@@ -715,7 +751,10 @@ by itself.
 **The detector (AC1) counts rows whose `tier` is `null`** in
 `_shape_rule_dispositions.jsonl`, grouped by `(source, key_fingerprint)`,
 over a configurable window (`librarian.rule_proposals.window_days`, default
-30). This is a deliberate **respecification** of the issue text: AC1 as
+30). Note that the bulk of those `tier: null` rows are `no-match`, which
+since athenaeum#1274 are only written when `librarian.shape_rules.log_no_match`
+is on — see §6.1 above before enabling this detector. This is a deliberate
+**respecification** of the issue text: AC1 as
 filed said "restricted to those handled at tier 2 or tier 3", written
 against an "intake ledger" that did not exist when the issue was drafted.
 The ledger the operator chose to build instead (§6.1, issue athenaeum#975) only

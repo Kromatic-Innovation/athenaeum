@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The shape-rule disposition log no longer records the 99.8% that nothing
+  reads (athenaeum#1274).** `wiki/_shape_rule_dispositions.jsonl` reached 341 MB
+  / 1,488,689 rows in 9 days on a real deployment, of which 1,485,942 (99.8%)
+  were `disposition: "no-match"` — a negative result, regenerated on every
+  nightly pass and re-derivable by re-running the phase, accumulating inside a
+  git repo whose stated value is being small and diffable. Those rows are now
+  written only when the new `librarian.shape_rules.log_no_match` is on, and it
+  is **off by default**. That is safe because their sole consumer —
+  athenaeum#905's shape-frequency detector, which reads exactly the `tier:
+  null` rows `no-match` dominates — is reached only through
+  `librarian._run_rule_proposal_phase`, itself gated on
+  `librarian.rule_proposals.enabled` (also default off), which returns before
+  any disposition-ledger read. An operator enabling `rule_proposals` must
+  enable `log_no_match` too and allow `librarian.rule_proposals.window_days`
+  for fresh history to accumulate; the coupling is documented rather than
+  wired as a derived default so that "enable detection" never quietly means
+  "wait a month" with nothing in config to show for it. Suppression is never
+  silent: the phase logs the count at INFO naming the key, and reports
+  `no_match_rows_suppressed` in its run summary.
+
+  Retention also gained its own key. athenaeum#1229 had
+  `prune_shape_rule_dispositions` reusing `librarian.rule_proposals.window_days`
+  — a READ window doing double duty as a RETENTION policy. Coupled, narrowing
+  the detector's window silently deleted ledger history, and an operator who
+  disabled `rule_proposals` outright still had retention governed by a key
+  belonging to a phase they had turned off. Retention is now
+  `librarian.shape_rules.dispositions_retention_days`, same default (30), so
+  no existing deployment's behaviour changes.
+
+  Both resolve env > yaml > default
+  (`ATHENAEUM_SHAPE_RULES_LOG_NO_MATCH`,
+  `ATHENAEUM_SHAPE_RULES_DISPOSITIONS_RETENTION_DAYS`), matching every other
+  resolver in `athenaeum.config`. Note this is a WRITE-path fix only: an
+  existing oversized ledger is not pruned retroactively, and the log's
+  placement under `wiki/` is unchanged — both remain open on athenaeum#1274.
+
 - **`storage lint-pii` no longer scans machine-generated audit logs under
   `wiki/` (athenaeum#1273).** `_shape_rule_dispositions.jsonl` — a 341+ MB,
   ~1.49M-record log the shape-rule engine regenerates every nightly run —

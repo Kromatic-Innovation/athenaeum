@@ -160,12 +160,21 @@ def _record(**overrides) -> dict:
     return d
 
 
-def _run(tmp_path: Path, **kwargs):
+#: Issue athenaeum#1274 made `no-match` disposition rows opt-in
+#: (`librarian.shape_rules.log_no_match`, DEFAULT OFF). Most tests in this
+#: file predate that and are about what a disposition ROW contains, so they
+#: need the rows to exist -- `_run` therefore turns logging ON by default and
+#: the athenaeum#1274 tests below pass `config=None` explicitly to assert the
+#: shipped default. Suppression itself is covered by `TestNoMatchLogging`.
+_LOG_NO_MATCH: dict = {"librarian": {"shape_rules": {"log_no_match": True}}}
+
+
+def _run(tmp_path: Path, config: dict | None = _LOG_NO_MATCH, **kwargs):
     return run_shape_rule_phase(
         raw_root=tmp_path / "raw",
         wiki_root=tmp_path / "wiki",
         knowledge_root=tmp_path,
-        config=None,
+        config=config,
         **kwargs,
     )
 
@@ -1096,8 +1105,9 @@ class TestDedupeAtWrite:
 
 
 # ---------------------------------------------------------------------------
-# Issue athenaeum#1229 part 3: retention. Rows older than
-# `librarian.rule_proposals.window_days` are pruned -- bounding the ledger
+# Issue athenaeum#1229 part 3: retention. Rows older than the retention
+# window (`librarian.shape_rules.dispositions_retention_days` since issue
+# athenaeum#1274 re-keyed it) are pruned -- bounding the ledger
 # independently of dedupe-at-write (see athenaeum.rules's module-level
 # "Dedupe-at-write + retention" note for why both are needed).
 # ---------------------------------------------------------------------------
@@ -1238,7 +1248,17 @@ class TestPruneShapeRuleDispositions:
             raw_root=tmp_path / "raw",
             wiki_root=tmp_path / "wiki",
             knowledge_root=tmp_path,
-            config={"librarian": {"rule_proposals": {"window_days": 30}}},
+            # Issue athenaeum#1274 re-keyed retention off
+            # `librarian.rule_proposals.window_days` onto its own key, and
+            # made the `no-match` row this test looks for opt-in.
+            config={
+                "librarian": {
+                    "shape_rules": {
+                        "dispositions_retention_days": 30,
+                        "log_no_match": True,
+                    }
+                }
+            },
         )
 
         assert summary["disposition_rows_pruned"] == 1
@@ -1301,3 +1321,233 @@ class TestShapeFrequencyQuery:
         assert shape_frequency[widget_key] == 3
         assert shape_frequency[other_key] == 1
         assert sum(shape_frequency.values()) == 4
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1274: `no-match` rows are opt-in, and retention has its own
+# key. On the measured deployment `no-match` was 1,485,942 of 1,488,689 rows
+# (99.8%) of a 341 MB ledger inside a git repo -- a negative result,
+# regenerated every nightly pass, read only by athenaeum#905's detector, which
+# is itself off by default.
+# ---------------------------------------------------------------------------
+
+
+def _write_unmatched_record(
+    tmp_path: Path, name: str = "20260806T140211Z-9f3ac1d2.jsonl"
+) -> None:
+    """A loaded rule (so the phase runs) plus a record it cannot match."""
+    _write_rule(tmp_path / "rules", "r1.yaml", _emit_rule())
+    _write_raw_jsonl(tmp_path / "raw", "unrelated-source", name, {"whatever": "shape"})
+
+
+class TestNoMatchLogging:
+    def test_no_match_row_is_not_written_by_default(self, tmp_path: Path) -> None:
+        # The shipped default (`config=None`): the candidate is still
+        # EVALUATED -- the phase does its real work -- but the 99.8% row is
+        # never appended.
+        _write_unmatched_record(tmp_path)
+
+        summary = _run(tmp_path, config=None)
+
+        assert summary["files_evaluated"] == 1
+        assert summary["files_matched"] == 0
+        assert summary["no_match_rows_suppressed"] == 1
+        assert _disposition_rows(tmp_path) == []
+        assert not default_shape_rule_dispositions_path(tmp_path / "wiki").exists()
+
+    def test_empty_config_is_also_off(self, tmp_path: Path) -> None:
+        # A real deployment passes a populated config dict, not None -- an
+        # absent key must resolve the same way an absent config does.
+        _write_unmatched_record(tmp_path)
+        summary = _run(tmp_path, config={"librarian": {}})
+        assert summary["no_match_rows_suppressed"] == 1
+        assert _disposition_rows(tmp_path) == []
+
+    def test_no_match_row_is_written_when_explicitly_enabled(
+        self, tmp_path: Path
+    ) -> None:
+        # The athenaeum#975 behaviour is preserved, not deleted -- an
+        # operator running athenaeum#905's detector turns this back on and
+        # gets exactly the row that existed before.
+        _write_unmatched_record(tmp_path)
+
+        summary = _run(tmp_path, config=_LOG_NO_MATCH)
+
+        assert "no_match_rows_suppressed" not in summary
+        rows = _disposition_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["disposition"] == "no-match"
+        assert rows[0]["rule_id"] is None
+        assert rows[0]["tier"] is None
+
+    def test_env_var_overrides_yaml_off(self, tmp_path: Path, monkeypatch) -> None:
+        # Precedence: env > yaml > default, mirroring
+        # `resolve_rule_proposals_enabled`.
+        monkeypatch.setenv("ATHENAEUM_SHAPE_RULES_LOG_NO_MATCH", "1")
+        _write_unmatched_record(tmp_path)
+        _run(tmp_path, config={"librarian": {"shape_rules": {"log_no_match": False}}})
+        assert len(_disposition_rows(tmp_path)) == 1
+
+    def test_suppression_does_not_touch_matched_dispositions(
+        self, tmp_path: Path
+    ) -> None:
+        # Only `no-match` is suppressed. A record a rule DOES claim still
+        # gets its row with logging off -- those are the 0.2% the ledger
+        # exists for.
+        _write_rule(tmp_path / "rules", "r1.yaml", _emit_rule())
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "delivery-monitor",
+            "20260806T140211Z-9f3ac1d2.jsonl",
+            _record(),
+        )
+        _write_raw_jsonl(
+            tmp_path / "raw",
+            "unrelated-source",
+            "20260806T140212Z-9f3ac1d3.jsonl",
+            {"whatever": "shape"},
+        )
+
+        summary = _run(tmp_path, config=None)
+
+        assert summary["no_match_rows_suppressed"] == 1
+        rows = _disposition_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["disposition"] == "emit"
+
+
+class TestDispositionsRetentionDays:
+    """The retention key athenaeum#1274 split out of
+    `librarian.rule_proposals.window_days` (a READ window athenaeum#1229 had
+    doing double duty as a retention policy).
+
+    Deliberately NOT time-frozen, unlike `TestPruneShapeRuleDispositions`
+    above: these go through `run_shape_rule_phase`, which calls
+    `prune_shape_rule_dispositions` with no `now=` and so uses wall clock.
+    Seeded ages are relative to `datetime.now` for that reason."""
+
+    def _seed_old_and_fresh(self, tmp_path: Path) -> Path:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        _seed_disposition_row(
+            wiki_root, source_ref="s/ancient.jsonl", at=now - timedelta(days=90)
+        )
+        _seed_disposition_row(
+            wiki_root, source_ref="s/old.jsonl", at=now - timedelta(days=20)
+        )
+        _seed_disposition_row(
+            wiki_root, source_ref="s/fresh.jsonl", at=now - timedelta(days=1)
+        )
+        return wiki_root
+
+    def test_default_is_thirty_days(self) -> None:
+        from athenaeum.config import resolve_shape_rules_dispositions_retention_days
+
+        # Matches athenaeum#1229's effective behaviour
+        # (`rule_proposals.window_days` also defaults to 30) so the split is
+        # a no-op for existing deployments.
+        assert resolve_shape_rules_dispositions_retention_days(None) == 30
+
+    def test_yaml_key_is_honoured(self) -> None:
+        from athenaeum.config import resolve_shape_rules_dispositions_retention_days
+
+        assert (
+            resolve_shape_rules_dispositions_retention_days(
+                {"librarian": {"shape_rules": {"dispositions_retention_days": 7}}}
+            )
+            == 7
+        )
+
+    def test_env_var_overrides_yaml(self, monkeypatch) -> None:
+        from athenaeum.config import resolve_shape_rules_dispositions_retention_days
+
+        monkeypatch.setenv("ATHENAEUM_SHAPE_RULES_DISPOSITIONS_RETENTION_DAYS", "3")
+        assert (
+            resolve_shape_rules_dispositions_retention_days(
+                {"librarian": {"shape_rules": {"dispositions_retention_days": 7}}}
+            )
+            == 3
+        )
+
+    def test_narrowing_the_key_bounds_the_ledger_through_the_phase(
+        self, tmp_path: Path
+    ) -> None:
+        # The AC that matters: the cap actually bounds the file across a
+        # run. Seed three rows spanning 90 days, run the phase with a
+        # 7-day retention, and only the fresh one survives on disk.
+        wiki_root = self._seed_old_and_fresh(tmp_path)
+        assert len(_disposition_rows(tmp_path)) == 3
+        _write_unmatched_record(tmp_path)
+
+        summary = _run(
+            tmp_path,
+            config={"librarian": {"shape_rules": {"dispositions_retention_days": 7}}},
+        )
+
+        assert summary["disposition_rows_pruned"] == 2
+        remaining = _disposition_rows(tmp_path)
+        assert [row["source_ref"] for row in remaining] == ["s/fresh.jsonl"]
+        assert default_shape_rule_dispositions_path(wiki_root).is_file()
+
+    def test_steady_state_is_bounded_across_repeated_runs(self, tmp_path: Path) -> None:
+        # Monotonic growth is the defect this issue exists for. Ten
+        # consecutive phase runs over an unchanged corpus, each preceded by
+        # an ESCALATING number of rows already outside the retention window
+        # (1, then 2, then 3 ... so a prune that silently stopped firing
+        # would show up as a climbing count, not a flat one), must converge
+        # rather than accumulate.
+        #
+        # `log_no_match` is ON here so the phase's OWN writes participate:
+        # the unmatched candidate contributes a real in-window row that
+        # dedupe-at-write (athenaeum#1229) keeps at exactly one across all
+        # ten runs. That is the ledger's true steady state -- one live row,
+        # every stale row dropped by the run that follows it -- so the
+        # expected series is a hard-coded constant, not a self-referential
+        # `sizes[0]`. Nothing else is pre-seeded, deliberately: an in-window
+        # seeded row would survive every prune and inflate the constant
+        # without testing anything.
+        _write_unmatched_record(tmp_path)
+        config = {
+            "librarian": {
+                "shape_rules": {
+                    "dispositions_retention_days": 7,
+                    "log_no_match": True,
+                }
+            }
+        }
+
+        sizes = []
+        for run_index in range(10):
+            for stale_index in range(run_index + 1):
+                _seed_disposition_row(
+                    tmp_path / "wiki",
+                    source_ref=f"s/stale-{run_index}-{stale_index}.jsonl",
+                    at=datetime.now(timezone.utc) - timedelta(days=45),
+                )
+            _run(tmp_path, config=config)
+            sizes.append(len(_disposition_rows(tmp_path)))
+
+        # One row: the unmatched candidate's own `no-match`, written on run
+        # 1 and deduped on runs 2-10. Every seeded stale row is gone.
+        assert sizes == [1] * 10
+        rows = _disposition_rows(tmp_path)
+        assert rows[0]["disposition"] == "no-match"
+        assert not any("stale" in row["source_ref"] for row in rows)
+        assert not any("ancient" in row["source_ref"] for row in rows)
+
+    def test_rule_proposals_window_no_longer_governs_retention(
+        self, tmp_path: Path
+    ) -> None:
+        # The decoupling athenaeum#1274 is for: narrowing the DETECTOR's
+        # read window must no longer silently delete ledger history.
+        self._seed_old_and_fresh(tmp_path)
+        _write_unmatched_record(tmp_path)
+
+        _run(tmp_path, config={"librarian": {"rule_proposals": {"window_days": 1}}})
+
+        # Retention still at its own default (30), so the 20-day-old row
+        # survives even though the detector would no longer count it.
+        refs = {row["source_ref"] for row in _disposition_rows(tmp_path)}
+        assert "s/old.jsonl" in refs
+        assert "s/ancient.jsonl" not in refs
