@@ -98,8 +98,16 @@ def test_observe_logs_on_invalid_value(caplog: pytest.LogCaptureFixture) -> None
 
 
 def test_observe_reports_unexpected_top_level_key(caplog: pytest.LogCaptureFixture) -> None:
+    # Uses resolutions (not claim_kind) for this general "post-hoc top-level
+    # extra key" path: athenaeum#608 (M17 phase 2) tightened claim_kind and
+    # contradictions to extra="forbid", so an extra key there now fails
+    # validation up front (see TestPhase2Strictness) rather than reaching the
+    # model_extra-based reporting this test exercises. resolutions is the one
+    # named-field contract still on extra="allow" — deliberately deferred.
     with caplog.at_level(logging.WARNING, logger=_SCHEMA_LOGGER):
-        llm_schemas.observe_claim_kind({"claim_kind": "fact", "brand_new_field": 1}, call_site="t")
+        llm_schemas.observe_resolutions(
+            {"action": "keep_a", "brand_new_field": 1}, call_site="t"
+        )
     recs = _mismatch_records(caplog)
     assert len(recs) == 1
     msg = recs[0].getMessage()
@@ -240,17 +248,12 @@ def test_tier2_schema_violation_is_behavior_neutral(
 
 class TestPhase2aStrictness:
     def test_strict_contracts_registry_matches_the_decision(self) -> None:
-        assert llm_schemas.STRICT_CONTRACTS == frozenset(
-            {"tiers.tier2", "tiers.tier3-merge"}
-        )
-        # the three starved contracts and query_topics must NOT be in the
-        # decided set — AC4 (they stay observe-only, decision deferred to athenaeum#608)
-        assert not llm_schemas.STRICT_CONTRACTS & {
-            "query_topics",
-            "claim_kind",
-            "contradictions",
-            "resolutions",
-        }
+        # athenaeum#1035's two contracts are still decided, and still carry the
+        # postures it chose — phase 2 (athenaeum#608) added contracts, it did
+        # not revisit these.
+        assert {"tiers.tier2", "tiers.tier3-merge"} <= llm_schemas.STRICT_CONTRACTS
+        assert llm_schemas.Tier2Entity.model_config.get("extra") == "forbid"
+        assert llm_schemas.MergeOp.model_config.get("extra") == "allow"
 
     # --- tiers.tier2: strict-pass / strict-fail on extra="forbid" -----------
 
@@ -339,28 +342,166 @@ class TestPhase2aStrictness:
             agg["tiers.tier3-merge"]["by_class"].get(llm_schemas.MISMATCH_MISSING_REQUIRED) == 1
         )
 
-    # --- regression guard: the other four contracts are untouched (AC4) -----
+
+# ---------------------------------------------------------------------------
+# M17 phase 2 (athenaeum#608) — the remaining decision, taken over the
+# 2026-08-05 -> 2026-09-02 window (16,411 records, 0 malformed):
+# claim_kind (n=1,071, 0 mismatches) and contradictions (n=1,464, 0) tighten to
+# extra="forbid"; query_topics (n=1,405, 1 wrong-type) is CONFIRMED as-is (a
+# RootModel has no extra= knob); resolutions (n=89) is deliberately DEFERRED on
+# an under-sampled denominator, not decided.
+# ---------------------------------------------------------------------------
+
+
+class TestPhase2Strictness:
+    def test_strict_contracts_registry_matches_the_phase2_decision(self) -> None:
+        assert llm_schemas.STRICT_CONTRACTS == frozenset(
+            {
+                "claim_kind",
+                "contradictions",
+                "query_topics",
+                "tiers.tier2",
+                "tiers.tier3-merge",
+            }
+        )
+
+    def test_resolutions_is_the_one_deferred_contract(self) -> None:
+        # The deferral is the load-bearing part of athenaeum#608's answer: at
+        # n=89 against four figures for every sibling, a forbid here would be a
+        # guess wearing a measurement's clothes. If a future pass decides it,
+        # this test is the thing that must be updated deliberately.
+        assert "resolutions" not in llm_schemas.STRICT_CONTRACTS
+        assert llm_schemas.ResolutionResponse.model_config.get("extra") == "allow"
+        # every INSTRUMENTED contract is either decided or the one deferral
+        assert set(llm_schemas.INSTRUMENTED_CONTRACTS) - llm_schemas.STRICT_CONTRACTS == {
+            "resolutions"
+        }
+
+    # --- claim_kind / contradictions: strict-pass vs strict-fail -----------
 
     @pytest.mark.parametrize(
-        "model",
+        "model,clean",
         [
-            llm_schemas.ClaimKindResponse,
-            llm_schemas.ContradictionResponse,
-            llm_schemas.ResolutionResponse,
+            (llm_schemas.ClaimKindResponse, {"claim_kind": "fact"}),
+            (llm_schemas.ContradictionResponse, {"detected": False}),
         ],
     )
-    def test_other_contracts_extra_policy_is_unchanged(self, model: type) -> None:
-        assert model.model_config.get("extra") == "allow"
+    def test_clean_payload_is_strict_pass(self, model: type, clean: dict) -> None:
+        # Forbidding costs nothing observed: the shapes the window actually
+        # carried still validate cleanly.
+        model.model_validate(clean)
 
-    def test_query_topics_and_starved_contracts_still_tolerate_extra_shape(self) -> None:
-        # query_topics is a RootModel[list[str]] with no extra-key concept;
-        # the three starved BaseModel contracts must still accept an
-        # unexpected key without raising (untouched by athenaeum#1035).
-        llm_schemas.ClaimKindResponse.model_validate({"claim_kind": "fact", "new_field": 1})
-        llm_schemas.ContradictionResponse.model_validate({"detected": False, "new_field": 1})
-        llm_schemas.ResolutionResponse.model_validate(
-            {"action": "keep_a", "new_field": 1}
-        )
+    @pytest.mark.parametrize(
+        "model,payload",
+        [
+            (llm_schemas.ClaimKindResponse, {"claim_kind": "fact", "surprise": 1}),
+            (llm_schemas.ContradictionResponse, {"detected": False, "surprise": 1}),
+        ],
+    )
+    def test_extra_key_is_strict_fail(self, model: type, payload: dict) -> None:
+        # Before athenaeum#608 both validated cleanly (extra="allow") and only
+        # the key NAME was reported post-hoc; now an unexpected key fails
+        # validation outright — the decided "teeth where mismatch is ~0%".
+        with pytest.raises(ValidationError):
+            model.model_validate(payload)
+
+    @pytest.mark.parametrize(
+        "observe,payload,contract",
+        [
+            (
+                llm_schemas.observe_claim_kind,
+                {"claim_kind": "fact", "surprise": 1},
+                "claim_kind",
+            ),
+            (
+                llm_schemas.observe_contradictions,
+                {"detected": False, "surprise": 1},
+                "contradictions",
+            ),
+        ],
+    )
+    def test_extra_key_still_classifies_as_extra_keys(
+        self, observe, payload: dict, contract: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The WARNING's error_class changes shape (ValidationError instead of
+        # the post-hoc ExtraKeys report) but the ledger's mismatch CLASS is
+        # unchanged — same signal, new path. A phase-2 tightening must not
+        # silently re-bucket historical drift.
+        with caplog.at_level(logging.WARNING, logger=_SCHEMA_LOGGER):
+            observe(payload, call_site="t")
+        recs = _mismatch_records(caplog)
+        assert len(recs) == 1
+        msg = recs[0].getMessage()
+        assert "error_class=ValidationError" in msg
+        assert "surprise" in msg
+        agg = llm_schemas.aggregate_observations()
+        assert agg[contract]["by_class"].get(llm_schemas.MISMATCH_EXTRA_KEYS) == 1
+
+    @pytest.mark.parametrize(
+        "model,payload",
+        [
+            (llm_schemas.ClaimKindResponse, {}),
+            (llm_schemas.ContradictionResponse, {"conflict_type": "x"}),
+        ],
+    )
+    def test_required_set_did_not_grow_or_shrink(self, model: type, payload: dict) -> None:
+        # The one required field per contract is unchanged: claim_kind's
+        # `claim_kind` and contradictions' `detected`, each the site's own
+        # tolerance boundary. Omitting it still fails; nothing ELSE became
+        # required (covered by the clean-payload test above, which omits every
+        # Optional field).
+        with pytest.raises(ValidationError):
+            model.model_validate(payload)
+
+    def test_contradictions_optional_fields_stayed_optional(self) -> None:
+        # extra="forbid" forbids UNMODELED keys; it must not have turned the
+        # site's defaulted reads into required ones.
+        for field in ("conflict_type", "members_involved", "conflicting_passages", "rationale"):
+            assert not llm_schemas.ContradictionResponse.model_fields[field].is_required()
+
+    # --- query_topics: confirmed, not tightened ---------------------------
+
+    def test_query_topics_shape_is_confirmed_not_tightened(self) -> None:
+        # A RootModel[list[str]] has no named fields, so "an unexpected key" is
+        # not a representable outcome — membership in STRICT_CONTRACTS records
+        # the shape as DECIDED, and there is no extra= knob to have turned.
+        assert "extra" not in llm_schemas.QueryTopicsResponse.model_config
+        llm_schemas.QueryTopicsResponse.model_validate(["alpha", "beta"])
+
+    def test_query_topics_wrong_type_element_is_the_windows_one_mismatch(self) -> None:
+        # The single mismatch measured in the window was a non-string element.
+        with pytest.raises(ValidationError):
+            llm_schemas.QueryTopicsResponse.model_validate(["alpha", 7])
+
+    def test_query_topics_wrong_type_degrades_at_the_site_not_here(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # AC: the decided posture for this contract IS the site's existing
+        # degrade. observe() logs it and returns None; it never gates.
+        with caplog.at_level(logging.WARNING, logger=_SCHEMA_LOGGER):
+            assert llm_schemas.observe_query_topics(["alpha", 7], call_site="t") is None
+        agg = llm_schemas.aggregate_observations()
+        assert agg["query_topics"]["by_class"].get(llm_schemas.MISMATCH_WRONG_TYPE) == 1
+
+    # --- the phase-2 answer to reject-vs-degrade --------------------------
+
+    @pytest.mark.parametrize(
+        "observe,payload",
+        [
+            (llm_schemas.observe_claim_kind, {"claim_kind": "fact", "surprise": 1}),
+            (llm_schemas.observe_contradictions, {"detected": False, "surprise": 1}),
+            (llm_schemas.observe_query_topics, ["alpha", 7]),
+            (llm_schemas.observe_resolutions, {"action": "keep_a", "surprise": 1}),
+        ],
+    )
+    def test_observe_still_never_raises_for_any_phase2_contract(
+        self, observe, payload: object
+    ) -> None:
+        # This is athenaeum#608's actual answer to reject-vs-degrade: DEGRADE,
+        # for every contract, decided rather than deferred. A tightened schema
+        # changes how drift is CLASSIFIED, never whether the pipeline acts on
+        # it. If a future change makes observe() gate, this fails first.
+        assert observe(payload, call_site="t") is None
 
 
 # ---------------------------------------------------------------------------
