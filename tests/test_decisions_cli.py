@@ -141,6 +141,7 @@ def test_count_empty(tmp_path: Path) -> None:
         "merges": 0,
         "retractions": 0,
         "audits": 0,
+        "confirmations": 0,
         "oldest": None,
         "oldest_age_days": None,
     }
@@ -248,3 +249,114 @@ def test_questions_only(tmp_path: Path) -> None:
     payload = json.loads(out)
     assert payload["questions"] == 1
     assert payload["merges"] == 0
+
+
+# ---------------------------------------------------------------------------
+# `athenaeum decisions raise-confirmation` (issue athenaeum#1290) — the CLI
+# half of AC1, the CLI counterpart to the MCP raise_decision tool's
+# kind="confirmation" path.
+# ---------------------------------------------------------------------------
+
+_RAISE_ARGV = [
+    "--raiser",
+    "dijkstra-lane-1290",
+    "--repo",
+    "Kromatic-Innovation/athenaeum",
+    "--issue-ref",
+    "1290",
+    "--narrowed-scope",
+    "only scalar fields",
+    "--implemented-behavior",
+    "extended raise_decision",
+    "--alternative",
+    "a parallel decision type",
+]
+
+
+def test_raise_confirmation_text(tmp_path: Path) -> None:
+    (tmp_path / "wiki").mkdir()
+    rc, out = _run(
+        ["decisions", "raise-confirmation", "--path", str(tmp_path), *_RAISE_ARGV]
+    )
+    assert rc == 0
+    assert out.startswith("confirmation raised: id=")
+
+
+def test_raise_confirmation_json(tmp_path: Path) -> None:
+    (tmp_path / "wiki").mkdir()
+    rc, out = _run(
+        [
+            "decisions",
+            "raise-confirmation",
+            "--path",
+            str(tmp_path),
+            "--json",
+            *_RAISE_ARGV,
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["decision_id"]
+
+
+def test_raise_confirmation_round_trips_through_list_and_count(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "wiki").mkdir()
+    rc, _ = _run(
+        ["decisions", "raise-confirmation", "--path", str(tmp_path), *_RAISE_ARGV]
+    )
+    assert rc == 0
+
+    rc, out = _run(["decisions", "count", "--path", str(tmp_path), "--json"])
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["count"] == 1
+    assert payload["confirmations"] == 1
+
+    rc, out = _run(["decisions", "list", "--path", str(tmp_path), "--json"])
+    assert rc == 0
+    items = json.loads(out)
+    assert len(items) == 1
+    assert items[0]["type"] == "confirmation"
+    assert items[0]["payload"]["raiser"] == "dijkstra-lane-1290"
+
+    rc, out = _run(["decisions", "next", "--path", str(tmp_path)])
+    assert rc == 0
+    assert "confirmation" in out
+    assert "dijkstra-lane-1290" in out
+
+
+def test_raise_confirmation_missing_arg_is_argparse_error(tmp_path: Path) -> None:
+    (tmp_path / "wiki").mkdir()
+    argv_without_alternative = _RAISE_ARGV[:-2]  # drop --alternative and its value
+    with pytest.raises(SystemExit):
+        _run(
+            [
+                "decisions",
+                "raise-confirmation",
+                "--path",
+                str(tmp_path),
+                *argv_without_alternative,
+            ]
+        )
+
+
+def test_raise_confirmation_blank_required_field_is_reported_not_written(
+    tmp_path: Path,
+) -> None:
+    """argparse only checks PRESENCE; a whitespace-only value passes argparse
+    but is refused by raise_pending_question's own validation."""
+    (tmp_path / "wiki").mkdir()
+    argv = list(_RAISE_ARGV)
+    idx = argv.index("--raiser")
+    argv[idx + 1] = "   "
+    rc, out = _run(
+        ["decisions", "raise-confirmation", "--path", str(tmp_path), "--json", *argv]
+    )
+    assert rc == 1
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert payload["error_code"] == "missing_confirmation_field"
+    assert not (tmp_path / "wiki" / "_pending_questions.md").exists()

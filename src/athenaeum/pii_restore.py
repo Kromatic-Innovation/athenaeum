@@ -137,12 +137,14 @@ _ISBN = re.compile(r"^\d{13}$")
 _DECIMAL = re.compile(r"^\d*\.\d+$")
 
 #: Generic, non-identifying entries safe to ship in a public repo. An
-#: operator-specific address does NOT belong here -- see
-#: ``scripts/pii-restore.py``'s ``safe_email_exact`` for the live-config
-#: extension point that class of value uses; this module's classify() only
-#: needs the structural (service-id/role/test-account) buckets, which never
-#: hardcode a specific address.
-_SAFE_EMAIL_EXACT = frozenset({"git@github.com", "root@example.com"})
+#: operator-specific address does NOT belong here -- it is read from live
+#: config by :func:`safe_email_exact` below, mirroring
+#: ``scripts/pii-restore.py``'s function of the same name exactly (issue
+#: athenaeum#1284: this module previously never read config at all, so the
+#: documented ``pii.restore.safe_email_exact`` key had no effect on the
+#: installed ``athenaeum pii-restore`` CLI -- a capability regression
+#: against the legacy script).
+SAFE_EMAIL_EXACT_DEFAULT = frozenset({"git@github.com", "root@example.com"})
 _SAFE_EMAIL_SUBSTR = (
     "group.calendar.google.com",
     "iam.gserviceaccount.com",
@@ -152,7 +154,45 @@ _SAFE_EMAIL_PREFIX = ("noreply@", "no-reply@", "donotreply@", "admin@", "support
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
 
-def classify(token: str) -> str | None:
+def safe_email_exact(knowledge_root: Path) -> frozenset[str]:
+    """Resolve the exact-match safe-email allowlist: code defaults + live
+    config -- mirrors ``scripts/pii-restore.py``'s ``safe_email_exact``
+    exactly (issue athenaeum#1284). *knowledge_root* is required (never
+    defaulted) per this module's own no-default-root contract; callers
+    always have an explicit root (:func:`build_restore_plan`'s *repo_root*,
+    :func:`apply_restore_plan`'s ``wiki_root.parent``).
+
+    Operator-specific addresses are read from ``athenaeum.yaml``::
+
+        pii:
+          restore:
+            safe_email_exact:
+              - googledrive-tk@example.com
+
+    Entries are case-folded to match :func:`classify`'s lowercased
+    comparison. A missing or malformed block yields just the built-in
+    defaults -- failing CLOSED, because an address absent from the
+    allowlist stays REDACTED, which is the safe direction (this codebase's
+    governing rule is that over-restoring is worse than under-restoring).
+    """
+    values: set[str] = set(SAFE_EMAIL_EXACT_DEFAULT)
+    try:
+        from athenaeum.config import load_config
+
+        config = load_config(knowledge_root)
+    except Exception:  # noqa: BLE001 - config is advisory; defaults still apply
+        return frozenset(values)
+    block = config.get("pii") if isinstance(config, dict) else None
+    restore = block.get("restore") if isinstance(block, dict) else None
+    configured = restore.get("safe_email_exact") if isinstance(restore, dict) else None
+    if isinstance(configured, (list, tuple, set)):
+        values.update(str(v).strip().lower() for v in configured if str(v).strip())
+    return frozenset(values)
+
+
+def classify(
+    token: str, *, safe_email_exact_set: frozenset[str] = SAFE_EMAIL_EXACT_DEFAULT
+) -> str | None:
     """Return a restore-class name for *token*, or ``None`` to leave it redacted.
 
     ``None`` is the SAFE direction: an email that is not positively
@@ -162,6 +202,14 @@ def classify(token: str) -> str | None:
     athenaeum#1037's PII-safety AC. Every caller in this module routes through
     :func:`_classify_or_refuse` rather than this function directly, so a
     ``None`` here becomes a hard refusal, not a silent skip.
+
+    *safe_email_exact_set* is the exact-match allowlist :func:`classify`
+    checks a token's address against; it defaults to the code-only
+    :data:`SAFE_EMAIL_EXACT_DEFAULT` so this function stays pure/config-free
+    when called directly (as the golden-fixture tests do). Real plan-
+    building callers (:func:`build_restore_plan`, :func:`apply_restore_plan`)
+    resolve the config-augmented set via :func:`safe_email_exact` once per
+    call and thread it down through :func:`_classify_or_refuse`.
     """
     t = token.strip()
     if not t:
@@ -171,7 +219,7 @@ def classify(token: str) -> str | None:
     if _EMAIL_RE.search(t):
         addr_m = _EMAIL_RE.search(t)
         addr = addr_m.group(0).lower() if addr_m else low
-        if addr in _SAFE_EMAIL_EXACT or low in _SAFE_EMAIL_EXACT:
+        if addr in safe_email_exact_set or low in safe_email_exact_set:
             return "email:host-alias/path"
         if any(s in low for s in _SAFE_EMAIL_SUBSTR):
             return "email:service-id"
@@ -277,7 +325,12 @@ class GitHistoryUnavailableError(RuntimeError):
 GIT_HISTORY_UNAVAILABLE_REASON = "git-history-unavailable"
 
 
-def _classify_or_refuse(token: str, *, method: str) -> str:
+def _classify_or_refuse(
+    token: str,
+    *,
+    method: str,
+    safe_email_exact_set: frozenset[str] = SAFE_EMAIL_EXACT_DEFAULT,
+) -> str:
     """Classify *token* for restoration under *method*, or raise.
 
     The single choke point every restoration in this module passes through
@@ -295,9 +348,14 @@ def _classify_or_refuse(token: str, *, method: str) -> str:
     routes to :func:`classify` (the general, deliberately-conservative
     prose-token boundary, which refuses a phone-shaped digit run precisely
     because it CANNOT rule out a real phone number from the token alone).
+    *safe_email_exact_set* is forwarded to :func:`classify` unchanged
+    (unused for ``"retro-filename-lookup"``, which never touches email
+    tokens); see :func:`safe_email_exact` for how callers resolve it.
     """
     restore_class = (
-        classify_retro_issue_list(token) if method == "retro-filename-lookup" else classify(token)
+        classify_retro_issue_list(token)
+        if method == "retro-filename-lookup"
+        else classify(token, safe_email_exact_set=safe_email_exact_set)
     )
     if restore_class is None:
         raise PiiRestoreSafetyError(
@@ -603,24 +661,33 @@ def build_restore_plan(
     history is walked in (the ``wiki_root``'s parent in the normal
     ``knowledge_root/wiki`` layout, but kept as an explicit parameter so a
     test fixture's repo root and wiki subdirectory can be named separately).
+    It doubles as the knowledge root :func:`safe_email_exact` resolves
+    ``pii.restore.safe_email_exact`` from (issue athenaeum#1284) -- the same
+    ``athenaeum.yaml`` :func:`athenaeum._cmd_pii_restore.cmd_pii_restore`
+    already loads for ``contacts_surface_root``.
     """
     hits = find_markers(wiki_root, contacts_root)
     if limit is not None:
         hits = hits[:limit]
     pages_scanned = len({h.page_relpath for h in hits})
 
+    allowlist = safe_email_exact(repo_root)
     plan = RestorePlan(pages_scanned=pages_scanned)
     for hit in hits:
         retro_match = _RETRO_FRAGMENT_RE.search(hit.line_text)
         if retro_match:
-            _plan_retro_filename(repo_root, hit, retro_match.group("ts"), plan)
+            _plan_retro_filename(repo_root, hit, retro_match.group("ts"), plan, allowlist)
             continue
-        _plan_anchored_restore(repo_root, hit, plan)
+        _plan_anchored_restore(repo_root, hit, plan, allowlist)
     return plan
 
 
 def _plan_retro_filename(
-    repo_root: Path, hit: MarkerHit, timestamp_key: str, plan: RestorePlan
+    repo_root: Path,
+    hit: MarkerHit,
+    timestamp_key: str,
+    plan: RestorePlan,
+    safe_email_exact_set: frozenset[str],
 ) -> None:
     filename = _resolve_retro_filename(repo_root, timestamp_key)
     if filename is None:
@@ -630,7 +697,9 @@ def _plan_retro_filename(
     # the "<issue-list>" segment exactly.
     issue_list = filename[len(f"{timestamp_key}--") : -len(".md")]
     try:
-        restore_class = _classify_or_refuse(issue_list, method="retro-filename-lookup")
+        restore_class = _classify_or_refuse(
+            issue_list, method="retro-filename-lookup", safe_email_exact_set=safe_email_exact_set
+        )
     except PiiRestoreSafetyError:
         # Defense in depth: a retro filename's tail should always classify
         # as a safe digit-dash shape. If a resolved filename ever tails off
@@ -643,7 +712,9 @@ def _plan_retro_filename(
     )
 
 
-def _plan_anchored_restore(repo_root: Path, hit: MarkerHit, plan: RestorePlan) -> None:
+def _plan_anchored_restore(
+    repo_root: Path, hit: MarkerHit, plan: RestorePlan, safe_email_exact_set: frozenset[str]
+) -> None:
     line = hit.line_text
     start = hit.char_offset
     end = start + len(MARKER)
@@ -677,7 +748,9 @@ def _plan_anchored_restore(repo_root: Path, hit: MarkerHit, plan: RestorePlan) -
 
     token, sha = found
     try:
-        restore_class = _classify_or_refuse(token, method="anchored-rename-follow")
+        restore_class = _classify_or_refuse(
+            token, method="anchored-rename-follow", safe_email_exact_set=safe_email_exact_set
+        )
     except PiiRestoreSafetyError:
         plan.residue.append(ResidueEntry(hit, "kept:real-pii"))
         return
@@ -737,14 +810,21 @@ def apply_restore_plan(
     token.
     """
     pre_count = len(iter_contact_records(contacts_root))
+    repo_root = wiki_root.parent
+    allowlist = safe_email_exact(repo_root)
 
     by_page: dict[str, list[Restoration]] = {}
     for r in plan.restorations:
-        _classify_or_refuse(r.token, method=r.method)  # re-verify; see docstring.
+        # re-verify; see docstring. Same config-resolved allowlist
+        # build_restore_plan used (issue athenaeum#1284) -- this can only
+        # make the re-check MORE strict than the plan it is re-verifying
+        # (an address dropped from config between build and apply), never
+        # less: plan.restorations already only holds tokens that passed
+        # this same gate once.
+        _classify_or_refuse(r.token, method=r.method, safe_email_exact_set=allowlist)
         by_page.setdefault(r.hit.page_relpath, []).append(r)
 
     pages_changed = 0
-    repo_root = wiki_root.parent
     for relpath, restorations in by_page.items():
         page_path = repo_root / relpath
         if _is_excluded_path(page_path, contacts_root):

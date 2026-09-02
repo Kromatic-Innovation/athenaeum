@@ -262,12 +262,23 @@ class TestPhase2StaysDark:
         assert "from athenaeum.verdict_effects import" in source
 
     def test_comparator_gate_callers_are_recompare_and_the_wiki_dedupe_cutover(self) -> None:
-        """``resolve_comparator_enabled`` has exactly FOUR callers in ``src/``
-        post-cut-over: the pre-existing ``athenaeum merges recompare`` command,
-        and the three new call sites the wiki-dedup cut-over added —
+        """``resolve_comparator_enabled`` has exactly FIVE callers in ``src/``
+        post-athenaeum#1255: the pre-existing ``athenaeum merges recompare``
+        command, the three call sites the wiki-dedup cut-over added --
         ``librarian.py`` and ``_cmd_curate.py`` (each decides whether to even
         build an LLM client / refuses to run) and ``wiki_dedupe.py`` (the
-        actual dark/live gate on the comparator pass itself).
+        actual dark/live gate on the comparator pass itself) -- and, new in
+        athenaeum#1255, ``cluster_comparator.py``.
+
+        athenaeum#1255 deliberately admits this fifth caller: the cluster-domain
+        driver has no wiring caller of its own yet (nothing in
+        ``librarian.py`` calls it -- it is dark), so the gate check has to
+        live INSIDE the driver rather than at an external call site the way
+        ``wiki_dedupe.py``'s gate is read by ``librarian.py``/``_cmd_curate.py``
+        before the pass even runs. This is the drift guard the athenaeum#1255
+        issue body calls out by name as needing a deliberate update, not an
+        incidental one -- the caller SET changed on purpose, from four to
+        five, and this is that acknowledgement.
 
         Matches a CALL (``resolve_comparator_enabled(``), not any textual
         mention -- ``comparator.py`` names the resolver in its docstring
@@ -284,6 +295,7 @@ class TestPhase2StaysDark:
         assert callers == [
             "_cmd_curate.py",
             "_cmd_merges.py",
+            "cluster_comparator.py",
             "librarian.py",
             "wiki_dedupe.py",
         ]

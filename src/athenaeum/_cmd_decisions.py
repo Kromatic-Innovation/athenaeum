@@ -20,6 +20,13 @@ Three modes mirror ``questions`` / ``merges``:
 - ``next``   the OLDEST pending decision (one block)
 - ``count``  ``N decisions pending (Q questions, M merges; oldest Xd)``
 
+A fourth item type, ``confirmation`` (issue athenaeum#1290), is included in
+all three above — an agent-raiseable "implemented X without Y, confirm?"
+flag. ``raise-confirmation`` is the CLI's WRITE path for it (mirroring the
+MCP ``raise_decision`` tool's ``kind="confirmation"``); resolving one is
+still ``resolve_question`` (MCP) since storage-wise it is a block in
+``_pending_questions.md`` like any other question.
+
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` — this
 is where a NEW subcommand goes, not inline in ``cli.py``'s ``main()``. This
@@ -35,6 +42,7 @@ import json
 import sys
 from pathlib import Path
 
+from athenaeum.answers import raise_pending_question
 from athenaeum.config import (
     DEFAULT_KNOWLEDGE_ROOT,
     load_config,
@@ -83,6 +91,20 @@ def _format_block(decision: dict) -> str:
         lines.append(f"  proposal: {payload.get('proposal_id', '')}")
         if payload.get("reason"):
             lines.append(f"  reason: {payload['reason']}")
+    elif decision["type"] == "confirmation":
+        # Issue athenaeum#1290: an agent-raised "implemented X without Y,
+        # confirm?" flag — render the structured fields the MCP payload
+        # carries (see ``athenaeum.decisions.confirmation_to_decision``).
+        lines.append(f"  raiser: {payload.get('raiser', '')}")
+        lines.append(f"  repo: {payload.get('repo', '')}")
+        lines.append(f"  issue/PR: {payload.get('issue_ref', '')}")
+        lines.append(f"  narrowed scope: {payload.get('narrowed_scope', '')}")
+        lines.append(
+            f"  implemented behaviour: {payload.get('implemented_behavior', '')}"
+        )
+        lines.append(f"  alternative: {payload.get('alternative', '')}")
+        if payload.get("raised_at"):
+            lines.append(f"  raised at: {payload['raised_at']}")
     else:
         if payload.get("description"):
             lines.append(f"  description: {payload['description']}")
@@ -94,16 +116,27 @@ def _format_block(decision: dict) -> str:
     return "\n".join(lines)
 
 
-def _counts(decisions: list[dict]) -> tuple[int, int, int, int, int, str | None]:
-    """Return ``(total, questions, merges, retractions, audits, oldest_created_at)``."""
+def _counts(decisions: list[dict]) -> tuple[int, int, int, int, int, int, str | None]:
+    """Return ``(total, questions, merges, retractions, audits, confirmations,
+    oldest_created_at)``."""
     questions = sum(1 for d in decisions if d["type"] == "question")
     merges = sum(1 for d in decisions if d["type"] == "merge")
     retractions = sum(1 for d in decisions if d["type"] == "retraction")
     audits = sum(1 for d in decisions if d["type"] == "audit")
+    # Issue athenaeum#1290.
+    confirmations = sum(1 for d in decisions if d["type"] == "confirmation")
     # ``list_pending_decisions`` returns oldest-first, so the first item's
     # created_at is the oldest across all queues.
     oldest = decisions[0]["created_at"] if decisions else None
-    return len(decisions), questions, merges, retractions, audits, oldest
+    return (
+        len(decisions),
+        questions,
+        merges,
+        retractions,
+        audits,
+        confirmations,
+        oldest,
+    )
 
 
 def _cmd_scan_retractions(args: argparse.Namespace) -> int:
@@ -137,6 +170,40 @@ def _cmd_scan_retractions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_raise_confirmation(args: argparse.Namespace) -> int:
+    """``athenaeum decisions raise-confirmation`` — the CLI half of AC1 (athenaeum#1290).
+
+    The CLI counterpart to the MCP ``raise_decision`` tool's
+    ``kind="confirmation"`` path — same underlying function
+    (:func:`athenaeum.answers.raise_pending_question`), same validation, same
+    on-disk block. Exists so an agent WITHOUT MCP access (a plain shell
+    context) can still raise a durable "implemented X without Y, confirm?"
+    flag, exactly per AC1's "through the MCP server and the CLI".
+    """
+    wiki_root = _resolve_wiki_root(args)
+    pending_path = wiki_root / "_pending_questions.md"
+    result = raise_pending_question(
+        pending_path,
+        args.question or "",
+        args.context or "",
+        entity=args.entity or "",
+        kind="confirmation",
+        raiser=args.raiser,
+        repo=args.repo,
+        issue_ref=args.issue_ref,
+        narrowed_scope=args.narrowed_scope,
+        implemented_behavior=args.implemented_behavior,
+        alternative=args.alternative,
+    )
+    if args.json:
+        sys.stdout.write(json.dumps(result) + "\n")
+    elif result["ok"]:
+        print(f"confirmation raised: id={result['decision_id']}")
+    else:
+        print(f"error [{result['error_code']}]: {result['message']}", file=sys.stderr)
+    return 0 if result["ok"] else 1
+
+
 def cmd_decisions(args: argparse.Namespace) -> int:
     """Dispatch ``athenaeum decisions {list,next,count}``.
 
@@ -144,15 +211,25 @@ def cmd_decisions(args: argparse.Namespace) -> int:
     print nothing (or ``null`` JSON for ``next``) and exit 0.
     """
     sub = getattr(args, "decisions_target", None)
-    if sub not in ("list", "next", "count", "scan-retractions"):
+    if sub not in (
+        "list",
+        "next",
+        "count",
+        "scan-retractions",
+        "raise-confirmation",
+    ):
         print(
-            "usage: athenaeum decisions {list,next,count,scan-retractions} [...]",
+            "usage: athenaeum decisions "
+            "{list,next,count,scan-retractions,raise-confirmation} [...]",
             file=sys.stderr,
         )
         return 2
 
     if sub == "scan-retractions":
         return _cmd_scan_retractions(args)
+
+    if sub == "raise-confirmation":
+        return _cmd_raise_confirmation(args)
 
     wiki_root = _resolve_wiki_root(args)
     with_proposal = getattr(args, "with_proposal", False)
@@ -165,7 +242,9 @@ def cmd_decisions(args: argparse.Namespace) -> int:
     )
 
     if sub == "count":
-        total, questions, merges, retractions, audits, oldest = _counts(decisions)
+        total, questions, merges, retractions, audits, confirmations, oldest = _counts(
+            decisions
+        )
         oldest_age = age_days(oldest) if oldest else None
         if args.json:
             sys.stdout.write(
@@ -176,6 +255,7 @@ def cmd_decisions(args: argparse.Namespace) -> int:
                         "merges": merges,
                         "retractions": retractions,
                         "audits": audits,
+                        "confirmations": confirmations,
                         "oldest": oldest,
                         "oldest_age_days": oldest_age,
                     }
@@ -191,6 +271,8 @@ def cmd_decisions(args: argparse.Namespace) -> int:
                 breakdown += f", {retractions} retractions"
             if audits:
                 breakdown += f", {audits} audits"
+            if confirmations:
+                breakdown += f", {confirmations} confirmations"
             print(f"{total} decisions pending ({breakdown}{age_str})")
         return 0
 
@@ -288,3 +370,72 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_common(scan_p, with_proposal=False)
+
+    raise_p = d_sub.add_parser(
+        "raise-confirmation",
+        help=(
+            "File a NEW agent-raised 'implemented X without Y, confirm?' "
+            "item into the pending-decisions queue (issue athenaeum#1290) — "
+            "the CLI counterpart of the MCP raise_decision tool's "
+            "kind=\"confirmation\" path."
+        ),
+    )
+    raise_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    raise_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of plain text.",
+    )
+    raise_p.add_argument(
+        "--raiser", required=True, help="Who/what narrowed scope (agent name, lane id, ...)."
+    )
+    raise_p.add_argument("--repo", required=True, help="The owner/repo narrowed in.")
+    raise_p.add_argument(
+        "--issue-ref",
+        dest="issue_ref",
+        required=True,
+        help="The issue or PR the narrowing relates to.",
+    )
+    raise_p.add_argument(
+        "--narrowed-scope",
+        dest="narrowed_scope",
+        required=True,
+        help="What was narrowed — the scope NOT covered.",
+    )
+    raise_p.add_argument(
+        "--implemented-behavior",
+        dest="implemented_behavior",
+        required=True,
+        help="What was actually built instead.",
+    )
+    raise_p.add_argument(
+        "--alternative",
+        required=True,
+        help="The road not taken — what a human might have wanted instead.",
+    )
+    raise_p.add_argument(
+        "--question",
+        default="",
+        help=(
+            "Optional checkbox question text. Auto-phrased from the "
+            "structured fields above when omitted."
+        ),
+    )
+    raise_p.add_argument(
+        "--context",
+        default="",
+        help=(
+            "Optional standalone context. Auto-phrased from the structured "
+            "fields above when omitted."
+        ),
+    )
+    raise_p.add_argument(
+        "--entity",
+        default="",
+        help="Optional short human-readable header label. Cosmetic only.",
+    )

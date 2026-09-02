@@ -128,9 +128,14 @@ log = logging.getLogger(__name__)
 #: dropped. v3 (issue athenaeum#781) adds per-KNOB token attribution
 #: (``tokens_by_knob``), a SIBLING field alongside ``tokens_by_model`` —
 #: also ADDITIVE. Pre-v3 rows stay readable and are counted as
-#: *knob-unattributed*, never dropped. See the module docstring and
-#: :func:`summarize`.
-LEDGER_VERSION = 3
+#: *knob-unattributed*, never dropped. v4 (issue athenaeum#1289) adds per-SURFACE
+#: input-token attribution (``tokens_by_surface``), a SIBLING field alongside
+#: ``tokens_by_knob`` — also ADDITIVE. Unlike ``tokens_by_knob``, it always
+#: carries a synthesized ``"unattributed"`` entry (see :func:`tokens_by_surface`)
+#: so an un-tagged call site's spend is a visible remainder rather than a gap.
+#: Pre-v4 rows stay readable and are counted as *surface-unattributed*, never
+#: dropped. See the module docstring and :func:`summarize`.
+LEDGER_VERSION = 4
 
 #: The two billing modes, in cwc#1629's vocabulary. ``subscription`` notional
 #: dollars and ``api`` real dollars are two metrics that are NEVER summed.
@@ -329,6 +334,51 @@ def tokens_by_knob(usage: "TokenUsage") -> dict[str, dict[str, int]]:
     return out
 
 
+def tokens_by_surface(usage: "TokenUsage") -> dict[str, dict[str, int]]:
+    """Per-surface INPUT-token attribution for a ledger row (issue athenaeum#1289).
+
+    A SIBLING of :func:`tokens_by_knob` — same bucket shape, sourced from
+    :attr:`TokenUsage.per_surface`, which the six declared non-batched
+    surfaces (``athenaeum.models.SURFACE_*`` — see that module for the
+    citation and the batch.py source each name traces to) tag via the
+    ``surface=`` kwarg threaded through ``add()``/``add_tokens()``/
+    ``add_batch_tokens()``.
+
+    UNLIKE ``tokens_by_knob``/``tokens_by_model``, this is never simply
+    empty when a run tagged no surface: it always carries a synthesized
+    ``"unattributed"`` entry (:data:`athenaeum.models.SURFACE_UNATTRIBUTED`)
+    equal to the run's totals minus the sum of every explicitly-tagged
+    surface — batched tier-2/tier-3, and every other knob this issue does
+    not attribute (reasoning tiers, topic, rule_proposals, the freetext-edit
+    resolver path, ...) land there rather than silently vanishing. This is
+    what makes the conservation property true BY CONSTRUCTION: summing every
+    entry's ``"input"`` here always equals ``usage.input_tokens`` exactly,
+    whether or not any of the six surfaces fired this run.
+    """
+    from athenaeum.models import SURFACE_UNATTRIBUTED
+
+    out: dict[str, dict[str, int]] = {}
+    attributed_input = 0
+    attributed_output = 0
+    for surface, bucket in usage.per_surface.items():
+        inp = int(bucket.get("input_tokens", 0) or 0)
+        outp = int(bucket.get("output_tokens", 0) or 0)
+        entry = {"input": inp, "output": outp, "total": inp + outp}
+        for key in _PER_MODEL_DETAIL_KEYS:
+            entry[key] = int(bucket.get(key, 0) or 0)
+        out[surface] = entry
+        attributed_input += inp
+        attributed_output += outp
+    remainder_input = usage.input_tokens - attributed_input
+    remainder_output = usage.output_tokens - attributed_output
+    out[SURFACE_UNATTRIBUTED] = {
+        "input": remainder_input,
+        "output": remainder_output,
+        "total": remainder_input + remainder_output,
+    }
+    return out
+
+
 def build_record(
     usage: "TokenUsage",
     *,
@@ -379,6 +429,16 @@ def build_record(
         # which run_type/models cannot answer on their own (see the module
         # docstring's v3 note).
         "tokens_by_knob": tokens_by_knob(usage),
+        # Per-surface INPUT-token attribution (issue athenaeum#1289): a SIBLING
+        # of tokens_by_knob, not a reshape — answers "of my non-batched
+        # spend, how much went to the C4 resolver / a same-page merge / a
+        # truncation retry / the full-echo fallback?" (the six surfaces
+        # batch.py's module docstring declares out of the Batch API's
+        # scope), which knob/model cannot answer on their own since several
+        # of the six share a knob with ordinary batched traffic. Always
+        # carries an "unattributed" remainder — see tokens_by_surface's
+        # docstring.
+        "tokens_by_surface": tokens_by_surface(usage),
         "api_calls": usage.api_calls,
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
@@ -784,6 +844,7 @@ def summarize(
     by_model: bool = False,
     by_provider: bool = False,
     by_knob: bool = False,
+    by_surface: bool = False,
 ) -> dict[str, Any]:
     """Summarise ledger records, keeping the two cost paths SEPARATE.
 
@@ -792,7 +853,9 @@ def summarize(
     adds per-model sub-buckets; ``by_provider`` adds a per-run-type breakdown
     within each path; ``by_knob`` (issue athenaeum#781) adds per-knob sub-buckets,
     mirroring ``by_model`` exactly (record-level attribution, same never-a-
-    blended-total split within each knob).
+    blended-total split within each knob). ``by_surface`` (issue athenaeum#1289)
+    adds per-surface sub-buckets the same way, one level finer than knob for
+    the six declared non-batched surfaces.
     """
     subscription = _blank_bucket()
     api = _blank_bucket()
@@ -801,8 +864,10 @@ def summarize(
     per_model: dict[str, dict[str, Any]] = {}
     per_run_type: dict[str, dict[str, Any]] = {}
     per_knob: dict[str, dict[str, Any]] = {}
+    per_surface: dict[str, dict[str, Any]] = {}
     unpriceable = 0
     knob_unattributed = 0
+    surface_unattributed = 0
 
     def _blank_slot() -> dict[str, Any]:
         return {
@@ -828,6 +893,13 @@ def summarize(
         # billing bucket.
         if not record.get("tokens_by_knob"):
             knob_unattributed += 1
+        # Mirrors knob_unattributed one level finer: a PRE-v4 row has no
+        # tokens_by_surface key at all (issue athenaeum#1289) — distinct from a
+        # v4 row that simply has nothing but its own synthesized
+        # "unattributed" entry (which IS present, so this stays False for
+        # every v4+ row regardless of whether any of the six surfaces fired).
+        if not record.get("tokens_by_surface"):
+            surface_unattributed += 1
         if by_model:
             for model in record.get("models") or ["(untagged)"]:
                 slot = per_model.setdefault(model, _blank_slot())
@@ -839,6 +911,10 @@ def summarize(
         if by_knob:
             for knob in record.get("tokens_by_knob") or ["(unattributed)"]:
                 slot = per_knob.setdefault(knob, _blank_slot())
+                _accumulate(slot[path], record)
+        if by_surface:
+            for surface in record.get("tokens_by_surface") or ["(unattributed)"]:
+                slot = per_surface.setdefault(surface, _blank_slot())
                 _accumulate(slot[path], record)
 
     # The subscription path carries no real dollars — surface tokens only.
@@ -854,6 +930,10 @@ def summarize(
         # run that tagged no knob (issue athenaeum#781). Additive, same treatment
         # as ``unpriceable_records`` one level down.
         "knob_unattributed_records": knob_unattributed,
+        # Count of PRE-v4 rows with no tokens_by_surface key at all (issue
+        # athenaeum#1289). Additive, same treatment one level finer than
+        # knob_unattributed_records.
+        "surface_unattributed_records": surface_unattributed,
         "subscription": subscription,
         "api": api,
         # Rows whose billing mode could not be determined (issue athenaeum#694):
@@ -869,6 +949,8 @@ def summarize(
         summary["by_run_type"] = per_run_type
     if by_knob:
         summary["by_knob"] = per_knob
+    if by_surface:
+        summary["by_surface"] = per_surface
     return summary
 
 
@@ -887,6 +969,7 @@ def format_summary(
     by_model: bool = False,
     by_provider: bool = False,
     by_knob: bool = False,
+    by_surface: bool = False,
 ) -> str:
     """Render a human report that never blends dollars into subscription rows."""
     sub = summary["subscription"]
@@ -937,6 +1020,17 @@ def format_summary(
             s, a = slot["subscription"], slot["api"]
             lines.append(
                 f"    {knob:<28} sub {_fmt_tokens(s['billable_tokens'])} tok"
+                f"  / api ${a['estimated_cost_usd']:.2f}"
+            )
+    if by_surface and summary.get("by_surface"):
+        # Mirrors the "By knob:" rendering above (issue athenaeum#1289) — one
+        # level finer, the six declared non-batched surfaces plus the
+        # synthesized "unattributed" remainder (see tokens_by_surface).
+        lines.append("  By surface:")
+        for surface, slot in sorted(summary["by_surface"].items()):
+            s, a = slot["subscription"], slot["api"]
+            lines.append(
+                f"    {surface:<28} sub {_fmt_tokens(s['billable_tokens'])} tok"
                 f"  / api ${a['estimated_cost_usd']:.2f}"
             )
     return "\n".join(lines)
