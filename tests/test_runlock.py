@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import threading
 import time
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.cli import main
 from athenaeum.config import (
     resolve_lock_break_stale_after,
+    resolve_lock_heartbeat_interval,
     resolve_lock_warn_stale_after,
 )
 from athenaeum.runlock import (
@@ -172,6 +174,154 @@ class TestRunLockHeartbeat:
         lock.acquire()
         lock.heartbeat()  # no fd held in the degrade path; must not raise
         lock.release()
+
+
+class TestRunLockHeartbeatTimerThread:
+    """Issue athenaeum#1271: the real defect was a heartbeat that only bumped at
+    phase/file boundaries -- a healthy holder mid-way through one long phase
+    could go tens of minutes without a bump, byte-identical in the lockfile
+    to a dead holder over that window. These tests cover the fix: a
+    background thread bumps `heartbeat` on a timer, entirely independent of
+    whether the caller ever calls `lock.heartbeat()` itself. A tiny injected
+    interval keeps this fast and deterministic instead of sleeping the real
+    30s default (never a flaky fixed-wall-clock wait).
+    """
+
+    def test_heartbeat_advances_on_its_own_without_any_caller_call(
+        self, tmp_path: Path
+    ) -> None:
+        interval = 0.05
+        lock = RunLock(tmp_path, heartbeat_interval=interval)
+        lockfile = tmp_path / runlock.LOCKFILE_NAME
+        lock.acquire()
+        try:
+            original = read_holder(lockfile)
+            assert original is not None
+            # Long enough for several timer bumps; the caller NEVER calls
+            # lock.heartbeat() anywhere in this test.
+            time.sleep(interval * 8)
+            refreshed = read_holder(lockfile)
+            assert refreshed is not None
+            assert refreshed["heartbeat"] != original["heartbeat"]
+            # pid/timestamp/host still untouched -- only heartbeat moved.
+            assert refreshed["pid"] == original["pid"]
+            assert refreshed["timestamp"] == original["timestamp"]
+            assert refreshed["host"] == original["host"]
+        finally:
+            lock.release()
+
+    def test_no_two_consecutive_heartbeat_bumps_exceed_a_bounded_gap(
+        self, tmp_path: Path
+    ) -> None:
+        """The reworded acceptance criterion, directly: no two consecutive
+        heartbeat observations on a live holder are more than N seconds
+        apart, for a documented N (here N is a small, generous multiple of
+        the injected interval -- the ratio is what the fix guarantees, not
+        this test's absolute numbers)."""
+        interval = 0.05
+        bound_seconds = interval * 8
+        lock = RunLock(tmp_path, heartbeat_interval=interval)
+        lockfile = tmp_path / runlock.LOCKFILE_NAME
+        lock.acquire()
+        try:
+            distinct_bumps: list[datetime] = []
+            last_raw: str | None = None
+            deadline = time.monotonic() + interval * 12
+            while time.monotonic() < deadline:
+                holder = read_holder(lockfile)
+                # A bare read can transiently land in the microsecond
+                # ftruncate-before-write window a refresh opens (pre-existing
+                # to lease_refresh_heartbeat) and see an empty file; just
+                # retry on the next poll rather than treating that as absence
+                # of a bump.
+                if holder is None:
+                    time.sleep(interval / 5)
+                    continue
+                hb_raw = holder["heartbeat"]
+                if hb_raw != last_raw:
+                    distinct_bumps.append(datetime.fromisoformat(hb_raw))
+                    last_raw = hb_raw
+                time.sleep(interval / 5)
+            # The background thread bumped multiple times unaided.
+            assert len(distinct_bumps) >= 3
+            for earlier, later in zip(distinct_bumps, distinct_bumps[1:]):
+                gap = (later - earlier).total_seconds()
+                assert gap <= bound_seconds
+        finally:
+            lock.release()
+
+    def test_release_stops_the_background_thread_promptly(
+        self, tmp_path: Path
+    ) -> None:
+        interval = 0.05
+        lock = RunLock(tmp_path, heartbeat_interval=interval)
+        lock.acquire()
+        thread = lock._heartbeat_thread
+        assert thread is not None
+        assert thread.is_alive()
+        lock.release()
+        assert lock._heartbeat_thread is None
+        assert not thread.is_alive()
+
+    def test_manual_and_timer_heartbeat_calls_do_not_corrupt_the_lockfile(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1271: a caller's own phase/file-boundary
+        `lock.heartbeat()` calls (several already exist in the codebase) can
+        race the background timer thread's own calls. Both funnel through
+        the same write lock, so the lockfile must stay well-formed (never a
+        partial/interleaved write) under concurrent callers."""
+        interval = 0.01
+        lock = RunLock(tmp_path, heartbeat_interval=interval)
+        lockfile = tmp_path / runlock.LOCKFILE_NAME
+        lock.acquire()
+        try:
+            stop = threading.Event()
+
+            def _hammer() -> None:
+                while not stop.is_set():
+                    lock.heartbeat()
+
+            hammerer = threading.Thread(target=_hammer)
+            hammerer.start()
+            try:
+                deadline = time.monotonic() + 0.3
+                saw_a_read = False
+                while time.monotonic() < deadline:
+                    holder = read_holder(lockfile)
+                    # A bare (non-flock) read can transiently land in the
+                    # microsecond ftruncate-before-write window a refresh
+                    # opens (pre-existing to lease_refresh_heartbeat, not
+                    # introduced here) and see an empty file -- read_holder
+                    # correctly reports that as None. What must NEVER happen,
+                    # from either writer racing the other, is a read landing
+                    # on a PARTIAL/malformed record (e.g. some but not all of
+                    # the four fields) -- every non-None read must be the
+                    # complete, well-formed record.
+                    if holder is None:
+                        continue
+                    saw_a_read = True
+                    assert set(holder.keys()) == {
+                        "pid",
+                        "timestamp",
+                        "host",
+                        "heartbeat",
+                    }
+                    assert holder["pid"] == str(os.getpid())
+                assert saw_a_read
+            finally:
+                stop.set()
+                hammerer.join(timeout=5.0)
+        finally:
+            lock.release()
+
+    def test_heartbeat_interval_falls_back_to_default_for_non_positive(
+        self, tmp_path: Path
+    ) -> None:
+        lock = RunLock(tmp_path, heartbeat_interval=0)
+        assert lock.heartbeat_interval == runlock.HEARTBEAT_INTERVAL_SECONDS
+        lock2 = RunLock(tmp_path, heartbeat_interval=-5)
+        assert lock2.heartbeat_interval == runlock.HEARTBEAT_INTERVAL_SECONDS
 
 
 class TestHeartbeatAgeSeconds:
@@ -733,6 +883,97 @@ class TestRunLockLoudStaleWarning:
             lock1.release()
 
 
+class TestLockHeldMessageDetail:
+    """Issue athenaeum#1271, proposal item 3: an expired `--wait` (or an
+    immediate fail-fast) must report the holder's pid, acquisition time, and
+    last heartbeat instead of a bare "another athenaeum run holds the lock" —
+    and item 4: a same-host `os.kill(pid, 0)` liveness note, independent of
+    the heartbeat."""
+
+    def test_message_reports_pid_acquisition_age_and_liveness(
+        self, tmp_path: Path
+    ) -> None:
+        holder_lock = RunLock(tmp_path)
+        holder_lock.acquire()
+        try:
+            waiter = RunLock(tmp_path)
+            with pytest.raises(LockHeld) as excinfo:
+                waiter.acquire()
+            msg = str(excinfo.value)
+            assert f"PID {os.getpid()}" in msg
+            assert "acquired" in msg
+            assert "heartbeat" in msg
+            # Same-host, genuinely-live holder -> a positive liveness note.
+            assert "pid alive (os.kill probe)" in msg
+        finally:
+            holder_lock.release()
+
+    def test_message_reports_last_heartbeat_age_after_a_bump(
+        self, tmp_path: Path
+    ) -> None:
+        holder_lock = RunLock(tmp_path, heartbeat_interval=0.02)
+        holder_lock.acquire()
+        try:
+            time.sleep(0.08)  # let the timer thread bump at least once
+            waiter = RunLock(tmp_path)
+            with pytest.raises(LockHeld) as excinfo:
+                waiter.acquire()
+            msg = str(excinfo.value)
+            assert "last heartbeat" in msg
+            assert "heartbeat never bumped past acquire" not in msg
+        finally:
+            holder_lock.release()
+
+    def test_message_never_raises_on_a_holder_with_no_metadata(
+        self, tmp_path: Path
+    ) -> None:
+        # A lockfile the flock is held on but with unparseable/absent
+        # metadata must still render a message, not raise from inside
+        # LockHeld.__init__/._render.
+        exc = LockHeld(tmp_path / runlock.LOCKFILE_NAME, None)
+        assert "another athenaeum process" in str(exc)
+
+
+class TestLivenessStrHelper:
+    """Unit coverage for `runlock._liveness_str`, the belt-and-braces
+    `os.kill(pid, 0)` signal (issue athenaeum#1271, proposal item 4) — kept
+    independent of the heartbeat, and deliberately host-aware: a PID number
+    is only meaningful on the machine that minted it."""
+
+    def test_alive_local_pid_reports_alive(self) -> None:
+        note = runlock._liveness_str(
+            {"pid": str(os.getpid()), "host": socket.gethostname()}
+        )
+        assert note == "pid alive (os.kill probe)"
+
+    def test_dead_local_pid_reports_not_alive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(runlock, "_pid_alive", lambda _pid: False)
+        note = runlock._liveness_str({"pid": "999999", "host": socket.gethostname()})
+        assert note is not None
+        assert "NOT alive locally" in note
+
+    def test_foreign_host_pid_is_unchecked_not_guessed_dead_or_alive(self) -> None:
+        # A pid number from a DIFFERENT host is never comparable to a local
+        # os.kill() probe -- must not claim alive OR dead, just unchecked.
+        note = runlock._liveness_str(
+            {"pid": str(os.getpid()), "host": "some-other-machine.example"}
+        )
+        assert note is not None
+        assert "unchecked" in note
+        assert "some-other-machine.example" in note
+
+    def test_missing_pid_returns_none(self) -> None:
+        assert runlock._liveness_str({"host": socket.gethostname()}) is None
+
+    def test_unparseable_pid_returns_none(self) -> None:
+        assert (
+            runlock._liveness_str({"pid": "not-a-number", "host": socket.gethostname()})
+            is None
+        )
+
+
 class TestResolveLockBreakStaleAfter:
     def test_default_is_six_hours(self) -> None:
         assert resolve_lock_break_stale_after(None) == 21600.0
@@ -809,6 +1050,52 @@ class TestResolveLockWarnStaleAfter:
         assert resolve_lock_warn_stale_after(cfg) == 7200.0
         cfg = {"librarian": {"lock_warn_stale_after": "nope"}}
         assert resolve_lock_warn_stale_after(cfg) == 7200.0
+
+
+class TestResolveLockHeartbeatInterval:
+    """Issue athenaeum#1271."""
+
+    def test_default_is_thirty_seconds(self) -> None:
+        assert resolve_lock_heartbeat_interval(None) == 30.0
+        assert resolve_lock_heartbeat_interval({}) == 30.0
+        assert resolve_lock_heartbeat_interval({"librarian": {}}) == 30.0
+        # Matches the module constant the RunLock class default falls back to.
+        assert resolve_lock_heartbeat_interval(None) == runlock.HEARTBEAT_INTERVAL_SECONDS
+
+    def test_yaml_value_wins(self) -> None:
+        cfg = {"librarian": {"lock_heartbeat_interval": 10}}
+        assert resolve_lock_heartbeat_interval(cfg) == 10.0
+
+    def test_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_LOCK_HEARTBEAT_INTERVAL", "5")
+        cfg = {"librarian": {"lock_heartbeat_interval": 10}}
+        assert resolve_lock_heartbeat_interval(cfg) == 5.0
+
+    def test_zero_or_negative_falls_back_to_default_not_disabled(self) -> None:
+        # Unlike break/warn_stale_after, there is no disable mode: a live
+        # lock should always get a timer-driven bump.
+        assert (
+            resolve_lock_heartbeat_interval({"librarian": {"lock_heartbeat_interval": 0}})
+            == 30.0
+        )
+        assert (
+            resolve_lock_heartbeat_interval({"librarian": {"lock_heartbeat_interval": -5}})
+            == 30.0
+        )
+
+    def test_env_zero_or_negative_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_LOCK_HEARTBEAT_INTERVAL", "0")
+        assert resolve_lock_heartbeat_interval(None) == 30.0
+        monkeypatch.setenv("ATHENAEUM_LOCK_HEARTBEAT_INTERVAL", "-1")
+        assert resolve_lock_heartbeat_interval(None) == 30.0
+
+    def test_bool_and_non_numeric_fall_through(self) -> None:
+        cfg = {"librarian": {"lock_heartbeat_interval": True}}
+        assert resolve_lock_heartbeat_interval(cfg) == 30.0
+        cfg = {"librarian": {"lock_heartbeat_interval": "nope"}}
+        assert resolve_lock_heartbeat_interval(cfg) == 30.0
 
 
 class TestNoFcntlDegrade:

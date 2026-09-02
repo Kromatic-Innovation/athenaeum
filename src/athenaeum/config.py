@@ -1573,6 +1573,51 @@ def resolve_lock_warn_stale_after(config: dict[str, Any] | None) -> float | None
     return default
 
 
+def resolve_lock_heartbeat_interval(config: dict[str, Any] | None) -> float:
+    """Resolve the run lock's guaranteed background bump interval (athenaeum#1271, default 30s).
+
+    :class:`athenaeum.runlock.RunLock` starts a daemon thread the moment a
+    lock is acquired that refreshes the lockfile's ``heartbeat`` line every
+    this-many seconds, independent of whatever the caller's own run loop is
+    doing — see that module's "Staleness contract" docstring section for the
+    full reasoning (this closes the gap where the ONLY bumps came from
+    caller-driven phase/file-boundary ticks, which could go tens of minutes
+    between bumps on one long phase even while fully healthy)::
+
+        librarian:
+          lock_heartbeat_interval: 30   # seconds
+
+    Precedence: ``ATHENAEUM_LOCK_HEARTBEAT_INTERVAL`` env, then
+    ``librarian.lock_heartbeat_interval`` yaml, then ``30.0`` — matching
+    :data:`athenaeum.runlock.HEARTBEAT_INTERVAL_SECONDS`, duplicated here as a
+    literal rather than imported (this module stays L2 and does not import
+    ``athenaeum.runlock`` at module or function scope, mirroring how
+    ``resolve_lock_break_stale_after``/``resolve_lock_warn_stale_after`` above
+    hardcode their own defaults instead of reaching into ``runlock``). ``bool``
+    and non-numeric values fall through to the default. Unlike
+    ``lock_break_stale_after``/``lock_warn_stale_after`` there is no
+    ``<= 0``-disables convention here — a non-positive value falls back to
+    the default instead, so a stray ``0`` in config can never silently turn
+    the heartbeat thread off (a live lock should always get one).
+    """
+    default = 30.0
+    value = _env_number("ATHENAEUM_LOCK_HEARTBEAT_INTERVAL", float)
+    if value is not None:
+        return value if value > 0 else default
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("lock_heartbeat_interval")
+            if raw is None or isinstance(raw, bool):
+                return default
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return default
+            return value if value > 0 else default
+    return default
+
+
 #: Default pending-batch raw-file lease, in seconds (issue athenaeum#1143).
 #:
 #: 72h. Shorter than the Batch API's 29-day result retention, so a
