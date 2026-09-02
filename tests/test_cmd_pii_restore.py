@@ -135,6 +135,38 @@ def test_missing_git_repository_fails_loudly_instead_of_reporting_false_zero(
     assert "TOTAL RESTORABLE" not in captured.out
 
 
+def test_apply_honours_configured_safe_email_exact(tmp_path: Path) -> None:
+    """issue athenaeum#1284: pii.restore.safe_email_exact in athenaeum.yaml
+    must actually be honoured end to end through the INSTALLED CLI, not
+    just at the library layer -- this is the exact capability regression
+    the issue names against scripts/pii-restore.py."""
+    root = _build_fixture_repo(tmp_path)
+    (root / "athenaeum.yaml").write_text(
+        "storage:\n  mapping:\n    pii: excluded\n"
+        "pii:\n  restore:\n    safe_email_exact:\n      - jane.doe@example.com\n"
+    )
+
+    rc = _run(root, "--apply")
+
+    assert rc == 0
+    restored = (root / "wiki" / "person-a.md").read_text()
+    assert MARKER not in restored
+    assert "jane.doe@example.com" in restored
+    # Phone axis is untouched by this key -- still redacted.
+    assert MARKER in (root / "wiki" / "person-b.md").read_text()
+
+
+def test_apply_without_config_still_redacts_real_person_email(tmp_path: Path) -> None:
+    """Control: with no pii.restore block at all, person-a.md's real
+    address stays redacted exactly as before this issue's fix."""
+    root = _build_fixture_repo(tmp_path)
+
+    rc = _run(root, "--apply")
+
+    assert rc == 0
+    assert MARKER in (root / "wiki" / "person-a.md").read_text()
+
+
 def test_clean_corpus_dry_run_returns_zero(tmp_path: Path) -> None:
     """A corpus with no markers at all is a clean 0, not the CI-gate 2."""
     root = tmp_path / "knowledge"

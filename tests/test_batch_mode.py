@@ -1333,6 +1333,81 @@ class TestSamePageMerges:
         assert ref0 in page and ref1 in page
         assert page.index(ref0) < page.index(ref1)
 
+    def test_same_target_merges_tag_same_page_multi_merge_surface(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1289: a page targeted by more than one merge this
+        run (the scenario above) is the declared SURFACE_SAME_PAGE_MULTI_MERGE
+        surface -- driven directly through process_batch_run (default
+        batch_write=True) so the real TokenUsage accumulator can be
+        inspected."""
+        from athenaeum.models import SURFACE_SAME_PAGE_MULTI_MERGE
+
+        contents = [
+            "Acme Corp update one.\n",
+            "Acme Corp update two.\n",
+        ]
+        root = _seed_root(tmp_path, "k", contents, with_acme=True)
+        raw_files = discover_raw_files(root / "raw")
+        index = EntityIndex(root / "wiki")
+        client = _FakeClient(_scripted_responder)  # sync allowed for merges
+
+        usage = TokenUsage()
+        result = process_batch_run(
+            raw_files,
+            index,
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+        )
+        assert result.updated == 2  # both merges landed on the same page
+
+        assert usage.per_surface[SURFACE_SAME_PAGE_MULTI_MERGE]["input_tokens"] == 200
+        # Conservation: everything else this run spent (tier-2 classify, both
+        # files, catching nothing) is either zero (Acme Corp matches at tier
+        # 1, no LLM call) or lands in the caller-visible total either way.
+        assert usage.input_tokens >= 200
+
+    def test_batch_write_false_does_not_tag_same_page_multi_merge_surface(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1289: when the write knob is not batched AT ALL
+        this run (``batch_write=False``), EVERY merge routes through
+        ``sync_merges`` -- not just same-page groups -- so tagging them all
+        as the same-page surface would overcount it. A single, NON-grouped
+        merge in this mode must stay unattributed."""
+        contents = ["Acme Corp update one.\n"]
+        root = _seed_root(tmp_path, "k", contents, with_acme=True)
+        raw_files = discover_raw_files(root / "raw")
+        index = EntityIndex(root / "wiki")
+        client = _FakeClient(_scripted_responder)  # sync allowed for merges
+
+        usage = TokenUsage()
+        result = process_batch_run(
+            raw_files,
+            index,
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            batch_write=False,
+        )
+        assert result.updated == 1
+        assert usage.per_surface == {}
+        # 100 tier-2 classify (batched, untagged either way) + 100 the
+        # sync merge itself spent -- untagged because batch_write=False.
+        assert usage.per_knob["write"]["input_tokens"] == 100
+        assert usage.input_tokens == 200
+
 
 # ---------------------------------------------------------------------------
 # Documented dedup divergence: tier 0/1 runs up front for the whole window

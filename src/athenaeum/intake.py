@@ -59,6 +59,8 @@ from athenaeum.config import (
     resolve_non_intake_sources,
     resolve_operational_markers,
     resolve_raw_file_max_bytes,
+    resolve_raw_retention_max_file_bytes,
+    resolve_raw_retention_max_source_bytes,
 )
 from athenaeum.corrections import parse_batch_envelope
 from athenaeum.dimensions import stamp_recorded_time, validate_intake_temporal
@@ -758,15 +760,17 @@ def round_robin_by_source(
       order means the same trailing sources get zero slots on every run
       forever -- starvation by sort position again, merely at a different
       threshold. The librarian passes
-      :func:`athenaeum.run_summary_log.read_starvation_priority` here — the
-      previous run's zero-slot sources, LONGEST-STARVED FIRST, recovered from
-      the athenaeum#1102 run-summary ledger so this needs no new state. That
-      aging is load-bearing, not cosmetic: rotating by name alone lets a
-      source keep losing its turn to sources starved only once and still wait
-      unboundedly, while a rank that rises every skipped run reaches the head
-      within ``ceil(n_sources / limit)`` runs. A source named here that has no
-      pending files this run is simply absent from ``by_source`` and costs
-      nothing.
+      :func:`athenaeum.run_summary_log.read_combined_starvation_priority`
+      here — the previous run's zero-slot sources (athenaeum#1291), LONGEST-
+      STARVED FIRST, THEN (athenaeum#1295) any source that received slots but
+      processed zero files, longest-STALL-streak-first, appended after —
+      both recovered from the athenaeum#1102 run-summary ledger so this needs
+      no new state. That aging is load-bearing, not cosmetic: rotating by
+      name alone lets a source keep losing its turn to sources starved only
+      once and still wait unboundedly, while a rank that rises every skipped
+      run reaches the head within ``ceil(n_sources / limit)`` runs. A source
+      named here that has no pending files this run is simply absent from
+      ``by_source`` and costs nothing.
     * **The window is interleaved, not re-concatenated.** A source's first
       file is scheduled before any source's second file, so a run that trips
       its wall-clock deadline part-way through the window has still touched
@@ -930,6 +934,99 @@ def discover_raw_backlog_bytes(
         except OSError:
             continue
     return total
+
+
+def check_raw_retention(
+    raw_root: Path, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Report raw-intake files/sources exceeding configured size ceilings
+    (issue athenaeum#1269) — detect and report ONLY, never act.
+
+    Two independent, DEFAULT-NONE dimensions, both resolved from *config*
+    via :func:`athenaeum.config.resolve_raw_retention_max_file_bytes` /
+    :func:`resolve_raw_retention_max_source_bytes`:
+
+    - **Per file**: any single file anywhere under a `raw/<source>/` tree
+      at or above ``max_file_bytes``.
+    - **Per source**: the SUM of every file's on-disk size anywhere under
+      one `raw/<source>/` tree, at or above ``max_source_bytes`` — this is
+      the dimension that catches many individually-small files aggregating
+      past a ceiling that no single one of them would trip (the corpus that
+      motivated this issue: 943 MB across 2,247 files, ~420 KB average —
+      see `athenaeum-adapters#151`).
+
+    Deliberately walks the raw filesystem tree directly
+    (:func:`os.walk`, every regular file, any extension) rather than
+    delegating to :func:`discover_raw_files` — this is a storage-hygiene
+    concern about literal bytes committed to a git repository, independent
+    of whether a given file's extension or shape makes it something the
+    entity tiers would ever offer to a rule or a reasoning pass. The mural
+    corpus above is `.json`, which `discover_raw_files` never globs at all;
+    a check built on top of it would silently never see the files it exists
+    to report on. Also independent of `librarian.non_intake_sources` and the
+    `answers` skip `discover_raw_files` applies for the same reason: those
+    exclusions are about intake CLASSIFICATION, not repository size.
+
+    Returns a summary dict, unconditionally carrying the two counters this
+    issue names plus the offending paths/sources — never raises, never
+    writes, never touches `discover_raw_files`'s compiled-exempt/claimed-
+    correction-batch bookkeeping::
+
+        {
+            "raw-oversize-file": <int count>,
+            "raw-oversize-source": <int count>,
+            "oversize_files": [{"path": "<source>/<relpath>", "bytes": <int>}, ...],
+            "oversize_sources": [{"source": "<source>", "bytes": <int>}, ...],
+        }
+
+    With BOTH thresholds unset (the default) this returns the all-zero
+    summary immediately, without walking the filesystem at all — a fresh
+    install pays no cost for a check it never armed. *raw_root* need not
+    exist (mirrors :func:`discover_raw_files`'s tolerance of a
+    not-yet-created raw tree): returns the all-zero summary rather than
+    raising. Tolerant of a file vanishing mid-walk (race with a concurrent
+    compile/retire pass), same as :func:`discover_raw_backlog_bytes`.
+    """
+    summary: dict[str, Any] = {
+        "raw-oversize-file": 0,
+        "raw-oversize-source": 0,
+        "oversize_files": [],
+        "oversize_sources": [],
+    }
+    max_file_bytes = resolve_raw_retention_max_file_bytes(config)
+    max_source_bytes = resolve_raw_retention_max_source_bytes(config)
+    if max_file_bytes is None and max_source_bytes is None:
+        return summary
+    if not raw_root.exists():
+        return summary
+    _raise_if_raw_root_is_actually_knowledge_root(raw_root, param_name="raw_root")
+
+    for source_dir in sorted(raw_root.iterdir()):
+        if not source_dir.is_dir():
+            continue
+        source = source_dir.name
+        source_total = 0
+        for dirpath, _dirnames, filenames in os.walk(source_dir):
+            for filename in filenames:
+                fpath = Path(dirpath) / filename
+                try:
+                    size = fpath.stat().st_size
+                except OSError:
+                    continue
+                source_total += size
+                if max_file_bytes is not None and size >= max_file_bytes:
+                    summary["oversize_files"].append(
+                        {
+                            "path": fpath.relative_to(raw_root).as_posix(),
+                            "bytes": size,
+                        }
+                    )
+        if max_source_bytes is not None and source_total >= max_source_bytes:
+            summary["oversize_sources"].append({"source": source, "bytes": source_total})
+
+    summary["raw-oversize-file"] = len(summary["oversize_files"])
+    summary["raw-oversize-source"] = len(summary["oversize_sources"])
+    return summary
 
 
 def tier0_passthrough(

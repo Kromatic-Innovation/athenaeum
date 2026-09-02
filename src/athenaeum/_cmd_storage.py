@@ -17,7 +17,10 @@ Two sub-commands:
   athenaeum#502 deliberately excluded: rename a confidently-nameable page (derived
   display name from the local-part), move the address off-corpus, and rewrite
   inbound wikilinks — an ambiguous local-part is left unrenamed and reported
-  as a residual count instead.
+  as a residual count instead. Consults the same adjudicated
+  ``wiki/_pii-allowlist.yml`` ``lint-pii`` reads (issue athenaeum#1275): a value with
+  an entry there is never migrated, and a skip is always reported (dry-run and
+  ``--apply`` agree on the skip set).
 - ``lint-pii`` — a corpus-wide PII gate: scan EVERY file under ``wiki/`` (not
   only entity pages — ``_``-prefixed queue/index/archive files and ``.bak``
   files included) for an inline email/phone and exit non-zero on any finding,
@@ -47,18 +50,29 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    from athenaeum.runlock import RunLock
+
+from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
+from athenaeum.pending_merges_pii import scrub_pending_merges
 from athenaeum.pii import (
     PII_ALLOWLIST_FILENAME,
+    PiiAllowlistEntry,
     adjudicate_corpus_pii,
     is_pii_class_excluded,
     load_pii_allowlist,
     resolve_pii_scan_exclude_filenames,
     scan_corpus_pii,
     scan_excluded_by_name,
+)
+from athenaeum.rules import (
+    DispositionPruneMismatchError,
+    default_shape_rule_dispositions_path,
+    prune_shape_rule_dispositions_to_positive,
 )
 from athenaeum.sensitivity_lint import (
     SensitivityMappingLintResult,
@@ -97,7 +111,9 @@ _PROGRESS_EVERY = 500
 
 
 def _resolve_knowledge_root(args: argparse.Namespace) -> Path:
-    return (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    return (
+        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    )
 
 
 def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
@@ -303,6 +319,34 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Emit machine-readable JSON findings instead of plain text.",
     )
 
+    prune_p = s_sub.add_parser(
+        "prune-dispositions",
+        help=(
+            "One-time prune of wiki/_shape_rule_dispositions.jsonl to its "
+            "positive-disposition records only (issue athenaeum#1274 AC3/AC4). "
+            "Dry-run by default: reports the disposition histogram and "
+            "projected size. --apply writes."
+        ),
+    )
+    prune_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge root (default: ~/knowledge).",
+    )
+    prune_p.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Write the pruned ledger (atomic replace). Without this flag the "
+            "command is a dry-run that prints the histogram and projected "
+            "size and writes nothing. Refuses to write (exit 1, nothing "
+            "written) if a re-parse of the constructed output does not "
+            "carry exactly the positive-row count the scan pass promised."
+        ),
+    )
+    _add_lock_args(prune_p)
+
 
 def cmd_storage(args: argparse.Namespace) -> int:
     sub = getattr(args, "storage_target", None)
@@ -312,8 +356,11 @@ def cmd_storage(args: argparse.Namespace) -> int:
         return _cmd_storage_lint_pii(args)
     if sub == "lint-mapping":
         return _cmd_storage_lint_mapping(args)
+    if sub == "prune-dispositions":
+        return _cmd_storage_prune_dispositions(args)
     print(
-        "usage: athenaeum storage {migrate-pii,lint-pii,lint-mapping} [...]",
+        "usage: athenaeum storage {migrate-pii,lint-pii,lint-mapping,"
+        "prune-dispositions} [...]",
         file=sys.stderr,
     )
     return 2
@@ -364,6 +411,56 @@ def _print_excluded_record_conflicts(plan: PiiMigrationPlan, *, refusing: bool) 
         print(
             f"  {conflict.field}: existing={conflict.existing_value!r} "
             f"new={conflict.new_value!r}",
+            file=sys.stderr,
+        )
+
+
+def _scrub_merge_sidecar(
+    knowledge_root: Path, values: list[str], *, apply: bool
+) -> None:
+    """Redact just-migrated values out of ``_pending_merges.md`` (issue athenaeum#1276).
+
+    A merge proposal stores its ``draft_merged_body`` verbatim, so a page whose
+    PII this run just moved off-corpus can still have a plain-text copy of the
+    same addresses sitting in the sidecar — an invisible failure: the page reads
+    clean, the excluded record exists, the index is refreshed, and ``lint-pii``
+    still finds the values under ``wiki/``. Scrubbing here is what makes
+    "migrated" mean migrated.
+
+    Never silent in either direction: a redaction is reported, and so is a value
+    the scrubber deliberately left on an identity-bearing line (see
+    :class:`~athenaeum.pending_merges_pii.ProposalPiiResidual`). Follows the
+    caller's dry-run/apply mode, so ``migrate-pii`` without ``--apply`` still
+    writes nothing anywhere.
+    """
+    if not values:
+        return
+    merges_path = knowledge_root / "wiki" / "_pending_merges.md"
+    try:
+        result = scrub_pending_merges(merges_path, values=values, apply=apply)
+    except (OSError, UnicodeDecodeError) as exc:  # pragma: no cover - defensive
+        print(
+            f"warning: could not scrub {merges_path} ({exc}); the migrated "
+            "contact data may still be embedded in a pending merge proposal. "
+            "Run `athenaeum merges scrub-pii --apply` once resolved.",
+            file=sys.stderr,
+        )
+        return
+    if result.scrubbed:
+        verb = "redacted" if result.applied else "[DRY RUN] would redact"
+        print(
+            f"{verb} {result.values_redacted} migrated value(s) from "
+            f"{len(result.scrubbed)} pending merge proposal(s) in "
+            f"{merges_path.name}."
+        )
+    for residual in result.residual:
+        print(
+            f"NOTE: {merges_path.name}: proposal {residual.merge_target_name!r} "
+            f"still names {len(residual.values)} migrated value(s) on an "
+            "identity-bearing line (header/sources) — left in place because "
+            "rewriting it would re-id the proposal. Rename the underlying page "
+            "(`migrate-pii --rename-name-email`, issue athenaeum#505) and "
+            "re-propose.",
             file=sys.stderr,
         )
 
@@ -484,6 +581,58 @@ def _cmd_storage_migrate_pii(args: argparse.Namespace) -> int:
     return _cmd_storage_migrate_pii_single(args)
 
 
+def _load_migrate_pii_allowlist(wiki_root: Path) -> dict[str, str] | None:
+    """Load the adjudicated allowlist ``migrate-pii`` must never override (issue athenaeum#1275).
+
+    Reuses :func:`athenaeum.pii.load_pii_allowlist` — the exact reader
+    ``lint-pii`` already uses for the same conventional path — so the two
+    commands can never disagree about what "adjudicated" means (one policy,
+    one source of truth; no second, parallel allowlist parser).
+
+    A MISSING file is not an error: it means nothing has been adjudicated
+    yet, so migrating everything is correct — exactly today's pre-athenaeum#1275
+    behaviour, and :func:`~athenaeum.pii.load_pii_allowlist`'s own documented
+    contract. A file that EXISTS but fails to load cleanly (malformed YAML,
+    or any entry missing its value/reason) is different: silently treating
+    that as "zero entries" would redact values the operator already
+    adjudicated as not-PII — the exact bug this issue fixes, just relocated
+    into the allowlist reader instead of its absence. So that case fails
+    loud — printed and refused — rather than silently-empty (unsafe: skips
+    protection) or allow-everything (unsafe the other way: would tolerate a
+    broken allowlist file forever).
+
+    Returns ``{value: reason}`` on success (possibly empty), or ``None`` if
+    the caller must abort (the errors are already printed to stderr).
+    """
+    allowlist_path = wiki_root / PII_ALLOWLIST_FILENAME
+    entries, errors = load_pii_allowlist(allowlist_path)
+    if errors:
+        for err in errors:
+            print(f"error: allowlist unreadable -- {err}", file=sys.stderr)
+        print(
+            f"error: refusing to run migrate-pii: {allowlist_path} exists but "
+            'did not load cleanly (see above). Treating that as "nothing '
+            'adjudicated" would redact values the operator already ruled are '
+            "not PII -- fix the allowlist, then re-run.",
+            file=sys.stderr,
+        )
+        return None
+    return {e.value: e.reason for e in entries}
+
+
+def _print_skipped_allowlisted(skipped: tuple[PiiAllowlistEntry, ...]) -> None:
+    """Print the per-page allowlist-skip report (issue athenaeum#1275, AC2).
+
+    Never silent: printed unconditionally when *skipped* is non-empty, in
+    BOTH the dry-run preview and the ``--apply`` path (the same call site
+    covers both — see :func:`_cmd_storage_migrate_pii_single` — so the two
+    modes agree on the skip set by construction, AC4).
+    """
+    print(f"Skipped {len(skipped)} allowlisted value(s) on this page, with reasons:")
+    for entry in skipped:
+        print(f"  {entry.value!r}: {entry.reason}")
+
+
 def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
     knowledge_root = _resolve_knowledge_root(args)
     page_path: Path = args.page
@@ -492,6 +641,15 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
         return 1
 
     config = load_config(knowledge_root)
+    wiki_root = knowledge_root / "wiki"
+
+    # issue athenaeum#1275: consult the adjudicated allowlist BEFORE planning
+    # anything, so a value the operator has already ruled is not PII is never
+    # migrated. See _load_migrate_pii_allowlist for the missing-vs-malformed
+    # distinction.
+    allowlist = _load_migrate_pii_allowlist(wiki_root)
+    if allowlist is None:
+        return 1
 
     # Safety gate: the excluded surface is only actually off-corpus when the
     # operator has mapped the ``pii`` class to an excluded-policy adapter.
@@ -523,7 +681,6 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
     # path the rename is about to invalidate would be reading a stale target.
     renamed_this_run = False
     if getattr(args, "rename_name_email", False):
-        wiki_root = knowledge_root / "wiki"
         rename_report = _run_rename_slice(
             args, wiki_root, config, knowledge_root, [page_path]
         )
@@ -541,10 +698,15 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
             renamed_this_run = True
             page_path = wiki_root / f"{rename_report.renames[-1][1]}.md"
 
-    plan = plan_pii_migration(page_path, config, knowledge_root)
+    plan = plan_pii_migration(page_path, config, knowledge_root, allowlist=allowlist)
+
+    if plan.skipped_allowlisted:
+        _print_skipped_allowlisted(plan.skipped_allowlisted)
 
     if not plan.changed:
-        print(f"no archival contact data (emails/phones) found in {page_path}; nothing to migrate.")
+        print(
+            f"no archival contact data (emails/phones) found in {page_path}; nothing to migrate."
+        )
         if renamed_this_run:
             # The rename still wrote; its index step is owed regardless of
             # whether the body pass found anything.
@@ -570,6 +732,7 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
         sys.stdout.write(plan.rewritten_page_text or "")
         print(f"\n--- {record_label} excluded contact record ---")
         sys.stdout.write(plan.excluded_page_text or "")
+        _scrub_merge_sidecar(knowledge_root, plan.emails + plan.phones, apply=False)
         return 0
 
     if plan.excluded_record_conflicts:
@@ -578,6 +741,7 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
 
     _apply_plan(plan)
     print(f"migrated PII off {page_path}\n{summary}")
+    _scrub_merge_sidecar(knowledge_root, plan.emails + plan.phones, apply=True)
     _post_apply_index_step(args, knowledge_root, config)
     return 0
 
@@ -601,6 +765,12 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
     knowledge_root = _resolve_knowledge_root(args)
     wiki_root = knowledge_root / "wiki"
     config = load_config(knowledge_root)
+
+    # issue athenaeum#1275: same allowlist consultation as the single-page path —
+    # see _load_migrate_pii_allowlist for the missing-vs-malformed distinction.
+    allowlist = _load_migrate_pii_allowlist(wiki_root)
+    if allowlist is None:
+        return 1
 
     # Same safety gate as the single-page path: refuse to --apply (which would
     # write contact records) unless the operator has actually mapped ``pii`` to
@@ -649,12 +819,21 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
     name_pii_excluded = 0
     conflicted = 0
     conflicted_pages: list[tuple[Path, tuple]] = []
+    skipped_allowlisted_pages: list[tuple[Path, tuple[PiiAllowlistEntry, ...]]] = []
+    # athenaeum#1276: every value this run moves off-corpus, accumulated so the
+    # merge sidecar is scrubbed ONCE after the sweep rather than re-read and
+    # rewritten per page (a 741-block file over an 11.5k-page scan).
+    migrated_values: list[str] = []
     for i, page_path in enumerate(pages, start=1):
         try:
-            plan = plan_pii_migration(page_path, config, knowledge_root)
+            plan = plan_pii_migration(
+                page_path, config, knowledge_root, allowlist=allowlist
+            )
         except (OSError, UnicodeDecodeError) as exc:
             print(f"[migrate-pii] skip {page_path}: {exc}", file=sys.stderr)
             continue
+        if plan.skipped_allowlisted:
+            skipped_allowlisted_pages.append((page_path, plan.skipped_allowlisted))
         if plan.name_field_pii:
             name_pii_excluded += 1
         if plan.changed:
@@ -672,6 +851,8 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
                 records += 1
                 total_emails += len(plan.emails)
                 total_phones += len(plan.phones)
+                migrated_values.extend(plan.emails)
+                migrated_values.extend(plan.phones)
                 if args.apply:
                     _apply_plan(plan)
         if i % _PROGRESS_EVERY == 0 or i == total:
@@ -687,6 +868,7 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
         f"{records} excluded contact record(s) to create; "
         f"{total_emails} email(s), {total_phones} phone(s)."
     )
+    _scrub_merge_sidecar(knowledge_root, migrated_values, apply=args.apply)
     if name_pii_excluded and not getattr(args, "rename_name_email", False):
         # The name-is-an-email population (athenaeum#502): EXCLUDED from this automatic
         # path (renaming breaks slugs/edges) and handled in a separate slice
@@ -716,12 +898,27 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
             fields = ", ".join(c.field for c in conflicts)
             print(f"  {page_path.name}: conflicting field(s): {fields}")
 
+    if skipped_allowlisted_pages:
+        # issue athenaeum#1275, AC2: never a silent skip. Printed unconditionally in
+        # both dry-run and --apply (this call site covers both), so the two
+        # modes agree on the skip set by construction (AC4).
+        total_skipped_allowlisted = sum(len(e) for _, e in skipped_allowlisted_pages)
+        print(
+            f"Skipped {total_skipped_allowlisted} allowlisted value(s) on "
+            f"{len(skipped_allowlisted_pages)} page(s), with reasons -- not migrated:"
+        )
+        for page_path, skip_entries in skipped_allowlisted_pages:
+            reasons = "; ".join(f"{e.value!r}: {e.reason}" for e in skip_entries)
+            print(f"  {page_path.name}: {reasons}")
+
     rename_report: NameEmailRenameReport | None = None
     if getattr(args, "rename_name_email", False):
         # athenaeum#505's name-is-an-email carve-out, scoped to the same target set as
         # the body migration above (athenaeum#745 — previously this was skipped
         # entirely under --glob and always ran corpus-wide under --all).
-        rename_report = _run_rename_slice(args, wiki_root, config, knowledge_root, pages)
+        rename_report = _run_rename_slice(
+            args, wiki_root, config, knowledge_root, pages
+        )
 
     if not args.apply and affected:
         print("re-run with --apply to write the changes.")
@@ -969,3 +1166,116 @@ def _cmd_storage_lint_mapping(args: argparse.Namespace) -> int:
             print(f"  [{f.kind}] {f.detail}")
 
     return 0 if result.is_clean else EXIT_MAPPING_ISSUES
+
+
+def _human_bytes(n: int) -> str:
+    """Render *n* bytes as a short human-readable size (binary units).
+
+    Local, tiny, and deliberately not shared with any other module — this
+    command's report is the only caller, and pulling in a general-purpose
+    formatter for one call site would be more machinery than the job needs.
+    """
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{n} B"
+        size /= 1024
+    return f"{n} B"  # pragma: no cover - unreachable, loop always returns
+
+
+def _cmd_storage_prune_dispositions(args: argparse.Namespace) -> int:
+    """``athenaeum storage prune-dispositions`` (issue athenaeum#1274 AC3/AC4).
+
+    Dry-run by default: reports the disposition histogram, positive-record
+    count, and projected post-prune size with no write. ``--apply`` writes
+    atomically via :func:`athenaeum.rules.prune_shape_rule_dispositions_to_positive`,
+    guarded by the single-machine run lock (issue athenaeum#309) — the same
+    guard every other mutating ``storage``/librarian command acquires, so a
+    prune can never race the nightly's own concurrent appends to this same
+    file (the exact hazard athenaeum#1274's own proposal names).
+
+    Exit codes:
+        0 - dry-run report printed, or ``--apply`` succeeded (including the
+            no-op case where there was nothing to prune).
+        1 - ledger missing, or the prune's own count-mismatch guard fired
+            (:class:`athenaeum.rules.DispositionPruneMismatchError` —
+            nothing was written).
+        75 - the run lock is held by another process (``--apply`` only;
+            :data:`athenaeum._cli_shared.EXIT_LOCK_HELD`).
+    """
+    knowledge_root = _resolve_knowledge_root(args)
+    wiki_root = knowledge_root / "wiki"
+    path = default_shape_rule_dispositions_path(wiki_root)
+    if not path.is_file():
+        print(f"no disposition ledger found at {path}; nothing to prune.")
+        return 0
+
+    mode = "APPLY" if args.apply else "DRY RUN"
+    lock: "RunLock | None" = None
+    if args.apply:
+        cfg = load_config(knowledge_root)
+        acquired = _acquire_or_exit(knowledge_root, args, cfg)
+        if isinstance(acquired, int):
+            return acquired
+        lock = acquired
+    try:
+        try:
+            report = prune_shape_rule_dispositions_to_positive(
+                wiki_root, apply=args.apply
+            )
+        except DispositionPruneMismatchError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+        print(f"=== disposition prune ({mode}) ===")
+        print(f"  ledger:            {path}")
+        print(f"  total records:     {report.total_records}")
+        print(
+            f"  no-match:          {report.no_match_count} "
+            f"({_pct(report.no_match_count, report.total_records)})"
+        )
+        print(
+            f"  positive records:  {report.positive_count} "
+            f"({_pct(report.positive_count, report.total_records)})"
+        )
+        for disposition in sorted(report.histogram):
+            print(f"    {disposition}: {report.histogram[disposition]}")
+        if report.malformed_lines:
+            print(f"    <malformed, kept>: {report.malformed_lines}")
+        print(
+            f"  current size:      {report.current_bytes} B "
+            f"({_human_bytes(report.current_bytes)})"
+        )
+        size_label = ("new size" if report.applied else "projected size") + ":"
+        print(
+            f"  {size_label.ljust(19)}{report.projected_bytes} B "
+            f"({_human_bytes(report.projected_bytes)})"
+        )
+        print(f"  rows dropped:      {report.rows_dropped}")
+
+        if not args.apply:
+            if report.rows_dropped:
+                print(
+                    f"\n  [DRY RUN] would drop {report.rows_dropped} no-match row(s)."
+                )
+                print("  Re-run with --apply to write.")
+            else:
+                print("\n  [DRY RUN] nothing to prune.")
+            return 0
+
+        if report.applied:
+            print(
+                f"\n  pruned {report.rows_dropped} no-match row(s); ledger rewritten."
+            )
+        else:
+            print("\n  nothing to prune; ledger left unchanged.")
+        return 0
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _pct(part: int, whole: int) -> str:
+    if whole == 0:
+        return "0.0%"
+    return f"{100.0 * part / whole:.1f}%"
