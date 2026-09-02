@@ -329,6 +329,12 @@ def _liveness_str(holder: dict[str, str]) -> str | None:
     that is an entirely unrelated process (pid-reuse is exactly this same
     hazard, just within one host instead of across two). Returns ``None``
     when there is nothing safe to say (no pid, or a foreign host).
+
+    A MISSING ``host`` field is treated the same as a foreign one, not as
+    local: every current lockfile write includes ``host`` (see
+    :mod:`athenaeum.store`), so an absent field means a legacy or
+    otherwise-untrusted lockfile — exactly the case this function must not
+    guess about (athenaeum#1299 review).
     """
     pid_raw = holder.get("pid")
     if not pid_raw:
@@ -339,7 +345,9 @@ def _liveness_str(holder: dict[str, str]) -> str | None:
         return None
     host = holder.get("host")
     local_host = socket.gethostname()
-    if host and host != local_host:
+    if not host:
+        return "pid liveness unchecked (holder host unknown -- legacy lockfile?)"
+    if host != local_host:
         return f"pid liveness unchecked (holder host {host!r} != local {local_host!r})"
     if _pid_alive(pid):
         return "pid alive (os.kill probe)"

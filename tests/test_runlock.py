@@ -964,6 +964,16 @@ class TestLivenessStrHelper:
         assert "unchecked" in note
         assert "some-other-machine.example" in note
 
+    def test_missing_host_pid_is_unchecked_not_guessed_local(self) -> None:
+        # A legacy lockfile with no `host` field at all must be treated the
+        # same as a foreign host -- NOT silently assumed local, since every
+        # current lockfile write always includes `host` (Seer review,
+        # athenaeum#1299): an absent field is itself the untrusted signal.
+        note = runlock._liveness_str({"pid": str(os.getpid())})
+        assert note is not None
+        assert "unchecked" in note
+        assert "unknown" in note
+
     def test_missing_pid_returns_none(self) -> None:
         assert runlock._liveness_str({"host": socket.gethostname()}) is None
 
