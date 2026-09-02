@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Lane A intake throughput could fall to exactly zero while the run reported
+  `reason=completed` (athenaeum#1322).** Two independent window-COMPOSITION
+  defects, neither visible from a pending count. **First**, the athenaeum#900
+  caller-scoped pin bypassed athenaeum#1291's round-robin: the pinned prefix
+  was head-truncated to `max_files`, and `discover_raw_files` groups by source
+  name, so whenever a caller named more files than the window the schedule
+  collapsed back to pre-athenaeum#1291 head truncation on the
+  alphabetically-earliest source. That is not a rare case — `compile_changed`
+  derives the caller scope from a raw-tree hash snapshot, and a file that has
+  never been compiled stays "new" forever, so on a backlogged corpus the pin
+  grows to mean the whole backlog (observed: `Caller-scoped compile: 5969 of
+  5970 raw file(s)`). The pinned partition is now round-robined too; a genuine
+  session scope names fewer files than the window and hits
+  `round_robin_by_source`'s `len(files) <= limit` short-circuit, so
+  athenaeum#900's behaviour is unchanged in the case it was written for.
+  **Second**, athenaeum#663 (stuck) and athenaeum#1185 (in-backoff) skipped
+  their files INSIDE the per-file loop — i.e. after each had already won a
+  `max_files` slot. An unworkable file was free of LLM cost but not of
+  scheduling cost, so a stuck head froze its source permanently. Both classes
+  are now held out of the candidate set BEFORE the window is filled
+  (`_hold_out_unworkable_raw`), keeping every athenaeum#663/#1185 guarantee —
+  the file stays on disk, the ledger still keys on content hash, a content
+  edit still resets it, the skip is still surfaced loudly — while making the
+  window a window of *workable* files. Only ledger-named files are hashed, so
+  the hold-out never hashes the backlog. Measured on the reference deployment
+  2026-09-02: 50 permanently-stuck files (48 `mural-board-summary` + 2
+  `claude-session`) filled the entire 50-slot window on every run for six
+  hours — `files=0 calls=0 stuck=50 reason=completed` — while 4,181 healthy
+  `relationship-stub` records behind them were never scheduled once.
+
+### Added
+
+- **The librarian's run summary now reports how its intake window was filled
+  (athenaeum#1322).** The entity segment gains `considered=` (candidates the
+  scheduler saw, before any hold-out) and `window=` (slots actually filled),
+  both unconditional, plus `caller_scoped=`, `pinned=`, `rr=`, `held_stuck=`
+  and `held_backoff=` when non-zero. `files=N` only ever said how many files a
+  pass drained; from outside, "capped", "deferred", "skipped" and "broken" were
+  indistinguishable, which is how a six-hour zero-throughput stall read as a
+  healthy run in the durable athenaeum#1102 ledger. A pass that filled its
+  window, skipped every slot as stuck/in-backoff and attempted nothing now
+  reports `reason=all-slots-skipped` instead of `reason=completed`. That reason
+  is deliberately NOT in `_LIBRARIAN_EARLY_STOP_REASONS`: it is not a resource
+  stop and must not change the athenaeum#1135 zero-progress refusal's exit code.
+
 ### Added
 
 - **M17 phase 2 — the per-contract strictness decision for the remaining four
