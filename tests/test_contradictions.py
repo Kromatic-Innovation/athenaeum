@@ -58,10 +58,19 @@ def _write_am(
 
 
 def _fake_client(payload_text: str) -> MagicMock:
-    """Build a MagicMock that mirrors the Anthropic SDK response shape."""
+    """Build a MagicMock that mirrors the Anthropic SDK response shape.
+
+    ``type="text"`` matters: without it, ``.type`` on a bare
+    ``MagicMock(text=...)`` auto-creates a ``MagicMock`` that never equals
+    ``"text"``, so ``provider.response_text()``'s primary
+    ``block.type == "text"`` walk finds nothing and silently falls through
+    to its ``content[0].text`` compatibility fallback instead — exercising
+    a different code path than a real Anthropic response (whose blocks
+    carry ``type="text"``) takes (athenaeum#1254 review).
+    """
     client = MagicMock()
     response = MagicMock()
-    response.content = [MagicMock(text=payload_text)]
+    response.content = [MagicMock(type="text", text=payload_text)]
     client.messages.create.return_value = response
     return client
 
