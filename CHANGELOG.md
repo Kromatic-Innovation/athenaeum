@@ -173,6 +173,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum storage prune-dispositions`: one-time prune of
+  `_shape_rule_dispositions.jsonl` to its positive-disposition records
+  (athenaeum#1274 AC3/AC4).** athenaeum#1293/athenaeum#1229 already stopped the ledger
+  growing without bound going forward (suppress-at-write + retention); this
+  closes the other half — collapsing an ALREADY-oversized pre-fix ledger
+  (341 MB / 1,488,689 rows on the deployment that motivated the issue, 99.8%
+  `no-match`) down to just its positives, as one auditable command instead of
+  a hand-rolled `jq` pipeline. Dry-run by default (reports the disposition
+  histogram, positive-record count, and projected post-prune size);
+  `--apply` writes atomically. Drops ONLY the literal `disposition:
+  "no-match"` value — `preserve`, `observed-preserve`, and any other or
+  unrecognised disposition (including a malformed/truncated line) are kept,
+  default-deny on deletion. Refuses to write if an independent re-parse of
+  the constructed output ever disagrees with the scan pass's positive-row
+  count, and (on `--apply`) acquires the single-machine run lock (issue
+  athenaeum#309) so it can never race the nightly's own concurrent appends to
+  this file. See `docs/configuration.md`'s shape-rules section.
 - **`type: person` wiki pages are demoted from general wiki entities to a
   new consult-only person registry (athenaeum#1183).** A CRM-imported contact
   record is not a wiki entity — treating it as one let a person page be
