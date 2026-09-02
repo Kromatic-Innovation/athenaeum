@@ -795,6 +795,12 @@ class BatchRunResult:
     #: ``tier4_escalate`` (by ``conflict_type == "oversize_page"``), the same
     #: way ``athenaeum.models.ProcessingResult.oversize_suppressed`` is.
     oversize_suppressed: int = 0
+    #: Issue athenaeum#1248: same cross-site derivation as oversize_suppressed
+    #: above, for the split/log_demote dispositions — see
+    #: ``athenaeum.models.ProcessingResult.oversize_split``/
+    #: ``oversize_log_demoted``'s docstrings.
+    oversize_split: int = 0
+    oversize_log_demoted: int = 0
     #: Issue athenaeum#1196: NEW entity writes this run's finalize loop refused
     #: because their ``type`` was outside declared ∪ ``KNOWN_TYPES`` (the
     #: write-boundary guard — see ``athenaeum.wiki_write_guard``). Not
@@ -1587,15 +1593,23 @@ def process_batch_run(
                     # batch merge item is ASSEMBLED — no request is ever
                     # submitted for an over-threshold page, so it costs no
                     # spend and receives no merge. Reuses check_page_size_gate
-                    # unchanged (same function tier3_derive_actions's
-                    # synchronous "update" branch calls); the escalation is
-                    # carried on st.address_escalations, which finalize
+                    # (same function tier3_derive_actions's synchronous
+                    # "update" branch calls, now also passed existing_path/
+                    # existing_meta/wiki_root so a configured split/log_demote
+                    # can actually fire — issue athenaeum#1248); the escalation
+                    # is carried on st.address_escalations, which finalize
                     # already flushes through the SAME tier4_escalate() call
                     # every other per-file escalation on this transport uses
                     # (see that field's docstring for the "flushed in BOTH
                     # branches that unlink the raw file" contract).
                     oversize_escalation = check_page_size_gate(
-                        action, existing_body, st.raw.ref, config
+                        action,
+                        existing_body,
+                        st.raw.ref,
+                        config,
+                        existing_path=existing_path,
+                        existing_meta=meta,
+                        wiki_root=wiki_root,
                     )
                     if oversize_escalation is not None:
                         st.address_escalations.append(oversize_escalation)
@@ -1785,6 +1799,16 @@ def process_batch_run(
                     for _e in st.address_escalations
                     if _e.conflict_type == "oversize_page"
                 )
+                result.oversize_split += sum(
+                    1
+                    for _e in st.address_escalations
+                    if _e.conflict_type == "oversize_split"
+                )
+                result.oversize_log_demoted += sum(
+                    1
+                    for _e in st.address_escalations
+                    if _e.conflict_type == "oversize_log_demote"
+                )
             st.raw.path.unlink()
             log.info("  Deleted: %s", st.raw.path)
             continue
@@ -1894,11 +1918,19 @@ def process_batch_run(
                 # Issue athenaeum#1182: page-size invariant, enforced BEFORE the
                 # merge prompt is built or any model call is made — mirrors
                 # tier3_derive_actions's synchronous "update" branch exactly
-                # (same check_page_size_gate call), since this loop is that
-                # same synchronous merge, just reached from the batch
-                # transport's finalize step instead of process_one.
+                # (same check_page_size_gate call, now also passed
+                # existing_path/existing_meta/wiki_root — issue athenaeum#1248),
+                # since this loop is that same synchronous merge, just
+                # reached from the batch transport's finalize step instead
+                # of process_one.
                 oversize_escalation = check_page_size_gate(
-                    action, existing_body, st.raw.ref, config
+                    action,
+                    existing_body,
+                    st.raw.ref,
+                    config,
+                    existing_path=existing_path,
+                    existing_meta=meta,
+                    wiki_root=wiki_root,
                 )
                 if oversize_escalation is not None:
                     escalations.append(oversize_escalation)
@@ -1972,6 +2004,12 @@ def process_batch_run(
             result.oversize_suppressed += sum(
                 1 for _e in escalations if _e.conflict_type == "oversize_page"
             )
+            result.oversize_split += sum(
+                1 for _e in escalations if _e.conflict_type == "oversize_split"
+            )
+            result.oversize_log_demoted += sum(
+                1 for _e in escalations if _e.conflict_type == "oversize_log_demote"
+            )
             result.skipped += len(st.skipped)
             st.raw.path.unlink()
             log.info("  Deleted: %s", st.raw.path)
@@ -2034,6 +2072,11 @@ class BatchCollectResult:
     #: Issue athenaeum#1182: summed from each inner process_batch_run() call's
     #: BatchRunResult.oversize_suppressed — see that field's docstring.
     oversize_suppressed: int = 0
+    #: Issue athenaeum#1248: same summing convention, for the split/
+    #: log_demote dispositions — see BatchRunResult.oversize_split/
+    #: oversize_log_demoted's docstrings.
+    oversize_split: int = 0
+    oversize_log_demoted: int = 0
     #: Issue athenaeum#1196: same write-boundary-guard counter as
     #: :attr:`BatchRunResult.type_rejected`, folded up from the underlying
     #: :func:`process_batch_run` call this collect delegates to.
@@ -2632,6 +2675,8 @@ def collect_pending_batches(
         out.degraded += applied.degraded
         out.truncated += applied.truncated
         out.oversize_suppressed += applied.oversize_suppressed
+        out.oversize_split += applied.oversize_split  # issue athenaeum#1248
+        out.oversize_log_demoted += applied.oversize_log_demoted  # issue athenaeum#1248
         out.type_rejected += applied.type_rejected  # issue athenaeum#1196
         out.failed_refs.extend(applied.failed_refs)
         out.in_flight_refs.extend(applied.in_flight_refs)
