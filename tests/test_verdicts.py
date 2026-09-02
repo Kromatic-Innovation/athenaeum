@@ -756,6 +756,70 @@ class TestOffCorpusLedgerRouting:
         assert result["error_code"] == "erasure_class_refused"
         assert ledger_count(wiki_root) == 0
 
+    def test_misconfigured_off_corpus_falls_back_to_refuse(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """issue athenaeum#1280 finding A / athenaeum#984 follow-up: the defensive
+        branch in ``record_pair_decision`` around
+        ``off_corpus.off_corpus_adapter(config)`` — ``off_corpus.enabled`` is
+        true but ``off_corpus.adapter`` names an adapter that does not exist
+        in ``storage.adapters`` (:func:`athenaeum.off_corpus.off_corpus_adapter`
+        raises :class:`~athenaeum.off_corpus.OffCorpusConfigError`) — shipped
+        with zero test assertions. This synthesizes exactly that
+        misconfiguration (a fixture for a condition that cannot occur except
+        through operator config error, per the issue's "cannot be reached in
+        normal operation is exactly the case a fixture exists for") and
+        asserts the fallback is the SAME safe refusal as the no-config
+        default: never a crash, never a silent write to either ledger.
+        """
+        import logging
+
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        pii_page = wiki_root / "jane.md"
+        pii_page.write_text(
+            "---\nname: Jane\ntype: person\npii: true\n---\nfact\n", encoding="utf-8"
+        )
+        ordinary = wiki_root / "topic.md"
+        _write_page(ordinary, name="topic")
+
+        # off_corpus.enabled=True, but off_corpus.adapter names a
+        # storage.adapters entry that does not exist -> off_corpus_adapter()
+        # raises OffCorpusConfigError (never a silent fallback, per its own
+        # docstring's D6 reference) rather than resolving a real adapter.
+        config = {
+            "off_corpus": {"enabled": True, "adapter": "does-not-exist"},
+            "storage": {"adapters": {}},
+        }
+
+        lock = RunLock(knowledge_root)
+        with caplog.at_level(logging.WARNING, logger="athenaeum.verdicts"):
+            with lock:
+                result = record_pair_decision(
+                    wiki_root,
+                    source_a=str(pii_page),
+                    source_b=str(ordinary),
+                    verdict="duplicate",
+                    decided_by="pipeline:merge-approve",
+                    lock=lock,
+                    config=config,
+                    knowledge_root=knowledge_root,
+                )
+
+        # Same observable refusal as the disabled/omitted-config path...
+        assert result["ok"] is False
+        assert result["error_code"] == "erasure_class_refused"
+        assert "ledger" not in result
+        assert ledger_count(wiki_root) == 0
+        # ...but reached via the misconfiguration branch specifically, not
+        # merely "off_corpus disabled" — pin the branch, not just the
+        # outcome, so a future change that silently skips logging (or
+        # silently treats misconfiguration as "disabled") is caught.
+        assert any(
+            "misconfigured" in rec.message for rec in caplog.records
+        ), [rec.message for rec in caplog.records]
+
 
 # ---------------------------------------------------------------------------
 # ensure_ledger_initialized — the "flag on" run-finalize contract

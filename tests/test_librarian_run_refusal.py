@@ -623,3 +623,334 @@ class TestNightlyInteractionWithRefusalMechanism:
             if r.getMessage().startswith("librarian-run-degraded")
         ]
         assert markers == ["librarian-run-degraded reason=spend-ceiling files=0"]
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1283 — the athenaeum#1135 refusal verdict is computed ONCE and
+# persisted, so ``athenaeum status`` (a SEPARATE process, run between
+# librarian runs) can see it. Before this, the verdict existed only as the
+# ``librarian-run-degraded`` log line above and the process exit code --
+# both die with the run. This closes that gap WITHOUT touching athenaeum#1135's
+# own predicate, exit codes, or marker-line text (pinned unchanged by the
+# suite above).
+# ---------------------------------------------------------------------------
+
+
+class TestSingleVerdictSite:
+    """``_librarian_run_refusal_tripped`` must be evaluated exactly ONCE per
+    run and reused -- not re-derived at the marker-line site and again at
+    the exit-code check, the pre-athenaeum#1283 shape."""
+
+    def test_predicate_called_exactly_once_on_a_refusal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.librarian as librarian_mod
+
+        ctx = _finalize_ctx(tmp_path)
+        ctx.usage = TokenUsage(api_calls=0)
+        ctx.raw_files = ["a.md"]
+        ctx.deferred_refs = ["a.md"]
+        ctx.entity_exit_reason = "spend-ceiling"
+        ctx.spend_ceiling_tripped = True
+
+        calls: list[RunContext] = []
+        real = librarian_mod._librarian_run_refusal_tripped
+
+        def _spy(c: RunContext) -> bool:
+            calls.append(c)
+            return real(c)
+
+        monkeypatch.setattr(librarian_mod, "_librarian_run_refusal_tripped", _spy)
+        rc = _run_finalize_phase(ctx)
+
+        assert rc == EXIT_LIBRARIAN_REFUSAL
+        assert len(calls) == 1, "predicate re-derived instead of reusing ctx.librarian_refusal"
+        assert ctx.librarian_refusal is True
+
+    def test_predicate_called_exactly_once_on_a_clean_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.librarian as librarian_mod
+
+        ctx = _finalize_ctx(tmp_path)
+        ctx.usage = TokenUsage(api_calls=4)
+        ctx.raw_files = ["a.md"]
+        ctx.deferred_refs = []
+        ctx.entity_exit_reason = "completed"
+        ctx.files_processed_count = 1
+
+        calls: list[RunContext] = []
+        real = librarian_mod._librarian_run_refusal_tripped
+
+        def _spy(c: RunContext) -> bool:
+            calls.append(c)
+            return real(c)
+
+        monkeypatch.setattr(librarian_mod, "_librarian_run_refusal_tripped", _spy)
+        rc = _run_finalize_phase(ctx)
+
+        assert rc == 0
+        assert len(calls) == 1
+        assert ctx.librarian_refusal is False
+
+
+class TestRefusalPersistedToLedger:
+    """The verdict lands in the athenaeum#1102 run-summary ledger (no new state
+    file), via the SAME ``ctx.librarian_refusal`` :class:`TestSingleVerdictSite`
+    just pinned as single-source.
+
+    THREE record shapes matter, not two -- see ``run_summary_log.py``'s
+    ``refusal_in_record`` docstring for the full contract this class pins
+    the writer side of: a tripped refusal writes ``{"tripped": True, ...}``,
+    an EVALUATED clean run writes ``{"tripped": False}`` (present, not
+    omitted), and only a run whose verdict was NEVER evaluated
+    (``ctx.librarian_refusal is None`` — the ``stop_on_deadline`` path,
+    covered separately below in ``TestUnevaluatedVerdictOmitsRefusalField``)
+    omits the key entirely."""
+
+    def test_refusal_run_writes_the_refusal_field(self, tmp_path: Path) -> None:
+        from athenaeum.config import resolve_cache_dir
+        from athenaeum.run_summary_log import (
+            default_run_summary_ledger_path,
+            read_run_summary_ledger,
+        )
+
+        ctx = _finalize_ctx(tmp_path)
+        ctx.usage = TokenUsage(api_calls=0)
+        ctx.raw_files = ["a.md"]
+        ctx.deferred_refs = ["a.md"]
+        ctx.entity_exit_reason = "budget"
+        # write_run_summary_record no-ops on an empty profile (issue athenaeum#1102's
+        # deliberate "nothing yet to report" gate — see its own docstring); a
+        # real run always appends at least one phase segment (the entity
+        # phase itself, via ``_run_entity_tier_phase``), so a fabricated
+        # finalize-only context has to supply one to exercise the ledger
+        # write at all. Mirrors ``_PROFILE`` in ``test_run_summary_log.py``.
+        ctx.run_profile = [("entity", 1.0, {"reason": "budget", "files": 0})]
+
+        rc = _run_finalize_phase(ctx)
+        assert rc == EXIT_LIBRARIAN_REFUSAL
+
+        ledger_path = default_run_summary_ledger_path(resolve_cache_dir())
+        records = read_run_summary_ledger(ledger_path)
+        assert len(records) == 1
+        assert records[0]["refusal"] == {
+            "tripped": True,
+            "reason": "budget",
+            "files": 0,
+        }
+        assert records[0]["v"] == 3
+
+    def test_evaluated_clean_run_writes_tripped_false_not_an_omission(
+        self, tmp_path: Path
+    ) -> None:
+        # The athenaeum#1283 correctness fix, at the real call site: a run
+        # that reaches ``_run_finalize_phase`` and is evaluated as NOT a
+        # refusal (``ctx.librarian_refusal is False``, not ``None``) must
+        # write a PRESENT ``{"tripped": False}`` record -- an omitted key
+        # here would be indistinguishable from a run whose verdict was
+        # never evaluated at all (see ``TestUnevaluatedVerdictOmitsRefusalField``
+        # below), which is exactly the bug this follow-up closes.
+        from athenaeum.config import resolve_cache_dir
+        from athenaeum.run_summary_log import (
+            default_run_summary_ledger_path,
+            read_run_summary_ledger,
+        )
+
+        ctx = _finalize_ctx(tmp_path)
+        ctx.usage = TokenUsage(api_calls=4)
+        ctx.raw_files = ["a.md"]
+        ctx.deferred_refs = []
+        ctx.entity_exit_reason = "completed"
+        ctx.files_processed_count = 1
+        ctx.run_profile = [("entity", 1.0, {"reason": "completed", "files": 1})]
+
+        rc = _run_finalize_phase(ctx)
+        assert rc == 0
+        assert ctx.librarian_refusal is False
+
+        ledger_path = default_run_summary_ledger_path(resolve_cache_dir())
+        records = read_run_summary_ledger(ledger_path)
+        assert len(records) == 1
+        assert records[0]["refusal"] == {"tripped": False}
+
+
+class TestUnevaluatedVerdictOmitsRefusalField:
+    """The regression this follow-up review named: a run whose verdict was
+    NEVER evaluated (``ctx.librarian_refusal`` still ``None`` when
+    ``emit_run_summary`` writes the ledger record) must write a record
+    ``refusal_in_record`` reads as ``None`` ("cannot speak"), never
+    ``False`` ("confirmed clean").
+
+    Driven through the REAL ``RunContext.stop_on_deadline`` code path (not
+    a synthetic direct-``emit_run_summary`` call) — this is the concrete,
+    non-hypothetical case named in the review: a wall-clock deadline trip
+    in a pre-entity phase (wiki-dedup boundary, merge_only/auto-memory
+    catch, post-compile boundary — every call site routes through
+    ``stop_on_deadline``, per its own docstring) calls ``emit_run_summary``
+    and returns ``EXIT_GRACEFUL_PARTIAL`` straight to ``run()``'s caller,
+    entirely BEFORE ``_run_finalize_phase`` -- where ``ctx.librarian_refusal``
+    is set -- ever runs. ``ctx.dry_run = True`` sidesteps
+    ``stop_on_deadline``'s ``FilesystemStore(...).snapshot()`` /
+    ``_maybe_push_after_run`` calls (which need a real git repo) without
+    touching the code path under test — those calls are gated on
+    ``if not self.dry_run`` and sit BEFORE the ``emit_run_summary()`` call
+    this test cares about, so skipping them changes nothing about what is
+    being verified.
+    """
+
+    def test_stop_on_deadline_writes_an_unevaluated_not_a_clean_record(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.config import resolve_cache_dir
+        from athenaeum.run_summary_log import (
+            default_run_summary_ledger_path,
+            read_run_summary_ledger,
+            refusal_in_record,
+        )
+
+        ctx = _finalize_ctx(tmp_path)
+        ctx.dry_run = True
+        ctx.max_runtime = 3600  # stop_on_deadline's WARNING renders this with %d
+        ctx.run_profile = [("wiki-dedup", 1.0, {"reason": "completed"})]
+
+        assert ctx.librarian_refusal is None  # never evaluated -- the whole point
+
+        rc = ctx.stop_on_deadline("wiki-dedup boundary (issue athenaeum#396)")
+
+        assert rc == EXIT_GRACEFUL_PARTIAL
+        # _run_finalize_phase was never reached, so the verdict is STILL
+        # unevaluated after the call -- this is what makes the ledger
+        # record's omitted key an honest "cannot speak", not a stale read.
+        assert ctx.librarian_refusal is None
+
+        ledger_path = default_run_summary_ledger_path(resolve_cache_dir())
+        records = read_run_summary_ledger(ledger_path)
+        assert len(records) == 1
+        assert "refusal" not in records[0]
+        assert records[0]["v"] == 3
+        # The actual reader contract, exercised end to end: an omitted key
+        # on a v3 record reads as None (cannot speak), NOT False (clean).
+        assert refusal_in_record(records[0]) is None
+
+
+class TestRefusalVisibleInStatusAcrossRuns:
+    """The actual regression this issue names: a run with ``api_calls == 0``
+    AND ``attempted_calls == 0`` -- the exact case athenaeum#899's zero-yield
+    counter excludes by design -- must still make ``athenaeum status`` read
+    non-healthy. Drives the SAME finalize call the process-level
+    ``athenaeum run`` entry point uses, then reads status back exactly as a
+    separate ``athenaeum status`` invocation would (via the athenaeum#1102 ledger
+    under the cache dir the ``_isolate_cache_dir`` autouse fixture redirects
+    per test) -- proving the two are actually connected, not merely that
+    each half works in isolation.
+    """
+
+    def test_zero_calls_refusal_visible_in_status_while_zero_yield_stays_zero(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.config import resolve_cache_dir
+        from athenaeum.status import format_status, status
+        from athenaeum.zero_yield import load_state as load_zero_yield_state
+
+        ctx = _finalize_ctx(tmp_path)
+        (ctx.knowledge_root / "raw").mkdir(parents=True, exist_ok=True)
+
+        # The Motivation's exact reproduction: a spend-ceiling refusal that
+        # made NO calls and ATTEMPTED none -- calls=0 alone is already
+        # excluded by athenaeum#899's ``api_calls > 0`` leg, but this pins the
+        # stronger claim: even WITH the athenaeum#1177 ``attempted_calls``
+        # widening, a true zero-call refusal still never trips zero-yield.
+        ctx.usage = TokenUsage(api_calls=0)
+        assert ctx.usage.attempted_calls == 0
+        ctx.raw_files = ["a.md", "b.md"]
+        ctx.deferred_refs = ["a.md", "b.md"]
+        ctx.entity_exit_reason = "spend-ceiling"
+        ctx.spend_ceiling_tripped = True
+        ctx.run_profile = [("entity", 1.0, {"reason": "spend-ceiling", "files": 0})]
+
+        rc = _run_finalize_phase(ctx)
+        assert rc == EXIT_LIBRARIAN_REFUSAL
+
+        # Negative control: athenaeum#899's own predicate is UNCHANGED and does
+        # NOT catch this run -- pins that the new signal, not a change to
+        # zero-yield's semantics, is what closes the gap.
+        assert ctx.zero_yield_tripped is False
+        assert (
+            load_zero_yield_state(resolve_cache_dir())["consecutive"] == 0
+        )
+
+        # This is the defect from the issue's Motivation: before athenaeum#1283,
+        # nothing here would show a problem at all.
+        info = status(ctx.knowledge_root)
+        assert info["zero_yield_consecutive"] == 0
+        assert info["librarian_refusal_consecutive"] == 1
+        assert info["librarian_refusal_reason"] == {
+            "tripped": True,
+            "reason": "spend-ceiling",
+            "files": 0,
+        }
+
+        rendered = format_status(info)
+        assert "librarian-run-refusal" in rendered
+        assert "spend-ceiling" in rendered
+        assert "Zero-yield" not in rendered
+
+    def test_two_refusals_in_a_row_streak_to_two(self, tmp_path: Path) -> None:
+        from athenaeum.status import status
+
+        for _ in range(2):
+            ctx = _finalize_ctx(tmp_path)
+            (ctx.knowledge_root / "raw").mkdir(parents=True, exist_ok=True)
+            ctx.usage = TokenUsage(api_calls=0)
+            ctx.raw_files = ["a.md"]
+            ctx.deferred_refs = ["a.md"]
+            ctx.entity_exit_reason = "spend-ceiling"
+            ctx.spend_ceiling_tripped = True
+            ctx.run_profile = [("entity", 1.0, {"reason": "spend-ceiling", "files": 0})]
+            rc = _run_finalize_phase(ctx)
+            assert rc == EXIT_LIBRARIAN_REFUSAL
+
+        info = status(ctx.knowledge_root)
+        assert info["librarian_refusal_consecutive"] == 2
+
+    def test_a_later_clean_run_resets_status_to_quiet(self, tmp_path: Path) -> None:
+        from athenaeum.status import status
+
+        ctx = _finalize_ctx(tmp_path)
+        (ctx.knowledge_root / "raw").mkdir(parents=True, exist_ok=True)
+        ctx.usage = TokenUsage(api_calls=0)
+        ctx.raw_files = ["a.md"]
+        ctx.deferred_refs = ["a.md"]
+        ctx.entity_exit_reason = "spend-ceiling"
+        ctx.spend_ceiling_tripped = True
+        assert _run_finalize_phase(ctx) == EXIT_LIBRARIAN_REFUSAL
+
+        # Same ``tmp_path`` -> same default ``knowledge_root`` as ``ctx``
+        # above (``_finalize_ctx``/``_make_ctx`` derive it from ``tmp_path``
+        # alone), so this is a second run against the SAME knowledge base.
+        ctx2 = _finalize_ctx(tmp_path)
+        ctx2.usage = TokenUsage(api_calls=4)
+        ctx2.raw_files = ["b.md"]
+        ctx2.deferred_refs = []
+        ctx2.entity_exit_reason = "completed"
+        ctx2.files_processed_count = 1
+        assert _run_finalize_phase(ctx2) == 0
+
+        info = status(ctx.knowledge_root)
+        assert info["librarian_refusal_consecutive"] == 0
+        assert info["librarian_refusal_reason"] is None
+
+    def test_status_never_raises_when_ledger_is_missing(self, tmp_path: Path) -> None:
+        # No librarian run has ever finalized against this knowledge base --
+        # ``status.py``'s documented read-only/side-effect-free contract
+        # (module docstring) must hold: a missing ledger reads as "no
+        # history", never an exception.
+        from athenaeum.status import status
+
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        info = status(root)
+        assert info["librarian_refusal_consecutive"] == 0
+        assert info["librarian_refusal_reason"] is None
