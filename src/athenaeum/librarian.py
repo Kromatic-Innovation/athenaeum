@@ -153,6 +153,7 @@ from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE
     AUTO_MEMORY_FILE_RE,
     RAW_FILE_RE,
     attribute_person_observation,
+    check_raw_retention,
     discover_auto_memory_files,
     discover_raw_files,
     round_robin_by_source,
@@ -3896,6 +3897,13 @@ class RunContext:
     # discovery path claimed this run, and how many pending decisions were
     # raised (vs. already open/resolved) for them.
     intake_audit_summary: dict[str, Any] | None = None
+    # Issue athenaeum#1269: run-summary counts from ``_run_raw_retention_phase``
+    # (``None`` until that phase runs) -- ``raw-oversize-file`` /
+    # ``raw-oversize-source`` tallies and the offending paths/sources, from
+    # the configurable per-file and per-source-tree size ceilings on
+    # `raw/<source>/`. Detect-and-report only -- this phase never blocks
+    # intake, moves a file, or writes an exempt row.
+    raw_retention_summary: dict[str, Any] | None = None
     # Issue athenaeum#1063: run-summary counts from
     # ``_run_rule_proposal_phase`` (``None`` until that phase runs, including
     # when the config gate is off -- a disabled phase never touches this
@@ -5183,6 +5191,41 @@ def _run_intake_audit_phase(ctx: RunContext) -> None:
             summary["raised_groups"],
             summary["raised_files"],
             summary["already_open_groups"],
+        )
+
+
+def _run_raw_retention_phase(ctx: RunContext) -> None:
+    """Configurable raw-intake size ceilings, per-file and per-source
+    aggregate (issue athenaeum#1269).
+
+    Mechanical, LLM-free, cheap (one filesystem walk of `raw_root`, skipped
+    entirely when both thresholds are unset — see
+    :func:`athenaeum.intake.check_raw_retention`) — runs in the same
+    deterministic, unbudgeted phase family as `_run_intake_audit_phase`
+    right before it. Ordering relative to the other deterministic phases is
+    inert: this phase only ever reads and reports, it cannot affect what
+    any other phase claims or writes, and nothing another phase does
+    changes what it counts (grouped here purely because it is the same
+    class of read-only audit pass over `raw_root` the intake audit is).
+
+    DETECT AND REPORT ONLY, never act — the load-bearing constraint this
+    issue's design settled: crossing either configured ceiling never
+    blocks intake, moves a file, or writes an exempt row. It only tallies
+    `raw-oversize-file` / `raw-oversize-source` and names the offending
+    paths/sources in `ctx.raw_retention_summary`, mirroring
+    `_run_intake_audit_phase`'s summary-dict convention. See
+    `docs/shape-rules.md` §3.5 for the full rationale (size is a reported
+    condition, never a shape-rule match predicate).
+    """
+    summary = check_raw_retention(ctx.raw_root, ctx.config)
+    ctx.raw_retention_summary = summary
+    if summary["raw-oversize-file"] or summary["raw-oversize-source"]:
+        log.warning(
+            "raw-retention: %d oversize file(s) %s, %d oversize source(s) %s",
+            summary["raw-oversize-file"],
+            [f["path"] for f in summary["oversize_files"]],
+            summary["raw-oversize-source"],
+            [s["source"] for s in summary["oversize_sources"]],
         )
 
 
@@ -8437,6 +8480,14 @@ def run(
     # since none of them can affect which raw files are UNRECOGNISED (they
     # only ever act on files those phases' OWN discovery already claims).
     _run_intake_audit_phase(ctx)
+
+    # Phase: configurable raw-intake size ceilings, per-file and per-source
+    # aggregate (issue athenaeum#1269) -- deterministic, LLM-free, unbudgeted,
+    # same read-only-audit-of-raw_root family as intake-audit above and
+    # ordered right after it for that reason alone; detect-and-report only,
+    # never blocks intake, moves a file, or writes an exempt row (see
+    # `_run_raw_retention_phase`'s docstring).
+    _run_raw_retention_phase(ctx)
 
     # Phase: field-correction fast path (issue athenaeum#797) -- deterministic,
     # LLM-free, own runtime share. Ordered here (after the deadline is armed,

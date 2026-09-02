@@ -270,6 +270,28 @@ librarian command does, so it can never race the nightly's own concurrent append
 this file. This is a live-store operation an operator runs once, deliberately — it is
 not wired into any automatic run.
 
+### Raw intake retention limits (`librarian.raw_retention.*`, athenaeum#1269)
+
+Two independent, DEFAULT-NONE size ceilings on `raw/<source>/` — see
+[`shape-rules.md`](shape-rules.md#35-size-is-a-reported-condition-not-a-match-predicate-issue-athenaeum1269)
+for the full rationale. Runs as its own deterministic, LLM-free,
+unbudgeted phase inside `athenaeum run`
+(`librarian._run_raw_retention_phase`), right after the unrecognised-raw-
+intake audit. **Detects and reports only** — crossing either ceiling never
+blocks intake, moves a file, or writes an exempt row.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Per-file ceiling | `ATHENAEUM_RAW_RETENTION_MAX_FILE_BYTES` | `librarian.raw_retention.max_file_bytes` | *(unset — disabled)* | A single file anywhere under a `raw/<source>/` tree at or above this many bytes is reported as an oversize file (`raw-oversize-file`). |
+| Per-source aggregate ceiling | `ATHENAEUM_RAW_RETENTION_MAX_SOURCE_BYTES` | `librarian.raw_retention.max_source_bytes` | *(unset — disabled)* | The SUM of every file's on-disk size anywhere under one `raw/<source>/` tree, at or above this many bytes, is reported as an oversize source (`raw-oversize-source`) — the dimension that catches many individually-small files aggregating past a ceiling no single one of them would trip. |
+
+No seed in `_DEFAULTS` (issue athenaeum#231): a fresh install imposes no
+limit on either dimension until an operator opts in. `bool` (an `int`
+subclass) and non-int / non-positive values — env OR yaml — fall through
+to disabled, same as an unset key. With both unset, the phase still runs
+but skips its filesystem walk entirely, so an operator who never opts in
+pays no cost.
+
 ### Rule proposals (`librarian.rule_proposals.*`, athenaeum#905 / athenaeum#1063)
 
 The librarian's rule-proposal detector/drafter (`athenaeum.rule_proposals`,
