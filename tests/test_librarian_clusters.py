@@ -561,15 +561,24 @@ class TestFallbackEmbedder:
         assert len(clusters) == 2
         assert all(len(c.member_paths) == 1 for c in clusters)
 
-    def test_fallback_engagement_logs_warning_and_records_embedder(
+    def test_fallback_engagement_logs_info_and_records_embedder(
         self,
         singleton_pair_root: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Issue athenaeum#1032: the "fell back" count line is WARNING (was DEBUG,
-        invisible at deployed INFO), and every cluster formed from
-        hashing-trick vectors records ``embedder="fallback-hashing"`` so run
-        artifacts can tell which embedder produced a cluster's vectors.
+        """Issue athenaeum#1279: the "served from chromadb" count line is INFO (was
+        WARNING, issue athenaeum#1032) and names the raw auto-memory C2 cluster
+        pass explicitly — the demoted-and-reworded half of this issue's
+        misdirection finding. This engagement is normal, by-design
+        ephemeral-intake behavior (``raw/auto-memory/`` is consume-and-delete,
+        so the recall index and the live intake tree are routinely out of
+        sync), NOT evidence anything is broken; the pre-athenaeum#1279 WARNING
+        text, with no path attribution, sent an unrelated wiki-dedupe
+        over-cluster investigation sideways for a full pass in production
+        (see this issue and athenaeum#1005's comment trail). Every cluster formed
+        from hashing-trick vectors still records ``embedder="fallback-hashing"``
+        so run artifacts can tell which embedder produced a cluster's
+        vectors — that part of athenaeum#1032 is unchanged.
         """
         import logging
 
@@ -583,7 +592,7 @@ class TestFallbackEmbedder:
         files = discover_auto_memory_files(singleton_pair_root)
         extra_roots = resolve_extra_intake_roots(singleton_pair_root)
 
-        caplog.set_level(logging.WARNING, logger="athenaeum.clusters")
+        caplog.set_level(logging.INFO, logger="athenaeum.clusters")
         clusters = cluster_auto_memory_files(
             files,
             extra_roots=extra_roots,
@@ -593,9 +602,92 @@ class TestFallbackEmbedder:
         assert clusters
         assert all(c.embedder == EMBEDDER_FALLBACK_HASHING for c in clusters)
 
-        fallback_warnings = [r for r in caplog.records if "fell back" in r.getMessage()]
-        assert len(fallback_warnings) == 1
-        assert fallback_warnings[0].levelno == logging.WARNING
+        fallback_lines = [
+            r for r in caplog.records if "served from the chromadb" in r.getMessage()
+        ]
+        assert len(fallback_lines) == 1
+        assert fallback_lines[0].levelno == logging.INFO
+        # Not WARNING: a benign by-design engagement must not read as alarming.
+        assert not any(r.levelno == logging.WARNING for r in fallback_lines)
+        # Names the actual code path, so a reader is never left to guess
+        # (or misattribute to wiki-dedupe) which pass produced the line.
+        assert "raw auto-memory C2 cluster pass" in fallback_lines[0].getMessage()
+
+    def test_out_embedder_counts_tallies_per_file_not_per_cluster(
+        self,
+        singleton_pair_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue athenaeum#1279: ``out_embedder_counts`` tallies PER-FILE, so a run
+        whose every affected cluster is a harmless singleton (this issue's
+        motivating incident: raw-intake chromadb service fell ~98%->0% over
+        two days with every affected cluster a singleton) still produces a
+        real, non-zero count — the exact signal the pre-athenaeum#1279 code had
+        no durable, machine-readable form for.
+
+        Mixes a chromadb-served file with a fallback-served file in the SAME
+        call (stubbing ``VectorBackend.fetch_embeddings`` for one of the two
+        ids, same technique as
+        ``test_chromadb_hit_records_chromadb_default_embedder`` above) so
+        both counters land in one assertion.
+        """
+        from athenaeum.clusters import (
+            EMBEDDER_CHROMADB_DEFAULT,
+            EMBEDDER_FALLBACK_HASHING,
+            _indexed_id_for,
+            cluster_auto_memory_files,
+        )
+        from athenaeum.config import resolve_extra_intake_roots
+        from athenaeum.librarian import discover_auto_memory_files
+        from athenaeum.search import VectorBackend
+
+        files = discover_auto_memory_files(singleton_pair_root)
+        assert len(files) == 2
+        extra_roots = resolve_extra_intake_roots(singleton_pair_root)
+        served_id = _indexed_id_for(files[0], extra_roots)
+
+        def _fake_fetch_embeddings(
+            self: VectorBackend, ids: Iterable[str], cache_dir: Path
+        ) -> dict[str, list[float]]:
+            # Only the FIRST file's id is ever served — the second always
+            # falls back, synthesizing the mixed-source run this test needs.
+            return {idx_id: [1.0, 0.0] for idx_id in ids if idx_id == served_id}
+
+        monkeypatch.setattr(VectorBackend, "fetch_embeddings", _fake_fetch_embeddings)
+
+        out_counts: dict[str, int] = {}
+        clusters = cluster_auto_memory_files(
+            files,
+            extra_roots=extra_roots,
+            cache_dir=singleton_pair_root / ".empty-cache",
+            threshold=0.9,
+            out_embedder_counts=out_counts,
+        )
+        assert len(clusters) == 2  # two singletons; counting is per-FILE regardless
+        assert out_counts == {
+            EMBEDDER_CHROMADB_DEFAULT: 1,
+            EMBEDDER_FALLBACK_HASHING: 1,
+        }
+
+    def test_out_embedder_counts_none_by_default_is_a_pure_no_op(
+        self, singleton_pair_root: Path
+    ) -> None:
+        """``out_embedder_counts`` omitted (every pre-athenaeum#1279 caller)
+        changes nothing about the return value — the out-param write is
+        gated on ``is not None``, not merely on presence of a fallback."""
+        from athenaeum.clusters import cluster_auto_memory_files
+        from athenaeum.config import resolve_extra_intake_roots
+        from athenaeum.librarian import discover_auto_memory_files
+
+        files = discover_auto_memory_files(singleton_pair_root)
+        extra_roots = resolve_extra_intake_roots(singleton_pair_root)
+        clusters = cluster_auto_memory_files(
+            files,
+            extra_roots=extra_roots,
+            cache_dir=singleton_pair_root / ".empty-cache",
+            threshold=0.9,
+        )
+        assert len(clusters) == 2
 
     def test_chromadb_hit_records_chromadb_default_embedder(
         self,
