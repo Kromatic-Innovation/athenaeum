@@ -44,7 +44,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any, cast
@@ -709,6 +709,103 @@ def discover_raw_files(
                 )
             )
     return files
+
+
+def round_robin_by_source(
+    files: Sequence[RawFile],
+    limit: int,
+    *,
+    priority_sources: Sequence[str] = (),
+) -> list[RawFile]:
+    """Fill a window of *limit* slots by taking from each source in turn (athenaeum#1291).
+
+    :func:`discover_raw_files` returns its result grouped by source directory
+    in ``sorted()`` order, and the run loop used to fill its ``max_files``
+    window by head-truncating that list. Because the list is ordered by source
+    NAME and cut from the HEAD, the window could only ever advance past a
+    source once that source's own backlog dropped below the cap -- so a large,
+    alphabetically-early, continuously-refilled source (``raw/auto-memory/``
+    on the deployment that surfaced this) starved every lexicographically
+    later source INDEFINITELY. Observed: ~2,200 records in
+    ``raw/mural-board-summary/`` frozen across at least 8 consecutive runs
+    while ``auto-memory`` alone exceeded the whole per-run budget.
+
+    Round-robin bounds the worst-case wait: every source with pending intake
+    reaches the head of its own queue within ``ceil(n_sources * k / limit)``
+    runs, regardless of any other source's backlog or of its own name's sort
+    position. That is the athenaeum#1291 AC1 guarantee, and it is the smallest
+    change to the existing shape (the alternatives the issue lists --
+    a per-source floor, or oldest-first across sources -- bound the wait
+    equally but reshape more of the path).
+
+    Contract:
+
+    * **Within-source ordering is preserved exactly.** Each source's files are
+      taken from the front of its own queue in discovery order, so the
+      oldest-first property discovery already gives a source survives.
+    * **Source turn order is first-appearance order** in *files* -- i.e. the
+      ``sorted()`` source-directory order discovery produced -- EXCEPT that
+      any source named in *priority_sources* takes its turn first, in the
+      order given. Deterministic, so the same input always yields the same
+      window.
+
+      *priority_sources* is what makes AC1 hold when ``limit`` is smaller than
+      the number of sources. Round-robin alone bounds the wait only while
+      every source gets at least one slot per run; below that, a FIXED turn
+      order means the same trailing sources get zero slots on every run
+      forever -- starvation by sort position again, merely at a different
+      threshold. The librarian passes
+      :func:`athenaeum.run_summary_log.read_starvation_priority` here — the
+      previous run's zero-slot sources, LONGEST-STARVED FIRST, recovered from
+      the athenaeum#1102 run-summary ledger so this needs no new state. That
+      aging is load-bearing, not cosmetic: rotating by name alone lets a
+      source keep losing its turn to sources starved only once and still wait
+      unboundedly, while a rank that rises every skipped run reaches the head
+      within ``ceil(n_sources / limit)`` runs. A source named here that has no
+      pending files this run is simply absent from ``by_source`` and costs
+      nothing.
+    * **The window is interleaved, not re-concatenated.** A source's first
+      file is scheduled before any source's second file, so a run that trips
+      its wall-clock deadline part-way through the window has still touched
+      every source rather than only the earliest ones.
+    * **Budget semantics are untouched** (athenaeum#1291 AC4): this decides
+      WHICH files fill the window, never how many. ``len(result) ==
+      min(len(files), limit)`` always, and ``limit <= 0`` yields an empty
+      window.
+    """
+    if limit <= 0:
+        return []
+    if len(files) <= limit:
+        # Everything fits: no scheduling decision to make, and returning the
+        # input order verbatim keeps a single-source or under-cap corpus
+        # byte-identical to its pre-athenaeum#1291 behaviour.
+        return list(files)
+    # dict preserves insertion order, so `queues` is in first-appearance
+    # (== discovery `sorted()`) source order without a second sort.
+    by_source: dict[str, list[RawFile]] = {}
+    for raw in files:
+        by_source.setdefault(raw.source, []).append(raw)
+    # Sources starved last run go first; everything else keeps discovery
+    # order behind them. `dict.fromkeys` de-duplicates *priority_sources*
+    # while preserving the caller's order.
+    head = [s for s in dict.fromkeys(priority_sources) if s in by_source]
+    order = head + [s for s in by_source if s not in set(head)]
+    queues = [by_source[s] for s in order]
+    cursors = [0] * len(queues)
+    selected: list[RawFile] = []
+    while len(selected) < limit:
+        progressed = False
+        for i, queue in enumerate(queues):
+            if cursors[i] >= len(queue):
+                continue
+            selected.append(queue[cursors[i]])
+            cursors[i] += 1
+            progressed = True
+            if len(selected) >= limit:
+                break
+        if not progressed:  # pragma: no cover - unreachable while limit < len(files)
+            break
+    return selected
 
 
 def discover_shape_rule_extra_intake_files(
