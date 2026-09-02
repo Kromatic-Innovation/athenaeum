@@ -1517,11 +1517,14 @@ def _mixed_knob_api_usage() -> TokenUsage:
 
 
 class TestSchemaV3:
-    def test_ledger_version_is_3(self, ledger: Path) -> None:
-        assert spend.LEDGER_VERSION == 3
+    def test_ledger_version_stamps_current_schema(self, ledger: Path) -> None:
+        # Not hardcoded to 3: athenaeum#1289 bumped LEDGER_VERSION to 4 for the
+        # ADDITIVE tokens_by_surface field below -- a knob-tagged row still
+        # carries tokens_by_knob regardless of which version stamps it. See
+        # TestSchemaV4 for the v4-specific tokens_by_surface assertions.
         assert spend.record_spend(_mixed_knob_api_usage(), run_type="librarian", provider="api")
         rec = spend.read_ledger(ledger)[0]
-        assert rec["v"] == 3
+        assert rec["v"] == spend.LEDGER_VERSION
 
     def test_tokens_by_knob_is_a_sibling_of_tokens_by_model(self, ledger: Path) -> None:
         """AC: tokens_by_knob carries the right knob per source, and
@@ -1644,6 +1647,217 @@ class TestSchemaV3:
             assert key in summary
         # by_knob is opt-in -- absent when not requested.
         assert "by_knob" not in summary
+
+
+# ---------------------------------------------------------------------------
+# Schema v4 (issue athenaeum#1289) — per-SURFACE input-token attribution,
+# tokens_by_surface, and the surface-unattributed pre-v4 contract. Mirrors
+# TestSchemaV3 one field down, PLUS the "unattributed" synthesized remainder
+# tokens_by_knob does not have (see spend.tokens_by_surface's docstring).
+# ---------------------------------------------------------------------------
+
+
+def _six_surface_api_usage() -> TokenUsage:
+    """A metered run touching four of the six declared surfaces (the two
+    zero-LLM-call surfaces -- tier0_passthrough / tier1_programmatic_match --
+    never appear in per_surface by construction) PLUS ordinary untagged
+    batched tier-2/tier-3 traffic, so the synthesized "unattributed"
+    remainder is exercised too."""
+    from athenaeum.models import (
+        SURFACE_C4_CONTRADICTION,
+        SURFACE_SAME_PAGE_MULTI_MERGE,
+        SURFACE_TIER2_TRUNCATION_RETRY,
+        SURFACE_TIER3_FULL_ECHO_FALLBACK,
+    )
+
+    u = TokenUsage()
+    u.add(
+        1_000, 200,
+        model="claude-haiku-4-5-20251001", knob="classify",
+        surface=SURFACE_C4_CONTRADICTION,
+    )
+    u.add(
+        2_000, 400,
+        model="claude-opus-4-7", knob="resolve",
+        surface=SURFACE_C4_CONTRADICTION,
+    )
+    u.add(
+        3_000, 600,
+        model="claude-sonnet-4-6", knob="write",
+        surface=SURFACE_SAME_PAGE_MULTI_MERGE,
+    )
+    u.add(
+        4_000, 800,
+        model="claude-haiku-4-5-20251001", knob="classify",
+        surface=SURFACE_TIER2_TRUNCATION_RETRY,
+    )
+    u.add(
+        5_000, 1_000,
+        model="claude-sonnet-4-6", knob="write",
+        surface=SURFACE_TIER3_FULL_ECHO_FALLBACK,
+    )
+    # Untagged (batched) traffic -- this is the remainder tokens_by_surface
+    # must still account for under "unattributed".
+    u.add_batch_tokens(6_000, 1_200, model="claude-haiku-4-5-20251001", knob="classify")
+    return u
+
+
+class TestSchemaV4:
+    def test_ledger_version_is_4(self, ledger: Path) -> None:
+        assert spend.LEDGER_VERSION == 4
+        assert spend.record_spend(_six_surface_api_usage(), run_type="librarian", provider="api")
+        rec = spend.read_ledger(ledger)[0]
+        assert rec["v"] == 4
+
+    def test_tokens_by_surface_is_a_sibling_of_tokens_by_knob(self, ledger: Path) -> None:
+        """AC: tokens_by_surface carries the right surface per source, and
+        tokens_by_knob/tokens_by_model keep their EXISTING shapes byte-for-byte."""
+        from athenaeum.models import (
+            SURFACE_C4_CONTRADICTION,
+            SURFACE_SAME_PAGE_MULTI_MERGE,
+            SURFACE_TIER2_TRUNCATION_RETRY,
+            SURFACE_TIER3_FULL_ECHO_FALLBACK,
+            SURFACE_UNATTRIBUTED,
+        )
+
+        assert spend.record_spend(_six_surface_api_usage(), run_type="librarian", provider="api")
+        rec = spend.read_ledger(ledger)[0]
+
+        tbs = rec["tokens_by_surface"]
+        assert set(tbs) == {
+            SURFACE_C4_CONTRADICTION,
+            SURFACE_SAME_PAGE_MULTI_MERGE,
+            SURFACE_TIER2_TRUNCATION_RETRY,
+            SURFACE_TIER3_FULL_ECHO_FALLBACK,
+            SURFACE_UNATTRIBUTED,
+        }
+        assert tbs[SURFACE_C4_CONTRADICTION]["input"] == 3_000  # 1_000 + 2_000
+        assert tbs[SURFACE_C4_CONTRADICTION]["output"] == 600  # 200 + 400
+        assert tbs[SURFACE_SAME_PAGE_MULTI_MERGE]["input"] == 3_000
+        assert tbs[SURFACE_TIER2_TRUNCATION_RETRY]["input"] == 4_000
+        assert tbs[SURFACE_TIER3_FULL_ECHO_FALLBACK]["input"] == 5_000
+        assert tbs[SURFACE_UNATTRIBUTED]["input"] == 6_000  # the untagged batch call
+
+        # tokens_by_knob / tokens_by_model are untouched by the surface
+        # addition -- same shape as schema v3 produced.
+        tbk = rec["tokens_by_knob"]
+        assert set(tbk) == {"classify", "resolve", "write"}
+        tbm = rec["tokens_by_model"]
+        assert set(tbm) == {
+            "claude-haiku-4-5-20251001", "claude-opus-4-7", "claude-sonnet-4-6",
+        }
+
+    def test_tokens_by_surface_conservation_property(self, ledger: Path) -> None:
+        """AC: the sum of every tokens_by_surface entry's 'input' equals
+        usage.input_tokens exactly -- the conservation property that makes
+        the "unattributed" bucket meaningful rather than a silent gap."""
+        usage = _six_surface_api_usage()
+        by_surface = spend.tokens_by_surface(usage)
+        assert sum(v["input"] for v in by_surface.values()) == usage.input_tokens
+        assert sum(v["output"] for v in by_surface.values()) == usage.output_tokens
+
+    def test_tokens_by_surface_all_unattributed_when_no_surface_tagged(self) -> None:
+        """A run that tags no surface at all (every current non-six call
+        site) still gets a tokens_by_surface entry -- unlike tokens_by_knob,
+        which would be empty."""
+        from athenaeum.models import SURFACE_UNATTRIBUTED
+
+        usage = TokenUsage()
+        usage.add(500, 100, model="claude-opus-4-7", knob="topic")
+        by_surface = spend.tokens_by_surface(usage)
+        assert set(by_surface) == {SURFACE_UNATTRIBUTED}
+        assert by_surface[SURFACE_UNATTRIBUTED]["input"] == 500
+        assert by_surface[SURFACE_UNATTRIBUTED]["output"] == 100
+
+    def test_pre_v4_rows_readable_and_counted_surface_unattributed(self, ledger: Path) -> None:
+        """A pre-v4 row (no per-surface attribution at all) stays readable
+        and is counted as surface-unattributed -- never silently dropped --
+        exactly as a pre-v3 row is counted knob-unattributed (athenaeum#1289)."""
+        # A genuine v3 row, as athenaeum#781 wrote it: tokens_by_knob present,
+        # tokens_by_surface absent entirely.
+        v3 = {
+            "v": 3,
+            "ts": "2026-08-25T00:00:00Z",
+            "run_type": "librarian",
+            "provider": "anthropic",
+            "billing_mode": "api",
+            "subscription_covered": False,
+            "models": ["claude-sonnet-4-6"],
+            "tokens_by_model": {"claude-sonnet-4-6": {"input": 1000, "output": 200, "total": 1200}},
+            "tokens_by_knob": {"write": {"input": 1000, "output": 200, "total": 1200}},
+            "api_calls": 10,
+            "input_tokens": 1000,
+            "output_tokens": 200,
+            "total_tokens": 1200,
+            "estimated_cost_usd": 0.15,
+            "notional_usd": 0.15,
+        }
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(json.dumps(v3, separators=(",", ":")) + "\n", encoding="utf-8")
+        # A conforming v4 row appended after it.
+        spend.record_spend(_six_surface_api_usage(), run_type="librarian", provider="api")
+
+        records = spend.read_ledger(ledger)
+        assert len(records) == 2  # the v3 row is NOT dropped
+        summary = spend.summarize(records)
+        assert summary["record_count"] == 2
+        assert summary["surface_unattributed_records"] == 1  # only the v3 row
+        # knob_unattributed_records is unaffected -- both rows carry per-knob
+        # attribution, this is purely the per-surface dimension.
+        assert summary["knob_unattributed_records"] == 0
+        # The v3 row is still present in its billing bucket.
+        assert summary["api"]["records"] == 2
+
+    def test_by_surface_summarize_and_format(self, ledger: Path) -> None:
+        from athenaeum.models import SURFACE_C4_CONTRADICTION, SURFACE_UNATTRIBUTED
+
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        spend.record_spend(_six_surface_api_usage(), run_type="librarian", provider="api")
+        summary = spend.summarize(spend.read_ledger(ledger), by_surface=True)
+        assert SURFACE_C4_CONTRADICTION in summary["by_surface"]
+        assert SURFACE_UNATTRIBUTED in summary["by_surface"]
+        out = spend.format_summary(summary, since_label="7d", by_surface=True)
+        assert "By surface:" in out
+        assert SURFACE_C4_CONTRADICTION in out
+
+    def test_by_surface_keeps_subscription_api_split_never_blended(self, ledger: Path) -> None:
+        """AC: --by-surface reports tokens AND dollars per surface, but the
+        two cost paths inside each surface bucket are never summed together."""
+        from athenaeum.models import SURFACE_C4_CONTRADICTION
+
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        spend.record_spend(_six_surface_api_usage(), run_type="librarian", provider="api")
+        summary = spend.summarize(spend.read_ledger(ledger), by_surface=True)
+        slot = summary["by_surface"][SURFACE_C4_CONTRADICTION]
+        assert "subscription" in slot
+        assert "api" in slot
+        assert slot["subscription"]["estimated_cost_usd"] == 0.0
+        assert slot["api"]["estimated_cost_usd"] > 0.0
+
+    def test_cli_by_surface_flag(self, ledger: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        from athenaeum.models import SURFACE_C4_CONTRADICTION, SURFACE_UNATTRIBUTED
+
+        spend.record_spend(_six_surface_api_usage(), run_type="librarian", provider="api")
+        rc = main(["spend", "--since", "30d", "--by-surface", "--json", "--ledger", str(ledger)])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert SURFACE_C4_CONTRADICTION in payload["by_surface"]
+        assert SURFACE_UNATTRIBUTED in payload["by_surface"]
+
+        rc = main(["spend", "--since", "30d", "--by-surface", "--ledger", str(ledger)])
+        assert rc == 0
+        human = capsys.readouterr().out
+        assert "By surface:" in human
+
+    def test_summarize_existing_shape_unchanged_by_surface_opt_in(self, ledger: Path) -> None:
+        """AC: summarize()'s existing shape is unchanged when by_surface is
+        not requested -- it only ADDS keys, mirroring by_knob's own test."""
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        summary = spend.summarize(spend.read_ledger(ledger))
+        for key in ("subscription", "api", "unknown", "record_count"):
+            assert key in summary
+        assert "by_surface" not in summary
+        assert "surface_unattributed_records" in summary  # additive, always present
 
 
 # ---------------------------------------------------------------------------
@@ -2068,7 +2282,7 @@ class TestQueryTopicsLedger:
         assert recs[0]["estimated_cost_usd"] > 0.0
         # v2 conformance on a genuinely LLM-driven write (issue athenaeum#487): the row
         # carries billing_mode, per-model attribution, and the notional figure.
-        assert recs[0]["v"] == 3
+        assert recs[0]["v"] == spend.LEDGER_VERSION
         assert recs[0]["billing_mode"] == "api"
         assert recs[0]["notional_usd"] == recs[0]["estimated_cost_usd"]
         tbm = recs[0]["tokens_by_model"]

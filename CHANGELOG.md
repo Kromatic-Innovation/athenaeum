@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-surface input-token attribution for the six declared non-batched
+  surfaces (athenaeum#1289).** athenaeum#1148's investigation found that
+  `TokenUsage.per_knob` (athenaeum#781) buckets by model knob only, and while
+  `add_batch_tokens`/`add_tokens` already separate batched from synchronous
+  spend *within* a knob, neither can separate one non-batched *surface* from
+  another — `batch.py`'s module docstring declares six surfaces out of scope
+  for the Batch API transport (tier-0 passthrough, tier-1 programmatic
+  matching, the C4 contradiction detector and resolver, same-page
+  multi-merge groups, the athenaeum#476 truncation retry, and the tier-3
+  full-echo fallback), but nothing recorded which surface a non-batched
+  token actually went to. `TokenUsage.per_surface` is now a SIBLING of
+  `per_knob` — same additive-subset bucket shape, tagged via a `surface=`
+  kwarg on `add()`/`add_tokens()`/`add_batch_tokens()` — populated at the
+  five surfaces that spend real tokens (the two zero-LLM-call surfaces
+  never appear, by construction). Reported as `tokens_by_surface`, a new
+  sibling ledger field (schema v4) alongside `tokens_by_knob`, and via
+  `athenaeum spend --by-surface`. Unlike `per_knob`, the reporting layer
+  (`spend.tokens_by_surface`) always synthesizes an `"unattributed"` entry —
+  the run's total input minus every explicitly-tagged surface — so spend
+  outside the six (batched tier-2/tier-3, reasoning tiers, topic,
+  rule_proposals, the freetext-edit resolver path, ...) is a visible
+  remainder instead of silently dropped, and the sum of every entry's
+  `input` always equals `usage.input_tokens` exactly. Purely additive
+  instrumentation: no existing reported number changes value, no spend
+  ceiling or policy changes, and pre-v4 ledger rows stay readable (counted
+  `surface_unattributed_records`, never dropped).
+
 ### Fixed
 
 - **Intake starvation: a scheduled source that never gets *reached* is now
