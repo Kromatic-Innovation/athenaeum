@@ -115,7 +115,8 @@ from athenaeum.compiled_exempt import mark_exempt
 from athenaeum.config import (
     resolve_preserved_log_adapter,
     resolve_preserved_log_dir,
-    resolve_rule_proposals_window_days,
+    resolve_shape_rules_dispositions_retention_days,
+    resolve_shape_rules_log_no_match,
     resolve_shape_rules_max_records_per_run,
 )
 from athenaeum.corrections import compute_correction_id
@@ -1553,15 +1554,36 @@ def _shape_rule_disposition_row(
 #    that upgrades onto one pays a one-time larger read on its first
 #    post-fix run.
 # 2. Retention (:func:`prune_shape_rule_dispositions`): rows older than
-#    `librarian.rule_proposals.window_days` (the same window
-#    `detect_shape_frequency` already restricts its own read to -- nothing
-#    downstream ever reads past it) are dropped from the ledger outright,
-#    independent of whether dedupe ever fires for a given record. Needed
-#    because dedupe alone still lets the file grow without bound as
-#    genuinely NEW distinct records accumulate over months; retention alone
-#    still reaches roughly 1.1 GB at the observed pre-dedupe rate over a
-#    30-day window (the issue's own arithmetic) -- both together are what
-#    bounds the file.
+#    `librarian.shape_rules.dispositions_retention_days` are dropped from
+#    the ledger outright, independent of whether dedupe ever fires for a
+#    given record. Needed because dedupe alone still lets the file grow
+#    without bound as genuinely NEW distinct records accumulate over months;
+#    retention alone still reaches roughly 1.1 GB at the observed pre-dedupe
+#    rate over a 30-day window (the issue's own arithmetic) -- both together
+#    are what bounds the file.
+#
+# Issue athenaeum#1274 added a third lever, and re-keyed the second:
+#
+# 3. Suppress-at-write (`librarian.shape_rules.log_no_match`, DEFAULT OFF,
+#    :func:`athenaeum.config.resolve_shape_rules_log_no_match`): the
+#    `no-match` rows dedupe cannot help with -- a corpus of genuinely
+#    distinct unclaimed records has a genuinely distinct row each, and on
+#    the measured deployment they were 1,485,942 of 1,488,689 rows (99.8%)
+#    -- are not written at all unless asked for. They are only ever read by
+#    athenaeum#905's detector via `_grouped_deferred_rows`'s `tier is None`
+#    filter, and that detector is unreachable while
+#    `librarian.rule_proposals.enabled` is off (its own default): the phase
+#    returns before any ledger read. Turning the detector on therefore means
+#    turning this on too -- see the resolver's docstring for why the
+#    dependency is documented rather than wired as a derived default.
+#
+# ...and the retention window above moved off `librarian.rule_proposals.
+# window_days` onto its own `librarian.shape_rules.dispositions_retention_
+# days` (same default, 30, so no deployment's behaviour changes). A READ
+# window and a RETENTION policy are different questions: coupled, narrowing
+# the detector's window silently deleted ledger history, and an operator who
+# disabled `rule_proposals` outright still had retention governed by a key
+# belonging to a phase they had turned off.
 
 
 def _disposition_row_key(row: dict[str, Any]) -> tuple[str, str, str, str | None, str]:
@@ -1813,9 +1835,14 @@ def run_shape_rule_phase(
     Issue athenaeum#975: alongside that per-`(rule, mode)` aggregate, this also
     appends one PER-RECORD disposition row (:func:`append_shape_rule_disposition_row`,
     `wiki_root/_shape_rule_dispositions.jsonl`) for every candidate this phase
-    evaluates -- including the ones no rule matched (`rule_id: null`,
-    `disposition: "no-match"`) -- unless `dry_run` is set, mirroring the
-    aggregate's own dry-run behaviour.
+    evaluates -- unless `dry_run` is set, mirroring the aggregate's own
+    dry-run behaviour.
+
+    Issue athenaeum#1274: the ones no rule matched (`rule_id: null`,
+    `disposition: "no-match"`) are the exception -- 99.8% of the measured
+    ledger, written only when `librarian.shape_rules.log_no_match` is on
+    (DEFAULT OFF). Their count lands in the summary as
+    `no_match_rows_suppressed` when it is off.
 
     Returns a summary dict: `rules_loaded`, `rules_skipped_malformed`,
     `files_evaluated`, `files_matched`, `dispositions` (disposition ->
@@ -1889,6 +1916,8 @@ def run_shape_rule_phase(
     if unclaimed_candidates:
         candidates.extend((r, True) for r in unclaimed_candidates)
 
+    # Issue athenaeum#1274: resolved once per run, not per candidate.
+    log_no_match = resolve_shape_rules_log_no_match(config)
     # Issue athenaeum#1229: dedupe-at-write. Built ONCE, up front -- see the
     # "Dedupe-at-write + retention" section above `_disposition_row_key` for
     # why this is cheap even on a long-lived corpus. `None` in dry-run: no
@@ -1964,7 +1993,14 @@ def run_shape_rule_phase(
             # Issue athenaeum#975: the interesting shapes for athenaeum#905's detector are
             # precisely the ones no rule claims -- so this candidate still gets
             # a disposition row, just with no rule/tier to attribute it to.
-            if not dry_run:
+            #
+            # Issue athenaeum#1274: ...but only when something is going to read
+            # it. These rows were 99.8% of a 341 MB ledger, and their sole
+            # consumer (that same athenaeum#905 detector) is itself off by
+            # default -- so `librarian.shape_rules.log_no_match` gates the
+            # write, default OFF. See the "Dedupe-at-write + retention"
+            # section above, lever 3.
+            if not dry_run and log_no_match:
                 assert existing_disposition_keys is not None
                 _append_disposition_row_deduped(
                     wiki_root,
@@ -1972,6 +2008,14 @@ def run_shape_rule_phase(
                         raw=raw, record=record, rule_id=None, disposition="no-match"
                     ),
                     existing_disposition_keys,
+                )
+            elif not dry_run:
+                # Counted only on a real run. A dry run writes NO disposition
+                # row of any kind (athenaeum#975's own behaviour, unchanged),
+                # so attributing its silence to athenaeum#1274's suppression
+                # would misreport why the ledger is empty.
+                summary["no_match_rows_suppressed"] = (
+                    summary.get("no_match_rows_suppressed", 0) + 1
                 )
             continue
         summary["files_matched"] += 1
@@ -2385,20 +2429,29 @@ def run_shape_rule_phase(
         # Issue athenaeum#1229 part 3: bound the ledger independently of
         # dedupe-at-write above -- see the "Dedupe-at-write + retention"
         # section for why retention alone and dedupe alone are each
-        # insufficient on their own. Same window
-        # `athenaeum.rule_proposals._grouped_deferred_rows` already reads
-        # against, so a row this old was already invisible to the detector
-        # before it is physically dropped here.
-        _pruned = prune_shape_rule_dispositions(
-            wiki_root, window_days=resolve_rule_proposals_window_days(config)
-        )
+        # insufficient on their own. Issue athenaeum#1274 re-keyed the window
+        # from `librarian.rule_proposals.window_days` (a READ window doing
+        # double duty) onto retention's own key, same default.
+        _retention_days = resolve_shape_rules_dispositions_retention_days(config)
+        _pruned = prune_shape_rule_dispositions(wiki_root, window_days=_retention_days)
         if _pruned:
             summary["disposition_rows_pruned"] = _pruned
             log.info(
                 "shape-rules: pruned %d disposition row(s) older than %d day(s) "
-                "(librarian.rule_proposals.window_days, issue athenaeum#1229)",
+                "(librarian.shape_rules.dispositions_retention_days, "
+                "issue athenaeum#1274)",
                 _pruned,
-                resolve_rule_proposals_window_days(config),
+                _retention_days,
+            )
+        _suppressed = summary.get("no_match_rows_suppressed", 0)
+        if _suppressed:
+            # Breadcrumb for an operator staring at an empty athenaeum#905
+            # detector: name the key that has to be flipped.
+            log.info(
+                "shape-rules: suppressed %d no-match disposition row(s) "
+                "(librarian.shape_rules.log_no_match is off; enable it if "
+                "librarian.rule_proposals.enabled is on -- issue athenaeum#1274)",
+                _suppressed,
             )
 
     return summary
