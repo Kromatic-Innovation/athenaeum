@@ -1090,3 +1090,229 @@ def read_refusal_streak(
         return (0, None)
     detail = history[-1].get(REFUSAL_FIELD)
     return (streak, detail if isinstance(detail, dict) else None)
+
+
+# ---------------------------------------------------------------------------
+# Processing-stall streaks (issue athenaeum#1295)
+# ---------------------------------------------------------------------------
+#
+# ``starved_sources`` above (issue athenaeum#1291) counts SLOTS: a source with
+# pending intake that got zero slots in the ``max_files`` window. That signal
+# is blind by construction to a second, independent channel --
+# ``round_robin_by_source`` guarantees a source a slot, it does not guarantee
+# that slot is ever REACHED. The entity loop can stop part-way through an
+# already-scheduled window on either ``max_runtime`` or ``max_api_calls``
+# (both enforced downstream of window selection), and the athenaeum#1291
+# interleaving only SOFTENS the odds of that landing on the same source every
+# run -- it does not eliminate them. A source whose slots consistently fall
+# just past the point a mid-window budget trip stops the loop gets a nonzero
+# slot count and a clean ``starved_sources`` record, run after run, while
+# processing nothing.
+#
+# This is deliberately a SEPARATE field, a separate WARNING prefix, and a
+# separate streak from the athenaeum#1291 pair immediately above -- conflating
+# "got no slots" with "got slots but never got run" would erase the exact
+# distinction an operator needs (the former points at the scheduler /
+# ``max_files`` sizing, the latter points at the per-run budget being too
+# tight for the window it itself sized). Same "no new state file" shape as
+# athenaeum#1291: the entity phase records this run's stalled sources on its
+# profile segment (:data:`STALL_FIELD`), ``build_run_summary_ledger_record``
+# copies every phase field into the durable JSONL verbatim, and the streak is
+# "how many consecutive trailing records also name it" -- the same
+# derivation :func:`starvation_streaks` uses, mirrored exactly.
+
+#: Entity-phase profile field naming this run's zero-processed-despite-slots
+#: sources, as one comma-joined token -- the athenaeum#1295 sibling of
+#: :data:`STARVATION_FIELD`.
+STALL_FIELD = "stalled"
+
+#: K in "K consecutive runs with pending intake, nonzero slots, and zero
+#: files processed". Reuses :data:`STARVATION_STREAK_THRESHOLD` rather than
+#: defining a separate magic number: the underlying question -- "is this a
+#: one-off or a stall?" -- is identical in kind for both channels, and three
+#: is the smallest streak that is unambiguously not a one-off for either. If
+#: the two channels ever need to diverge (e.g. one proves noisier in
+#: practice), split this into its own constant then, with the measurement
+#: that justifies the new value.
+STALL_STREAK_THRESHOLD = STARVATION_STREAK_THRESHOLD
+
+#: Stable, greppable WARNING prefix -- distinct from
+#: :data:`STARVATION_ALERT_PREFIX` so an operator's log sweep can tell "no
+#: slots" apart from "slots but no progress" without parsing the message
+#: body.
+STALL_ALERT_PREFIX = "librarian-source-processing-stall"
+
+
+def stalled_sources_in_record(record: dict[str, Any]) -> set[str] | None:
+    """This run's zero-processed-despite-slots sources from one ledger *record*.
+
+    Mirrors :func:`starved_sources_in_record` exactly, reading
+    :data:`STALL_FIELD` instead of :data:`STARVATION_FIELD`. Returns ``None``
+    for a record whose entity phase never ran (merge-only/cluster-only run,
+    or an early deadline trip) -- distinct from ``set()`` ("the entity phase
+    ran and nothing stalled") for the same reason :func:`starved_sources_in_record`
+    draws that distinction: :func:`stall_streaks` must not let a run that
+    could not possibly process anything break a streak.
+    """
+    phases = record.get("phases")
+    if not isinstance(phases, dict):
+        return None
+    entity = phases.get("entity")
+    if not isinstance(entity, dict):
+        return None
+    token = entity.get(STALL_FIELD)
+    if not isinstance(token, str):
+        # "render only when non-empty" convention (see the entity profile
+        # segment in librarian.py) -- absence means an empty set, not None.
+        return set()
+    return {part.strip() for part in token.split(",") if part.strip()}
+
+
+def stall_streaks(
+    stalled_now: "Iterable[str]", history: "list[dict[str, Any]]"
+) -> dict[str, int]:
+    """Consecutive-run processing-stall streak per source, INCLUDING this run.
+
+    Mirrors :func:`starvation_streaks` exactly, reading
+    :func:`stalled_sources_in_record` instead of
+    :func:`starved_sources_in_record`. *history* is oldest-first, read BEFORE
+    this run's own record is appended.
+    """
+    prior = [
+        stalled
+        for stalled in (stalled_sources_in_record(rec) for rec in history)
+        if stalled is not None
+    ]
+    streaks: dict[str, int] = {}
+    for source in stalled_now:
+        streak = 1
+        for entry in reversed(prior):
+            if source not in entry:
+                break
+            streak += 1
+        streaks[source] = streak
+    return streaks
+
+
+def read_stall_streaks(
+    stalled_now: "Iterable[str]",
+    *,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> dict[str, int]:
+    """:func:`stall_streaks` against the durable ledger. Best-effort.
+
+    Mirrors :func:`read_starvation_streaks` exactly -- fail-open, and never
+    raises into the run it is only observing.
+    """
+    sources = list(stalled_now)
+    if not sources:
+        return {}
+    try:
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        history = read_run_summary_ledger(target)
+    except Exception as exc:  # noqa: BLE001 — observability must never raise
+        log.debug("run-summary: stall history read skipped: %s", exc)
+        history = []
+    return stall_streaks(sources, history)
+
+
+def stall_priority(history: "list[dict[str, Any]]") -> list[str]:
+    """The processing-stall channel's contribution to the next run's turn order.
+
+    Mirrors :func:`starvation_priority` exactly (see its docstring for why
+    longest-streak-first ordering is load-bearing), but reads
+    :func:`stalled_sources_in_record` instead of
+    :func:`starved_sources_in_record` -- the previous run's sources that had
+    pending intake, nonzero slots, and zero files processed, longest STALL
+    streak first. Returns ``[]`` when the most recent entity run stalled
+    nobody, or when there is no entity run to read.
+
+    Used alone this would age a stalled source into the head exactly the way
+    :func:`starvation_priority` ages a zero-slot source. See
+    :func:`combined_starvation_priority` for how the two channels compose
+    into the single list :func:`athenaeum.intake.round_robin_by_source`
+    actually consumes.
+    """
+    index = None
+    for i in range(len(history) - 1, -1, -1):
+        if stalled_sources_in_record(history[i]) is not None:
+            index = i
+            break
+    if index is None:
+        return []
+    previous = stalled_sources_in_record(history[index]) or set()
+    if not previous:
+        return []
+    streaks = stall_streaks(previous, history[:index])
+    return sorted(previous, key=lambda source: (-streaks[source], source))
+
+
+def combined_starvation_priority(
+    slot_priority: "list[str]", processing_stall_priority: "list[str]"
+) -> list[str]:
+    """Merge the slot-starvation and processing-stall priority heads (athenaeum#1295).
+
+    The scheduler (:func:`athenaeum.intake.round_robin_by_source`) takes ONE
+    ``priority_sources`` list. Two independent channels now want to age
+    sources into its head -- :func:`starvation_priority` (zero slots) and
+    :func:`stall_priority` (slots but zero processed) -- and they must
+    combine deterministically without weakening either guarantee.
+
+    The merge is: *slot_priority* first, in its own order, UNCHANGED; then
+    any *processing_stall_priority* source not already present, appended
+    after, also in its own order. Two things fall out of that shape:
+
+    * The athenaeum#1291 AC1 bound is untouched. Every slot-starved source
+      keeps EXACTLY the rank and position :func:`starvation_priority` alone
+      would have given it -- prepending nothing before it and never
+      reordering it -- so the existing ``ceil(n_sources / limit)`` proof
+      does not need to be redone.
+    * A processing-stalled source that is not also slot-starved still ages
+      ahead of plain discovery order (the whole point of Plan step 3 -- the
+      signal is diagnostic only until something reads it back into the
+      schedule), just behind whatever the slot channel already prioritised
+      this run. A source named by BOTH channels is deduplicated to its
+      (earlier, slot-channel) position rather than appearing twice.
+
+    Deterministic given deterministic inputs: no set iteration, ``dict.
+    fromkeys`` preserves first-seen order exactly like
+    :func:`athenaeum.intake.round_robin_by_source`'s own ``head``
+    de-duplication.
+    """
+    return list(dict.fromkeys([*slot_priority, *processing_stall_priority]))
+
+
+def read_combined_starvation_priority(
+    *,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> list[str]:
+    """:func:`combined_starvation_priority` against the durable ledger. Best-effort.
+
+    This is what the librarian actually passes to ``round_robin_by_source``
+    as ``priority_sources`` -- the single call site that folds both the
+    athenaeum#1291 slot-starvation channel and the athenaeum#1295
+    processing-stall channel into one turn-order head. Reads the ledger
+    exactly once (both :func:`starvation_priority` and :func:`stall_priority`
+    are pure functions over the same *history* list) and fails open to
+    ``[]`` -- plain discovery-order turns -- like every other read in this
+    module.
+    """
+    try:
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        history = read_run_summary_ledger(target)
+        return combined_starvation_priority(
+            starvation_priority(history), stall_priority(history)
+        )
+    except Exception as exc:  # noqa: BLE001 — observability must never raise
+        log.debug("run-summary: combined starvation priority read skipped: %s", exc)
+        return []

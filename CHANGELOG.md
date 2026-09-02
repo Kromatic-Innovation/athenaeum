@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Intake starvation: a scheduled source that never gets *reached* is now
+  named (athenaeum#1295).** athenaeum#1291 fixed one starvation channel
+  (ordering) and made it observable — but its `starved_sources` signal counts
+  **scheduled slots**, not files processed. `round_robin_by_source` guarantees
+  a source gets slots in the window; it does not guarantee those slots are
+  ever reached. The entity loop can stop part-way through an already-scheduled
+  window on either `max_runtime` or `max_api_calls`, both enforced *downstream*
+  of window selection, so a source whose slots consistently land past the trip
+  point gets a non-zero slot count and a zero starvation streak, run after run,
+  while processing nothing. Interleaving the window bounds that damage; it does
+  not eliminate it. Every athenaeum#1291 acceptance criterion is worded in
+  terms of slots, so nothing that shipped there is false — this is the second,
+  independent channel that signal is blind to by construction.
+  A per-source count of files **actually processed** is now accumulated in the
+  entity loop and read back at the end of the run: a source with pending
+  intake, non-zero slots and zero processed files is reported as `stalled`,
+  on its own `librarian-source-processing-stall` prefix and its own streak,
+  kept deliberately distinct from athenaeum#1291's zero-slot `starved` channel
+  so the two are never conflated. It rides the entity profile segment, so the
+  athenaeum#1102 run-summary ledger carries it forward for free — no new state
+  file. A stalled source also ages into the scheduler's turn-order head
+  (`combined_starvation_priority`: the slot channel's ranking is preserved
+  exactly and unshifted, so athenaeum#1291's `ceil(n_sources / limit)` bound is
+  untouched, with stall-only sources appended after it), because a signal
+  nothing reads back into the schedule is diagnostic only and self-corrects
+  nothing. Per-run budget semantics are unchanged: this adds reporting and
+  turn order, never a new way to exceed a budget.
+
 - **`athenaeum status` no longer reads healthy after a zero-progress budget
   refusal (athenaeum#1283).** athenaeum#1135 already detected, at run time, a run
   that stopped early for a resource reason (budget / deadline / spend ceiling)
