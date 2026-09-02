@@ -10,6 +10,7 @@ import pytest
 
 from athenaeum.librarian import RUN_SUMMARY_PREFIX
 from athenaeum.run_summary_log import (
+    REFUSAL_FIELD,
     REGRESSION_ALERT_RATIO,
     REGRESSION_MIN_SAMPLES,
     RUN_SUMMARY_LEDGER_VERSION,
@@ -22,7 +23,10 @@ from athenaeum.run_summary_log import (
     parse_run_summary_line,
     parse_run_summary_log,
     parse_run_summary_text,
+    read_refusal_streak,
     read_run_summary_ledger,
+    refusal_in_record,
+    refusal_streak,
     write_run_summary_record,
 )
 
@@ -538,6 +542,247 @@ class TestRunSummaryLedgerRecordEconomicsField:
         record = build_run_summary_ledger_record(_PROFILE)
         assert "economics" not in record
         assert "alerts" not in record
+
+
+# ---------------------------------------------------------------------------
+# The athenaeum#1135 refusal verdict, persisted (issue athenaeum#1283).
+#
+# THREE ledger-record shapes matter here, not two -- a first cut of this
+# issue collapsed "verdict never evaluated for this run" and "verdict
+# evaluated, run was clean" into the same omitted ``refusal`` key, which
+# made a real, non-hypothetical path (``RunContext.stop_on_deadline``, a
+# wall-clock deadline trip in a pre-entity phase -- it calls
+# ``emit_run_summary`` and returns BEFORE ``_run_finalize_phase`` ever sets
+# ``ctx.librarian_refusal``) misread as a confirmed-clean run. The fix: the
+# ``refusal`` field, when present, is a dict keyed on ``tripped`` -- so
+# "evaluated and clean" writes ``{"tripped": False}`` (present, falsy
+# ``tripped``) and only "never evaluated" omits the key entirely.
+# ---------------------------------------------------------------------------
+
+
+def _refusal_record(*, v: int = RUN_SUMMARY_LEDGER_VERSION) -> dict:
+    """A v3 record whose run WAS a refusal (mirrors ``_record`` in
+    ``test_intake_scheduling_fairness.py``'s starvation-streak tests, but for
+    the single ``refusal`` field rather than a per-source token)."""
+    return {
+        "v": v,
+        "ts": "2026-09-02T00:00:00Z",
+        "phases": {},
+        REFUSAL_FIELD: {"tripped": True, "reason": "spend-ceiling", "files": 0},
+    }
+
+
+def _evaluated_clean_record(*, v: int = RUN_SUMMARY_LEDGER_VERSION) -> dict:
+    """A record whose run was evaluated and was NOT a refusal — the
+    ``refusal`` key is PRESENT with a falsy ``tripped``, distinct from
+    :func:`_unevaluated_record` below (key absent entirely). This is the
+    shape a real clean run writes via ``RunContext.emit_run_summary`` once
+    ``ctx.librarian_refusal`` is ``False`` (not ``None``)."""
+    return {
+        "v": v,
+        "ts": "2026-09-02T00:00:00Z",
+        "phases": {},
+        REFUSAL_FIELD: {"tripped": False},
+    }
+
+
+def _unevaluated_record(*, v: int = RUN_SUMMARY_LEDGER_VERSION) -> dict:
+    """A record whose ``refusal`` key is entirely ABSENT — either because
+    ``v < 3`` (predates the field existing at all) or because ``v >= 3`` but
+    the verdict was never evaluated for that particular run (e.g. the
+    ``stop_on_deadline`` path named in the module docstring above). Both are
+    "cannot speak", for different reasons — see :func:`refusal_in_record`.
+    """
+    return {"v": v, "ts": "2026-09-02T00:00:00Z", "phases": {}}
+
+
+class TestRunSummaryLedgerRecordRefusalField:
+    def test_refusal_round_trips_through_the_ledger(self, tmp_path: Path) -> None:
+        ledger_path = tmp_path / "run_summary.jsonl"
+        write_run_summary_record(
+            _PROFILE,
+            ledger_path=ledger_path,
+            refusal={"tripped": True, "reason": "budget", "files": 0},
+        )
+        records = read_run_summary_ledger(ledger_path)
+        assert len(records) == 1
+        assert records[0]["refusal"] == {
+            "tripped": True,
+            "reason": "budget",
+            "files": 0,
+        }
+        assert records[0]["v"] == RUN_SUMMARY_LEDGER_VERSION == 3
+
+    def test_an_evaluated_clean_verdict_is_written_not_omitted(
+        self, tmp_path: Path
+    ) -> None:
+        # The athenaeum#1283 correctness fix, pinned directly: an EVALUATED
+        # clean run (``{"tripped": False}``, a truthy dict) is written, not
+        # omitted -- distinct from the never-evaluated case below, which
+        # omits the key entirely. Before this fix the two were
+        # indistinguishable on disk.
+        ledger_path = tmp_path / "run_summary.jsonl"
+        write_run_summary_record(
+            _PROFILE, ledger_path=ledger_path, refusal={"tripped": False}
+        )
+        records = read_run_summary_ledger(ledger_path)
+        assert len(records) == 1
+        assert records[0]["refusal"] == {"tripped": False}
+
+    def test_omitted_only_when_the_verdict_was_never_evaluated(self) -> None:
+        # This exercises the raw builder's own omission gate (unchanged by
+        # this fix: ``build_run_summary_ledger_record`` still omits on any
+        # falsy *refusal* argument). What changed is which argument a REAL
+        # caller (``RunContext.emit_run_summary``) passes for a clean run:
+        # it now passes the truthy ``{"tripped": False}`` (see the test
+        # above), reserving ``None``/``{}`` for "never evaluated" only — so
+        # this omission path should no longer be reached by an evaluated
+        # run in practice, only by one that never reached the verdict.
+        assert "refusal" not in build_run_summary_ledger_record(_PROFILE)
+        assert "refusal" not in build_run_summary_ledger_record(
+            _PROFILE, refusal=None
+        )
+        assert "refusal" not in build_run_summary_ledger_record(
+            _PROFILE, refusal={}
+        )
+
+    def test_version_bumped_to_3(self) -> None:
+        # Issue athenaeum#1283: the version bump itself is load-bearing, not
+        # just additive bookkeeping -- it is what lets a reader distinguish
+        # a v<3 record (cannot speak, full stop -- the field didn't exist)
+        # from a v>=3 one, where an ABSENT ``refusal`` key means "never
+        # evaluated" and a PRESENT one carries the actual verdict via its
+        # ``tripped`` sub-field -- see TestRefusalInRecord below.
+        assert RUN_SUMMARY_LEDGER_VERSION == 3
+        assert build_run_summary_ledger_record(_PROFILE)["v"] == 3
+
+
+class TestRefusalInRecord:
+    def test_true_for_a_v3_refusal_record(self) -> None:
+        assert refusal_in_record(_refusal_record()) is True
+
+    def test_false_for_a_v3_evaluated_clean_record(self) -> None:
+        assert refusal_in_record(_evaluated_clean_record()) is False
+
+    def test_none_for_a_pre_v3_record_even_with_no_refusal_key(self) -> None:
+        # The load-bearing case: a v1/v2 record's ABSENT ``refusal`` key must
+        # not be read as "confirmed not a refusal" -- that version of the
+        # code never evaluated the athenaeum#1135 predicate into the ledger at
+        # all, so the record simply cannot speak to it.
+        assert refusal_in_record(_unevaluated_record(v=2)) is None
+        assert refusal_in_record(_unevaluated_record(v=1)) is None
+
+    def test_none_for_a_v3_record_whose_verdict_was_never_evaluated(self) -> None:
+        # The GAP this whole follow-up closes: a v3 record's ABSENT
+        # ``refusal`` key is NOT "evaluated and clean" -- it is
+        # ``RunContext.emit_run_summary`` having run before
+        # ``ctx.librarian_refusal`` was ever set (the ``stop_on_deadline``
+        # path; see this module's section docstring above and
+        # ``test_librarian_run_refusal.py``'s real-code-path regression
+        # test). Must read ``None``, never ``False``.
+        assert refusal_in_record(_unevaluated_record()) is None
+        assert refusal_in_record(_unevaluated_record(v=RUN_SUMMARY_LEDGER_VERSION)) is None
+
+    def test_none_for_missing_or_unparseable_version(self) -> None:
+        assert refusal_in_record({"ts": "x", "phases": {}}) is None
+        assert refusal_in_record({"v": "not-a-number", "phases": {}}) is None
+
+    def test_non_dict_refusal_value_reads_as_never_evaluated(self) -> None:
+        # Defensive: a malformed/hand-edited record whose ``refusal`` key
+        # exists but isn't a dict (so ``.get("tripped")`` would raise on a
+        # naive implementation) must degrade to "cannot speak", not crash.
+        assert refusal_in_record({"v": 3, "refusal": "not-a-dict"}) is None
+        assert refusal_in_record({"v": 3, "refusal": True}) is None
+
+
+class TestRefusalStreak:
+    def test_no_history_is_zero(self) -> None:
+        assert refusal_streak([]) == 0
+
+    def test_single_trailing_refusal_scores_one(self) -> None:
+        assert refusal_streak([_refusal_record()]) == 1
+
+    def test_counts_consecutive_trailing_refusals(self) -> None:
+        history = [_refusal_record() for _ in range(4)]
+        assert refusal_streak(history) == 4
+
+    def test_an_evaluated_clean_run_breaks_the_streak(self) -> None:
+        history = [_refusal_record(), _refusal_record(), _evaluated_clean_record()]
+        assert refusal_streak(history) == 0
+
+    def test_only_the_trailing_run_of_refusals_counts(self) -> None:
+        # Oldest-first: an older refusal, a clean run, then a fresh refusal.
+        # Only the NEWEST trailing run of refusals counts.
+        history = [
+            _refusal_record(),
+            _evaluated_clean_record(),
+            _refusal_record(),
+        ]
+        assert refusal_streak(history) == 1
+
+    def test_stops_at_a_pre_v3_record_rather_than_counting_through_it(self) -> None:
+        # The AC this test exists for: a v<3 record (predates athenaeum#1283)
+        # sitting between two confirmed refusals must NOT be bridged. If the
+        # reader wrongly treated "cannot speak" as "was a refusal" and kept
+        # walking past it, this would read 3; if it wrongly treated it as
+        # "not a refusal" and reset, the visible result would happen to
+        # match (1) in THIS shape, which is exactly why the assertion below
+        # also pins that the older, pre-boundary refusal is invisible to
+        # this call -- the stop must be genuine, not a lucky same-answer
+        # reset.
+        history = [_refusal_record(), _unevaluated_record(v=2), _refusal_record()]
+        assert refusal_streak(history) == 1
+
+    def test_stops_at_an_unevaluated_v3_record_the_same_way(self) -> None:
+        # The SECOND source of ambiguity (issue athenaeum#1283's follow-up
+        # fix): a v3 record whose verdict was simply never evaluated for
+        # that run (e.g. a stop_on_deadline trip) must be stopped at
+        # exactly like a pre-v3 record above -- never bridged past to reach
+        # an older confirmed refusal.
+        history = [_refusal_record(), _unevaluated_record(), _refusal_record()]
+        assert refusal_streak(history) == 1
+
+    def test_a_lone_pre_v3_record_is_zero_not_a_crash(self) -> None:
+        assert refusal_streak([_unevaluated_record(v=1)]) == 0
+
+    def test_a_lone_unevaluated_v3_record_is_zero_not_a_crash(self) -> None:
+        assert refusal_streak([_unevaluated_record()]) == 0
+
+
+class TestReadRefusalStreak:
+    def test_reads_the_durable_ledger_with_reason_detail(self, tmp_path: Path) -> None:
+        import json
+
+        ledger = tmp_path / "run_summary.jsonl"
+        ledger.write_text(
+            "".join(json.dumps(_refusal_record()) + "\n" for _ in range(3)),
+            encoding="utf-8",
+        )
+        streak, detail = read_refusal_streak(ledger_path=ledger)
+        assert streak == 3
+        assert detail == {"tripped": True, "reason": "spend-ceiling", "files": 0}
+
+    def test_a_missing_ledger_degrades_to_no_history(self, tmp_path: Path) -> None:
+        streak, detail = read_refusal_streak(ledger_path=tmp_path / "absent.jsonl")
+        assert (streak, detail) == (0, None)
+
+    def test_a_clean_ledger_reports_zero_and_no_detail(self, tmp_path: Path) -> None:
+        import json
+
+        ledger = tmp_path / "run_summary.jsonl"
+        ledger.write_text(
+            json.dumps(_evaluated_clean_record()) + "\n", encoding="utf-8"
+        )
+        assert read_refusal_streak(ledger_path=ledger) == (0, None)
+
+    def test_an_unevaluated_ledger_reports_zero_and_no_detail(
+        self, tmp_path: Path
+    ) -> None:
+        import json
+
+        ledger = tmp_path / "run_summary.jsonl"
+        ledger.write_text(json.dumps(_unevaluated_record()) + "\n", encoding="utf-8")
+        assert read_refusal_streak(ledger_path=ledger) == (0, None)
 
 
 class TestDefaultRunSummaryLedgerPath:

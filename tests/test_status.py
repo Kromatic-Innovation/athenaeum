@@ -123,6 +123,59 @@ class TestStatus:
         info = status(root)
         assert info["zero_yield_consecutive"] == 4
 
+    def test_status_librarian_refusal_defaults_to_zero(self, tmp_path: Path) -> None:
+        # Issue athenaeum#1283: no librarian run has ever finalized against this
+        # knowledge base -- no ``run_summary.jsonl`` cache-dir ledger exists,
+        # and the read-side (:func:`athenaeum.run_summary_log.read_refusal_streak`)
+        # fails open to ``(0, None)`` rather than raising.
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        info = status(root)
+        assert info["librarian_refusal_consecutive"] == 0
+        assert info["librarian_refusal_reason"] is None
+
+    def test_status_surfaces_persisted_librarian_refusal_streak(
+        self, tmp_path: Path
+    ) -> None:
+        # Issue athenaeum#1283: the persisted consecutive-refusal count is
+        # surfaced in ``athenaeum status`` -- exercised here via the SAME
+        # durable athenaeum#1102 ledger the finalize phase writes
+        # (``RunContext.emit_run_summary``), without driving a full
+        # librarian run. Written under the CACHE dir (redirected to a
+        # per-test tmp dir by the ``_isolate_cache_dir`` autouse fixture),
+        # not the knowledge root -- mirrors the zero-yield sidecar's own
+        # reasoning (see its module docstring).
+        from athenaeum.config import resolve_cache_dir
+        from athenaeum.run_summary_log import (
+            default_run_summary_ledger_path,
+            write_run_summary_record,
+        )
+
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        ledger_path = default_run_summary_ledger_path(resolve_cache_dir())
+        profile = [("entity", 1.0, {"reason": "spend-ceiling", "files": 0})]
+        write_run_summary_record(
+            profile,
+            ledger_path=ledger_path,
+            refusal={"tripped": True, "reason": "spend-ceiling", "files": 0},
+        )
+        write_run_summary_record(
+            profile,
+            ledger_path=ledger_path,
+            refusal={"tripped": True, "reason": "spend-ceiling", "files": 0},
+        )
+
+        info = status(root)
+        assert info["librarian_refusal_consecutive"] == 2
+        assert info["librarian_refusal_reason"] == {
+            "tripped": True,
+            "reason": "spend-ceiling",
+            "files": 0,
+        }
+
     def test_status_verdict_ledger_duty_cycle_defaults_to_none(self, tmp_path: Path) -> None:
         # Issue athenaeum#712: no run has ever materialized wiki/_verdicts/ (the
         # flag-off default) -- status must not report a duty cycle at all.
@@ -201,6 +254,53 @@ class TestStatus:
         del info["zero_yield_consecutive"]
         output = format_status(info)  # type: ignore[arg-type]
         assert "Zero-yield" not in output
+
+    def test_format_status_includes_librarian_refusal_line_at_streak_of_one(
+        self,
+    ) -> None:
+        # Issue athenaeum#1283: unlike the zero-yield line (an unconditional
+        # count once non-zero) and the athenaeum#1291 starvation WARNING
+        # (streak-of-3 threshold), a SINGLE refusal must already render --
+        # this is "status must not read healthy", not a threshold alarm.
+        info = {
+            "raw_pending": 0,
+            "entity_count": 0,
+            "entities_by_type": {},
+            "last_commit_date": "",
+            "last_commit_message": "",
+            "pending_questions": 0,
+            "librarian_refusal_consecutive": 1,
+            "librarian_refusal_reason": {
+                "tripped": True,
+                "reason": "spend-ceiling",
+                "files": 0,
+            },
+        }
+        output = format_status(info)
+        assert "librarian-run-refusal" in output
+        assert "1 consecutive run(s)" in output
+        assert "spend-ceiling" in output
+
+    def test_format_status_omits_librarian_refusal_line_when_healthy(self) -> None:
+        info = {
+            "raw_pending": 0,
+            "entity_count": 0,
+            "entities_by_type": {},
+            "last_commit_date": "",
+            "last_commit_message": "",
+            "pending_questions": 0,
+            "librarian_refusal_consecutive": 0,
+            "librarian_refusal_reason": None,
+        }
+        output = format_status(info)
+        assert "librarian-run-refusal" not in output
+
+        # And the pre-athenaeum#1283 dict (keys absent entirely) still formats
+        # cleanly.
+        del info["librarian_refusal_consecutive"]
+        del info["librarian_refusal_reason"]
+        output = format_status(info)  # type: ignore[arg-type]
+        assert "librarian-run-refusal" not in output
 
     def test_format_status_includes_verdict_ledger_duty_cycle_line(self) -> None:
         info = {
