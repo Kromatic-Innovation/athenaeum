@@ -25,6 +25,7 @@ from athenaeum.answers import (
     _writeback_source,
     ingest_answers,
 )
+from athenaeum.models import TokenUsage
 from athenaeum.resolutions import propose_freetext_source_edits
 
 # ---------------------------------------------------------------------------
@@ -89,6 +90,41 @@ class TestProposeFreetextSourceEdits:
         assert src in result
         assert result[src] == new_body
         assert "primary venture" not in result[src]
+
+    def test_does_not_tag_c4_contradiction_surface(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1289 (negative control): this function shares the
+        ``resolve`` knob with the C4 resolver (propose_resolution) but is a
+        DIFFERENT declared surface's territory -- it is the interactive
+        freetext-edit application, not the automated merge-phase C4 loop, so
+        it must NOT tag ``SURFACE_C4_CONTRADICTION``. Its spend lands in the
+        "unattributed" remainder instead (see spend.tokens_by_surface)."""
+        from athenaeum.models import SURFACE_C4_CONTRADICTION
+
+        src = tmp_path / "career.md"
+        original_body = "Tristan runs Krobar as his current primary venture.\n"
+        new_body = "Tristan co-leads Krobar and Kromatic as co-equal ventures.\n"
+        payload = _edits_json(
+            [{"path": str(src), "changed": True, "new_body": new_body}]
+        )
+        client = _fake_client(payload)
+        client.messages.create.return_value.usage = MagicMock(
+            input_tokens=150,
+            output_tokens=25,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        usage = TokenUsage()
+        propose_freetext_source_edits(
+            "Krobar and Kromatic are co-equal",
+            [(src, original_body)],
+            ["current primary venture"],
+            client=client,
+            usage=usage,
+        )
+        assert usage.per_surface == {}
+        assert SURFACE_C4_CONTRADICTION not in usage.per_surface
+        # The knob tag is unaffected -- surface is an independent dimension.
+        assert usage.per_knob["resolve"]["input_tokens"] == 150
 
     def test_quantified_wins_picks_one_number(self, tmp_path: Path) -> None:
         src = tmp_path / "quantified_wins.md"
