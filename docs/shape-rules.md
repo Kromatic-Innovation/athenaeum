@@ -232,6 +232,56 @@ same pending-decision flow as before this issue. Resolving that pending
 decision remains available and is unaffected by this mechanism; the two
 are independent ways of answering the same underlying question.
 
+### 3.5 Size is a reported condition, not a match predicate (issue athenaeum#1269)
+
+The knowledge root is a git repository, and its value is being small,
+diffable and reviewable. **Size is not, and will not become, a `match:`
+key** — the table in §3 is exhaustive. Nothing about how large a raw file
+or a raw source tree has grown can select a rule the way `source`,
+`format`, `filename_glob`, `key_fingerprint`, `fields`, or `unclaimed` do.
+
+Instead, two independent, DEFAULT-NONE thresholds under
+`librarian.raw_retention` (see
+[`configuration.md`](configuration.md#raw-intake-retention-limits-librarianraw_retention-athenaeum1269)
+for the full env/yaml/default table) arm a detection sweep that runs as its
+own deterministic, LLM-free phase inside `athenaeum run`
+(`librarian._run_raw_retention_phase`, right after the unrecognised-raw-
+intake audit — §8 above covers phase ordering elsewhere in this doc):
+
+```yaml
+librarian:
+  raw_retention:
+    max_file_bytes: 10485760      # 10 MB -- one raw file
+    max_source_bytes: 268435456   # 256 MB -- one raw/<source>/ tree, aggregate
+```
+
+**Both dimensions are required, not redundant.** A per-file ceiling alone
+cannot catch a source made of many individually-small files that only
+become a repository-hygiene problem in aggregate — the case that motivated
+this mechanism was 943 MB spread across 2,247 files (~420 KB average) under
+`raw/mural/`, found only by a human audit (`athenaeum-adapters#150`,
+`athenaeum-adapters#151`). No per-file threshold sane for a git repository
+would have fired on a single one of those files; only the per-source
+aggregate does. `athenaeum.intake.check_raw_retention` walks each
+`raw/<source>/` tree directly (every file, any extension — deliberately
+NOT built on top of `discover_raw_files`'s `.md`/`.jsonl` glob, since the
+motivating corpus is `.json` and would be invisible to it) and tallies both
+`raw-oversize-file` and `raw-oversize-source`, naming every offending path
+and source in the run summary (`ctx.raw_retention_summary`).
+
+**Crossing either threshold is DETECTED AND REPORTED ONLY.** It never
+blocks intake, never moves a file, and never writes a compiled-exempt row
+— the file stays exactly where it was. This is deliberate, not a
+placeholder for a future auto-action: deciding *where* bulky bytes should
+live is a routing decision for an operator (and for storage adapters
+outside this repository), not something this mechanism should do
+unasked. An operator who wants oversize files actually relocated still
+writes an explicit `preserve` rule (§5) themselves — this check only tells
+them where to point it. With both thresholds unset (the default — no seed
+in `_DEFAULTS`, matching `athenaeum#231`'s convention that a fresh install
+imposes no limit), the phase still runs but its filesystem walk is skipped
+entirely, so an operator who never opts in pays no cost.
+
 ---
 
 ## 4. Transform — field interpolation, closed function vocabulary
