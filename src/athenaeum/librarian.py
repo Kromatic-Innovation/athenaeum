@@ -96,6 +96,8 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.authority import AuthorityManifest, load_authority_manifest
 from athenaeum.bounce_contract import check_tier0_bounce_conformance
 from athenaeum.clusters import (
+    EMBEDDER_CHROMADB_DEFAULT,
+    EMBEDDER_FALLBACK_HASHING,
     cluster_auto_memory_files,
     prune_cluster_rotations,
     resolve_cluster_output_path,
@@ -2034,12 +2036,19 @@ def _run_cluster_pass(
     config: dict[str, object] | None = None,
     dry_run: bool = False,
     changed_paths: set[Path] | None = None,
+    out_embedder_counts: dict[str, int] | None = None,
 ) -> set[str] | None:
     """Cluster discovered auto-memory files and write the JSONL report.
 
     Reuses the recall-index chromadb collection via
     :class:`athenaeum.search.VectorBackend`; falls back to a hashing-
     trick vector if the index is unavailable.
+
+    ``out_embedder_counts`` (issue athenaeum#1279) is threaded straight through to
+    every :func:`athenaeum.clusters.cluster_auto_memory_files` call this
+    function makes (whole-corpus and, via :func:`_delta_cluster_pass`, the
+    delta pool) — see that function's own ``out_embedder_counts`` docstring.
+    ``None`` (the default) skips it entirely.
 
     Returns:
         - ``None`` in the whole-corpus mode (the merge pass should recompile
@@ -2119,6 +2128,7 @@ def _run_cluster_pass(
             threshold=threshold,
             knowledge_root=knowledge_root,
             resolved_config=resolved_config,
+            out_embedder_counts=out_embedder_counts,
         )
         if affected_ids is not None:
             return affected_ids
@@ -2130,6 +2140,7 @@ def _run_cluster_pass(
         extra_roots=extra_roots,
         cache_dir=cache_dir,
         threshold=threshold,
+        out_embedder_counts=out_embedder_counts,
     )
 
     log.info(
@@ -2155,6 +2166,7 @@ def _delta_cluster_pass(
     threshold: float,
     knowledge_root: Path,
     resolved_config: dict[str, object] | None,
+    out_embedder_counts: dict[str, int] | None = None,
 ) -> set[str] | None:
     """Delta-scoped cluster pass (issue athenaeum#370 PR2). ``None`` = fall back to full.
 
@@ -2182,6 +2194,7 @@ def _delta_cluster_pass(
         extra_roots=extra_roots,
         cache_dir=cache_dir,
         threshold=threshold,
+        out_embedder_counts=out_embedder_counts,
     )
     spliced = splice_cluster_report(prior_rows, scope.affected_ids, new_partial)
 
@@ -2271,6 +2284,7 @@ def _compile_auto_memory(
     resolve_client: Any = None,
     reasoning_t1_client: Any = None,
     reasoning_t2_client: Any = None,
+    out_embedder_counts: dict[str, int] | None = None,
 ) -> list:
     """Cluster (C2) + merge (C3/C4) the auto-memory corpus. Returns the entries.
 
@@ -2338,6 +2352,14 @@ def _compile_auto_memory(
     ``escalations_written``) without recomputing it. ``None`` (the default)
     skips the out-param write entirely.
 
+    ``out_embedder_counts`` (issue athenaeum#1279) is threaded straight through to
+    :func:`_run_cluster_pass` (see its own docstring) — a per-file
+    ``{EMBEDDER_*: count}`` tally of this run's cluster-pass embedding
+    resolution. On the F6 slug-collision fallback below, the dict is
+    CLEARED before the whole-corpus re-run: that re-run supersedes the
+    discarded delta attempt's clustering entirely, so counting both would
+    double-count the same files. ``None`` (the default) skips it entirely.
+
     ``contradiction_sweep_since`` / ``force_full_contradiction_sweep`` (issue
     athenaeum#909) thread straight through to
     :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``c4_since`` /
@@ -2383,6 +2405,7 @@ def _compile_auto_memory(
         config=config,
         dry_run=dry_run,
         changed_paths=changed_paths if delta_eligible else None,
+        out_embedder_counts=out_embedder_counts,
     )
 
     # F6: run-global slug-collision guard. If any affected entry's slug would
@@ -2396,8 +2419,17 @@ def _compile_auto_memory(
             "delta: affected slug collides run-globally (F6) — re-running "
             "whole-corpus cluster + merge"
         )
+        if out_embedder_counts is not None:
+            # Issue athenaeum#1279: the discarded delta attempt's tally must not
+            # survive into the whole-corpus re-run's total — see this
+            # function's own out_embedder_counts docstring above.
+            out_embedder_counts.clear()
         _run_cluster_pass(
-            auto_memory_files, knowledge_root, config=config, dry_run=dry_run
+            auto_memory_files,
+            knowledge_root,
+            config=config,
+            dry_run=dry_run,
+            out_embedder_counts=out_embedder_counts,
         )
         only_cluster_ids = None
 
@@ -7348,6 +7380,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     # RunDeadlineExceeded, caught here.
     _delta_taken_out: dict[str, bool] = {}
     _merge_stats: dict = {}  # issue athenaeum#464
+    _embedder_counts: dict[str, int] = {}  # issue athenaeum#1279
     _auto_memory_start = time.monotonic()  # issue athenaeum#464
     try:
         ctx.merged_entries = _compile_auto_memory(
@@ -7371,13 +7404,17 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             heartbeat=ctx.heartbeat,  # issue athenaeum#762: tick run-lock heartbeat in C4
             contradiction_sweep_since=contradiction_sweep_since,  # issue athenaeum#909
             force_full_contradiction_sweep=ctx.full_contradiction_sweep,  # athenaeum#909
+            out_embedder_counts=_embedder_counts,  # issue athenaeum#1279
         )
     except RunDeadlineExceeded as exc:
         # Issue athenaeum#464: record the auto-memory phase's partial elapsed
         # time (and whatever detector/resolver counts landed in
         # ``_merge_stats`` before the trip — usually none, since the
         # merge call raised, but this stays correct either way)
-        # before the deadline-stop path emits the summary.
+        # before the deadline-stop path emits the summary. The C2 cluster
+        # pass (and therefore ``_embedder_counts``) always runs BEFORE C3/C4
+        # merge, so a deadline trip here still reports real embedder counts,
+        # not zeros (issue athenaeum#1279).
         ctx.run_profile.append(
             (
                 "auto-memory",
@@ -7391,6 +7428,17 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                     "clusters_merged": _merge_stats.get("entries_merged", 0),
                     "escalations": _merge_stats.get(
                         "escalations_written", 0
+                    ),
+                    # Issue athenaeum#1279: per-file embedder provenance this run's
+                    # C2 cluster pass resolved — see
+                    # ``clusters.cluster_auto_memory_files``'s
+                    # ``out_embedder_counts`` docstring. Always rendered
+                    # (defaulting to 0), mirroring every other field above.
+                    "embed_chromadb": _embedder_counts.get(
+                        EMBEDDER_CHROMADB_DEFAULT, 0
+                    ),
+                    "embed_fallback": _embedder_counts.get(
+                        EMBEDDER_FALLBACK_HASHING, 0
                     ),
                     "reason": "deadline",  # issue athenaeum#1102 AC1
                 },
@@ -7409,6 +7457,15 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 ),
                 "clusters_merged": _merge_stats.get("entries_merged", 0),
                 "escalations": _merge_stats.get("escalations_written", 0),
+                # Issue athenaeum#1279: per-file embedder provenance this run's C2
+                # cluster pass resolved — see the deadline-trip branch above
+                # for the full rationale.
+                "embed_chromadb": _embedder_counts.get(
+                    EMBEDDER_CHROMADB_DEFAULT, 0
+                ),
+                "embed_fallback": _embedder_counts.get(
+                    EMBEDDER_FALLBACK_HASHING, 0
+                ),
                 # Issue athenaeum#1177 (AC3): no longer unconditionally
                 # "completed" -- see ``_auto_memory_reason``.
                 "reason": _auto_memory_reason(_merge_stats),
