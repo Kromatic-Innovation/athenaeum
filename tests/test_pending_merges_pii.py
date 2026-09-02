@@ -204,6 +204,36 @@ class TestScrubPendingMerges:
         assert PHONE not in text
         assert result.scrubbed[0].values == (PHONE,)
 
+    def test_allowlist_covers_phones_too(self, tmp_path: Path) -> None:
+        """The phone axis carries athenaeum#500's false positives (a 13-digit
+        record id reads as a phone), so adjudication has to reach it."""
+        root = _seed_root(tmp_path)
+        merges_path = _queue_proposal(root)
+        (root / "wiki" / "_pii-allowlist.yml").write_text(
+            f'- value: "{PHONE}"\n  reason: "switchboard, not a person"\n',
+            encoding="utf-8",
+        )
+
+        result = scrub_pending_merges(merges_path, apply=True)
+
+        assert result.scrubbed[0].values == (EMAIL,)
+        assert PHONE in merges_path.read_text(encoding="utf-8")
+
+    def test_malformed_allowlist_entry_fails_closed(self, tmp_path, caplog) -> None:
+        """An entry with no reason adjudicates nothing (athenaeum#936), so the
+        value it would have covered is still redacted — never tolerated by
+        omission."""
+        root = _seed_root(tmp_path)
+        merges_path = _queue_proposal(root)
+        (root / "wiki" / "_pii-allowlist.yml").write_text(
+            f'- value: "{EMAIL}"\n', encoding="utf-8"
+        )
+
+        result = scrub_pending_merges(merges_path, apply=True)
+
+        assert set(result.scrubbed[0].values) == {EMAIL, PHONE}
+        assert "allowlist entry ignored" in caplog.text
+
     def test_explicit_values_ignore_the_allowlist(self, tmp_path: Path) -> None:
         """``migrate-pii`` names values it has ALREADY moved off-corpus; that
         is an instruction about state, not a detection to adjudicate."""
