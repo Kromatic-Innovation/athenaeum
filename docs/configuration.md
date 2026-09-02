@@ -1326,6 +1326,87 @@ observation log, not whether today's response is accepted. No new
 documented constant (`STRICT_CONTRACTS`), matching how `INSTRUMENTED_CONTRACTS`
 above is expressed.
 
+### Per-contract strictness decision (M17 phase 2, athenaeum#608)
+
+athenaeum#608 closes the remaining decision — the four contracts athenaeum#1035
+left on the phase-1 observe-only posture — from a 28-day window of the same
+ledger, **2026-08-05T13:12Z to 2026-09-02T12:42Z, 16,411 records, 0
+malformed**. It is drawn entirely from the post-2026-08-05 clean ledger (see
+the test-pollution note above for why that date is the boundary), and the
+C4-downstream contracts that were starved of a denominator when athenaeum#1035
+was decided now carry four figures of observations each:
+
+| contract | records | mismatches | rate | mismatch classes |
+|---|---:|---:|---:|---|
+| `contradictions` | 1,464 | 0 | 0% | — |
+| `query_topics` | 1,405 | 1 | 0.0712% | wrong-type 1 |
+| `claim_kind` | 1,071 | 0 | 0% | — |
+| `resolutions` | 89 | 0 | 0% | — |
+
+**The reject-vs-degrade question, answered: degrade — everywhere, and now by
+decision rather than by deferral.** `observe()` keeps its never-raise contract
+for every contract. The "reject" teeth this milestone asked about already
+exist, one layer down: each parse site has its own hand-rolled guard that
+degrades to a documented safe fallback (`parse_tier2_entities` skips a
+nameless item, `query_topics` drops a non-string element, `parse_merge_ops_response`
+falls back to a full echo). A second gate inside `observe()` would duplicate
+them without adding protection, and would put a logging side-channel on the
+critical path of the knowledge-write pipeline. What a per-contract strictness
+setting decides is therefore the schema **shape** — which keys are expected,
+which fields are required — so that future drift is classified honestly in the
+observation log.
+
+**Uniform or per-contract? Per-contract, and the data is what settles it.** A
+uniform `extra="forbid"` would be wrong for `tiers.tier3-merge`, whose
+extra-key traffic is real and repeated. A uniform `extra="allow"` leaves four
+contracts tolerating a silently-added field that has demonstrably never
+appeared across four figures of production traffic each. Neither uniform
+posture survives this window, which is the answer.
+
+Applying athenaeum#608's framework ("only missing-required mismatches justify
+rejection; extra keys are a different signal"):
+
+- **`claim_kind`** — 0 mismatches of any class at n=1,071, now over real
+  production traffic (athenaeum#742 wired `stamp_claim_kind` into the nightly
+  intake, reversing the earlier no-caller row). `ClaimKindResponse` tightens
+  from `extra="allow"` to `extra="forbid"`. `claim_kind` stays the only
+  required field.
+- **`contradictions`** — 0 mismatches of any class at n=1,464, the largest
+  clean sample of the four. `ContradictionResponse` tightens to
+  `extra="forbid"`. `detected` stays the only required field; the four
+  `Optional` fields are the site's real tolerance boundary and none of them
+  became required.
+- **`query_topics`** — confirmed, not tightened. `QueryTopicsResponse` is a
+  `RootModel[list[str]]`: it has no named fields, so it has no `extra=` knob
+  and no representable "unexpected key". The window's single mismatch is
+  `wrong-type` (a non-string element) — neither of the framework's two
+  classes — and the site already drops such an element. That existing degrade
+  IS the decided posture.
+- **`resolutions`** — **deliberately deferred, on the denominator rather than
+  the answer.** 0 mismatches at n=89 is 0%, but n=89 is an order of magnitude
+  below every sibling above, and this is the one contract still downstream of
+  the C4 entity-phase bottleneck (athenaeum#1102 shipped
+  `librarian.intake_runtime_floor` defaulting **off**). Its model spans a
+  14-branch `action` union that 89 observations cannot have exercised
+  representatively, so a `forbid` taken now would be a guess wearing a
+  measurement's clothes. `ResolutionResponse` stays `extra="allow"`.
+  **Release bar:** `resolutions` reaches three figures of observations spread
+  across several runs — the same order of magnitude as its siblings — drawn
+  from runs in which the C4 phase was not truncated.
+
+`resolutions` is consequently the one entry in `INSTRUMENTED_CONTRACTS` absent
+from `STRICT_CONTRACTS`; a test pins exactly that, so a future pass has to
+change it deliberately rather than by accident.
+
+As with phase 2a this is a schema-shape decision only, it introduces no
+`athenaeum.yaml` key or env var, and no field became required or optional in
+either direction. One reading caveat, carried forward from the athenaeum#608
+thread because the numbers alone do not show it: every call site invokes
+`observe()` **below** its own parse guard, so the ledger measures field-shape
+drift *within already-parseable responses*. A 0% rate is evidence that no
+unexpected key has appeared in accepted traffic — it is not evidence about
+responses the guard discarded before `observe()` ever saw them.
+
 ## Pending-decisions queue (`athenaeum decisions`, athenaeum#401 / athenaeum#912 / athenaeum#1290)
 
 `athenaeum decisions {list,next,count}` is the ONE "human decisions needed"
