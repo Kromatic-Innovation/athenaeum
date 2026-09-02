@@ -259,6 +259,15 @@ T1_FAILURE_CASES: list[tuple[str, str]] = [
     ("extra_key", '{"verdict": "reject", "reason": "ok", "unexpected_field": "x"}'),
     ("partial_payload", '{"verdict": "reject"}'),  # missing "reason"
     ("validation_error_wrong_type", '{"verdict": 123, "reason": "wrong type"}'),
+    # athenaeum#609 post-review addition (Seer thread on reasoning_tiers.py:717):
+    # a *present* but blank/whitespace-only "reason" satisfied a plain
+    # `reason: str` field and was NOT in the original enumeration -- it
+    # reached ReasoningTierDecision.__post_init__ unvalidated and raised
+    # ValueError there (a failure path outside the safe set). See
+    # _require_nonblank_reason and TestBlankReasonRegression below for the
+    # dedicated crash-pinning regression test.
+    ("blank_reason_empty_string", '{"verdict": "reject", "reason": ""}'),
+    ("blank_reason_whitespace_only", '{"verdict": "reject", "reason": "   "}'),
 ]
 
 
@@ -297,6 +306,19 @@ T2_FAILURE_CASES: list[tuple[str, str]] = [
         '{"verdict": "approve", "reason": "looks safe", "amended_sources": null, '
         '"drafted_body": null, "sneaky_extra_field": "hi"}',
     ),
+    # athenaeum#609 post-review addition (Seer thread on reasoning_tiers.py:717):
+    # a blank/whitespace-only "reason" alongside a LEGITIMATE "approve" verdict
+    # -- the most dangerous shape, since T2 has real write authority and the
+    # verdict itself is well-formed. See _require_nonblank_reason and
+    # TestBlankReasonRegression below.
+    (
+        "blank_reason_empty_string",
+        '{"verdict": "approve", "reason": "", "amended_sources": null, "drafted_body": null}',
+    ),
+    (
+        "blank_reason_whitespace_only",
+        '{"verdict": "approve", "reason": "   ", "amended_sources": null, "drafted_body": null}',
+    ),
 ]
 
 
@@ -322,6 +344,84 @@ class TestT2ExhaustiveDirectional:
         # always lands specifically on escalate.
         assert decision.verdict == "escalate"
         assert decision.verdict != "approve"
+
+
+# ---------------------------------------------------------------------------
+# Regression: a blank/whitespace-only "reason" must NOT crash run_t1_tier /
+# run_t2_tier (athenaeum#609 post-review fix -- Seer thread on
+# reasoning_tiers.py:717, flagged after the initial exhaustive-directional
+# enumeration above shipped WITHOUT this case).
+#
+# Before the fix, `reason: str` on both response models accepted a
+# whitespace-only string, so _parse_t1_response / _parse_t2_response handed
+# it straight through to ReasoningTierDecision(...) /
+# ReasoningTierT2Decision(...), whose own __post_init__ (`not self.reason or
+# not self.reason.strip()`) raised an uncaught ValueError out of
+# run_t1_tier/run_t2_tier -- a failure path outside the safe set
+# (reject/pass_up/escalate), and NOT one of the seven categories the
+# original TestT1ExhaustiveDirectional / TestT2ExhaustiveDirectional
+# parametrization enumerated. The two cases above
+# ("blank_reason_empty_string" / "blank_reason_whitespace_only") now cover
+# it at the parametrized-enumeration level; this class exists SEPARATELY to
+# pin the crash at the exact boundary (run_t1_tier/run_t2_tier, not just
+# "the model rejects the payload" -- the model DID accept a whitespace
+# reason before this fix, so a model-only test would not have caught it).
+# ---------------------------------------------------------------------------
+
+
+class TestBlankReasonRegression:
+    def test_t1_whitespace_only_reason_does_not_raise(self, tmp_path: Path) -> None:
+        client = _mock_client('{"verdict": "reject", "reason": "   "}')
+        decision = run_t1_tier(_t1_proposal(tmp_path), client=client)  # must not raise
+        assert decision.verdict in REASONING_TIER_VERDICTS
+        assert decision.verdict == "pass_up"
+
+    def test_t1_empty_string_reason_does_not_raise(self, tmp_path: Path) -> None:
+        client = _mock_client('{"verdict": "reject", "reason": ""}')
+        decision = run_t1_tier(_t1_proposal(tmp_path), client=client)  # must not raise
+        assert decision.verdict in REASONING_TIER_VERDICTS
+        assert decision.verdict == "pass_up"
+
+    def test_t2_whitespace_only_reason_with_legitimate_approve_does_not_raise(
+        self, tmp_path: Path
+    ) -> None:
+        # The most dangerous shape: a well-formed "approve" (T2's real
+        # authority verdict) paired with a blank reason, on a proposal that
+        # otherwise clears the safe class.
+        client = _mock_client(
+            '{"verdict": "approve", "reason": "   ", '
+            '"amended_sources": null, "drafted_body": null}'
+        )
+        decision = run_t2_tier(_t2_safe_proposal(tmp_path), client=client)  # must not raise
+        safe_set = REASONING_TIER_T2_VERDICTS - {"approve"}
+        assert decision.verdict in safe_set
+        assert decision.verdict == "escalate"
+        assert decision.verdict != "approve"
+
+    def test_t2_empty_string_reason_with_legitimate_approve_does_not_raise(
+        self, tmp_path: Path
+    ) -> None:
+        client = _mock_client(
+            '{"verdict": "approve", "reason": "", '
+            '"amended_sources": null, "drafted_body": null}'
+        )
+        decision = run_t2_tier(_t2_safe_proposal(tmp_path), client=client)  # must not raise
+        safe_set = REASONING_TIER_T2_VERDICTS - {"approve"}
+        assert decision.verdict in safe_set
+        assert decision.verdict == "escalate"
+
+    def test_model_layer_alone_rejects_blank_reason(self) -> None:
+        # Confirms the validator fires at the model layer too -- but this is
+        # NOT sufficient on its own (see the class docstring above): the
+        # crash this regression pins happened one layer further out, in
+        # run_t1_tier/run_t2_tier's decision construction, which is why the
+        # four tests above call the full run_*_tier path.
+        with pytest.raises(ValidationError):
+            T1VerdictResponse.model_validate({"verdict": "reject", "reason": "   "})
+        with pytest.raises(ValidationError):
+            T2VerdictResponse.model_validate(
+                {"verdict": "approve", "reason": "   "}
+            )
 
 
 # ---------------------------------------------------------------------------

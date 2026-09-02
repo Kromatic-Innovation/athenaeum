@@ -136,7 +136,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from athenaeum._retry import with_retry
 from athenaeum.authority import (
@@ -174,6 +174,38 @@ def _fmt_pydantic_error(err: Mapping[str, Any]) -> str:
     """
     loc = ".".join(str(p) for p in err.get("loc", ())) or "<root>"
     return f"{loc}: {err.get('msg', 'invalid')}"
+
+
+def _require_nonblank_reason(value: str) -> str:
+    """Shared ``reason`` field validator for :class:`T1VerdictResponse` and
+    :class:`T2VerdictResponse` (athenaeum#609 post-review fix, Seer thread on
+    ``reasoning_tiers.py:717``).
+
+    A whitespace-only ``reason`` (``"   "``) satisfies a plain ``reason:
+    str`` field just as well as a genuinely empty one does NOT — both
+    ``ReasoningTierDecision.__post_init__`` and
+    ``ReasoningTierT2Decision.__post_init__`` raise ``ValueError`` on a
+    blank reason (``not self.reason.strip()``), and the pre-retrofit
+    hand-rolled parser papered over this with a placeholder default
+    (``"(no reason given by ... model)"``). This retrofit's own docstrings
+    already claim "a response carrying no reason at all is itself treated
+    as malformed input, not defaulted through" — this validator is what
+    makes that claim true for a WHITESPACE-only reason too, not just an
+    absent key: without it, a blank/whitespace reason passed the model
+    (``reason: str`` accepts ``"   "``) and reached
+    ``ReasoningTierDecision``/``ReasoningTierT2Decision`` construction
+    unvalidated, where the dataclass's own guard raised an uncaught
+    ``ValueError`` — a failure path outside the safe set
+    (``reject``/``pass_up``/``escalate``), and the exact "unenumerated
+    erosion path" the issue's own escape hatch warns a mechanical check
+    cannot catch on its own. Raising HERE instead turns it into an ordinary
+    :class:`~pydantic.ValidationError`, which ``_parse_t1_response`` /
+    ``_parse_t2_response`` already route to the tier's existing safe
+    fallback exactly like any other validation failure.
+    """
+    if not value.strip():
+        raise ValueError("reason must not be blank or whitespace-only")
+    return value
 
 
 # Reasoning-tier output budgets (issue athenaeum#575): formerly bare literals in the
@@ -661,10 +693,12 @@ class T1VerdictResponse(BaseModel):
     as :data:`ReasoningTierVerdict` — so "approve" (or any other string) is
     unrepresentable here exactly as it is on :class:`ReasoningTierDecision`
     itself; a payload claiming it fails Pydantic validation rather than
-    silently coercing. ``reason`` is required (unlike the llm_schemas.py
-    ``Optional`` convention for a site that defaults a missing field): at
-    this authority boundary a response carrying no reason at all is itself
-    treated as malformed input, not defaulted through.
+    silently coercing. ``reason`` is required AND non-blank (see
+    :func:`_require_nonblank_reason`; unlike the llm_schemas.py ``Optional``
+    convention for a site that defaults a missing field) — at this
+    authority boundary a response carrying no reason at all, including a
+    whitespace-only one, is itself treated as malformed input, not
+    defaulted through.
 
     ``extra="forbid"`` (see the module docstring's M17-retrofit note): an
     unexpected key is validation failure here, not an observe-only signal —
@@ -675,6 +709,11 @@ class T1VerdictResponse(BaseModel):
 
     verdict: Literal["reject", "pass_up"]
     reason: str
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, value: str) -> str:
+        return _require_nonblank_reason(value)
 
 
 def _parse_t1_response(text: str) -> tuple[ReasoningTierVerdict, str]:
@@ -1201,7 +1240,9 @@ class T2VerdictResponse(BaseModel):
     payload is well-formed enough to trust as input to
     :func:`_t2_decision_from_model_verdict`, which is the sole place
     :func:`run_t2_tier`'s :func:`safe_class_violation` gate is applied.
-    ``reason`` is required, same rationale as :class:`T1VerdictResponse`.
+    ``reason`` is required AND non-blank, same rationale (and the same
+    shared :func:`_require_nonblank_reason` validator) as
+    :class:`T1VerdictResponse`.
 
     ``extra="forbid"`` (see the module docstring's M17-retrofit note) is the
     load-bearing difference from :mod:`athenaeum.llm_schemas`'s equivalent
@@ -1217,6 +1258,11 @@ class T2VerdictResponse(BaseModel):
     reason: str
     amended_sources: list[str] | None = None
     drafted_body: str | None = None
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, value: str) -> str:
+        return _require_nonblank_reason(value)
 
 
 def _parse_t2_response(

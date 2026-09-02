@@ -93,7 +93,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the retrofit touches, an AST-walk test proving `"approve"` is produced on
   exactly one code path dominated by the `safe_class_violation` gate, and a
   negative-control test proving both checks fail against a deliberately
-  eroded variant (never committed to the production module).
+  eroded variant (never committed to the production module). **Post-review
+  fix (Seer thread on `reasoning_tiers.py:717`):** a *present but
+  blank/whitespace-only* `reason` (e.g. `{"verdict": "reject", "reason":
+  "   "}`) satisfied the initial `reason: str` field and reached
+  `ReasoningTierDecision`/`ReasoningTierT2Decision` construction
+  unvalidated, where each dataclass's own non-empty-reason guard raised an
+  uncaught `ValueError` — a failure path outside the safe set that the
+  original exhaustive-directional enumeration missed. Both response models
+  now reject a blank/whitespace-only `reason` at the Pydantic layer (a
+  shared `_require_nonblank_reason` field validator), so it takes the
+  tier's existing safe fallback (T1 → `pass_up`, T2 → `escalate`) like any
+  other schema mismatch, instead of being defaulted through OR crashing.
+  No version bump for this fix — folded into the same `0.19.45` this PR
+  had not yet released.
 
 ### Fixed
 
