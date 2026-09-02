@@ -115,6 +115,55 @@ class TestContentHash:
         b = "---\nname: alpha\ntype: reference\n---\nbody\n"
         assert content_hash(a) != content_hash(b)
 
+    def test_content_hash_unchanged_for_existing_all_string_page(self) -> None:
+        """Pins the hash of an all-str/int/float frontmatter page to a literal.
+
+        Computed against `content_hash` BEFORE issue athenaeum#1281's fix
+        (adding a ``default=`` fallback to the internal ``json.dumps`` call).
+        That fallback is only ever invoked for values the encoder would
+        otherwise reject, so any page whose frontmatter was already fully
+        JSON-native (as this one is) takes the identical code path today —
+        this must never change, or every already-recorded verdict in the
+        athenaeum#712 ledger keyed off the old hash silently invalidates.
+        """
+        page = "---\nname: alpha\ntype: feedback\n---\nsome claim text\n"
+        assert (
+            content_hash(page)
+            == "5a08ad7389f6519453d2e3a2b42179612ead8ab2667e0215a841b0b6a461d5c5"
+        )
+
+    def test_content_hash_unquoted_iso_date_does_not_raise(self) -> None:
+        """Issue athenaeum#1281: unquoted ISO-date frontmatter used to raise TypeError.
+
+        PyYAML parses an unquoted ``created: 2026-08-25`` as a
+        :class:`datetime.date`, which the old bare ``json.dumps(...)`` call
+        (no ``default=``) could not encode.
+        """
+        page = "---\nname: alpha\ncreated: 2026-08-25\n---\nsome claim text\n"
+        # Must not raise TypeError.
+        h = content_hash(page)
+        assert isinstance(h, str) and len(h) == 64
+
+    def test_content_hash_unquoted_datetime_does_not_raise(self) -> None:
+        """Same defect, ``datetime.datetime`` variant (full ISO timestamp)."""
+        page = "---\nname: alpha\nupdated: 2026-08-25T18:17:02Z\n---\nbody\n"
+        h = content_hash(page)
+        assert isinstance(h, str) and len(h) == 64
+
+    def test_content_hash_stable_across_runs(self) -> None:
+        """Same logical page hashes identically on repeated calls (determinism)."""
+        page = "---\nname: alpha\ncreated: 2026-08-25\n---\nsome claim text\n"
+        assert content_hash(page) == content_hash(page)
+
+    def test_content_hash_unquoted_and_quoted_date_agree(self) -> None:
+        """A bare ISO date and the same value explicitly quoted are the same
+        claim content and hash identically — the YAML implicit tag is not
+        part of the logical content.
+        """
+        unquoted = "---\nname: alpha\ncreated: 2026-08-25\n---\nbody\n"
+        quoted = '---\nname: alpha\ncreated: "2026-08-25"\n---\nbody\n'
+        assert content_hash(unquoted) == content_hash(quoted)
+
 
 class TestMakePairKey:
     def test_order_independent(self) -> None:
