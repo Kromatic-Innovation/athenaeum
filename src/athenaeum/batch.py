@@ -82,6 +82,7 @@ from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.intake import tier0_passthrough
 from athenaeum.models import (
+    SURFACE_SAME_PAGE_MULTI_MERGE,
     EntityAction,
     EntityIndex,
     EscalationItem,
@@ -1944,6 +1945,23 @@ def process_batch_run(
                     usage=usage,
                     config=config,
                     wiki_root=wiki_root,
+                    # Issue athenaeum#1289: this loop (``st.sync_merges``) is
+                    # reached for THREE reasons (see the append sites above:
+                    # ``not batch_write``, a same-page multi-merge group, or
+                    # an anchor-unsafe body) — only the middle one is the
+                    # declared ``SURFACE_SAME_PAGE_MULTI_MERGE`` surface.
+                    # When ``batch_write`` is False the write knob is not
+                    # batched at ALL this run, so every merge lands here
+                    # regardless of same-page grouping — tagging those as
+                    # the same-page surface would overcount it, so leave
+                    # them unattributed instead. The anchor-unsafe reason is
+                    # harmless either way: tier3_merge re-checks it first and
+                    # routes straight to tier3_merge_full, which always tags
+                    # its OWN declared surface regardless of what is passed
+                    # here.
+                    surface=(
+                        SURFACE_SAME_PAGE_MULTI_MERGE if batch_write else None
+                    ),
                 )
                 if esc:
                     escalations.append(esc)
