@@ -25,11 +25,22 @@ load-bearing constraint:
 
     **M17 phase 2a (athenaeum#1035) records a per-contract strictness decision for
     two of the six contracts** — see :data:`STRICT_CONTRACTS` for the decided
-    posture, the measured window it is drawn from, and the reasoning. The
-    other four contracts (``query_topics``, ``claim_kind``, ``contradictions``,
-    ``resolutions``) remain phase 1 observe-only, decision deferred to
-    athenaeum#608 exactly as above — this module's behavior for them is
-    unchanged by athenaeum#1035.
+    posture, the measured window it is drawn from, and the reasoning.
+
+    **M17 phase 2 (athenaeum#608) closes the remaining decision** over a
+    28-day window, and its answer to the reject-vs-degrade question is:
+    **degrade, everywhere, at this boundary.** :func:`observe` keeps its
+    never-raise contract for every contract, decided rather than deferred —
+    the "reject" teeth live in each site's own hand-rolled guard, which
+    already degrades to a documented safe fallback, and adding a second gate
+    here would duplicate them without adding protection. What a per-contract
+    strictness setting therefore decides is the **schema SHAPE** — which
+    keys are expected and which fields are required — so that a *future*
+    drift is classified honestly in the observation log. Three more
+    contracts (``query_topics``, ``claim_kind``, ``contradictions``) join
+    :data:`STRICT_CONTRACTS` on that basis; ``resolutions`` alone stays
+    deferred, for an under-sampled denominator rather than an unclear
+    answer (see :data:`STRICT_CONTRACTS` for its stated release bar).
 
 Convention for adding a contract (so other sites can follow this one):
 
@@ -228,7 +239,80 @@ INSTRUMENTED_CONTRACTS: tuple[str, ...] = (
 #: pipeline does with a response — the tightened schema changes how a future
 #: mismatch is *classified* in the observation log, not whether one is acted
 #: on by the pipeline today.
-STRICT_CONTRACTS: frozenset[str] = frozenset({"tiers.tier2", "tiers.tier3-merge"})
+#:
+#: **M17 phase 2 (athenaeum#608) — the remaining four contracts.**
+#: Decided 2026-09-02 from the same ledger over a 28-day window,
+#: 2026-08-05T13:12Z -> 2026-09-02T12:42Z (16,411 records, 0 malformed) —
+#: the post-quarantine clean window athenaeum#608's entry criteria require,
+#: with the C4-downstream contracts no longer starved of a denominator:
+#:
+#: | contract          | records | mismatches | rate    | classes        |
+#: |--------------------|--------:|-----------:|--------:|-----------------|
+#: | ``contradictions`` |   1,464 |          0 |      0% | -              |
+#: | ``query_topics``   |   1,405 |          1 | 0.0712% | wrong-type 1   |
+#: | ``claim_kind``     |   1,071 |          0 |      0% | -              |
+#: | ``resolutions``    |      89 |          0 |      0% | -              |
+#:
+#: **The uniform-vs-per-contract question, answered explicitly: per-contract,
+#: and the measurement — not the intuition — is what decides it.** A uniform
+#: ``extra="forbid"`` would have been wrong for ``tiers.tier3-merge``, whose
+#: repeated extra-key traffic is real; a uniform ``extra="allow"`` leaves four
+#: contracts tolerating a silently-added field that has demonstrably never
+#: appeared across four figures of production traffic. Neither uniform posture
+#: is defensible against this data, which is the answer.
+#:
+#: Applying athenaeum#608's framework verbatim ("only missing-required
+#: mismatches justify rejection; extra keys are a different signal"):
+#:
+#: - ``claim_kind`` — 0 mismatches of any class at n=1,071, and (unlike the
+#:   athenaeum#1035 window) this is now real production traffic: athenaeum#742
+#:   wired ``stamp_claim_kind`` into the nightly intake, which is what reversed
+#:   the earlier no-caller row. No extra key has ever appeared, so
+#:   :class:`ClaimKindResponse` tightens to ``extra="forbid"``. ``claim_kind``
+#:   stays the only required field — the site's own tolerance boundary,
+#:   confirmed rather than moved.
+#: - ``contradictions`` — 0 mismatches of any class at n=1,464, the largest
+#:   clean sample of the four. :class:`ContradictionResponse` tightens to
+#:   ``extra="forbid"``. ``detected`` stays the only required field: the site
+#:   gates everything on it and defaults every other read, so the four
+#:   ``Optional`` fields are its real tolerance boundary and none of them
+#:   becomes required.
+#: - ``query_topics`` — the decided shape is confirmed, not tightened.
+#:   :class:`QueryTopicsResponse` is a ``RootModel[list[str]]``, which has no
+#:   ``extra=`` knob to turn: there are no named fields, so "an unexpected
+#:   key" is not a representable outcome for this contract. Its one mismatch
+#:   in the window is ``wrong-type`` (a non-string element), which is neither
+#:   of the framework's two classes — and it is already degraded safely at the
+#:   site, which keeps each non-empty ``str`` element and drops the rest. That
+#:   existing degrade IS the decided posture; membership below records the
+#:   shape as DECIDED, which is what this set means.
+#: - ``resolutions`` — **deferred, and the reason is the denominator, not the
+#:   answer.** 0 mismatches at n=89 is 0%, but n=89 is one order of magnitude
+#:   below every other contract here and this is the one contract downstream
+#:   of the C4 entity-phase bottleneck that has still not cleared it
+#:   (athenaeum#1102 shipped ``librarian.intake_runtime_floor`` defaulting
+#:   OFF). Its model spans a discriminated union of 14 ``action`` branches;
+#:   89 observations cannot have exercised them representatively, so an
+#:   ``extra="forbid"`` taken now would be a guess wearing a measurement's
+#:   clothes. :class:`ResolutionResponse` stays ``extra="allow"``.
+#:   **Release bar** (stated so the next pass does not re-litigate it):
+#:   ``resolutions`` reaches three figures of observations spread across
+#:   several runs — i.e. the same order of magnitude as its siblings here —
+#:   drawn from runs in which the C4 phase was not truncated.
+#:
+#: Again no field became required and no contract's required set shrank; the
+#: only code changes are the two ``extra=`` values above. :func:`observe`
+#: still never raises for ANY contract — see the module docstring for why
+#: that is now a decision rather than a deferral.
+STRICT_CONTRACTS: frozenset[str] = frozenset(
+    {
+        "claim_kind",
+        "contradictions",
+        "query_topics",
+        "tiers.tier2",
+        "tiers.tier3-merge",
+    }
+)
 
 #: Stated-local copies of the two vocabularies these models range over. Kept in
 #: sync with their live sources (``models.CLAIM_KINDS`` /
@@ -267,6 +351,13 @@ class QueryTopicsResponse(RootModel[list[str]]):
     The site keeps each non-empty ``str`` element and drops the rest, so the
     accepted shape is ``list[str]``; a non-list payload or a non-string element
     is drift worth logging.
+
+    Shape CONFIRMED as decided (M17 phase 2, athenaeum#608 — see
+    :data:`STRICT_CONTRACTS`): a ``RootModel[list[str]]`` has no named fields,
+    so it has no ``extra=`` knob and no representable "unexpected key". The
+    window's single mismatch was a ``wrong-type`` element, already degraded
+    safely by the site's own per-element filter. Nothing tightened; the
+    posture is recorded rather than deferred.
     """
 
 
@@ -275,9 +366,16 @@ class ClaimKindResponse(BaseModel):
 
     The site rejects (→ unclassified) any value outside CLAIM_KINDS, so an
     out-of-vocabulary label is genuine drift → ``Literal`` over the set.
+
+    ``extra="forbid"`` (M17 phase 2, athenaeum#608 — see
+    :data:`STRICT_CONTRACTS` for the measured window and full reasoning).
+    Measured 0% mismatch of any class at n=1,071 over real production traffic
+    (athenaeum#742 wired the nightly caller), so no extra key has ever
+    appeared: forbidding costs nothing observed and catches a future
+    silently-added field. ``claim_kind`` stays the only required field.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     claim_kind: Literal[_CLAIM_KINDS]  # type: ignore[valid-type]
 
@@ -291,9 +389,16 @@ class ContradictionResponse(BaseModel):
     ``conflict_type`` stays ``Optional[str]`` rather than a ``Literal`` because
     the site only enforces its vocabulary on the ``detected`` branch; the
     mismatch signal there is captured by the ``detected``/shape check.
+
+    ``extra="forbid"`` (M17 phase 2, athenaeum#608 — see
+    :data:`STRICT_CONTRACTS` for the measured window and full reasoning).
+    Measured 0% mismatch of any class at n=1,464, the largest clean sample of
+    the phase-2 four. ``detected`` stays the only required field: every other
+    read is defaulted at the site, so the ``Optional`` fields below are its
+    real tolerance boundary and none of them was tightened.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     detected: bool
     conflict_type: Optional[str] = None
@@ -311,6 +416,14 @@ class ResolutionResponse(BaseModel):
     non-``propose_merge`` branch, so it stays ``Optional[str]``; the merge-branch
     fields (``merge_target_name`` / ``draft_merged_body``) and the shared
     optional fields mirror today's tolerant reads.
+
+    ``extra="allow"`` stays, DEFERRED rather than decided (M17 phase 2,
+    athenaeum#608 — see :data:`STRICT_CONTRACTS`). The window measured 0
+    mismatches, but at n=89 against four figures for every sibling contract:
+    this is the one contract still downstream of the C4 entity-phase
+    bottleneck, and 89 observations cannot have exercised 14 ``action``
+    branches representatively. The release bar is stated in
+    :data:`STRICT_CONTRACTS`.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -449,8 +562,10 @@ def _classify_validation_errors(raw_errors: list[Mapping[str, Any]]) -> list[str
     ``missing`` → ``missing-required``; any ``*_type`` / ``*_parsing`` /
     ``model_type`` error, plus an out-of-vocabulary ``literal_error`` / ``enum``
     (a value that does not match the field's expected type/domain) →
-    ``wrong-type``; ``extra_forbidden`` → ``extra-keys`` (not expected under
-    ``extra="allow"``, mapped for completeness); anything else → ``other``.
+    ``wrong-type``; ``extra_forbidden`` → ``extra-keys`` (raised by the
+    contracts in :data:`STRICT_CONTRACTS` that carry ``extra="forbid"``;
+    under ``extra="allow"`` the same signal arrives via the post-hoc
+    :func:`_extra_keys` path instead); anything else → ``other``.
     """
     classes: list[str] = []
     seen: set[str] = set()

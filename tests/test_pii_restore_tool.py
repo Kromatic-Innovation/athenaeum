@@ -35,6 +35,7 @@ from athenaeum.pii_restore import (
     _RETRO_FRAGMENT_RE,
     GIT_HISTORY_UNAVAILABLE_REASON,
     MARKER,
+    SAFE_EMAIL_EXACT_DEFAULT,
     ApplyResult,
     GitHistoryUnavailableError,
     PiiRestoreSafetyError,
@@ -49,6 +50,7 @@ from athenaeum.pii_restore import (
     classify,
     classify_retro_issue_list,
     find_markers,
+    safe_email_exact,
 )
 
 # --------------------------------------------------------------------------- #
@@ -104,6 +106,114 @@ def test_classify_or_refuse_raises_on_plausible_phone() -> None:
 
 def test_classify_or_refuse_accepts_safe_class() -> None:
     assert _classify_or_refuse("2026-08-14", method="anchored-rename-follow") == "date:iso"
+
+
+# --------------------------------------------------------------------------- #
+# safe_email_exact() -- code defaults ∪ live config, fail CLOSED (athenaeum#1284).
+# Mirrors tests/test_pii_restore.py's ``TestSafeEmailExactConfig`` for the
+# legacy script's function of the same name -- this module's version must
+# behave identically, called with an explicit knowledge_root so the result
+# never depends on whatever the host running the suite happens to have in
+# its own ~/knowledge/athenaeum.yaml.
+# --------------------------------------------------------------------------- #
+
+
+class TestSafeEmailExactConfig:
+    def test_defaults_only_when_no_config_file(self, tmp_path: Path) -> None:
+        assert safe_email_exact(tmp_path) == SAFE_EMAIL_EXACT_DEFAULT
+
+    def test_defaults_union_live_config(self, tmp_path: Path) -> None:
+        (tmp_path / "athenaeum.yaml").write_text(
+            "pii:\n  restore:\n    safe_email_exact:\n      - ops-alias@example.com\n"
+        )
+        result = safe_email_exact(tmp_path)
+        assert result == SAFE_EMAIL_EXACT_DEFAULT | {"ops-alias@example.com"}
+
+    def test_configured_entries_are_case_folded(self, tmp_path: Path) -> None:
+        (tmp_path / "athenaeum.yaml").write_text(
+            "pii:\n  restore:\n    safe_email_exact:\n      - Ops-Alias@Example.COM\n"
+        )
+        result = safe_email_exact(tmp_path)
+        assert "ops-alias@example.com" in result
+        assert "Ops-Alias@Example.COM" not in result
+
+    def test_fails_closed_on_non_list_value(self, tmp_path: Path) -> None:
+        """A malformed ``safe_email_exact`` (not a list/tuple/set) is ignored
+        entirely -- defaults only, not a crash and not a partial parse."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            'pii:\n  restore:\n    safe_email_exact: "not-a-list"\n'
+        )
+        assert safe_email_exact(tmp_path) == SAFE_EMAIL_EXACT_DEFAULT
+
+    def test_fails_closed_on_missing_restore_key(self, tmp_path: Path) -> None:
+        (tmp_path / "athenaeum.yaml").write_text("pii: {}\n")
+        assert safe_email_exact(tmp_path) == SAFE_EMAIL_EXACT_DEFAULT
+
+    def test_fails_closed_on_missing_pii_key(self, tmp_path: Path) -> None:
+        (tmp_path / "athenaeum.yaml").write_text("auto_recall: true\n")
+        assert safe_email_exact(tmp_path) == SAFE_EMAIL_EXACT_DEFAULT
+
+    def test_fails_closed_on_malformed_yaml(self, tmp_path: Path) -> None:
+        (tmp_path / "athenaeum.yaml").write_text("pii: [unclosed\n")
+        assert safe_email_exact(tmp_path) == SAFE_EMAIL_EXACT_DEFAULT
+
+    def test_fails_closed_when_knowledge_root_unreadable(self, tmp_path: Path) -> None:
+        """*knowledge_root* pointing at a path that cannot hold a config file
+        (e.g. a file, not a directory) must still yield just the defaults --
+        the try/except around ``load_config`` is defense in depth beyond
+        ``load_config``'s own fail-closed handling."""
+        not_a_dir = tmp_path / "not-a-directory"
+        not_a_dir.write_text("x")
+        assert safe_email_exact(not_a_dir) == SAFE_EMAIL_EXACT_DEFAULT
+
+
+# --------------------------------------------------------------------------- #
+# classify()'s safe_email_exact_set exact-match boundary (athenaeum#1284):
+# match / case-difference / superstring / absent.
+# --------------------------------------------------------------------------- #
+
+
+class TestClassifySafeEmailExactBoundary:
+    ALLOWLIST = frozenset({"ops-alias@example.com"})
+
+    def test_configured_address_matches_exactly(self) -> None:
+        assert (
+            classify("ops-alias@example.com", safe_email_exact_set=self.ALLOWLIST)
+            == "email:host-alias/path"
+        )
+
+    def test_case_difference_still_matches(self) -> None:
+        """classify() lower-cases the extracted address before comparing
+        (mirroring safe_email_exact()'s own case-folding of configured
+        entries), so a differently-cased occurrence of a configured address
+        still matches."""
+        assert (
+            classify("Ops-Alias@Example.COM", safe_email_exact_set=self.ALLOWLIST)
+            == "email:host-alias/path"
+        )
+
+    def test_superstring_of_configured_address_does_not_match(self) -> None:
+        """Exact match only -- an address that merely CONTAINS (as a prefix,
+        suffix, or embedded substring) a configured address must never
+        match. A substring bypass here would let one configured alias
+        silently launder an entire family of lookalike addresses back into
+        the corpus -- the over-restore direction this tool exists to
+        refuse."""
+        assert classify("not-ops-alias@example.com", safe_email_exact_set=self.ALLOWLIST) is None
+        assert (
+            classify("ops-alias@example.com.evil.example", safe_email_exact_set=self.ALLOWLIST)
+            is None
+        )
+
+    def test_unconfigured_address_stays_redacted(self) -> None:
+        assert classify("someone.else@example.com", safe_email_exact_set=self.ALLOWLIST) is None
+
+    def test_default_parameter_is_code_defaults_only(self) -> None:
+        """Calling classify() with no safe_email_exact_set at all -- as the
+        golden-fixture tests above do -- must behave exactly as before this
+        issue's fix: only the two code-only defaults, no config reach-in."""
+        assert classify("git@github.com") == "email:host-alias/path"
+        assert classify("ops-alias@example.com") is None
 
 
 # --------------------------------------------------------------------------- #
@@ -573,6 +683,65 @@ def test_genuine_pii_pre_image_stays_residue_never_restored(
     matches = [e for e in plan.residue if e.hit.page_relpath == page_relpath]
     assert len(matches) == 1
     assert matches[0].reason == "kept:real-pii"
+
+
+# --------------------------------------------------------------------------- #
+# athenaeum#1284: build_restore_plan/apply_restore_plan must actually read
+# pii.restore.safe_email_exact from athenaeum.yaml -- prior to this fix,
+# this module never called load_config() at all, so the documented config
+# key had no effect on the installed CLI regardless of what athenaeum.yaml
+# said (a capability regression against scripts/pii-restore.py, which does
+# honour it).
+# --------------------------------------------------------------------------- #
+
+
+def test_build_restore_plan_honours_configured_safe_email_exact(fixture_repo: Path) -> None:
+    """The fixture's person-a.md pre-image (jane.doe@example.com) is real
+    PII and stays residue by default (proven above). Configuring it via
+    pii.restore.safe_email_exact must flip it to a restoration -- and must
+    NOT affect the phone axis (person-b.md), which this key never covers."""
+    wiki_root, contacts_root = _roots(fixture_repo)
+    # Preserve the fixture's storage.mapping (resolves contacts_root) while
+    # adding the pii.restore block -- overwriting it entirely would collapse
+    # contacts_root back onto wiki_root (same caution the CLI reindex test
+    # in test_cmd_pii_restore.py takes).
+    (fixture_repo / "athenaeum.yaml").write_text(
+        "storage:\n  mapping:\n    pii: excluded\n"
+        "pii:\n  restore:\n    safe_email_exact:\n      - jane.doe@example.com\n"
+    )
+
+    plan = build_restore_plan(fixture_repo, wiki_root, contacts_root)
+
+    matches = [r for r in plan.restorations if r.hit.page_relpath == "wiki/person-a.md"]
+    assert len(matches) == 1
+    assert matches[0].token == "jane.doe@example.com"
+    assert matches[0].restore_class == "email:host-alias/path"
+    assert not any(e.hit.page_relpath == "wiki/person-a.md" for e in plan.residue)
+    # Phone axis is untouched by this key -- still residue.
+    assert any(
+        e.hit.page_relpath == "wiki/person-b.md" and e.reason == "kept:real-pii"
+        for e in plan.residue
+    )
+
+
+def test_apply_restore_plan_honours_configured_safe_email_exact(fixture_repo: Path) -> None:
+    """Same wiring, through the write path: apply_restore_plan's own
+    re-verify must use the same config-resolved allowlist build_restore_plan
+    did, so the configured address is actually written to disk."""
+    wiki_root, contacts_root = _roots(fixture_repo)
+    (fixture_repo / "athenaeum.yaml").write_text(
+        "storage:\n  mapping:\n    pii: excluded\n"
+        "pii:\n  restore:\n    safe_email_exact:\n      - jane.doe@example.com\n"
+    )
+
+    plan = build_restore_plan(fixture_repo, wiki_root, contacts_root)
+    apply_restore_plan(plan, wiki_root=wiki_root, contacts_root=contacts_root)
+
+    restored = (wiki_root / "person-a.md").read_text()
+    assert MARKER not in restored
+    assert "jane.doe@example.com" in restored
+    # person-b.md's phone axis is untouched.
+    assert MARKER in (wiki_root / "person-b.md").read_text()
 
 
 def test_full_plan_shape(fixture_repo: Path) -> None:

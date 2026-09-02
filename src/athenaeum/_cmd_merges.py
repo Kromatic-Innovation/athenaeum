@@ -27,6 +27,12 @@ Six modes:
                    proposal and ledger a verdict per source pair (issue
                    athenaeum#715). Dry-run by default; ``--apply`` writes to the
                    LEDGER only — never to ``_pending_merges.md``.
+- ``scrub-pii``   redact contact data out of proposal bodies IN PLACE
+                   (issue athenaeum#1276) — a zero-LLM purge path, so a stale
+                   ``draft_merged_body`` left behind by ``storage migrate-pii``
+                   can be cleaned without approving, rejecting or withdrawing
+                   the merge, and without paying for a nightly ``run``.
+                   Dry-run by default; ``--apply`` writes.
 - ``propose-fold`` propose folding source pages INTO a named canonical page
                    (issue athenaeum#747) — the operator-facing entry point for
                    the fold path, deriving merge_target_name / write_kind so
@@ -324,6 +330,129 @@ def _cmd_revalidate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_scrub_pii(args: argparse.Namespace) -> int:
+    """``athenaeum merges scrub-pii [--apply]`` — issue athenaeum#1276.
+
+    Redact contact data out of ``_pending_merges.md`` proposal bodies IN
+    PLACE. A proposal stores its ``draft_merged_body`` verbatim, so migrating
+    an entity page's PII off-corpus (``storage migrate-pii``) used to leave a
+    plain-text copy of the same addresses in the sidecar — defeating the
+    migration invisibly, and blocking ``storage lint-pii`` on findings that
+    are genuine contact data and so cannot be allowlisted either.
+
+    This is the PURGE PATH that issue athenaeum#1276 asked for, and its two
+    properties are the point:
+
+    * **Zero LLM cost.** Detection is the same deterministic pair of
+      detectors ``lint-pii`` gates on — no model call, no network, nothing
+      like the entity phase that dominates a nightly run's spend.
+    * **It does not force the merge decision.** Approving, rejecting or
+      withdrawing a proposal were previously the only ways to clear its body.
+      This redacts the values and leaves the proposal exactly as unresolved
+      as it was.
+
+    Dry-run by default, mirroring ``revalidate``/``recompare``: it reports
+    what WOULD be redacted and writes nothing unless ``--apply`` is passed.
+    """
+    from athenaeum.config import load_config
+    from athenaeum.pending_merges_pii import scrub_pending_merges
+
+    knowledge_root = (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    merges_path = knowledge_root / "wiki" / "_pending_merges.md"
+    config = load_config(knowledge_root)
+    try:
+        result = scrub_pending_merges(
+            merges_path,
+            allowlist_path=getattr(args, "allowlist", None),
+            apply=getattr(args, "apply", False),
+            config=config,
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        # An unreadable/undecodable sidecar is an operator-fixable condition
+        # (permissions, a truncated write, a non-UTF-8 byte), not a bug — and
+        # this command's whole job is contact data, so it must fail LOUDLY and
+        # non-zero rather than traceback or, worse, report a reassuring
+        # "0 proposals carry contact data". Same handling as
+        # ``_cmd_storage._scrub_merge_sidecar``'s.
+        print(f"error: could not read {merges_path}: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "applied": result.applied,
+                    "blocks_scanned": result.blocks_scanned,
+                    "values_redacted": result.values_redacted,
+                    "scrubbed": [
+                        {
+                            "id": s.id,
+                            "merge_target_name": s.merge_target_name,
+                            "values_redacted": len(s.values),
+                        }
+                        for s in result.scrubbed
+                    ],
+                    "residual": [
+                        {
+                            "id": r.id,
+                            "merge_target_name": r.merge_target_name,
+                            "values": len(r.values),
+                        }
+                        for r in result.residual
+                    ],
+                }
+            )
+            + "\n"
+        )
+        return 0
+
+    # Counts, never the values themselves: this command exists to get contact
+    # data OUT of a file under wiki/, so echoing it to a terminal (and into
+    # whatever captures that terminal) would put it straight back in reach.
+    if not result.scrubbed:
+        print(f"0 proposals carry contact data ({result.blocks_scanned} scanned)")
+    else:
+        verb = "Redacted" if result.applied else "Would redact"
+        print(
+            f"{verb} {result.values_redacted} contact value(s) across "
+            f"{len(result.scrubbed)} proposal(s) of {result.blocks_scanned} scanned:"
+        )
+        for scrubbed in result.scrubbed:
+            print(
+                f"  - {scrubbed.merge_target_name!r}: "
+                f"{len(scrubbed.values)} value(s)"
+            )
+    for residual in result.residual:
+        print(
+            f"NOTE: {residual.merge_target_name!r} names "
+            f"{len(residual.values)} contact value(s) on an identity-bearing "
+            "line (header/sources), left in place — rewriting it would re-id "
+            "the proposal and repoint its fold target. Rename the underlying "
+            "page (`storage migrate-pii --rename-name-email`, issue "
+            "athenaeum#505) and re-propose.",
+            file=sys.stderr,
+        )
+    if result.scrubbed and not result.applied:
+        print(
+            "\nDry-run — no changes written. Re-run with --apply to redact "
+            "them in place (the merge decisions stay open)."
+        )
+        # Detection is `lint-pii`'s, so its false positives are this
+        # command's false positives — a 13-digit record id reads as a phone
+        # (issue athenaeum#500). Adjudicating one in the allowlist is the
+        # designed remedy (issue athenaeum#936); redacting a true non-personal
+        # fact is the athenaeum#691 mistake, and there is no undo here short of
+        # git. So point at the command that prints the actual values before
+        # anything is written.
+        print(
+            "Values are not echoed here (that would put them back in reach). "
+            "To review them first, run `athenaeum storage lint-pii` and "
+            "adjudicate any false positive in `wiki/_pii-allowlist.yml` — an "
+            "allowlisted value is left untouched."
+        )
+    return 0
+
+
 def _cmd_recompare(args: argparse.Namespace) -> int:
     """``athenaeum merges recompare [--apply]`` — issue athenaeum#715.
 
@@ -475,16 +604,21 @@ def cmd_merges(args: argparse.Namespace) -> int:
         "revalidate",
         "propose-fold",
         "recompare",
+        "scrub-pii",
     ):
         print(
             "usage: athenaeum merges "
-            "{list,next,count,provenance,revalidate,propose-fold,recompare} [...]",
+            "{list,next,count,provenance,revalidate,propose-fold,recompare,"
+            "scrub-pii} [...]",
             file=sys.stderr,
         )
         return 2
 
     if sub == "propose-fold":
         return _cmd_propose_fold(args)
+
+    if sub == "scrub-pii":
+        return _cmd_scrub_pii(args)
 
     if sub == "recompare":
         return _cmd_recompare(args)
@@ -640,6 +774,36 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
         type=int,
         default=0,
         help="Only re-run the first N unresolved proposals (default: 0 = all).",
+    )
+
+    scrub_p = m_sub.add_parser(
+        "scrub-pii",
+        help=(
+            "Redact contact data out of merge-proposal bodies in place "
+            "(issue athenaeum#1276). The zero-LLM purge path for a stale "
+            "`draft_merged_body` left behind by `storage migrate-pii`: it "
+            "clears the values without approving, rejecting or withdrawing "
+            "the merge. Dry-run by default; --apply writes."
+        ),
+    )
+    _add_common(scrub_p)
+    scrub_p.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Redact the detected values in place. Default: dry-run — report "
+            "only, write nothing."
+        ),
+    )
+    scrub_p.add_argument(
+        "--allowlist",
+        type=Path,
+        default=None,
+        help=(
+            "Adjudicated PII allowlist (default: `wiki/_pii-allowlist.yml`, "
+            "issue athenaeum#936). A value with a reasoned entry there is not "
+            "PII and is left untouched."
+        ),
     )
 
     fold_p = m_sub.add_parser(

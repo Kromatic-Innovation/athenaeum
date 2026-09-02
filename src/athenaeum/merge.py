@@ -102,7 +102,7 @@ from athenaeum.config import (
     resolve_reasoning_tier_auditing_enabled,
     resolve_reasoning_tier_t2_auto_apply_enabled,
 )
-from athenaeum.contradictions import ContradictionResult, detect_contradictions
+from athenaeum.contradictions import detect_contradictions
 from athenaeum.cross_scope import (
     candidate_to_auto_memory_files,
     chunk_by_cap,
@@ -132,6 +132,7 @@ from athenaeum.merge_type_gate import (
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
     AutoMemoryFile,
+    ContradictionResult,
     EscalationItem,
     TokenUsage,
     coerce_source_type,

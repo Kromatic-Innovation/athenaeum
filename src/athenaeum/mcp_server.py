@@ -1993,6 +1993,13 @@ def create_server(
     def resolve_question(id: str, answer: str) -> dict:
         """Record an answer to a pending question (issue athenaeum#908: deferred apply).
 
+        Also resolves a ``type: "confirmation"`` item (issue athenaeum#1290)
+        with NO special-casing: a confirmation is a block in
+        ``_pending_questions.md`` like any other, and this tool operates on
+        the raw block/id, never on ``list_pending_decisions``'s ``type``
+        label. Pass the ``id`` ``list_pending_decisions`` reported for the
+        confirmation item; ``answer`` becomes its recorded outcome.
+
         Validates ``id`` against the CURRENT state of
         ``_pending_questions.md`` (unknown / already-answered id fails
         immediately, nothing is written), then writes the answer as a
@@ -2074,7 +2081,19 @@ def create_server(
         }
 
     @mcp.tool()
-    def raise_decision(question: str, context: str, entity: str = "") -> dict:
+    def raise_decision(
+        question: str = "",
+        context: str = "",
+        entity: str = "",
+        *,
+        kind: str = "question",
+        raiser: str = "",
+        repo: str = "",
+        issue_ref: str = "",
+        narrowed_scope: str = "",
+        implemented_behavior: str = "",
+        alternative: str = "",
+    ) -> dict:
         """File a NEW agent-raised item into the pending-decisions queue (issue athenaeum#912).
 
         Before this tool, ``_pending_questions.md`` had exactly one writer —
@@ -2094,25 +2113,59 @@ def create_server(
         problem one level up).
 
         Args:
-            question: The question a human should answer. Required —
-                rejected if empty or all-whitespace (``error_code
-                "invalid_question"``).
+            question: The question a human should answer. Required for
+                ``kind="question"`` — rejected if empty or all-whitespace
+                (``error_code "invalid_question"``). For ``kind=
+                "confirmation"`` it is OPTIONAL (issue athenaeum#1290:
+                ``question`` is not one of a confirmation's required
+                fields) — an empty value is auto-phrased from
+                ``implemented_behavior``/``alternative``/``repo``/
+                ``issue_ref`` below.
             context: Standalone context a human needs to answer this
                 WITHOUT the originating session — the entire reason this
                 tool exists is that a session-scoped flag evaporates once
-                the session ends. Required — rejected if empty or
-                all-whitespace (``error_code "missing_context"``); there is
-                deliberately no default, so a contextless raise is never
-                silently accepted.
+                the session ends. Required for ``kind="question"`` —
+                rejected if empty or all-whitespace (``error_code
+                "missing_context"``); there is deliberately no default, so a
+                contextless raise is never silently accepted. Same
+                ``kind="confirmation"`` auto-phrasing exception as
+                ``question``.
             entity: Optional short human-readable label. Cosmetic only —
                 provenance is carried by a dedicated marker (see below), not
                 by this label, so an unlabeled raise is still fully
                 distinguishable from a detector item.
+            kind: ``"question"`` (default — everything above this line is
+                unchanged from before issue athenaeum#1290) or
+                ``"confirmation"``. A confirmation is the OTHER shape this
+                tool exists for as of athenaeum#1290: an agent that narrowed
+                scope mid-build raising "implemented X without Y, confirm?"
+                as a durable, non-blocking flag. It renders as a DIFFERENT
+                ``type`` (``"confirmation"``, not ``"question"``) in
+                ``list_pending_decisions`` output, with a richer payload —
+                see the six ``kind="confirmation"``-only args below — but
+                resolves through the exact same ``resolve_question`` tool,
+                because storage-wise it is still a block in
+                ``_pending_questions.md``. An unrecognized ``kind`` is
+                rejected (``error_code "invalid_kind"``).
+            raiser: Who/what narrowed scope — an agent name, a lane id, etc.
+                Required (and validated non-empty) when ``kind=
+                "confirmation"``; ignored otherwise.
+            repo: The ``owner/repo`` the narrowing happened in.
+                Confirmation-only, required.
+            issue_ref: The issue or PR the narrowing relates to.
+                Confirmation-only, required.
+            narrowed_scope: What the agent DIDN'T cover. Confirmation-only,
+                required.
+            implemented_behavior: What the agent built instead.
+                Confirmation-only, required.
+            alternative: The road not taken — what a human might have wanted
+                instead. Confirmation-only, required.
 
         Returns:
             A dict with ``ok`` (bool), ``error_code`` (``"invalid_question"``
-            | ``"missing_context"`` | ``"disabled"`` | ``None``), ``message``
-            (str), and ``decision_id`` — on success, the SAME id
+            | ``"missing_context"`` | ``"invalid_kind"`` |
+            ``"missing_confirmation_field"`` | ``"disabled"`` | ``None``),
+            ``message`` (str), and ``decision_id`` — on success, the SAME id
             ``list_pending_decisions`` / ``list_pending_questions`` will
             report for this item, usable immediately with
             ``resolve_question`` without a round-trip list call. ``raw_block``
@@ -2125,7 +2178,11 @@ def create_server(
             from a detector-raised item — surfaced as ``payload["raised_by"]
             == "agent"`` on the corresponding ``list_pending_decisions``
             entry (``""`` for every detector-raised item, including every
-            item that predates this tool).
+            item that predates this tool). A ``kind="confirmation"`` raise
+            additionally surfaces as ``type: "confirmation"`` (not
+            ``"question"``) with ``payload`` carrying ``raiser``, ``repo``,
+            ``issue_ref``, ``narrowed_scope``, ``implemented_behavior``,
+            ``alternative``, and ``raised_at`` (an ISO-8601 UTC timestamp).
 
         Deliberately NOT owner-gated: unlike ``resolve_question`` /
         ``resolve_merge`` / ``review_audit_item`` (which ADJUDICATE an
@@ -2153,7 +2210,19 @@ def create_server(
         from athenaeum.answers import raise_pending_question
 
         pending_path = wiki_root / "_pending_questions.md"
-        return raise_pending_question(pending_path, question, context, entity=entity)
+        return raise_pending_question(
+            pending_path,
+            question,
+            context,
+            entity=entity,
+            kind=kind,
+            raiser=raiser,
+            repo=repo,
+            issue_ref=issue_ref,
+            narrowed_scope=narrowed_scope,
+            implemented_behavior=implemented_behavior,
+            alternative=alternative,
+        )
 
     @mcp.tool()
     def list_pending_merges(full_body: bool = False) -> list[dict]:
@@ -2213,14 +2282,20 @@ def create_server(
         needs a human to decide something" backlog in a single call rather
         than having to poll two tools and merge them itself.
 
-        Each item is tagged ``type: "question" | "merge"`` and carries the
-        common fields ``id``, ``created_at``, ``summary`` (a one-line,
-        answerable question) and ``confidence`` (a float for merges, ``null``
-        for questions), plus a type-specific ``payload``. For a merge the
-        ``summary`` names each source page by its human title with a one-line
-        gist, so the decision is answerable without opening the raw wiki
-        files. Resolve items with the existing ``resolve_question`` /
-        ``resolve_merge`` tools, dispatching on ``type``.
+        Each item is tagged ``type: "question" | "merge" | "confirmation" |
+        ...`` and carries the common fields ``id``, ``created_at``,
+        ``summary`` (a one-line, answerable question) and ``confidence`` (a
+        float for merges, ``null`` for everything else), plus a
+        type-specific ``payload``. For a merge the ``summary`` names each
+        source page by its human title with a one-line gist, so the decision
+        is answerable without opening the raw wiki files. A
+        ``type: "confirmation"`` item (issue athenaeum#1290 — see
+        ``raise_decision``'s ``kind="confirmation"``) carries ``payload``
+        fields ``raiser``, ``repo``, ``issue_ref``, ``narrowed_scope``,
+        ``implemented_behavior``, ``alternative``, ``raised_at``. Resolve a
+        question OR a confirmation with ``resolve_question`` (both are
+        blocks in the same underlying file); resolve a merge with
+        ``resolve_merge`` — dispatch on ``type``.
 
         Read-path bound (issue athenaeum#431): a merge item's ``payload["sources"]``
         is capped (env ``ATHENAEUM_DECISIONS_MAX_SOURCES_PER_MERGE`` > yaml

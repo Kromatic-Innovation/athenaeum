@@ -277,12 +277,41 @@ def _resolve_embeddings(
     # Fallback for any misses.
     missing = [am for am in files if str(am.path) not in embeddings]
     if missing:
-        # Issue athenaeum#1032: raised DEBUG -> WARNING — this was invisible at the
-        # deployed INFO level, so the coarse-embedding-fallback engagement that
-        # feeds athenaeum#1005's over-cluster diagnosis left no trace in normal runs.
-        log.warning(
-            "cluster embeddings: %d of %d served from chromadb, %d fell back "
-            "to the fallback-hashing embedder",
+        # Issue athenaeum#1279: demoted WARNING -> INFO and reworded. athenaeum#1032
+        # raised this from DEBUG to WARNING so the fallback's engagement would
+        # leave a trace at all; in production that trace instead sent a
+        # separate over-cluster investigation (athenaeum#1005) sideways for a
+        # full pass, because the ALARMING WARNING text reads as a defect on
+        # the WIKI-DEDUPE path (a different module, a different failure mode)
+        # when it actually fired on THIS path — the raw auto-memory C2
+        # cluster pass, id-matching against the recall vector index.
+        #
+        # A miss here is normal, by-design behavior, not evidence anything is
+        # broken: ``raw/auto-memory/`` is consume-and-delete (files are
+        # written, indexed on the next recall-index build, then moved/removed
+        # once merged), so the recall index and the live intake tree are
+        # routinely out of sync — ids the index holds may point at files
+        # already gone, and files just written may not be indexed yet. See
+        # this module's docstring and ``_fallback_embeddings``'s docstring
+        # ("graceful-degradation path", not a replacement embedder) — this is
+        # the SAME by-design condition, just the moment it engages.
+        #
+        # This does NOT make a sustained collapse to 100% fallback invisible:
+        # issue athenaeum#1279 threads a per-run ``out_embedder_counts`` tally (see
+        # ``cluster_auto_memory_files`` below) into the durable
+        # ``librarian-run-summary`` ledger record (``phases.auto-memory.
+        # embed_chromadb`` / ``embed_fallback``), so a trend across runs — the
+        # kind of multi-day chromadb-service collapse this issue's motivation
+        # names — is machine-countable from ledger history even though every
+        # single affected cluster is a benign, unremarkable singleton. See
+        # ``athenaeum.run_summary_log.read_latest_embedder_counts`` and
+        # ``athenaeum.status.status()``'s ``embedder_provenance`` field.
+        log.info(
+            "raw auto-memory C2 cluster pass: %d of %d file(s) served from "
+            "the chromadb recall index, %d not found there (expected for "
+            "newly-written or already-consumed auto-memory files — see "
+            "clusters.py module docstring) — served via the fallback-hashing "
+            "degradation path instead",
             len(files) - len(missing),
             len(files),
             len(missing),
@@ -558,6 +587,7 @@ def cluster_auto_memory_files(
     threshold: float = DEFAULT_CLUSTER_THRESHOLD,
     embeddings: dict[str, list[float]] | None = None,
     embedder_sources: dict[str, str] | None = None,
+    out_embedder_counts: dict[str, int] | None = None,
 ) -> list[Cluster]:
     """Group auto-memory files into near-duplicate clusters.
 
@@ -603,6 +633,24 @@ def cluster_auto_memory_files(
             itself being ``None``) reports :data:`EMBEDDER_UNKNOWN` on its
             cluster — observability bookkeeping only, never affects which
             files land in a cluster.
+        out_embedder_counts: Optional mutable out-param (issue athenaeum#1279,
+            mirrors the ``out_stats``/``out_merge_stats`` convention
+            :func:`athenaeum.librarian._compile_auto_memory` already uses):
+            when given, this function tallies the resolved per-FILE
+            ``embedder_sources`` map into it as ``{EMBEDDER_*: count}``,
+            INCREMENTING existing keys rather than overwriting — so a caller
+            that threads the SAME dict across several calls in one run (e.g.
+            the delta cluster pass's multiple pool slices) accumulates a
+            whole-run total. This is per-FILE, not per-cluster: a cluster
+            with 5 fallback members contributes 5 to
+            ``EMBEDDER_FALLBACK_HASHING``, not 1 — the granularity
+            :func:`athenaeum.librarian._render_run_summary`'s ``auto-memory``
+            phase segment needs to make a chromadb-service collapse visible
+            even when every affected cluster is a singleton (this issue's
+            motivating incident: raw-intake chromadb service fell ~98%->0%
+            over two days with every affected cluster a singleton, so
+            nothing counted it). ``None`` (the default) skips the out-param
+            write entirely — every pre-athenaeum#1279 caller is unaffected.
 
     Returns:
         A list of :class:`Cluster` records. Empty input → empty list.
@@ -619,6 +667,9 @@ def cluster_auto_memory_files(
         )
     if embedder_sources is None:
         embedder_sources = {}
+    if out_embedder_counts is not None:
+        for source in embedder_sources.values():
+            out_embedder_counts[source] = out_embedder_counts.get(source, 0) + 1
     # Index files by the string form of their absolute path (stable and
     # unique; avoids Path equality surprises across tempdirs).
     file_ids: list[str] = [str(am.path) for am in files]
