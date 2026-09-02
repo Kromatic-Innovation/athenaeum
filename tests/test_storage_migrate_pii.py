@@ -18,7 +18,7 @@ from athenaeum.cli import main
 from athenaeum.config import load_config
 from athenaeum.librarian import reindex
 from athenaeum.models import parse_frontmatter
-from athenaeum.pii import is_service_address
+from athenaeum.pii import PiiAllowlistEntry, is_service_address
 from athenaeum.search import query_fts5_index
 from athenaeum.storage import surface_root_for_class
 from athenaeum.storage_migrate import (
@@ -1927,11 +1927,16 @@ class TestSensitivityRegistryEquivalence:
 
     def test_migratable_emails_still_excludes_service_addresses(self) -> None:
         # _migratable_emails' is_service_address filter (issue athenaeum#507) is
-        # applied AFTER the registry lookup, unchanged.
+        # applied AFTER the registry lookup, unchanged. athenaeum#1275 added a
+        # second return value (allowlist skips); the migratable list itself
+        # keeps its pre-athenaeum#1275 contract when no allowlist is passed.
         from athenaeum.storage_migrate import _migratable_emails
 
-        assert _migratable_emails("git@github.com is the clone url", None) == []
-        assert _migratable_emails("reach jane@example.com", None) == ["jane@example.com"]
+        assert _migratable_emails("git@github.com is the clone url", None) == ([], [])
+        assert _migratable_emails("reach jane@example.com", None) == (
+            ["jane@example.com"],
+            [],
+        )
 
 
 class TestPhoneFalsePositiveSuppressionPreserved:
@@ -2040,3 +2045,336 @@ class TestSensitivityRegistryDeploymentDefaultUnchanged:
         plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
         assert plan.emails == ["jane@example.com"]
         assert plan.phones == ["+1-555-0100"]
+
+
+# ---------------------------------------------------------------------------
+# Adjudicated allowlist consultation (issue athenaeum#1275)
+# ---------------------------------------------------------------------------
+#
+# Before this, `migrate-pii` ignored `wiki/_pii-allowlist.yml` entirely — a
+# value the operator had deliberately adjudicated as not-PII (e.g. an account
+# identifier email) was migrated anyway, purely because it shared a page with
+# genuine PII. These tests pin: (1) an allowlisted value is never migrated
+# while genuine PII on the same page still is, (2) matching is EXACT value
+# equality only (a near-miss by case or by being a different, longer string is
+# NOT allowlisted), (3) the skip is always reported, never silent, and dry-run
+# and --apply agree on the skip set, and (4) a missing allowlist behaves as
+# before (nothing adjudicated) while a malformed one refuses the run rather
+# than silently migrating what it should have protected.
+
+
+def _write_pii_allowlist(wiki_root: Path, entries: list[tuple[str, str]]) -> Path:
+    """Write `_pii-allowlist.yml` in the conventional location (same reader as lint-pii)."""
+    wiki_root.mkdir(parents=True, exist_ok=True)
+    path = wiki_root / "_pii-allowlist.yml"
+    body = "".join(f'- value: "{value}"\n  reason: "{reason}"\n' for value, reason in entries)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+class TestPlanPiiMigrationAllowlist:
+    def test_allowlisted_value_survives_genuine_pii_on_same_page_migrates(
+        self, tmp_path: Path
+    ) -> None:
+        # The exact scenario from the issue: a page with real PII *and* one
+        # adjudicated account-identifier email. The first must migrate, the
+        # second must survive byte-identical.
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "acct.md",
+            "uid: a1\nname: Account Two\ntype: person\n",
+            "Real contact: real.person@corp.example. "
+            "Account marker: tk@allowlisted.example.",
+        )
+        allowlist = {"tk@allowlisted.example": "account identifier, adjudicated safe"}
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root, allowlist=allowlist)
+
+        assert plan.emails == ["real.person@corp.example"]
+        assert plan.skipped_allowlisted == (
+            PiiAllowlistEntry(
+                value="tk@allowlisted.example",
+                reason="account identifier, adjudicated safe",
+            ),
+        )
+        assert INLINE_REDACTION_MARKER in (plan.rewritten_page_text or "")
+        assert "real.person@corp.example" not in (plan.rewritten_page_text or "")
+        # The allowlisted value is untouched, verbatim, in the rewritten page.
+        assert "tk@allowlisted.example" in (plan.rewritten_page_text or "")
+        # ...and never added to the excluded contact record either.
+        assert "tk@allowlisted.example" not in (plan.excluded_page_text or "")
+        assert "real.person@corp.example" in (plan.excluded_page_text or "")
+
+    def test_allowlisted_frontmatter_alias_survives_verbatim(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "dana2.md",
+            "uid: d2\nname: Dana Two\ntype: person\n"
+            "aliases:\n  - dana.real@corp.example\n  - tk@allowlisted.example\n",
+            "No inline contact data.",
+        )
+        allowlist = {"tk@allowlisted.example": "adjudicated safe"}
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root, allowlist=allowlist)
+
+        assert plan.emails == ["dana.real@corp.example"]
+        meta, _body = parse_frontmatter(plan.rewritten_page_text or "")
+        assert meta["aliases"] == ["tk@allowlisted.example"]
+
+    def test_allowlisted_phone_survives_genuine_phone_migrates(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "phones.md",
+            "uid: p1\nname: Phone Case\ntype: person\n",
+            "Call 555-010-0100 or the account line +1-555-020-0200.",
+        )
+        allowlist = {"+1-555-020-0200": "shared account line, adjudicated safe"}
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root, allowlist=allowlist)
+
+        assert plan.phones == ["555-010-0100"]
+        assert [e.value for e in plan.skipped_allowlisted] == ["+1-555-020-0200"]
+        assert "+1-555-020-0200" in (plan.rewritten_page_text or "")
+
+    def test_case_variant_is_not_allowlisted_and_is_migrated(self, tmp_path: Path) -> None:
+        # Matching is EXACT value equality (mirrors adjudicate_corpus_pii) --
+        # no case-folding. A differently-cased occurrence of an allowlisted
+        # value is a DIFFERENT string and must migrate normally.
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "case.md",
+            "uid: c1\nname: Case Variant\ntype: person\n",
+            "Contact: TK@Allowlisted.example.",
+        )
+        allowlist = {"tk@allowlisted.example": "adjudicated safe"}
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root, allowlist=allowlist)
+
+        assert plan.emails == ["TK@Allowlisted.example"]
+        assert plan.skipped_allowlisted == ()
+
+    def test_superstring_is_not_allowlisted_and_is_migrated(self, tmp_path: Path) -> None:
+        # A token that merely CONTAINS an allowlisted value as a substring is
+        # a different value and must not be treated as adjudicated.
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "super.md",
+            "uid: s1\nname: Superstring\ntype: person\n",
+            "Contact: prefix-tk@allowlisted.example.",
+        )
+        allowlist = {"tk@allowlisted.example": "adjudicated safe"}
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root, allowlist=allowlist)
+
+        assert plan.emails == ["prefix-tk@allowlisted.example"]
+        assert plan.skipped_allowlisted == ()
+
+    def test_no_allowlist_argument_preserves_pre_athenaeum1275_behaviour(
+        self, tmp_path: Path
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path)
+        page = root / "wiki" / "jane.md"
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+
+        assert plan.skipped_allowlisted == ()
+        assert plan.emails == ["jane@example.com"]
+
+    def test_page_that_is_only_allowlisted_pii_reports_skip_and_is_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        # A page whose ONLY detected token is allowlisted: nothing migrates,
+        # but the skip must still be visible (it is not simply invisible).
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "onlyallow.md",
+            "uid: o1\nname: Only Allow\ntype: person\n",
+            "Account marker: tk@allowlisted.example.",
+        )
+        allowlist = {"tk@allowlisted.example": "adjudicated safe"}
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root, allowlist=allowlist)
+
+        assert plan.changed is False
+        assert [e.value for e in plan.skipped_allowlisted] == ["tk@allowlisted.example"]
+
+
+class TestMigratePiiCliAllowlist:
+    def test_single_page_dry_run_reports_skip_and_apply_agrees(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        root = tmp_path / "knowledge"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        page = _write_page(
+            root / "wiki",
+            "acct.md",
+            "uid: a1\nname: Account Two\ntype: person\n",
+            "Real contact: real.person@corp.example. "
+            "Account marker: tk@allowlisted.example.",
+        )
+        _write_pii_allowlist(
+            root / "wiki",
+            [("tk@allowlisted.example", "account identifier, adjudicated safe")],
+        )
+
+        # Dry run first.
+        rc = main(["storage", "migrate-pii", "--path", str(root), "--page", str(page)])
+        assert rc == 0
+        dry_out = capsys.readouterr().out
+        assert "Skipped 1 allowlisted value(s) on this page, with reasons:" in dry_out
+        assert "'tk@allowlisted.example'" in dry_out
+        assert "account identifier, adjudicated safe" in dry_out
+        # Dry run must not have written anything.
+        assert "tk@allowlisted.example" in page.read_text(encoding="utf-8")
+        assert "real.person@corp.example" in page.read_text(encoding="utf-8")
+
+        # --apply: same skip report (AC4: dry-run and apply agree on the skip set).
+        rc = main(
+            ["storage", "migrate-pii", "--path", str(root), "--page", str(page), "--apply"]
+        )
+        assert rc == 0
+        apply_out = capsys.readouterr().out
+        assert "Skipped 1 allowlisted value(s) on this page, with reasons:" in apply_out
+        assert "'tk@allowlisted.example'" in apply_out
+        assert "account identifier, adjudicated safe" in apply_out
+
+        # The allowlisted value is untouched on disk; the real PII is redacted.
+        final_text = page.read_text(encoding="utf-8")
+        assert "tk@allowlisted.example" in final_text
+        assert "real.person@corp.example" not in final_text
+        assert INLINE_REDACTION_MARKER in final_text
+
+        excluded = surface_root_for_class("pii", EXCLUDED_CONFIG, root) / "acct.md"
+        excluded_text = excluded.read_text(encoding="utf-8")
+        assert "real.person@corp.example" in excluded_text
+        assert "tk@allowlisted.example" not in excluded_text
+
+    def test_missing_allowlist_migrates_everything_same_as_before(
+        self, tmp_path: Path
+    ) -> None:
+        # No `_pii-allowlist.yml` at all -- nothing has been adjudicated, so
+        # behaviour is unchanged from before athenaeum#1275 (not a refusal).
+        root = tmp_path / "knowledge"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        page = _write_page(
+            root / "wiki",
+            "nolist.md",
+            "uid: n1\nname: No List\ntype: person\n",
+            "Contact: someone@corp.example.",
+        )
+
+        rc = main(
+            ["storage", "migrate-pii", "--path", str(root), "--page", str(page), "--apply"]
+        )
+        assert rc == 0
+        assert "someone@corp.example" not in page.read_text(encoding="utf-8")
+
+    def test_malformed_allowlist_refuses_dry_run_and_apply_writes_nothing(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        root = tmp_path / "knowledge"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        page = _write_page(
+            root / "wiki",
+            "broken.md",
+            "uid: b1\nname: Broken\ntype: person\n",
+            "Contact: someone@corp.example.",
+        )
+        # Malformed: not a list of mappings at all.
+        (root / "wiki" / "_pii-allowlist.yml").write_text(
+            "not: a-list\n", encoding="utf-8"
+        )
+        original = page.read_text(encoding="utf-8")
+
+        rc = main(["storage", "migrate-pii", "--path", str(root), "--page", str(page)])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "refusing to run migrate-pii" in err
+        assert page.read_text(encoding="utf-8") == original
+
+        rc = main(
+            ["storage", "migrate-pii", "--path", str(root), "--page", str(page), "--apply"]
+        )
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "refusing to run migrate-pii" in err
+        # A broken allowlist must never be silently treated as empty --
+        # nothing was migrated, the origin page is untouched.
+        assert page.read_text(encoding="utf-8") == original
+        excluded = surface_root_for_class("pii", EXCLUDED_CONFIG, root) / "broken.md"
+        assert not excluded.exists()
+
+    def test_malformed_entry_also_refuses(self, tmp_path: Path, capsys) -> None:
+        # A single entry missing its required 'reason' is a load_pii_allowlist
+        # error too (per-entry, not just whole-file) -- also refused, not
+        # silently treated as "everything else still loaded fine".
+        root = tmp_path / "knowledge"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        page = _write_page(
+            root / "wiki",
+            "partial.md",
+            "uid: p1\nname: Partial\ntype: person\n",
+            "Contact: someone@corp.example.",
+        )
+        (root / "wiki" / "_pii-allowlist.yml").write_text(
+            '- value: "someone@corp.example"\n',  # no reason
+            encoding="utf-8",
+        )
+
+        rc = main(
+            ["storage", "migrate-pii", "--path", str(root), "--page", str(page), "--apply"]
+        )
+        assert rc == 1
+        assert "refusing to run migrate-pii" in capsys.readouterr().err
+
+    def test_bulk_reports_aggregate_skip_across_pages(self, tmp_path: Path, capsys) -> None:
+        root = tmp_path / "knowledge"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        _write_page(
+            root / "wiki",
+            "one.md",
+            "uid: o1\nname: One\ntype: person\n",
+            "Real: real1@corp.example. Marker: tk@allowlisted.example.",
+        )
+        _write_page(
+            root / "wiki",
+            "two.md",
+            "uid: o2\nname: Two\ntype: person\n",
+            "Real: real2@corp.example.",
+        )
+        _write_pii_allowlist(
+            root / "wiki", [("tk@allowlisted.example", "account identifier")]
+        )
+
+        rc = main(["storage", "migrate-pii", "--path", str(root), "--all", "--apply"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Skipped 1 allowlisted value(s) on 1 page(s), with reasons" in out
+        assert "one.md: 'tk@allowlisted.example': account identifier" in out
+
+        one_text = (root / "wiki" / "one.md").read_text(encoding="utf-8")
+        assert "tk@allowlisted.example" in one_text
+        assert "real1@corp.example" not in one_text
+        two_text = (root / "wiki" / "two.md").read_text(encoding="utf-8")
+        assert "real2@corp.example" not in two_text
