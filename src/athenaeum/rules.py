@@ -1741,6 +1741,232 @@ def prune_shape_rule_dispositions(
 
 
 # ---------------------------------------------------------------------------
+# One-time positive-only prune (issue athenaeum#1274 AC3/AC4)
+# ---------------------------------------------------------------------------
+#
+# `prune_shape_rule_dispositions` above is the ONGOING age-based retention
+# pass (issue athenaeum#1229) -- it runs every nightly and drops rows past
+# `dispositions_retention_days` regardless of their disposition. This is a
+# DIFFERENT, one-time operation that athenaeum#1274's AC3/AC4 ask for:
+# collapsing an already-oversized pre-fix ledger (341 MB / 1,488,689 rows on
+# the deployment that motivated the issue, 99.8% `no-match`) down to its
+# positive-disposition records, regardless of age. The two are complementary,
+# not redundant -- see that function's docstring for why retention alone
+# does not undo a ledger that grew before this issue's fixes ever ran.
+#
+# **Not run automatically anywhere in this codebase.** This is a live-store
+# mutation an operator invokes once, deliberately, via
+# `athenaeum storage prune-dispositions --apply` (`_cmd_storage.py`) -- see
+# that command for why: the target file lives under `~/knowledge`, not this
+# repo, and a prune racing the nightly's own concurrent appends is exactly
+# the hazard athenaeum#1274's own proposal names ("not something to do
+# mid-ingest"). The CLI wraps this function in
+# :class:`athenaeum.runlock.RunLock`; this function itself does no locking
+# -- it is a pure transform over a text blob, unit-testable without a live
+# store or a lock.
+#
+# **What counts as "positive."** Default-deny on deletion: the ONLY
+# disposition value this function ever drops is the literal string
+# `"no-match"`. Everything else -- `preserve`, `observed-preserve`, any
+# OTHER disposition (`fallthrough`, `observed-fallthrough`,
+# `transform-error`, ...; see `_TIER_0_DISPOSITIONS` above), an
+# unrecognised future disposition value, a row with a missing/non-string
+# `disposition` field, or a line that fails to parse as JSON at all
+# (malformed/truncated, e.g. an interrupted write) -- is treated as a
+# POSITIVE and kept. This is deliberately broader than the issue's own
+# "preserve + observed-preserve" framing: `athenaeum.rule_proposals.
+# _grouped_deferred_rows` (the ledger's only consumer -- confirmed by a
+# call-site search of every reader of `default_shape_rule_dispositions_path`
+# in this package, not by inference; see `docs/configuration.md`'s
+# `log_no_match` entry) reads every `tier is None` row, not only `no-match`
+# ones. Dropping a `fallthrough`-shaped row this function has never observed
+# in the wild would still be an unreviewed, silent loss of data a live
+# consumer depends on. Keeping everything but the one named, understood,
+# 99.8%-of-the-file value is the safe default.
+
+
+class DispositionPruneMismatchError(RuntimeError):
+    """Raised when the prune's own re-parse of the content it is about to
+    write disagrees with what the scan pass promised -- see
+    :func:`prune_shape_rule_dispositions_to_positive`'s docstring, "The
+    guard". The prune is aborted; nothing is written."""
+
+
+@dataclass(frozen=True)
+class DispositionPruneReport:
+    """Result of :func:`prune_shape_rule_dispositions_to_positive`, dry-run
+    or applied. Every count is over the ledger as read this call."""
+
+    total_records: int
+    #: Per-disposition-value counts across every row that parsed as a JSON
+    #: object with a string `disposition` and was NOT `"no-match"`.
+    #: `"<missing-disposition>"` buckets a parsed row whose `disposition`
+    #: field is missing or non-string -- kept as a positive (see the module
+    #: note above) but not a real disposition value.
+    histogram: dict[str, int]
+    #: Lines that failed to parse as a JSON object at all -- kept as
+    #: positives (fail-open), counted separately since they carry no
+    #: `disposition` to bucket into `histogram`.
+    malformed_lines: int
+    no_match_count: int
+    #: `total_records - no_match_count` -- every row this prune keeps.
+    positive_count: int
+    current_bytes: int
+    #: Size of the file if `positive_count` rows were written, one JSON
+    #: object per line -- what `--apply` would produce.
+    projected_bytes: int
+    #: Rows this prune drops (== `no_match_count`).
+    rows_dropped: int
+    #: Whether this report reflects a write that actually happened.
+    applied: bool
+
+
+def _classify_disposition_ledger_text(
+    text: str,
+) -> tuple[list[str], dict[str, int], int, int]:
+    """One classification pass over disposition-ledger *text*: which lines
+    survive a positive-only prune, plus the stats
+    :func:`prune_shape_rule_dispositions_to_positive` reports.
+
+    Returns `(kept_lines, histogram, malformed_lines, no_match_count)`.
+    `kept_lines` holds the ORIGINAL (stripped) line text unmodified for
+    every row this function does not drop -- never a re-serialization, so a
+    kept row's on-disk bytes (field order, whitespace) are byte-identical to
+    what was there before. Blank lines are skipped entirely (never counted,
+    never kept) -- the ledger writer never emits them, and dropping a
+    hand-edited file's stray blank lines here is harmless.
+
+    Deliberately factored out of the public function so it can run TWICE in
+    one prune -- once over the original text (the scan), once over the
+    freshly-built output (the guard's re-parse) -- with identical logic both
+    times. See :func:`prune_shape_rule_dispositions_to_positive`'s
+    docstring for why re-running the SAME classifier over the constructed
+    output, rather than trusting the first pass's bookkeeping, is the point.
+    """
+    kept_lines: list[str] = []
+    histogram: dict[str, int] = {}
+    malformed = 0
+    no_match = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            row = json.loads(stripped)
+        except json.JSONDecodeError:
+            malformed += 1
+            kept_lines.append(stripped)
+            continue
+        if not isinstance(row, dict):
+            malformed += 1
+            kept_lines.append(stripped)
+            continue
+        disposition = row.get("disposition")
+        if disposition == "no-match":
+            no_match += 1
+            continue
+        key = disposition if isinstance(disposition, str) else "<missing-disposition>"
+        histogram[key] = histogram.get(key, 0) + 1
+        kept_lines.append(stripped)
+    return kept_lines, histogram, malformed, no_match
+
+
+def prune_shape_rule_dispositions_to_positive(
+    wiki_root: Path, *, apply: bool = False
+) -> DispositionPruneReport:
+    """One-time prune of `_shape_rule_dispositions.jsonl` to its positive
+    (non-`no-match`) records (issue athenaeum#1274 AC3/AC4).
+
+    Dry-run by default (`apply=False`): reads the ledger and returns a
+    :class:`DispositionPruneReport` with no write. `apply=True` writes
+    atomically (:func:`athenaeum.atomic_io.atomic_write_text`) -- the file
+    on disk is always either the complete pre-prune content or the complete
+    post-prune content, never torn by an interrupted write.
+
+    **The guard (AC4 made mechanical).** A row this function drops is gone
+    from the live tree (though always recoverable from git history -- AC3;
+    this function does not touch git itself). AC4 asks for the positive
+    count to be "verified by count before and after," not merely assumed.
+    So after building the candidate output, this function re-runs the SAME
+    classifier (:func:`_classify_disposition_ledger_text`) over the text it
+    is about to write and confirms that re-parse reports exactly
+    `positive_count` surviving rows and ZERO `no-match` rows. Any
+    disagreement -- structurally impossible given the same classifier ran
+    both times, and exactly what a construction bug (a dropped line, a line
+    built from the wrong row) would produce -- raises
+    :class:`DispositionPruneMismatchError` and writes NOTHING. This mirrors
+    `run_shape_rule_phase`'s own `counts_seen` vs. `tallies` invariant,
+    built independently for the identical reason: catch a bug that would
+    otherwise cancel itself out in a single bookkeeping pass.
+
+    Returns a report with `applied=False` (no write, even under
+    `apply=True`) when the ledger file is missing, or when there is nothing
+    to prune (zero `no-match` rows) -- an already-pruned or freshly-pruned
+    ledger is left byte-identical rather than churned.
+    """
+    path = default_shape_rule_dispositions_path(wiki_root)
+    if not path.is_file():
+        return DispositionPruneReport(
+            total_records=0,
+            histogram={},
+            malformed_lines=0,
+            no_match_count=0,
+            positive_count=0,
+            current_bytes=0,
+            projected_bytes=0,
+            rows_dropped=0,
+            applied=False,
+        )
+    text = path.read_text(encoding="utf-8")
+    current_bytes = len(text.encode("utf-8"))
+
+    kept_lines, histogram, malformed, no_match_count = _classify_disposition_ledger_text(text)
+    total_records = sum(histogram.values()) + malformed + no_match_count
+    positive_count = total_records - no_match_count
+    new_text = "".join(f"{line}\n" for line in kept_lines)
+    projected_bytes = len(new_text.encode("utf-8"))
+
+    # The guard: re-classify the constructed output independently rather
+    # than trusting the scan pass's own bookkeeping (see docstring).
+    verify_kept, _verify_hist, _verify_malformed, verify_no_match = (
+        _classify_disposition_ledger_text(new_text)
+    )
+    if len(verify_kept) != positive_count or verify_no_match != 0:
+        raise DispositionPruneMismatchError(
+            f"prune guard: re-parse of the constructed output reports "
+            f"{len(verify_kept)} surviving row(s) and {verify_no_match} "
+            f"no-match row(s); expected {positive_count} and 0. Refusing "
+            f"to write {path} -- nothing was written."
+        )
+
+    report = DispositionPruneReport(
+        total_records=total_records,
+        histogram=histogram,
+        malformed_lines=malformed,
+        no_match_count=no_match_count,
+        positive_count=positive_count,
+        current_bytes=current_bytes,
+        projected_bytes=projected_bytes,
+        rows_dropped=no_match_count,
+        applied=False,
+    )
+    if not apply or no_match_count == 0:
+        return report
+    atomic_write_text(path, new_text)
+    return DispositionPruneReport(
+        total_records=report.total_records,
+        histogram=report.histogram,
+        malformed_lines=report.malformed_lines,
+        no_match_count=report.no_match_count,
+        positive_count=report.positive_count,
+        current_bytes=report.current_bytes,
+        projected_bytes=report.projected_bytes,
+        rows_dropped=report.rows_dropped,
+        applied=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Rollup aggregation (issue athenaeum#903)
 # ---------------------------------------------------------------------------
 

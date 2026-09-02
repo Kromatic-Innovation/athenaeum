@@ -7,7 +7,165 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **M17 phase 2 — the per-contract strictness decision for the remaining four
+  LLM contracts (athenaeum#608).** athenaeum#570 shipped observe-only schema
+  validation specifically so the reject-vs-degrade question could be decided
+  from measurement rather than intuition, and athenaeum#1035 decided two of
+  the six contracts once their window was representative. The remaining four
+  are now decided from a 28-day window (2026-08-05T13:12Z to
+  2026-09-02T12:42Z, 16,411 records, 0 malformed) of the post-quarantine clean
+  ledger — the C4-downstream contracts that were starved of a denominator in
+  August now carry four figures of observations each. **The answer to
+  reject-vs-degrade is degrade, everywhere, and now by decision rather than
+  deferral:** `observe()` keeps its never-raise contract for every contract,
+  because the reject teeth already exist one layer down in each site's own
+  hand-rolled guard, and a second gate inside a logging side-channel would
+  duplicate them on the critical path of the knowledge-write pipeline. The
+  uniform-vs-per-contract question resolves to **per-contract**: `claim_kind`
+  (n=1,071, 0 mismatches) and `contradictions` (n=1,464, 0) tighten from
+  `extra="allow"` to `extra="forbid"`; `query_topics` (n=1,405, one wrong-type
+  element) is confirmed as-is, since a `RootModel[list[str]]` has no `extra=`
+  knob and the site already drops a non-string element; and `resolutions`
+  (n=89) is deliberately **deferred** on an under-sampled denominator rather
+  than decided, with its release bar stated in code and in
+  `docs/configuration.md`. Schema-shape only: no field became required or
+  optional, no `athenaeum.yaml` key or env var is introduced, and no reported
+  number or pipeline behavior changes — a tightened schema changes how a
+  *future* mismatch is classified in the observation log, never whether
+  today's response is accepted.
+
+- **Per-surface input-token attribution for the six declared non-batched
+  surfaces (athenaeum#1289).** athenaeum#1148's investigation found that
+  `TokenUsage.per_knob` (athenaeum#781) buckets by model knob only, and while
+  `add_batch_tokens`/`add_tokens` already separate batched from synchronous
+  spend *within* a knob, neither can separate one non-batched *surface* from
+  another — `batch.py`'s module docstring declares six surfaces out of scope
+  for the Batch API transport (tier-0 passthrough, tier-1 programmatic
+  matching, the C4 contradiction detector and resolver, same-page
+  multi-merge groups, the athenaeum#476 truncation retry, and the tier-3
+  full-echo fallback), but nothing recorded which surface a non-batched
+  token actually went to. `TokenUsage.per_surface` is now a SIBLING of
+  `per_knob` — same additive-subset bucket shape, tagged via a `surface=`
+  kwarg on `add()`/`add_tokens()`/`add_batch_tokens()` — populated at the
+  five surfaces that spend real tokens (the two zero-LLM-call surfaces
+  never appear, by construction). Reported as `tokens_by_surface`, a new
+  sibling ledger field (schema v4) alongside `tokens_by_knob`, and via
+  `athenaeum spend --by-surface`. Unlike `per_knob`, the reporting layer
+  (`spend.tokens_by_surface`) always synthesizes an `"unattributed"` entry —
+  the run's total input minus every explicitly-tagged surface — so spend
+  outside the six (batched tier-2/tier-3, reasoning tiers, topic,
+  rule_proposals, the freetext-edit resolver path, ...) is a visible
+  remainder instead of silently dropped, and the sum of every entry's
+  `input` always equals `usage.input_tokens` exactly. Purely additive
+  instrumentation: no existing reported number changes value, no spend
+  ceiling or policy changes, and pre-v4 ledger rows stay readable (counted
+  `surface_unattributed_records`, never dropped).
+
+### Changed
+
+- **`reasoning_tiers` T1/T2 retrofitted onto the M17 response-model
+  convention, with a deliberately stricter posture than the observe-only
+  sites (athenaeum#609).** `_parse_t1_response`/`_parse_t2_response` now
+  validate the model's raw JSON verdict through a Pydantic response model
+  (`T1VerdictResponse` / `T2VerdictResponse`) — one model per contract,
+  `Literal` over each tier's own verdict vocabulary, matching
+  `athenaeum.llm_schemas`' athenaeum#570 convention. Two things are
+  deliberately NOT that module's convention, per athenaeum#608's decided
+  strictness posture applied to this authority boundary: both models default
+  to `extra="forbid"` (not `extra="allow"` — there is no ledger measurement
+  for these contracts, and a tolerated unknown key at an authority boundary
+  is a widening risk, not a neutral one), and a validation failure drives
+  the tier's existing safe fallback directly (T1 → `pass_up`, T2 →
+  `escalate`) rather than being logged-and-passed-through the way
+  `athenaeum.llm_schemas.observe` treats every other contract's mismatch.
+  Every structural guarantee the module already carried is unchanged: T1's
+  two-member `Literal` (`"approve"` remains unrepresentable) and
+  `run_t2_tier`'s `safe_class_violation` gate (the single enforcement point
+  for an approved T2 decision) are untouched. One documented, intentional
+  behavior change: a payload that previously succeeded despite an
+  unexpected extra key (e.g. `{"verdict": "reject", "reason": "ok",
+  "surprise": "x"}`) now fails validation and falls back to the tier's
+  safe default instead — always landing on the OTHER already-safe outcome,
+  never a widened one. New tests: adversarial cases per invariant, an
+  exhaustive parametrized directional test enumerating every failure path
+  the retrofit touches, an AST-walk test proving `"approve"` is produced on
+  exactly one code path dominated by the `safe_class_violation` gate, and a
+  negative-control test proving both checks fail against a deliberately
+  eroded variant (never committed to the production module). **Post-review
+  fix (Seer thread on `reasoning_tiers.py:717`):** a *present but
+  blank/whitespace-only* `reason` (e.g. `{"verdict": "reject", "reason":
+  "   "}`) satisfied the initial `reason: str` field and reached
+  `ReasoningTierDecision`/`ReasoningTierT2Decision` construction
+  unvalidated, where each dataclass's own non-empty-reason guard raised an
+  uncaught `ValueError` — a failure path outside the safe set that the
+  original exhaustive-directional enumeration missed. Both response models
+  now reject a blank/whitespace-only `reason` at the Pydantic layer (a
+  shared `_require_nonblank_reason` field validator), so it takes the
+  tier's existing safe fallback (T1 → `pass_up`, T2 → `escalate`) like any
+  other schema mismatch, instead of being defaulted through OR crashing.
+  No version bump for this fix — folded into the same `0.19.45` this PR
+  had not yet released.
+
 ### Fixed
+
+- **Intake starvation: a scheduled source that never gets *reached* is now
+  named (athenaeum#1295).** athenaeum#1291 fixed one starvation channel
+  (ordering) and made it observable — but its `starved_sources` signal counts
+  **scheduled slots**, not files processed. `round_robin_by_source` guarantees
+  a source gets slots in the window; it does not guarantee those slots are
+  ever reached. The entity loop can stop part-way through an already-scheduled
+  window on either `max_runtime` or `max_api_calls`, both enforced *downstream*
+  of window selection, so a source whose slots consistently land past the trip
+  point gets a non-zero slot count and a zero starvation streak, run after run,
+  while processing nothing. Interleaving the window bounds that damage; it does
+  not eliminate it. Every athenaeum#1291 acceptance criterion is worded in
+  terms of slots, so nothing that shipped there is false — this is the second,
+  independent channel that signal is blind to by construction.
+  A per-source count of files **actually processed** is now accumulated in the
+  entity loop and read back at the end of the run: a source with pending
+  intake, non-zero slots and zero processed files is reported as `stalled`,
+  on its own `librarian-source-processing-stall` prefix and its own streak,
+  kept deliberately distinct from athenaeum#1291's zero-slot `starved` channel
+  so the two are never conflated. It rides the entity profile segment, so the
+  athenaeum#1102 run-summary ledger carries it forward for free — no new state
+  file. A stalled source also ages into the scheduler's turn-order head
+  (`combined_starvation_priority`: the slot channel's ranking is preserved
+  exactly and unshifted, so athenaeum#1291's `ceil(n_sources / limit)` bound is
+  untouched, with stall-only sources appended after it), because a signal
+  nothing reads back into the schedule is diagnostic only and self-corrects
+  nothing. Per-run budget semantics are unchanged: this adds reporting and
+  turn order, never a new way to exceed a budget.
+
+- **`athenaeum status` no longer reads healthy after a zero-progress budget
+  refusal (athenaeum#1283).** athenaeum#1135 already detected, at run time, a run
+  that stopped early for a resource reason (budget / deadline / spend ceiling)
+  and committed nothing — it logs `librarian-run-degraded` and exits
+  `EXIT_LIBRARIAN_REFUSAL`. But that verdict died with the process, so nothing
+  *between* runs could see it, and the one counter `athenaeum status` did
+  surface — athenaeum#899's zero-yield streak — excludes this case **by
+  design**: it requires `api_calls > 0` (or `attempted_calls > 0`), and a run
+  refused on an exhausted budget makes zero calls. Status therefore read clean
+  straight through the exact incident athenaeum#1135 was filed about. The
+  refusal verdict is now computed once, at a single site in
+  `_run_finalize_phase`, and persisted through the existing athenaeum#1102
+  run-summary ledger (schema v3, new optional `refusal` field) — no new state
+  file — from which `status` reads a consecutive-refusal streak and renders a
+  `librarian-run-refusal:` line naming the reason. The line fires at a streak
+  of **one**: a single run that refused all work must not read as healthy, so
+  this is deliberately not a threshold alarm like the athenaeum#1291 starvation
+  warning. Run behaviour, the athenaeum#899 predicate, and the athenaeum#1135
+  exit codes and marker line are all unchanged — this makes an
+  already-correct verdict outlive the run that reached it.
+  Because the field must distinguish three states, a v3 record now carries
+  `refusal` whenever the verdict was *evaluated* (`{"tripped": false}` on a
+  clean run), and omits it only when the verdict was never reached — e.g. the
+  `stop_on_deadline` path, which emits its summary and returns before
+  `_run_finalize_phase` runs. Readers treat both an omitted field and a pre-v3
+  record as "cannot speak", never as "confirmed clean"; the streak stops at
+  such a record rather than counting through it, so it can under-report a real
+  streak but never fabricate one.
 
 - **The shape-rule disposition log no longer records the 99.8% that nothing
   reads (athenaeum#1274).** `wiki/_shape_rule_dispositions.jsonl` reached 341 MB
@@ -45,6 +203,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing oversized ledger is not pruned retroactively, and the log's
   placement under `wiki/` is unchanged — both remain open on athenaeum#1274.
 
+- **Intake scheduling no longer starves a source indefinitely
+  (athenaeum#1291).** `discover_raw_files` returns its result grouped by
+  source directory in `sorted()` order, and the librarian's run loop filled
+  its `max_files` window by head-truncating that list. Because the list was
+  ordered by source NAME and cut from the HEAD, the window could only ever
+  advance past a source once that source's own backlog fell below the cap —
+  so a large, alphabetically-early, continuously-refilled source starved
+  every lexicographically later source forever. On the deployment that
+  surfaced it, ~2,200 records sat frozen in `raw/mural-board-summary/` across
+  at least 8 consecutive runs while `raw/auto-memory/` (79 files) alone
+  exceeded the entire 50-file per-run budget. The window is now filled
+  ROUND-ROBIN across sources (`athenaeum.intake.round_robin_by_source`),
+  with the turn order rotated each run by how long each source has been
+  waiting (`read_starvation_priority`, longest-starved first) so the bound
+  also holds when `max_files` is narrower than the source count. Worst-case
+  wait is now `ceil(n_sources / max_files)` runs regardless of sort position
+  or any other source's backlog; within-source ordering is preserved, the
+  athenaeum#900 caller-scoped prefix stays pinned at the head, and the per-run
+  budget semantics (`max_files`, `max_api_calls`, `max_runtime`) are unchanged —
+  this decides *which* files fill the window, never how many. Starvation is
+  also now observable rather than inferred: the entity phase records its
+  zero-slot sources on its run-summary segment (`starved=`), and
+  `emit_run_summary` computes a consecutive-run streak from the durable
+  athenaeum#1102 run-summary ledger (no new state file), naming any source
+  at or over `STARVATION_STREAK_THRESHOLD` runs in the summary head
+  (`starved_sources=<name>:<runs>`) and on a greppable
+  `librarian-source-starvation` WARNING. The previous `beyond_window` count
+  read as ordinary backpressure while describing a permanent stall.
 - **`storage lint-pii` no longer scans machine-generated audit logs under
   `wiki/` (athenaeum#1273).** `_shape_rule_dispositions.jsonl` — a 341+ MB,
   ~1.49M-record log the shape-rule engine regenerates every nightly run —
@@ -88,6 +274,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum storage prune-dispositions`: one-time prune of
+  `_shape_rule_dispositions.jsonl` to its positive-disposition records
+  (athenaeum#1274 AC3/AC4).** athenaeum#1293/athenaeum#1229 already stopped the ledger
+  growing without bound going forward (suppress-at-write + retention); this
+  closes the other half — collapsing an ALREADY-oversized pre-fix ledger
+  (341 MB / 1,488,689 rows on the deployment that motivated the issue, 99.8%
+  `no-match`) down to just its positives, as one auditable command instead of
+  a hand-rolled `jq` pipeline. Dry-run by default (reports the disposition
+  histogram, positive-record count, and projected post-prune size);
+  `--apply` writes atomically. Drops ONLY the literal `disposition:
+  "no-match"` value — `preserve`, `observed-preserve`, and any other or
+  unrecognised disposition (including a malformed/truncated line) are kept,
+  default-deny on deletion. Refuses to write if an independent re-parse of
+  the constructed output ever disagrees with the scan pass's positive-row
+  count, and (on `--apply`) acquires the single-machine run lock (issue
+  athenaeum#309) so it can never race the nightly's own concurrent appends to
+  this file. See `docs/configuration.md`'s shape-rules section.
+- **The `split` and `log_demote` oversize-page dispositions are implemented
+  (athenaeum#1248).** athenaeum#1182 shipped the page-size gate with only
+  `review` (escalate, leave the page unmodified) live; `split`/`log_demote`
+  were recognized `librarian.oversize_page_action` values that raised
+  `NotImplementedError` at dispatch. Both now run for real, in
+  `check_page_size_gate` (`src/athenaeum/tiers.py`), and `review` stays the
+  shipped default — neither new route ever runs unattended.
+  `split` decomposes an over-threshold page into one atomic child page per
+  top-level markdown section, leaving the original in place as a **hub**:
+  same `uid`/`name`/frontmatter, so every existing index key and
+  cross-reference into it keeps resolving, with a shrunk body linking to
+  each child. Content before the first heading has no heading to name a
+  child page after, so it stays on the hub verbatim — nothing is dropped.
+  A page with no markdown heading at all cannot be split (athenaeum#1282 is
+  the no-heading cohort's own follow-up) and falls back to `review`.
+  `log_demote` reuses `athenaeum.rules.preserve_raw_file` — the SAME move
+  the `preserve` shape-rule disposition already uses — to relocate the page
+  whole into `librarian.preserved_log_dir`, rather than building a second,
+  parallel demotion mechanism; with no `preserved_log_dir` configured it
+  falls back to `review`.
+  **Atomicity:** every write either completes or the page is left
+  byte-identical to before the call. `split` writes every child page first
+  and the hub last, and rolls back (deletes) any child already written if a
+  later write fails, so a mid-operation failure never leaves a partially
+  split page; `log_demote`'s underlying move never removes the source until
+  the destination write is confirmed. Either route degrading to `review` on
+  a failure (missing config, no heading, or a genuine `OSError`) is logged,
+  never a raised exception that could take a run down over one oversized
+  page.
+  Run-summary counters `oversize_split`/`oversize_log_demoted` are new and
+  disjoint from the existing `oversize_suppressed` (that one counts
+  `review` only), so a run makes clear which disposition actually fired for
+  each oversize page. Documented in `docs/configuration.md` alongside the
+  other `librarian.*` knobs. Unblocks athenaeum#1214 (the operator
+  disposition sweep), whose per-page dispositions are only executable once
+  all three actions exist.
 - **`type: person` wiki pages are demoted from general wiki entities to a
   new consult-only person registry (athenaeum#1183).** A CRM-imported contact
   record is not a wiki entity — treating it as one let a person page be

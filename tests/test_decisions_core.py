@@ -5,11 +5,13 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+from athenaeum.answers import PendingQuestion
 from athenaeum.decisions import (
     _fallback_title,
     _first_body_line,
     _one_line,
     age_days,
+    confirmation_to_decision,
     list_pending_decisions,
     quarantine_to_decision,
     source_info,
@@ -79,6 +81,85 @@ def test_source_info_missing_file(tmp_path: Path) -> None:
 def test_list_pending_decisions_empty(tmp_path: Path) -> None:
     (tmp_path / "wiki").mkdir()
     assert list_pending_decisions(tmp_path / "wiki") == []
+
+
+# ---------------------------------------------------------------------------
+# confirmation_to_decision (issue athenaeum#1290) — mirrors
+# test_quarantine_to_decision_shape below.
+# ---------------------------------------------------------------------------
+
+
+def test_confirmation_to_decision_shape() -> None:
+    pq = PendingQuestion(
+        id="abc123",
+        entity="(confirmation: o/r#42)",
+        source="agent-raised",
+        question="Confirm: implemented X instead of Y on o/r#42?",
+        conflict_type="",
+        description="Raised by lane-42 on o/r#42. ...",
+        created_at="2026-09-02",
+        answered=False,
+        answer_lines=[],
+        raw_block="",
+        raised_by="agent",
+        decision_kind="confirmation",
+        raiser="lane-42",
+        repo="o/r",
+        issue_ref="42",
+        narrowed_scope="scalar fields only",
+        implemented_behavior="extended the existing tool",
+        alternative="a parallel tool",
+        raised_at="2026-09-02T09:50:00Z",
+    )
+    decision = confirmation_to_decision(pq)
+    assert decision["type"] == "confirmation"
+    assert decision["id"] == "abc123"
+    assert decision["confidence"] is None
+    assert decision["created_at"] == "2026-09-02"
+    assert "lane-42" in decision["summary"]
+    assert "o/r#42" in decision["summary"]
+    assert "extended the existing tool" in decision["summary"]
+    assert "a parallel tool" in decision["summary"]
+    payload = decision["payload"]
+    assert payload == {
+        "raiser": "lane-42",
+        "repo": "o/r",
+        "issue_ref": "42",
+        "narrowed_scope": "scalar fields only",
+        "implemented_behavior": "extended the existing tool",
+        "alternative": "a parallel tool",
+        "raised_at": "2026-09-02T09:50:00Z",
+        "question": pq.question,
+        "context": pq.description,
+        "raised_by": "agent",
+    }
+
+
+def test_plain_question_payload_shape_unchanged_by_confirmation_field(
+    tmp_path: Path,
+) -> None:
+    """An ordinary (decision_kind="question") item's dict is UNAFFECTED by
+    the new PendingQuestion fields athenaeum#1290 added — same keys as
+    before, no confirmation fields leaking in."""
+    from athenaeum.answers import raise_pending_question
+
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    pending = wiki / "_pending_questions.md"
+    raise_pending_question(pending, "Plain Q?", "plain context")
+
+    decisions = list_pending_decisions(wiki)
+    assert len(decisions) == 1
+    decision = decisions[0]
+    assert decision["type"] == "question"
+    assert set(decision["payload"]) == {
+        "entity",
+        "source",
+        "question",
+        "conflict_type",
+        "description",
+        "raised_by",
+    }
 
 
 # ---------------------------------------------------------------------------

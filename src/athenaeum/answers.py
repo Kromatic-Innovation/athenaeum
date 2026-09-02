@@ -137,6 +137,40 @@ _META_PREFIXES = ("**Conflict type**:", "**Description**:")
 _RAISED_BY_PREFIX = "**Raised by**:"
 _RAISED_BY_AGENT = "agent"
 
+# Issue athenaeum#1290: a "confirmation" decision — an agent narrowed scope
+# mid-build and needs a durable, non-blocking place to flag "implemented X
+# without Y, confirm?" that survives the session. Reuses the SAME
+# `_pending_questions.md` block grammar `raise_pending_question` already
+# writes (issue athenaeum#912) — a confirmation is a question block carrying
+# extra structured metadata lines, never a second parallel queue. The kind
+# tag distinguishes it from a plain agent-raised question in
+# ``athenaeum.decisions.question_to_decision``; the six structured fields
+# capture exactly what the pending-decisions consumer contract requires
+# (see ``docs/configuration.md``'s "confirmation-type consumer contract").
+_DECISION_KIND_PREFIX = "**Decision kind**:"
+_DECISION_KIND_CONFIRMATION = "confirmation"
+_RAISER_PREFIX = "**Raiser**:"
+_REPO_PREFIX = "**Repo**:"
+_ISSUE_REF_PREFIX = "**Issue/PR**:"
+_NARROWED_SCOPE_PREFIX = "**Narrowed scope**:"
+_IMPLEMENTED_BEHAVIOR_PREFIX = "**Implemented behaviour**:"
+_ALTERNATIVE_PREFIX = "**Alternative**:"
+_RAISED_AT_PREFIX = "**Raised at**:"
+
+# Maps a PendingQuestion attribute name to the block-line prefix that
+# carries it. Used by both `_parse_block` (read) and `raise_pending_question`
+# (write) so the two can never drift out of sync on which keys exist.
+_CONFIRMATION_FIELD_PREFIXES: dict[str, str] = {
+    "decision_kind": _DECISION_KIND_PREFIX,
+    "raiser": _RAISER_PREFIX,
+    "repo": _REPO_PREFIX,
+    "issue_ref": _ISSUE_REF_PREFIX,
+    "narrowed_scope": _NARROWED_SCOPE_PREFIX,
+    "implemented_behavior": _IMPLEMENTED_BEHAVIOR_PREFIX,
+    "alternative": _ALTERNATIVE_PREFIX,
+    "raised_at": _RAISED_AT_PREFIX,
+}
+
 
 @dataclass
 class PendingQuestion:
@@ -175,6 +209,28 @@ class PendingQuestion:
     # parsing identically. ``"agent"`` means the block was inserted via the
     # ``raise_decision`` MCP tool (:func:`raise_pending_question` below).
     raised_by: str = ""
+    # Issue athenaeum#1290: ``"question"`` (the default, including every
+    # pre-athenaeum#1290 block, which lacks a ``**Decision kind**:`` line) or
+    # ``"confirmation"`` for an agent-raised "implemented X without Y,
+    # confirm?" flag. Drives ``athenaeum.decisions.question_to_decision``'s
+    # choice of ``type: "question"`` vs ``type: "confirmation"`` — a purely
+    # ADDITIVE distinction; a plain question's parsed shape and payload are
+    # completely unchanged by this field's existence.
+    decision_kind: str = "question"
+    # The remaining fields are populated ONLY on a ``decision_kind ==
+    # "confirmation"`` block (empty string otherwise, including every
+    # ordinary question). See ``_CONFIRMATION_FIELD_PREFIXES`` above for the
+    # on-disk line each one is recovered from.
+    raiser: str = ""
+    repo: str = ""
+    issue_ref: str = ""
+    narrowed_scope: str = ""
+    implemented_behavior: str = ""
+    alternative: str = ""
+    # Full ISO-8601 UTC timestamp (``**Raised at**:``) — finer-grained than
+    # ``created_at`` (date-only, from the header), which the confirmation
+    # AC's "a timestamp" field maps onto.
+    raised_at: str = ""
 
 
 def _make_id(header_line: str, question_text: str) -> str:
@@ -349,6 +405,27 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
     also_affects: list[str] = []
     fingerprint = ""
     raised_by = ""
+    # Issue athenaeum#1290: confirmation-only metadata, keyed by
+    # PendingQuestion attribute name — see `_CONFIRMATION_FIELD_PREFIXES`.
+    # Absent (empty dict) on every ordinary question block.
+    confirmation_fields: dict[str, str] = {}
+
+    def _match_confirmation_key(stripped_line: str) -> bool:
+        """Recognize a `**<Confirmation key>**:` line; record it if found.
+
+        Mirrors the `**Fingerprint**:` / `**Raised by**:` recognition
+        pattern above (metadata, never leaked into `answer_lines`), but
+        table-driven over `_CONFIRMATION_FIELD_PREFIXES` instead of one
+        `if` per key — these eight keys only ever appear together, all on a
+        `decision_kind == "confirmation"` block.
+        """
+        for field_name, prefix in _CONFIRMATION_FIELD_PREFIXES.items():
+            if stripped_line.startswith(prefix):
+                confirmation_fields[field_name] = stripped_line.removeprefix(
+                    prefix
+                ).strip()
+                return True
+        return False
 
     # Tracks whether we're still accumulating continuation lines into the
     # description field. A **Description**: line opens the window; the next
@@ -392,6 +469,9 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
             in_description = False
             raised_by = stripped.removeprefix(_RAISED_BY_PREFIX).strip()
             continue
+        if _match_confirmation_key(stripped):
+            in_description = False
+            continue
         if in_description:
             # Continuation: consume into description until we hit a terminator.
             # Blank line or another ``**Key**:`` tag closes the window.
@@ -418,6 +498,8 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
                     continue
                 if stripped.startswith(_RAISED_BY_PREFIX):
                     raised_by = stripped.removeprefix(_RAISED_BY_PREFIX).strip()
+                    continue
+                if _match_confirmation_key(stripped):
                     continue
                 # Unknown **Key**: — treat as answer body.
                 answer_lines.append(raw_line)
@@ -448,6 +530,14 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
         fingerprint=fingerprint,
         also_affects=also_affects,
         raised_by=raised_by,
+        decision_kind=confirmation_fields.get("decision_kind", "question"),
+        raiser=confirmation_fields.get("raiser", ""),
+        repo=confirmation_fields.get("repo", ""),
+        issue_ref=confirmation_fields.get("issue_ref", ""),
+        narrowed_scope=confirmation_fields.get("narrowed_scope", ""),
+        implemented_behavior=confirmation_fields.get("implemented_behavior", ""),
+        alternative=confirmation_fields.get("alternative", ""),
+        raised_at=confirmation_fields.get("raised_at", ""),
     )
 
 
@@ -1287,6 +1377,67 @@ def list_unanswered(
 # ---------------------------------------------------------------------------
 
 
+#: Fields required on ``kind="confirmation"``, in the order they are
+#: validated (issue athenaeum#1290) — the AC's own enumeration order
+#: ("raiser, repo, issue/PR, the narrowed scope, the implemented behaviour,
+#: the alternative"). Maps the ``raise_pending_question`` / ``raise_decision``
+#: keyword name to the human-readable label used in a validation message.
+_REQUIRED_CONFIRMATION_FIELDS: tuple[tuple[str, str], ...] = (
+    ("raiser", "raiser"),
+    ("repo", "repo"),
+    ("issue_ref", "issue/PR"),
+    ("narrowed_scope", "narrowed scope"),
+    ("implemented_behavior", "implemented behaviour"),
+    ("alternative", "alternative"),
+)
+
+
+def default_confirmation_question(
+    *,
+    repo: str,
+    issue_ref: str,
+    implemented_behavior: str,
+    alternative: str,
+) -> str:
+    """Auto-phrase a confirmation's checkbox question from its structured fields.
+
+    Issue athenaeum#1290: ``question``/``context`` are not among the AC's
+    required confirmation fields (only raiser/repo/issue_ref/narrowed_scope/
+    implemented_behavior/alternative/timestamp are) — but the block grammar
+    (shared with plain questions) needs SOME checkbox text and description.
+    Used by :func:`raise_pending_question` whenever a confirmation raise
+    omits ``question`` — so a caller across the MCP tool AND the CLI can
+    supply just the structured fields and get a sensibly-phrased block for
+    free, mirroring how :func:`athenaeum.decisions._merge_question` phrases
+    a merge proposal from its own structured fields.
+    """
+    return (
+        f'Confirm: implemented "{implemented_behavior}" instead of '
+        f'"{alternative}" on {repo}#{issue_ref}?'
+    )
+
+
+def default_confirmation_context(
+    *,
+    raiser: str,
+    repo: str,
+    issue_ref: str,
+    narrowed_scope: str,
+    implemented_behavior: str,
+    alternative: str,
+) -> str:
+    """Auto-phrase a confirmation's standalone context from its structured fields.
+
+    See :func:`default_confirmation_question` — same rationale, for the
+    ``**Description**:`` field instead of the checkbox line.
+    """
+    return (
+        f"Raised by {raiser} on {repo}#{issue_ref}. Narrowed scope: "
+        f"{narrowed_scope}. Implemented instead: {implemented_behavior}. "
+        f"Alternative not taken: {alternative}."
+    )
+
+
 def raise_pending_question(
     pending_path: Path,
     question: str,
@@ -1295,6 +1446,13 @@ def raise_pending_question(
     entity: str = "",
     source: str = "",
     now: datetime | None = None,
+    kind: str = "question",
+    raiser: str = "",
+    repo: str = "",
+    issue_ref: str = "",
+    narrowed_scope: str = "",
+    implemented_behavior: str = "",
+    alternative: str = "",
 ) -> dict:
     """Append a NEW agent-raised block to ``_pending_questions.md`` (athenaeum#912).
 
@@ -1313,15 +1471,22 @@ def raise_pending_question(
     Args:
         pending_path: Path to ``_pending_questions.md``.
         question: The question a human should answer. Rejected if empty or
-            all-whitespace.
+            all-whitespace — UNLESS ``kind="confirmation"``, where an empty
+            value is auto-phrased from ``implemented_behavior``/
+            ``alternative``/``repo``/``issue_ref`` (issue athenaeum#1290:
+            ``question`` is not one of a confirmation's required fields).
         context: Standalone context — what a human needs to answer this
             WITHOUT the originating session. Rejected if empty or
-            all-whitespace; there is no default, deliberately (see above).
+            all-whitespace; there is no default, deliberately (see above) —
+            UNLESS ``kind="confirmation"``, same auto-phrasing exception as
+            ``question``.
         entity: Optional short human-readable label for the header's
             ``Entity: "..."`` field. Defaults to a generic
-            ``"(agent-raised decision)"`` when omitted — this is cosmetic
-            only; the machine-readable provenance signal is the
-            ``**Raised by**:`` line, not this label.
+            ``"(agent-raised decision)"`` when omitted (``kind="question"``)
+            or ``"(confirmation: <repo>#<issue_ref>)"`` (``kind=
+            "confirmation"``) — this is cosmetic only; the machine-readable
+            provenance signal is the ``**Raised by**:`` line, not this
+            label.
         source: Optional free-text provenance ref for the header's
             ``(from ...)`` field (mirrors a detector item's originating raw
             file). Defaults to the literal ``"agent-raised"`` when omitted.
@@ -1331,20 +1496,108 @@ def raise_pending_question(
             ``source`` happens to resolve to a page it is authorized to
             read — fail-closed, same as every other decision-queue item.
         now: Injectable clock for tests. Defaults to the real UTC time.
+        kind: ``"question"`` (default, unchanged behaviour) or
+            ``"confirmation"`` (issue athenaeum#1290) — an agent-raised
+            "implemented X without Y, confirm?" flag. On ``"confirmation"``
+            every one of ``raiser``/``repo``/``issue_ref``/``narrowed_scope``/
+            ``implemented_behavior``/``alternative`` below is REQUIRED (each
+            rejected if empty/all-whitespace, same fail-closed posture as
+            ``question``/``context`` above); an unrecognized ``kind`` is
+            rejected too. Ignored (no validation, nothing written) when
+            ``kind="question"`` — passing them is simply a no-op, so an
+            existing ``kind="question"`` caller is entirely unaffected by
+            this parameter's existence.
+        raiser: Who/what narrowed scope (an agent name, a lane id, ...).
+            Confirmation-only.
+        repo: The ``owner/repo`` the narrowing happened in. Confirmation-only.
+        issue_ref: The issue or PR number/reference the narrowing relates to.
+            Confirmation-only.
+        narrowed_scope: What was narrowed — the scope the agent DIDN'T cover.
+            Confirmation-only.
+        implemented_behavior: What the agent actually built instead.
+            Confirmation-only.
+        alternative: The road not taken — what a human might have wanted
+            instead. Confirmation-only.
 
     Returns:
         A dict with ``ok`` (bool), ``error_code`` (``"invalid_question"`` |
-        ``"missing_context"`` | ``None``), ``message`` (str), ``decision_id``
-        (the id ``list_pending_questions`` / ``resolve_question`` will use
-        for this item, computed the same way :func:`_make_id` computes it
-        for any other block — ``None`` on failure), and ``raw_block`` (the
-        rendered block text, ``None`` on failure). ``block`` / ``error`` are
-        legacy-shaped aliases (mirroring :func:`resolve_by_id`) for
-        ``raw_block`` / ``message``-on-failure respectively. Never raises —
-        every failure mode is a structured refusal, matching every other
-        mutating MCP-facing helper in this module.
+        ``"missing_context"`` | ``"invalid_kind"`` |
+        ``"missing_confirmation_field"`` | ``None``), ``message`` (str),
+        ``decision_id`` (the id ``list_pending_questions`` /
+        ``resolve_question`` will use for this item, computed the same way
+        :func:`_make_id` computes it for any other block — ``None`` on
+        failure), and ``raw_block`` (the rendered block text, ``None`` on
+        failure). ``block`` / ``error`` are legacy-shaped aliases (mirroring
+        :func:`resolve_by_id`) for ``raw_block`` / ``message``-on-failure
+        respectively. Never raises — every failure mode is a structured
+        refusal, matching every other mutating MCP-facing helper in this
+        module.
     """
+    if kind not in ("question", "confirmation"):
+        msg = f'kind must be "question" or "confirmation", got {kind!r}'
+        return {
+            "ok": False,
+            "error_code": "invalid_kind",
+            "message": msg,
+            "decision_id": None,
+            "raw_block": None,
+            "block": None,
+            "error": msg,
+        }
+
+    confirmation_values = {
+        "raiser": raiser,
+        "repo": repo,
+        "issue_ref": issue_ref,
+        "narrowed_scope": narrowed_scope,
+        "implemented_behavior": implemented_behavior,
+        "alternative": alternative,
+    }
+    if kind == "confirmation":
+        for field_name, label in _REQUIRED_CONFIRMATION_FIELDS:
+            if not confirmation_values[field_name].strip():
+                msg = (
+                    f"{label} must be non-empty for a confirmation raise "
+                    "(issue athenaeum#1290) — every one of raiser/repo/"
+                    "issue_ref/narrowed_scope/implemented_behavior/"
+                    "alternative is required so a human reading this on a "
+                    "LATER, DIFFERENT session has everything needed to "
+                    "confirm without the originating session"
+                )
+                return {
+                    "ok": False,
+                    "error_code": "missing_confirmation_field",
+                    "message": msg,
+                    "decision_id": None,
+                    "raw_block": None,
+                    "block": None,
+                    "error": msg,
+                }
+
     q = question.strip()
+    ctx_arg = context.strip()
+    if kind == "confirmation":
+        # Issue athenaeum#1290: question/context are NOT among the AC's
+        # required confirmation fields — auto-phrase them from the
+        # structured fields (already validated non-empty above) rather than
+        # forcing a caller to restate the same story twice.
+        if not q:
+            q = default_confirmation_question(
+                repo=repo,
+                issue_ref=issue_ref,
+                implemented_behavior=implemented_behavior,
+                alternative=alternative,
+            )
+        if not ctx_arg:
+            ctx_arg = default_confirmation_context(
+                raiser=raiser,
+                repo=repo,
+                issue_ref=issue_ref,
+                narrowed_scope=narrowed_scope,
+                implemented_behavior=implemented_behavior,
+                alternative=alternative,
+            )
+
     if not q:
         msg = "question must be non-empty"
         return {
@@ -1356,7 +1609,7 @@ def raise_pending_question(
             "block": None,
             "error": msg,
         }
-    ctx = context.strip()
+    ctx = ctx_arg
     if not ctx:
         msg = (
             "context must be non-empty — a human answering this on a later, "
@@ -1375,19 +1628,32 @@ def raise_pending_question(
 
     when = now or datetime.now(timezone.utc)
     created_at = when.strftime("%Y-%m-%d")
-    ent = entity.strip() or "(agent-raised decision)"
+    if kind == "confirmation":
+        default_entity = f"(confirmation: {repo.strip()}#{issue_ref.strip()})"
+    else:
+        default_entity = "(agent-raised decision)"
+    ent = entity.strip() or default_entity
     ref = source.strip() or "agent-raised"
     # Same escaping tier4_escalate applies to a header entity name, so an
     # entity containing a literal `"` or `\` round-trips through the header
     # grammar (`_HEADER_RE`) instead of corrupting it.
     escaped_entity = ent.replace("\\", "\\\\").replace('"', '\\"')
     header = f'## [{created_at}] Entity: "{escaped_entity}" (from {ref})'
-    block = (
-        f"{header}\n"
-        f"- [ ] {q}\n\n"
-        f"**Description**: {ctx}\n"
-        f"{_RAISED_BY_PREFIX} {_RAISED_BY_AGENT}\n"
-    ).rstrip() + "\n"
+    lines = [header, f"- [ ] {q}", "", f"**Description**: {ctx}"]
+    if kind == "confirmation":
+        raised_at_iso = when.strftime("%Y-%m-%dT%H:%M:%SZ")
+        lines += [
+            f"{_DECISION_KIND_PREFIX} {_DECISION_KIND_CONFIRMATION}",
+            f"{_RAISER_PREFIX} {raiser.strip()}",
+            f"{_REPO_PREFIX} {repo.strip()}",
+            f"{_ISSUE_REF_PREFIX} {issue_ref.strip()}",
+            f"{_NARROWED_SCOPE_PREFIX} {narrowed_scope.strip()}",
+            f"{_IMPLEMENTED_BEHAVIOR_PREFIX} {implemented_behavior.strip()}",
+            f"{_ALTERNATIVE_PREFIX} {alternative.strip()}",
+            f"{_RAISED_AT_PREFIX} {raised_at_iso}",
+        ]
+    lines.append(f"{_RAISED_BY_PREFIX} {_RAISED_BY_AGENT}")
+    block = ("\n".join(lines)).rstrip() + "\n"
 
     # Computed the exact same way `_make_id` computes an id when the block
     # is later re-parsed off disk, from the same (header, question) pair —

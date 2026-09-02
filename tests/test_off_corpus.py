@@ -15,6 +15,16 @@ Covers the four acceptance criteria:
   refusal test proving the ``versioned``/``purgeable`` distinction is real,
   not just declared).
 
+Also covers two of the three defensive branches named in issue athenaeum#1280
+(consolidating an athenaeum#984 follow-up finding) that shipped with zero test
+assertions — ``TestBuildOffCorpusIndexVectorFallback`` (the vector-backend
+``ImportError`` skip) and ``TestQueryOffCorpusUnknownBackend`` (the
+unrecognized-``backend_name`` skip). The third (the misconfigured-off_corpus
+fallback on the erasure-class verdict routing path) lives in
+``tests/test_verdicts.py::TestOffCorpusLedgerRouting`` alongside its sibling
+routing tests. ``TestMergeRankedHits`` below also covers athenaeum#1280's tie-break
+invariant test.
+
 Every fixture is a scratch ``tmp_path`` tree — never the operator's live
 ``~/knowledge`` store (see the issue's "Live-store boundary" section).
 """
@@ -289,6 +299,132 @@ class TestErasureDelete:
             off_corpus.erase_off_corpus_record(None, tmp_path, tmp_path / "cache", "x.md")
 
 
+class TestBuildOffCorpusIndexVectorFallback:
+    """issue athenaeum#1280 finding A: ``build_off_corpus_index``'s ``except
+    ImportError:`` around the vector-index build (the ``athenaeum[vector]``
+    extra not installed) shipped with zero assertions. Simulates the
+    condition with a monkeypatch (the extra genuinely IS installed in this
+    dev venv, so this cannot be reached by omitting it) rather than treating
+    it as untestable."""
+
+    def test_vector_backend_import_error_skips_vector_shard_only(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        scratch_knowledge_root: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        import athenaeum.search as search_mod
+
+        off_corpus_dir = tmp_path / "off-corpus-store"
+        off_corpus_dir.mkdir()
+        _write_page(
+            off_corpus_dir / "erasure-claim-one.md",
+            name="Zephyrwidgets Erasure Claim",
+            page_type="erasure-claim",
+            body="a fact",
+        )
+        config = _make_config(off_corpus_dir)
+        cache_dir = tmp_path / "cache"
+
+        def _raise_import_error(*_args: object, **_kwargs: object) -> int:
+            raise ImportError("simulated: athenaeum[vector] not installed")
+
+        # build_off_corpus_index does ``from athenaeum.search import
+        # build_fts5_index, build_vector_index`` at CALL time (function-local
+        # import) -- patching the source attribute is what a deferred import
+        # picks up.
+        monkeypatch.setattr(search_mod, "build_vector_index", _raise_import_error)
+
+        with caplog.at_level(logging.INFO, logger="athenaeum.off_corpus"):
+            counts = off_corpus.build_off_corpus_index(
+                config, scratch_knowledge_root, cache_dir
+            )
+
+        # Never raises, never returns None (that would mean "disabled",
+        # which this is not) -- fts5 shard still built for real.
+        assert counts is not None
+        assert counts["fts5"] == 1
+        assert "vector" not in counts
+        assert any(
+            "vector backend unavailable" in rec.message for rec in caplog.records
+        ), [rec.message for rec in caplog.records]
+
+        # The fts5 shard is a REAL artifact on disk, not just a count --
+        # proves the ImportError only skipped the vector half.
+        oc_cache = off_corpus.off_corpus_cache_dir(cache_dir)
+        assert oc_cache.exists()
+
+
+class TestQueryOffCorpusUnknownBackend:
+    """issue athenaeum#1280 finding A: ``query_off_corpus``'s ``except
+    KeyError:`` around ``get_backend(backend_name)`` (an unrecognized
+    search-backend name) shipped with zero assertions."""
+
+    def test_unknown_backend_name_degrades_to_empty_hits_not_a_crash(
+        self, tmp_path: Path, scratch_knowledge_root: Path
+    ) -> None:
+        off_corpus_dir = tmp_path / "off-corpus-store"
+        off_corpus_dir.mkdir()
+        _write_page(
+            off_corpus_dir / "erasure-claim-one.md",
+            name="Zephyrwidgets Erasure Claim",
+            page_type="erasure-claim",
+            body="a fact",
+        )
+        config = _make_config(off_corpus_dir)
+        cache_dir = tmp_path / "cache"
+        off_corpus.build_off_corpus_index(config, scratch_knowledge_root, cache_dir)
+
+        result = off_corpus.query_off_corpus(
+            config,
+            scratch_knowledge_root,
+            cache_dir,
+            "Zephyrwidgets",
+            backend_name="not-a-real-backend",
+            top_k=5,
+        )
+
+        # None means "off-corpus disabled" -- this is NOT that; the
+        # subsystem was reached (root resolved) and degraded to empty hits.
+        assert result is not None
+        hits, root = result
+        assert hits == []
+        assert root == off_corpus.off_corpus_root(config, scratch_knowledge_root)
+
+    def test_recognized_backend_still_returns_real_hits(
+        self, tmp_path: Path, scratch_knowledge_root: Path
+    ) -> None:
+        """Control: proves the unknown-backend test above is exercising a
+        real degrade path, not a fixture that would return empty hits
+        regardless of ``backend_name``."""
+        off_corpus_dir = tmp_path / "off-corpus-store"
+        off_corpus_dir.mkdir()
+        _write_page(
+            off_corpus_dir / "erasure-claim-one.md",
+            name="Zephyrwidgets Erasure Claim",
+            page_type="erasure-claim",
+            body="a fact",
+        )
+        config = _make_config(off_corpus_dir)
+        cache_dir = tmp_path / "cache"
+        off_corpus.build_off_corpus_index(config, scratch_knowledge_root, cache_dir)
+
+        result = off_corpus.query_off_corpus(
+            config,
+            scratch_knowledge_root,
+            cache_dir,
+            "Zephyrwidgets",
+            backend_name="fts5",
+            top_k=5,
+        )
+        assert result is not None
+        hits, _root = result
+        assert len(hits) == 1
+
+
 class TestMergeRankedHits:
     def test_merge_sorts_by_score_and_caps_top_k(self) -> None:
         primary = [("a.md", "A", 5.0), ("b.md", "B", 1.0)]
@@ -304,3 +440,35 @@ class TestMergeRankedHits:
         off = [("b.md", "B", 2.0)]
         merged = off_corpus.merge_ranked_hits(primary, off, top_k=2)
         assert merged[0][0] == "b.md"
+
+    def test_exact_score_tie_keeps_primary_before_off_corpus(self) -> None:
+        """issue athenaeum#1280 finding A: the docstring's tie-break invariant —
+        'A stable sort keeps primary before off_corpus_hits on an exact
+        score tie' — had no test. Every pair here ties exactly, so the only
+        thing that can determine order is the tie-break rule itself."""
+        primary = [("a.md", "A", 5.0), ("b.md", "B", 5.0)]
+        off = [("c.md", "C", 5.0), ("d.md", "D", 5.0)]
+        merged = off_corpus.merge_ranked_hits(primary, off, top_k=10)
+        assert [h[0] for h in merged] == ["a.md", "b.md", "c.md", "d.md"]
+
+    def test_tie_break_only_breaks_ties_not_general_order(self) -> None:
+        """The tie-break must not override real score ordering — it only
+        decides among EQUAL scores. A higher-scored off-corpus hit still
+        outranks a tied-lower primary/off-corpus pair, and a lower-scored
+        primary hit still sorts after the tie."""
+        primary = [("a.md", "A", 5.0), ("b.md", "B", 1.0)]
+        off = [("c.md", "C", 5.0), ("d.md", "D", 9.0)]
+        merged = off_corpus.merge_ranked_hits(primary, off, top_k=10)
+        assert [h[0] for h in merged] == ["d.md", "a.md", "c.md", "b.md"]
+
+    def test_tie_break_is_deterministic_across_repeated_calls(self) -> None:
+        """A tie-break invariant only holds anything up if it is
+        deterministic: the SAME inputs must produce the SAME order every
+        time, not merely 'a stable-looking order this run'."""
+        primary = [("a.md", "A", 3.0), ("b.md", "B", 3.0), ("e.md", "E", 3.0)]
+        off = [("c.md", "C", 3.0), ("d.md", "D", 3.0)]
+        results = [
+            off_corpus.merge_ranked_hits(primary, off, top_k=10) for _ in range(25)
+        ]
+        assert all(r == results[0] for r in results)
+        assert [h[0] for h in results[0]] == ["a.md", "b.md", "e.md", "c.md", "d.md"]

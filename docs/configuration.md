@@ -127,7 +127,7 @@ See [exit-codes.md](exit-codes.md) for the full `athenaeum run` exit-code table 
 | Quarantine threshold | — | `ATHENAEUM_QUARANTINE_THRESHOLD` | `librarian.quarantine_threshold` | `2` | Consecutive-run count after which a raw file that keeps exceeding ANY of the three bounds above is **quarantined** (athenaeum#898) — physically moved from `raw/<source>/` to `wiki/_quarantine/<source>/`, so it drops out of `discover_raw_files`'s discovery set, plus an audit-ledger record (`wiki/_quarantine.jsonl`) and a `type: "quarantine"` entry in `athenaeum decisions` / `list_pending_decisions`. Mirrors the stuck-file ledger's shape (`wiki/_quarantine_candidates.json`, keyed by ref + content hash, so editing the file resets its count) but is tracked as a SEPARATE ledger — a bound violation is a measured resource fact, not a processing exception, and its disposition (physical removal) is heavier than the stuck-file skip-in-place. Reversible only via an operator decision (`athenaeum.quarantine.release_quarantine`) — there is no automatic un-quarantine. Must be `>= 1`; non-numeric / non-positive / bool values fall back to the default. |
 | Zero-yield alert threshold | — | `ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD` | `librarian.zero_yield_alert_threshold` | `3` | Consecutive-zero-yield-run count (athenaeum#899's `zero_yield_state.json` `consecutive`) at which `athenaeum run` logs a dedicated `librarian-zero-yield-alert` ERROR-level line (athenaeum#1177) — distinct from the plain `librarian-zero-yield` WARNING that fires on every zero-yield run regardless of streak length. At the observed ~40 runs/day, the default of `3` alerts within roughly two hours, nowhere close to the four-day silent incident this issue exists to catch sooner. Must be `>= 1`; non-numeric / non-positive / bool values fall back to the default. |
 | Page-size threshold | — | — | `librarian.page_size_threshold_chars` | `10000` | Char threshold above which an existing wiki page is **too large to merge into** (athenaeum#1182). Enforced BEFORE a Tier-3 merge is dispatched — before the merge prompt is built or any model call is made — so an over-threshold page never pays for (or risks) a merge call at all; see `oversize_page_action` below for what happens instead. Picked from the corpus distribution (23,534 pages, non-`_`-prefixed `*.md`: median 1,544 bytes, p75 1,751, p90 2,061, p99 8,468), not the model's context window: well under the 20,000-char merge-input window and comfortably above p99, so it catches unbounded-accretion anomalies without false-positiving on the ordinary corpus. Must be `>= 1`; non-numeric / non-positive / bool values fall back to the default. |
-| Oversize-page action | — | — | `librarian.oversize_page_action` | `review` | What an over-`page_size_threshold_chars` page routes to instead of another merge (athenaeum#1182): one of `review`, `split`, `log_demote`. Only `review` is implemented — it escalates the page (`_pending_questions.md`, carrying the observation that would have been merged) and leaves the page byte-for-byte unmodified. `split` and `log_demote` are RESERVED (recognized values that raise `NotImplementedError` at dispatch, not a silent fallback to `review`) — both are destructive restructurings of durable operator data and must not run unattended on a first landing. Any other value falls back to `review`. |
+| Oversize-page action | — | — | `librarian.oversize_page_action` | `review` | What an over-`page_size_threshold_chars` page routes to instead of another merge (athenaeum#1182, dispositions implemented athenaeum#1248): one of `review`, `split`, `log_demote`. Any other value falls back to `review`. **Safety contract: `review` is the only route that is safe to leave enabled unattended, and it stays the shipped default** — `split`/`log_demote` restructure a durable operator page on disk and must be an explicit operator choice. `review` escalates the page (`_pending_questions.md`, carrying the observation that would have been merged) and leaves the page byte-for-byte unmodified. `split` decomposes the page into one atomic child page per top-level markdown heading/section, leaving the original in place as a **hub** — same `uid`/`name`/other frontmatter, so every existing index key and cross-reference into it still resolves — with a shrunk body that links to each child; content before the first heading has nowhere atomic to go, so it stays on the hub verbatim. A page with **no markdown heading at all** cannot be split (that cohort is athenaeum#1282's job) and falls back to `review`, page untouched. `log_demote` MOVES the page whole into the preserved-log area named by `librarian.preserved_log_dir` (see [shape-rules.md](shape-rules.md) — this reuses the SAME `preserve_raw_file` move the `preserve` shape-rule disposition already uses, not a second mechanism); with no `preserved_log_dir` configured it falls back to `review`, page untouched. **Atomicity, for both routes:** every write is either fully applied or the page is left byte-for-byte identical to before the call — `split` writes every child page first and the hub last, rolling back (deleting) any already-written child if a later write fails, so a mid-operation failure never leaves a partially-split page; `log_demote`'s move never removes the source until the destination write is confirmed. Either route degrading to `review` on failure is silent-but-logged, never a raised exception that could take a run down over one oversized page. Run-summary counters `oversize_split`/`oversize_log_demoted` (issue athenaeum#1248) are disjoint from `oversize_suppressed` (that one counts `review` only), so a run makes clear which disposition actually fired. |
 | Merge-worthiness gate | — | `ATHENAEUM_MERGE_WORTHINESS_GATE_ENABLED` | `librarian.merge_worthiness_gate_enabled` | `false` (**off**) | Arms a deterministic, zero-LLM containment check (athenaeum#1172) that runs immediately before a Tier-3 merge is dispatched, right after the page-size gate above: every non-blank line of the raw file's observations must be an exact, normalized, contiguous substring of a SINGLE line of the target entity's existing page (checked against the SAME `_MAX_EXISTING_BODY_CHARS`-truncated window a merge would see — never the full body, and never the body flattened across line boundaries — an ordinary markdown paragraph is one line, so normal prose is unaffected) AND at least `_MERGE_WORTHINESS_MIN_UNIT_CHARS` (24) normalized chars long — a shorter line is treated as **not verifiable** and FAILS the check (dispatches the merge) rather than being excluded from it, since a short/generic unit (a bare date, a number, a one-word fragment) is cheap to satisfy by coincidence on any ordinary page. Only when every line clears both bars is the merge suppressed: no LLM call, no write, and no escalation (there is nothing to escalate — the content already exists). Normalization is casefold + whitespace-collapse only; no markdown-stripping, no fuzzy matching, no reordering, so a unit that fails only on formatting is dispatched, not suppressed. An empty observation (zero non-blank lines) is trivially "contained" and suppressed. Design intent is **zero false suppressions**: a false suppression permanently destroys a fact (raw files are unlinked after processing, with no re-derivation path), while a false pass costs only one ordinary merge call — so the gate ships off by default and only fires on overwhelming, line-exact, sufficiently-specific evidence. `1`/`true`/`yes`/`on` (case-insensitive) enable via env; a non-bool yaml value falls through to off. When the gate fires it logs one INFO line (`page=`, `source=`, `observation_chars=`, `existing_body_chars=`, `window=`) — the only durable trail a false suppression would leave. See [`resolve_merge_worthiness_gate_enabled`](../src/athenaeum/config.py) and [`check_merge_worthiness_gate`](../src/athenaeum/tiers.py). |
 | Junk-match stopwords | — | — | `librarian.junk_match_stopwords` | *(extends the built-in default)* | Extra entity names to treat as **junk** so a Tier-1 match on them never issues a Tier-3 merge LLM call (athenaeum#662). Tier-1 matches any indexed page name ≥ 3 chars, and the index accumulates junk pages (`here`, `get`, `main`, `reach`, `lane a`, …) — each became a ~16-23KB merge call, roughly **half** of the ~15-18 Tier-3 calls per file. A conservative built-in default (the measured junk plus common English function words) is always applied; entries here are **added** to it, case-insensitively on the whole name. Tune per corpus as the junk set changes. |
 | Junk-match allowlist | — | — | `librarian.junk_match_allowlist` | `[]` | Entity names that must **never** be treated as junk (athenaeum#662) — the escape hatch for a real entity whose name collides with a default/stopword junk word (e.g. a company literally named "Reach"). Wins over both the built-in default and `junk_match_stopwords`, case-insensitively. |
@@ -140,7 +140,8 @@ See [exit-codes.md](exit-codes.md) for the full `athenaeum run` exit-code table 
 | Batch API mode | `--batch-mode` / `--no-batch-mode` | `ATHENAEUM_BATCH_MODE` | `librarian.batch_mode` | off | Submit tier-2/tier-3 LLM calls via the [Anthropic Messages Batch API](https://platform.claude.com/docs/en/build-with-claude/batch-processing) at a 50% token discount (athenaeum#236). Latency-tolerant: most batches finish within an hour, 24h worst case — intended for the nightly run. Same-page tier-3 merges stay synchronous; the budget cap is enforced at batch-assembly time (re-checked per file at phase-2 assembly and before the synchronous merges). `--no-batch-mode` forces the synchronous path even when env/yaml turn batch mode on. |
 | Per-knob batch selection | — | — | `librarian.batch.<knob>` | falls back to `librarian.batch_mode` | Batch `classify` and `write` INDEPENDENTLY (athenaeum#1175). Only those two knobs are ever batched. `write` is nearly all the spend and is where the 50% discount pays; `classify` is cheap and is the knob whose latency stays visible, so `batch: {classify: false, write: true}` is the combination worth having — it was unreachable while one global flag governed both. An absent knob key falls back to the resolved `batch_mode`, so a config setting only `batch_mode` is unchanged. Setting a knob here turns the run into a batch run even with `batch_mode` off; `--no-batch-mode` remains a hard off that no yaml key can defeat. Setting a NON-batchable knob to `true` refuses the run — a config error, not a silent no-op. Deliberately under `librarian:`, not a new `llm.batch` parent. |
 | Pending-batch raw-file lease | — | `ATHENAEUM_BATCH_LEASE_SECONDS` | `librarian.batch_lease_seconds` | `259200` (72h) | Seconds a submitted-but-uncollected batch holds a **lease** over the raw intake files it was built from (athenaeum#1143). `discover_raw_files` has no in-flight concept and raw files are only unlinked on finalize success, so without the lease a run that submits a batch and exits leaves its intake on disk for the next run to rediscover and **resubmit at full price** — silently, looking exactly like normal progress. The handle (batch id, knob, `custom_id -> raw ref` map with a per-ref content hash) lives at `<cache_dir>/pending_batches.json`; the entity-phase claim loop skips a leased ref until its lease expires, and an expired lease is released automatically on the next claim pass so an abandoned batch cannot strand its intake forever. 72h is below the Batch API's 29-day result retention (prefer collecting over re-claiming) and above its 24h processing ceiling (do not abandon a slow batch mid-flight). `bool` / non-numeric values fall through to the default; `<= 0` disables leasing entirely. |
-| Cluster threshold | — | — | `librarian.cluster_threshold` | `0.55` | Cosine cutoff for auto-memory near-duplicate clustering (C2, athenaeum#196). Higher = tighter clusters. |
+| Cluster threshold | — | — | `librarian.cluster_threshold` | `0.55` | Cosine cutoff for auto-memory near-duplicate clustering (C2, athenaeum#196). Higher = tighter clusters. **Any cluster figure is meaningless without stating this value alongside it** — see "Wiki-page dedup: cluster figures require the threshold" below. |
+| Wiki-dedupe min body chars | — | — | `librarian.wiki_dedupe_min_body_chars` | `0` (**off**) | Eligibility floor for the wiki-dedupe pass (athenaeum#1252): a candidate page whose stripped body is shorter than this many characters is excluded from `discover_wiki_dedupe_candidates` entirely — never embedded, never clustered. Rationale: athenaeum#1140's chunk-and-mean-pool fix only dilutes a structurally uniform lede's weight in a page's pooled vector when there is a second chunk to average against it; a page short enough to fit in one chunk gets a mean-pool-of-one, a mathematical no-op versus the pre-athenaeum#1140 whole-page embed. DEFAULT OFF: whether short pages are actually driving a given corpus's over-clustering was not re-measured against a live embedder when this knob shipped (see the section below) — a non-zero default would silently change cluster/merge-proposal eligibility for every operator without that re-measurement. `bool` and non-int / `<= 0` yaml values fall through to off. See `resolve_wiki_dedupe_min_body_chars`. |
 | Cluster output | — | — | `librarian.cluster_output` | `raw/_librarian-clusters.jsonl` | Canonical cluster JSONL path, resolved relative to the knowledge root. Each run also writes a timestamped sibling. |
 | Rotation retention | — | `ATHENAEUM_ROTATION_RETENTION` | `librarian.rotation_retention` | `30` | Number of timestamped cluster-report rotations to keep; older ones are pruned after each run (athenaeum#311). Rotations are debugging artifacts, not recovery-critical (recovery is git-based). `0` (or negative) disables pruning (keep all). A prune failure is a non-fatal warning. |
 | Ephemeral scopes | — | — | `librarian.ephemeral_scopes` | `[]` | Glob patterns (matched against the auto-memory scope) whose raw intake is classified ephemeral and dropped before clustering (athenaeum#280), so operational/throwaway scopes never materialize a durable `wiki/auto-*.md` page. Default-empty (off). |
@@ -255,6 +256,42 @@ is its own self-contained YAML file, not a config-table entry.
 | Log `no-match` rows | `ATHENAEUM_SHAPE_RULES_LOG_NO_MATCH` | `librarian.shape_rules.log_no_match` | `false` | **Default off (athenaeum#1274).** Whether a candidate no rule claimed gets a `disposition: "no-match"` row in `wiki/_shape_rule_dispositions.jsonl`. On a real deployment those were 1,485,942 of 1,488,689 rows (99.8%) of a 341 MB ledger accumulated in 9 days — a negative result, regenerated on every nightly pass, in a git repo whose value is being small and diffable. Their only consumer is the athenaeum#905 detector's `tier is null` read, and that phase is itself gated off by `librarian.rule_proposals.enabled` (also default false), returning before any ledger read. **Turn this on whenever you turn `rule_proposals` on** — and expect the detector to need `librarian.rule_proposals.window_days` of fresh history before it proposes anything, since nothing was recorded while this was off. |
 | Dispositions retention | `ATHENAEUM_SHAPE_RULES_DISPOSITIONS_RETENTION_DAYS` | `librarian.shape_rules.dispositions_retention_days` | `30` | Days of `_shape_rule_dispositions.jsonl` history kept; older rows are pruned at the tail of every shape-rules phase, giving the ledger a bounded steady state. athenaeum#1274 split this out of `librarian.rule_proposals.window_days`, which athenaeum#1229 had doing double duty — a READ window and a RETENTION policy are different questions, and coupled, narrowing the detector's window silently deleted history. Same default, so the split changes no existing deployment's behaviour. A row with a missing or unparseable `at` is kept, never dropped. |
 | Phase runtime share | `ATHENAEUM_SHAPE_RULES_RUNTIME_SHARE` | `librarian.shape_rules.runtime_share` | `0.05` | Fraction of `librarian.max_runtime` this phase may spend, mirroring `librarian.corrections.runtime_share`'s mechanism exactly (own budget — an overrun in one deterministic phase never starves the other). Checked at FILE boundaries only (never mid-file). |
+
+**One-time prune of an already-oversized ledger** (issue athenaeum#1274 AC3/AC4). The
+retention/suppression knobs above only bound the ledger going FORWARD; they do not
+undo a pre-fix ledger that already grew large. `athenaeum storage prune-dispositions`
+(`--path <knowledge-root>`, dry-run by default, `--apply` to write) drops every
+`disposition: "no-match"` row and keeps everything else — `preserve`,
+`observed-preserve`, and any other/unrecognised disposition value are all treated as
+positive and kept (default-deny on deletion). It reports the disposition histogram,
+positive-record count, and projected post-prune size before writing, refuses to
+write if its own before/after positive-row recount ever disagrees, and (on `--apply`)
+acquires the same single-machine run lock (issue athenaeum#309) every other mutating
+librarian command does, so it can never race the nightly's own concurrent appends to
+this file. This is a live-store operation an operator runs once, deliberately — it is
+not wired into any automatic run.
+
+### Raw intake retention limits (`librarian.raw_retention.*`, athenaeum#1269)
+
+Two independent, DEFAULT-NONE size ceilings on `raw/<source>/` — see
+[`shape-rules.md`](shape-rules.md#35-size-is-a-reported-condition-not-a-match-predicate-issue-athenaeum1269)
+for the full rationale. Runs as its own deterministic, LLM-free,
+unbudgeted phase inside `athenaeum run`
+(`librarian._run_raw_retention_phase`), right after the unrecognised-raw-
+intake audit. **Detects and reports only** — crossing either ceiling never
+blocks intake, moves a file, or writes an exempt row.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Per-file ceiling | `ATHENAEUM_RAW_RETENTION_MAX_FILE_BYTES` | `librarian.raw_retention.max_file_bytes` | *(unset — disabled)* | A single file anywhere under a `raw/<source>/` tree at or above this many bytes is reported as an oversize file (`raw-oversize-file`). |
+| Per-source aggregate ceiling | `ATHENAEUM_RAW_RETENTION_MAX_SOURCE_BYTES` | `librarian.raw_retention.max_source_bytes` | *(unset — disabled)* | The SUM of every file's on-disk size anywhere under one `raw/<source>/` tree, at or above this many bytes, is reported as an oversize source (`raw-oversize-source`) — the dimension that catches many individually-small files aggregating past a ceiling no single one of them would trip. |
+
+No seed in `_DEFAULTS` (issue athenaeum#231): a fresh install imposes no
+limit on either dimension until an operator opts in. `bool` (an `int`
+subclass) and non-int / non-positive values — env OR yaml — fall through
+to disabled, same as an unset key. With both unset, the phase still runs
+but skips its filesystem walk entirely, so an operator who never opts in
+pays no cost.
 
 ### Rule proposals (`librarian.rule_proposals.*`, athenaeum#905 / athenaeum#1063)
 
@@ -578,7 +615,10 @@ All model values are free-form model-id strings passed to the Anthropic SDK.
 The table below is the **full set** of model knobs, one row per entry in
 `prompt_registry.KNOBS` (derived from `_META_ROWS`, athenaeum#781) — not a fixed
 count restated here, so this table cannot go stale the next time a knob is
-added. They all live under the `models:` yaml block (athenaeum#232, athenaeum#513)
+added — and `tests/test_configuration_doc_model_defaults.py` asserts the
+**Default** column of every row still matches the resolver's code-level
+default (`athenaeum#1278`), so a bumped model id cannot drift out of sync
+with this table either. They all live under the `models:` yaml block (athenaeum#232, athenaeum#513)
 and share one resolver helper (`config.resolve_model`). The resolver model
 additionally accepts the pre-athenaeum#232 `resolve.model` key for backward
 compatibility. See [routing.md](routing.md) for provider + model + batch
@@ -589,11 +629,11 @@ precedence rule, and the `athenaeum explain-routing` preview command
 | Knob | Env var | YAML key | Default | Used by |
 |---|---|---|---|---|
 | Classifier | `ATHENAEUM_CLASSIFY_MODEL` | `models.classify` | `claude-haiku-4-5-20251001` | Tier-2 classifier **and** the C4 contradiction detector — one knob by design. |
-| Writer | `ATHENAEUM_WRITE_MODEL` | `models.write` | `claude-sonnet-4-6` | Tier-3 wiki writer. |
+| Writer | `ATHENAEUM_WRITE_MODEL` | `models.write` | `claude-sonnet-5` | Tier-3 wiki writer. |
 | Topic extractor | `ATHENAEUM_TOPIC_MODEL` | `models.topic` | `claude-haiku-4-5-20251001` | `athenaeum query-topics` recall query rewriting. |
-| Resolver | `ATHENAEUM_RESOLVE_MODEL` | `models.resolve` (_also_ `resolve.model`¹) | `claude-opus-4-7` | Contradiction resolver (proposes a winner once the detector flags a conflict). |
+| Resolver | `ATHENAEUM_RESOLVE_MODEL` | `models.resolve` (_also_ `resolve.model`¹) | `claude-opus-5` | Contradiction resolver (proposes a winner once the detector flags a conflict). |
 | Reasoning tier 1 | `ATHENAEUM_REASONING_T1_MODEL` | `models.reasoning_t1` | `claude-haiku-4-5-20251001` | First-pass model for the reasoning-tier chain.² |
-| Reasoning tier 2 | `ATHENAEUM_REASONING_T2_MODEL` | `models.reasoning_t2` | `claude-opus-4-1-20250805` | Escalation model for the reasoning-tier chain.² |
+| Reasoning tier 2 | `ATHENAEUM_REASONING_T2_MODEL` | `models.reasoning_t2` | `claude-opus-4-8` | Escalation model for the reasoning-tier chain.² |
 | Rule proposals | `ATHENAEUM_RULE_PROPOSALS_MODEL` | `models.rule_proposals` | `claude-opus-4-8` | Rule-proposal drafting call (athenaeum#1174) — see the "Rule proposals" section above (`librarian.rule_proposals.*`) for the full knob set (threshold, window, exemplar count, max tokens, thinking). |
 
 > ¹ `resolve.model` is still read post-athenaeum#512/#513 (`athenaeum.resolutions._get_model`), not yet removed. Precedence, highest first: `ATHENAEUM_RESOLVE_MODEL` env var, then `models.resolve` yaml, then `resolve.model` yaml (legacy), then the code default — so if both `models.resolve` and `resolve.model` are set, **`models.resolve` wins**. There is no scheduled removal; it is kept indefinitely so existing `athenaeum.yaml` files keep working unchanged. Prefer `models.resolve` for new configs, for consistency with the other model knobs.
@@ -721,7 +761,7 @@ being accepted-and-ignored:
 
 Applied against this repo's current defaults, adding a blanket sampling
 parameter today would **400 exactly one stage — the Opus resolver**
-(`models.resolve` defaults to `claude-opus-4-7`, the single most consequential
+(`models.resolve` defaults to `claude-opus-5`, the single most consequential
 call) — and would break **every** stage the moment an operator points a model
 knob at a 4.7+/5-family model. So the absence is load-bearing, not incidental.
 
@@ -1163,9 +1203,22 @@ spend:
   max_usd_per_day: 5.00           # cap real API dollars per day
   # accounting_timezone: America/New_York  # default: system-local; see rationale above
   weekly_token_limit: 28000000    # declared weekly subscription quota, billable tokens
-  max_pct_per_day: 50             # -> 2,000,000 billable-token/day derived ceiling
+  max_pct_per_day: 100            # -> 4,000,000 billable-token/day derived ceiling
   # warning_threshold_pct: 75     # warn at 75% of either dollar cap (default)
 ```
+
+`weekly_token_limit / 7 * max_pct_per_day / 100` = `28,000,000 / 7 * 100 / 100`
+= `4,000,000` — the derived per-day ceiling above must land at or above the
+3.37M-billable-token single run cited for `max_tokens_per_run` above, or a
+single ordinary night would trip the per-day ceiling before the per-run one
+ever engages. `max_pct_per_day: 100` is the smallest multiple-of-25 percentage
+that clears that bar with the stated `weekly_token_limit`, and it lands the
+derived daily figure exactly on `max_tokens_per_run` — sized for one nightly
+run per accounting day, matching the same 3.37M-run headroom reasoning above
+rather than a second, independently-chosen number. An operator who runs more
+than once per accounting day, or wants a tighter derived cap, should raise
+`weekly_token_limit` instead of lowering `max_pct_per_day` back below this
+floor.
 
 The weekly-limit + max-percent-per-day pair (issue athenaeum#785) is a SECOND,
 independent way to bound the subscription per-day figure — derived rather
@@ -1319,6 +1372,168 @@ observation log, not whether today's response is accepted. No new
 `athenaeum.yaml` key or env var is introduced; the decision is a hardcoded,
 documented constant (`STRICT_CONTRACTS`), matching how `INSTRUMENTED_CONTRACTS`
 above is expressed.
+
+### Per-contract strictness decision (M17 phase 2, athenaeum#608)
+
+athenaeum#608 closes the remaining decision — the four contracts athenaeum#1035
+left on the phase-1 observe-only posture — from a 28-day window of the same
+ledger, **2026-08-05T13:12Z to 2026-09-02T12:42Z, 16,411 records, 0
+malformed**. It is drawn entirely from the post-2026-08-05 clean ledger (see
+the test-pollution note above for why that date is the boundary), and the
+C4-downstream contracts that were starved of a denominator when athenaeum#1035
+was decided now carry four figures of observations each:
+
+| contract | records | mismatches | rate | mismatch classes |
+|---|---:|---:|---:|---|
+| `contradictions` | 1,464 | 0 | 0% | — |
+| `query_topics` | 1,405 | 1 | 0.0712% | wrong-type 1 |
+| `claim_kind` | 1,071 | 0 | 0% | — |
+| `resolutions` | 89 | 0 | 0% | — |
+
+**The reject-vs-degrade question, answered: degrade — everywhere, and now by
+decision rather than by deferral.** `observe()` keeps its never-raise contract
+for every contract. The "reject" teeth this milestone asked about already
+exist, one layer down: each parse site has its own hand-rolled guard that
+degrades to a documented safe fallback (`parse_tier2_entities` skips a
+nameless item, `query_topics` drops a non-string element, `parse_merge_ops_response`
+falls back to a full echo). A second gate inside `observe()` would duplicate
+them without adding protection, and would put a logging side-channel on the
+critical path of the knowledge-write pipeline. What a per-contract strictness
+setting decides is therefore the schema **shape** — which keys are expected,
+which fields are required — so that future drift is classified honestly in the
+observation log.
+
+**Uniform or per-contract? Per-contract, and the data is what settles it.** A
+uniform `extra="forbid"` would be wrong for `tiers.tier3-merge`, whose
+extra-key traffic is real and repeated. A uniform `extra="allow"` leaves four
+contracts tolerating a silently-added field that has demonstrably never
+appeared across four figures of production traffic each. Neither uniform
+posture survives this window, which is the answer.
+
+Applying athenaeum#608's framework ("only missing-required mismatches justify
+rejection; extra keys are a different signal"):
+
+- **`claim_kind`** — 0 mismatches of any class at n=1,071, now over real
+  production traffic (athenaeum#742 wired `stamp_claim_kind` into the nightly
+  intake, reversing the earlier no-caller row). `ClaimKindResponse` tightens
+  from `extra="allow"` to `extra="forbid"`. `claim_kind` stays the only
+  required field.
+- **`contradictions`** — 0 mismatches of any class at n=1,464, the largest
+  clean sample of the four. `ContradictionResponse` tightens to
+  `extra="forbid"`. `detected` stays the only required field; the four
+  `Optional` fields are the site's real tolerance boundary and none of them
+  became required.
+- **`query_topics`** — confirmed, not tightened. `QueryTopicsResponse` is a
+  `RootModel[list[str]]`: it has no named fields, so it has no `extra=` knob
+  and no representable "unexpected key". The window's single mismatch is
+  `wrong-type` (a non-string element) — neither of the framework's two
+  classes — and the site already drops such an element. That existing degrade
+  IS the decided posture.
+- **`resolutions`** — **deliberately deferred, on the denominator rather than
+  the answer.** 0 mismatches at n=89 is 0%, but n=89 is an order of magnitude
+  below every sibling above, and this is the one contract still downstream of
+  the C4 entity-phase bottleneck (athenaeum#1102 shipped
+  `librarian.intake_runtime_floor` defaulting **off**). Its model spans a
+  14-branch `action` union that 89 observations cannot have exercised
+  representatively, so a `forbid` taken now would be a guess wearing a
+  measurement's clothes. `ResolutionResponse` stays `extra="allow"`.
+  **Release bar:** `resolutions` reaches three figures of observations spread
+  across several runs — the same order of magnitude as its siblings — drawn
+  from runs in which the C4 phase was not truncated.
+
+`resolutions` is consequently the one entry in `INSTRUMENTED_CONTRACTS` absent
+from `STRICT_CONTRACTS`; a test pins exactly that, so a future pass has to
+change it deliberately rather than by accident.
+
+As with phase 2a this is a schema-shape decision only, it introduces no
+`athenaeum.yaml` key or env var, and no field became required or optional in
+either direction. One reading caveat, carried forward from the athenaeum#608
+thread because the numbers alone do not show it: every call site invokes
+`observe()` **below** its own parse guard, so the ledger measures field-shape
+drift *within already-parseable responses*. A 0% rate is evidence that no
+unexpected key has appeared in accepted traffic — it is not evidence about
+responses the guard discarded before `observe()` ever saw them.
+
+## Pending-decisions queue (`athenaeum decisions`, athenaeum#401 / athenaeum#912 / athenaeum#1290)
+
+`athenaeum decisions {list,next,count}` is the ONE "human decisions needed"
+list — see [`src/athenaeum/decisions.py`](../src/athenaeum/decisions.py) and
+the `list_pending_decisions` MCP tool. It unifies several item types, each
+tagged `type`, oldest-first: `question` (contradiction-detector escalations
+and plain agent-raised flags), `merge` (resolver merge proposals),
+`retraction`, `audit`, `quarantine`, `proposed-rule`, and — as of issue
+athenaeum#1290 — `confirmation`.
+
+### The `confirmation` decision type — consumer contract (athenaeum#1290)
+
+This is the seam cwc#2362's `good-morning` half is built against — a
+**stable contract**, not an incidental dump. An agent that narrows scope
+mid-build (implements X without covering Y) can raise a durable,
+non-blocking "confirm?" flag that survives the session, through either
+surface:
+
+- **MCP**: `raise_decision(question="", context="", kind="confirmation",
+  raiser=..., repo=..., issue_ref=..., narrowed_scope=...,
+  implemented_behavior=..., alternative=...)`. `question`/`context` are
+  optional for this `kind` — omitted, they are auto-phrased from the other
+  fields.
+- **CLI**: `athenaeum decisions raise-confirmation --raiser ... --repo ...
+  --issue-ref ... --narrowed-scope ... --implemented-behavior ...
+  --alternative ... [--question ...] [--context ...] [--json]`.
+
+Both call the SAME underlying function
+(`athenaeum.answers.raise_pending_question`, `kind="confirmation"`) and write
+to the SAME file the plain-question queue already uses
+(`wiki/_pending_questions.md`) — a confirmation is a question-queue block
+carrying extra metadata lines, never a second, parallel queue.
+
+**Where it shows up.** `list_pending_decisions` (MCP) and `athenaeum
+decisions {list,next,count}` (CLI) include it exactly like every other item:
+
+- `list` / `next`: an item with `"type": "confirmation"` and the payload
+  shape below. Ordering is the queue-wide rule — oldest `created_at` first,
+  interleaved with every other type, never a separate section.
+- `count`: the JSON payload's `confirmations` field is the pending
+  (unresolved) count, alongside the existing `questions` / `merges` /
+  `retractions` / `audits` fields. The plain-text rendering appends
+  `", N confirmations"` to the breakdown when `N > 0` (omitted at zero, like
+  `retractions`/`audits`).
+
+**Item shape** (`type: "confirmation"`):
+
+| Field | Type | What it carries |
+|---|---|---|
+| `type` | string | Always the literal `"confirmation"`. |
+| `id` | string | Opaque, stable id — pass to `resolve_question` (see below) to close it. |
+| `created_at` | string (`YYYY-MM-DD`) | Date-only, from the block header — used for queue ordering. |
+| `summary` | string | A plainly-phrased confirm question built from the fields below (e.g. `"<raiser> narrowed scope on <repo>#<issue_ref>: implemented \"<implemented_behavior>\" instead of \"<alternative>\" (scope narrowed: <narrowed_scope>) — confirm?"`) — render this directly, no client-side phrasing needed. |
+| `confidence` | `null` | Always `null` — there is no similarity score behind a confirmation, mirroring `retraction`/`audit`/`quarantine`. |
+| `payload.raiser` | string | Who/what narrowed scope (an agent name, a lane id, ...). |
+| `payload.repo` | string | The `owner/repo` the narrowing happened in. |
+| `payload.issue_ref` | string | The issue or PR the narrowing relates to. |
+| `payload.narrowed_scope` | string | What was NOT covered. |
+| `payload.implemented_behavior` | string | What was built instead. |
+| `payload.alternative` | string | The road not taken. |
+| `payload.raised_at` | string (ISO-8601 `Z`) | Full timestamp (finer-grained than `created_at`) — this is the AC's "a timestamp" field. |
+| `payload.question` / `payload.context` | string | The (possibly auto-phrased) checkbox question and standalone description text — present for completeness; a consumer should prefer `summary` for display. |
+| `payload.raised_by` | string | Always `"agent"` for a confirmation (there is no detector-raised confirmation). |
+
+**Resolution states.** A confirmation has exactly two states: **pending**
+(present in `list_pending_decisions` / `decisions list`) and **resolved**
+(absent from both — never a third "acknowledged" or "snoozed" state). Close
+one with the EXISTING `resolve_question` MCP tool — `resolve_question(id,
+answer)` — passing the `id` from the item above; there is no separate
+`resolve_confirmation` tool, because storage-wise a confirmation is a block
+in `_pending_questions.md` like any other and `resolve_question` operates on
+the raw block, never on the unified view's `type` tag. Resolution is
+DEFERRED (issue athenaeum#908): `resolve_question` records the answer
+immediately (`deferred: true` in its response) but the queue only reflects
+the closure after the next `athenaeum ingest-answers` tick applies it — a
+consumer polling `decisions count`/`list` right after calling
+`resolve_question` may still see the item until that tick runs. `answer`
+becomes the recorded outcome (free text — e.g. `"confirmed"` /
+`"overridden: use the broader reading"`); there is no fixed outcome
+vocabulary, unlike a merge's `approve`/`reject`.
 
 ## Contradiction detection and resolver
 
@@ -2118,6 +2333,118 @@ default `1024`; `ATHENAEUM_COMPARATOR_CONTENT_RELATION_THINKING`, default
 (`ATHENAEUM_CLASSIFY_MODEL`) rather than adding a fourth model dial — the
 same sharing `athenaeum.contradictions`'s detector already does.
 
+### `athenaeum merges scrub-pii` (athenaeum#1276)
+
+The sidecar's PII purge path. A merge proposal stores its
+`draft_merged_body` **verbatim** — a copy of the source pages' text at
+proposal time — so `athenaeum storage migrate-pii` moving a page's contact
+data off-corpus left the raw addresses sitting in `wiki/_pending_merges.md`.
+The failure was invisible: the entity page read clean, an `excluded/` record
+existed, the vector index was refreshed, and `athenaeum storage lint-pii`
+still found the values under `wiki/`.
+
+Two halves close it:
+
+* `storage migrate-pii` now scrubs the sidecar on the same pass, using the
+  exact values it just moved off-corpus. Follows the caller's
+  dry-run/`--apply` mode.
+* `merges scrub-pii` is the standalone sweep, for the backlog that already
+  exists and for anything a migration did not cover.
+
+Two properties are the point of the standalone command:
+
+* **Zero LLM cost.** Detection is the same deterministic pair of detectors
+  `lint-pii` gates on (`find_inline_emails` / `find_inline_phones`), so
+  clearing a backlog here actually moves that gate — and it costs nothing
+  like a nightly `athenaeum run`, whose entity phase is ~94% of runtime and
+  spend.
+* **It does not force the merge decision.** Approving, rejecting or
+  withdrawing a proposal were previously the only ways to clear its body.
+  This redacts the values in place and leaves the proposal exactly as
+  unresolved as it was.
+
+What it will not do:
+
+* **It does not delete.** A value is replaced by the same
+  `[contact redacted → excluded surface]` marker the migrated page carries,
+  so an approved proposal writes a merged page consistent with its sources
+  and `athenaeum pii-restore` still recognises the marker. Deleting the
+  surrounding prose destroys true non-PII content — the athenaeum#691
+  mistake.
+* **It does not rewrite identity-bearing lines.** The block header, its
+  checkbox line and the `**Sources**:` paths determine the proposal's id and
+  its fold target. A value found only there (the athenaeum#502
+  name-is-an-email population) is **reported as residual**, never silently
+  rewritten and never silently dropped. Clear one by renaming the underlying
+  page (`storage migrate-pii --rename-name-email`, athenaeum#505) and
+  re-proposing.
+* **It does not second-guess the allowlist.** A value with a reasoned entry
+  in `wiki/_pii-allowlist.yml` (athenaeum#936) is adjudicated *not* PII, does
+  not fail `lint-pii`, and is left untouched.
+
+Detection is `lint-pii`'s, so its false positives are this command's false
+positives — a 13-digit record id reads as a phone (athenaeum#500). The
+command therefore prints **counts, never values** (echoing them would put the
+data straight back in reach) and points at `storage lint-pii`, which does
+print them, as the review step before `--apply`. Adjudicate a false positive
+in the allowlist first.
+
+```console
+$ athenaeum storage lint-pii                    # review: what is actually in there
+$ athenaeum merges scrub-pii                    # dry-run: how many, in which proposals
+$ athenaeum merges scrub-pii --apply            # redact in place; decisions stay open
+```
+
+## Wiki-page dedup: cluster figures require the threshold (athenaeum#1252)
+
+**Any reported cluster count, cluster size, or "% of corpus clustered"
+figure for the wiki-dedupe pass is meaningless unless it is stated
+alongside the `librarian.cluster_threshold` value it was measured at.**
+This is not a hypothetical caution — it already happened once. During
+athenaeum#1252's residual-over-clustering investigation, a first
+re-measurement pass ran at threshold `0.85` (not the operator's actual
+configured value) and reported a 7-page maximum cluster — which would have
+read as "the over-clustering problem is resolved," the **opposite** of the
+conclusion the correctly-thresholded re-measurement supported (a 99-page
+largest cluster, 88% of eligible pages clustered, at the live threshold
+`0.55`).
+
+**Always resolve the live threshold before quoting, comparing, or
+re-measuring any cluster figure** — never assume `0.55` (the shipped
+*default*, `DEFAULT_CLUSTER_THRESHOLD` in `src/athenaeum/clusters.py`) is
+what a given deployment actually runs with:
+
+```console
+$ python -c "
+from pathlib import Path
+from athenaeum.clusters import resolve_cluster_threshold
+print(resolve_cluster_threshold(Path.home() / 'knowledge'))
+"
+```
+
+or, for a full threshold-aware cluster snapshot in one step, use the
+shadow-mode measurement command (see "Reproducing the measurement pack" in
+`docs/memory-model-measurements.md`):
+
+```console
+$ athenaeum measure shadow-linkage
+```
+
+Both read `librarian.cluster_threshold` from the SAME resolver
+(`athenaeum.clusters.resolve_cluster_threshold` — env has no override for
+this knob, yaml only, see the "Cluster threshold" row above) that
+`athenaeum.wiki_dedupe.propose_wiki_page_merges` and
+`athenaeum.merge`'s cluster pass both use in production. Two cluster
+figures are comparable ONLY when both name the threshold they were
+measured at AND that threshold is identical — a before/after comparison
+across a code change (e.g. athenaeum#1140's chunk-and-mean-pool fix) is
+only valid run against the SAME live-resolved threshold on both sides.
+
+See also `librarian.wiki_dedupe_min_body_chars` (below the cluster-tuning
+table above) — an athenaeum#1252 eligibility knob, default off, that
+excludes pages too short for the chunk-and-mean-pool fix to meaningfully
+dilute a structurally uniform lede.
+
 ## Name-collision detection and auto-merge (athenaeum#1170)
 
 A nightly, deterministic, EXACT-`name:`-match scan over `wiki/*.md` — no
@@ -2704,7 +3031,7 @@ librarian:
   raw_file_max_runtime_seconds: 900    # per-raw-file wall-clock bound in seconds (athenaeum#898, recalibrated athenaeum#994)
   quarantine_threshold: 2              # consecutive bound-violations before quarantine (athenaeum#898)
   page_size_threshold_chars: 10000     # pages over this size are never merged into (athenaeum#1182)
-  oversize_page_action: review         # review (shipped) | split | log_demote (reserved, athenaeum#1182)
+  oversize_page_action: review         # review (default, safe unattended) | split | log_demote (both explicit-only, athenaeum#1182, athenaeum#1248)
   merge_worthiness_gate_enabled: false # zero-LLM containment pre-check before a T3 merge dispatches (athenaeum#1172)
   junk_match_stopwords: []      # extra entity names filtered before a tier-3 merge call (athenaeum#662)
   junk_match_allowlist: []      # entity names to never treat as junk — escape hatch (athenaeum#662)
@@ -2748,9 +3075,9 @@ librarian:
 
 models:
   classify: claude-haiku-4-5-20251001
-  write: claude-sonnet-4-6
+  write: claude-sonnet-5
   topic: claude-haiku-4-5-20251001
-  resolve: claude-opus-4-7
+  resolve: claude-opus-5
 
 pricing:                        # per-MTok rate table (athenaeum#783); athenaeum init
   claude-opus-5: [5.0, 25.0]    # ships this ACTIVE and pre-populated -- see
@@ -2766,7 +3093,7 @@ contradiction:
   not_a_conflict_ttl_days: 0  # 0 = disabled; >0 decays stale auto not_a_conflict (athenaeum#251)
 
 resolve:
-  # model: claude-opus-4-7   # legacy — prefer models.resolve above
+  # model: claude-opus-5   # legacy — prefer models.resolve above
   auto_apply: true
   auto_apply_threshold: 0.90
   full_body_token_cap: 1500

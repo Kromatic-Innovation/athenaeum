@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -208,7 +209,24 @@ def entity_phase_wall_clock_per_file(
 #: Ledger schema version — bump additively if the record shape changes.
 #: v2 (issue athenaeum#1184) adds the optional ``economics`` and ``alerts`` keys;
 #: both are additive and a v1 reader that ignores unknown keys is unaffected.
-RUN_SUMMARY_LEDGER_VERSION = 2
+#: v3 (issue athenaeum#1283) adds the optional ``refusal`` key — see
+#: :func:`build_run_summary_ledger_record`'s docstring for its shape and
+#: omission rule, and :func:`refusal_in_record` for why the version bump
+#: itself matters here (not merely additive bookkeeping): a record written
+#: under v1/v2 predates the athenaeum#1135 refusal verdict even existing on
+#: ``RunContext``, so its ABSENT ``refusal`` key means "this record cannot
+#: speak to whether that run was a refusal" — that is true of EVERY v1/v2
+#: record, unconditionally, regardless of the key's presence in a v3+
+#: record. A v3+ record's own ABSENT ``refusal`` key carries a DIFFERENT,
+#: narrower meaning: the verdict was never evaluated for that particular
+#: run (e.g. a wall-clock deadline trip in a pre-entity phase, handled by
+#: ``RunContext.stop_on_deadline``, which emits a summary and returns
+#: before ``_run_finalize_phase`` -- where the verdict is computed -- ever
+#: runs) -- also "cannot speak", just for a run-shape reason rather than a
+#: schema-age one. Only a v3+ record whose ``refusal`` key IS present
+#: speaks to the verdict at all, via that dict's own ``tripped`` field --
+#: see :func:`refusal_in_record`, the one place all three cases are read.
+RUN_SUMMARY_LEDGER_VERSION = 3
 
 #: Ledger filename under the cache dir (mirrors ``athenaeum.spend.LEDGER_FILENAME``).
 RUN_SUMMARY_LEDGER_FILENAME = "run_summary.jsonl"
@@ -237,6 +255,7 @@ def build_run_summary_ledger_record(
     ts: datetime | None = None,
     economics: dict[str, Any] | None = None,
     alerts: "list[dict[str, Any]] | None" = None,
+    refusal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one durable ledger record from a ``run()`` profile.
 
@@ -259,6 +278,29 @@ def build_run_summary_ledger_record(
     that has nothing to report (e.g. a merge-only/cluster-only run that never
     reaches the entity phase) writes a record identical in shape to a
     pre-athenaeum#1184 one.
+
+    *refusal* (issue athenaeum#1283, schema v3) is the optional athenaeum#1135
+    zero-progress-refusal verdict, built by the caller
+    (:meth:`athenaeum.librarian.RunContext.emit_run_summary`) from the SAME
+    ``ctx.librarian_refusal`` verdict ``_run_finalize_phase`` already
+    computed once — a small JSON-native dict keyed on a ``tripped`` bool:
+    ``{"tripped": True, "reason": ctx.entity_exit_reason, "files": 0}`` when
+    the run WAS a refusal, ``{"tripped": False}`` when it was evaluated and
+    was NOT. Pass ``None`` (the default) ONLY when the verdict was never
+    evaluated for this run at all (``ctx.librarian_refusal is None`` —
+    e.g. a wall-clock deadline trip via ``RunContext.stop_on_deadline``,
+    which calls this before ``_run_finalize_phase`` ever runs); that is the
+    one case that omits the ``refusal`` key entirely, mirroring the
+    ``economics``/``alerts`` "omit, don't null" convention immediately
+    above for the SAME reason (nothing to report) but a DIFFERENT trigger
+    (unevaluated, not merely absent/zero) — an evaluated-clean run still
+    writes ``{"tripped": False}``, not an omission, precisely so a reader
+    cannot mistake "never evaluated" for "confirmed clean". This DOES mean
+    a clean run's record is no longer byte-identical in shape to a
+    pre-athenaeum#1283 one (it gains a `{"tripped": false}` refusal block) —
+    a deliberate trade of that stability for an honest three-state record;
+    the version bump already signals the shape changed. See
+    :func:`refusal_in_record` for the reader that consumes all three states.
     """
     stamp = (ts if ts is not None else datetime.now(tz=timezone.utc)).astimezone(
         timezone.utc
@@ -277,6 +319,8 @@ def build_run_summary_ledger_record(
         record["economics"] = economics
     if alerts:
         record["alerts"] = alerts
+    if refusal:
+        record["refusal"] = refusal
     return record
 
 
@@ -288,6 +332,7 @@ def write_run_summary_record(
     ts: datetime | None = None,
     economics: dict[str, Any] | None = None,
     alerts: "list[dict[str, Any]] | None" = None,
+    refusal: dict[str, Any] | None = None,
 ) -> bool:
     """Append one durable run-summary record. Best-effort (issue athenaeum#1102 AC2).
 
@@ -300,14 +345,15 @@ def write_run_summary_record(
     is a deliberate, narrower gate (an empty record carries no aggregable
     information). Returns ``True`` when a record was written.
 
-    *economics* / *alerts* (issue athenaeum#1184) pass straight through to
+    *economics* / *alerts* (issue athenaeum#1184) and *refusal* (issue
+    athenaeum#1283) pass straight through to
     :func:`build_run_summary_ledger_record` — see its docstring.
     """
     if not profile:
         return False
     try:
         record = build_run_summary_ledger_record(
-            profile, ts=ts, economics=economics, alerts=alerts
+            profile, ts=ts, economics=economics, alerts=alerts, refusal=refusal
         )
         target = (
             ledger_path
@@ -661,3 +707,751 @@ def read_run_summary_ledger(
                 continue
         records.append(record)
     return records
+
+
+# ---------------------------------------------------------------------------
+# Embedder provenance (issue athenaeum#1279)
+# ---------------------------------------------------------------------------
+#
+# athenaeum#1032 recorded WHICH embedder produced a cluster's vectors on the
+# ``Cluster`` record itself, but nothing summarized it anywhere a lane or a
+# probe could read without re-deriving it from context, and the raw-intake
+# C2 cluster pass's chromadb-service ratio could (and did — see this issue's
+# motivation) collapse from ~98% to 0% over two days with every affected
+# cluster a harmless singleton, so nothing counted it and nothing could have
+# alerted on it. The ``auto-memory`` phase segment now carries
+# ``embed_chromadb`` / ``embed_fallback`` (see
+# :func:`athenaeum.clusters.cluster_auto_memory_files`'s
+# ``out_embedder_counts`` and :mod:`athenaeum.librarian`'s auto-memory phase
+# driver), which :func:`build_run_summary_ledger_record` copies into the
+# durable ledger like every other phase field — no new state file, same
+# "copy the profile's fields verbatim" convention every other reader in this
+# module relies on. This is the reader half: the LATEST run's counts, for
+# :func:`athenaeum.status.status`'s ``embedder_provenance`` field and for any
+# lane or probe that wants a one-call answer instead of parsing the ledger
+# itself.
+#
+# Documented surface for a lane-evidence probe (issue athenaeum#1279's scope
+# boundary — the probe registration itself lives in the hestia repo, not
+# here; this is the athenaeum-side half the probe would read):
+#
+#   - Python: ``athenaeum.status.status(knowledge_root)["embedder_provenance"]``
+#     — a documented field on the public ``StatusInfo`` TypedDict (see
+#     ``status.py``'s own "Public API" note on that class), shaped
+#     ``{"embed_chromadb": N, "embed_fallback": M, "fallback_ratio": R,
+#     "as_of": ts}``, or ``None`` if no run has ever clustered anything.
+#     ``athenaeum status`` (the CLI, no ``--json`` flag exists today) prints
+#     this as a human-readable line via ``status.format_status`` when
+#     present — see that function for the exact wording.
+#   - Durable ledger directly: ``<cache_dir>/run_summary.jsonl``, newest
+#     record whose ``phases.auto-memory`` dict has both ``embed_chromadb``
+#     and ``embed_fallback`` keys (ints). A TREND — this issue's 98%->0%
+#     incident — needs several TRAILING records, not just the newest one:
+#     read the ledger directly for that (one JSON object per line, oldest
+#     first).
+#   - Standing snapshot of the CURRENT cluster report (a complementary,
+#     coarser signal — per-CLUSTER not per-file, and reflects the last
+#     WHOLE-corpus or delta-affected slice rather than every run):
+#     :func:`athenaeum.status.status`'s ``cluster_embedder_snapshot`` field,
+#     tallying ``raw/_librarian-clusters.jsonl``'s ``embedder`` column.
+
+#: Field names on the ``auto-memory`` profile segment / ledger phase dict
+#: (issue athenaeum#1279) — see :func:`athenaeum.clusters.
+#: cluster_auto_memory_files`'s ``out_embedder_counts`` docstring for what
+#: they count (per-FILE, not per-cluster).
+EMBED_CHROMADB_FIELD = "embed_chromadb"
+EMBED_FALLBACK_FIELD = "embed_fallback"
+
+
+def embedder_counts_in_record(record: dict[str, Any]) -> "dict[str, int] | None":
+    """This record's auto-memory-phase embedder counts, or ``None``.
+
+    ``None`` means "cannot speak to it" — either this record predates issue
+    athenaeum#1279 (no ``auto-memory`` phase segment, or one without both
+    fields), or the auto-memory phase simply did not run this run at all
+    (e.g. an empty raw-intake corpus that short-circuits before the C2
+    cluster pass). Deliberately never collapsed to ``{"embed_chromadb": 0,
+    "embed_fallback": 0}`` in that case — that would misreport "confirmed
+    zero fallback" for a run that never clustered anything, the same
+    three-state discipline :func:`refusal_in_record` documents for the
+    identical reason (a false negative is worse than an honest "cannot
+    tell").
+    """
+    phases = record.get("phases")
+    if not isinstance(phases, dict):
+        return None
+    auto_memory = phases.get("auto-memory")
+    if not isinstance(auto_memory, dict):
+        return None
+    if (
+        EMBED_CHROMADB_FIELD not in auto_memory
+        or EMBED_FALLBACK_FIELD not in auto_memory
+    ):
+        return None
+    try:
+        chromadb_count = int(auto_memory[EMBED_CHROMADB_FIELD])
+        fallback_count = int(auto_memory[EMBED_FALLBACK_FIELD])
+    except (TypeError, ValueError):
+        return None
+    return {
+        EMBED_CHROMADB_FIELD: chromadb_count,
+        EMBED_FALLBACK_FIELD: fallback_count,
+    }
+
+
+def read_latest_embedder_counts(
+    *,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> "dict[str, Any] | None":
+    """The MOST RECENT run's embedder-provenance counts, best-effort.
+
+    Walks the ledger newest-first and returns the first record
+    :func:`embedder_counts_in_record` can actually read — so a run whose
+    auto-memory phase never ran (empty corpus, or a record predating this
+    issue) does not mask an earlier run's real counts behind a false zero.
+    Fail-open to ``None`` on any read error / missing ledger / no record
+    ever recorded counts, mirroring every other convenience reader in this
+    module (:func:`read_refusal_streak` above all) — :mod:`athenaeum.status`
+    is documented read-only/side-effect-free and depends on that.
+
+    Returns ``{"embed_chromadb": N, "embed_fallback": M, "fallback_ratio":
+    R, "as_of": ts}`` where ``R = M / (N + M)`` (``None`` when ``N + M ==
+    0`` — the phase ran but resolved zero files, e.g. an empty delta pool)
+    and ``ts`` is that record's ISO timestamp (``None`` if the record
+    somehow lacks one).
+    """
+    try:
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        history = read_run_summary_ledger(target)
+    except Exception as exc:  # noqa: BLE001 — observability must never raise
+        log.debug("run-summary: embedder-counts read skipped: %s", exc)
+        return None
+    for record in reversed(history):
+        counts = embedder_counts_in_record(record)
+        if counts is None:
+            continue
+        chromadb_count = counts[EMBED_CHROMADB_FIELD]
+        fallback_count = counts[EMBED_FALLBACK_FIELD]
+        total = chromadb_count + fallback_count
+        ratio = (fallback_count / total) if total > 0 else None
+        return {
+            EMBED_CHROMADB_FIELD: chromadb_count,
+            EMBED_FALLBACK_FIELD: fallback_count,
+            "fallback_ratio": ratio,
+            "as_of": record.get("ts"),
+        }
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Source-starvation streaks (issue athenaeum#1291 AC3)
+# ---------------------------------------------------------------------------
+#
+# The scheduler change (``athenaeum.intake.round_robin_by_source``) bounds the
+# worst-case wait, but a bound is not a report: an operator still cannot see
+# that a specific source is going hungry, and the pre-athenaeum#1291 signal --
+# ``beyond_window`` ("plus N more beyond the max_files window", rendered by
+# ``librarian._write_deferred_manifest``) -- is a COUNT. It reads as ordinary
+# backpressure while potentially describing a permanent stall, because it never
+# says WHICH files, so it can never say that the SAME ones are excluded every
+# run.
+#
+# This computes the missing streak from the ledger athenaeum#1102 already
+# writes, rather than adding a second piece of persisted state. The entity
+# phase records its zero-slot sources for the run as the ``starved`` field on
+# its profile segment; ``build_run_summary_ledger_record`` copies every phase
+# field into the durable JSONL verbatim, so the field is already durable; and
+# the streak is then just "how many consecutive trailing records also name it".
+
+#: Entity-phase profile field naming this run's zero-slot sources, as one
+#: comma-joined token (the same convention the ``reconciled`` field uses).
+STARVATION_FIELD = "starved"
+
+#: K in "K consecutive runs with pending intake and zero slots" -- the streak
+#: at which a source is named in the run summary's head segment and a WARNING
+#: fires. Three is the smallest streak that is unambiguously not a one-off
+#: (one run is ordinary windowing; two could be two coincidentally busy runs).
+STARVATION_STREAK_THRESHOLD = 3
+
+#: Stable, greppable WARNING prefix -- mirrors :data:`REGRESSION_ALERT_PREFIX`
+#: above, so an operator's existing nightly log sweep catches this without a
+#: new channel to watch.
+STARVATION_ALERT_PREFIX = "librarian-source-starvation"
+
+
+def starved_sources_in_record(record: dict[str, Any]) -> set[str] | None:
+    """This run's zero-slot sources from one ledger *record*.
+
+    Returns ``None`` for a record whose entity phase never ran (a merge-only
+    or cluster-only run, or an early deadline trip). That is deliberately
+    distinct from ``set()`` ("the entity phase ran and starved nobody"):
+    :func:`starvation_streaks` must not let a run that could not possibly
+    schedule anything break a streak.
+    """
+    phases = record.get("phases")
+    if not isinstance(phases, dict):
+        return None
+    entity = phases.get("entity")
+    if not isinstance(entity, dict):
+        return None
+    token = entity.get(STARVATION_FIELD)
+    if not isinstance(token, str):
+        # The field is omitted entirely on a run that starved nobody (the
+        # "render only when non-empty" convention every optional entity field
+        # in the profile follows), so absence means an empty set, not None.
+        return set()
+    return {part.strip() for part in token.split(",") if part.strip()}
+
+
+def starvation_streaks(
+    starved_now: "Iterable[str]", history: "list[dict[str, Any]]"
+) -> dict[str, int]:
+    """Consecutive-run starvation streak per source, INCLUDING this run.
+
+    *history* is the ledger's records oldest-first (exactly what
+    :func:`read_run_summary_ledger` returns), read BEFORE this run's own
+    record is appended -- so a source starved for the first time this run
+    scores ``1``, and one starved on the two prior runs as well scores ``3``.
+
+    Records with no entity phase are skipped rather than counted as a
+    non-starving run (see :func:`starved_sources_in_record`).
+    """
+    prior = [
+        starved
+        for starved in (starved_sources_in_record(rec) for rec in history)
+        if starved is not None
+    ]
+    streaks: dict[str, int] = {}
+    for source in starved_now:
+        streak = 1
+        for entry in reversed(prior):
+            if source not in entry:
+                break
+            streak += 1
+        streaks[source] = streak
+    return streaks
+
+
+def read_starvation_streaks(
+    starved_now: "Iterable[str]",
+    *,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> dict[str, int]:
+    """:func:`starvation_streaks` against the durable ledger. Best-effort.
+
+    Mirrors :func:`build_economics_and_alerts`' fail-open contract exactly: a
+    missing or corrupt ledger reads as "no history", and no failure here may
+    ever raise into the run it is only observing. An empty *starved_now*
+    short-circuits without touching the filesystem.
+    """
+    sources = list(starved_now)
+    if not sources:
+        return {}
+    try:
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        history = read_run_summary_ledger(target)
+    except Exception as exc:  # noqa: BLE001 — observability must never raise
+        log.debug("run-summary: starvation history read skipped: %s", exc)
+        history = []
+    return starvation_streaks(sources, history)
+
+
+
+def starvation_priority(history: "list[dict[str, Any]]") -> list[str]:
+    """The next run's scheduling priority head: LONGEST-STARVED SOURCE FIRST.
+
+    This is what makes :func:`athenaeum.intake.round_robin_by_source`'s turn
+    order rotate across runs (issue athenaeum#1291 AC1). Round-robin alone
+    bounds the wait only while ``max_files`` is at least the number of
+    sources; below that a FIXED turn order starves the same trailing sources
+    on every run forever -- sort-position starvation again, merely at a
+    different threshold.
+
+    Rotation has to AGE, not just alternate. Feeding back the previous run's
+    zero-slot sources in name order is not enough: a source can keep losing
+    its turn to sources that were only starved once, and still wait
+    unboundedly (verified -- 5 sources, a window of 2, and the last source is
+    never scheduled). Ordering the head by DESCENDING consecutive-starvation
+    streak makes the wait strictly monotone: a source's rank rises every run
+    it is skipped, so it reaches the head within ``ceil(n_sources /
+    max_files)`` runs. Ties break by name, so the result is deterministic.
+
+    *history* is the ledger's records oldest-first
+    (:func:`read_run_summary_ledger`). Returns ``[]`` when the most recent
+    entity run starved nobody, or when there is no entity run to read --
+    both mean "no rotation needed", i.e. plain discovery-order turns.
+    """
+    index = None
+    for i in range(len(history) - 1, -1, -1):
+        if starved_sources_in_record(history[i]) is not None:
+            index = i
+            break
+    if index is None:
+        return []
+    previous = starved_sources_in_record(history[index]) or set()
+    if not previous:
+        return []
+    # Streaks as of THAT run, so `history[:index]` — the run itself supplies
+    # the +1 `starvation_streaks` always adds for "this run".
+    streaks = starvation_streaks(previous, history[:index])
+    return sorted(previous, key=lambda source: (-streaks[source], source))
+
+
+def previous_starved_sources(history: "list[dict[str, Any]]") -> list[str]:
+    """The most recent entity run's zero-slot sources, sorted by name.
+
+    Records with no entity phase (merge-only / cluster-only runs, early
+    deadline trips) are skipped rather than read as "nobody was starved" --
+    they scheduled nothing, so they are no evidence either way, the same
+    distinction :func:`starved_sources_in_record` draws for the streak
+    counter. :func:`starvation_priority` is the scheduling-order form of
+    this; use that one to drive the scheduler.
+    """
+    for record in reversed(history):
+        starved = starved_sources_in_record(record)
+        if starved is not None:
+            return sorted(starved)
+    return []
+
+
+def read_starvation_priority(
+    *,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> list[str]:
+    """:func:`starvation_priority` against the durable ledger. Best-effort.
+
+    Reuses the athenaeum#1102 run-summary ledger the entity phase already
+    writes, so the fair-scheduling rotation introduces no second piece of
+    persisted state. Fail-open like every other read in this module: a
+    missing or corrupt ledger reads as "no history" (``[]``, i.e. plain
+    discovery-order turns), and nothing here may raise into the run it is
+    only observing.
+    """
+    try:
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        return starvation_priority(read_run_summary_ledger(target))
+    except Exception as exc:  # noqa: BLE001 — observability must never raise
+        log.debug("run-summary: starvation priority read skipped: %s", exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Zero-progress-refusal streak (issue athenaeum#1283)
+# ---------------------------------------------------------------------------
+#
+# athenaeum#1135 already detects, at run time, a run that stopped early for a
+# resource reason (budget/deadline/spend-ceiling — see
+# ``librarian._LIBRARIAN_EARLY_STOP_REASONS``) and committed nothing, and
+# logs it loudly (the ``librarian-run-degraded`` marker line, plus a non-zero
+# ``EXIT_LIBRARIAN_REFUSAL`` exit code). But that verdict died with the
+# process: nothing BETWEEN runs could see it, so ``athenaeum status`` read
+# healthy straight through the exact incident that motivated athenaeum#1135 in the
+# first place — the athenaeum#899 zero-yield counter it relies on excludes this
+# case by design (it requires ``api_calls > 0``, and a budget-exhausted run
+# makes zero calls). This section closes that gap the same way athenaeum#1291's
+# source-starvation streak (above) closed an analogous one: by computing the
+# missing "how many runs in a row" figure from the SAME athenaeum#1102 ledger,
+# rather than adding a second piece of persisted state.
+# ``RunContext.emit_run_summary`` (``librarian.py``) already writes the
+# athenaeum#1135 verdict into every record's optional ``refusal`` field (see
+# :func:`build_run_summary_ledger_record`'s *refusal* parameter), so the
+# streak is just "how many consecutive trailing records also carry it".
+
+#: The ledger record key carrying this run's athenaeum#1135 refusal verdict —
+#: see :func:`build_run_summary_ledger_record`'s *refusal* parameter.
+REFUSAL_FIELD = "refusal"
+
+#: Stable, greppable line prefix for the ``status.py`` render (issue
+#: athenaeum#1283) — mirrors :data:`STARVATION_ALERT_PREFIX` /
+#: :data:`REGRESSION_ALERT_PREFIX` above, so an operator's existing
+#: log/status sweep catches this without a new channel to watch. Unlike
+#: those two, this fires at streak 1 — see ``status.format_status``: a
+#: single refusal is already "status must not read healthy", not a
+#: threshold alarm.
+REFUSAL_ALERT_PREFIX = "librarian-run-refusal"
+
+
+def refusal_in_record(record: dict[str, Any]) -> bool | None:
+    """This record's athenaeum#1135 refusal verdict — THREE outcomes, not two.
+
+    This is the load-bearing distinction the whole streak counter below
+    depends on. The ``refusal`` field, when present, is itself a small dict
+    keyed on ``tripped`` (see :func:`build_run_summary_ledger_record`'s
+    *refusal* parameter) — this function is the one place that dict gets
+    unpacked into the bool a reader actually wants:
+
+    * ``True`` — this run's ``refusal`` field is present and its
+      ``tripped`` sub-field is truthy: the verdict WAS evaluated and it WAS
+      a refusal.
+    * ``False`` — this run's ``refusal`` field is present and its
+      ``tripped`` sub-field is falsy: the verdict WAS evaluated (by a
+      version of the code new enough to record it) and it was NOT a
+      refusal.
+    * ``None`` — the verdict CANNOT be read from this record, for either of
+      two distinct reasons, both collapsed to the same honest answer:
+
+      1. This record's ``v`` predates 3 (or ``v`` is missing/unparseable,
+         e.g. a hand-edited or torn line that still parsed as JSON) — a
+         record written before athenaeum#1283 landed cannot speak to whether
+         that run was a refusal at all: the athenaeum#1135 verdict existed at
+         run time (as a log line only), but nothing wrote it into the
+         ledger.
+      2. This record's ``v`` is ``>= 3`` but its ``refusal`` field is
+         MISSING (or not a dict) — the schema supports the field, but
+         ``RunContext.librarian_refusal`` was still ``None`` (never
+         evaluated) for THIS particular run when
+         :meth:`~athenaeum.librarian.RunContext.emit_run_summary` wrote it.
+         Not hypothetical: :meth:`~athenaeum.librarian.RunContext.
+         stop_on_deadline` (a wall-clock deadline trip in a pre-entity
+         phase) calls ``emit_run_summary`` and returns straight to
+         ``run()``'s caller BEFORE ``_run_finalize_phase`` — where the
+         verdict is computed — ever runs; the ``cluster_only``/
+         ``merge_only`` early-exit paths share the same property.
+
+      Never collapse either case into ``False`` — doing so would silently
+      treat a pre-athenaeum#1283 record, OR a run whose verdict was simply
+      never reached, as "confirmed not a refusal": exactly the
+      false-negative this whole issue is about, just moved one layer down
+      into the reader (or the writer) instead of being visible at the
+      source.
+    """
+    raw_version = record.get("v")
+    try:
+        version = int(raw_version)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if version < 3:
+        return None
+    detail = record.get(REFUSAL_FIELD)
+    if not isinstance(detail, dict):
+        # Schema supports the field (v >= 3), but this run's verdict was
+        # never evaluated -- e.g. the stop_on_deadline path named above.
+        # "Cannot speak", the same honest answer as the pre-v3 case, just a
+        # different reason.
+        return None
+    return bool(detail.get("tripped"))
+
+
+def refusal_streak(history: "list[dict[str, Any]]") -> int:
+    """Consecutive TRAILING refusal runs in *history* (oldest-first, exactly
+    what :func:`read_run_summary_ledger` returns).
+
+    Walks *history* from the newest record backwards, counting while
+    :func:`refusal_in_record` reads ``True``, and STOPS — rather than
+    skipping past — the moment it reads anything other than ``True`` (a
+    genuine ``False`` clean run, OR a ``None`` that cannot speak to whether
+    it was a refusal: the streak MIGHT continue further back, but this
+    instrument has no way to know, so it reports only the confirmed
+    trailing run count rather than guessing through the gap). No logic
+    change was needed here to fix athenaeum#1283's writer-side bug (the
+    record-shape fix that made an unevaluated run distinguishable from an
+    evaluated-clean one lives in :func:`build_run_summary_ledger_record` /
+    :func:`refusal_in_record`); this function already stopped on anything
+    that wasn't ``True``, so it was already correct once its input became
+    honest.
+
+    ``None`` now has TWO distinct sources, not one, and this function
+    treats both identically (stop, don't bridge past):
+
+    1. A ``v < 3`` record — predates the ``refusal`` field's existence.
+    2. A ``v >= 3`` record whose verdict was simply never evaluated for that
+       run (e.g. a wall-clock deadline trip via ``RunContext.
+       stop_on_deadline``, which emits a summary before
+       ``_run_finalize_phase`` -- where the verdict is computed -- ever
+       runs) — see :func:`refusal_in_record`'s docstring for the concrete
+       code path.
+
+    This is where :func:`refusal_in_record`'s three-state design pays for
+    itself regardless of which ``None`` source is in play: a naive
+    two-state reader would either (a) treat an ambiguous record as "not a
+    refusal" and silently truncate a real streak the moment it hits one, or
+    (b) treat it as "was a refusal" and fabricate one that never happened.
+    Both are wrong; stopping at the ambiguous record is the only honest
+    answer — it under-reports a streak that truly extends past the
+    ambiguous point, never over-reports one.
+    """
+    streak = 0
+    for record in reversed(history):
+        if refusal_in_record(record) is not True:
+            break
+        streak += 1
+    return streak
+
+
+def read_refusal_streak(
+    *,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> "tuple[int, dict[str, Any] | None]":
+    """:func:`refusal_streak` against the durable ledger, best-effort, paired
+    with the most recent run's ``refusal`` detail dict.
+
+    Mirrors every other convenience reader in this module's fail-open
+    contract: a missing or corrupt ledger reads as "no history"
+    (``(0, None)``), and nothing here may ever raise into a caller —
+    ``status.py`` above all, which is documented read-only/side-effect-free
+    (see its module docstring's factoring rule).
+
+    Returns ``(streak, most_recent_refusal_detail)``: *streak* is
+    :func:`refusal_streak`'s count; *most_recent_refusal_detail* is the
+    newest record's ``refusal`` dict (``{"reason": ..., "files": 0}``) when
+    ``streak > 0``, else ``None`` — so a single call gives a caller (e.g.
+    ``status.format_status``) both "N consecutive refusals" and the reason
+    to name, without a second ledger read.
+    """
+    try:
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        history = read_run_summary_ledger(target)
+    except Exception as exc:  # noqa: BLE001 — observability must never raise
+        log.debug("run-summary: refusal streak read skipped: %s", exc)
+        return (0, None)
+    streak = refusal_streak(history)
+    if streak <= 0 or not history:
+        return (0, None)
+    detail = history[-1].get(REFUSAL_FIELD)
+    return (streak, detail if isinstance(detail, dict) else None)
+
+
+# ---------------------------------------------------------------------------
+# Processing-stall streaks (issue athenaeum#1295)
+# ---------------------------------------------------------------------------
+#
+# ``starved_sources`` above (issue athenaeum#1291) counts SLOTS: a source with
+# pending intake that got zero slots in the ``max_files`` window. That signal
+# is blind by construction to a second, independent channel --
+# ``round_robin_by_source`` guarantees a source a slot, it does not guarantee
+# that slot is ever REACHED. The entity loop can stop part-way through an
+# already-scheduled window on either ``max_runtime`` or ``max_api_calls``
+# (both enforced downstream of window selection), and the athenaeum#1291
+# interleaving only SOFTENS the odds of that landing on the same source every
+# run -- it does not eliminate them. A source whose slots consistently fall
+# just past the point a mid-window budget trip stops the loop gets a nonzero
+# slot count and a clean ``starved_sources`` record, run after run, while
+# processing nothing.
+#
+# This is deliberately a SEPARATE field, a separate WARNING prefix, and a
+# separate streak from the athenaeum#1291 pair immediately above -- conflating
+# "got no slots" with "got slots but never got run" would erase the exact
+# distinction an operator needs (the former points at the scheduler /
+# ``max_files`` sizing, the latter points at the per-run budget being too
+# tight for the window it itself sized). Same "no new state file" shape as
+# athenaeum#1291: the entity phase records this run's stalled sources on its
+# profile segment (:data:`STALL_FIELD`), ``build_run_summary_ledger_record``
+# copies every phase field into the durable JSONL verbatim, and the streak is
+# "how many consecutive trailing records also name it" -- the same
+# derivation :func:`starvation_streaks` uses, mirrored exactly.
+
+#: Entity-phase profile field naming this run's zero-processed-despite-slots
+#: sources, as one comma-joined token -- the athenaeum#1295 sibling of
+#: :data:`STARVATION_FIELD`.
+STALL_FIELD = "stalled"
+
+#: K in "K consecutive runs with pending intake, nonzero slots, and zero
+#: files processed". Reuses :data:`STARVATION_STREAK_THRESHOLD` rather than
+#: defining a separate magic number: the underlying question -- "is this a
+#: one-off or a stall?" -- is identical in kind for both channels, and three
+#: is the smallest streak that is unambiguously not a one-off for either. If
+#: the two channels ever need to diverge (e.g. one proves noisier in
+#: practice), split this into its own constant then, with the measurement
+#: that justifies the new value.
+STALL_STREAK_THRESHOLD = STARVATION_STREAK_THRESHOLD
+
+#: Stable, greppable WARNING prefix -- distinct from
+#: :data:`STARVATION_ALERT_PREFIX` so an operator's log sweep can tell "no
+#: slots" apart from "slots but no progress" without parsing the message
+#: body.
+STALL_ALERT_PREFIX = "librarian-source-processing-stall"
+
+
+def stalled_sources_in_record(record: dict[str, Any]) -> set[str] | None:
+    """This run's zero-processed-despite-slots sources from one ledger *record*.
+
+    Mirrors :func:`starved_sources_in_record` exactly, reading
+    :data:`STALL_FIELD` instead of :data:`STARVATION_FIELD`. Returns ``None``
+    for a record whose entity phase never ran (merge-only/cluster-only run,
+    or an early deadline trip) -- distinct from ``set()`` ("the entity phase
+    ran and nothing stalled") for the same reason :func:`starved_sources_in_record`
+    draws that distinction: :func:`stall_streaks` must not let a run that
+    could not possibly process anything break a streak.
+    """
+    phases = record.get("phases")
+    if not isinstance(phases, dict):
+        return None
+    entity = phases.get("entity")
+    if not isinstance(entity, dict):
+        return None
+    token = entity.get(STALL_FIELD)
+    if not isinstance(token, str):
+        # "render only when non-empty" convention (see the entity profile
+        # segment in librarian.py) -- absence means an empty set, not None.
+        return set()
+    return {part.strip() for part in token.split(",") if part.strip()}
+
+
+def stall_streaks(
+    stalled_now: "Iterable[str]", history: "list[dict[str, Any]]"
+) -> dict[str, int]:
+    """Consecutive-run processing-stall streak per source, INCLUDING this run.
+
+    Mirrors :func:`starvation_streaks` exactly, reading
+    :func:`stalled_sources_in_record` instead of
+    :func:`starved_sources_in_record`. *history* is oldest-first, read BEFORE
+    this run's own record is appended.
+    """
+    prior = [
+        stalled
+        for stalled in (stalled_sources_in_record(rec) for rec in history)
+        if stalled is not None
+    ]
+    streaks: dict[str, int] = {}
+    for source in stalled_now:
+        streak = 1
+        for entry in reversed(prior):
+            if source not in entry:
+                break
+            streak += 1
+        streaks[source] = streak
+    return streaks
+
+
+def read_stall_streaks(
+    stalled_now: "Iterable[str]",
+    *,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> dict[str, int]:
+    """:func:`stall_streaks` against the durable ledger. Best-effort.
+
+    Mirrors :func:`read_starvation_streaks` exactly -- fail-open, and never
+    raises into the run it is only observing.
+    """
+    sources = list(stalled_now)
+    if not sources:
+        return {}
+    try:
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        history = read_run_summary_ledger(target)
+    except Exception as exc:  # noqa: BLE001 — observability must never raise
+        log.debug("run-summary: stall history read skipped: %s", exc)
+        history = []
+    return stall_streaks(sources, history)
+
+
+def stall_priority(history: "list[dict[str, Any]]") -> list[str]:
+    """The processing-stall channel's contribution to the next run's turn order.
+
+    Mirrors :func:`starvation_priority` exactly (see its docstring for why
+    longest-streak-first ordering is load-bearing), but reads
+    :func:`stalled_sources_in_record` instead of
+    :func:`starved_sources_in_record` -- the previous run's sources that had
+    pending intake, nonzero slots, and zero files processed, longest STALL
+    streak first. Returns ``[]`` when the most recent entity run stalled
+    nobody, or when there is no entity run to read.
+
+    Used alone this would age a stalled source into the head exactly the way
+    :func:`starvation_priority` ages a zero-slot source. See
+    :func:`combined_starvation_priority` for how the two channels compose
+    into the single list :func:`athenaeum.intake.round_robin_by_source`
+    actually consumes.
+    """
+    index = None
+    for i in range(len(history) - 1, -1, -1):
+        if stalled_sources_in_record(history[i]) is not None:
+            index = i
+            break
+    if index is None:
+        return []
+    previous = stalled_sources_in_record(history[index]) or set()
+    if not previous:
+        return []
+    streaks = stall_streaks(previous, history[:index])
+    return sorted(previous, key=lambda source: (-streaks[source], source))
+
+
+def combined_starvation_priority(
+    slot_priority: "list[str]", processing_stall_priority: "list[str]"
+) -> list[str]:
+    """Merge the slot-starvation and processing-stall priority heads (athenaeum#1295).
+
+    The scheduler (:func:`athenaeum.intake.round_robin_by_source`) takes ONE
+    ``priority_sources`` list. Two independent channels now want to age
+    sources into its head -- :func:`starvation_priority` (zero slots) and
+    :func:`stall_priority` (slots but zero processed) -- and they must
+    combine deterministically without weakening either guarantee.
+
+    The merge is: *slot_priority* first, in its own order, UNCHANGED; then
+    any *processing_stall_priority* source not already present, appended
+    after, also in its own order. Two things fall out of that shape:
+
+    * The athenaeum#1291 AC1 bound is untouched. Every slot-starved source
+      keeps EXACTLY the rank and position :func:`starvation_priority` alone
+      would have given it -- prepending nothing before it and never
+      reordering it -- so the existing ``ceil(n_sources / limit)`` proof
+      does not need to be redone.
+    * A processing-stalled source that is not also slot-starved still ages
+      ahead of plain discovery order (the whole point of Plan step 3 -- the
+      signal is diagnostic only until something reads it back into the
+      schedule), just behind whatever the slot channel already prioritised
+      this run. A source named by BOTH channels is deduplicated to its
+      (earlier, slot-channel) position rather than appearing twice.
+
+    Deterministic given deterministic inputs: no set iteration, ``dict.
+    fromkeys`` preserves first-seen order exactly like
+    :func:`athenaeum.intake.round_robin_by_source`'s own ``head``
+    de-duplication.
+    """
+    return list(dict.fromkeys([*slot_priority, *processing_stall_priority]))
+
+
+def read_combined_starvation_priority(
+    *,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> list[str]:
+    """:func:`combined_starvation_priority` against the durable ledger. Best-effort.
+
+    This is what the librarian actually passes to ``round_robin_by_source``
+    as ``priority_sources`` -- the single call site that folds both the
+    athenaeum#1291 slot-starvation channel and the athenaeum#1295
+    processing-stall channel into one turn-order head. Reads the ledger
+    exactly once (both :func:`starvation_priority` and :func:`stall_priority`
+    are pure functions over the same *history* list) and fails open to
+    ``[]`` -- plain discovery-order turns -- like every other read in this
+    module.
+    """
+    try:
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        history = read_run_summary_ledger(target)
+        return combined_starvation_priority(
+            starvation_priority(history), stall_priority(history)
+        )
+    except Exception as exc:  # noqa: BLE001 — observability must never raise
+        log.debug("run-summary: combined starvation priority read skipped: %s", exc)
+        return []

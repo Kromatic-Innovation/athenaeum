@@ -84,6 +84,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -95,6 +96,8 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.authority import AuthorityManifest, load_authority_manifest
 from athenaeum.bounce_contract import check_tier0_bounce_conformance
 from athenaeum.clusters import (
+    EMBEDDER_CHROMADB_DEFAULT,
+    EMBEDDER_FALLBACK_HASHING,
     cluster_auto_memory_files,
     prune_cluster_rotations,
     resolve_cluster_output_path,
@@ -150,8 +153,10 @@ from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE
     AUTO_MEMORY_FILE_RE,
     RAW_FILE_RE,
     attribute_person_observation,
+    check_raw_retention,
     discover_auto_memory_files,
     discover_raw_files,
+    round_robin_by_source,
     tier0_passthrough,
 )
 from athenaeum.intake_audit import (
@@ -213,7 +218,16 @@ from athenaeum.rules import run_shape_rule_phase
 from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home now
     REGRESSION_ALERT_PREFIX,
     RUN_SUMMARY_PREFIX,
+    STALL_ALERT_PREFIX,
+    STALL_FIELD,
+    STALL_STREAK_THRESHOLD,
+    STARVATION_ALERT_PREFIX,
+    STARVATION_FIELD,
+    STARVATION_STREAK_THRESHOLD,
     build_economics_and_alerts,
+    read_combined_starvation_priority,
+    read_stall_streaks,
+    read_starvation_streaks,
     write_run_summary_record,
 )
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
@@ -1428,6 +1442,14 @@ def _apply_tier3_results(
     result.oversize_suppressed += sum(
         1 for _e in escalations if _e.conflict_type == "oversize_page"
     )
+    # Issue athenaeum#1248: same derivation, disjoint conflict_types — see
+    # ProcessingResult.oversize_split/oversize_log_demoted's docstrings.
+    result.oversize_split += sum(
+        1 for _e in escalations if _e.conflict_type == "oversize_split"
+    )
+    result.oversize_log_demoted += sum(
+        1 for _e in escalations if _e.conflict_type == "oversize_log_demote"
+    )
 
     # --- Tier 4: Escalation ---
     if escalations:
@@ -2023,12 +2045,19 @@ def _run_cluster_pass(
     config: dict[str, object] | None = None,
     dry_run: bool = False,
     changed_paths: set[Path] | None = None,
+    out_embedder_counts: dict[str, int] | None = None,
 ) -> set[str] | None:
     """Cluster discovered auto-memory files and write the JSONL report.
 
     Reuses the recall-index chromadb collection via
     :class:`athenaeum.search.VectorBackend`; falls back to a hashing-
     trick vector if the index is unavailable.
+
+    ``out_embedder_counts`` (issue athenaeum#1279) is threaded straight through to
+    every :func:`athenaeum.clusters.cluster_auto_memory_files` call this
+    function makes (whole-corpus and, via :func:`_delta_cluster_pass`, the
+    delta pool) — see that function's own ``out_embedder_counts`` docstring.
+    ``None`` (the default) skips it entirely.
 
     Returns:
         - ``None`` in the whole-corpus mode (the merge pass should recompile
@@ -2108,6 +2137,7 @@ def _run_cluster_pass(
             threshold=threshold,
             knowledge_root=knowledge_root,
             resolved_config=resolved_config,
+            out_embedder_counts=out_embedder_counts,
         )
         if affected_ids is not None:
             return affected_ids
@@ -2119,6 +2149,7 @@ def _run_cluster_pass(
         extra_roots=extra_roots,
         cache_dir=cache_dir,
         threshold=threshold,
+        out_embedder_counts=out_embedder_counts,
     )
 
     log.info(
@@ -2144,6 +2175,7 @@ def _delta_cluster_pass(
     threshold: float,
     knowledge_root: Path,
     resolved_config: dict[str, object] | None,
+    out_embedder_counts: dict[str, int] | None = None,
 ) -> set[str] | None:
     """Delta-scoped cluster pass (issue athenaeum#370 PR2). ``None`` = fall back to full.
 
@@ -2171,6 +2203,7 @@ def _delta_cluster_pass(
         extra_roots=extra_roots,
         cache_dir=cache_dir,
         threshold=threshold,
+        out_embedder_counts=out_embedder_counts,
     )
     spliced = splice_cluster_report(prior_rows, scope.affected_ids, new_partial)
 
@@ -2260,6 +2293,7 @@ def _compile_auto_memory(
     resolve_client: Any = None,
     reasoning_t1_client: Any = None,
     reasoning_t2_client: Any = None,
+    out_embedder_counts: dict[str, int] | None = None,
 ) -> list:
     """Cluster (C2) + merge (C3/C4) the auto-memory corpus. Returns the entries.
 
@@ -2327,6 +2361,14 @@ def _compile_auto_memory(
     ``escalations_written``) without recomputing it. ``None`` (the default)
     skips the out-param write entirely.
 
+    ``out_embedder_counts`` (issue athenaeum#1279) is threaded straight through to
+    :func:`_run_cluster_pass` (see its own docstring) — a per-file
+    ``{EMBEDDER_*: count}`` tally of this run's cluster-pass embedding
+    resolution. On the F6 slug-collision fallback below, the dict is
+    CLEARED before the whole-corpus re-run: that re-run supersedes the
+    discarded delta attempt's clustering entirely, so counting both would
+    double-count the same files. ``None`` (the default) skips it entirely.
+
     ``contradiction_sweep_since`` / ``force_full_contradiction_sweep`` (issue
     athenaeum#909) thread straight through to
     :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``c4_since`` /
@@ -2372,6 +2414,7 @@ def _compile_auto_memory(
         config=config,
         dry_run=dry_run,
         changed_paths=changed_paths if delta_eligible else None,
+        out_embedder_counts=out_embedder_counts,
     )
 
     # F6: run-global slug-collision guard. If any affected entry's slug would
@@ -2385,8 +2428,17 @@ def _compile_auto_memory(
             "delta: affected slug collides run-globally (F6) — re-running "
             "whole-corpus cluster + merge"
         )
+        if out_embedder_counts is not None:
+            # Issue athenaeum#1279: the discarded delta attempt's tally must not
+            # survive into the whole-corpus re-run's total — see this
+            # function's own out_embedder_counts docstring above.
+            out_embedder_counts.clear()
         _run_cluster_pass(
-            auto_memory_files, knowledge_root, config=config, dry_run=dry_run
+            auto_memory_files,
+            knowledge_root,
+            config=config,
+            dry_run=dry_run,
+            out_embedder_counts=out_embedder_counts,
         )
         only_cluster_ids = None
 
@@ -3621,6 +3673,8 @@ def _render_run_summary(
     schema_fragments: "dict[str, tuple[str, bool]] | None" = None,
     prompt_manifest_hash: "str | None" = None,
     zero_yield_consecutive: "int | None" = None,
+    starved_streaks: "dict[str, int] | None" = None,
+    stall_streaks: "dict[str, int] | None" = None,
 ) -> str:
     """Render the accumulated per-phase *profile* into ONE greppable line.
 
@@ -3669,6 +3723,29 @@ def _render_run_summary(
     before finalize runs never evaluate the predicate, so it stays omitted
     there — same "omit on ``None``" contract as the two attribution fields
     above).
+
+    ``starved_streaks`` (issue athenaeum#1291 AC3) maps each source that got
+    ZERO slots in this run's ``max_files`` window to how many consecutive runs
+    that has now been true for, including this one. Only sources at or over
+    :data:`~athenaeum.run_summary_log.STARVATION_STREAK_THRESHOLD` are
+    rendered, as ``starved_sources=<name>:<runs>,...`` on the head segment:
+    one run with no slots is ordinary windowing, K in a row is a stall, and
+    naming it here is exactly what the pre-athenaeum#1291 ``beyond_window``
+    COUNT could not do. Omitted entirely when nothing meets the threshold, so
+    a healthy run's line is byte-unchanged. (This run's zero-slot sources,
+    streak or no streak, are on the entity segment's own ``starved=`` token.)
+
+    ``stall_streaks`` (issue athenaeum#1295) is the same shape and the same
+    threshold-gated rendering as ``starved_streaks`` immediately above, but
+    for the DIFFERENT channel: sources that received slots in the window yet
+    processed zero files for K consecutive runs (a mid-window
+    ``max_runtime``/``max_api_calls`` trip landing past their turn every
+    time). Rendered as ``stalled_sources=<name>:<runs>,...`` — a distinct
+    head token so the two channels are never conflated on the same line, one
+    naming a scheduler-visibility gap and the other a per-run-budget gap.
+    Omitted entirely when nothing meets the threshold. (This run's stalled
+    sources, streak or no streak, are on the entity segment's own
+    ``stalled=`` token.)
     """
     total_secs = sum(secs for _phase, secs, _fields in profile)
     head = f"{RUN_SUMMARY_PREFIX} total_secs={total_secs:.3f}"
@@ -3680,6 +3757,22 @@ def _render_run_summary(
         head += f" prompt_manifest={prompt_manifest_hash}"
     if zero_yield_consecutive is not None:
         head += f" zero_yield={zero_yield_consecutive}"
+    if starved_streaks:
+        flagged = [
+            f"{source}:{streak}"
+            for source, streak in sorted(starved_streaks.items())
+            if streak >= STARVATION_STREAK_THRESHOLD
+        ]
+        if flagged:
+            head += f" starved_sources={','.join(flagged)}"
+    if stall_streaks:
+        stall_flagged = [
+            f"{source}:{streak}"
+            for source, streak in sorted(stall_streaks.items())
+            if streak >= STALL_STREAK_THRESHOLD
+        ]
+        if stall_flagged:
+            head += f" stalled_sources={','.join(stall_flagged)}"
     parts = [head]
     for phase, secs, fields in profile:
         tokens = " ".join(f"{k}={v}" for k, v in fields.items())
@@ -3804,6 +3897,13 @@ class RunContext:
     # discovery path claimed this run, and how many pending decisions were
     # raised (vs. already open/resolved) for them.
     intake_audit_summary: dict[str, Any] | None = None
+    # Issue athenaeum#1269: run-summary counts from ``_run_raw_retention_phase``
+    # (``None`` until that phase runs) -- ``raw-oversize-file`` /
+    # ``raw-oversize-source`` tallies and the offending paths/sources, from
+    # the configurable per-file and per-source-tree size ceilings on
+    # `raw/<source>/`. Detect-and-report only -- this phase never blocks
+    # intake, moves a file, or writes an exempt row.
+    raw_retention_summary: dict[str, Any] | None = None
     # Issue athenaeum#1063: run-summary counts from
     # ``_run_rule_proposal_phase`` (``None`` until that phase runs, including
     # when the config gate is off -- a disabled phase never touches this
@@ -3971,6 +4071,24 @@ class RunContext:
     zero_yield_tripped: bool | None = None
     zero_yield_consecutive: int | None = None
 
+    # Issue athenaeum#1283: the athenaeum#1135 zero-progress-refusal predicate's
+    # verdict for THIS run, computed ONCE in ``_run_finalize_phase`` (as soon
+    # as ``entity_exit_reason`` and ``files_processed_count`` are both final
+    # — the same point ``zero_yield_tripped`` above is evaluated) and stored
+    # here so every later consumer in the SAME run — the ``emit_run_summary``
+    # ledger write, the ``librarian-run-degraded`` marker line, and the
+    # ``EXIT_LIBRARIAN_REFUSAL`` exit-code check — reads this stored verdict
+    # rather than each re-deriving it from ``_librarian_run_refusal_tripped``.
+    # ``None`` (mirroring ``zero_yield_tripped``'s own ``None`` contract)
+    # means "not yet evaluated" — true for the whole run until finalize
+    # reaches that point, never coerced to ``False``, so a consumer can tell
+    # "evaluated, not a refusal" from "never evaluated". This is the
+    # persisted half of the athenaeum#1283 fix: athenaeum#1135 already computed this
+    # verdict correctly at run time but never made it outlive the run —
+    # ``status.py`` cannot read a value that was never durable, only ever a
+    # log line. See ``run_summary_log.REFUSAL_FIELD`` for the durable form.
+    librarian_refusal: bool | None = None
+
     # Issue athenaeum#1184: cost/matches-per-file regression instrumentation.
     # ``total_matched`` sums ``ProcessingResult.matched`` (Tier-1 fan-out) across
     # every file the SYNCHRONOUS entity loop processed to completion.
@@ -3987,6 +4105,44 @@ class RunContext:
     total_matched: int = 0
     total_files_acted: int = 0
 
+    # Issue athenaeum#1291 AC3: sources that had pending intake this run and
+    # received ZERO slots in the max_files window. Empty on every run where
+    # the whole discovered set fit (and on merge-only/cluster-only runs, whose
+    # entity phase never fills a window at all). Rendered into the entity
+    # profile segment, from which the durable athenaeum#1102 ledger carries it
+    # forward as the state `emit_run_summary` computes a consecutive-run
+    # streak over.
+    starved_sources: list[str] = field(default_factory=list)
+
+    # Issue athenaeum#1295: per-source count of files this run actually
+    # PROCESSED (deleted + committed via `raw.path.unlink()`, mirroring
+    # `processed_count` itself) -- as opposed to `starved_sources` above,
+    # which counts scheduled SLOTS. Accumulated alongside `processed_count`
+    # in the entity loop's per-file success path; NOT incremented on
+    # `dry_run` (dry-run never unlinks a file, so it would otherwise read
+    # every source as processing zero files regardless of budget). Read
+    # against `pending_by_source`/`selected_by_source` (both local to
+    # `_run_entity_tier_phase`) once the loop ends to compute
+    # `stalled_sources` below.
+    processed_by_source: dict[str, int] = field(default_factory=dict)
+
+    # Issue athenaeum#1295: sources that had pending intake AND a nonzero
+    # slot count in this run's max_files window (so athenaeum#1291's
+    # zero-slot `starved_sources` does not name them) but for which ZERO
+    # files were actually processed -- the channel `round_robin_by_source`'s
+    # interleaving softens (a mid-window budget trip has touched every
+    # source) but cannot eliminate: a source whose slots consistently land
+    # just past the point `max_runtime`/`max_api_calls` stops the loop gets
+    # touched every run and advances on none of them. Deliberately a
+    # SEPARATE field from `starved_sources` -- see `STALL_FIELD`'s module
+    # docstring in run_summary_log.py for why the two must never be
+    # conflated. Empty on every run where the whole discovered set was
+    # processed within budget (and on merge-only/cluster-only/dry-run runs).
+    # Rendered into the entity profile segment (`STALL_FIELD`), from which
+    # the durable athenaeum#1102 ledger carries it forward as the state
+    # `emit_run_summary` computes its own consecutive-run streak over.
+    stalled_sources: list[str] = field(default_factory=list)
+
     # Issue athenaeum#1182: page-size-invariant suppressions. UNLIKE
     # total_matched (documented as synchronous-only above), this counter
     # covers BOTH transports: the synchronous entity loop (summed the same
@@ -3995,6 +4151,12 @@ class RunContext:
     # sync_merges finalize fallback in athenaeum.batch), via
     # BatchRunResult.oversize_suppressed / BatchCollectResult.oversize_suppressed.
     total_oversize_suppressed: int = 0
+    #: Issue athenaeum#1248: same cross-transport threading as
+    #: total_oversize_suppressed above, for the split/log_demote
+    #: dispositions — see ProcessingResult.oversize_split/
+    #: oversize_log_demoted's docstrings.
+    total_oversize_split: int = 0
+    total_oversize_log_demoted: int = 0
 
     def deadline_exceeded(self) -> bool:
         return self.run_deadline is not None and time.monotonic() >= self.run_deadline
@@ -4063,11 +4225,25 @@ class RunContext:
             # or dry-run) is exported as-is rather than coerced to ``False``,
             # so a consumer can tell "not zero-yield" from "not evaluated".
             self.out_run_stats["zero_yield"] = self.zero_yield_tripped
+            # Issue athenaeum#1283: the athenaeum#1135 zero-progress-refusal verdict,
+            # exported alongside ``zero_yield`` right above for the same
+            # reason — machine-detectable without parsing the
+            # ``librarian-run-degraded`` WARNING text. ``None`` (not yet
+            # evaluated) is exported as-is, mirroring ``zero_yield`` again.
+            self.out_run_stats["librarian_refusal"] = self.librarian_refusal
             # Issue athenaeum#1184: machine-detectable alongside the other run-state
             # flags above, rather than requiring a consumer to parse the
             # run-summary line for the fan-out/acted-files counts.
             self.out_run_stats["matched"] = self.total_matched
             self.out_run_stats["files_acted"] = self.total_files_acted
+            # Issue athenaeum#1291 AC3: sources that got zero slots this run,
+            # machine-detectable alongside the other run-state lists above
+            # rather than only as a token in the run-summary line.
+            self.out_run_stats["starved_sources"] = list(self.starved_sources)
+            # Issue athenaeum#1295: sources that got slots but processed zero
+            # files this run -- the AC1 signal, mirroring how
+            # `starved_sources` is exported immediately above.
+            self.out_run_stats["stalled_sources"] = list(self.stalled_sources)
 
     def emit_run_summary(self) -> None:
         if self.summary_emitted:
@@ -4092,6 +4268,26 @@ class RunContext:
         except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
             log.debug("run-summary: prompt_manifest_hash skipped: %s", exc)
             manifest_hash = None
+        # Issue athenaeum#1291 AC3: how many CONSECUTIVE runs each of this
+        # run's zero-slot sources has been starved, computed against the
+        # durable athenaeum#1102 ledger BEFORE this run's own record is
+        # appended below (so the run is never counted against itself — the
+        # same ordering `build_economics_and_alerts` relies on). Wrapped like
+        # the two blocks above: pure observability, never affects an outcome.
+        starved_streaks: dict[str, int] = {}
+        try:
+            starved_streaks = read_starvation_streaks(self.starved_sources)
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: starvation streaks skipped: %s", exc)
+        # Issue athenaeum#1295: the processing-stall channel's own streak,
+        # computed the same way and against the same pre-append ledger read
+        # as `starved_streaks` above -- a SEPARATE dict, from a SEPARATE
+        # field, so the two channels are never merged into one count.
+        stall_streaks: dict[str, int] = {}
+        try:
+            stall_streaks = read_stall_streaks(self.stalled_sources)
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: stall streaks skipped: %s", exc)
         log.info(
             "%s",
             _render_run_summary(
@@ -4099,8 +4295,44 @@ class RunContext:
                 schema_fragments=frag_state,
                 prompt_manifest_hash=manifest_hash,
                 zero_yield_consecutive=self.zero_yield_consecutive,
+                starved_streaks=starved_streaks,
+                stall_streaks=stall_streaks,
             ),
         )
+        # Surfaced on the SAME log.warning channel the zero-yield / stuck-file
+        # / economics-regression alarms already use, for the same reason: an
+        # operator's existing nightly log sweep catches it with no new channel
+        # to watch. This is the signal `beyond_window`'s bare count could not
+        # give — it names the source AND says the exclusion is not transient.
+        for source, streak in sorted(starved_streaks.items()):
+            if streak >= STARVATION_STREAK_THRESHOLD:
+                log.warning(
+                    "%s source=%s consecutive_runs=%d (threshold %d) — pending "
+                    "intake received zero slots in the max_files window on "
+                    "every one of those runs; issue athenaeum#1291",
+                    STARVATION_ALERT_PREFIX,
+                    source,
+                    streak,
+                    STARVATION_STREAK_THRESHOLD,
+                )
+        # Issue athenaeum#1295: the processing-stall alarm, on the SAME
+        # channel with a DISTINCT prefix (`STALL_ALERT_PREFIX`) so it is
+        # separately greppable from the athenaeum#1291 WARNING immediately
+        # above -- this one means "the scheduler gave it slots", the other
+        # means "the scheduler didn't".
+        for source, streak in sorted(stall_streaks.items()):
+            if streak >= STALL_STREAK_THRESHOLD:
+                log.warning(
+                    "%s source=%s consecutive_runs=%d (threshold %d) — pending "
+                    "intake received nonzero slots in the max_files window but "
+                    "zero files were processed on every one of those runs "
+                    "(a mid-window max_runtime/max_api_calls trip landed past "
+                    "this source's turn); issue athenaeum#1295",
+                    STALL_ALERT_PREFIX,
+                    source,
+                    streak,
+                    STALL_STREAK_THRESHOLD,
+                )
         # Issue athenaeum#1184: cost/matches-per-file regression economics,
         # computed from this run's counters and ratcheted against the
         # ledger's own trailing history BEFORE this run's record is
@@ -4146,9 +4378,46 @@ class RunContext:
         # but wrapped anyway — same defensive posture as the two `try`
         # blocks above: this is pure observability and must never affect a
         # run's outcome.
+        # Issue athenaeum#1283: the athenaeum#1135 zero-progress-refusal verdict,
+        # already computed once in ``_run_finalize_phase`` and stored on
+        # ``self.librarian_refusal`` (see that field's docstring) — threaded
+        # into the SAME durable record the economics/alerts above populate,
+        # rather than a second ledger or a new state file, so a later run
+        # (and ``status.py``, between runs) can see "this run refused to do
+        # any work on an exhausted budget" from the ledger alone.
+        #
+        # THREE states, not two — this is the load-bearing distinction a
+        # first cut of this issue got wrong (the record collapsed "never
+        # evaluated" and "evaluated, not a refusal" into the same omitted
+        # key, which made ``refusal_in_record`` misread an unevaluated
+        # record as a confirmed-clean one). ``self.librarian_refusal`` is
+        # ``None`` whenever THIS ``emit_run_summary`` call happens before
+        # ``_run_finalize_phase`` ever sets it — the real, non-hypothetical
+        # case is :meth:`stop_on_deadline`, which calls ``emit_run_summary``
+        # and returns ``EXIT_GRACEFUL_PARTIAL`` straight to ``run()``'s
+        # caller for a deadline trip in a pre-entity phase, never reaching
+        # ``_run_finalize_phase`` at all (see that method's own comment); the
+        # ``cluster_only``/``merge_only`` early-exit paths share the same
+        # property. Only ``None`` omits the ``refusal`` key entirely (the
+        # honest "cannot speak" absence); both ``True`` and ``False`` write
+        # a record — ``{"tripped": True, "reason": ..., "files": 0}`` or
+        # ``{"tripped": False}`` — so the reader can tell "evaluated and
+        # clean" from "never evaluated" instead of inferring the former from
+        # mere key absence. See :func:`~athenaeum.run_summary_log.
+        # refusal_in_record` for the reader side of this contract.
+        refusal: "dict[str, Any] | None" = None
+        if self.librarian_refusal is not None:
+            refusal = (
+                {"tripped": True, "reason": self.entity_exit_reason, "files": 0}
+                if self.librarian_refusal
+                else {"tripped": False}
+            )
         try:
             write_run_summary_record(
-                self.run_profile, economics=economics, alerts=econ_alerts
+                self.run_profile,
+                economics=economics,
+                alerts=econ_alerts,
+                refusal=refusal,
             )
         except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
             log.debug("run-summary: durable ledger write skipped: %s", exc)
@@ -4925,6 +5194,41 @@ def _run_intake_audit_phase(ctx: RunContext) -> None:
         )
 
 
+def _run_raw_retention_phase(ctx: RunContext) -> None:
+    """Configurable raw-intake size ceilings, per-file and per-source
+    aggregate (issue athenaeum#1269).
+
+    Mechanical, LLM-free, cheap (one filesystem walk of `raw_root`, skipped
+    entirely when both thresholds are unset — see
+    :func:`athenaeum.intake.check_raw_retention`) — runs in the same
+    deterministic, unbudgeted phase family as `_run_intake_audit_phase`
+    right before it. Ordering relative to the other deterministic phases is
+    inert: this phase only ever reads and reports, it cannot affect what
+    any other phase claims or writes, and nothing another phase does
+    changes what it counts (grouped here purely because it is the same
+    class of read-only audit pass over `raw_root` the intake audit is).
+
+    DETECT AND REPORT ONLY, never act — the load-bearing constraint this
+    issue's design settled: crossing either configured ceiling never
+    blocks intake, moves a file, or writes an exempt row. It only tallies
+    `raw-oversize-file` / `raw-oversize-source` and names the offending
+    paths/sources in `ctx.raw_retention_summary`, mirroring
+    `_run_intake_audit_phase`'s summary-dict convention. See
+    `docs/shape-rules.md` §3.5 for the full rationale (size is a reported
+    condition, never a shape-rule match predicate).
+    """
+    summary = check_raw_retention(ctx.raw_root, ctx.config)
+    ctx.raw_retention_summary = summary
+    if summary["raw-oversize-file"] or summary["raw-oversize-source"]:
+        log.warning(
+            "raw-retention: %d oversize file(s) %s, %d oversize source(s) %s",
+            summary["raw-oversize-file"],
+            [f["path"] for f in summary["oversize_files"]],
+            summary["raw-oversize-source"],
+            [s["source"] for s in summary["oversize_sources"]],
+        )
+
+
 def _run_rule_proposal_phase(ctx: RunContext) -> None:
     """Rule-proposal detector wiring (issue athenaeum#1063), closing the
     athenaeum#905 (detector) / athenaeum#921 (applier) loop — see
@@ -5657,6 +5961,8 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
     ctx.total_degraded += outcome.degraded
     ctx.total_truncated += outcome.truncated
     ctx.total_oversize_suppressed += outcome.oversize_suppressed  # issue athenaeum#1182
+    ctx.total_oversize_split += outcome.oversize_split  # issue athenaeum#1248
+    ctx.total_oversize_log_demoted += outcome.oversize_log_demoted  # issue athenaeum#1248
     ctx.total_type_rejected += outcome.type_rejected  # issue athenaeum#1196
     ctx.collected_refs = list(outcome.collected_refs)
     ctx.batch_reconciliation = dict(outcome.reconciliation)
@@ -5722,6 +6028,16 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         # Issue athenaeum#1143: a raw file held by an in-flight batch's lease is
         # NOT claimable — re-claiming it would re-submit work already paid for.
         _apply_pending_batch_leases(ctx)
+        # Issue athenaeum#1295: bound here (empty), OUTSIDE the `if
+        # ctx.raw_files` / `else` split below, so the stalled-sources
+        # computation further down — which runs UNCONDITIONALLY alongside
+        # the rest of the phase-profile epilogue, exactly like
+        # `_entity_calls`/`ctx.entity_exit_reason` do — never hits an
+        # UnboundLocalError on the "no raw files this run" path. Overwritten
+        # with the real per-source counts inside the `else` branch when
+        # there IS intake to schedule.
+        pending_by_source: Counter = Counter()
+        selected_by_source: Counter = Counter()
         if not ctx.raw_files:
             # An empty entity intake is no longer a whole-run early return
             # (issue athenaeum#461): auto-memory compiles independently of raw
@@ -5755,18 +6071,76 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     total_intake,
                 )
 
+            # Issue athenaeum#1291: per-source pending counts, snapshotted
+            # BEFORE the window is filled, so "had pending intake and got zero
+            # slots" is answerable below against the full discovered set.
+            pending_by_source = Counter(raw.source for raw in ctx.raw_files)
             if total_intake > ctx.max_files:
                 log.info(
                     "Budget cap: processing %d of %d files this run",
                     ctx.max_files,
                     total_intake,
                 )
-                ctx.raw_files = ctx.raw_files[: ctx.max_files]
+                # Issue athenaeum#1291: fill the window ROUND-ROBIN across
+                # sources instead of head-truncating a list that discovery
+                # grouped by source name. Head-truncation could only advance
+                # past a source once that source's own backlog fell below the
+                # cap, so a large, alphabetically-early, continuously-refilled
+                # source starved every later source indefinitely.
+                #
+                # The athenaeum#900 caller-scoped prefix is NOT subject to the
+                # round-robin: those files are pinned at the head by contract
+                # (a session-scoped compile must compile what that session just
+                # wrote), so fair scheduling applies to the REMAINING budget
+                # only. `n_scoped` is clamped to the window because a caller
+                # naming more files than `max_files` still gets exactly
+                # `max_files` of them — the pre-athenaeum#1291 head-truncation
+                # behaviour for that case, unchanged.
+                #
+                # Round-robin alone bounds the wait only while the window is
+                # at least as wide as the number of sources; below that, a
+                # FIXED turn order starves the same trailing sources every
+                # run — sort-position starvation again, at a different
+                # threshold. So the turn order ROTATES, aged by how long each
+                # source has been waiting: `read_combined_starvation_priority`
+                # returns the previous run's zero-slot sources (athenaeum#1291)
+                # longest-streak-first, THEN (issue athenaeum#1295 Plan step
+                # 3) any source that got slots but processed zero files,
+                # longest-STALL-streak-first, appended after -- so a source
+                # named only by the newer channel still ages ahead of plain
+                # discovery order without disturbing the athenaeum#1291
+                # channel's own rank or bound (see
+                # `combined_starvation_priority`'s docstring). Read from the
+                # athenaeum#1102 ledger the entity phase already writes
+                # (fail-open to `[]`), so no new state file.
+                pinned = ctx.raw_files[: min(n_scoped, ctx.max_files)]
+                ctx.raw_files = pinned + round_robin_by_source(
+                    ctx.raw_files[n_scoped:],
+                    ctx.max_files - len(pinned),
+                    priority_sources=read_combined_starvation_priority(),
+                )
             # Files discovery found but the max_files window excluded from
             # this run entirely. Counted into the deferred manifest on a
             # budget trip so the manifest reports the TRUE backlog, not just
             # the in-window remainder.
             ctx.beyond_window = total_intake - len(ctx.raw_files)
+            # Issue athenaeum#1291 AC3: a source that HAD pending intake and
+            # got zero slots this run. Recorded per run (and carried into the
+            # durable athenaeum#1102 ledger via the entity profile segment
+            # below) so `emit_run_summary` can turn it into a consecutive-run
+            # streak — the thing `beyond_window`'s bare count could never say.
+            selected_by_source = Counter(raw.source for raw in ctx.raw_files)
+            ctx.starved_sources = sorted(
+                source
+                for source in pending_by_source
+                if not selected_by_source.get(source)
+            )
+            if ctx.starved_sources:
+                log.info(
+                    "Intake window: %d source(s) received zero slots this run: %s",
+                    len(ctx.starved_sources),
+                    ", ".join(ctx.starved_sources),
+                )
 
             valid_types, valid_tags, valid_access = _resolve_schema_lists(
                 ctx.wiki_root
@@ -5949,6 +6323,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.total_oversize_suppressed = (
                         outcome.oversize_suppressed
                     )  # issue athenaeum#1182
+                    ctx.total_oversize_split = outcome.oversize_split  # issue athenaeum#1248
+                    ctx.total_oversize_log_demoted = (
+                        outcome.oversize_log_demoted
+                    )  # issue athenaeum#1248
                     ctx.total_type_rejected = outcome.type_rejected  # issue athenaeum#1196
                     ctx.failed_files = outcome.failed_refs
                     ctx.deferred_refs = outcome.deferred_refs
@@ -6436,6 +6814,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         ctx.total_oversize_suppressed += getattr(
                             result, "oversize_suppressed", 0
                         )
+                        # Issue athenaeum#1248: same getattr-tolerance rationale.
+                        ctx.total_oversize_split += getattr(result, "oversize_split", 0)
+                        ctx.total_oversize_log_demoted += getattr(
+                            result, "oversize_log_demoted", 0
+                        )
                         if result.created or result.updated:
                             ctx.total_files_acted += 1
 
@@ -6454,6 +6837,13 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             raw.path.unlink()
                             log.info("  Deleted: %s", raw.path)
                             ctx.processed_count += 1
+                            # Issue athenaeum#1295: per-source twin of
+                            # `processed_count` above, read back once the loop
+                            # ends to compute `stalled_sources` (pending
+                            # intake + nonzero slots + zero processed here).
+                            ctx.processed_by_source[raw.source] = (
+                                ctx.processed_by_source.get(raw.source, 0) + 1
+                            )
                             # Issue athenaeum#663: this file made progress — drop any
                             # failure history so a future failure starts a fresh
                             # consecutive count rather than inheriting a stale one.
@@ -6622,6 +7012,33 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         # run_profile dict) so the finalize phase's zero-progress-refusal
         # predicate can read it without re-deriving the same classification.
         ctx.entity_exit_reason = _entity_exit_reason
+        # Issue athenaeum#1295: the processing-stall signal, computed now that
+        # the per-file loop above has finished and `ctx.processed_by_source`
+        # is final for this run. `pending_by_source` (before the window was
+        # filled) and `selected_by_source` (the scheduled window, i.e. this
+        # run's per-source SLOT counts) were both captured earlier in this
+        # same function, mirroring how `starved_sources` reads them. Guarded
+        # on `not ctx.dry_run`: a dry run never unlinks a file, so
+        # `processed_by_source` would otherwise stay empty for every source
+        # regardless of budget and every slotted source would misreport as
+        # stalled.
+        ctx.stalled_sources = (
+            sorted(
+                source
+                for source in pending_by_source
+                if selected_by_source.get(source)
+                and not ctx.processed_by_source.get(source)
+            )
+            if not ctx.dry_run
+            else []
+        )
+        if ctx.stalled_sources:
+            log.info(
+                "Intake window: %d source(s) received slots but processed "
+                "zero files this run: %s",
+                len(ctx.stalled_sources),
+                ", ".join(ctx.stalled_sources),
+            )
         ctx.run_profile.append(
             (
                 "entity",
@@ -6637,6 +7054,35 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     "matched": ctx.total_matched,
                     "reason": _entity_exit_reason,
                     "out_tok_per_call": _entity_out_tok_per_call,
+                    # athenaeum#1291 AC3: sources with pending intake that got
+                    # zero slots in this run's window, as one comma-joined
+                    # token (the `reconciled` convention below). Rendered only
+                    # when non-empty, so a run that starved nobody has an
+                    # unchanged summary line — and, because the durable
+                    # athenaeum#1102 ledger copies every phase field through,
+                    # this IS the persisted state the consecutive-run streak
+                    # in `emit_run_summary` is computed from. No second state
+                    # file.
+                    **(
+                        {STARVATION_FIELD: ",".join(ctx.starved_sources)}
+                        if ctx.starved_sources
+                        else {}
+                    ),
+                    # athenaeum#1295: sources with pending intake and nonzero
+                    # slots this run (distinct from STARVATION_FIELD, which
+                    # is zero-slot sources) that nonetheless had zero files
+                    # actually PROCESSED -- a mid-window max_runtime/
+                    # max_api_calls trip stopped the loop before their slot
+                    # was reached. Same "render only when non-empty" /
+                    # "durable via the ledger's verbatim phase-field copy"
+                    # convention as STARVATION_FIELD immediately above; never
+                    # conflated with it -- see STALL_FIELD's module docstring
+                    # in run_summary_log.py.
+                    **(
+                        {STALL_FIELD: ",".join(ctx.stalled_sources)}
+                        if ctx.stalled_sources
+                        else {}
+                    ),
                     # athenaeum#1144 AC5: files whose batch is still running, left for
                     # a later run to collect. Rendered only when non-zero so a
                     # clean run's summary line is unchanged, matching the
@@ -6687,6 +7133,23 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     **(
                         {"oversize_suppressed": ctx.total_oversize_suppressed}
                         if ctx.total_oversize_suppressed
+                        else {}
+                    ),
+                    # athenaeum#1248: oversize pages the gate actually SPLIT (into a
+                    # hub + linked atomic pages) or DEMOTED to a log this run —
+                    # kept as separate fields from oversize_suppressed above so
+                    # a run summary makes clear which disposition fired for
+                    # each page, never conflating "escalated for a human" with
+                    # "already restructured automatically". Only rendered when
+                    # non-zero, same convention.
+                    **(
+                        {"oversize_split": ctx.total_oversize_split}
+                        if ctx.total_oversize_split
+                        else {}
+                    ),
+                    **(
+                        {"oversize_log_demoted": ctx.total_oversize_log_demoted}
+                        if ctx.total_oversize_log_demoted
                         else {}
                     ),
                     # athenaeum#1171: tier-3 create responses whose leading
@@ -7002,6 +7465,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     # RunDeadlineExceeded, caught here.
     _delta_taken_out: dict[str, bool] = {}
     _merge_stats: dict = {}  # issue athenaeum#464
+    _embedder_counts: dict[str, int] = {}  # issue athenaeum#1279
     _auto_memory_start = time.monotonic()  # issue athenaeum#464
     try:
         ctx.merged_entries = _compile_auto_memory(
@@ -7025,13 +7489,17 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             heartbeat=ctx.heartbeat,  # issue athenaeum#762: tick run-lock heartbeat in C4
             contradiction_sweep_since=contradiction_sweep_since,  # issue athenaeum#909
             force_full_contradiction_sweep=ctx.full_contradiction_sweep,  # athenaeum#909
+            out_embedder_counts=_embedder_counts,  # issue athenaeum#1279
         )
     except RunDeadlineExceeded as exc:
         # Issue athenaeum#464: record the auto-memory phase's partial elapsed
         # time (and whatever detector/resolver counts landed in
         # ``_merge_stats`` before the trip — usually none, since the
         # merge call raised, but this stays correct either way)
-        # before the deadline-stop path emits the summary.
+        # before the deadline-stop path emits the summary. The C2 cluster
+        # pass (and therefore ``_embedder_counts``) always runs BEFORE C3/C4
+        # merge, so a deadline trip here still reports real embedder counts,
+        # not zeros (issue athenaeum#1279).
         ctx.run_profile.append(
             (
                 "auto-memory",
@@ -7045,6 +7513,17 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                     "clusters_merged": _merge_stats.get("entries_merged", 0),
                     "escalations": _merge_stats.get(
                         "escalations_written", 0
+                    ),
+                    # Issue athenaeum#1279: per-file embedder provenance this run's
+                    # C2 cluster pass resolved — see
+                    # ``clusters.cluster_auto_memory_files``'s
+                    # ``out_embedder_counts`` docstring. Always rendered
+                    # (defaulting to 0), mirroring every other field above.
+                    "embed_chromadb": _embedder_counts.get(
+                        EMBEDDER_CHROMADB_DEFAULT, 0
+                    ),
+                    "embed_fallback": _embedder_counts.get(
+                        EMBEDDER_FALLBACK_HASHING, 0
                     ),
                     "reason": "deadline",  # issue athenaeum#1102 AC1
                 },
@@ -7063,6 +7542,15 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 ),
                 "clusters_merged": _merge_stats.get("entries_merged", 0),
                 "escalations": _merge_stats.get("escalations_written", 0),
+                # Issue athenaeum#1279: per-file embedder provenance this run's C2
+                # cluster pass resolved — see the deadline-trip branch above
+                # for the full rationale.
+                "embed_chromadb": _embedder_counts.get(
+                    EMBEDDER_CHROMADB_DEFAULT, 0
+                ),
+                "embed_fallback": _embedder_counts.get(
+                    EMBEDDER_FALLBACK_HASHING, 0
+                ),
                 # Issue athenaeum#1177 (AC3): no longer unconditionally
                 # "completed" -- see ``_auto_memory_reason``.
                 "reason": _auto_memory_reason(_merge_stats),
@@ -7395,6 +7883,24 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         - len(ctx.failed_files)
         - len(ctx.in_flight_refs),
     ) + len(ctx.collected_refs)
+
+    # Issue athenaeum#1283: evaluate the athenaeum#1135 zero-progress-refusal
+    # predicate ONCE, here — ``entity_exit_reason`` and ``files_processed_count``
+    # (just above) are both final at this point, the same point the athenaeum#899
+    # zero-yield predicate is evaluated a few lines below — and store the
+    # verdict on ``ctx`` so the ``emit_run_summary`` ledger write below, the
+    # ``librarian-run-degraded`` marker line, and the ``EXIT_LIBRARIAN_REFUSAL``
+    # exit-code check (both further down this function) all read this SAME
+    # stored verdict rather than each calling ``_librarian_run_refusal_tripped``
+    # again. Deliberately unconditional (not gated on ``ctx.dry_run`` the way
+    # the zero-yield block below is) — ``_librarian_run_refusal_tripped`` reads
+    # only ``entity_exit_reason``/``files_processed_count``, neither of which
+    # depends on whether raw files were actually unlinked this run, so the
+    # verdict is meaningful on a dry run too and this preserves the
+    # pre-athenaeum#1283 behavior of the (formerly marker-line-only) call site,
+    # which never checked ``dry_run`` either.
+    ctx.librarian_refusal = _librarian_run_refusal_tripped(ctx)
+
     if not ctx.dry_run:
         # Issue athenaeum#568 (H1): do NOT discard record_spend's return. When this run
         # actually spent budget and the ledger is enabled, a False return means
@@ -7651,7 +8157,12 @@ def _run_finalize_phase(ctx: RunContext) -> int:
     # a few hundred lines up). Deliberately never reused or overloaded; a
     # cron wrapper greps the FULL ``librarian-run-degraded`` token, not the
     # substring ``degraded``.
-    _librarian_refusal = _librarian_run_refusal_tripped(ctx)
+    # Issue athenaeum#1283: read the verdict ``_run_finalize_phase`` already
+    # stored on ``ctx`` (right after ``files_processed_count`` became final,
+    # well above this point and before ``emit_run_summary`` — see
+    # ``ctx.librarian_refusal``'s docstring) rather than calling
+    # ``_librarian_run_refusal_tripped`` a second time. Single verdict site.
+    _librarian_refusal = ctx.librarian_refusal
     if _librarian_refusal:
         _spend_window = _format_budget_window_spend(ctx)
         log.error(
@@ -7969,6 +8480,14 @@ def run(
     # since none of them can affect which raw files are UNRECOGNISED (they
     # only ever act on files those phases' OWN discovery already claims).
     _run_intake_audit_phase(ctx)
+
+    # Phase: configurable raw-intake size ceilings, per-file and per-source
+    # aggregate (issue athenaeum#1269) -- deterministic, LLM-free, unbudgeted,
+    # same read-only-audit-of-raw_root family as intake-audit above and
+    # ordered right after it for that reason alone; detect-and-report only,
+    # never blocks intake, moves a file, or writes an exempt row (see
+    # `_run_raw_retention_phase`'s docstring).
+    _run_raw_retention_phase(ctx)
 
     # Phase: field-correction fast path (issue athenaeum#797) -- deterministic,
     # LLM-free, own runtime share. Ordered here (after the deadline is armed,
