@@ -209,7 +209,24 @@ def entity_phase_wall_clock_per_file(
 #: Ledger schema version — bump additively if the record shape changes.
 #: v2 (issue athenaeum#1184) adds the optional ``economics`` and ``alerts`` keys;
 #: both are additive and a v1 reader that ignores unknown keys is unaffected.
-RUN_SUMMARY_LEDGER_VERSION = 2
+#: v3 (issue athenaeum#1283) adds the optional ``refusal`` key — see
+#: :func:`build_run_summary_ledger_record`'s docstring for its shape and
+#: omission rule, and :func:`refusal_in_record` for why the version bump
+#: itself matters here (not merely additive bookkeeping): a record written
+#: under v1/v2 predates the athenaeum#1135 refusal verdict even existing on
+#: ``RunContext``, so its ABSENT ``refusal`` key means "this record cannot
+#: speak to whether that run was a refusal" — that is true of EVERY v1/v2
+#: record, unconditionally, regardless of the key's presence in a v3+
+#: record. A v3+ record's own ABSENT ``refusal`` key carries a DIFFERENT,
+#: narrower meaning: the verdict was never evaluated for that particular
+#: run (e.g. a wall-clock deadline trip in a pre-entity phase, handled by
+#: ``RunContext.stop_on_deadline``, which emits a summary and returns
+#: before ``_run_finalize_phase`` -- where the verdict is computed -- ever
+#: runs) -- also "cannot speak", just for a run-shape reason rather than a
+#: schema-age one. Only a v3+ record whose ``refusal`` key IS present
+#: speaks to the verdict at all, via that dict's own ``tripped`` field --
+#: see :func:`refusal_in_record`, the one place all three cases are read.
+RUN_SUMMARY_LEDGER_VERSION = 3
 
 #: Ledger filename under the cache dir (mirrors ``athenaeum.spend.LEDGER_FILENAME``).
 RUN_SUMMARY_LEDGER_FILENAME = "run_summary.jsonl"
@@ -238,6 +255,7 @@ def build_run_summary_ledger_record(
     ts: datetime | None = None,
     economics: dict[str, Any] | None = None,
     alerts: "list[dict[str, Any]] | None" = None,
+    refusal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one durable ledger record from a ``run()`` profile.
 
@@ -260,6 +278,29 @@ def build_run_summary_ledger_record(
     that has nothing to report (e.g. a merge-only/cluster-only run that never
     reaches the entity phase) writes a record identical in shape to a
     pre-athenaeum#1184 one.
+
+    *refusal* (issue athenaeum#1283, schema v3) is the optional athenaeum#1135
+    zero-progress-refusal verdict, built by the caller
+    (:meth:`athenaeum.librarian.RunContext.emit_run_summary`) from the SAME
+    ``ctx.librarian_refusal`` verdict ``_run_finalize_phase`` already
+    computed once — a small JSON-native dict keyed on a ``tripped`` bool:
+    ``{"tripped": True, "reason": ctx.entity_exit_reason, "files": 0}`` when
+    the run WAS a refusal, ``{"tripped": False}`` when it was evaluated and
+    was NOT. Pass ``None`` (the default) ONLY when the verdict was never
+    evaluated for this run at all (``ctx.librarian_refusal is None`` —
+    e.g. a wall-clock deadline trip via ``RunContext.stop_on_deadline``,
+    which calls this before ``_run_finalize_phase`` ever runs); that is the
+    one case that omits the ``refusal`` key entirely, mirroring the
+    ``economics``/``alerts`` "omit, don't null" convention immediately
+    above for the SAME reason (nothing to report) but a DIFFERENT trigger
+    (unevaluated, not merely absent/zero) — an evaluated-clean run still
+    writes ``{"tripped": False}``, not an omission, precisely so a reader
+    cannot mistake "never evaluated" for "confirmed clean". This DOES mean
+    a clean run's record is no longer byte-identical in shape to a
+    pre-athenaeum#1283 one (it gains a `{"tripped": false}` refusal block) —
+    a deliberate trade of that stability for an honest three-state record;
+    the version bump already signals the shape changed. See
+    :func:`refusal_in_record` for the reader that consumes all three states.
     """
     stamp = (ts if ts is not None else datetime.now(tz=timezone.utc)).astimezone(
         timezone.utc
@@ -278,6 +319,8 @@ def build_run_summary_ledger_record(
         record["economics"] = economics
     if alerts:
         record["alerts"] = alerts
+    if refusal:
+        record["refusal"] = refusal
     return record
 
 
@@ -289,6 +332,7 @@ def write_run_summary_record(
     ts: datetime | None = None,
     economics: dict[str, Any] | None = None,
     alerts: "list[dict[str, Any]] | None" = None,
+    refusal: dict[str, Any] | None = None,
 ) -> bool:
     """Append one durable run-summary record. Best-effort (issue athenaeum#1102 AC2).
 
@@ -301,14 +345,15 @@ def write_run_summary_record(
     is a deliberate, narrower gate (an empty record carries no aggregable
     information). Returns ``True`` when a record was written.
 
-    *economics* / *alerts* (issue athenaeum#1184) pass straight through to
+    *economics* / *alerts* (issue athenaeum#1184) and *refusal* (issue
+    athenaeum#1283) pass straight through to
     :func:`build_run_summary_ledger_record` — see its docstring.
     """
     if not profile:
         return False
     try:
         record = build_run_summary_ledger_record(
-            profile, ts=ts, economics=economics, alerts=alerts
+            profile, ts=ts, economics=economics, alerts=alerts, refusal=refusal
         )
         target = (
             ledger_path
@@ -864,3 +909,184 @@ def read_starvation_priority(
     except Exception as exc:  # noqa: BLE001 — observability must never raise
         log.debug("run-summary: starvation priority read skipped: %s", exc)
         return []
+
+
+# ---------------------------------------------------------------------------
+# Zero-progress-refusal streak (issue athenaeum#1283)
+# ---------------------------------------------------------------------------
+#
+# athenaeum#1135 already detects, at run time, a run that stopped early for a
+# resource reason (budget/deadline/spend-ceiling — see
+# ``librarian._LIBRARIAN_EARLY_STOP_REASONS``) and committed nothing, and
+# logs it loudly (the ``librarian-run-degraded`` marker line, plus a non-zero
+# ``EXIT_LIBRARIAN_REFUSAL`` exit code). But that verdict died with the
+# process: nothing BETWEEN runs could see it, so ``athenaeum status`` read
+# healthy straight through the exact incident that motivated athenaeum#1135 in the
+# first place — the athenaeum#899 zero-yield counter it relies on excludes this
+# case by design (it requires ``api_calls > 0``, and a budget-exhausted run
+# makes zero calls). This section closes that gap the same way athenaeum#1291's
+# source-starvation streak (above) closed an analogous one: by computing the
+# missing "how many runs in a row" figure from the SAME athenaeum#1102 ledger,
+# rather than adding a second piece of persisted state.
+# ``RunContext.emit_run_summary`` (``librarian.py``) already writes the
+# athenaeum#1135 verdict into every record's optional ``refusal`` field (see
+# :func:`build_run_summary_ledger_record`'s *refusal* parameter), so the
+# streak is just "how many consecutive trailing records also carry it".
+
+#: The ledger record key carrying this run's athenaeum#1135 refusal verdict —
+#: see :func:`build_run_summary_ledger_record`'s *refusal* parameter.
+REFUSAL_FIELD = "refusal"
+
+#: Stable, greppable line prefix for the ``status.py`` render (issue
+#: athenaeum#1283) — mirrors :data:`STARVATION_ALERT_PREFIX` /
+#: :data:`REGRESSION_ALERT_PREFIX` above, so an operator's existing
+#: log/status sweep catches this without a new channel to watch. Unlike
+#: those two, this fires at streak 1 — see ``status.format_status``: a
+#: single refusal is already "status must not read healthy", not a
+#: threshold alarm.
+REFUSAL_ALERT_PREFIX = "librarian-run-refusal"
+
+
+def refusal_in_record(record: dict[str, Any]) -> bool | None:
+    """This record's athenaeum#1135 refusal verdict — THREE outcomes, not two.
+
+    This is the load-bearing distinction the whole streak counter below
+    depends on. The ``refusal`` field, when present, is itself a small dict
+    keyed on ``tripped`` (see :func:`build_run_summary_ledger_record`'s
+    *refusal* parameter) — this function is the one place that dict gets
+    unpacked into the bool a reader actually wants:
+
+    * ``True`` — this run's ``refusal`` field is present and its
+      ``tripped`` sub-field is truthy: the verdict WAS evaluated and it WAS
+      a refusal.
+    * ``False`` — this run's ``refusal`` field is present and its
+      ``tripped`` sub-field is falsy: the verdict WAS evaluated (by a
+      version of the code new enough to record it) and it was NOT a
+      refusal.
+    * ``None`` — the verdict CANNOT be read from this record, for either of
+      two distinct reasons, both collapsed to the same honest answer:
+
+      1. This record's ``v`` predates 3 (or ``v`` is missing/unparseable,
+         e.g. a hand-edited or torn line that still parsed as JSON) — a
+         record written before athenaeum#1283 landed cannot speak to whether
+         that run was a refusal at all: the athenaeum#1135 verdict existed at
+         run time (as a log line only), but nothing wrote it into the
+         ledger.
+      2. This record's ``v`` is ``>= 3`` but its ``refusal`` field is
+         MISSING (or not a dict) — the schema supports the field, but
+         ``RunContext.librarian_refusal`` was still ``None`` (never
+         evaluated) for THIS particular run when
+         :meth:`~athenaeum.librarian.RunContext.emit_run_summary` wrote it.
+         Not hypothetical: :meth:`~athenaeum.librarian.RunContext.
+         stop_on_deadline` (a wall-clock deadline trip in a pre-entity
+         phase) calls ``emit_run_summary`` and returns straight to
+         ``run()``'s caller BEFORE ``_run_finalize_phase`` — where the
+         verdict is computed — ever runs; the ``cluster_only``/
+         ``merge_only`` early-exit paths share the same property.
+
+      Never collapse either case into ``False`` — doing so would silently
+      treat a pre-athenaeum#1283 record, OR a run whose verdict was simply
+      never reached, as "confirmed not a refusal": exactly the
+      false-negative this whole issue is about, just moved one layer down
+      into the reader (or the writer) instead of being visible at the
+      source.
+    """
+    raw_version = record.get("v")
+    try:
+        version = int(raw_version)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if version < 3:
+        return None
+    detail = record.get(REFUSAL_FIELD)
+    if not isinstance(detail, dict):
+        # Schema supports the field (v >= 3), but this run's verdict was
+        # never evaluated -- e.g. the stop_on_deadline path named above.
+        # "Cannot speak", the same honest answer as the pre-v3 case, just a
+        # different reason.
+        return None
+    return bool(detail.get("tripped"))
+
+
+def refusal_streak(history: "list[dict[str, Any]]") -> int:
+    """Consecutive TRAILING refusal runs in *history* (oldest-first, exactly
+    what :func:`read_run_summary_ledger` returns).
+
+    Walks *history* from the newest record backwards, counting while
+    :func:`refusal_in_record` reads ``True``, and STOPS — rather than
+    skipping past — the moment it reads anything other than ``True`` (a
+    genuine ``False`` clean run, OR a ``None`` that cannot speak to whether
+    it was a refusal: the streak MIGHT continue further back, but this
+    instrument has no way to know, so it reports only the confirmed
+    trailing run count rather than guessing through the gap). No logic
+    change was needed here to fix athenaeum#1283's writer-side bug (the
+    record-shape fix that made an unevaluated run distinguishable from an
+    evaluated-clean one lives in :func:`build_run_summary_ledger_record` /
+    :func:`refusal_in_record`); this function already stopped on anything
+    that wasn't ``True``, so it was already correct once its input became
+    honest.
+
+    ``None`` now has TWO distinct sources, not one, and this function
+    treats both identically (stop, don't bridge past):
+
+    1. A ``v < 3`` record — predates the ``refusal`` field's existence.
+    2. A ``v >= 3`` record whose verdict was simply never evaluated for that
+       run (e.g. a wall-clock deadline trip via ``RunContext.
+       stop_on_deadline``, which emits a summary before
+       ``_run_finalize_phase`` -- where the verdict is computed -- ever
+       runs) — see :func:`refusal_in_record`'s docstring for the concrete
+       code path.
+
+    This is where :func:`refusal_in_record`'s three-state design pays for
+    itself regardless of which ``None`` source is in play: a naive
+    two-state reader would either (a) treat an ambiguous record as "not a
+    refusal" and silently truncate a real streak the moment it hits one, or
+    (b) treat it as "was a refusal" and fabricate one that never happened.
+    Both are wrong; stopping at the ambiguous record is the only honest
+    answer — it under-reports a streak that truly extends past the
+    ambiguous point, never over-reports one.
+    """
+    streak = 0
+    for record in reversed(history):
+        if refusal_in_record(record) is not True:
+            break
+        streak += 1
+    return streak
+
+
+def read_refusal_streak(
+    *,
+    cache_dir: Path | None = None,
+    ledger_path: Path | None = None,
+) -> "tuple[int, dict[str, Any] | None]":
+    """:func:`refusal_streak` against the durable ledger, best-effort, paired
+    with the most recent run's ``refusal`` detail dict.
+
+    Mirrors every other convenience reader in this module's fail-open
+    contract: a missing or corrupt ledger reads as "no history"
+    (``(0, None)``), and nothing here may ever raise into a caller —
+    ``status.py`` above all, which is documented read-only/side-effect-free
+    (see its module docstring's factoring rule).
+
+    Returns ``(streak, most_recent_refusal_detail)``: *streak* is
+    :func:`refusal_streak`'s count; *most_recent_refusal_detail* is the
+    newest record's ``refusal`` dict (``{"reason": ..., "files": 0}``) when
+    ``streak > 0``, else ``None`` — so a single call gives a caller (e.g.
+    ``status.format_status``) both "N consecutive refusals" and the reason
+    to name, without a second ledger read.
+    """
+    try:
+        target = (
+            ledger_path
+            if ledger_path is not None
+            else default_run_summary_ledger_path(cache_dir)
+        )
+        history = read_run_summary_ledger(target)
+    except Exception as exc:  # noqa: BLE001 — observability must never raise
+        log.debug("run-summary: refusal streak read skipped: %s", exc)
+        return (0, None)
+    streak = refusal_streak(history)
+    if streak <= 0 or not history:
+        return (0, None)
+    detail = history[-1].get(REFUSAL_FIELD)
+    return (streak, detail if isinstance(detail, dict) else None)

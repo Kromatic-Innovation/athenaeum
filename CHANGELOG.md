@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`athenaeum status` no longer reads healthy after a zero-progress budget
+  refusal (athenaeum#1283).** athenaeum#1135 already detected, at run time, a run
+  that stopped early for a resource reason (budget / deadline / spend ceiling)
+  and committed nothing — it logs `librarian-run-degraded` and exits
+  `EXIT_LIBRARIAN_REFUSAL`. But that verdict died with the process, so nothing
+  *between* runs could see it, and the one counter `athenaeum status` did
+  surface — athenaeum#899's zero-yield streak — excludes this case **by
+  design**: it requires `api_calls > 0` (or `attempted_calls > 0`), and a run
+  refused on an exhausted budget makes zero calls. Status therefore read clean
+  straight through the exact incident athenaeum#1135 was filed about. The
+  refusal verdict is now computed once, at a single site in
+  `_run_finalize_phase`, and persisted through the existing athenaeum#1102
+  run-summary ledger (schema v3, new optional `refusal` field) — no new state
+  file — from which `status` reads a consecutive-refusal streak and renders a
+  `librarian-run-refusal:` line naming the reason. The line fires at a streak
+  of **one**: a single run that refused all work must not read as healthy, so
+  this is deliberately not a threshold alarm like the athenaeum#1291 starvation
+  warning. Run behaviour, the athenaeum#899 predicate, and the athenaeum#1135
+  exit codes and marker line are all unchanged — this makes an
+  already-correct verdict outlive the run that reached it.
+  Because the field must distinguish three states, a v3 record now carries
+  `refusal` whenever the verdict was *evaluated* (`{"tripped": false}` on a
+  clean run), and omits it only when the verdict was never reached — e.g. the
+  `stop_on_deadline` path, which emits its summary and returns before
+  `_run_finalize_phase` runs. Readers treat both an omitted field and a pre-v3
+  record as "cannot speak", never as "confirmed clean"; the streak stops at
+  such a record rather than counting through it, so it can under-report a real
+  streak but never fabricate one.
+
 - **The shape-rule disposition log no longer records the 99.8% that nothing
   reads (athenaeum#1274).** `wiki/_shape_rule_dispositions.jsonl` reached 341 MB
   / 1,488,689 rows in 9 days on a real deployment, of which 1,485,942 (99.8%)
