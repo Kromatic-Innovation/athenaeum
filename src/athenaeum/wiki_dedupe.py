@@ -95,6 +95,20 @@ Design (see PR body for the full rationale):
 - Idempotency is the ledger's: :func:`athenaeum.comparator.record_comparison`
   skips a pair whose verdict is already FRESH before spending an LLM call —
   this module does not re-derive that check.
+- Issue athenaeum#1252 (residual over-clustering after athenaeum#1140):
+  :func:`discover_wiki_dedupe_candidates` also honors an optional
+  operator-configured body-length floor
+  (:func:`athenaeum.config.resolve_wiki_dedupe_min_body_chars`, DEFAULT 0 =
+  off). Rationale: athenaeum#1140's chunk-and-mean-pool fix only dilutes a
+  structurally uniform lede's weight in a page's pooled vector when there
+  is a SECOND chunk to average against it — a page short enough to fit in
+  one :data:`_CHUNK_CHARS` chunk gets a mean-pool-of-one, a mathematical
+  no-op versus the pre-athenaeum#1140 whole-page embed, so it is
+  unprotected by that fix regardless of embedder quality. See the resolver's
+  docstring for the corpus-level measurement (counts only, per athenaeum#1252's
+  privacy requirement) that motivated this, and why it defaults OFF (no
+  live re-measurement of the effect was possible in the environment that
+  shipped it).
 
 Out of scope (deliberate):
 
@@ -134,7 +148,12 @@ from athenaeum.comparator import (
     page_from_path,
     record_comparison,
 )
-from athenaeum.config import load_config, resolve_comparator_enabled, resolve_heartbeat_interval
+from athenaeum.config import (
+    load_config,
+    resolve_comparator_enabled,
+    resolve_heartbeat_interval,
+    resolve_wiki_dedupe_min_body_chars,
+)
 from athenaeum.merge_type_gate import cross_class_precheck
 from athenaeum.models import AutoMemoryFile, TokenUsage, parse_frontmatter, validity_bound_str
 from athenaeum.pii import is_pii_flagged
@@ -261,6 +280,16 @@ def discover_wiki_dedupe_candidates(
     inline is never proposed as a merge source, even when it is not (yet)
     routed to the excluded storage surface.
 
+    Issue athenaeum#1252: also excludes a page whose stripped body is shorter
+    than :func:`athenaeum.config.resolve_wiki_dedupe_min_body_chars`
+    characters, when that floor is configured (DEFAULT 0 = off, so this is
+    an inert no-op for every caller that does not opt in — see that
+    resolver's docstring for the corpus-level rationale). This check runs
+    regardless of whether *config* is explicitly passed: the resolver
+    itself treats ``config=None`` as "floor unset" and returns 0, so a
+    caller that never threads config through (byte-identical to every
+    pre-athenaeum#1252 call site) is unaffected.
+
     When *config* is provided, the storage-adapter layer (athenaeum#429) is also
     consulted: a page whose entity class resolves to a surface with
     ``merge_eligible=False`` is dropped even if it sits in ``wiki/`` and its
@@ -274,6 +303,8 @@ def discover_wiki_dedupe_candidates(
     """
     if not wiki_root.is_dir():
         return []
+
+    min_body_chars = resolve_wiki_dedupe_min_body_chars(config)
 
     candidates: list[AutoMemoryFile] = []
     for path in sorted(wiki_root.glob("*.md")):
@@ -311,6 +342,10 @@ def discover_wiki_dedupe_candidates(
         # source and contributes nothing beyond that one line — it must never
         # be proposed as a merge source (stub hygiene).
         if is_pointer_stub(meta):
+            continue
+        # Issue athenaeum#1252: an operator-configured body-length floor
+        # (default 0 = off). See resolve_wiki_dedupe_min_body_chars for why.
+        if min_body_chars > 0 and len(body.strip()) < min_body_chars:
             continue
 
         name = str(meta.get("name") or path.stem)

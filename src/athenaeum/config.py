@@ -727,6 +727,56 @@ def resolve_min_cluster_cohesion_scopes(config: dict[str, Any] | None) -> int:
     return default
 
 
+def resolve_wiki_dedupe_min_body_chars(config: dict[str, Any] | None) -> int:
+    """Resolve the wiki-dedupe eligibility body-length floor (issue athenaeum#1252).
+
+    ``athenaeum.wiki_dedupe.discover_wiki_dedupe_candidates`` excludes a
+    candidate page whose body (post-frontmatter, stripped) is shorter than
+    this many characters. Rationale, from athenaeum#1252's corpus-level
+    characterization (counts only, see the issue and the module docstring
+    of ``wiki_dedupe.py`` for the full measurement): issue athenaeum#1140's
+    chunk-and-mean-pool fix only DILUTES a structurally uniform lede's
+    contribution to a page's pooled vector when there is a SECOND chunk to
+    average it against. A page short enough to fit in one
+    :data:`athenaeum.wiki_dedupe._CHUNK_CHARS`-sized chunk gets a mean-pool
+    of exactly one vector -- a mathematical no-op, byte-identical to the
+    pre-athenaeum#1140 whole-page embedding -- so athenaeum#1140 provides it
+    ZERO protection against boilerplate-lede dominance. A two-chunk page
+    (one lede chunk + one body chunk, the modal shape in the operator's
+    live corpus) gets only 50% dilution, the weakest non-zero case. This
+    floor lets an operator exclude that short end of the eligible
+    population from vector-similarity candidacy entirely -- a
+    deterministic, LLM-free gate -- rather than trust a similarity score
+    computed over one or two chunks where the boilerplate signal
+    dominates.
+
+    DEFAULT 0 (OFF): whether a given corpus's short pages are actually
+    driving over-clustering is corpus-specific and was NOT re-measured
+    against the live embedder (blocked in the environment that produced
+    this fix -- see the issue). Shipping a non-zero default would silently
+    change which pages are eligible for merge/dedup comparison across the
+    operator's whole corpus without a live re-measurement to justify a
+    specific cutoff. Operators opt in via ``athenaeum.yaml`` once they can
+    re-measure cluster composition at a chosen floor. No seed in
+    ``_DEFAULTS`` (athenaeum#231) so the code default stays reachable.
+    ``bool`` (an ``int`` subclass) and non-int / ``<= 0`` yaml values fall
+    through to 0 (off) -- mirrors :func:`resolve_min_cluster_cohesion`'s
+    coercion contract.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("wiki_dedupe_min_body_chars")
+            if raw is not None and not isinstance(raw, bool):
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError):
+                    return 0
+                if value > 0:
+                    return value
+    return 0
+
+
 def resolve_max_merge_sources(config: dict[str, Any] | None) -> int:
     """Resolve the resolver merge-proposal source-count cap (athenaeum#400).
 
