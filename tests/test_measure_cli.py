@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+from athenaeum._cmd_measure import add_measure_subparser
 from athenaeum.cli import main as cli_main
 
 
@@ -264,3 +266,86 @@ class TestOrdinaryNightCli:
         assert payload["files_per_day_source"] == "operator-supplied"
         assert payload["wall_clock_per_file_seconds"] == 1.0
         assert payload["wall_clock_source"] == "operator-supplied"
+
+
+class TestOverrideArgConsolidation:
+    """Issue athenaeum#1285: --cache-dir/--summary-log/--calls-per-file/
+    --wall-clock-per-file-seconds are declared once each (via
+    ``_add_cache_dir``/``_add_summary_log``/``_add_override_arg`` in
+    ``_cmd_measure.py``) and shared by both ``backlog-price`` and
+    ``ordinary-night`` instead of being copy-pasted per subcommand. Build
+    the real parsers and pin: both subcommands still accept every override
+    flag, and the two blocks that were byte-for-byte duplicates
+    (``--cache-dir``, ``--summary-log``) now render identical help text on
+    both subcommands (previously ``ordinary-night``'s copies had no/stub
+    help text — see PR body for that intentional pick)."""
+
+    @staticmethod
+    def _measure_subparsers() -> dict[str, argparse.ArgumentParser]:
+        top = argparse.ArgumentParser()
+        subparsers = top.add_subparsers(dest="cmd")
+        add_measure_subparser(subparsers)
+        measure_action = next(
+            a for a in top._actions if isinstance(a, argparse._SubParsersAction)
+        )
+        measure_parser = measure_action.choices["measure"]
+        measure_sub_action = next(
+            a for a in measure_parser._actions if isinstance(a, argparse._SubParsersAction)
+        )
+        return dict(measure_sub_action.choices)
+
+    def _action(self, parser: argparse.ArgumentParser, flag: str) -> argparse.Action:
+        return next(a for a in parser._actions if flag in a.option_strings)
+
+    def test_both_subcommands_accept_every_shared_override_flag(self) -> None:
+        subs = self._measure_subparsers()
+        price_p, night_p = subs["backlog-price"], subs["ordinary-night"]
+        for flag in ("--cache-dir", "--summary-log", "--calls-per-file"):
+            assert self._action(price_p, flag) is not None
+            assert self._action(night_p, flag) is not None
+        # wall-clock-per-file-seconds is shared by all three commands that take it
+        assert self._action(price_p, "--wall-clock-per-file-seconds") is not None
+        assert self._action(night_p, "--wall-clock-per-file-seconds") is not None
+        # override args unique to one subcommand still exist, unaffected
+        assert self._action(price_p, "--backlog-count") is not None
+        assert self._action(night_p, "--files-per-day") is not None
+
+    def test_shared_blocks_render_identical_help_across_subcommands(self) -> None:
+        # --cache-dir and --summary-log carry no per-issue AC reference, so
+        # these two are byte-identical across both subcommands.
+        subs = self._measure_subparsers()
+        price_p, night_p = subs["backlog-price"], subs["ordinary-night"]
+        for flag in ("--cache-dir", "--summary-log"):
+            price_help = self._action(price_p, flag).help
+            night_help = self._action(night_p, flag).help
+            assert price_help == night_help, flag
+
+    def test_calls_per_file_and_wall_clock_help_match_modulo_ac_reference(self) -> None:
+        # --calls-per-file and --wall-clock-per-file-seconds each cite a
+        # different AC per subcommand (AC3(b)/AC3(c) vs AC5, issue
+        # athenaeum#1095) by design — everything else in the shared
+        # template must still match.
+        subs = self._measure_subparsers()
+        price_p, night_p = subs["backlog-price"], subs["ordinary-night"]
+        price_calls = self._action(price_p, "--calls-per-file").help
+        night_calls = self._action(night_p, "--calls-per-file").help
+        assert price_calls.replace("AC3(b)", "AC5") == night_calls
+
+        price_wc = self._action(price_p, "--wall-clock-per-file-seconds").help
+        night_wc = self._action(night_p, "--wall-clock-per-file-seconds").help
+        assert price_wc.replace("AC3(c)", "AC5") == night_wc
+
+    def test_all_defaults_and_types_unchanged(self) -> None:
+        subs = self._measure_subparsers()
+        price_p, night_p = subs["backlog-price"], subs["ordinary-night"]
+        for parser, flag, expected_type in [
+            (price_p, "--backlog-count", int),
+            (price_p, "--calls-per-file", float),
+            (price_p, "--wall-clock-per-file-seconds", float),
+            (night_p, "--calls-per-file", float),
+            (night_p, "--files-per-day", float),
+            (night_p, "--wall-clock-per-file-seconds", float),
+        ]:
+            action = self._action(parser, flag)
+            assert action.default is None, flag
+            assert action.type is expected_type, flag
