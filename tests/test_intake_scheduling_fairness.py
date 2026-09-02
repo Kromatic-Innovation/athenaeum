@@ -37,12 +37,21 @@ from athenaeum.intake import round_robin_by_source
 from athenaeum.librarian import _render_run_summary, run
 from athenaeum.models import RawFile
 from athenaeum.run_summary_log import (
+    STALL_FIELD,
+    STALL_STREAK_THRESHOLD,
     STARVATION_FIELD,
     STARVATION_STREAK_THRESHOLD,
+    combined_starvation_priority,
     parse_run_summary_line,
     previous_starved_sources,
+    read_combined_starvation_priority,
+    read_run_summary_ledger,
+    read_stall_streaks,
     read_starvation_priority,
     read_starvation_streaks,
+    stall_priority,
+    stall_streaks,
+    stalled_sources_in_record,
     starvation_priority,
     starvation_streaks,
     starved_sources_in_record,
@@ -257,12 +266,22 @@ class TestTurnOrderRotates:
 # ---------------------------------------------------------------------------
 
 
-def _record(starved: list[str] | None, *, entity: bool = True) -> dict:
+def _record(
+    starved: list[str] | None,
+    *,
+    entity: bool = True,
+    stalled: list[str] | None = None,
+) -> dict:
     if not entity:
         return {"v": 2, "ts": "2026-09-01T00:00:00Z", "phases": {"retire": {"secs": 0}}}
     fields: dict = {"secs": 1.0, "reason": "completed"}
     if starved:
         fields[STARVATION_FIELD] = ",".join(starved)
+    # Issue athenaeum#1295: `stalled` is the processing-stall channel's own
+    # field, additive to (never derived from) `starved` above -- a record
+    # can carry either, both, or neither.
+    if stalled:
+        fields[STALL_FIELD] = ",".join(stalled)
     return {"v": 2, "ts": "2026-09-01T00:00:00Z", "phases": {"entity": fields}}
 
 
@@ -399,6 +418,189 @@ class TestRunSummaryNamesStarvedSources:
 
 
 # ---------------------------------------------------------------------------
+# Processing-stall streaks over the durable athenaeum#1102 ledger
+# (issue athenaeum#1295 AC1/AC3) — the SECOND, independent starvation
+# channel: a source that gets slots but never gets its slots reached before
+# a mid-window max_runtime/max_api_calls trip. Mirrors every
+# TestStarvation*/TestPreviousStarvedSources test above one-for-one, reading
+# STALL_FIELD instead of STARVATION_FIELD, to pin that the two channels stay
+# structurally identical in shape but are NEVER conflated in practice (see
+# TestBothChannelsInOneRun below for the "never conflated" property itself).
+# ---------------------------------------------------------------------------
+
+
+class TestStallStreaks:
+    def test_first_stall_scores_one(self) -> None:
+        assert stall_streaks(["mural"], []) == {"mural": 1}
+
+    def test_streak_counts_consecutive_trailing_runs_including_this_one(self) -> None:
+        history = [_record(None, stalled=["mural"]) for _ in range(7)]
+        assert stall_streaks(["mural"], history) == {"mural": 8}
+
+    def test_a_run_that_processed_the_source_breaks_the_streak(self) -> None:
+        history = [
+            _record(None, stalled=["mural"]),
+            _record(None, stalled=[]),
+            _record(None, stalled=["mural"]),
+        ]
+        assert stall_streaks(["mural"], history) == {"mural": 2}
+
+    def test_a_run_with_no_entity_phase_neither_breaks_nor_extends(self) -> None:
+        history = [
+            _record(None, stalled=["mural"]),
+            _record(None, entity=False),
+            _record(None, stalled=["mural"]),
+        ]
+        assert stall_streaks(["mural"], history) == {"mural": 3}
+
+    def test_stalled_sources_in_record_distinguishes_absent_from_empty(self) -> None:
+        assert stalled_sources_in_record(_record(None, entity=False)) is None
+        assert stalled_sources_in_record(_record(None, stalled=[])) == set()
+        assert stalled_sources_in_record(_record(None, stalled=["a", "b"])) == {
+            "a",
+            "b",
+        }
+        assert stalled_sources_in_record({"phases": "not-a-dict"}) is None
+
+    def test_starved_and_stalled_fields_are_read_independently(self) -> None:
+        # The two channels can both be present on the SAME record without
+        # either reader picking up the other's field.
+        record = _record(["mural"], stalled=["retros"])
+        assert starved_sources_in_record(record) == {"mural"}
+        assert stalled_sources_in_record(record) == {"retros"}
+
+    def test_reads_the_durable_ledger(self, tmp_path: Path) -> None:
+        ledger = tmp_path / "run_summary.jsonl"
+        ledger.write_text(
+            "".join(
+                json.dumps(_record(None, stalled=["mural"])) + "\n" for _ in range(3)
+            ),
+            encoding="utf-8",
+        )
+        assert read_stall_streaks(["mural"], ledger_path=ledger) == {"mural": 4}
+
+    def test_a_missing_ledger_degrades_to_no_history(self, tmp_path: Path) -> None:
+        streaks = read_stall_streaks(["mural"], ledger_path=tmp_path / "absent.jsonl")
+        assert streaks == {"mural": 1}
+
+    def test_no_stalled_sources_never_touches_the_filesystem(self) -> None:
+        assert read_stall_streaks([], ledger_path=Path("/nonexistent/x")) == {}
+
+
+class TestStallPriority:
+    def test_longest_stalled_source_leads(self) -> None:
+        history = [
+            _record(None, stalled=["s2", "s3", "s4"]),
+            _record(None, stalled=["s0", "s1", "s4"]),
+        ]
+        assert stall_priority(history) == ["s4", "s0", "s1"]
+
+    def test_ties_break_by_name_for_determinism(self) -> None:
+        assert stall_priority([_record(None, stalled=["b", "a", "c"])]) == [
+            "a",
+            "b",
+            "c",
+        ]
+
+    def test_a_healthy_last_run_needs_no_rotation(self) -> None:
+        assert (
+            stall_priority([_record(None, stalled=["s3"]), _record(None, stalled=[])])
+            == []
+        )
+
+    def test_no_history_is_plain_discovery_order(self) -> None:
+        assert stall_priority([]) == []
+
+    def test_skips_runs_whose_entity_phase_never_ran(self) -> None:
+        history = [_record(None, stalled=["s3"]), _record(None, entity=False)]
+        assert stall_priority(history) == ["s3"]
+
+
+class TestCombinedStarvationPriority:
+    """Plan step 3: the two channels compose into ONE deterministic head."""
+
+    def test_slot_priority_is_unchanged_and_leads(self) -> None:
+        # The athenaeum#1291 AC1 bound rests on this list's order/position
+        # never moving; combining channels must not disturb it.
+        combined = combined_starvation_priority(["s2", "s0"], ["s5", "s1"])
+        assert combined == ["s2", "s0", "s5", "s1"]
+
+    def test_a_source_named_by_both_channels_is_not_duplicated(self) -> None:
+        combined = combined_starvation_priority(["s2", "s0"], ["s0", "s5"])
+        assert combined == ["s2", "s0", "s5"]
+
+    def test_either_channel_alone_passes_through(self) -> None:
+        assert combined_starvation_priority(["s2"], []) == ["s2"]
+        assert combined_starvation_priority([], ["s5"]) == ["s5"]
+
+    def test_both_empty_is_empty(self) -> None:
+        assert combined_starvation_priority([], []) == []
+
+    def test_reads_the_durable_ledger_and_composes_both_channels(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = tmp_path / "run_summary.jsonl"
+        # One record: `slot-src` got zero slots (starved), `stall-src` got
+        # slots but processed nothing (stalled). A real run's entity phase
+        # can emit both fields on the same record (see TestBothChannelsInOneRun).
+        ledger.write_text(
+            json.dumps(_record(["slot-src"], stalled=["stall-src"])) + "\n",
+            encoding="utf-8",
+        )
+        assert read_combined_starvation_priority(ledger_path=ledger) == [
+            "slot-src",
+            "stall-src",
+        ]
+        assert read_combined_starvation_priority(ledger_path=tmp_path / "absent") == []
+
+
+class TestRunSummaryNamesStalledSources:
+    """Mirrors TestRunSummaryNamesStarvedSources for the athenaeum#1295 channel."""
+
+    def test_a_source_over_the_threshold_is_named_in_the_head(self) -> None:
+        line = _render_run_summary(
+            [("entity", 1.0, {"files": 50, "reason": "completed"})],
+            stall_streaks={"mural-board-summary": STALL_STREAK_THRESHOLD},
+        )
+        assert (
+            f"stalled_sources=mural-board-summary:{STALL_STREAK_THRESHOLD}" in line
+        )
+
+    def test_a_transient_one_run_exclusion_is_not_flagged(self) -> None:
+        line = _render_run_summary(
+            [("entity", 1.0, {"files": 50, "reason": "completed"})],
+            stall_streaks={"mural-board-summary": 1},
+        )
+        assert "stalled_sources=" not in line
+
+    def test_omitted_entirely_on_a_healthy_run(self) -> None:
+        line = _render_run_summary([("entity", 1.0, {"reason": "completed"})])
+        assert "stalled_sources=" not in line
+
+    def test_the_two_head_tokens_are_never_conflated_on_one_line(self) -> None:
+        # Both channels flagged on the SAME run: two distinct head tokens,
+        # neither swallowing the other.
+        line = _render_run_summary(
+            [("entity", 1.0, {"reason": "completed"})],
+            starved_streaks={"slot-src": STARVATION_STREAK_THRESHOLD},
+            stall_streaks={"stall-src": STALL_STREAK_THRESHOLD},
+        )
+        assert f"starved_sources=slot-src:{STARVATION_STREAK_THRESHOLD}" in line
+        assert f"stalled_sources=stall-src:{STALL_STREAK_THRESHOLD}" in line
+
+    def test_the_athenaeum713_parser_survives_the_new_tokens(self) -> None:
+        line = _render_run_summary(
+            [("entity", 1.0, {"files": 2, STALL_FIELD: "s3,s4"})],
+            stall_streaks={"s3": 5, "s4": 3},
+        )
+        record = parse_run_summary_line(line)
+        assert record is not None
+        assert record.phases["entity"][STALL_FIELD] == "s3,s4"
+        assert record.phases["entity"]["files"] == "2"
+        assert "stalled_sources=s3:5,s4:3" in line
+
+
+# ---------------------------------------------------------------------------
 # End-to-end through run() (AC2, AC3)
 # ---------------------------------------------------------------------------
 
@@ -432,6 +634,34 @@ def _write_source(root: Path, source: str, count: int, *, day_offset: int = 0) -
 
 def _recording_process_one(seen: list[str], wiki_root: Path):
     def fake_process_one(raw, index, wiki_root_arg, client, *args, **kwargs):
+        seen.append(raw.source)
+        page = wiki_root / f"entity-{len(seen)}.md"
+        page.write_text(f"# Entity\nfrom {raw.ref}\n", encoding="utf-8")
+        return SimpleNamespace(
+            created=[page.name], updated=[], escalated=[], skipped=[]
+        )
+
+    return fake_process_one
+
+
+def _budget_counting_process_one(seen: list[str], wiki_root: Path):
+    """Like :func:`_recording_process_one`, but spends one ``usage.api_calls``
+    per file (issue athenaeum#1295).
+
+    The real entity loop's ``max_api_calls`` check (``ctx.usage.api_calls >=
+    ctx.max_api_calls``) reads the SAME ``TokenUsage`` instance the librarian
+    threads into ``process_one`` as the ``usage=`` kwarg — a stub that never
+    touches it (like ``_recording_process_one`` above) can never trip the
+    budget, no matter how low ``max_api_calls`` is set. This stub increments
+    it by exactly 1 per call, mirroring a single-call file, so a test can
+    drive a real, deterministic mid-window budget trip without a live API or
+    a wall-clock sleep.
+    """
+
+    def fake_process_one(raw, index, wiki_root_arg, client, *args, **kwargs):
+        usage = kwargs.get("usage")
+        if usage is not None:
+            usage.api_calls += 1
         seen.append(raw.source)
         page = wiki_root / f"entity-{len(seen)}.md"
         page.write_text(f"# Entity\nfrom {raw.ref}\n", encoding="utf-8")
@@ -596,3 +826,377 @@ class TestEndToEndFairness:
             m.startswith("librarian-source-starvation") and "source=backlog" in m
             for m in caplog.messages
         )
+
+
+# ---------------------------------------------------------------------------
+# Processing-stall channel, end-to-end through run() (issue athenaeum#1295)
+#
+# athenaeum#1291's `starved_sources` counts SLOTS. It cannot see a source
+# that receives slots every run but never gets them REACHED because a
+# mid-window `max_runtime`/`max_api_calls` trip stops the loop first. These
+# pin the athenaeum#1295 acceptance criteria:
+#
+# * AC1 -- a source with pending intake, nonzero slots, and zero processed
+#   files for K consecutive runs is named, DISTINCTLY from the athenaeum#1291
+#   zero-slot case (TestBothChannelsInOneRun).
+# * AC2 -- a real max_api_calls trip, part-way through a genuinely
+#   INTERLEAVED window, names the affected source
+#   (TestEndToEndProcessingStall).
+# * AC3 -- the counter persists through the athenaeum#1102 ledger with no
+#   new state file, and the streak accrues across consecutive runs and
+#   resets (TestStallStreakEndToEnd; TestStallStreaks above covers reset at
+#   the pure-function level).
+# * Plan step 3 -- a source stalled through this channel ages into the head
+#   of the NEXT run's turn order (TestTurnOrderAgesInStalledSource).
+# * Negative cases -- a healthy run's summary line and ledger record are
+#   byte-unchanged, and a source that processes files is never named
+#   (TestStallSignalUnchangedOnHealthyRuns).
+# ---------------------------------------------------------------------------
+
+
+class TestEndToEndProcessingStall:
+    def test_a_mid_window_api_call_budget_trip_stalls_the_last_turn_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # AC2, literally: interleave a window across THREE sources (so the
+        # window is genuinely interleaved, not just two sources trivially
+        # alternating), budget a call count that reaches only the first TWO
+        # turns, and assert the third source -- touched by neither a
+        # zero-slot outcome NOR any processing -- is named STALLED, not
+        # starved. This is the shape the issue's premise rests on:
+        # interleaving softens the damage (alpha/beta each got their first
+        # file through) but does not eliminate it (gamma's slots existed —
+        # equal footing with alpha/beta — and were never reached).
+        root = _seed(tmp_path)
+        for source in ("alpha", "beta", "gamma"):
+            _write_source(root, source, 3)
+        ledger = tmp_path / "run_summary.jsonl"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setattr(
+            "athenaeum.run_summary_log.default_run_summary_ledger_path",
+            lambda cache_dir=None: ledger,
+        )
+        seen: list[str] = []
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one",
+            _budget_counting_process_one(seen, root / "wiki"),
+        )
+        stats: dict = {}
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_files=6,
+            max_api_calls=2,
+            out_run_stats=stats,
+        )
+
+        assert rc == 0
+        # The window really was interleaved: alpha's and beta's FIRST files
+        # were processed before gamma's first file was ever reached, even
+        # though gamma had files in the window on equal footing.
+        assert seen == ["alpha", "beta"]
+        assert stats["stalled_sources"] == ["gamma"]
+        assert stats["starved_sources"] == []
+
+    def test_a_processed_source_is_never_named_stalled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The direct negative of the above: alpha and beta each processed a
+        # file this run, so neither may appear in `stalled_sources` even
+        # though the run overall DID trip its budget.
+        root = _seed(tmp_path)
+        for source in ("alpha", "beta", "gamma"):
+            _write_source(root, source, 3)
+        ledger = tmp_path / "run_summary.jsonl"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setattr(
+            "athenaeum.run_summary_log.default_run_summary_ledger_path",
+            lambda cache_dir=None: ledger,
+        )
+        seen: list[str] = []
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one",
+            _budget_counting_process_one(seen, root / "wiki"),
+        )
+        stats: dict = {}
+
+        run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_files=6,
+            max_api_calls=2,
+            out_run_stats=stats,
+        )
+
+        assert "alpha" not in stats["stalled_sources"]
+        assert "beta" not in stats["stalled_sources"]
+
+
+class TestBothChannelsInOneRun:
+    def test_zero_slot_and_zero_processed_fire_together_without_conflation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        # AC1: both starvation channels can trip in the SAME run --
+        # `ccc` gets NO slots at all (the athenaeum#1291 case), `bbb` gets a
+        # slot but the budget trips before it is reached (the athenaeum#1295
+        # case) -- and the two lists must never merge or cross-contaminate.
+        root = _seed(tmp_path)
+        for source in ("aaa", "bbb", "ccc"):
+            _write_source(root, source, 2)
+        ledger = tmp_path / "run_summary.jsonl"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setattr(
+            "athenaeum.run_summary_log.default_run_summary_ledger_path",
+            lambda cache_dir=None: ledger,
+        )
+        seen: list[str] = []
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one",
+            _budget_counting_process_one(seen, root / "wiki"),
+        )
+        stats: dict = {}
+
+        with caplog.at_level("INFO", logger="athenaeum.librarian"):
+            rc = run(
+                raw_root=root / "raw",
+                wiki_root=root / "wiki",
+                knowledge_root=root,
+                # A window narrower than the source count: only 2 of 3
+                # sources get ANY slot at all.
+                max_files=2,
+                max_api_calls=1,
+                out_run_stats=stats,
+            )
+
+        assert rc == 0
+        assert seen == ["aaa"]
+        assert stats["starved_sources"] == ["ccc"]
+        assert stats["stalled_sources"] == ["bbb"]
+        # Never conflated: disjoint sets, and neither list contains a source
+        # from the wrong channel.
+        assert set(stats["starved_sources"]).isdisjoint(stats["stalled_sources"])
+        summary_line = next(
+            m for m in caplog.messages if m.startswith("librarian-run-summary")
+        )
+        assert f" {STARVATION_FIELD}=ccc" in summary_line
+        assert f" {STALL_FIELD}=bbb" in summary_line
+
+
+class TestStallStreakEndToEnd:
+    def test_a_stalled_source_is_named_after_k_runs_and_resets(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        # AC3 end-to-end. A caller-scoped pin (exempt from round-robin AND
+        # from priority-order aging, per athenaeum#900) always consumes the
+        # run's single API call, so `backlog` -- which DOES receive slots
+        # every run via round-robin -- never gets any of them reached,
+        # REGARDLESS of the Plan-step-3 turn-order aging this issue adds
+        # (that aging only reorders the round-robin remainder, never the
+        # pinned head). This isolates the streak-accrual property from the
+        # self-correcting aging behaviour, which is exercised separately in
+        # TestTurnOrderAgesInStalledSource below.
+        root = _seed(tmp_path)
+        _write_source(root, "backlog", 20)
+        callers = root / "raw" / "caller"
+        callers.mkdir(parents=True)
+        mine = []
+        p0 = callers / "20260810T120000Z-deadbee0.md"
+        p0.write_text("Met Alice Zhang.\n", encoding="utf-8")
+        mine.append(p0)
+        ledger = tmp_path / "run_summary.jsonl"
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setattr(
+            "athenaeum.run_summary_log.default_run_summary_ledger_path",
+            lambda cache_dir=None: ledger,
+        )
+
+        summaries: list[str] = []
+        for run_no in range(STALL_STREAK_THRESHOLD):
+            seen: list[str] = []
+            monkeypatch.setattr(
+                "athenaeum.librarian.process_one",
+                _budget_counting_process_one(seen, root / "wiki"),
+            )
+            stats: dict = {}
+            with caplog.at_level("INFO", logger="athenaeum.librarian"):
+                caplog.clear()
+                rc = run(
+                    raw_root=root / "raw",
+                    wiki_root=root / "wiki",
+                    knowledge_root=root,
+                    # 1 pinned + 2 round-robin slots for `backlog`.
+                    max_files=3,
+                    max_api_calls=1,
+                    entity_changed_paths=set(mine),
+                    out_run_stats=stats,
+                )
+            assert rc == 0
+            # The pin consumed the sole call; `backlog` got slots (not
+            # starved) but never got run (stalled).
+            assert stats["starved_sources"] == [], f"run {run_no}"
+            assert stats["stalled_sources"] == ["backlog"], f"run {run_no}"
+            summaries.append(
+                next(m for m in caplog.messages if m.startswith("librarian-run-summary"))
+            )
+            # Re-pin a fresh caller file for the next run (the previous one
+            # was consumed/deleted).
+            p = callers / f"2026082{run_no}T120000Z-cafebab{run_no}.md"
+            p.write_text(f"Met Bob Lee {run_no}.\n", encoding="utf-8")
+            mine.append(p)
+
+        # One run with slots but nothing processed is ordinary backpressure;
+        # by run K it is a stall, named rather than left as a bare count.
+        assert "stalled_sources=" not in summaries[0]
+        assert (
+            f"stalled_sources=backlog:{STALL_STREAK_THRESHOLD}" in summaries[-1]
+        )
+        assert any(
+            m.startswith("librarian-source-processing-stall")
+            and "source=backlog" in m
+            for m in caplog.messages
+        )
+        # AC3: no second state file -- every field above came out of the
+        # SAME athenaeum#1102 ledger the athenaeum#1291 pair already writes.
+        ledger_records = read_run_summary_ledger(ledger)
+        assert len(ledger_records) == STALL_STREAK_THRESHOLD
+        assert all(
+            rec["phases"]["entity"].get(STALL_FIELD) == "backlog"
+            for rec in ledger_records
+        )
+
+        # AC3 (reset half): a healthy run -- generous budget, the pin no
+        # longer needed to prove anything -- processes `backlog` for real,
+        # and its streak breaks.
+        seen = []
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one",
+            _budget_counting_process_one(seen, root / "wiki"),
+        )
+        stats = {}
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_files=3,
+            max_api_calls=1000,
+            entity_changed_paths=set(mine),
+            out_run_stats=stats,
+        )
+        assert rc == 0
+        assert stats["stalled_sources"] == []
+        assert "backlog" in seen
+
+
+class TestTurnOrderAgesInStalledSource:
+    def test_a_stalled_source_leads_the_very_next_runs_turn_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Plan step 3: without this, the signal is diagnostic only. Two
+        # sources, discovery order alphabetical (`aaa-normal` naturally
+        # first). Run 1 trips a 1-call budget and stalls `zzz-stalled` (last
+        # in natural turn order). Run 2 must schedule `zzz-stalled` FIRST --
+        # proving the athenaeum#1295 channel, not just the athenaeum#1291
+        # one, feeds `round_robin_by_source`'s priority head.
+        root = _seed(tmp_path)
+        _write_source(root, "aaa-normal", 3)
+        _write_source(root, "zzz-stalled", 3)
+        ledger = tmp_path / "run_summary.jsonl"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setattr(
+            "athenaeum.run_summary_log.default_run_summary_ledger_path",
+            lambda cache_dir=None: ledger,
+        )
+
+        seen_run1: list[str] = []
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one",
+            _budget_counting_process_one(seen_run1, root / "wiki"),
+        )
+        stats1: dict = {}
+        rc1 = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_files=2,
+            max_api_calls=1,
+            out_run_stats=stats1,
+        )
+        assert rc1 == 0
+        # Natural (unaged) order: `aaa-normal` goes first, `zzz-stalled`
+        # never gets its (one) slot reached.
+        assert seen_run1 == ["aaa-normal"]
+        assert stats1["stalled_sources"] == ["zzz-stalled"]
+
+        seen_run2: list[str] = []
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one",
+            _budget_counting_process_one(seen_run2, root / "wiki"),
+        )
+        stats2: dict = {}
+        rc2 = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_files=2,
+            max_api_calls=1,
+            out_run_stats=stats2,
+        )
+        assert rc2 == 0
+        # Aged order: `zzz-stalled` now leads, and IT is the one that gets
+        # this run's sole call -- self-correction, not merely a diagnostic.
+        assert seen_run2 == ["zzz-stalled"]
+        assert stats2["stalled_sources"] == ["aaa-normal"]
+
+
+class TestStallSignalUnchangedOnHealthyRuns:
+    def test_a_healthy_runs_summary_line_and_ledger_record_are_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        # Negative case: every file fits and every file is processed --
+        # `stalled_sources` (and STALL_FIELD on the ledger record) must be
+        # absent, not merely empty-and-rendered, so a healthy run's line is
+        # byte-identical to its pre-athenaeum#1295 form.
+        root = _seed(tmp_path)
+        _write_source(root, "alpha", 2)
+        _write_source(root, "beta", 2)
+        ledger = tmp_path / "run_summary.jsonl"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setattr(
+            "athenaeum.run_summary_log.default_run_summary_ledger_path",
+            lambda cache_dir=None: ledger,
+        )
+        seen: list[str] = []
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one",
+            _recording_process_one(seen, root / "wiki"),
+        )
+        stats: dict = {}
+
+        with caplog.at_level("INFO", logger="athenaeum.librarian"):
+            rc = run(
+                raw_root=root / "raw",
+                wiki_root=root / "wiki",
+                knowledge_root=root,
+                max_files=10,
+                max_api_calls=1000,
+                out_run_stats=stats,
+            )
+
+        assert rc == 0
+        assert len(seen) == 4
+        assert stats["starved_sources"] == []
+        assert stats["stalled_sources"] == []
+        summary_line = next(
+            m for m in caplog.messages if m.startswith("librarian-run-summary")
+        )
+        assert STALL_FIELD not in summary_line
+        assert "stalled_sources=" not in summary_line
+
+        ledger_records = read_run_summary_ledger(ledger)
+        assert len(ledger_records) == 1
+        assert STALL_FIELD not in ledger_records[0]["phases"]["entity"]
+        assert STARVATION_FIELD not in ledger_records[0]["phases"]["entity"]

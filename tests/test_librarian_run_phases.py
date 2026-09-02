@@ -205,6 +205,10 @@ class TestRunContext:
             # zero slots in the max_files window — empty here, since this unit
             # test never runs the entity phase that fills a window.
             "starved_sources": [],
+            # Issue athenaeum#1295: sources that had pending intake, nonzero
+            # slots, and processed zero files — empty here for the same
+            # reason as starved_sources above.
+            "stalled_sources": [],
         }
 
     def test_mutation_through_context_is_visible_to_next_phase(

@@ -758,15 +758,17 @@ def round_robin_by_source(
       order means the same trailing sources get zero slots on every run
       forever -- starvation by sort position again, merely at a different
       threshold. The librarian passes
-      :func:`athenaeum.run_summary_log.read_starvation_priority` here — the
-      previous run's zero-slot sources, LONGEST-STARVED FIRST, recovered from
-      the athenaeum#1102 run-summary ledger so this needs no new state. That
-      aging is load-bearing, not cosmetic: rotating by name alone lets a
-      source keep losing its turn to sources starved only once and still wait
-      unboundedly, while a rank that rises every skipped run reaches the head
-      within ``ceil(n_sources / limit)`` runs. A source named here that has no
-      pending files this run is simply absent from ``by_source`` and costs
-      nothing.
+      :func:`athenaeum.run_summary_log.read_combined_starvation_priority`
+      here — the previous run's zero-slot sources (athenaeum#1291), LONGEST-
+      STARVED FIRST, THEN (athenaeum#1295) any source that received slots but
+      processed zero files, longest-STALL-streak-first, appended after —
+      both recovered from the athenaeum#1102 run-summary ledger so this needs
+      no new state. That aging is load-bearing, not cosmetic: rotating by
+      name alone lets a source keep losing its turn to sources starved only
+      once and still wait unboundedly, while a rank that rises every skipped
+      run reaches the head within ``ceil(n_sources / limit)`` runs. A source
+      named here that has no pending files this run is simply absent from
+      ``by_source`` and costs nothing.
     * **The window is interleaved, not re-concatenated.** A source's first
       file is scheduled before any source's second file, so a run that trips
       its wall-clock deadline part-way through the window has still touched
