@@ -93,6 +93,8 @@ from athenaeum.json_utils import (
     scan_json_objects,
 )
 from athenaeum.models import (
+    SURFACE_TIER2_TRUNCATION_RETRY,
+    SURFACE_TIER3_FULL_ECHO_FALLBACK,
     AutoMemoryFile,
     ClassifiedEntity,
     EntityAction,
@@ -153,6 +155,7 @@ def _record_usage(
     usage: TokenUsage | None,
     model: str | None = None,
     knob: str | None = None,
+    surface: str | None = None,
 ) -> None:
     """Record token usage from an API response if tracking is enabled.
 
@@ -162,13 +165,22 @@ def _record_usage(
     the model-knob (``classify`` / ``write``) so ``TokenUsage.per_knob`` can
     attribute spend per knob — the same knob string the caller already
     resolved the model with (``_get_classify_model`` / ``_get_write_model``).
+    *surface* (issue athenaeum#1289) optionally tags one of the six declared
+    non-batched surfaces (``models.SURFACE_*``) so ``TokenUsage.per_surface``
+    can attribute spend per surface, independent of *knob*.
     """
     if usage is not None and hasattr(response, "usage"):
         input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(
             response
         )
         usage.add(
-            input_toks, output_toks, cache_creation, cache_read, model=model, knob=knob
+            input_toks,
+            output_toks,
+            cache_creation,
+            cache_read,
+            model=model,
+            knob=knob,
+            surface=surface,
         )
         if cache_creation or cache_read:
             log.debug(
@@ -2223,7 +2235,18 @@ def tier2_reclassify_larger_budget(
         f"tier2_classify-truncation-retry {raw.ref}",
         usage=usage,
     )
-    _record_usage(response, usage, model=params["model"], knob="classify")
+    # Issue athenaeum#1289: this function IS the athenaeum#476 truncation retry —
+    # always tag the declared surface, regardless of whether this call was
+    # reached from the sync path (tier2_classify) or the batch finalize
+    # fallback (batch.py), mirroring how tier3_merge_full below always tags
+    # its own declared surface regardless of caller.
+    _record_usage(
+        response,
+        usage,
+        model=params["model"],
+        knob="classify",
+        surface=SURFACE_TIER2_TRUNCATION_RETRY,
+    )
     retry_stats = Tier2ParseStats()
     entities = parse_tier2_entities(
         response_text(response),
@@ -3713,6 +3736,7 @@ def tier3_merge(
     config: dict[str, Any] | None = None,
     *,
     wiki_root: Path | None = None,
+    surface: str | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
     """Use a capable LLM to merge observations into an existing entity page.
 
@@ -3725,7 +3749,16 @@ def tier3_merge(
     record is never LLM-merged; it accepts structured field updates only,
     via the tier-0 no-LLM path.
 
-    Returns (updated_body, escalation_item).
+    *surface* (issue athenaeum#1289, keyword-only, ``None`` default): this
+    function serves BOTH the ordinary single-page synchronous tier-3 merge
+    (not one of the six declared non-batched surfaces — leave ``None``) AND,
+    when called from the batch transport's finalize step for a page touched
+    by more than one merge this run, the declared
+    ``SURFACE_SAME_PAGE_MULTI_MERGE`` surface — the caller passes it
+    explicitly since only the caller knows which context this is. If this
+    call needs the full-echo fallback, :func:`tier3_merge_full` tags its OWN
+    declared surface instead, regardless of what (if anything) was passed
+    here — the two are separate declared surfaces even for the same page.
     """
     _refuse_person_rewrite(action, "tier3_merge")
     # Anchor safety (issue athenaeum#562 / audit M20): a body that would break the
@@ -3755,7 +3788,9 @@ def tier3_merge(
         f"tier3_merge {source_ref}",
         usage=usage,
     )
-    _record_usage(response, usage, model=params["model"], knob="write")
+    _record_usage(
+        response, usage, model=params["model"], knob="write", surface=surface
+    )
 
     body, escalation, needs_fallback = parse_merge_ops_response(
         # Issue athenaeum#578: patch merge enables adaptive thinking — skip any leading
@@ -3847,7 +3882,19 @@ def tier3_merge_full(
         f"tier3_merge_full {source_ref}",
         usage=usage,
     )
-    _record_usage(response, usage, model=params["model"], knob="write")
+    # Issue athenaeum#1289: this function IS the declared tier-3 full-echo
+    # fallback surface — always tag it, regardless of whether the caller is
+    # tier3_merge's own internal fallback (any page) or the batch transport's
+    # direct finalize-time call (batch.py); it is a distinct declared surface
+    # from whatever surface (if any) the caller that reached here was tagged
+    # with.
+    _record_usage(
+        response,
+        usage,
+        model=params["model"],
+        knob="write",
+        surface=SURFACE_TIER3_FULL_ECHO_FALLBACK,
+    )
     # Issue athenaeum#1184: same echo accounting as tier3_merge's patch attempt
     # above — this full-echo call embeds its own up-to-_MAX_EXISTING_BODY_CHARS
     # copy of the existing page (tier3_merge_full_params fences it with the

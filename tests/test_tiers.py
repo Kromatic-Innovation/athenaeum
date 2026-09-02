@@ -2985,6 +2985,167 @@ class TestTier3MergePatchOps:
         assert big_body in merged  # nothing dropped
         assert merged.endswith("[^2]: sessions/raw.md")
 
+    # --- issue athenaeum#1289: per-surface attribution --------------------------
+
+    def test_patch_success_tags_callers_surface(self) -> None:
+        """A caller-supplied ``surface=`` (e.g. the batch transport's
+        same-page multi-merge group) tags the patch-attempt call when it
+        succeeds without a fallback."""
+        from athenaeum.models import SURFACE_SAME_PAGE_MULTI_MERGE, TokenUsage
+
+        client = _mock_client(
+            json.dumps(
+                {"ops": [{"op": "append_section", "text": "Raised Series C.[^2]"}]}
+            )
+        )
+        client.messages.create.return_value.usage = MagicMock(
+            input_tokens=500,
+            output_tokens=40,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        usage = TokenUsage()
+        tier3_merge(
+            self._action(),
+            "# Acme Corp\n\nFintech, Series B.",
+            "ref",
+            client,
+            usage=usage,
+            surface=SURFACE_SAME_PAGE_MULTI_MERGE,
+        )
+        assert (
+            usage.per_surface[SURFACE_SAME_PAGE_MULTI_MERGE]["input_tokens"] == 500
+        )
+
+    def test_no_surface_given_leaves_per_surface_empty_on_patch_success(self) -> None:
+        """The ordinary single-page synchronous merge (tiers.py's own caller)
+        passes no ``surface=`` -- not one of the six declared surfaces."""
+        from athenaeum.models import TokenUsage
+
+        client = _mock_client(
+            json.dumps(
+                {"ops": [{"op": "append_section", "text": "Raised Series C.[^2]"}]}
+            )
+        )
+        client.messages.create.return_value.usage = MagicMock(
+            input_tokens=500,
+            output_tokens=40,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        usage = TokenUsage()
+        tier3_merge(
+            self._action(),
+            "# Acme Corp\n\nFintech, Series B.",
+            "ref",
+            client,
+            usage=usage,
+        )
+        assert usage.per_surface == {}
+        assert usage.input_tokens == 500  # scalar totals stay authoritative
+
+    def test_full_echo_fallback_tags_its_own_surface_alongside_callers(self) -> None:
+        """Issue athenaeum#1289: when the patch attempt needs a full-echo
+        fallback, BOTH real spends are attributed -- the caller's surface
+        (if any) on the patch attempt that actually happened, AND
+        SURFACE_TIER3_FULL_ECHO_FALLBACK on the fallback call -- two
+        separate declared surfaces, two separate real API calls."""
+        from athenaeum.models import (
+            SURFACE_SAME_PAGE_MULTI_MERGE,
+            SURFACE_TIER3_FULL_ECHO_FALLBACK,
+            TokenUsage,
+        )
+
+        patch_response = MagicMock()
+        patch_response.content = [MagicMock(text="not json at all")]
+        patch_response.stop_reason = "end_turn"
+        patch_response.usage = MagicMock(
+            input_tokens=300,
+            output_tokens=10,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        fallback_response = MagicMock()
+        fallback_response.content = [
+            MagicMock(text="# Acme Corp\n\nFintech, Series B, Series C.[^2]")
+        ]
+        fallback_response.stop_reason = "end_turn"
+        fallback_response.usage = MagicMock(
+            input_tokens=4_000,
+            output_tokens=250,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        client = MagicMock()
+        client.messages.create.side_effect = [patch_response, fallback_response]
+
+        usage = TokenUsage()
+        body, esc = tier3_merge(
+            self._action(),
+            "# Acme Corp\n\nFintech, Series B.",
+            "ref",
+            client,
+            usage=usage,
+            surface=SURFACE_SAME_PAGE_MULTI_MERGE,
+        )
+        assert esc is None
+        assert body == "# Acme Corp\n\nFintech, Series B, Series C.[^2]"
+        assert (
+            usage.per_surface[SURFACE_SAME_PAGE_MULTI_MERGE]["input_tokens"] == 300
+        )
+        assert (
+            usage.per_surface[SURFACE_TIER3_FULL_ECHO_FALLBACK]["input_tokens"]
+            == 4_000
+        )
+        # Conservation: the two surfaces' input sums to the run's total input.
+        assert usage.input_tokens == 4_300
+
+    def test_full_echo_fallback_tags_its_surface_even_with_no_caller_surface(
+        self,
+    ) -> None:
+        """Same as above, but the caller (the ordinary single-page sync
+        loop) passes no surface at all -- the fallback's own tag still
+        fires; only the patch attempt's own (absent) tag stays untagged."""
+        from athenaeum.models import SURFACE_TIER3_FULL_ECHO_FALLBACK, TokenUsage
+
+        patch_response = MagicMock()
+        patch_response.content = [MagicMock(text="not json at all")]
+        patch_response.stop_reason = "end_turn"
+        patch_response.usage = MagicMock(
+            input_tokens=300,
+            output_tokens=10,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        fallback_response = MagicMock()
+        fallback_response.content = [
+            MagicMock(text="# Acme Corp\n\nFintech, Series B, Series C.[^2]")
+        ]
+        fallback_response.stop_reason = "end_turn"
+        fallback_response.usage = MagicMock(
+            input_tokens=4_000,
+            output_tokens=250,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        client = MagicMock()
+        client.messages.create.side_effect = [patch_response, fallback_response]
+
+        usage = TokenUsage()
+        tier3_merge(
+            self._action(),
+            "# Acme Corp\n\nFintech, Series B.",
+            "ref",
+            client,
+            usage=usage,
+        )
+        assert set(usage.per_surface) == {SURFACE_TIER3_FULL_ECHO_FALLBACK}
+        assert (
+            usage.per_surface[SURFACE_TIER3_FULL_ECHO_FALLBACK]["input_tokens"]
+            == 4_000
+        )
+        assert usage.input_tokens == 4_300  # scalar total still includes both
+
 
 class TestTier2And3SelfResolvingDocumentGuard:
     """Issue athenaeum#300: Tier 2 classify and Tier 3 create must apply the same
@@ -4105,6 +4266,34 @@ class TestTier2ReclassifyLargerBudget:
         assert entities == []
         assert retry_stats.truncated == 1
         assert retry_stats.degraded == 0
+
+    def test_tags_tier2_truncation_retry_surface(self) -> None:
+        """Issue athenaeum#1289: this function IS the declared athenaeum#476
+        truncation-retry surface -- always tag it, regardless of caller
+        (the sync tier2_classify retry and the batch finalize fallback both
+        reach here)."""
+        from athenaeum.models import SURFACE_TIER2_TRUNCATION_RETRY
+
+        client = MagicMock()
+        response = MagicMock()
+        response.content = [MagicMock(text=self._valid_payload())]
+        response.stop_reason = "end_turn"
+        response.usage = MagicMock(
+            input_tokens=900,
+            output_tokens=60,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        client.messages.create.return_value = response
+        raw = _make_raw("Entity-dense source text worth classifying.")
+        usage = TokenUsage()
+        tier2_reclassify_larger_budget(
+            raw, [], self._TYPES, [], ["internal"], client, usage=usage
+        )
+        assert (
+            usage.per_surface[SURFACE_TIER2_TRUNCATION_RETRY]["input_tokens"] == 900
+        )
+        assert usage.per_knob["classify"]["input_tokens"] == 900
 
 
 class TestClaudeCliParamDropGating:
