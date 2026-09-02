@@ -532,7 +532,10 @@ All model values are free-form model-id strings passed to the Anthropic SDK.
 The table below is the **full set** of model knobs, one row per entry in
 `prompt_registry.KNOBS` (derived from `_META_ROWS`, athenaeum#781) — not a fixed
 count restated here, so this table cannot go stale the next time a knob is
-added. They all live under the `models:` yaml block (athenaeum#232, athenaeum#513)
+added — and `tests/test_configuration_doc_model_defaults.py` asserts the
+**Default** column of every row still matches the resolver's code-level
+default (`athenaeum#1278`), so a bumped model id cannot drift out of sync
+with this table either. They all live under the `models:` yaml block (athenaeum#232, athenaeum#513)
 and share one resolver helper (`config.resolve_model`). The resolver model
 additionally accepts the pre-athenaeum#232 `resolve.model` key for backward
 compatibility. See [routing.md](routing.md) for provider + model + batch
@@ -543,11 +546,11 @@ precedence rule, and the `athenaeum explain-routing` preview command
 | Knob | Env var | YAML key | Default | Used by |
 |---|---|---|---|---|
 | Classifier | `ATHENAEUM_CLASSIFY_MODEL` | `models.classify` | `claude-haiku-4-5-20251001` | Tier-2 classifier **and** the C4 contradiction detector — one knob by design. |
-| Writer | `ATHENAEUM_WRITE_MODEL` | `models.write` | `claude-sonnet-4-6` | Tier-3 wiki writer. |
+| Writer | `ATHENAEUM_WRITE_MODEL` | `models.write` | `claude-sonnet-5` | Tier-3 wiki writer. |
 | Topic extractor | `ATHENAEUM_TOPIC_MODEL` | `models.topic` | `claude-haiku-4-5-20251001` | `athenaeum query-topics` recall query rewriting. |
-| Resolver | `ATHENAEUM_RESOLVE_MODEL` | `models.resolve` (_also_ `resolve.model`¹) | `claude-opus-4-7` | Contradiction resolver (proposes a winner once the detector flags a conflict). |
+| Resolver | `ATHENAEUM_RESOLVE_MODEL` | `models.resolve` (_also_ `resolve.model`¹) | `claude-opus-5` | Contradiction resolver (proposes a winner once the detector flags a conflict). |
 | Reasoning tier 1 | `ATHENAEUM_REASONING_T1_MODEL` | `models.reasoning_t1` | `claude-haiku-4-5-20251001` | First-pass model for the reasoning-tier chain.² |
-| Reasoning tier 2 | `ATHENAEUM_REASONING_T2_MODEL` | `models.reasoning_t2` | `claude-opus-4-1-20250805` | Escalation model for the reasoning-tier chain.² |
+| Reasoning tier 2 | `ATHENAEUM_REASONING_T2_MODEL` | `models.reasoning_t2` | `claude-opus-4-8` | Escalation model for the reasoning-tier chain.² |
 | Rule proposals | `ATHENAEUM_RULE_PROPOSALS_MODEL` | `models.rule_proposals` | `claude-opus-4-8` | Rule-proposal drafting call (athenaeum#1174) — see the "Rule proposals" section above (`librarian.rule_proposals.*`) for the full knob set (threshold, window, exemplar count, max tokens, thinking). |
 
 > ¹ `resolve.model` is still read post-athenaeum#512/#513 (`athenaeum.resolutions._get_model`), not yet removed. Precedence, highest first: `ATHENAEUM_RESOLVE_MODEL` env var, then `models.resolve` yaml, then `resolve.model` yaml (legacy), then the code default — so if both `models.resolve` and `resolve.model` are set, **`models.resolve` wins**. There is no scheduled removal; it is kept indefinitely so existing `athenaeum.yaml` files keep working unchanged. Prefer `models.resolve` for new configs, for consistency with the other model knobs.
@@ -675,7 +678,7 @@ being accepted-and-ignored:
 
 Applied against this repo's current defaults, adding a blanket sampling
 parameter today would **400 exactly one stage — the Opus resolver**
-(`models.resolve` defaults to `claude-opus-4-7`, the single most consequential
+(`models.resolve` defaults to `claude-opus-5`, the single most consequential
 call) — and would break **every** stage the moment an operator points a model
 knob at a 4.7+/5-family model. So the absence is load-bearing, not incidental.
 
@@ -1117,9 +1120,22 @@ spend:
   max_usd_per_day: 5.00           # cap real API dollars per day
   # accounting_timezone: America/New_York  # default: system-local; see rationale above
   weekly_token_limit: 28000000    # declared weekly subscription quota, billable tokens
-  max_pct_per_day: 50             # -> 2,000,000 billable-token/day derived ceiling
+  max_pct_per_day: 100            # -> 4,000,000 billable-token/day derived ceiling
   # warning_threshold_pct: 75     # warn at 75% of either dollar cap (default)
 ```
+
+`weekly_token_limit / 7 * max_pct_per_day / 100` = `28,000,000 / 7 * 100 / 100`
+= `4,000,000` — the derived per-day ceiling above must land at or above the
+3.37M-billable-token single run cited for `max_tokens_per_run` above, or a
+single ordinary night would trip the per-day ceiling before the per-run one
+ever engages. `max_pct_per_day: 100` is the smallest multiple-of-25 percentage
+that clears that bar with the stated `weekly_token_limit`, and it lands the
+derived daily figure exactly on `max_tokens_per_run` — sized for one nightly
+run per accounting day, matching the same 3.37M-run headroom reasoning above
+rather than a second, independently-chosen number. An operator who runs more
+than once per accounting day, or wants a tighter derived cap, should raise
+`weekly_token_limit` instead of lowering `max_pct_per_day` back below this
+floor.
 
 The weekly-limit + max-percent-per-day pair (issue athenaeum#785) is a SECOND,
 independent way to bound the subscription per-day figure — derived rather
@@ -2814,9 +2830,9 @@ librarian:
 
 models:
   classify: claude-haiku-4-5-20251001
-  write: claude-sonnet-4-6
+  write: claude-sonnet-5
   topic: claude-haiku-4-5-20251001
-  resolve: claude-opus-4-7
+  resolve: claude-opus-5
 
 pricing:                        # per-MTok rate table (athenaeum#783); athenaeum init
   claude-opus-5: [5.0, 25.0]    # ships this ACTIVE and pre-populated -- see
@@ -2832,7 +2848,7 @@ contradiction:
   not_a_conflict_ttl_days: 0  # 0 = disabled; >0 decays stale auto not_a_conflict (athenaeum#251)
 
 resolve:
-  # model: claude-opus-4-7   # legacy — prefer models.resolve above
+  # model: claude-opus-5   # legacy — prefer models.resolve above
   auto_apply: true
   auto_apply_threshold: 0.90
   full_body_token_cap: 1500
