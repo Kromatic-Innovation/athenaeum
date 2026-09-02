@@ -92,6 +92,34 @@ Do not describe this module as having "no production caller" (stale as of
 athenaeum#518) and do not describe T2 as "unwired" (stale as of athenaeum#602) — both
 tiers are wired, each opt-in behind its OWN flag (athenaeum#1200), each
 defaulting to the identical unscreened behavior when it is off.
+
+**M17 retrofit (athenaeum#609), applying athenaeum#608's decided strictness posture to this
+authority boundary.** T1/T2 now parse the model's raw JSON verdict through a
+Pydantic response model (:class:`T1VerdictResponse` / :class:`T2VerdictResponse`)
+before constructing a decision — the same one-model-per-contract, ``Literal``-
+for-vocabulary convention :mod:`athenaeum.llm_schemas` established for its six
+observe-only contracts. Two things about it are DELIBERATELY NOT that
+module's convention, per athenaeum#608's decision (there is no ledger measurement
+for these contracts, and the asymmetry at an authority boundary means a
+tolerated unknown key is a widening risk, not a neutral one):
+
+- ``model_config = ConfigDict(extra="forbid")`` by default, not
+  ``extra="allow"``. An unexpected key at this boundary is never "signal to
+  observe later" — it is validation failure, immediately.
+- A validation failure drives the EXISTING safe fallback (T1: ``pass_up``;
+  T2: ``escalate``) directly, in place of the hand-rolled defensive parsing
+  it replaces. It is never logged-and-passed-through the way
+  :func:`athenaeum.llm_schemas.observe` treats every other contract's
+  mismatch — that posture is correct there and would be an erosion here (see
+  athenaeum#609's issue body).
+
+This is a SCHEMA-SHAPE-AND-PARSE-DIRECTION change only. Every structural
+guarantee this module already carried is unchanged and unweakened by the
+retrofit: :data:`ReasoningTierVerdict`'s two-member ``Literal`` (T1) and
+:func:`run_t2_tier`'s :func:`safe_class_violation` gate (T2) remain the
+enforcement points — see ``tests/test_reasoning_tiers.py`` /
+``tests/test_t2_reasoning_tier.py`` for the adversarial/directional/
+single-enforcement-point/negative-control tests this retrofit added.
 """
 
 from __future__ import annotations
@@ -99,11 +127,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from athenaeum._retry import with_retry
 from athenaeum.authority import (
@@ -125,6 +155,23 @@ from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_te
 from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
+
+
+def _fmt_pydantic_error(err: Mapping[str, Any]) -> str:
+    """Render one pydantic error dict as ``field.path: message`` (athenaeum#609).
+
+    Takes a ``Mapping`` (not ``dict``) so pydantic's ``ErrorDetails``
+    TypedDict — returned by ``ValidationError.errors()`` — is accepted
+    directly, mirroring :func:`athenaeum.llm_schemas._fmt_error`'s own
+    signature. Rendering logic is restated locally rather than imported —
+    this module stays free of any :mod:`athenaeum.llm_schemas` dependency
+    (that module's own docstring explicitly excludes the T1/T2 contracts, so
+    pulling from it here would be backwards: this is a DIFFERENT, stricter
+    posture, not an extension of the observe-only one).
+    """
+    loc = ".".join(str(p) for p in err.get("loc", ())) or "<root>"
+    return f"{loc}: {err.get('msg', 'invalid')}"
+
 
 # Reasoning-tier output budgets (issue athenaeum#575): formerly bare literals in the
 # request-param dicts below; named and resolved through the provider seam so
@@ -603,15 +650,44 @@ def build_t1_request_params(
     }
 
 
+class T1VerdictResponse(BaseModel):
+    """M17 response model (athenaeum#570 convention, athenaeum#609 retrofit) for the T1
+    JSON contract — ``{"verdict": "reject" | "pass_up", "reason": "..."}``.
+
+    ``verdict`` is a two-member ``Literal`` — the SAME two-member vocabulary
+    as :data:`ReasoningTierVerdict` — so "approve" (or any other string) is
+    unrepresentable here exactly as it is on :class:`ReasoningTierDecision`
+    itself; a payload claiming it fails Pydantic validation rather than
+    silently coercing. ``reason`` is required (unlike the llm_schemas.py
+    ``Optional`` convention for a site that defaults a missing field): at
+    this authority boundary a response carrying no reason at all is itself
+    treated as malformed input, not defaulted through.
+
+    ``extra="forbid"`` (see the module docstring's M17-retrofit note): an
+    unexpected key is validation failure here, not an observe-only signal —
+    the decided posture for a contract with no measured mismatch window.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: Literal["reject", "pass_up"]
+    reason: str
+
+
 def _parse_t1_response(text: str) -> tuple[ReasoningTierVerdict, str]:
     """Parse the T1 model's JSON response into (verdict, reason).
 
     Defensive parsing (mirrors :func:`athenaeum.tiers.parse_tier2_entities`):
-    malformed/missing JSON, or a verdict outside the two allowed values,
-    degrades to a ``pass_up`` — T1 can only ever reject when it is
-    confidently able to say so; anything it cannot parse is NOT treated as
-    a rejection (that would be a false-negative failure mode with much
-    higher cost than an extra pass-up).
+    malformed/missing JSON, a payload that fails :class:`T1VerdictResponse`
+    validation (missing field, wrong type, out-of-vocabulary verdict, extra
+    key, empty payload, ...), degrades to a ``pass_up`` — T1 can only ever
+    reject when it is confidently able to say so; anything it cannot parse
+    AND validate is NOT treated as a rejection (that would be a
+    false-negative failure mode with much higher cost than an extra
+    pass-up). This is the retrofit's enforcement point (athenaeum#609): a
+    schema mismatch here drives the fallback directly, unlike
+    :mod:`athenaeum.llm_schemas`'s observe-only sites, where a mismatch is
+    only ever logged.
     """
     text = text.strip()
     try:
@@ -620,18 +696,22 @@ def _parse_t1_response(text: str) -> tuple[ReasoningTierVerdict, str]:
         payload = json.loads(text[start:end])
     except (ValueError, json.JSONDecodeError):
         return "pass_up", f"T1 response unparseable, passing up: {text[:200]!r}"
-    if not isinstance(payload, dict):
-        return "pass_up", "T1 response was not a JSON object; passing up"
-    verdict = payload.get("verdict")
-    reason = payload.get("reason")
-    if not isinstance(reason, str) or not reason.strip():
-        reason = "(no reason given by T1 model)"
-    if verdict == "reject":
-        return "reject", reason
-    # Anything else (including "approve", garbage, or missing) -> pass_up.
-    # T1's output type has no "approve" branch, so even if the model text
-    # says "approve" it is coerced to a pass-up, never surfaced as approval.
-    return "pass_up", reason
+    try:
+        validated = T1VerdictResponse.model_validate(payload)
+    except ValidationError as exc:
+        # Includes: missing "verdict", "verdict" outside {"reject",
+        # "pass_up"} (which covers "approve" and any other hallucinated
+        # string), wrong-typed "verdict"/"reason", a missing "reason", an
+        # unexpected extra key, and a non-dict/empty payload. T1's output
+        # type has no "approve" branch under any of these, so even if the
+        # model text says "approve" it is coerced to a pass-up, never
+        # surfaced as approval.
+        return (
+            "pass_up",
+            f"T1 response failed schema validation, passing up: {exc.error_count()} "
+            f"error(s): {'; '.join(_fmt_pydantic_error(e) for e in exc.errors())}",
+        )
+    return validated.verdict, validated.reason
 
 
 def _duplicate_check_reason(
@@ -1106,6 +1186,36 @@ def build_t2_request_params(
     }
 
 
+class T2VerdictResponse(BaseModel):
+    """M17 response model (athenaeum#570 convention, athenaeum#609 retrofit) for the T2
+    JSON contract — ``{"verdict": ..., "reason": ..., "amended_sources": ...,
+    "drafted_body": ...}``.
+
+    ``verdict`` ranges over the SAME four-member vocabulary as
+    :data:`ReasoningTierT2Verdict` — including ``"approve"``, which IS a
+    legitimate T2 outcome (unlike T1, T2 has real, bounded write authority).
+    This model does not, and must not, gate approval; it only proves the
+    payload is well-formed enough to trust as input to
+    :func:`_t2_decision_from_model_verdict`, which is the sole place
+    :func:`run_t2_tier`'s :func:`safe_class_violation` gate is applied.
+    ``reason`` is required, same rationale as :class:`T1VerdictResponse`.
+
+    ``extra="forbid"`` (see the module docstring's M17-retrofit note) is the
+    load-bearing difference from :mod:`athenaeum.llm_schemas`'s equivalent
+    contracts: an extra key here is validation failure, not an
+    observe-and-continue signal — a payload combining a legitimate-looking
+    ``"approve"`` with an unrecognized key must never reach the safe-class
+    gate as a trusted approval; it fails validation and escalates instead.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: Literal["approve", "amend", "draft", "escalate"]
+    reason: str
+    amended_sources: list[str] | None = None
+    drafted_body: str | None = None
+
+
 def _parse_t2_response(
     text: str,
 ) -> tuple[ReasoningTierT2Verdict, str, tuple[str, ...] | None, str | None]:
@@ -1113,8 +1223,19 @@ def _parse_t2_response(
 
     Returns ``(verdict, reason, amended_sources, drafted_body)``. Defensive
     parsing mirrors :func:`_parse_t1_response`: malformed/missing JSON, or a
-    verdict outside the four allowed values, degrades to ``"escalate"`` —
-    T2's failure mode is "ask a human", never a silent approval.
+    payload that fails :class:`T2VerdictResponse` validation (missing field,
+    wrong type, out-of-vocabulary verdict, extra key, empty payload, ...),
+    degrades to ``"escalate"`` — T2's failure mode is "ask a human", never a
+    silent approval. This is the retrofit's enforcement point (athenaeum#609): a
+    schema mismatch here drives the fallback directly rather than being
+    logged-and-passed-through the way :mod:`athenaeum.llm_schemas` treats
+    every other contract's mismatch.
+
+    Note what this function does NOT do: it never inspects ``violation`` or
+    downgrades an "approve" verdict itself — that stays exclusively
+    :func:`_t2_decision_from_model_verdict`'s job (called from
+    :func:`run_t2_tier`, gated on :func:`safe_class_violation`), so the
+    safe-class enforcement point remains singular even after this retrofit.
     """
     text = text.strip()
     try:
@@ -1123,31 +1244,33 @@ def _parse_t2_response(
         payload = json.loads(text[start:end])
     except (ValueError, json.JSONDecodeError):
         return "escalate", f"T2 response unparseable, escalating: {text[:200]!r}", None, None
-    if not isinstance(payload, dict):
-        return "escalate", "T2 response was not a JSON object; escalating", None, None
+    try:
+        validated = T2VerdictResponse.model_validate(payload)
+    except ValidationError as exc:
+        # Includes: missing "verdict", "verdict" outside the four allowed
+        # values (a model hallucinating some other string), wrong-typed
+        # fields, a missing "reason", an unexpected extra key (including one
+        # riding alongside an otherwise-legitimate-looking "approve"), and a
+        # non-dict/empty payload. Never coerced to "approve" — the safest
+        # fallback (escalate) is used instead, matching T1's "cannot parse
+        # confidently -> least-authority fallback" discipline.
+        return (
+            "escalate",
+            f"T2 response failed schema validation, escalating: {exc.error_count()} "
+            f"error(s): {'; '.join(_fmt_pydantic_error(e) for e in exc.errors())}",
+            None,
+            None,
+        )
 
-    verdict = payload.get("verdict")
-    reason = payload.get("reason")
-    if not isinstance(reason, str) or not reason.strip():
-        reason = "(no reason given by T2 model)"
-
-    amended_sources: tuple[str, ...] | None = None
-    raw_amended = payload.get("amended_sources")
-    if isinstance(raw_amended, list) and raw_amended:
-        amended_sources = tuple(str(s) for s in raw_amended)
-
-    drafted_body: str | None = None
-    raw_draft = payload.get("drafted_body")
-    if isinstance(raw_draft, str) and raw_draft.strip():
-        drafted_body = raw_draft
-
-    if verdict not in REASONING_TIER_T2_VERDICTS:
-        # Includes a model hallucinating some other string. Never coerced
-        # to "approve" — the safest fallback (escalate) is used instead,
-        # matching T1's "cannot parse confidently -> least-authority
-        # fallback" discipline.
-        return "escalate", reason, amended_sources, drafted_body
-    return verdict, reason, amended_sources, drafted_body
+    amended_sources = (
+        tuple(validated.amended_sources) if validated.amended_sources else None
+    )
+    drafted_body = (
+        validated.drafted_body
+        if validated.drafted_body and validated.drafted_body.strip()
+        else None
+    )
+    return validated.verdict, validated.reason, amended_sources, drafted_body
 
 
 def _t2_decision_from_model_verdict(
@@ -1474,8 +1597,10 @@ __all__ = [
     "SAFE_CLASS_VIOLATION_TOO_MANY_PAGES",
     "T1_SYSTEM_PROMPT",
     "T1_TIER_NAME",
+    "T1VerdictResponse",
     "T2_SYSTEM_PROMPT",
     "T2_TIER_NAME",
+    "T2VerdictResponse",
     "BoundedSourceView",
     "ReasoningPipelineResult",
     "ReasoningProposal",

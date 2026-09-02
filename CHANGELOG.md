@@ -36,6 +36,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ceiling or policy changes, and pre-v4 ledger rows stay readable (counted
   `surface_unattributed_records`, never dropped).
 
+### Changed
+
+- **`reasoning_tiers` T1/T2 retrofitted onto the M17 response-model
+  convention, with a deliberately stricter posture than the observe-only
+  sites (athenaeum#609).** `_parse_t1_response`/`_parse_t2_response` now
+  validate the model's raw JSON verdict through a Pydantic response model
+  (`T1VerdictResponse` / `T2VerdictResponse`) — one model per contract,
+  `Literal` over each tier's own verdict vocabulary, matching
+  `athenaeum.llm_schemas`' athenaeum#570 convention. Two things are
+  deliberately NOT that module's convention, per athenaeum#608's decided
+  strictness posture applied to this authority boundary: both models default
+  to `extra="forbid"` (not `extra="allow"` — there is no ledger measurement
+  for these contracts, and a tolerated unknown key at an authority boundary
+  is a widening risk, not a neutral one), and a validation failure drives
+  the tier's existing safe fallback directly (T1 → `pass_up`, T2 →
+  `escalate`) rather than being logged-and-passed-through the way
+  `athenaeum.llm_schemas.observe` treats every other contract's mismatch.
+  Every structural guarantee the module already carried is unchanged: T1's
+  two-member `Literal` (`"approve"` remains unrepresentable) and
+  `run_t2_tier`'s `safe_class_violation` gate (the single enforcement point
+  for an approved T2 decision) are untouched. One documented, intentional
+  behavior change: a payload that previously succeeded despite an
+  unexpected extra key (e.g. `{"verdict": "reject", "reason": "ok",
+  "surprise": "x"}`) now fails validation and falls back to the tier's
+  safe default instead — always landing on the OTHER already-safe outcome,
+  never a widened one. New tests: adversarial cases per invariant, an
+  exhaustive parametrized directional test enumerating every failure path
+  the retrofit touches, an AST-walk test proving `"approve"` is produced on
+  exactly one code path dominated by the `safe_class_violation` gate, and a
+  negative-control test proving both checks fail against a deliberately
+  eroded variant (never committed to the production module).
+
 ### Fixed
 
 - **Intake starvation: a scheduled source that never gets *reached* is now
