@@ -227,7 +227,15 @@ class _FakeClient:
 def _capture_compile(monkeypatch):
     seen: dict[str, object] = {}
 
-    def fake_cluster(files, kr, *, config=None, dry_run=False, changed_paths=None):
+    def fake_cluster(
+        files,
+        kr,
+        *,
+        config=None,
+        dry_run=False,
+        changed_paths=None,
+        out_embedder_counts=None,
+    ):
         seen["cluster_changed_paths"] = changed_paths
         return None
 
@@ -268,7 +276,15 @@ def test_d5_live_client_delta_eligible_by_default(
     files = discover_auto_memory_files(root, config=config)
     seen: dict[str, object] = {}
 
-    def fake_cluster(files, kr, *, config=None, dry_run=False, changed_paths=None):
+    def fake_cluster(
+        files,
+        kr,
+        *,
+        config=None,
+        dry_run=False,
+        changed_paths=None,
+        out_embedder_counts=None,
+    ):
         seen["cluster_changed_paths"] = changed_paths
         return {"alpha-new"}  # pretend one cluster was affected
 
@@ -380,7 +396,15 @@ def test_delta_engages_on_client_none(tmp_path: Path, monkeypatch) -> None:
 
     seen: dict[str, object] = {}
 
-    def fake_cluster(files, kr, *, config=None, dry_run=False, changed_paths=None):
+    def fake_cluster(
+        files,
+        kr,
+        *,
+        config=None,
+        dry_run=False,
+        changed_paths=None,
+        out_embedder_counts=None,
+    ):
         seen["cluster_changed_paths"] = changed_paths
         return {"alpha-new"}  # pretend one cluster was affected
 

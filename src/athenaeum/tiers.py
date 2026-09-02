@@ -73,6 +73,7 @@ from athenaeum.config import (
     resolve_heartbeat_interval,
     resolve_merge_worthiness_gate_enabled,
     resolve_model,
+    resolve_preserved_log_dir,
 )
 from athenaeum.fingerprint import (
     _member_key_str,
@@ -3824,15 +3825,19 @@ def stamp_merge_provenance(
 DEFAULT_PAGE_SIZE_THRESHOLD_CHARS = 10_000
 
 # The action an over-threshold page routes to instead of another merge.
-# Only "review" ships implemented (orchestrator decision, issue athenaeum#1182):
-# split and log-demotion are destructive restructurings of durable operator
-# data and must not run unattended on a first landing. Both are RESERVED
-# here -- a recognized config value that resolves cleanly and then raises
-# NotImplementedError at dispatch time (see check_page_size_gate) rather
-# than either silently falling back to "review" (hiding the operator's
-# explicit choice) or a KeyError one yaml typo away from indistinguishable
-# from a real "review" -- so enabling them later is a follow-up, not a
-# rebuild of the gate itself.
+# "review" (issue athenaeum#1182) is the shipped DEFAULT and the only action
+# that ever runs unattended: it escalates and leaves the page byte-for-byte
+# unmodified. "split" and "log_demote" (issue athenaeum#1248) restructure a
+# durable operator page on disk, so BOTH require an explicit operator
+# config choice -- there is no yaml-typo path from "review" to either of
+# them, since resolve_oversize_page_action falls back to "review" for any
+# value outside this tuple. Both routes degrade back to "review" (page
+# left untouched) rather than raising whenever they cannot proceed -- no
+# preserved_log_dir configured (log_demote), no markdown heading to split
+# on (split, issue athenaeum#1248 -- the no-heading cohort is athenaeum#1282's job,
+# not this one's), or the filesystem operation itself failing partway
+# (see check_page_size_gate's docstring for the atomicity contract both
+# routes give).
 VALID_OVERSIZE_PAGE_ACTIONS = ("review", "split", "log_demote")
 DEFAULT_OVERSIZE_PAGE_ACTION = "review"
 
@@ -3872,11 +3877,275 @@ def resolve_oversize_page_action(config: dict[str, Any] | None = None) -> str:
     return DEFAULT_OVERSIZE_PAGE_ACTION
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1248: the "split" and "log_demote" oversize-page dispositions.
+# ---------------------------------------------------------------------------
+#
+# Both routes are performed as a SIDE EFFECT of check_page_size_gate firing
+# (below) -- there is no separate "apply the disposition" call the caller
+# has to remember to make. Both share one non-negotiable property: the
+# page they act on is either left COMPLETELY untouched, or the whole
+# operation lands. There is no code path that leaves a page half-written.
+
+
+@dataclass
+class _SplitChildPage:
+    """One atomic page `split` is about to write (issue athenaeum#1248) --
+    computed in full, including its render(), before ANY file on disk is
+    touched, so the write loop in :func:`_perform_oversize_page_split` does
+    pure I/O with no chance of a mid-computation failure after some pages
+    are already on disk."""
+
+    entity: WikiEntity
+    path: Path
+
+
+# A markdown heading line at any level (mirrors tiers._SECTION_HEADING_RE,
+# issue athenaeum#1181, exactly -- kept as a SEPARATE constant rather than
+# reused because this one additionally computes the shallowest depth
+# present, which that gate's section-scoping use case never needed).
+_SPLIT_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*)$", re.MULTILINE)
+
+
+def _split_into_atomic_sections(body: str) -> list[tuple[str, str]]:
+    """Split *body* into ``(heading_text, section_text)`` pairs at its
+    TOP-LEVEL markdown heading depth (issue athenaeum#1248) -- the
+    shallowest ``#``-count actually present in the body, e.g. every ``##``
+    if the page has no ``#``. A deeper heading (a ``###`` under a ``##``)
+    is a SUBSECTION and stays folded into its enclosing top-level
+    section's text verbatim, so a page using nested heading structure
+    splits into one atomic page per top-level section, not one per
+    subsection too.
+
+    Mirrors :func:`_split_into_sections`'s contract (verbatim substrings,
+    a leading ``("", preamble_text)`` pair for content before the first
+    heading) but scoped to one heading depth rather than every heading --
+    a deliberately separate function, not a parameterization of that one,
+    since that gate's section-scoped-merge use case has no notion of
+    "top level" and must not change behaviour here.
+
+    A body with no heading at all returns ``[]`` -- the caller (issue
+    athenaeum#1248's own explicit call, see :data:`VALID_OVERSIZE_PAGE_ACTIONS`'s
+    docstring) treats this as "cannot split", not as "split into one
+    section": a heading-less oversized page is left to the existing
+    ``review`` route (the no-headings cohort is issue athenaeum#1282's job).
+    """
+    matches = list(_SPLIT_HEADING_RE.finditer(body))
+    if not matches:
+        return []
+    top_level = min(len(m.group(1)) for m in matches)
+    top_matches = [m for m in matches if len(m.group(1)) == top_level]
+    sections: list[tuple[str, str]] = []
+    if top_matches[0].start() > 0:
+        sections.append(("", body[: top_matches[0].start()]))
+    for i, m in enumerate(top_matches):
+        end = top_matches[i + 1].start() if i + 1 < len(top_matches) else len(body)
+        sections.append((m.group(2).strip(), body[m.start() : end]))
+    return sections
+
+
+def _build_split_child_pages(
+    *,
+    sections: list[tuple[str, str]],
+    parent_uid: str,
+    parent_name: str,
+    parent_type: str,
+    parent_access: str,
+    parent_tags: list[str],
+    wiki_root: Path,
+    today: str,
+) -> tuple[list[_SplitChildPage], str, list[dict[str, str]]]:
+    """Build one new :class:`WikiEntity` per non-preamble section (issue
+    athenaeum#1248) plus the hub body text that links back to all of them.
+    Pure -- writes nothing. Returns ``(children, hub_body,
+    child_related_for_hub)``: the last item is the list of ``related``
+    entries the hub's OWN frontmatter should gain (one ``split-into`` row
+    per child), kept separate from each child's own ``related`` (a single
+    ``split-from`` row pointing back at the parent) since the two entities'
+    frontmatter are written to different files.
+
+    Content before the first heading (the ``("", ...)`` pair, if present)
+    has no heading text to name a child page after, so it stays on the HUB
+    verbatim instead of becoming a child -- still fully preserved, just
+    not atomized (issue athenaeum#1248's "no existing content is dropped").
+    """
+    children: list[_SplitChildPage] = []
+    child_related: list[dict[str, str]] = []
+    preamble = ""
+    link_lines: list[str] = []
+    for heading, text in sections:
+        if not heading:
+            preamble = text.strip()
+            continue
+        child_uid = generate_uid()
+        child_name = f"{parent_name}: {heading}"
+        entity = WikiEntity(
+            uid=child_uid,
+            type=parent_type,
+            name=child_name,
+            access=parent_access,
+            tags=list(parent_tags),
+            related=[{"uid": parent_uid, "role": "split-from"}],
+            created=today,
+            updated=today,
+            body=text.strip() + "\n",
+            source=f"oversize-page-split:{parent_uid}:{today}",
+        )
+        children.append(_SplitChildPage(entity=entity, path=wiki_root / entity.filename))
+        child_related.append({"uid": child_uid, "role": "split-into"})
+        link_lines.append(f"- [[{child_uid}|{child_name}]]")
+
+    hub_paragraphs = [
+        "This page exceeded the page-size threshold and was split into "
+        f"linked pages on {today} (issue athenaeum#1248, "
+        "`librarian.oversize_page_action: split`). All original content "
+        "is preserved in full across the linked pages below -- nothing "
+        "was dropped.",
+    ]
+    if preamble:
+        hub_paragraphs.append(preamble)
+    hub_paragraphs.append("\n".join(link_lines))
+    hub_body = "\n\n".join(hub_paragraphs) + "\n"
+    return children, hub_body, child_related
+
+
+def _perform_oversize_page_split(
+    *,
+    action: EntityAction,
+    existing_body: str,
+    existing_meta: dict[str, Any],
+    existing_path: Path,
+    wiki_root: Path,
+) -> bool:
+    """Split *existing_path* into one atomic child page per top-level
+    markdown section, leaving the original as a hub (issue athenaeum#1248).
+
+    Returns ``True`` on a fully-committed split. Returns ``False`` -- with
+    *existing_path* and the whole corpus otherwise UNTOUCHED -- when
+    *existing_body* has no markdown heading to split on at all; the caller
+    falls back to the ``review`` disposition in that case.
+
+    **Atomicity contract (issue athenaeum#1248 AC).** Every child page is
+    computed FIRST (:func:`_build_split_child_pages`, pure, no I/O), then
+    written one at a time via :func:`~athenaeum.atomic_io.atomic_write_text`
+    -- itself a same-dir temp-file-then-``os.replace``, so each individual
+    file write is torn-write-safe on its own. The hub (*existing_path*) is
+    rewritten LAST, only after every child has landed. If any child write
+    raises, *existing_path* has NEVER been touched -- the split is aborted
+    right there, every child written so far in THIS call is unlinked
+    (best-effort), and the exception propagates. If the hub write itself
+    raises, the same rollback removes every child that was written. Either
+    way, a caller that catches the propagated exception always finds the
+    corpus in exactly one of two states: fully split (hub + every child
+    present), or fully unsplit (*existing_path* byte-identical to before
+    this call, no child page left on disk) -- never a partial split.
+    """
+    sections = _split_into_atomic_sections(existing_body)
+    if not any(heading for heading, _ in sections):
+        return False
+
+    today = date.today().isoformat()
+    parent_uid = str(existing_meta.get("uid") or "")
+    parent_name = str(existing_meta.get("name") or action.name)
+    parent_type = str(existing_meta.get("type") or action.entity_type or "")
+    parent_access = str(existing_meta.get("access") or action.access or "internal")
+    raw_tags = existing_meta.get("tags")
+    parent_tags = list(raw_tags) if isinstance(raw_tags, list) else []
+    raw_related = existing_meta.get("related")
+    parent_related = list(raw_related) if isinstance(raw_related, list) else []
+
+    children, hub_body, child_related = _build_split_child_pages(
+        sections=sections,
+        parent_uid=parent_uid,
+        parent_name=parent_name,
+        parent_type=parent_type,
+        parent_access=parent_access,
+        parent_tags=parent_tags,
+        wiki_root=wiki_root,
+        today=today,
+    )
+
+    written: list[Path] = []
+    try:
+        for child in children:
+            atomic_write_text(child.path, child.entity.render())
+            written.append(child.path)
+
+        hub_meta = dict(existing_meta)
+        hub_meta["updated"] = today
+        hub_meta["related"] = parent_related + child_related
+        hub_content = render_frontmatter(hub_meta) + "\n" + hub_body
+        atomic_write_text(existing_path, hub_content)
+    except Exception:
+        for path in written:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise
+
+    log.info(
+        "oversize-page-gate: split %s into %d linked page(s) (issue athenaeum#1248)",
+        existing_path.name,
+        len(children),
+    )
+    return True
+
+
+def _perform_oversize_log_demote(
+    existing_path: Path,
+    wiki_root: Path,
+    config: dict[str, Any] | None,
+) -> Path | None:
+    """MOVE an over-threshold wiki page into the operator-configured
+    preserved-log area (issue athenaeum#1248) by calling
+    :func:`athenaeum.rules.preserve_raw_file` -- the SAME move mechanism
+    the ``preserve`` shape-rule disposition (issue athenaeum#837) already
+    uses to route a log-shaped raw intake file out of discovery. Reused
+    directly rather than reimplemented, per this issue's explicit
+    constraint that ``log_demote`` must not become a second, parallel
+    demotion mechanism; see that function's docstring for its own
+    fail-closed move contract (git ``mv``, or a same-filesystem ``rename``
+    fallback -- either way the source is never removed unless the
+    destination write is confirmed).
+
+    Returns the destination :class:`~pathlib.Path` on success. Returns
+    ``None`` -- *existing_path* left completely untouched -- when
+    ``librarian.preserved_log_dir`` is not configured, or when the move
+    itself could not be made (mirrors :func:`~athenaeum.rules.preserve_raw_file`'s
+    own ``None`` contract exactly); the caller falls back to the
+    ``review`` disposition in either case.
+    """
+    from athenaeum.rules import preserve_raw_file
+
+    preserved_dir = resolve_preserved_log_dir(config)
+    if preserved_dir is None:
+        log.warning(
+            "oversize-page-gate: log_demote requested for %s but no "
+            "librarian.preserved_log_dir is configured (issue athenaeum#1248) "
+            "-- falling back to review, page untouched",
+            existing_path.name,
+        )
+        return None
+    knowledge_root = wiki_root.parent
+    return preserve_raw_file(
+        knowledge_root,
+        existing_path,
+        preserved_dir=preserved_dir,
+        source="oversize-wiki-pages",
+        rule_tag="oversize-page-gate",
+    )
+
+
 def check_page_size_gate(
     action: EntityAction,
     existing_body: str,
     source_ref: str,
     config: dict[str, Any] | None,
+    *,
+    existing_path: Path | None = None,
+    existing_meta: dict[str, Any] | None = None,
+    wiki_root: Path | None = None,
 ) -> EscalationItem | None:
     """Enforce the page-size invariant BEFORE a merge is dispatched (issue athenaeum#1182).
 
@@ -3892,57 +4161,154 @@ def check_page_size_gate(
     merge exactly as before, byte-for-byte unchanged from pre-athenaeum#1182
     behaviour.
 
-    Returns an :class:`~athenaeum.models.EscalationItem`
-    (``conflict_type="oversize_page"``) when the page is over threshold and
-    the configured action is ``"review"`` (the shipped default). The caller
-    MUST NOT dispatch the merge and MUST NOT modify the page; instead it
-    appends the returned item to its escalations so
-    :func:`tier4_escalate` surfaces the page (and the observation that would
-    have been merged) in ``_pending_questions.md`` rather than losing it.
+    Returns an :class:`~athenaeum.models.EscalationItem` when the page is
+    over threshold. In every case the caller MUST NOT dispatch the merge
+    this call was about to make; instead it appends the returned item to
+    its escalations so :func:`tier4_escalate` surfaces the page (and the
+    observation that would have been merged) in ``_pending_questions.md``
+    rather than losing it. ``conflict_type`` on the returned item tells the
+    caller which disposition actually fired, so run-summary counters can
+    tell them apart (issue athenaeum#1248):
 
-    Raises :class:`NotImplementedError` when ``librarian.oversize_page_action``
-    is explicitly set to ``"split"`` or ``"log_demote"`` (both currently
-    RESERVED, not implemented) -- naming the page and the requested action,
-    rather than silently substituting ``"review"`` for an operator's
-    explicit-but-not-yet-buildable choice.
+    - ``"oversize_page"`` -- the ``review`` disposition (the shipped
+      default, and also the graceful fallback below): the page is left
+      byte-for-byte unmodified.
+    - ``"oversize_split"`` -- ``librarian.oversize_page_action: split``
+      fired and the page WAS split into a hub plus linked atomic child
+      pages on disk (:func:`_perform_oversize_page_split`).
+    - ``"oversize_log_demote"`` -- ``librarian.oversize_page_action:
+      log_demote`` fired and the page WAS moved into the preserved-log
+      area (:func:`_perform_oversize_log_demote`).
+
+    ``split``/``log_demote`` are only attempted when the caller supplies
+    *existing_path* and *wiki_root* (both keyword-only) -- a call site that
+    omits them (e.g. an older/simpler caller, or most of this module's own
+    test suite) gets ``review`` behaviour for every action, identical to
+    this function's pre-athenaeum#1248 contract. *existing_meta* is the
+    page's already-parsed frontmatter dict (the caller has it in hand from
+    the same ``parse_frontmatter`` call that produced *existing_body* --
+    this function never re-reads the file itself); ``None``/missing keys
+    fall back to *action*'s own fields.
+
+    Neither route ever runs unattended in a way that could raise past this
+    function on its own -- see :func:`_perform_oversize_page_split` and
+    :func:`_perform_oversize_log_demote` for their own atomicity/rollback
+    contracts. A genuine ``OSError`` from either (disk full, permission
+    denied, no space for the temp file, ...) is caught here and degrades to
+    the ``review`` disposition, page left untouched, rather than taking the
+    whole run down over one oversized page.
     """
     threshold = resolve_page_size_threshold_chars(config)
     if len(existing_body) <= threshold:
         return None
 
     configured_action = resolve_oversize_page_action(config)
-    if configured_action == "review":
-        log.info(
-            "T3 merge suppressed by page-size gate (issue athenaeum#1182): "
-            "page=%s source=%s existing_body_chars=%d threshold=%d action=review",
-            action.name,
-            source_ref,
-            len(existing_body),
-            threshold,
-        )
-        return EscalationItem(
-            raw_ref=source_ref,
-            entity_name=action.name,
-            conflict_type="oversize_page",
-            description=(
-                f"Page {action.name!r} is {len(existing_body)} chars, over "
-                f"the {threshold}-char page-size threshold (issue "
-                "athenaeum#1182). Merging another observation into it was "
-                "suppressed and the page was left unmodified. This page has "
-                "likely outgrown the atomic-page form and should be split "
-                "or demoted to a log (~/knowledge/logs/) by an operator -- "
-                "automatic split/log-demotion are reserved, not yet "
-                f"implemented. The new observation from {source_ref} "
-                f"follows so it is not lost:\n\n{action.observations[:2000]}"
-            ),
-        )
+    meta = existing_meta if existing_meta is not None else {}
 
-    raise NotImplementedError(
-        f"librarian.oversize_page_action={configured_action!r} is reserved "
-        "but not yet implemented (issue athenaeum#1182) -- page="
-        f"{action.name!r} source={source_ref!r} is over the page-size "
-        "threshold and would route here. Set librarian.oversize_page_action "
-        'to "review" (the default) until split/log-demotion ship.'
+    if configured_action == "split" and existing_path is not None and wiki_root is not None:
+        try:
+            split_ok = _perform_oversize_page_split(
+                action=action,
+                existing_body=existing_body,
+                existing_meta=meta,
+                existing_path=existing_path,
+                wiki_root=wiki_root,
+            )
+        except OSError:
+            log.warning(
+                "oversize-page-gate: split of %s failed partway and was "
+                "rolled back -- falling back to review (issue athenaeum#1248)",
+                existing_path.name,
+            )
+            split_ok = False
+        if split_ok:
+            log.info(
+                "T3 merge suppressed by page-size gate (issue athenaeum#1182): "
+                "page=%s source=%s action=split",
+                action.name,
+                source_ref,
+            )
+            return EscalationItem(
+                raw_ref=source_ref,
+                entity_name=action.name,
+                conflict_type="oversize_split",
+                description=(
+                    f"Page {action.name!r} was over the page-size threshold "
+                    "and has been automatically split into linked atomic "
+                    "pages (issue athenaeum#1248); the original page is now "
+                    "a hub linking to them. The new observation from "
+                    f"{source_ref} was not merged this run; it follows so "
+                    f"it is not lost:\n\n{action.observations[:2000]}"
+                ),
+            )
+        # No heading to split on, or the split failed and was rolled back --
+        # fall through to the review disposition below; the page is
+        # untouched either way.
+
+    if configured_action == "log_demote" and existing_path is not None and wiki_root is not None:
+        try:
+            dest = _perform_oversize_log_demote(existing_path, wiki_root, config)
+        except OSError:
+            log.warning(
+                "oversize-page-gate: log_demote of %s raised -- falling "
+                "back to review (issue athenaeum#1248)",
+                existing_path.name,
+            )
+            dest = None
+        if dest is not None:
+            log.info(
+                "T3 merge suppressed by page-size gate (issue athenaeum#1182): "
+                "page=%s source=%s action=log_demote dest=%s",
+                action.name,
+                source_ref,
+                dest,
+            )
+            return EscalationItem(
+                raw_ref=source_ref,
+                entity_name=action.name,
+                conflict_type="oversize_log_demote",
+                description=(
+                    f"Page {action.name!r} was over the page-size threshold "
+                    f"and has been demoted to a log at {dest} (issue "
+                    f"athenaeum#1248). The new observation from {source_ref} "
+                    "was not merged this run; it follows so it is not lost:"
+                    f"\n\n{action.observations[:2000]}"
+                ),
+            )
+        # No librarian.preserved_log_dir configured, or the move failed --
+        # fall through to the review disposition below; the page is
+        # untouched either way.
+
+    # "review" (the shipped default), OR split/log_demote was requested but
+    # could not proceed for any of the reasons documented above -- always
+    # the safe, non-destructive path: the page is left completely
+    # unmodified.
+    log.info(
+        "T3 merge suppressed by page-size gate (issue athenaeum#1182): "
+        "page=%s source=%s existing_body_chars=%d threshold=%d action=%s",
+        action.name,
+        source_ref,
+        len(existing_body),
+        threshold,
+        configured_action,
+    )
+    return EscalationItem(
+        raw_ref=source_ref,
+        entity_name=action.name,
+        conflict_type="oversize_page",
+        description=(
+            f"Page {action.name!r} is {len(existing_body)} chars, over "
+            f"the {threshold}-char page-size threshold (issue "
+            "athenaeum#1182). Merging another observation into it was "
+            "suppressed and the page was left unmodified. This page has "
+            "likely outgrown the atomic-page form and should be split "
+            "or demoted to a log (~/knowledge/logs/) by an operator -- "
+            "or, if librarian.oversize_page_action is already configured "
+            "to split/log_demote, it could not proceed automatically (no "
+            "markdown heading to split on, or no librarian.preserved_log_dir "
+            f"configured). The new observation from {source_ref} "
+            f"follows so it is not lost:\n\n{action.observations[:2000]}"
+        ),
     )
 
 
@@ -4316,11 +4682,19 @@ def tier3_derive_actions(
                 # merge prompt is built or any model call is made — see
                 # check_page_size_gate's docstring for the full contract. An
                 # over-threshold page is never merged into; the escalation
-                # (when the shipped "review" action fires) carries the
-                # would-be observation so it is not lost, and the page is
-                # left byte-for-byte unmodified.
+                # carries the would-be observation so it is not lost.
+                # Issue athenaeum#1248: existing_path/wiki_root/existing_meta
+                # let the gate actually perform split/log_demote when
+                # configured — review's own contract (page left
+                # byte-for-byte unmodified) is unchanged.
                 oversize_escalation = check_page_size_gate(
-                    action, existing_body, raw.ref, config
+                    action,
+                    existing_body,
+                    raw.ref,
+                    config,
+                    existing_path=existing_path,
+                    existing_meta=meta,
+                    wiki_root=wiki_root,
                 )
                 if oversize_escalation is not None:
                     escalations.append(oversize_escalation)
