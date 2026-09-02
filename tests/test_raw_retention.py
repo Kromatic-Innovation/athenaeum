@@ -317,6 +317,52 @@ class TestCheckRawRetention:
         assert summary["raw-oversize-source"] == 1
         assert summary["oversize_sources"] == [{"source": "hestia", "bytes": 6000}]
 
+    def test_stray_file_directly_under_raw_root_is_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        """Only directories directly under `raw_root` are treated as source
+        trees -- a stray file at that level (never valid layout, but must
+        not crash or be mis-treated as an empty source) is skipped.
+        """
+        raw_root = tmp_path / "raw"
+        raw_root.mkdir()
+        (raw_root / "stray.txt").write_bytes(b"x" * 10)
+        _write(raw_root / "mural" / "a.json", 5000)
+        cfg = {"librarian": {"raw_retention": {"max_file_bytes": 100}}}
+
+        summary = check_raw_retention(raw_root, config=cfg)
+
+        assert summary["raw-oversize-file"] == 1
+        assert summary["oversize_files"] == [{"path": "mural/a.json", "bytes": 5000}]
+
+    def test_vanishing_file_mid_walk_is_tolerated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A file removed between the directory read and the stat call (a
+        race with a concurrent compile/retire pass) is skipped rather than
+        raising -- mirrors `discover_raw_backlog_bytes`'s own tolerance.
+        """
+        raw_root = tmp_path / "raw"
+        _write(raw_root / "mural" / "vanishes.json", 100)
+        _write(raw_root / "mural" / "stays.json", 5000)
+        cfg = {"librarian": {"raw_retention": {"max_file_bytes": 1000}}}
+
+        real_stat = Path.stat
+
+        def _flaky_stat(self: Path, *args, **kwargs):
+            if self.name == "vanishes.json":
+                raise OSError("vanished mid-walk")
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", _flaky_stat)
+
+        summary = check_raw_retention(raw_root, config=cfg)
+
+        assert summary["raw-oversize-file"] == 1
+        assert summary["oversize_files"] == [
+            {"path": "mural/stays.json", "bytes": 5000}
+        ]
+
     def test_wrong_root_raises(self, tmp_path: Path) -> None:
         """Mirrors the adjacent-wrong-root guard the other `discover_*`
         helpers in this module share (issue athenaeum#1134) -- passing
