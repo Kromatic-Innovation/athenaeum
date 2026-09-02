@@ -792,3 +792,155 @@ class TestChunkAndMeanPoolFixesTruncationCollapse:
             wiki_root, threshold=0.55, embedding_provider=stub_provider
         )
         assert clusters == []
+
+
+# --- Issue athenaeum#1252: residual over-clustering after athenaeum#1140 ---
+#
+# athenaeum#1140's chunk-and-mean-pool fix reduced but did not resolve
+# over-clustering (99-page largest cluster, 88% of the corpus, at the live
+# 0.55 threshold — full trail in the issue). This lane characterizes ONE of
+# the issue's three candidate causes purely from code + synthetic fixtures
+# (no real embedder, no corpus content — counts/classes only, per the
+# issue's own privacy requirement): eligibility
+# (``discover_wiki_dedupe_candidates``) admitting pages whose body is too
+# short for athenaeum#1140's fix to help at all.
+#
+# The pipeline fact this rests on is ``mean_pool``'s own documented
+# behavior (athenaeum.vecmath): "A single-vector input is returned
+# re-normalized (a no-op...)". A page that fits in one
+# ``_CHUNK_CHARS``-sized chunk therefore gets EXACTLY the same vector
+# athenaeum#1140 would have produced pre-fix — chunking a single-chunk page
+# changes nothing, mathematically, regardless of embedder quality. The new
+# ``librarian.wiki_dedupe_min_body_chars`` knob (default 0 = off) lets an
+# operator exclude that unprotected short end of the eligible population.
+
+
+class TestSingleChunkPagesAreStructurallyUnprotectedByMeanPool:
+    """Eligibility characterization (athenaeum#1252 AC2): a page short enough
+    to fit in one chunk gets zero benefit from athenaeum#1140's fix, by
+    construction of ``mean_pool`` — provable without any embedder."""
+
+    def test_short_page_produces_exactly_one_chunk(self) -> None:
+        from athenaeum.wiki_dedupe import _CHUNK_CHARS, _chunk_page_text
+
+        short_body = "word " * 50  # well under _CHUNK_CHARS
+        assert len(short_body) < _CHUNK_CHARS
+        assert len(_chunk_page_text(short_body)) == 1
+
+    def test_mean_pool_of_one_chunk_is_a_no_op(self) -> None:
+        """Pins the exact claim the knob's rationale rests on: mean-pooling
+        a single chunk vector reproduces the pre-athenaeum#1140 whole-page
+        embedding (a re-normalize of itself), never diluting it."""
+        from athenaeum.vecmath import cosine, mean_pool
+
+        whole_page_vector = [3.0, 4.0, 0.0]  # not unit length on purpose
+        pooled = mean_pool([whole_page_vector])
+        assert cosine(pooled, whole_page_vector) == pytest.approx(1.0)
+
+    def test_two_chunk_page_dilutes_lede_by_only_half(self) -> None:
+        """Contrast case: the modal real-corpus shape (one shared/boilerplate
+        lede chunk + exactly one divergent body chunk) gets the WEAKEST
+        non-zero dilution the athenaeum#1140 fix can provide — the lede
+        chunk still contributes half the pooled vector's weight, unlike a
+        page with many divergent chunks (see the existing
+        ``TestChunkAndMeanPoolFixesTruncationCollapse`` fixture above, whose
+        multi-chunk divergent body dilutes far more)."""
+        from athenaeum.vecmath import cosine, mean_pool
+
+        lede_vec = [1.0, 0.0, 0.0]
+        divergent_a = [0.0, 1.0, 0.0]
+        divergent_b = [0.0, 0.0, 1.0]
+
+        pooled_a = mean_pool([lede_vec, divergent_a])
+        pooled_b = mean_pool([lede_vec, divergent_b])
+
+        # Two fully orthogonal bodies still leave the pooled pair at exactly
+        # 0.5 cosine once diluted by only one shared lede chunk — a real
+        # (non-orthogonal) embedder's baseline prose-to-prose similarity
+        # only pushes this UP, never down. This is the structural ceiling,
+        # not a live measurement.
+        assert cosine(pooled_a, pooled_b) == pytest.approx(0.5)
+
+
+class TestWikiDedupeMinBodyCharsKnob:
+    """The athenaeum#1252 fix behind its config knob. DEFAULT 0 (off) means
+    every call site that does not opt in sees byte-identical eligibility to
+    before this issue — see ``resolve_wiki_dedupe_min_body_chars``."""
+
+    _SHORT_BODY = "A short stub page with almost no distinguishing content."
+    _LONG_BODY = _SHARED_LEDE + _DIVERGENT_BODY_A  # well over any small floor
+
+    def test_default_off_short_page_still_eligible(self, tmp_path: Path) -> None:
+        from athenaeum.wiki_dedupe import discover_wiki_dedupe_candidates
+
+        wiki_root = tmp_path / "wiki"
+        _write_page(wiki_root, "short.md", body=self._SHORT_BODY)
+        _write_page(wiki_root, "long.md", body=self._LONG_BODY)
+
+        # No config at all (existing call sites) ...
+        names = {c.path.name for c in discover_wiki_dedupe_candidates(wiki_root)}
+        assert names == {"short.md", "long.md"}
+
+        # ... and an explicit config with the knob simply absent.
+        names = {
+            c.path.name
+            for c in discover_wiki_dedupe_candidates(wiki_root, config={"librarian": {}})
+        }
+        assert names == {"short.md", "long.md"}
+
+    def test_configured_floor_excludes_short_page_only(self, tmp_path: Path) -> None:
+        from athenaeum.wiki_dedupe import discover_wiki_dedupe_candidates
+
+        wiki_root = tmp_path / "wiki"
+        _write_page(wiki_root, "short.md", body=self._SHORT_BODY)
+        _write_page(wiki_root, "long.md", body=self._LONG_BODY)
+
+        config = {"librarian": {"wiki_dedupe_min_body_chars": 200}}
+        candidates = discover_wiki_dedupe_candidates(wiki_root, config=config)
+        names = {c.path.name for c in candidates}
+        assert names == {"long.md"}
+
+    def test_configured_floor_removes_short_page_from_clustering_end_to_end(
+        self, tmp_path: Path
+    ) -> None:
+        """With the knob on, a short page never reaches the embedder at all
+        — proven with a deterministic stub embedder that raises if handed
+        the short page's body."""
+        from athenaeum.wiki_dedupe import _chunk_page_text, find_wiki_page_clusters
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        _write_page(wiki_root, "short-a.md", body=self._SHORT_BODY)
+        _write_page(wiki_root, "short-b.md", body=self._SHORT_BODY + " ")
+        _write_page(wiki_root, "long-a.md", body=_PAGE_A_CONTENT)
+        _write_page(wiki_root, "long-b.md", body=_PAGE_B_CONTENT)
+
+        def _stub_provider(texts: list[str]) -> list[list[float]]:
+            for t in texts:
+                assert "short stub page" not in t, (
+                    "the short-body candidate must be excluded before "
+                    "embedding when the floor is configured"
+                )
+            # Deterministic vectors keyed only on which long page a chunk
+            # came from — reuses the athenaeum#1140 fixture's vector map.
+            chunks_a = _chunk_page_text(_PAGE_A_CONTENT)
+            chunks_b = _chunk_page_text(_PAGE_B_CONTENT)
+            vector_map = _build_chunk_vector_map(chunks_a, chunks_b)
+            return [vector_map[t] for t in texts]
+
+        config = {"librarian": {"wiki_dedupe_min_body_chars": 200}}
+        clusters = find_wiki_page_clusters(
+            wiki_root, threshold=0.55, embedding_provider=_stub_provider, config=config
+        )
+        all_members = {name for c in clusters for name in c.member_paths}
+        assert "short-a.md" not in all_members
+        assert "short-b.md" not in all_members
+
+    def test_configured_floor_is_a_yaml_only_knob_no_env_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mirrors ``resolve_min_cluster_cohesion``'s shape: no env var —
+        this is a corpus-tuning knob, not an ops-emergency dial."""
+        from athenaeum.config import resolve_wiki_dedupe_min_body_chars
+
+        monkeypatch.setenv("ATHENAEUM_WIKI_DEDUPE_MIN_BODY_CHARS", "500")
+        assert resolve_wiki_dedupe_min_body_chars({"librarian": {}}) == 0

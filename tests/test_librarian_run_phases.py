@@ -196,6 +196,10 @@ class TestRunContext:
             # unit test never runs the entity loop that would populate them.
             "matched": 0,
             "files_acted": 0,
+            # Issue athenaeum#1291: sources that had pending intake and got
+            # zero slots in the max_files window — empty here, since this unit
+            # test never runs the entity phase that fills a window.
+            "starved_sources": [],
         }
 
     def test_mutation_through_context_is_visible_to_next_phase(
