@@ -164,6 +164,7 @@ See [exit-codes.md](exit-codes.md) for the full `athenaeum run` exit-code table 
 | Run-lock wait | `--wait` | `ATHENAEUM_LOCK_TIMEOUT` | `librarian.lock_timeout` | `0` | Default seconds a mutating command blocks for the single-machine run lock before failing (athenaeum#309). `0` = fail-fast (name the holder, exit non-zero). The `--wait` flag overrides per-invocation. See the run-lock note below. |
 | Run-lock auto-break age | — | `ATHENAEUM_LOCK_BREAK_STALE_AFTER` | `librarian.lock_break_stale_after` | `21600` (6h) | Seconds of holder-heartbeat age after which a contended acquire auto-breaks a wedged-but-alive holder's lock, without a human passing `--force` (athenaeum#397). Comfortably above any healthy run; lower it once the librarian reliably refreshes the heartbeat. |
 | Run-lock stale warning age | — | `ATHENAEUM_LOCK_WARN_STALE_AFTER` | `librarian.lock_warn_stale_after` | `7200` (2h) | Seconds of holder-heartbeat age after which a contended acquire logs a prominent "likely wedged" warning naming the holder (athenaeum#397) — typically lower than the auto-break age, so an operator gets an early heads-up before auto-break fires. |
+| Run-lock heartbeat interval | — | `ATHENAEUM_LOCK_HEARTBEAT_INTERVAL` | `librarian.lock_heartbeat_interval` | `30` | Seconds between guaranteed background `heartbeat` bumps a held lock makes on its own (athenaeum#1271) — a daemon thread refreshes the lockfile on this timer regardless of what the caller's own run loop is doing, on top of (not instead of) any phase/file-boundary bumps the caller makes itself. See the run-lock note below for the staleness contract this makes possible. Non-positive values fall back to the default (no disable mode — a live lock always gets a timer-driven bump). |
 | Progress-heartbeat interval | — | `ATHENAEUM_HEARTBEAT_INTERVAL` | `librarian.heartbeat_interval` | `60` | Seconds between `librarian-heartbeat` progress ticks emitted by the dark-zone phases (T3 merge, C4 detection, athenaeum#290 wiki-dedup, athenaeum#188 re-resolve) so a stall is visible in the log and to a watchdog (athenaeum#398). `<= 0` emits every tick. |
 | Delta-scoped compile | — | — | `librarian.delta.enabled` | `true` | Enable delta-scoped incremental compile on the deterministic (`client=None`) path — `session-end` / `ingest` tier0 (athenaeum#370). When on, re-cluster and re-merge only the clusters a change actually touches instead of the whole auto-memory corpus; byte-equivalent to the whole-corpus path. Set `false` to always compile whole-corpus. The nightly LLM `run` always stays whole-corpus regardless of this flag. `bool` yaml values are honored; anything else falls through to the `true` default. |
 | Delta affected-cluster cap | — | — | `librarian.delta.max_affected_clusters` | `8` | If a change would touch more than this many clusters, fall back to a full whole-corpus compile rather than churning most of the corpus through the delta path (athenaeum#370). `bool` / non-positive / non-int values fall through to the default. |
@@ -338,8 +339,10 @@ Every **mutating** command acquires an exclusive advisory
 cron overlapping a manual invocation, or two editor sessions) cannot race
 whole-file wiki writes, interleave block appends to the `_pending_*.md`
 sidecars, double-spend the API-call budget, or race the move-then-retire git
-ops. The lockfile records the holder's PID, an ISO-8601 timestamp, and the
-hostname for diagnostics.
+ops. The lockfile records the holder's PID, an ISO-8601 acquire `timestamp`,
+the hostname, and a `heartbeat` timestamp that a background thread refreshes
+on a timer for as long as the lock is held (see "Heartbeat & staleness
+contract" below).
 
 - **Locked commands:** `run`, `ingest`, `ingest-answers`, `ingest-merges`,
   `reresolve-questions`, `rebuild-index`, `session-end`, `drain`,
@@ -348,11 +351,12 @@ hostname for diagnostics.
   (non-`--dry-run`).
 - **Never locked:** `status`, `recall`, `serve`, and every `--dry-run`
   (they don't mutate the knowledge base).
-- **Default** — fail fast with a message naming the holder (PID + age) and a
-  non-zero exit.
-- **`--wait <seconds>`** — block up to the timeout for the lock, then fail if
-  still held. Default from `librarian.lock_timeout` / `ATHENAEUM_LOCK_TIMEOUT`
-  (`0` = fail-fast).
+- **Default** — fail fast with a message naming the holder (PID, host,
+  acquisition age, last heartbeat, and a same-host `os.kill(pid, 0)`
+  liveness note) and a non-zero exit.
+- **`--wait <seconds>`** — block up to the timeout for the lock, then fail
+  with that same holder-detail message if still held. Default from
+  `librarian.lock_timeout` / `ATHENAEUM_LOCK_TIMEOUT` (`0` = fail-fast).
 - **`--force`** — break the lock **even if a process is still holding it** (the
   current holder is logged first for an audit trail) and proceed. Use ONLY when
   you are certain the holder is hung or dead, and never run two `--force`
@@ -365,6 +369,49 @@ network filesystems, so this guard makes no attempt at multi-machine
 coordination (use `librarian.push_after_run` + a single scheduler host for
 multi-machine setups). On non-POSIX platforms without `fcntl`, the lock
 degrades gracefully: a warning is logged and the command runs unlocked.
+
+#### Heartbeat & staleness contract (issue athenaeum#1271)
+
+Before athenaeum#1271, `heartbeat` was refreshed only by phase/file-boundary calls
+from the caller's own run loop — a healthy holder mid-way through one long
+phase (or one long LLM call) could go tens of minutes without a bump,
+byte-identical in the lockfile to a holder that died at the start of that
+same window. A waiter had no way to tell the two apart without an
+out-of-band `ps` check.
+
+As of this issue, a held lock ALSO refreshes `heartbeat` from a background
+thread every **Run-lock heartbeat interval** seconds (default 30s) regardless
+of caller progress — see the table above. That makes a simple, documented
+contract possible for anyone reading `.athenaeum.lock` directly, without
+running `athenaeum status` or `ps`:
+
+- **Guaranteed bump interval:** ~30s while the holder is alive (configurable;
+  `librarian.lock_heartbeat_interval` / `ATHENAEUM_LOCK_HEARTBEAT_INTERVAL`).
+- **Advisory "likely abandoned" threshold:** a `heartbeat` idle past ~300s
+  (10x the bump interval — generous enough to absorb a missed tick from a GC
+  pause, scheduler contention, or one slow `fsync`, tight enough to resolve
+  in minutes rather than hours) is reasonable grounds to suspect the holder
+  is gone. This number is reported in the `LockHeld` message alongside the
+  holder's PID, acquisition time, and last-heartbeat age.
+
+**This threshold is advisory only.** It is deliberately a much tighter number
+than **Run-lock auto-break age** (default 6h) and **Run-lock stale warning
+age** (default 2h) above, which remain the ONLY thresholds that ever trigger
+an automatic break or a loud warning during a contended acquire, and whose
+defaults are unchanged by this issue — those comments' "lower it once the
+librarian reliably refreshes the heartbeat" now applies (the heartbeat IS
+reliable as of this issue), but lowering them is a separate, more consequential
+decision (it changes when the code itself breaks a live lock) left to the
+operator, not defaulted here. The 300s figure is display text for a human or
+agent judgment call — reading it never breaks a lock by itself.
+
+The lock also runs a same-host `os.kill(pid, 0)` liveness probe as a
+belt-and-braces signal independent of the heartbeat (catches a crashed holder
+even if a heartbeat bump was somehow missed), reported alongside the other
+holder detail in the `LockHeld` message. It is explicitly **not** evaluated
+for a holder whose lockfile `host:` differs from the local hostname — a PID
+number is only comparable to `os.kill` on the machine that minted it, so a
+foreign-host PID is reported as "unchecked" rather than guessed at.
 
 ## SessionEnd budget derivation (`athenaeum session-end`, athenaeum#896)
 
