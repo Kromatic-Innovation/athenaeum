@@ -22,21 +22,37 @@ Register:
 1. :class:`TestFrontmatterWrite` — the ``status: contradiction-flagged`` +
    ``contradiction_type`` frontmatter written by
    ``athenaeum.merge.render_merged_entry`` (observed at
-   ``src/athenaeum/merge.py:1592-1594`` at time of writing).
+   ``src/athenaeum/merge.py:1592-1594`` at time of writing). CONSUMER-side:
+   builds a :class:`~athenaeum.merge.MergedWikiEntry` with ``contradiction``
+   already populated and pins the projection into frontmatter, not the
+   detector path that fills that field.
 2. :class:`TestRecallHeaderRender` — the contested-header line rendered by
    ``athenaeum.mcp_server._recall_metadata_lines`` off
    ``status == "contradiction-flagged"`` (observed at
-   ``src/athenaeum/mcp_server.py:619-624``).
+   ``src/athenaeum/mcp_server.py:619-624``). CONSUMER-side: writes
+   ``status: contradiction-flagged`` directly to a page on disk, so it
+   exercises only the ``status``-equality disjunct of that predicate, not
+   the sibling ``fm.get("contradictions_detected")`` disjunct.
 3. :class:`TestRetireGuard` — the retire-pass MOVE guard in
    ``athenaeum.retire._move_eligibility`` that blocks the move with
    ``"no contradiction verdict available — not safe to retire"`` when
    ``entry.contradiction is None`` (observed at
-   ``src/athenaeum/retire.py:176-177``).
+   ``src/athenaeum/retire.py:176-177``). CONSUMER-side, pure-function call.
 4. :class:`TestConflictTypeReachesPendingQuestions` — the ``conflict_type``
-   value (``factual`` / ``prescriptive``) that the C4 escalation path stamps
-   onto the :class:`~athenaeum.models.EscalationItem` it appends (observed
-   at ``src/athenaeum/merge.py:2412``), which ``tier4_escalate`` then
-   renders into ``wiki/_pending_questions.md``.
+   value (``factual`` / ``prescriptive`` / ``stance``) that the C4
+   escalation path stamps onto the :class:`~athenaeum.models.EscalationItem`
+   it appends (observed at ``src/athenaeum/merge.py:2412``), which
+   ``tier4_escalate`` then renders into ``wiki/_pending_questions.md``.
+   PRODUCER-side and end-to-end: drives ``merge_clusters_to_wiki`` from
+   cluster JSONL through the (mocked) LLM detector to the rendered file —
+   the only test in this register that exercises detection itself rather
+   than a downstream projection of an already-decided verdict.
+
+Tests 1-3 pin the CONSUMER contracts independently of whether the detector
+still produces the data they consume — a defensible choice (each consumer
+contract should hold on its own), but it means this register does not, by
+itself, prove the detector keeps producing ``contradiction`` /
+``contradictions_detected``. Only test 4 does that end to end.
 
 Note on line-number drift: the citations above were re-read directly from
 this branch's source at the time this file was written (issue athenaeum#1254's
@@ -113,7 +129,14 @@ def _mock_client(payload_text: str) -> MagicMock:
     """
     client = MagicMock()
     response = MagicMock()
-    response.content = [MagicMock(text=payload_text)]
+    # type="text" matters: a bare MagicMock(text=...) has a .type attribute
+    # that is itself an auto-created MagicMock, which never equals "text".
+    # provider.response_text() walks response.content for a block whose
+    # .type == "text" and falls through to a content[0].text compatibility
+    # fallback otherwise — so an untyped mock exercises that fallback shim,
+    # not the primary path a real Anthropic response (whose blocks carry
+    # type="text") actually takes.
+    response.content = [MagicMock(type="text", text=payload_text)]
     client.messages.create.return_value = response
     return client
 
@@ -247,6 +270,22 @@ class TestConflictTypeReachesPendingQuestions:
     escalated block would read ``**Conflict type**: principled`` regardless
     of what kind of conflict was actually detected — a real loss of
     information for whoever triages the queue.
+
+    ``ConflictType`` (``contradictions.py:98``) is a THREE-member Literal —
+    ``factual`` / ``prescriptive`` / ``stance`` — but only the first two are
+    parametrized here. ``stance`` is deliberately excluded, not missed: a
+    detector verdict with ``conflict_type == "stance"`` is caught by
+    ``resolutions.py``'s deterministic athenaeum#327 opinion-attribution
+    short-circuit (fires whenever neither side is explicitly a non-opinion
+    ``claim_kind``, which includes this fixture's unclassified members) and
+    resolved as ``attribute_both`` WITHOUT an Opus call — the pair never
+    reaches escalation or ``_pending_questions.md`` at all, by design (both
+    opinions stay active, non-destructively attributed, rather than being
+    surfaced as a live contradiction to triage). See
+    :meth:`test_stance_conflict_type_never_reaches_pending_questions` below
+    for that path, and ``tests/test_resolutions.py`` for the short-circuit's
+    own unit coverage. Reusing this test's assertion shape for ``stance``
+    would assert something false about production behaviour.
     """
 
     @pytest.mark.parametrize("conflict_type", ["factual", "prescriptive"])
@@ -276,7 +315,12 @@ class TestConflictTypeReachesPendingQuestions:
                         "-scope-x/feedback_pin_v1.md",
                         "-scope-x/feedback_pin_v2.md",
                     ],
-                    # Below the cohesion threshold so the C4 detector runs.
+                    # Arbitrary value below CONTRADICTION_COHESION_THRESHOLD
+                    # (0.75), but that threshold is DEAD in production —
+                    # merge_clusters_to_wiki's C4 pass never gates on
+                    # centroid_score (verified: raising this to 0.99 still
+                    # runs the detector). 0.6 is just a plausible cluster
+                    # score for the fixture, not a control on the detector.
                     "centroid_score": 0.6,
                     "rationale": "cosine >= 0.55; shares tokens: commit, develop",
                 },
@@ -310,3 +354,80 @@ class TestConflictTypeReachesPendingQuestions:
         assert pending.exists()
         text = pending.read_text(encoding="utf-8")
         assert f"**Conflict type**: {conflict_type}" in text
+
+    def test_stance_conflict_type_never_reaches_pending_questions(
+        self, tmp_path: Path
+    ) -> None:
+        """The third ``ConflictType`` member, ``stance``, is short-circuited
+        BEFORE escalation (issue athenaeum#327) — pins that this is what
+        currently happens, as the register's counterpart to the
+        ``factual``/``prescriptive`` case above.
+
+        Same fixture shape as the parametrized test, ``conflict_type``
+        fixed to ``"stance"``: the detector's mocked response still reports
+        ``detected: true``, but ``resolutions.py``'s deterministic opinion-
+        attribution short-circuit intercepts it before an escalation is
+        emitted (see the class docstring). If that short-circuit were ever
+        deleted or its engagement gate narrowed, a ``stance`` verdict would
+        start reaching ``_pending_questions.md`` like the other two types —
+        this test would need to change deliberately, not silently.
+        """
+        knowledge_root = tmp_path / "knowledge"
+        scope = knowledge_root / "raw" / "auto-memory" / "-scope-x"
+        _write_am_file(
+            scope,
+            "feedback_pin_v1.md",
+            frontmatter_name="Pin v1",
+            body="The new onboarding flow is great.",
+        )
+        _write_am_file(
+            scope,
+            "feedback_pin_v2.md",
+            frontmatter_name="Pin v2",
+            body="The new onboarding flow is clunky.",
+        )
+        _write_cluster_jsonl(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "code-pin-0002",
+                    "member_paths": [
+                        "-scope-x/feedback_pin_v1.md",
+                        "-scope-x/feedback_pin_v2.md",
+                    ],
+                    "centroid_score": 0.6,
+                    "rationale": "cosine >= 0.55; shares tokens: onboarding, flow",
+                },
+            ],
+        )
+        _write_config(knowledge_root)
+
+        payload = json.dumps(
+            {
+                "detected": True,
+                "conflict_type": "stance",
+                "members_involved": [
+                    "-scope-x/feedback_pin_v1.md",
+                    "-scope-x/feedback_pin_v2.md",
+                ],
+                "conflicting_passages": [
+                    "The new onboarding flow is great.",
+                    "The new onboarding flow is clunky.",
+                ],
+                "rationale": "opposing evaluative opinions on the onboarding flow",
+            }
+        )
+        fake_client = _mock_client(payload)
+
+        entries = merge_clusters_to_wiki(knowledge_root, client=fake_client)
+
+        assert len(entries) == 1
+        # Suppressed by the athenaeum#327 short-circuit, not escalated.
+        assert entries[0].contradictions_detected is False
+        assert entries[0].contradiction is not None
+        assert entries[0].contradiction.rationale == "confirmation-pass-cleared"
+
+        pending = knowledge_root / "wiki" / "_pending_questions.md"
+        if pending.exists():
+            text = pending.read_text(encoding="utf-8")
+            assert "**Conflict type**: stance" not in text
