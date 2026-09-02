@@ -51,6 +51,7 @@ from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
+from athenaeum.pending_merges_pii import scrub_pending_merges
 from athenaeum.pii import (
     PII_ALLOWLIST_FILENAME,
     adjudicate_corpus_pii,
@@ -368,6 +369,54 @@ def _print_excluded_record_conflicts(plan: PiiMigrationPlan, *, refusing: bool) 
         )
 
 
+def _scrub_merge_sidecar(knowledge_root: Path, values: list[str], *, apply: bool) -> None:
+    """Redact just-migrated values out of ``_pending_merges.md`` (issue athenaeum#1276).
+
+    A merge proposal stores its ``draft_merged_body`` verbatim, so a page whose
+    PII this run just moved off-corpus can still have a plain-text copy of the
+    same addresses sitting in the sidecar — an invisible failure: the page reads
+    clean, the excluded record exists, the index is refreshed, and ``lint-pii``
+    still finds the values under ``wiki/``. Scrubbing here is what makes
+    "migrated" mean migrated.
+
+    Never silent in either direction: a redaction is reported, and so is a value
+    the scrubber deliberately left on an identity-bearing line (see
+    :class:`~athenaeum.pending_merges_pii.ProposalPiiResidual`). Follows the
+    caller's dry-run/apply mode, so ``migrate-pii`` without ``--apply`` still
+    writes nothing anywhere.
+    """
+    if not values:
+        return
+    merges_path = knowledge_root / "wiki" / "_pending_merges.md"
+    try:
+        result = scrub_pending_merges(merges_path, values=values, apply=apply)
+    except (OSError, UnicodeDecodeError) as exc:  # pragma: no cover - defensive
+        print(
+            f"warning: could not scrub {merges_path} ({exc}); the migrated "
+            "contact data may still be embedded in a pending merge proposal. "
+            "Run `athenaeum merges scrub-pii --apply` once resolved.",
+            file=sys.stderr,
+        )
+        return
+    if result.scrubbed:
+        verb = "redacted" if result.applied else "[DRY RUN] would redact"
+        print(
+            f"{verb} {result.values_redacted} migrated value(s) from "
+            f"{len(result.scrubbed)} pending merge proposal(s) in "
+            f"{merges_path.name}."
+        )
+    for residual in result.residual:
+        print(
+            f"NOTE: {merges_path.name}: proposal {residual.merge_target_name!r} "
+            f"still names {len(residual.values)} migrated value(s) on an "
+            "identity-bearing line (header/sources) — left in place because "
+            "rewriting it would re-id the proposal. Rename the underlying page "
+            "(`migrate-pii --rename-name-email`, issue athenaeum#505) and "
+            "re-propose.",
+            file=sys.stderr,
+        )
+
+
 def _post_apply_index_step(
     args: argparse.Namespace, knowledge_root: Path, config: dict | None
 ) -> None:
@@ -570,6 +619,7 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
         sys.stdout.write(plan.rewritten_page_text or "")
         print(f"\n--- {record_label} excluded contact record ---")
         sys.stdout.write(plan.excluded_page_text or "")
+        _scrub_merge_sidecar(knowledge_root, plan.emails + plan.phones, apply=False)
         return 0
 
     if plan.excluded_record_conflicts:
@@ -578,6 +628,7 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
 
     _apply_plan(plan)
     print(f"migrated PII off {page_path}\n{summary}")
+    _scrub_merge_sidecar(knowledge_root, plan.emails + plan.phones, apply=True)
     _post_apply_index_step(args, knowledge_root, config)
     return 0
 
@@ -649,6 +700,10 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
     name_pii_excluded = 0
     conflicted = 0
     conflicted_pages: list[tuple[Path, tuple]] = []
+    # athenaeum#1276: every value this run moves off-corpus, accumulated so the
+    # merge sidecar is scrubbed ONCE after the sweep rather than re-read and
+    # rewritten per page (a 741-block file over an 11.5k-page scan).
+    migrated_values: list[str] = []
     for i, page_path in enumerate(pages, start=1):
         try:
             plan = plan_pii_migration(page_path, config, knowledge_root)
@@ -672,6 +727,8 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
                 records += 1
                 total_emails += len(plan.emails)
                 total_phones += len(plan.phones)
+                migrated_values.extend(plan.emails)
+                migrated_values.extend(plan.phones)
                 if args.apply:
                     _apply_plan(plan)
         if i % _PROGRESS_EVERY == 0 or i == total:
@@ -687,6 +744,7 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
         f"{records} excluded contact record(s) to create; "
         f"{total_emails} email(s), {total_phones} phone(s)."
     )
+    _scrub_merge_sidecar(knowledge_root, migrated_values, apply=args.apply)
     if name_pii_excluded and not getattr(args, "rename_name_email", False):
         # The name-is-an-email population (athenaeum#502): EXCLUDED from this automatic
         # path (renaming breaks slugs/edges) and handled in a separate slice

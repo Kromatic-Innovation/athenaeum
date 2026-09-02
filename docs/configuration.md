@@ -2072,6 +2072,68 @@ default `1024`; `ATHENAEUM_COMPARATOR_CONTENT_RELATION_THINKING`, default
 (`ATHENAEUM_CLASSIFY_MODEL`) rather than adding a fourth model dial — the
 same sharing `athenaeum.contradictions`'s detector already does.
 
+### `athenaeum merges scrub-pii` (athenaeum#1276)
+
+The sidecar's PII purge path. A merge proposal stores its
+`draft_merged_body` **verbatim** — a copy of the source pages' text at
+proposal time — so `athenaeum storage migrate-pii` moving a page's contact
+data off-corpus left the raw addresses sitting in `wiki/_pending_merges.md`.
+The failure was invisible: the entity page read clean, an `excluded/` record
+existed, the vector index was refreshed, and `athenaeum storage lint-pii`
+still found the values under `wiki/`.
+
+Two halves close it:
+
+* `storage migrate-pii` now scrubs the sidecar on the same pass, using the
+  exact values it just moved off-corpus. Follows the caller's
+  dry-run/`--apply` mode.
+* `merges scrub-pii` is the standalone sweep, for the backlog that already
+  exists and for anything a migration did not cover.
+
+Two properties are the point of the standalone command:
+
+* **Zero LLM cost.** Detection is the same deterministic pair of detectors
+  `lint-pii` gates on (`find_inline_emails` / `find_inline_phones`), so
+  clearing a backlog here actually moves that gate — and it costs nothing
+  like a nightly `athenaeum run`, whose entity phase is ~94% of runtime and
+  spend.
+* **It does not force the merge decision.** Approving, rejecting or
+  withdrawing a proposal were previously the only ways to clear its body.
+  This redacts the values in place and leaves the proposal exactly as
+  unresolved as it was.
+
+What it will not do:
+
+* **It does not delete.** A value is replaced by the same
+  `[contact redacted → excluded surface]` marker the migrated page carries,
+  so an approved proposal writes a merged page consistent with its sources
+  and `athenaeum pii-restore` still recognises the marker. Deleting the
+  surrounding prose destroys true non-PII content — the athenaeum#691
+  mistake.
+* **It does not rewrite identity-bearing lines.** The block header, its
+  checkbox line and the `**Sources**:` paths determine the proposal's id and
+  its fold target. A value found only there (the athenaeum#502
+  name-is-an-email population) is **reported as residual**, never silently
+  rewritten and never silently dropped. Clear one by renaming the underlying
+  page (`storage migrate-pii --rename-name-email`, athenaeum#505) and
+  re-proposing.
+* **It does not second-guess the allowlist.** A value with a reasoned entry
+  in `wiki/_pii-allowlist.yml` (athenaeum#936) is adjudicated *not* PII, does
+  not fail `lint-pii`, and is left untouched.
+
+Detection is `lint-pii`'s, so its false positives are this command's false
+positives — a 13-digit record id reads as a phone (athenaeum#500). The
+command therefore prints **counts, never values** (echoing them would put the
+data straight back in reach) and points at `storage lint-pii`, which does
+print them, as the review step before `--apply`. Adjudicate a false positive
+in the allowlist first.
+
+```console
+$ athenaeum storage lint-pii                    # review: what is actually in there
+$ athenaeum merges scrub-pii                    # dry-run: how many, in which proposals
+$ athenaeum merges scrub-pii --apply            # redact in place; decisions stay open
+```
+
 ## Wiki-page dedup: cluster figures require the threshold (athenaeum#1252)
 
 **Any reported cluster count, cluster size, or "% of corpus clustered"
