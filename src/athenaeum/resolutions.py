@@ -78,6 +78,7 @@ from athenaeum.contradictions import ContradictionResult
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     OPINION_CLAIM_KIND,
+    SURFACE_C4_CONTRADICTION,
     AutoMemoryFile,
     TokenUsage,
     _coerce_iso_date,
@@ -1846,6 +1847,13 @@ def propose_resolution(
             response
         )
         if usage is not None:
+            # Issue athenaeum#1289: this IS the C4 contradiction resolver — the
+            # other half of the "C4 contradiction detector and resolver"
+            # declared surface (see contradictions.detect_contradictions'
+            # sibling tag). Always tag it, regardless of caller — both the
+            # primary merge-phase loop (merge._maybe_propose) and the
+            # athenaeum#188 reresolve heal pass (tiers.reresolve_open_questions)
+            # call this same function for the same underlying LLM surface.
             usage.add_tokens(
                 input_toks,
                 output_toks,
@@ -1853,6 +1861,7 @@ def propose_resolution(
                 cache_read,
                 model=resolve_model,
                 knob="resolve",
+                surface=SURFACE_C4_CONTRADICTION,
             )
         log.debug(
             "resolutions: propose_resolution usage input=%d output=%d"
