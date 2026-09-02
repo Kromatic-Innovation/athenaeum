@@ -66,13 +66,24 @@ has hung and stopped making progress; it holds the ``flock`` indefinitely and
 blocks every other writer until a human notices and runs ``--force``. Two
 complementary mechanisms close that gap:
 
-* **Heartbeat.** A long-running holder calls :meth:`RunLock.heartbeat`
-  periodically to refresh the lockfile's ``heartbeat`` line while leaving
-  ``pid``/``timestamp``/``host`` untouched. :func:`heartbeat_age_seconds`
-  reports how long it has been since the last refresh (falling back to
-  ``timestamp`` for older lockfiles that predate this field). A wedged holder
-  simply stops calling it, so its heartbeat goes stale even though the
-  process itself is still alive.
+* **Heartbeat.** A background daemon thread (issue athenaeum#1271), started the
+  moment :meth:`RunLock.acquire` succeeds and stopped by :meth:`RunLock.release`,
+  calls :meth:`RunLock.heartbeat` on a fixed timer (:data:`HEARTBEAT_INTERVAL_SECONDS`,
+  default 30s) to refresh the lockfile's ``heartbeat`` line, independent of
+  whatever the caller's own run loop is doing. Callers may ALSO call
+  :meth:`RunLock.heartbeat` themselves at phase/file boundaries (several do,
+  predating this issue) — both paths serialize through the same internal lock,
+  so they never corrupt the lockfile by racing each other; the timer thread
+  just guarantees a bump even when the caller's own progress stalls for
+  longer than one phase. Before athenaeum#1271, the ONLY bumps came from those
+  caller-driven phase/file ticks, so a holder mid-way through one long phase
+  (or one long LLM call) could go tens of minutes between bumps even while
+  fully healthy — observationally indistinguishable from a wedged holder over
+  any window shorter than the phase. :func:`heartbeat_age_seconds` reports how
+  long it has been since the last refresh (falling back to ``timestamp`` for
+  older lockfiles that predate this field). A wedged holder's thread dies
+  with the rest of the process, so its heartbeat goes stale exactly when the
+  process itself stops being alive to refresh it.
 * **Auto-break + loud warning.** A contended :meth:`RunLock.acquire` with
   ``break_stale_after`` set will, once the holder's heartbeat age exceeds that
   threshold AND the holder PID is still alive, log a loud warning and break
@@ -86,7 +97,25 @@ complementary mechanisms close that gap:
   :func:`athenaeum.config.resolve_lock_break_stale_after` and
   :func:`athenaeum.config.resolve_lock_warn_stale_after`).
 
-**Single-writer guarantee, stated plainly:** while one process holds the
+**Staleness contract for a waiter reading the lockfile directly (issue
+athenaeum#1271).** A human or agent that hits ``LockHeld`` (fail-fast or a
+``--wait`` timeout) does not have to reason about phase lengths anymore: the
+holder guarantees a ``heartbeat`` bump at least every
+:data:`HEARTBEAT_INTERVAL_SECONDS` (default 30s) for as long as it is alive.
+So ``heartbeat_age_seconds(lockfile)`` past roughly
+:data:`LIKELY_ABANDONED_AFTER_SECONDS` (default 300s, 10x the bump interval —
+generous enough to absorb a missed tick from GC/scheduler jitter or a single
+slow ``fsync``, tight enough to resolve in minutes rather than hours) is
+reasonable grounds to suspect the holder is gone. This threshold is
+**advisory only** — reported in the ``LockHeld`` message and meant for a human
+or agent judgment call, exactly like the pre-existing ``is_stale`` diagnostic
+above. It does **not** gate anything: it is deliberately a different (much
+tighter) number than ``break_stale_after``/``warn_stale_after``, which remain
+the only thresholds that ever trigger an automatic break, and whose own
+defaults are UNCHANGED by this issue — this module now bumps far more
+reliably, but nothing here makes it any easier to break a live lock. See
+``docs/configuration.md``'s "Run lock" section for the full contract written
+up for operators.
 ``flock``, no other cooperating athenaeum process may proceed past
 :meth:`RunLock.acquire` on the same ``knowledge_root`` — that is the entire
 guard against interleaved wiki/sidecar writes. It breaks only three ways: (1)
@@ -174,6 +203,8 @@ plausible path to the 6h default threshold, not a formal proof.
 from __future__ import annotations
 
 import logging
+import socket
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -204,12 +235,45 @@ LOCKFILE_NAME = ".athenaeum.lock"
 #: Poll interval (seconds) while blocking for the lock under ``--wait``.
 _POLL_INTERVAL = 0.25
 
+#: Guaranteed interval (seconds) at which the background heartbeat thread
+#: refreshes the lockfile's ``heartbeat`` line while a lock is held, on top
+#: of (never instead of) whatever phase/file-boundary bumps the caller's own
+#: run loop makes (issue athenaeum#1271). 30s is short enough to give a waiter
+#: sub-minute resolution on "is this holder still making progress" while
+#: being cheap — one small file write every 30s is negligible even for a
+#: multi-hour run. See :data:`LIKELY_ABANDONED_AFTER_SECONDS` for the paired
+#: advisory threshold and the module docstring's "Staleness contract" section
+#: for the full reasoning. Overridable per-instance via ``RunLock(...,
+#: heartbeat_interval=...)`` and resolved from config/env by the CLI via
+#: :func:`athenaeum.config.resolve_lock_heartbeat_interval`.
+HEARTBEAT_INTERVAL_SECONDS = 30.0
+
+#: Advisory-only threshold (seconds) past which a waiter reading
+#: ``heartbeat_age_seconds`` off the raw lockfile may reasonably suspect the
+#: holder is abandoned rather than merely between bumps (issue athenaeum#1271).
+#: Chosen as 10x :data:`HEARTBEAT_INTERVAL_SECONDS`: the RATIO is what
+#: matters (per the issue) — large enough that a handful of missed ticks
+#: (GC pause, scheduler contention, one slow ``fsync``) is never misread as
+#: death, small enough to resolve in minutes rather than the hours
+#: ``break_stale_after``/``warn_stale_after`` are deliberately tuned to.
+#: **Advisory only** — reported in :class:`LockHeld`'s message, never used to
+#: gate an automatic break; see the module docstring's "Staleness contract"
+#: section. Deliberately NOT wired to an env/yaml knob: it is display text
+#: for a human/agent judgment call, not an operational policy switch like
+#: ``break_stale_after``.
+LIKELY_ABANDONED_AFTER_SECONDS = 300.0
+
 
 class LockHeld(RuntimeError):
     """Raised when the run lock is held and could not be acquired.
 
-    Carries the parsed holder metadata (``pid``/``timestamp``/``host``) when
-    available so the CLI can print a clear, actionable message.
+    Carries the parsed holder metadata (``pid``/``timestamp``/``host``/
+    ``heartbeat``) when available so the CLI can print a clear, actionable
+    message — this is the message an operator sees both on immediate
+    contention (fail-fast) and after a ``--wait`` timeout expires (issue
+    athenaeum#1271, acceptance criterion: report holder pid, acquisition time,
+    and last heartbeat rather than a bare "another athenaeum run holds the
+    lock").
     """
 
     def __init__(self, lockfile: Path, holder: dict[str, str] | None) -> None:
@@ -221,21 +285,72 @@ class LockHeld(RuntimeError):
         pid = self.holder.get("pid")
         host = self.holder.get("host")
         ts = self.holder.get("timestamp")
+        hb = self.holder.get("heartbeat")
         parts = []
         if pid:
             parts.append(f"PID {pid}")
         if host:
             parts.append(f"host {host}")
-        age = _age_str(ts)
-        if age:
-            parts.append(f"held {age}")
+        acquired_age = _age_str(ts)
+        if acquired_age:
+            parts.append(f"acquired {acquired_age}")
+        if hb:
+            if hb == ts:
+                parts.append("heartbeat never bumped past acquire")
+            else:
+                hb_age = _age_str(hb)
+                if hb_age:
+                    parts.append(f"last heartbeat {hb_age}")
+        liveness = _liveness_str(self.holder)
+        if liveness:
+            parts.append(liveness)
         who = ", ".join(parts) if parts else "another athenaeum process"
         return (
             f"another athenaeum run holds the lock ({who}); "
-            f"lockfile: {self.lockfile}. "
-            f"Retry, pass --wait <seconds> to block, or --force to break a "
-            f"stale lock."
+            f"lockfile: {self.lockfile}. Holder bumps heartbeat every "
+            f"~{HEARTBEAT_INTERVAL_SECONDS:.0f}s while alive; a heartbeat "
+            f"idle past ~{LIKELY_ABANDONED_AFTER_SECONDS:.0f}s is advisory "
+            f"grounds to suspect it is abandoned (this does not auto-break "
+            f"anything). Retry, pass --wait <seconds> to block, or --force "
+            f"to break a stale lock."
         )
+
+
+def _liveness_str(holder: dict[str, str]) -> str | None:
+    """Belt-and-braces ``os.kill(pid, 0)`` liveness note for a ``LockHeld``
+    message (issue athenaeum#1271, proposal item 4) — independent of the
+    heartbeat, so it still catches a crashed holder even if a heartbeat bump
+    was missed.
+
+    Only meaningful for a holder on THIS host: the lockfile's ``host:`` field
+    is the sole cross-host signal this module has, and a bare PID number is
+    only ever comparable to ``os.kill`` on the machine that minted it — a PID
+    on a different host may coincidentally match a live *or* dead local PID
+    that is an entirely unrelated process (pid-reuse is exactly this same
+    hazard, just within one host instead of across two). Returns ``None``
+    when there is nothing safe to say (no pid, or a foreign host).
+    """
+    pid_raw = holder.get("pid")
+    if not pid_raw:
+        return None
+    try:
+        pid = int(pid_raw)
+    except ValueError:
+        return None
+    host = holder.get("host")
+    local_host = socket.gethostname()
+    if host and host != local_host:
+        return f"pid liveness unchecked (holder host {host!r} != local {local_host!r})"
+    if _pid_alive(pid):
+        return "pid alive (os.kill probe)"
+    # Same host, kernel flock contention, yet the pid looks dead: either a
+    # narrow just-died race or pid reuse. Flagged, not asserted as fact — see
+    # this function's docstring and the module docstring's "Reading a
+    # residual lockfile" note for why a dead PID alone is never conclusive.
+    return (
+        "pid NOT alive locally (os.kill probe — possible pid reuse or a "
+        "just-exited holder; investigate before --force)"
+    )
 
 
 def _age_str(iso_ts: str | None) -> str:
@@ -294,6 +409,7 @@ class RunLock:
         force: bool = False,
         break_stale_after: float | None = None,
         warn_stale_after: float | None = None,
+        heartbeat_interval: float | None = None,
     ) -> None:
         self.knowledge_root = Path(knowledge_root)
         self.lockfile = self.knowledge_root / LOCKFILE_NAME
@@ -305,9 +421,23 @@ class RunLock:
         self.warn_stale_after = (
             warn_stale_after if warn_stale_after and warn_stale_after > 0 else None
         )
+        # Issue athenaeum#1271: guaranteed background bump interval. Falls back to
+        # the module default for any non-positive/unset value — unlike
+        # break_stale_after/warn_stale_after there is no "disable" mode here;
+        # a caller that truly wants no timer-driven heartbeat can still avoid
+        # calling acquire() through a lock at all, but a live lock always
+        # gets one (safety default, never opt-out-by-accident).
+        self.heartbeat_interval = (
+            heartbeat_interval
+            if heartbeat_interval and heartbeat_interval > 0
+            else HEARTBEAT_INTERVAL_SECONDS
+        )
         self._fd: int | None = None
         self._acquired = False
         self._lease: FileLease | None = None
+        self._heartbeat_write_lock = threading.Lock()
+        self._heartbeat_thread: threading.Thread | None = None
+        self._heartbeat_stop = threading.Event()
 
     # -- internals -----------------------------------------------------------
     #
@@ -499,24 +629,79 @@ class RunLock:
         self._lease = lease
         self._fd = lease.fd
         self._acquired = True
+        self._start_heartbeat_thread()
+
+    def _start_heartbeat_thread(self) -> None:
+        """Start the background bump-on-a-timer thread (issue athenaeum#1271).
+
+        Daemon so it can never keep the process alive on its own — if the
+        holder crashes or exits without calling :meth:`release`, this thread
+        dies with it rather than wedging shutdown. Runs entirely on top of
+        (never in place of) any caller-driven :meth:`heartbeat` calls; both
+        funnel through the same :attr:`_heartbeat_write_lock` in
+        :meth:`heartbeat` so they can never interleave a partial write.
+        """
+        self._heartbeat_stop.clear()
+        thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name="athenaeum-runlock-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread = thread
+        thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        # Event.wait(timeout) returns True the instant the event is set (stop
+        # requested) and False only after the full timeout elapses with no
+        # stop — so this bumps at most once per interval and exits promptly
+        # (no extra bump) the moment release() calls _stop_heartbeat_thread.
+        while not self._heartbeat_stop.wait(self.heartbeat_interval):
+            self.heartbeat()
+
+    def _stop_heartbeat_thread(self) -> None:
+        """Stop and join the background thread before the lease is torn down.
+
+        Called from :meth:`release` BEFORE the lease is released/fd closed —
+        joining here (rather than merely signaling) guarantees no in-flight
+        :meth:`heartbeat` call can ever race a write against a closed fd, so
+        no extra synchronization is needed between this and ``release``'s own
+        teardown.
+        """
+        self._heartbeat_stop.set()
+        thread = self._heartbeat_thread
+        self._heartbeat_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5.0)
+            if thread.is_alive():  # pragma: no cover - defensive only
+                log.warning(
+                    "runlock: heartbeat thread did not stop within 5s on release"
+                )
 
     def heartbeat(self) -> None:
         """Refresh the lockfile's ``heartbeat`` line (issue athenaeum#397).
 
         Keeps the original ``pid``/``timestamp``/``host`` intact and rewrites
-        only ``heartbeat`` to now. A long-running holder calls this
-        periodically so a healthy run's heartbeat stays fresh; a WEDGED
-        holder stops refreshing it, which is what lets a contended acquire
-        tell "still working" apart from "hung but alive". No-op (safe, no
-        raise) when the lock was never acquired or the no-fcntl degrade path
-        left no fd. Failures are diagnostics-only (logged, not raised).
+        only ``heartbeat`` to now. Called two ways, both safe to mix (issue
+        athenaeum#1271): the background timer thread calls this on its own
+        every :attr:`heartbeat_interval` seconds regardless of caller
+        progress, and a long-running holder may ALSO call it directly at
+        phase/file boundaries (several already do). Both paths serialize
+        through :attr:`_heartbeat_write_lock` so two bumps can never
+        interleave and corrupt the lockfile. A WEDGED holder's process (and
+        therefore its thread) is gone, so nothing refreshes the heartbeat,
+        which is what lets a contended acquire tell "still working" apart
+        from "hung but alive". No-op (safe, no raise) when the lock was never
+        acquired or the no-fcntl degrade path left no fd. Failures are
+        diagnostics-only (logged, not raised) — a heartbeat write must never
+        take down the run it is trying to protect.
         """
         if not self._acquired or self._lease is None:
             return
-        try:
-            self._lease.heartbeat()
-        except OSError as exc:  # pragma: no cover - diagnostics only
-            log.warning("runlock: could not refresh heartbeat: %s", exc)
+        with self._heartbeat_write_lock:
+            try:
+                self._lease.heartbeat()
+            except OSError as exc:  # pragma: no cover - diagnostics only
+                log.warning("runlock: could not refresh heartbeat: %s", exc)
 
     def release(self) -> None:
         """Release the lock (idempotent). Safe to call when never acquired.
@@ -535,6 +720,11 @@ class RunLock:
         """
         if not self._acquired:
             return
+        # Issue athenaeum#1271: stop the background bump thread FIRST, before
+        # any lease teardown below — see _stop_heartbeat_thread's docstring
+        # for why joining here removes the need for any other cross-thread
+        # synchronization around the fd close that follows.
+        self._stop_heartbeat_thread()
         self._acquired = False
         lease = self._lease
         self._lease = None
