@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,7 @@ from athenaeum.store import (
     StoreKey,
     StoreKeyError,
     append_line_durable,
+    now_iso,
 )
 from athenaeum.store_conformance import StoreConformanceTests
 from tests.store_fakes import InMemoryStore
@@ -282,3 +284,42 @@ class TestAppendLineDurable:
         append_line_durable(direct_path, b"via-store\n")
 
         assert (knowledge_root / "wiki" / "ledger.jsonl").read_bytes() == direct_path.read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# now_iso — issue athenaeum#1348: the shared UTC-ISO second-precision
+# rendering the thirteen module-private ``_now_iso()`` copies collapsed onto.
+# ---------------------------------------------------------------------------
+
+
+class TestNowIso:
+    def test_renders_second_precision_no_fractional_seconds(self) -> None:
+        dt = datetime(2026, 9, 3, 19, 12, 33, 123456, tzinfo=timezone.utc)
+        assert now_iso(dt) == "2026-09-03T19:12:33Z"
+
+    def test_naive_datetime_assumed_utc(self) -> None:
+        naive = datetime(2026, 9, 3, 19, 12, 33)
+        assert now_iso(naive) == "2026-09-03T19:12:33Z"
+
+    def test_aware_non_utc_datetime_converted(self) -> None:
+        eastern = timezone(timedelta(hours=-4))
+        dt = datetime(2026, 9, 3, 15, 12, 33, tzinfo=eastern)
+        assert now_iso(dt) == "2026-09-03T19:12:33Z"
+
+    def test_no_argument_uses_current_utc_time(self) -> None:
+        before = datetime.now(timezone.utc)
+        rendered = now_iso()
+        after = datetime.now(timezone.utc)
+        parsed = datetime.strptime(rendered, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        # Allow the second-precision truncation on either side of the call.
+        assert before - timedelta(seconds=1) <= parsed <= after + timedelta(seconds=1)
+
+    def test_matches_fingerprint_resolved_at_format(self) -> None:
+        """The rendering must stay parseable by
+        :data:`athenaeum.fingerprint._RESOLVED_AT_FORMAT` — the whole point
+        of pinning second precision here (issue athenaeum#1348)."""
+        from athenaeum.fingerprint import _RESOLVED_AT_FORMAT
+
+        rendered = now_iso(datetime(2026, 9, 3, 19, 12, 33, tzinfo=timezone.utc))
+        # Must not raise.
+        datetime.strptime(rendered, _RESOLVED_AT_FORMAT)
