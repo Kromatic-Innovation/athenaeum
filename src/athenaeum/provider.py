@@ -110,6 +110,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from athenaeum._retry import TransientAPIError, TransientError
+from athenaeum.models import adaptive_thinking_supported
 from athenaeum.outbound_pii import redact_outbound_text
 
 if TYPE_CHECKING:
@@ -762,9 +763,11 @@ def resolve_thinking(
     env_var: str,
     default: str,
     config: dict[str, Any] | None = None,
+    model: str | None = None,
 ) -> dict[str, str]:
     """Resolve a stage's ``thinking`` posture from env > yaml
-    ``thinking.<knob>`` > code default (issue athenaeum#578).
+    ``thinking.<knob>`` > code default (issue athenaeum#578), then apply the
+    athenaeum#1336 model-capability downgrade rule.
 
     Mirrors :func:`resolve_max_tokens`'s precedence exactly: the *env_var*
     wins over the yaml ``thinking.<knob>`` key (read only when the operator
@@ -779,6 +782,12 @@ def resolve_thinking(
         env_var: the env var name, e.g. ``"ATHENAEUM_RESOLVE_THINKING"``.
         default: ``"adaptive"`` or ``"disabled"`` — the stage's code default.
         config: optional resolved athenaeum.yaml dict.
+        model: the model the resolved posture will actually be sent to
+            (issue athenaeum#1336), e.g. the ``write`` knob's resolved model at
+            ``tiers.py``'s three write call sites. ``None`` (the default)
+            reproduces every pre-athenaeum#1336 caller's behaviour unchanged —
+            only a caller that passes its resolved model opts into the
+            downgrade rule below.
 
     Returns:
         The dict the SDK expects for the ``thinking`` request param —
@@ -793,27 +802,91 @@ def resolve_thinking(
     ``"disabled"``, case-insensitive) is IGNORED with a warning and falls
     through to *default* — a mistyped override should not silently disable
     thinking on a stage that needs it, or vice versa.
+
+    **athenaeum#1336 downgrade rule.** Once the posture and its *source*
+    (``"env"``, ``"yaml"``, or ``"default"``) are resolved above, and only when
+    the resolved posture is ``"adaptive"``:
+
+    * :func:`athenaeum.models.adaptive_thinking_supported` returning ``False``
+      for *model* — the model is KNOWN not to honour ``adaptive`` — and
+      ``source == "default"`` (the CODE default, not an expressed operator
+      intent): downgrade to ``{"type": "disabled"}`` and log a WARNING naming
+      *knob*, *model*, and the downgrade. This is the fix for the
+      athenaeum#1262 failure: the ``write`` knob's three call sites requested
+      ``adaptive`` unconditionally and 400'd on every call against such a
+      model.
+    * The same ``False`` result but ``source in ("env", "yaml")`` — an
+      EXPLICIT operator instruction — is **never** downgraded: the resolved
+      ``{"type": "adaptive"}`` is returned as-is, with a WARNING that the
+      operator explicitly requested adaptive thinking on a model that does
+      not support it (naming *env_var* / the yaml ``thinking.<knob>`` key so
+      the operator can change it), and that the request will likely fail with
+      HTTP 400. An explicit operator override always wins.
+    * :func:`~athenaeum.models.adaptive_thinking_supported` returning ``None``
+      (unrecorded model, or *model* is ``None``) leaves behaviour completely
+      unchanged — this table must never gate a newly-released model. Same for
+      a resolved posture of ``"disabled"``: there is nothing to downgrade.
     """
+    posture = default
+    source = "default"
+
     env = os.environ.get(env_var)
     if env is not None and env.strip():
         parsed = _coerce_thinking_type(env)
         if parsed is not None:
-            return {"type": parsed}
-        log.warning(
-            "%s=%r is not 'adaptive' or 'disabled'; using default thinking=%r",
-            env_var,
-            env,
-            default,
-        )
-    if isinstance(config, dict):
+            posture, source = parsed, "env"
+        else:
+            log.warning(
+                "%s=%r is not 'adaptive' or 'disabled'; using default thinking=%r",
+                env_var,
+                env,
+                default,
+            )
+
+    if source == "default" and isinstance(config, dict):
         section = config.get("thinking")
         if isinstance(section, dict):
             raw = section.get(knob)
             if isinstance(raw, str):
                 parsed = _coerce_thinking_type(raw)
                 if parsed is not None:
-                    return {"type": parsed}
-    return {"type": default}
+                    posture, source = parsed, "yaml"
+
+    # athenaeum#1336. NOTE the forward coupling to ``tests/test_thinking_seam.py``'s
+    # standing invariant (``TestNoXhighOrMaxWithDisabledThinking``): an
+    # ``output_config.effort`` of ``xhigh``/``max`` combined with
+    # ``thinking: {"type": "disabled"}`` returns HTTP 400 on Opus 5. The
+    # downgrade below can produce that ``disabled`` at RUNTIME rather than in
+    # the call site's literal, so the invariant can no longer be read off the
+    # call sites alone. It is inert today only because NO call site sets
+    # ``output_config`` at all — a fact that same test file pins
+    # (``test_no_call_site_sets_output_config_at_all_today``), which is
+    # therefore the tripwire: whoever makes that test fail by adding an
+    # ``effort`` to a stage whose posture can be downgraded here must revisit
+    # this branch at the same time.
+    if posture == "adaptive" and adaptive_thinking_supported(model) is False:
+        if source == "default":
+            log.warning(
+                "thinking knob %r: code default 'adaptive' is not supported by "
+                "model %r; downgrading to 'disabled' (issue athenaeum#1336)",
+                knob,
+                model,
+            )
+            return {"type": "disabled"}
+        override_name = env_var if source == "env" else f"thinking.{knob} (yaml)"
+        log.warning(
+            "thinking knob %r: operator explicitly requested 'adaptive' via "
+            "%s, but model %r does not support it — the request will likely "
+            "fail with HTTP 400. Not downgrading an explicit override; change "
+            "%s if this is unintended (issue athenaeum#1336).",
+            knob,
+            override_name,
+            model,
+            override_name,
+        )
+        return {"type": "adaptive"}
+
+    return {"type": posture}
 
 
 # ---------------------------------------------------------------------------
