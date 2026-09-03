@@ -29,14 +29,8 @@ import json
 import sys
 from pathlib import Path
 
+from athenaeum._cli_shared import _resolve_wiki_root
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
-
-
-def _resolve_wiki_root(args: argparse.Namespace) -> Path:
-    knowledge_root = (
-        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
-    )
-    return knowledge_root / "wiki"
 
 
 def _format_entry(entry: dict) -> str:
