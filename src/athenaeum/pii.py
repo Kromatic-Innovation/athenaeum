@@ -110,7 +110,7 @@ Five pieces, in the order the issue settles them:
    field is reported as a :class:`RedactionMarker` naming the field and that a
    value exists — never the value — so a caller can tell "redacted" from
    "absent" instead of both collapsing to the same missing key. Reachable
-   from the MCP server (``read_entity`` tool) and ``athenaeum query entity``.
+   from the MCP server (``read_entity`` tool) and ``athenaeum entity``.
 
    :func:`read_entities` is the BATCH form of the same read (issue
    athenaeum#877), and the one to reach for whenever more than one uid is
