@@ -35,7 +35,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -1929,6 +1929,29 @@ def _rates_for_model(model: str | None) -> tuple[float, float]:
     return (_BLENDED_INPUT_USD_PER_MTOK, _BLENDED_OUTPUT_USD_PER_MTOK)
 
 
+_T = TypeVar("_T")
+
+
+def _longest_prefix_value(model: str | None, table: dict[str, _T]) -> _T | None:
+    """Longest-prefix ``startswith`` match of *model* against *table*, or
+    ``None`` if *model* is falsy or matches no recorded prefix.
+
+    Shared scan for the model-capability tables below (sampling-params,
+    prompt-caching, adaptive-thinking): each is keyed by model-id prefix and
+    wants the value for the LONGEST matching prefix, treating a miss as
+    ``None`` rather than a default that could be confused for a recorded
+    fact. Factored out so the loop is written once, not once per table.
+    """
+    if not model:
+        return None
+    best: _T | None = None
+    best_len = -1
+    for prefix, value in table.items():
+        if model.startswith(prefix) and len(prefix) > best_len:
+            best, best_len = value, len(prefix)
+    return best
+
+
 # Model-level sampling-parameter capability (issue athenaeum#577; epic athenaeum#515 deliverable 4,
 # which lands here ONCE — athenaeum#573 reads this rather than re-declaring it). Records
 # where ``temperature`` / ``top_p`` / ``top_k`` return HTTP 400: the Claude 4.7+
@@ -1937,7 +1960,7 @@ def _rates_for_model(model: str | None) -> tuple[float, float]:
 # parameters — athenaeum sends none on any path. Verified 2026-08-01 against the
 # ``claude-api`` skill (the source of truth for model facts, per hestia#1055).
 # Keyed by the same longest-prefix ``startswith`` style as the rate table above;
-# maintain the two tables together.
+# maintain the four tables together.
 _SAMPLING_PARAMS_REJECTED_PREFIXES: dict[str, bool] = {
     # Rejected — sampling parameters return HTTP 400 on these models.
     "claude-opus-5": True,
@@ -1960,14 +1983,7 @@ def _sampling_params_rejected(model: str | None) -> bool | None:
     this exists so a caller (e.g. athenaeum#573) can consult one authoritative table
     instead of re-deriving the request-surface rule from a training prior.
     """
-    if not model:
-        return None
-    best: bool | None = None
-    best_len = -1
-    for prefix, rejected in _SAMPLING_PARAMS_REJECTED_PREFIXES.items():
-        if model.startswith(prefix) and len(prefix) > best_len:
-            best, best_len = rejected, len(prefix)
-    return best
+    return _longest_prefix_value(model, _SAMPLING_PARAMS_REJECTED_PREFIXES)
 
 
 # Model-level prompt-caching capability (issue athenaeum#927). Records the MINIMUM
@@ -1987,7 +2003,7 @@ def _sampling_params_rejected(model: str | None) -> bool | None:
 # model facts, per hestia#1055); it agrees with the per-model figures already
 # recorded in prose at ``resolutions.py``'s athenaeum#230 breakpoint comment.
 # Keyed by the same longest-prefix ``startswith`` style as the rate table and
-# _SAMPLING_PARAMS_REJECTED_PREFIXES above; maintain the three tables together.
+# _SAMPLING_PARAMS_REJECTED_PREFIXES above; maintain the four tables together.
 _MIN_CACHEABLE_PREFIX_TOKENS: dict[str, int] = {
     # Claude 5 tier — 512.
     "claude-opus-5": 512,
@@ -2034,14 +2050,82 @@ def min_cacheable_prefix_tokens(model: str | None) -> int | None:
     rather than assuming the breakpoint will engage. Silence is the whole failure
     mode this table exists to make checkable.
     """
-    if not model:
-        return None
-    best: int | None = None
-    best_len = -1
-    for prefix, minimum in _MIN_CACHEABLE_PREFIX_TOKENS.items():
-        if model.startswith(prefix) and len(prefix) > best_len:
-            best, best_len = minimum, len(prefix)
-    return best
+    return _longest_prefix_value(model, _MIN_CACHEABLE_PREFIX_TOKENS)
+
+
+# Model-level adaptive-thinking capability (issue athenaeum#1336). Records whether
+# a model honours ``thinking: {"type": "adaptive"}`` at all. A model recorded
+# ``False`` here rejects ``adaptive`` with HTTP 400 and must be sent the older
+# ``{"type": "enabled", "budget_tokens": N}`` form instead; the ``write`` knob's
+# three call sites (``tier3_create_params`` / ``tier3_merge_params`` /
+# ``tier3_merge_full_params`` in ``tiers.py``) requested ``adaptive``
+# unconditionally and 400'd on every call the moment that knob pointed at such
+# a model — see athenaeum#1262's live eval, which this table exists to make
+# checkable ahead of a call instead of after a bill.
+#
+# Two facts below are non-obvious and safety-relevant, so they are recorded as
+# comments, not just data:
+#
+# 1. On ``claude-fable-5`` / ``claude-fable-5-1`` / ``claude-mythos-5`` /
+#    ``claude-mythos-5-1``, ``{"type": "disabled"}`` is REJECTED with a 400 —
+#    thinking is always on there. That is the MIRROR IMAGE of this issue's
+#    defect, and it is why those four are recorded ``True``: a ``False`` entry
+#    would make :func:`athenaeum.provider.resolve_thinking`'s downgrade path
+#    emit the one value those models refuse.
+# 2. ``claude-haiku-4`` has exactly one member (Haiku 4.5), so
+#    ``"claude-haiku-4": False`` is a safe family fallback — mirroring the
+#    ``_MIN_CACHEABLE_PREFIX_TOKENS`` family-fallback idiom above.
+#    ``claude-opus-4`` and ``claude-sonnet-4`` are NOT safe fallbacks: those
+#    families straddle the adaptive-thinking boundary (4.0/4.1/4.5 do not
+#    support it, 4.6/4.7/4.8 do), so no family-level entry is recorded for
+#    them — an id matching only the bare family prefix stays UNRECORDED
+#    (``None``) rather than guessed in either direction.
+#
+# Verified 2026-09-03 against the ``claude-api`` skill (the source of truth for
+# model facts, per hestia#1055). Keyed by the same longest-prefix ``startswith``
+# style as the rate table and _SAMPLING_PARAMS_REJECTED_PREFIXES /
+# _MIN_CACHEABLE_PREFIX_TOKENS above; maintain the four tables together. An
+# unrecorded id resolves to ``None`` (unchanged behaviour), never a guess — this
+# table must not become a gate a newly-released model has to be added to before
+# it works.
+_ADAPTIVE_THINKING_SUPPORTED_PREFIXES: dict[str, bool] = {
+    # Supported — adaptive thinking is the on-mode for these tiers.
+    "claude-opus-5": True,
+    "claude-opus-4-8": True,
+    "claude-opus-4-7": True,
+    "claude-opus-4-6": True,
+    "claude-sonnet-5": True,
+    "claude-sonnet-4-6": True,
+    # Fable/Mythos: `disabled` 400s here (fact 1 above) — always-on, so `True`.
+    "claude-fable-5": True,
+    "claude-fable-5-1": True,
+    "claude-mythos-5": True,
+    "claude-mythos-5-1": True,
+    # NOT supported — these predate adaptive thinking and take the old
+    # ``{"type": "enabled", "budget_tokens": N}`` form instead.
+    "claude-haiku-4-5": False,
+    "claude-sonnet-4-5": False,
+    "claude-sonnet-4-0": False,
+    "claude-opus-4-5": False,
+    "claude-opus-4-1": False,
+    "claude-opus-4-0": False,
+    "claude-3-5-haiku": False,
+    # Family-level fallbacks (fact 2 above). No claude-opus-4 / claude-sonnet-4
+    # fallback — those families straddle the boundary.
+    "claude-haiku-4": False,
+    "claude-haiku-3": False,
+}
+
+
+def adaptive_thinking_supported(model: str | None) -> bool | None:
+    """Whether *model* honours ``thinking: {"type": "adaptive"}`` (longest-prefix
+    match), or ``None`` if *model* matches no recorded prefix (issue athenaeum#1336).
+
+    ``None`` means UNKNOWN, not "unsupported" — :func:`athenaeum.provider.resolve_thinking`
+    treats an unrecorded model as unchanged behaviour (no downgrade), so a
+    newly-released model works with no table update required.
+    """
+    return _longest_prefix_value(model, _ADAPTIVE_THINKING_SUPPORTED_PREFIXES)
 
 
 #: Characters per token used by :func:`estimate_prompt_tokens`. Deliberately an
