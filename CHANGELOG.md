@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The Lane A intake cap and its drain budget are documented
+  (athenaeum#1322).** `librarian.max_files` was documented as a knob ("stop
+  after processing this many raw files per run") but never as the thing a large
+  prose submission has to be budgeted against, so athenaeum-adapters#182 spent
+  ~$10.70 minting 4,181 records and then discovered the queue-drain time
+  afterwards. `docs/configuration.md` gains "Intake window composition and the
+  Lane A drain budget": the three properties of the cap that are easy to get
+  wrong from outside (it counts FILES not records, it is a scheduling cap and
+  not a rate limit, and the window is filled round-robin across sources), a
+  field-by-field table of the athenaeum#1322 window-composition instrumentation
+  (`considered=`, `window=`, `caller_scoped=`, `pinned=`, `rr=`, `held_stuck=`,
+  `held_backoff=`, `reason=all-slots-skipped`) including the subset caveat on
+  the held-out counts, the arithmetic for projecting a submission's drain time
+  and cost with the measured per-file constants, and the `--max-files` ceiling
+  — the binding constraint is neither the call budget nor the entity deadline
+  but the run lock against the caller's own cadence, which a 200-file pass
+  collides with and a 150-file pass does not. Documentation only; no behaviour
+  change.
+
 ## [0.19.45] - 2026-09-03
 
 _Supersedes 44 untagged, unpublished patch bumps (0.19.1–0.19.44) that never shipped to PyPI; the last published release was v0.19.0._

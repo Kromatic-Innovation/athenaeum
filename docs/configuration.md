@@ -222,6 +222,87 @@ Path and mode flags on `athenaeum run` (CLI-only): `--raw-root` and
 `--path` (default `~/knowledge`), `--dry-run`, `--cluster-only`,
 `--merge-only`, `--verbose`.
 
+### Intake window composition and the Lane A drain budget (athenaeum#1322)
+
+`librarian.max_files` (50, above) is the **Lane A prose intake cap**, and it is
+the knob a Lane A submission has to be budgeted against. Three properties of it
+are easy to get wrong from the outside, and getting them wrong is how
+athenaeum#1322 happened — 5,966 records sat pending for six hours while the run
+summary reported `reason=completed`:
+
+- **It counts FILES, not records.** One raw file is one slot, whatever it
+  contains. A 4,000-record submission written as 4,000 files needs 4,000 slots;
+  the same content written as 40 files needs 40.
+- **It is a SCHEDULING cap, not a rate limit.** Nothing throttles Lane A below
+  it. The question a stalled queue raises is never "how fast is the cap" but
+  **which files filled the window** — every slot spent on an unworkable or
+  already-favoured file is a slot a waiting source did not get.
+- **The window is filled fairly, across sources.** athenaeum#1291 fills it
+  round-robin over `raw/<source>/` directories rather than head-truncating
+  discovery order (which is grouped by source name, so head truncation starves
+  every alphabetically-later source indefinitely). athenaeum#1322 extended that
+  to the athenaeum#900 caller-scoped pin, which was still head-truncated, and
+  holds ledger-stuck (athenaeum#663) and in-backoff (athenaeum#1185) files OUT
+  of the candidate set *before* the window is filled instead of skipping them
+  inside the per-file loop after each has already won a slot.
+
+**Per-pass throughput is on the run-summary line.** The `entity` segment (and
+its `run_summary.jsonl` sibling above) reports how the window was filled, so
+"capped", "deferred", "skipped" and "broken" are distinguishable from the record
+alone rather than inferred from a pending count:
+
+| Field | Rendered | Meaning |
+|---|---|---|
+| `considered=N` | always | Candidate raw files the scheduler saw, BEFORE any hold-out. |
+| `window=N` | always | Slots actually filled — what this pass drew from. `files=N` (elsewhere on the line) is how many of them it applied. |
+| `caller_scoped=N` | when non-zero | Pre-truncation size of the athenaeum#900 caller's own claim. When it dwarfs `window`, the caller has effectively named the whole backlog and the pin is no longer scoping anything. |
+| `pinned=N` / `rr=N` | when non-zero | How the window split between the caller-scoped share and the athenaeum#1291 round-robin remainder. |
+| `held_stuck=N` / `held_backoff=N` | when non-zero | Unworkable files held out of selection. A **subset** of the existing `stuck=`/`backoff=` counts, never an addition — those count every such file the run touched by either route, so summing the pair double-counts. |
+| `reason=all-slots-skipped` | when it applies | The pass filled its window, skipped every slot as stuck/in-backoff, and attempted nothing. Distinct from `reason=completed`, which is what a zero-throughput stall used to report. Deliberately NOT an early-stop reason: it is not a resource stop and does not change the athenaeum#1135 exit code. |
+
+**Budgeting a large Lane A submission.** Drain time is arithmetic over the cap,
+the number of sources competing for it, and the caller's own run cadence (there
+is no in-repo scheduler — see "Reasoning-tier triggers" below):
+
+```
+passes  = files ÷ (max_files ÷ number of backlogged sources)
+elapsed = passes × cadence
+cost    = files × per-file cost
+```
+
+Worked against the athenaeum#1322 reference deployment, measured on one
+instrumented 50-slot pass (2026-09-02): 45 files in 306 s at $0.713 — **≈ $0.016
+and ≈ 6.8 s per file, ≈ 1.76 API calls per file**. With two backlogged sources
+sharing a 50-slot window at a 30-minute cadence (≈ 48 passes/day), a
+**4,000-file submission takes ≈ 160 passes ≈ 3.3 days and ≈ $64**. Submit
+4,000 files without budgeting for that and the spend lands days before the
+corpus does.
+
+Two caveats on the projection: per-file cost and duration vary with the source
+mix, and the share to any one source RISES as its competitors drain out, so the
+figure is a ceiling rather than an estimate. Observed on that deployment between
+2026-09-02 and 2026-09-03T06:44Z, at the standing cadence with the
+athenaeum#1322 fix live: 326 Lane A raw files drained (178 `relationship-stub`
++ 148 `mural-board-summary`), and the count of wiki pages carrying the
+`relationship-stub` submission trailer rose from 0 to 163.
+
+**To drain faster, raise the window — but not past the cadence.** `--max-files`
+has headroom against both the API-call budget (`max_api_calls` 800 ÷ 1.76
+calls/file ≈ 450 files) and the entity-phase deadline
+(`entity_runtime_share` 0.6 × `max_runtime` 3600 = 2160 s ÷ 6.8 s/file ≈ 315
+files). What binds first is neither: it is the **run lock against the caller's
+own cadence**. A 200-file pass runs ≈ 23 minutes, so on a 30-minute tick the
+next invocation fires while the run still holds `.athenaeum.lock`, and a caller
+that passes neither `--wait` nor `--force` simply loses that scheduled pass —
+every time. **`--max-files 150`** (≈ 17 minutes) keeps the cadence intact and
+roughly triples the per-pass share. Anything larger wants
+[`athenaeum drain`](#backlog-drain-athenaeum-drain-athenaeum470) — the
+supervised, cost-ceilinged, unbounded-runtime path — run in the foreground with
+the cadence job unloaded, not layered on top of it. The athenaeum#470 ETA
+advisor projects nights-to-drain from observed ledger throughput at the end of
+any run that leaves intake undrained, so a growing backlog announces itself
+without this calculation being redone by hand.
+
 ### Field corrections (`librarian.corrections.*`, athenaeum#797)
 
 The deterministic, LLM-free field-correction fast path documented in
@@ -474,6 +555,12 @@ Behavior and guards:
 - **No credential handling** (athenaeum#284/#330): requires `ANTHROPIC_API_KEY` in the environment and errors out naming that requirement if it is absent.
 - **Cost guard is mandatory:** prints an up-front cost **estimate** (backlog × observed avg tokens/file × current model prices, batch discount applied) and requires `--yes` to proceed non-interactively.
 - **Loops intake windows** until the raw backlog is empty, the cumulative `--max-usd` ceiling trips, or a window makes **zero progress** (stops loudly — never spins).
+
+For how one window is *composed* — the round-robin share across sources, the
+fields that report it, and how to project a large submission's drain time and
+cost before spending it — see [Intake window composition and the Lane A drain
+budget](#intake-window-composition-and-the-lane-a-drain-budget-athenaeum1322)
+under "Librarian run" above.
 
 ## Reasoning-tier triggers (athenaeum#909)
 
