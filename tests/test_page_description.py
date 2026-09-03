@@ -231,6 +231,18 @@ class TestBackfill:
         assert not bare.read_text().startswith("---")
         assert "description" not in retired.read_text()
 
+    def test_thin_body_is_skipped_before_any_llm_call(self, wiki: Path) -> None:
+        """A heading plus a footnote (the CRM person-stub shape) has nothing to
+        summarize; asking the model every pass would waste tokens and clog a
+        ``limit`` window with stubs."""
+        _page(
+            wiki, "stub.md", "uid: s\nname: Dawn B\ntype: person", "# Dawn B\n\n[^1]: CRM export.\n"
+        )
+        client = FakeLLMClient(response=make_llm_response("[]", make_llm_usage(1, 1)))
+        report = build_description_report(wiki, client=client)
+        assert report.counts_by_reason() == {"thin-body": 1}
+        assert client.calls == []
+
     def test_limit_makes_successive_runs_drain(self, wiki: Path) -> None:
         for i in range(3):
             _page(wiki, f"p{i}.md", f"uid: p{i}\nname: P{i}", f"# P{i}\n\nPage {i} prose.\n")

@@ -239,7 +239,7 @@ class PageOutcome:
     for every skip. ``reason`` is a closed vocabulary the report groups by:
     ``mechanical`` / ``llm`` (assignments) and ``already-described`` /
     ``no-frontmatter`` / ``empty-frontmatter`` / ``unparseable-frontmatter`` /
-    ``retired`` / ``undecided`` (skips).
+    ``retired`` / ``thin-body`` / ``undecided`` (skips).
     """
 
     path: Path
@@ -325,6 +325,16 @@ def _triage_page(
 
     if not include_retired and bool(meta.get("retired")):
         return PageOutcome(path, None, "retired"), None, ""
+
+    if derive_description_from_body(body) is None:
+        # No prose paragraph at all (a heading plus a source footnote is the
+        # common shape: CRM-export person stubs). There is nothing for either
+        # mode to summarize, and the model correctly declines such pages —
+        # but re-asking them on every pass would burn tokens and, under
+        # ``limit``, clog the window with stubs ahead of pages that CAN be
+        # described. Skipped and counted instead. Live corpus 2026-09-03: 539
+        # of the first 1,500 candidates were this shape.
+        return PageOutcome(path, None, "thin-body"), None, ""
 
     return None, meta, body.strip()
 
