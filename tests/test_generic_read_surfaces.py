@@ -12,7 +12,7 @@ ask the person-shaped question. These tests pin the caller-facing surfaces:
   not a smaller version of the same tool — it removes a filter
   `docs/security-posture.md` §2.3 depends on), and its fail-closed audience
   check.
-- ``TestCliEntityCommand`` — the same for the shell: `athenaeum query entity`
+- ``TestCliEntityCommand`` — the same for the shell: `athenaeum entity`
   prints the same JSON object shape.
 - ``TestCliRecallWithPii`` — `athenaeum recall --with-pii`. `cmd_recall` is a
   SECOND implementation of the layer ordering (it builds its own backend and

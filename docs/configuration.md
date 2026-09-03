@@ -1790,7 +1790,7 @@ intake per the configured action and access.
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
-| Medical screening | `ATHENAEUM_SCREEN_MEDICAL` | `screening.medical.action` | `off` | Action for medical intake: `off` (default, no screening) or an enabled action per `docs/screening.md`. **Fails loudly** — a mis-set value raises `ScreeningConfigError` rather than serving with a silently inert classifier. This is one of the two deliberate exceptions to the WARN-and-fall-back malformed-env policy (athenaeum#528). |
+| Medical screening | `ATHENAEUM_SCREEN_MEDICAL` | `screening.medical.action` | `off` | Action for medical intake: `off` (default, no screening) or `label_restrict` (label the matched entry and restrict its access). Those are the only two accepted values. `drop` is present in `VALID_MEDICAL_ACTIONS` in `src/athenaeum/screening.py` but is refused for the medical category — medical is label-first — and raises `ScreeningConfigError`, so do not set it. See `resolve_screening` in `src/athenaeum/config.py` for the resolution order and the full validation rules. **Fails loudly** — a mis-set value raises `ScreeningConfigError` rather than serving with a silently inert classifier. This is one of the two deliberate exceptions to the WARN-and-fall-back malformed-env policy (athenaeum#528). |
 
 ## Sensitivity classes (athenaeum#910)
 
