@@ -24,6 +24,19 @@
 # feedback loops" -> "Innovation Accounting"). Each backend rescues a
 # class of queries the other handles poorly — the merge is load-bearing.
 #
+# Push telemetry (issue athenaeum#1343). This hook used to record NOTHING
+# about what it pushed — the exact reason issue athenaeum#1120's
+# `AND memory_tier = 'hot'` gate (below) was able to silently over-exclude
+# 96.56% of the corpus for weeks with nothing watching. Every turn that
+# renders at least one candidate now appends one JSONL row to the SAME
+# durable ledger `athenaeum.push_metrics.record_push` writes for the
+# explicit `recall` MCP path, tagged `"source":"sidecar"` so the two
+# writers stay separable. Still shell/awk-only: the append costs pure
+# bash string building plus at most one `shasum`/`sha256sum` subprocess —
+# no Python interpreter start added to this path (see the query_hash
+# section near the bottom of this file for the one subprocess it does
+# spend, and the <50ms contract this is measured against above).
+#
 # Hot-tier filter + push-token budget (issue athenaeum#1120). Unprompted
 # recall (this hook) previously queried FTS5 directly and never saw the
 # `hot`-tier filter or `push_budget.tokens_per_turn` budget that issue
@@ -117,6 +130,343 @@ case "$BUDGET" in
   ''|*[!0-9]*) BUDGET=1200 ;;
   0) BUDGET=1200 ;;
 esac
+
+# ── Sidecar push telemetry setup (issue athenaeum#1343) ─────────────────
+# Every unprompted push this hook renders gets one JSONL row appended to
+# the SAME durable ledger `athenaeum.push_metrics.record_push` writes for
+# the explicit `recall` MCP path — previously this hook wrote nothing at
+# all (see the issue's motivation: the `AND memory_tier = 'hot'` gate
+# above shipped with no telemetry, so its 96.56% over-exclusion on the
+# real corpus went undetected for weeks). Setup only; the actual append
+# happens after the budget pass below, which is the only place that
+# knows the *rendered* set.
+
+# Enablement (D10): mirrors `athenaeum.config.resolve_push_metrics_enabled`'s
+# precedence exactly — `ATHENAEUM_PUSH_METRICS_ENABLED` env >
+# `PUSH_METRICS_ENABLED` (cached from `push_metrics.enabled` yaml by
+# session-start-recall.sh, same shape as `PUSH_TOKEN_BUDGET`) > default
+# on. The env layer has an asymmetry that must be reproduced exactly: an
+# env var that is SET but EMPTY is FALSEY (off), while an UNSET env var
+# falls through to the yaml/default layer — `${VAR:-x}` conflates those
+# two cases in shell, so the "is it set at all" test below uses
+# `${VAR+x}`, not `${VAR:-x}`.
+PM_ENABLED=true
+if [ -n "${ATHENAEUM_PUSH_METRICS_ENABLED+x}" ]; then
+  case "$(printf '%s' "$ATHENAEUM_PUSH_METRICS_ENABLED" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+    0 | false | no | off | "") PM_ENABLED=false ;;
+    *) PM_ENABLED=true ;;
+  esac
+elif [ "${PUSH_METRICS_ENABLED:-true}" = "false" ]; then
+  PM_ENABLED=false
+fi
+
+# Ledger path (D3): reproduces `push_metrics.durable_push_records_path`'s
+# two-branch rule exactly — new (`<wiki_root>/_push_records.jsonl`) when
+# it exists or the legacy cache-dir file does not, else legacy
+# (`<cache_dir>/_push_records.jsonl`). Deliberately a SEPARATE resolution
+# from this hook's own `$CACHE_DIR` above (which is pinned to `$HOME` and
+# does not honour `ATHENAEUM_CACHE_DIR`) — the ledger must resolve to
+# exactly where `push_metrics.push_records_path`/`durable_push_records_path`
+# would, or a hook-written row and a Python-written row could split
+# across two different files. `wiki_root` mirrors
+# `session-start-recall.sh:59-60`'s identical expression
+# (`mcp_server.py:423` confirms `wiki_root = knowledge_root / "wiki"`).
+PM_KNOWLEDGE_ROOT="${KNOWLEDGE_ROOT:-$HOME/knowledge}"
+PM_WIKI_ROOT="${KNOWLEDGE_WIKI_PATH:-${PM_KNOWLEDGE_ROOT}/wiki}"
+PM_CACHE_DIR="${ATHENAEUM_CACHE_DIR:-$HOME/.cache/athenaeum}"
+PM_LEDGER_NEW="${PM_WIKI_ROOT}/_push_records.jsonl"
+PM_LEDGER_LEGACY="${PM_CACHE_DIR}/_push_records.jsonl"
+if [ -f "$PM_LEDGER_NEW" ] || [ ! -f "$PM_LEDGER_LEGACY" ]; then
+  PM_LEDGER_PATH="$PM_LEDGER_NEW"
+else
+  PM_LEDGER_PATH="$PM_LEDGER_LEGACY"
+fi
+
+# ── Push telemetry helpers (pure bash — no subprocess on the hot path) ──
+#
+# CONVENTION: these helpers return their result in the global `_PM_RET`
+# rather than printing it, and callers read `_PM_RET` immediately. That
+# is deliberate and load-bearing, not a style choice: `x=$(helper ...)`
+# FORKS a subshell even when `helper` is a shell function, and this path
+# calls six of them PER PUSHED ITEM (~18 forks per turn on a 3-item
+# push). Measured on the fixture index, the command-substitution form
+# cost ~11-29ms per turn against the <50ms contract stated in this
+# file's header — the same order as the Python interpreter start this
+# whole shell-native design exists to avoid. Initialized here so `set -u`
+# can never see it unset.
+_PM_RET=""
+
+
+# `id` (AC "id is never a name-derived slug"): the FTS5 `wiki` table has
+# no `uid` column, so this shell fallback derives an id from the filename
+# alone, mirroring `push_metrics.opaque_push_id`'s non-uid branch. A
+# compiled entity's filename is `<8-hex-uid-prefix>-<slugified-name>.md`
+# (`athenaeum.models.WikiEntity.filename`) — recording only the 8-hex
+# prefix keeps the name-derived slug out of the ledger entirely. A
+# raw-intake filename (`<timestamp>Z-<hash>.md`) never matches that shape
+# and is recorded whole (it carries no name to leak).
+_pm_opaque_push_id() {
+  case "$1" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-*)
+      _PM_RET="${1:0:8}"
+      ;;
+    *)
+      _PM_RET="$1"
+      ;;
+  esac
+}
+
+# `scope` (D5): derived from the index's `audience` column, the only
+# audience representation this shell hook can see. Mirrors
+# `build_push_record`'s intent through `models.audience_index_string`'s
+# delimiter-anchored shape (`"|"` empty sentinel, `"|__access_open__|"`
+# public marker, `"|role|role|"` roles, any combination): audience-empty
+# -> "owner"; public marker alone -> "open"; roles present (with or
+# without the public marker) -> sorted, comma-joined roles.
+#
+# NO bash arrays here — deliberately (issue athenaeum#1343 review finding).
+# `#!/usr/bin/env bash` on stock macOS resolves to `/bin/bash`, GNU bash
+# 3.2.57 (Apple stopped shipping newer bash over the GPLv3 relicense).
+# Under bash 3.2 with `set -u`, referencing an empty array (`${#a[@]}`,
+# `${a[0]}`) can raise "unbound variable" — exactly the class of bug
+# athenaeum#1104 already found and fixed by removing a bash-4-only
+# `mapfile` call from `scripts/public-safe-lint-gate.sh` for this same
+# stock-macOS-bash reason (see CHANGELOG.md ~line 2190). The public-marker-
+# only case (`|__access_open__|`, a normal public page) hits exactly that
+# empty-array state here, so this is rewritten as a plain string pipeline
+# through `tr`/`grep`/`sort` instead — slower by a negligible amount for
+# an at-most-3-item, at-most-a-handful-of-roles input, but correct on
+# every bash this hook ships to.
+_pm_scope_from_audience() {
+  local aud="${1:-|}"
+  local trimmed="${aud#|}"
+  trimmed="${trimmed%|}"
+  local had_public=false joined="" part rest="$trimmed"
+  # Pure parameter expansion: no arrays (bash 3.2, see above) and NO
+  # subprocess at all. Issue athenaeum#1343's "shell/awk plus at most one
+  # shasum/sha256sum subprocess" contract is a PER-TURN budget, and this
+  # helper runs once PER PUSHED ITEM — a `tr | grep | sort` pipeline here
+  # would fork ~7 processes per item (~20 per turn) against a <50ms
+  # contract, which is exactly the cost this shell-native design exists
+  # to avoid.
+  #
+  # No sort is needed: `models.delimited_index_string` already emits its
+  # tokens `sorted({v for v in values if v})` (models.py:1158), so the
+  # tokens arrive sorted, deduped and empty-free — the same ordering
+  # `build_push_record`'s own `",".join(sorted(roles))` produces. Walking
+  # them in index order therefore reproduces that join exactly.
+  while [ -n "$rest" ]; do
+    part="${rest%%|*}"
+    if [ "$part" = "$rest" ]; then
+      rest=""
+    else
+      rest="${rest#*|}"
+    fi
+    if [ "$part" = "__access_open__" ]; then
+      had_public=true
+    elif [ -n "$part" ]; then
+      if [ -n "$joined" ]; then
+        joined="${joined},${part}"
+      else
+        joined="$part"
+      fi
+    fi
+  done
+  if [ -n "$joined" ]; then
+    _PM_RET="$joined"
+  elif [ "$had_public" = true ]; then
+    _PM_RET=open
+  else
+    _PM_RET=owner
+  fi
+}
+
+# Numeric guard (issue athenaeum#1343 review findings, defects 1 & 3).
+# Used before ANY value derived from a parsed `$RESULTS` row is either
+# used in bash arithmetic or interpolated unquoted into JSON. Two
+# distinct hazards this closes:
+#   (1) `read -r fname name rank audience mtier backend cost` shifts
+#       fields if an indexed column (e.g. `name`) ever contains a literal
+#       tab -- `read` dumps all overflow into the LAST variable, so
+#       `cost` can become a compound non-numeric string. Arithmetic on
+#       that (`$(( total + cost ))`) makes bash's arithmetic evaluator
+#       treat a leading identifier-shaped token as a VARIABLE NAME, and
+#       under `set -u` an unbound one aborts the whole script — this is
+#       NOT suppressed by wrapping the caller in `|| true` (verified:
+#       `set -u`'s unbound-variable abort fires even when the failing
+#       command sits inside a function invoked as `f || true`; only
+#       ordinary non-zero exit statuses are suppressed that way).
+#   (2) `relevance` must never be interpolated as a bare, unquoted,
+#       possibly-empty/non-numeric token — `"relevance":,` is malformed
+#       JSON `read_push_records` cannot parse.
+# `[[ =~ ]]` extended-regex matching is available since bash 3.0, so this
+# is bash-3.2-safe too.
+_pm_is_number() {
+  [[ "$1" =~ ^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$ ]]
+}
+
+# Minimal RFC 8259 string escaper (D11 — no jq/python on this path).
+# Escapes backslash, double-quote, and C0 control characters as
+# `\uXXXX`. The values passed through this are index-derived (filenames,
+# audience tokens) rather than arbitrary user text, but escaping
+# unconditionally is cheap (pure bash, no subprocess) and removes the
+# question entirely.
+_pm_json_escape() {
+  local s="$1" out="" c i len ord hex
+  len=${#s}
+  for (( i = 0; i < len; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      '\') out+='\\' ;;
+      '"') out+='\"' ;;
+      *)
+        printf -v ord '%d' "'$c"
+        if [ "$ord" -lt 32 ]; then
+          printf -v hex '%04x' "$ord"
+          out+="\\u${hex}"
+        else
+          out+="$c"
+        fi
+        ;;
+    esac
+  done
+  _PM_RET="$out"
+}
+
+# Builds and appends the ONE telemetry row for this turn (issue
+# athenaeum#1343 review finding, defect 1). Deliberately a SEPARATE pass
+# over `$RESULTS` from the render loop below, invoked exactly once as
+# `_pm_record_push || true` — never inlined into the render loop.
+#
+# Why this matters under `set -euo pipefail`: `f || true` DOES suppress
+# an ordinary non-zero exit from anything inside `f` (verified: a `false`
+# inside a function called as `f || true` does not abort the script).
+# But it does NOT suppress a `set -u` unbound-variable abort, which fires
+# immediately regardless of how the failing command's exit status would
+# otherwise be tested (verified separately). A tab embedded in an
+# indexed `name` column shifts the `read -r fname name rank audience
+# mtier backend cost` fields — `read` dumps all overflow into the LAST
+# variable, so `cost` can become a compound non-numeric string, and bash
+# arithmetic on it (`$(( total + cost ))`) tries to resolve a
+# leading-identifier-shaped token as a variable name, which is exactly
+# the unbound-variable abort `|| true` cannot catch. So the render loop
+# below is kept to ONLY what it did before this issue (build MATCHES,
+# write SEEN_FILE) — it can never be broken by this function — and this
+# function additionally guards every value it puts in arithmetic or
+# unquoted JSON with `_pm_is_number` first, so even a shifted/garbled row
+# degrades to a safe default (cost 0, relevance null) instead of
+# crashing.
+_pm_record_push() {
+  [ "$PM_ENABLED" = true ] || return 0
+
+  local fname name rank audience mtier backend cost
+  local _pm_id _pm_scope _pm_id_esc _pm_scope_esc _pm_mtier_esc _pm_backend_esc
+  local _pm_cost _pm_relevance _pm_item
+  local pm_items_json="" pm_total_cost=0 pm_item_count=0
+
+  while IFS=$'\t' read -r fname name rank audience mtier backend cost; do
+    [ -n "$fname" ] || continue
+
+    if _pm_is_number "$cost"; then
+      _pm_cost="$cost"
+    else
+      _pm_cost=0
+    fi
+
+    if [ "$backend" = "vector" ]; then
+      _pm_relevance="null"
+    elif _pm_is_number "$rank"; then
+      _pm_relevance="$rank"
+    else
+      _pm_relevance="null"
+    fi
+
+    _pm_opaque_push_id "$fname"; _pm_id="$_PM_RET"
+    _pm_scope_from_audience "$audience"; _pm_scope="$_PM_RET"
+    _pm_json_escape "$_pm_id"; _pm_id_esc="$_PM_RET"
+    _pm_json_escape "$_pm_scope"; _pm_scope_esc="$_PM_RET"
+    _pm_json_escape "$mtier"; _pm_mtier_esc="$_PM_RET"
+    # `backend` is escaped too (not just interpolated raw): under normal
+    # operation it is always the literal "fts5"/"vector" this script
+    # itself wrote, but a shifted/garbled row (the tab-in-`name` case
+    # above) could otherwise carry a stray quote/backslash into it.
+    _pm_json_escape "$backend"; _pm_backend_esc="$_PM_RET"
+
+    _pm_item="{\"id\":\"${_pm_id_esc}\",\"tier\":\"internal\",\"scope\":\"${_pm_scope_esc}\",\"token_cost\":${_pm_cost},\"relevance\":${_pm_relevance},\"backend\":\"${_pm_backend_esc}\",\"memory_tier\":\"${_pm_mtier_esc}\"}"
+    if [ -n "$pm_items_json" ]; then
+      pm_items_json="${pm_items_json},${_pm_item}"
+    else
+      pm_items_json="$_pm_item"
+    fi
+    pm_total_cost=$(( pm_total_cost + _pm_cost ))
+    pm_item_count=$(( pm_item_count + 1 ))
+  done <<< "$RESULTS"
+
+  # A turn that pushes nothing never reaches here in practice (`[ -n
+  # "$RESULTS" ] || exit 0` runs before this function is called), but the
+  # guard is kept so this function is safe to call unconditionally.
+  [ "$pm_item_count" -gt 0 ] || return 0
+
+  # query_hash (D2): sha256 of the RAW PROMPT text, truncated to 16 hex
+  # chars — the SAME digest `push_metrics._query_hash` computes. The
+  # prompt text itself is NEVER written. This is the ONE shasum/sha256sum
+  # subprocess this path spends (the issue's "shell/awk plus at most one
+  # shasum/sha256sum subprocess" contract) — everything else above is
+  # pure bash/awk or a bounded sqlite3 lookup already paid for by the
+  # recall query itself.
+  local pm_query_hash pm_ts pm_session_id_esc pm_record
+  if command -v sha256sum >/dev/null 2>&1; then
+    pm_query_hash=$(printf '%s' "$PROMPT" | sha256sum); pm_query_hash="${pm_query_hash:0:16}"
+  elif command -v shasum >/dev/null 2>&1; then
+    pm_query_hash=$(printf '%s' "$PROMPT" | shasum -a 256); pm_query_hash="${pm_query_hash:0:16}"
+  else
+    pm_query_hash=""
+  fi
+
+  # ts (D9): second-resolution, Z-suffixed — `_parse_ts`'s
+  # `datetime.fromisoformat(raw.replace("Z", "+00:00"))` accepts this
+  # exactly. BSD/macOS `date` has no `%N`, and this hook is macOS-first,
+  # so this deliberately does not attempt microsecond resolution the way
+  # `push_metrics._now_iso()` does.
+  # `printf '%(fmt)T'` is a bash 4.2+ BUILTIN — no fork at all. Stock
+  # macOS ships bash 3.2.57 (see the athenaeum#1104 precedent noted
+  # above), which lacks it, so fall back to `date` there. On bash 4.2+
+  # this path therefore spends exactly ONE subprocess in total (the
+  # sha256 above), which is the issue athenaeum#1343 contract; on bash
+  # 3.2 it spends two, because bash 3.2 has no way to read the wall
+  # clock without one. TZ=UTC makes the builtin's output UTC, matching
+  # `date -u` and `push_metrics._now_iso()`'s timezone-aware stamp.
+  if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 2))); then
+    local _pm_oldtz="${TZ-__unset__}"
+    TZ=UTC printf -v pm_ts '%(%Y-%m-%dT%H:%M:%SZ)T' -1
+    if [ "$_pm_oldtz" = "__unset__" ]; then unset TZ; else TZ="$_pm_oldtz"; fi
+  else
+    pm_ts=$(TZ=UTC date -u +%Y-%m-%dT%H:%M:%SZ)
+  fi
+  _pm_json_escape "$SESSION_ID"; pm_session_id_esc="$_PM_RET"
+  pm_record="{\"v\":1,\"session_id\":\"${pm_session_id_esc}\",\"ts\":\"${pm_ts}\",\"query_hash\":\"${pm_query_hash}\",\"backend\":\"${SEARCH_BACKEND}\",\"items\":[${pm_items_json}],\"pushed_count\":${pm_item_count},\"token_cost\":${pm_total_cost},\"token_cost_estimated\":true,\"source\":\"sidecar\"}"
+
+  # Best-effort, single O_APPEND write of one complete line — never
+  # breaks or delays the push. `>>` opens with O_APPEND and `printf`
+  # issues one write(2) for a line this short (well under PIPE_BUF), so
+  # two concurrent hook runs can never interleave a partial line,
+  # matching `store.append_line_durable`'s atomicity guarantee (this
+  # path skips its `fsync`: a per-turn fsync would add a syscall this hot
+  # path cannot afford, and a torn TRAILING line on a crash is already
+  # the tolerated failure mode every ledger reader in this codebase
+  # accepts). Each command below has its OWN `|| true` — belt-and-braces
+  # alongside the caller's `_pm_record_push || true`, since an unbound-
+  # variable abort (unlike an ordinary failure) is not caught by the
+  # caller's guard, and every value reaching this point has already been
+  # through the numeric guards above.
+  if [ "$PM_LEDGER_PATH" = "$PM_LEDGER_NEW" ]; then
+    mkdir -p "$PM_WIKI_ROOT" 2>/dev/null || true
+  else
+    mkdir -p "$PM_CACHE_DIR" 2>/dev/null || true
+  fi
+  printf '%s\n' "$pm_record" >> "$PM_LEDGER_PATH" 2>/dev/null || true
+  return 0
+}
 
 [ "$AUTO_RECALL" = "true" ] || exit 0
 
@@ -213,8 +563,13 @@ fi
 FTS_RESULTS=""
 if [ -f "$DB_FILE" ]; then
   if [ "$HAS_TIER_COLUMN" = true ]; then
+    # Issue athenaeum#1343 (Plan step 3): `audience` and `memory_tier` added
+    # to the SELECT list purely to feed the telemetry row below — a wider
+    # row from the SAME query, no new query. The trailing literal
+    # `'fts5'` tags each row with the backend it came from, so the merge
+    # step downstream never needs to guess.
     FTS_RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
-      SELECT filename, name, rank
+      SELECT filename, name, rank, audience, memory_tier, 'fts5'
       FROM wiki
       WHERE wiki MATCH '${FTS_QUERY}'
       AND memory_tier = 'hot'
@@ -223,8 +578,12 @@ if [ -f "$DB_FILE" ]; then
       LIMIT 3;
     " 2>/dev/null || echo "")
   else
+    # Legacy DB (no memory_tier column): `audience` predates memory_tier
+    # (issue athenaeum#312 vs. schema v4) and is safe to select
+    # unconditionally; memory_tier is recorded as the literal empty
+    # string per item (D8 — the column doesn't exist on this DB).
     FTS_RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
-      SELECT filename, name, rank
+      SELECT filename, name, rank, audience, '', 'fts5'
       FROM wiki
       WHERE wiki MATCH '${FTS_QUERY}'
       ${EXCLUDE}
@@ -285,7 +644,15 @@ fi
 # not. Cost: the vector branch already pays a Python interpreter start
 # (~400ms, see the header latency note); one more bounded (<=3-row)
 # sqlite3 lookup (~1-3ms) does not touch that contract.
-if [ "$HAS_TIER_COLUMN" = true ] && [ -n "$VECTOR_RESULTS" ]; then
+#
+# Issue athenaeum#1343: this same bounded lookup is widened (not a new
+# query) to also carry `audience` and `memory_tier` through for each
+# surviving vector hit into `VECTOR_META` (a `filename\taudience\tmemory_tier`
+# map), so the telemetry row built below can record `scope` (D5) and
+# `memory_tier` (D8) for a vector-sourced item exactly as it does for an
+# FTS5-sourced one.
+VECTOR_META=""
+if [ -f "$DB_FILE" ] && [ -n "$VECTOR_RESULTS" ]; then
   _vector_filenames=$(printf '%s\n' "$VECTOR_RESULTS" | awk -F'\t' 'NF >= 1 && $1 != "" { print $1 }')
   _vector_in_list=""
   if [ -n "$_vector_filenames" ]; then
@@ -305,21 +672,65 @@ if [ "$HAS_TIER_COLUMN" = true ] && [ -n "$VECTOR_RESULTS" ]; then
     done <<< "$_vector_filenames"
   fi
 
-  _hot_vector_filenames=""
   if [ -n "$_vector_in_list" ]; then
-    _hot_vector_filenames=$(sqlite3 -separator $'\t' "$DB_FILE" "
-      SELECT filename FROM wiki
-      WHERE filename IN (${_vector_in_list})
-      AND memory_tier = 'hot';
-    " 2>/dev/null || echo "")
+    if [ "$HAS_TIER_COLUMN" = true ]; then
+      # `VECTOR_META` is only populated for filenames that ARE
+      # `memory_tier = 'hot'` — it is therefore simultaneously the
+      # audience/tier lookup AND the authoritative "kept" set for the
+      # hot-tier post-filter below.
+      VECTOR_META=$(sqlite3 -separator $'\t' "$DB_FILE" "
+        SELECT filename, audience, memory_tier FROM wiki
+        WHERE filename IN (${_vector_in_list})
+        AND memory_tier = 'hot';
+      " 2>/dev/null || echo "")
+      _hot_vector_filenames=$(printf '%s\n' "$VECTOR_META" | awk -F'\t' 'NF >= 1 && $1 != "" { print $1 }')
+      VECTOR_RESULTS=$(printf '%s\n' "$VECTOR_RESULTS" | awk -F'\t' -v hot="$_hot_vector_filenames" '
+        BEGIN {
+          n = split(hot, arr, "\n")
+          for (i = 1; i <= n; i++) if (arr[i] != "") keep[arr[i]] = 1
+        }
+        NF >= 1 && ($1 in keep)
+      ')
+    else
+      # Legacy DB (no memory_tier column): the hot-tier gate is skipped
+      # on BOTH branches (see the FTS5 probe above), so no filtering
+      # happens here either. `audience` predates memory_tier (issue
+      # athenaeum#312 vs. schema v4) and is safe to select
+      # unconditionally; memory_tier per item is recorded as "" (D8 —
+      # the column doesn't exist on this DB, nothing truthful to carry).
+      VECTOR_META=$(sqlite3 -separator $'\t' "$DB_FILE" "
+        SELECT filename, audience, '' FROM wiki
+        WHERE filename IN (${_vector_in_list});
+      " 2>/dev/null || echo "")
+    fi
   fi
+fi
 
-  VECTOR_RESULTS=$(printf '%s\n' "$VECTOR_RESULTS" | awk -F'\t' -v hot="$_hot_vector_filenames" '
+# Normalize VECTOR_RESULTS (filename, name, score) to the SAME 6-field
+# shape the FTS5 branch's widened SELECT already produces (filename,
+# name, rank-or-empty, audience, memory_tier, backend), joining in
+# `VECTOR_META` by filename. `score` is a vector-similarity score, NOT a
+# BM25 rank — recording it as `relevance` would silently mix two
+# incomparable scales, so the rank/relevance field is left EMPTY here;
+# the ledger writer below maps `backend == "vector"` to a JSON `null`
+# relevance instead (D7). Normalizing here means the merge step
+# downstream never needs to know which backend a row came from.
+if [ -n "$VECTOR_RESULTS" ]; then
+  VECTOR_RESULTS=$(printf '%s\n' "$VECTOR_RESULTS" | awk -F'\t' -v meta="$VECTOR_META" '
     BEGIN {
-      n = split(hot, arr, "\n")
-      for (i = 1; i <= n; i++) if (arr[i] != "") keep[arr[i]] = 1
+      m = split(meta, marr, "\n")
+      for (i = 1; i <= m; i++) {
+        if (marr[i] == "") continue
+        split(marr[i], f, "\t")
+        aud[f[1]] = f[2]
+        tier[f[1]] = f[3]
+      }
     }
-    NF >= 1 && ($1 in keep)
+    NF >= 2 && $1 != "" {
+      a = ($1 in aud) ? aud[$1] : "|"
+      t = ($1 in tier) ? tier[$1] : ""
+      printf "%s\t%s\t\t%s\t%s\tvector\n", $1, $2, a, t
+    }
   ')
 fi
 
@@ -356,7 +767,11 @@ RESULTS=$(printf '%s' "$RESULTS" | awk -F'\t' -v preamble="$PREAMBLE" -v budget=
     cost = int(length(block) / 4)
     if (total + cost > budget) next
     total += cost
-    print
+    # Issue athenaeum#1343: append this candidate'"'"'s own token cost as a
+    # trailing 7th field — the telemetry row built below REUSES this
+    # value verbatim (per-item and, summed, in aggregate) rather than
+    # recomputing the estimate a second way.
+    print $0 "\t" cost
   }
 ')
 
@@ -365,10 +780,23 @@ RESULTS=$(printf '%s' "$RESULTS" | awk -F'\t' -v preamble="$PREAMBLE" -v budget=
 # ── Format output ───────────────────────────────────────────────────────
 # Must be wrapped in hookSpecificOutput.hookEventName — Claude Code
 # silently ignores a flat {"additionalContext": ...} payload.
+#
+# Issue athenaeum#1343 review finding (defect 1): this loop does ONLY what
+# it did before this issue — build MATCHES, write SEEN_FILE. It reads
+# just the first two `$RESULTS` fields (the trailing fields collapse into
+# the unused third `read` variable), the exact shape it had pre-athenaeum#1343, so
+# nothing about the wider 7-field row this issue added can affect it.
+# Telemetry is built and appended entirely separately, below.
 MATCHES=""
-while IFS=$'\t' read -r fname name score; do
+while IFS=$'\t' read -r fname name _pm_rest; do
   MATCHES="${MATCHES}  - ${name}\n"
   echo "$fname" >> "$SEEN_FILE"
 done <<< "$RESULTS"
+
+# Sidecar push telemetry (issue athenaeum#1343): exactly one call, and the
+# ONLY thing standing between a failure inside `_pm_record_push` and this
+# script's `set -e` is this `|| true` — see that function's header
+# comment for the `set -u` caveat it does NOT rely on `|| true` to cover.
+_pm_record_push || true
 
 printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[Knowledge context] Wiki pages relevant to this message (use `recall` MCP tool for full details):\\n%s"}}' "$MATCHES"

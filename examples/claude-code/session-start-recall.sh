@@ -111,6 +111,22 @@ with open(env_path, 'w') as f:
         if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
             tokens_per_turn = raw
     f.write(f'PUSH_TOKEN_BUDGET={tokens_per_turn}\n')
+    # Issue athenaeum#1343 (D10): cache the yaml-configured push-metrics
+    # enable flag so the per-turn hook's telemetry append can honour
+    # \`push_metrics.enabled\` without a Python import — SAME shape as
+    # PUSH_TOKEN_BUDGET immediately above (hook-local name, not the
+    # library's own \`ATHENAEUM_PUSH_METRICS_ENABLED\`, for the identical
+    # auto-export-shadowing reason given in that comment). Only the yaml
+    # value is resolved here; the env override + the falsey-token set +
+    # the set-but-empty-is-off asymmetry are all applied at per-turn-hook
+    # runtime, not baked in at session start.
+    push_metrics_enabled = True
+    push_metrics_cfg = cfg.get('push_metrics')
+    if isinstance(push_metrics_cfg, dict):
+        raw = push_metrics_cfg.get('enabled')
+        if isinstance(raw, bool):
+            push_metrics_enabled = raw
+    f.write(f'PUSH_METRICS_ENABLED={str(push_metrics_enabled).lower()}\n')
 " "$KNOWLEDGE_ROOT" "$CONFIG_ENV" 2>/dev/null; then
   _read_config_ok=true
 fi
@@ -123,21 +139,28 @@ if [ "$_read_config_ok" = false ]; then
   # Issue athenaeum#1120: same yaml-only resolution as the python path above
   # — env override happens at per-turn-hook runtime, not here.
   _push_budget="1200"
+  # Issue athenaeum#1343 (D10): same yaml-only resolution, same
+  # hook-local-name reasoning, as PUSH_TOKEN_BUDGET above.
+  _push_metrics_enabled="true"
   if [ -f "$CONFIG_YAML" ]; then
     _in_vector=false
     _in_push_budget=false
+    _in_push_metrics=false
     while IFS= read -r line; do
       line="${line%%#*}"
       case "$line" in
-        auto_recall:*)    _auto_recall="$(echo "${line#auto_recall:}" | tr -d ' ')"; _in_vector=false; _in_push_budget=false ;;
-        search_backend:*) _search_backend="$(echo "${line#search_backend:}" | tr -d ' ')"; _in_vector=false; _in_push_budget=false ;;
-        vector:*)         _in_vector=true; _in_push_budget=false ;;
-        push_budget:*)    _in_push_budget=true; _in_vector=false ;;
+        auto_recall:*)    _auto_recall="$(echo "${line#auto_recall:}" | tr -d ' ')"; _in_vector=false; _in_push_budget=false; _in_push_metrics=false ;;
+        search_backend:*) _search_backend="$(echo "${line#search_backend:}" | tr -d ' ')"; _in_vector=false; _in_push_budget=false; _in_push_metrics=false ;;
+        vector:*)         _in_vector=true; _in_push_budget=false; _in_push_metrics=false ;;
+        push_budget:*)    _in_push_budget=true; _in_vector=false; _in_push_metrics=false ;;
+        push_metrics:*)   _in_push_metrics=true; _in_vector=false; _in_push_budget=false ;;
         "  provider:"*|"    provider:"*)
           [ "$_in_vector" = true ] && _vector_provider="$(echo "${line#*provider:}" | tr -d ' ')" ;;
         "  tokens_per_turn:"*|"    tokens_per_turn:"*)
           [ "$_in_push_budget" = true ] && _push_budget="$(echo "${line#*tokens_per_turn:}" | tr -d ' ')" ;;
-        *) case "$line" in "  "*|"	"*) ;; ?*) _in_vector=false; _in_push_budget=false ;; esac ;;
+        "  enabled:"*|"    enabled:"*)
+          [ "$_in_push_metrics" = true ] && _push_metrics_enabled="$(echo "${line#*enabled:}" | tr -d ' ')" ;;
+        *) case "$line" in "  "*|"	"*) ;; ?*) _in_vector=false; _in_push_budget=false; _in_push_metrics=false ;; esac ;;
       esac
     done < "$CONFIG_YAML"
   fi
@@ -147,11 +170,21 @@ if [ "$_read_config_ok" = false ]; then
     ''|*[!0-9]*) _push_budget="1200" ;;
     0) _push_budget="1200" ;;
   esac
+  # Normalize to the same lowercase true/false shape the python branch's
+  # str(bool).lower() writes, same falsey-token set the per-turn hook
+  # itself understands — a non-boolean-looking yaml value falls through
+  # to the default (on), same as resolve_push_metrics_enabled's own
+  # "non-bool yaml value falls through to the default" rule.
+  case "$(echo "$_push_metrics_enabled" | tr '[:upper:]' '[:lower:]')" in
+    false | no | off | 0) _push_metrics_enabled="false" ;;
+    *) _push_metrics_enabled="true" ;;
+  esac
   {
     echo "AUTO_RECALL=${_auto_recall}"
     echo "SEARCH_BACKEND=${_search_backend}"
     echo "VECTOR_PROVIDER=${_vector_provider}"
     echo "PUSH_TOKEN_BUDGET=${_push_budget}"
+    echo "PUSH_METRICS_ENABLED=${_push_metrics_enabled}"
   } > "$CONFIG_ENV"
 fi
 
