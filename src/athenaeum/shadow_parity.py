@@ -255,6 +255,40 @@ def materialise_members(case: ParityCase, dest_dir: Path) -> list[AutoMemoryFile
     return members
 
 
+def _case_scope_dir(workdir: Path, case: ParityCase) -> Path:
+    """The on-disk materialisation directory for *case*, under *workdir*.
+
+    ``workdir / case.source / f"scope-{case.case_id}"`` — the LEAF name,
+    ``scope-<case_id>``, is not an arbitrary choice: it is the SAME
+    scope-directory convention ``tests/evals/test_detector_eval.py`` /
+    ``tests/evals/test_resolver_eval.py`` already use (``scope_dir = tmp_path
+    / f"scope-{case['id']}"``), which is what the recorded fixtures under
+    ``tests/fixtures/recorded/detector/`` were captured against.
+    :meth:`~athenaeum.models.AutoMemoryFile.origin_scope` becomes this
+    directory's NAME (see :func:`materialise_members`), and ``origin_scope``
+    is PROMPT-VISIBLE — :func:`athenaeum.contradictions._member_ref` renders
+    it into the detector's user message as ``f"{origin_scope}/{filename}"``
+    — so it is part of what the recorded fixture's prompt-hash staleness
+    contract checks (``tests.evals.harness.replay_client``). A leaf name
+    that diverges from the recording convention manufactures a
+    ``FixtureStaleError`` that has nothing to do with real prompt drift; one
+    that matches lets a caller (e.g. ``tests/evals/test_shadow_parity_recast.py``,
+    issue athenaeum#1333 AC4) replay the real recorded fixtures through this
+    harness's OWN materialisation, byte-for-byte.
+
+    The ``case.source`` PARENT directory is what actually needs to be
+    unique per case — it keeps two suites that happen to share a case id
+    from colliding on disk — so it is kept as a path segment rather than
+    folded into the leaf name.
+
+    Factored into one helper so :func:`project_shadow_parity` and
+    :func:`run_shadow_parity` (which must materialise the SAME case
+    identically, or their call counts and cost figures could diverge) share
+    one implementation rather than two copies that could drift apart.
+    """
+    return workdir / case.source / f"scope-{case.case_id}"
+
+
 # ---------------------------------------------------------------------------
 # Verdict spaces + the recast between them
 # ---------------------------------------------------------------------------
@@ -633,7 +667,7 @@ def project_shadow_parity(
     usage_upper = TokenUsage()
 
     for case in cases:
-        dest_dir = workdir / f"{case.source}-{case.case_id}"
+        dest_dir = _case_scope_dir(workdir, case)
         members = materialise_members(case, dest_dir)
 
         pair_count = planned_pair_count(members)
@@ -788,7 +822,10 @@ def run_shadow_parity(
     be discovered mid-run is not a ceiling (athenaeum#1333 AC6).
 
     Per case, in order: materialise members under
-    ``workdir/<source>-<case_id>/``; resolve the detector verdict (a
+    :func:`_case_scope_dir`'s ``workdir/<source>/scope-<case_id>/`` (the
+    ``scope-<case_id>`` leaf matches the recorded-fixture convention, so
+    real fixtures replay through this materialisation unchanged — see that
+    function's docstring); resolve the detector verdict (a
     declared verdict from ``tests/evals/data/resolver/cases.yaml``-shaped
     cases costs 0 calls; otherwise
     :func:`athenaeum.contradictions.detect_contradictions` runs, which
@@ -837,7 +874,7 @@ def run_shadow_parity(
     abort_reason = ""
 
     for case in cases:
-        dest_dir = workdir / f"{case.source}-{case.case_id}"
+        dest_dir = _case_scope_dir(workdir, case)
         members = materialise_members(case, dest_dir)
 
         if case.declared_detector is not None:

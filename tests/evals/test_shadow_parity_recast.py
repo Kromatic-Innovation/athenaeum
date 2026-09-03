@@ -2,12 +2,19 @@
 """Recast-machinery test for :mod:`athenaeum.shadow_parity` (issue athenaeum#1333, AC4).
 
 Runs in NORMAL CI — zero network, zero paid calls, NOT ``pytest.mark.eval``
-— by replaying the real recorded detector fixtures
-(``tests/fixtures/recorded/detector/``, prompt-hash enforced, the same
-posture ``tests/test_recorded_fixtures.py`` already uses) for detector-suite
-cases, using the resolver-suite cases' hand-authored ``detector:`` block for
-resolver-suite cases (the two corpora together are the 18 committed cases),
-and a SCRIPTED comparator stub for every pair.
+— by calling :func:`athenaeum.shadow_parity.run_shadow_parity` END-TO-END
+over BOTH committed corpora, with:
+
+- a detector client that dispatches, per detector-suite case, to
+  ``tests.evals.harness.replay_client(LAYER_DETECTOR, case_id)`` — the real
+  recorded fixture, prompt-hash enforced, the same posture
+  ``tests/test_recorded_fixtures.py`` already uses. Resolver-suite cases
+  carry a hand-authored ``detector:`` block and take
+  :func:`~athenaeum.shadow_parity.run_shadow_parity`'s declared-verdict
+  branch, which never reaches this client at all — see
+  :func:`_ordered_detector_client`.
+- a SCRIPTED comparator client, deterministic per case (see
+  :func:`_case_scoped_comparator_client`).
 
 **This test proves the recast MACHINERY is wired correctly — it is NOT a
 parity measurement.** The comparator stub's verdict is a fixed, deterministic
@@ -17,33 +24,9 @@ function of each case's ``outcome_class`` (see
 says nothing about real detector/comparator parity. The real measurement is
 athenaeum#1258's live-corpus run — do not dress this scripted answer up as one.
 
-**Why this drives the module's building blocks directly instead of calling
-:func:`athenaeum.shadow_parity.run_shadow_parity` end-to-end:**
-:func:`~athenaeum.shadow_parity.run_shadow_parity` materialises each case
-under ``workdir/<source>-<case_id>/`` (issue athenaeum#1333's own spec), so a
-detector-suite case's ``AutoMemoryFile.origin_scope`` there is
-``"detector-<case_id>"``. The ORIGINAL fixtures under
-``tests/fixtures/recorded/detector/`` were recorded by
-``tests/evals/test_detector_eval.py``, whose own scope directory is
-``"scope-<case_id>"`` — and ``origin_scope`` is embedded verbatim in the
-detector prompt (``contradictions._member_ref``), so it is part of what the
-prompt-hash staleness contract checks. Replaying through
-``run_shadow_parity``'s own materialisation therefore raises
-``FixtureStaleError`` for a reason that has NOTHING to do with the detector
-prompt actually drifting — it is purely this test's choice of scope-directory
-name diverging from the recording session's. Calling
-:func:`~athenaeum.shadow_parity.materialise_members` directly with a
-``"scope-<case_id>"`` destination (matching the recording convention exactly)
-avoids that false positive while still exercising every real recast function
-this issue built: :func:`~athenaeum.shadow_parity.detector_verdict_from_result`,
-:func:`~athenaeum.shadow_parity.roll_up_comparator_verdict`,
-:func:`~athenaeum.shadow_parity.classify_agreement`,
-:func:`~athenaeum.shadow_parity.comparator_decided_correctly`, plus the real
-:func:`athenaeum.contradictions.detect_contradictions` /
-:func:`athenaeum.cluster_comparator.run_cluster_comparator` call sites.
 A genuine prompt drift (an actual edit to ``contradictions._DETECT_SYSTEM``
 or ``_build_user_message``) still raises ``FixtureStaleError`` here exactly
-as it would through ``run_shadow_parity`` — this test does not special-case
+as it would through any other replay -- this test does not special-case
 that away, per athenaeum#1333's own instruction: a real staleness error must
 stop the test, not be worked around with a stub.
 """
@@ -55,27 +38,16 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-from athenaeum.cluster_comparator import run_cluster_comparator
-from athenaeum.contradictions import detect_contradictions
-from athenaeum.models import ContradictionResult, TokenUsage
+from athenaeum import comparator as comparator_mod
+from athenaeum.cluster_comparator import candidate_pairs, page_from_auto_memory_file
 from athenaeum.shadow_parity import (
-    AgreementMatrix,
     ParityCase,
-    ParityItem,
-    classify_agreement,
-    comparator_decided_correctly,
-    detector_verdict_from_result,
+    _case_scope_dir,
     load_parity_cases,
     materialise_members,
-    roll_up_comparator_verdict,
+    run_shadow_parity,
 )
 from tests.evals.harness import EVAL_DATA_ROOT, LAYER_DETECTOR, replay_client
-
-# Forces the comparator gate on, mirroring tests/test_cluster_comparator.py's
-# own ``_AUTO_ON`` constant -- the comparator defaults OFF everywhere else in
-# the codebase (athenaeum.config.resolve_comparator_enabled), so a harness
-# run must force it explicitly or it silently measures nothing.
-_COMPARATOR_ON: dict[str, object] = {"librarian": {"comparator_enabled": True}}
 
 # Deterministic, SCRIPTED Gate-2 content-relation verdict per outcome_class
 # -- not a live judgement (see module docstring). Picked to be a plausible
@@ -100,9 +72,9 @@ def _canned_response(payload: dict[str, Any]) -> MagicMock:
     return response
 
 
-def _scripted_comparator_client(outcome_class: str) -> MagicMock:
+def _content_relation_payload(outcome_class: str) -> dict[str, Any]:
     relation = _CONTENT_RELATION_BY_OUTCOME_CLASS.get(outcome_class, "conflicting")
-    payload = {
+    return {
         "content_relation": relation,
         "conflicting_passages": (
             ["scripted passage a", "scripted passage b"] if relation == "conflicting" else []
@@ -111,9 +83,6 @@ def _scripted_comparator_client(outcome_class: str) -> MagicMock:
         "predicate_b": "scripted-predicate-b",
         "rationale": "scripted stub -- proves recast machinery, not real parity",
     }
-    client = MagicMock()
-    client.messages.create.return_value = _canned_response(payload)
-    return client
 
 
 def _all_cases() -> list[ParityCase]:
@@ -122,93 +91,145 @@ def _all_cases() -> list[ParityCase]:
     )
 
 
-def _recast_one_case(case: ParityCase, tmp_path: Path) -> ParityItem:
-    # "scope-<case_id>" matches tests/evals/test_detector_eval.py's own
-    # recording scope-directory convention exactly -- see module docstring.
-    dest_dir = tmp_path / f"scope-{case.case_id}"
-    members = materialise_members(case, dest_dir)
+def _ordered_detector_client(cases: list[ParityCase]) -> MagicMock:
+    """One shared client for the whole run, dispatching to a REAL replay
+    client per detector-suite case, IN THE ORDER :func:`run_shadow_parity`
+    will call :func:`~athenaeum.contradictions.detect_contradictions`.
 
-    if case.declared_detector is not None:
-        det = case.declared_detector
-        detector_result = ContradictionResult(
-            detected=True,
-            conflict_type=det.conflict_type,
-            conflicting_passages=list(det.passages),
-            rationale=det.rationale,
-        )
-        detector_calls = 0
-    else:
-        # Real recorded fixture, prompt-hash enforced. A genuine
-        # FixtureStaleError propagates uncaught here -- a real finding,
-        # never worked around with a stub (athenaeum#1333's own instruction).
-        detector_client = replay_client(LAYER_DETECTOR, case.case_id)
-        detector_result = detect_contradictions(members, detector_client, usage=TokenUsage())
-        detector_calls = 1
-    detector_verdict = detector_verdict_from_result(detector_result)
+    Resolver-suite cases (a ``declared_detector``) take the declared-verdict
+    branch and never dispatch to this client at all — the state counter
+    below only ever advances past a detector-suite case's real fixture, and
+    raises if called more times than there are detector-suite cases, so an
+    accidental detector call for a declared-detector case fails loudly
+    rather than silently consuming the wrong fixture.
+    """
+    ordered_case_ids = [c.case_id for c in cases if c.declared_detector is None]
+    sub_creates = [replay_client(LAYER_DETECTOR, cid).messages.create for cid in ordered_case_ids]
 
-    comparator_client = _scripted_comparator_client(case.outcome_class)
-    cluster_result = run_cluster_comparator(
-        members,
-        comparator_client,
-        config=_COMPARATOR_ON,
-        usage=TokenUsage(),
-        cluster_id=f"{case.source}-{case.case_id}",
-    )
-    comparator_verdict = roll_up_comparator_verdict(
-        [outcome for _a, _b, outcome in cluster_result.outcomes]
-    )
-    agreement = classify_agreement(detector_verdict, comparator_verdict)
-    correct = comparator_decided_correctly(case.outcome_class, comparator_verdict)
+    client = MagicMock()
+    state = {"i": 0}
 
-    return ParityItem(
-        case_id=case.case_id,
-        source=case.source,
-        outcome_class=case.outcome_class,
-        detector_verdict=detector_verdict,
-        comparator_verdict=comparator_verdict,
-        pair_verdicts=[
-            {"a": id_a, "b": id_b, "verdict": outcome.verdict}
-            for id_a, id_b, outcome in cluster_result.outcomes
-        ],
-        agreement=agreement,
-        comparator_correct=correct,
-        detector_calls=detector_calls,
-        comparator_calls=len(cluster_result.outcomes),
-    )
+    def _create(**params: Any) -> Any:
+        i = state["i"]
+        if i >= len(sub_creates):
+            raise AssertionError(
+                f"detector client called {i + 1} times but only "
+                f"{len(sub_creates)} detector-suite cases exist -- a "
+                "declared-detector case must never dispatch a detector call"
+            )
+        state["i"] += 1
+        return sub_creates[i](**params)
+
+    client.messages.create.side_effect = _create
+    return client
+
+
+def _case_scoped_comparator_client(cases: list[ParityCase], workdir: Path) -> MagicMock:
+    """One shared client for the whole run, dispatching by EXACT match of
+    the outgoing Gate-2 user message against a precomputed per-case message.
+
+    Built the SAME way :func:`athenaeum.cluster_comparator.run_cluster_comparator`
+    builds it in production (:func:`~athenaeum.cluster_comparator.candidate_pairs`
+    + :func:`~athenaeum.cluster_comparator.page_from_auto_memory_file` +
+    :func:`athenaeum.comparator._build_content_relation_messages`), so this
+    is robust to two real risks a simpler dispatch would not survive:
+
+    - **Not every pair reaches Gate 2.** One committed case
+      (``deploy_target_sequential_snapshot``, disjoint ``valid_from``/
+      ``valid_until`` windows) resolves at Gate 1 without ever calling this
+      client (verified directly against :mod:`athenaeum.cluster_comparator`
+      before writing this dispatcher) — a naive "one call per case, in
+      order" positional list would silently misalign every case after it.
+    - **Body-text collisions.** Several resolver-suite cases reuse a
+      detector-suite case's own member body verbatim or as a substring (the
+      same underlying scenario, recast for the resolver eval) — a
+      substring-matching dispatcher can genuinely pick the WRONG case
+      (``tool_choice_editor`` vs ``refinement_editor_general_and_csv``,
+      different ``outcome_class``, one body a substring of the other).
+      Exact full-message equality does not have this problem: the two
+      pages' full fenced content together is unique per case even when a
+      fragment is shared.
+
+    ``page.body`` (what the Gate-2 message embeds) depends only on each
+    case's own content, not on which directory it is materialised under —
+    so precomputing into a throwaway ``workdir/precompute/`` directory
+    yields byte-identical messages to whatever
+    :func:`~athenaeum.shadow_parity.run_shadow_parity`'s own
+    materialisation (a DIFFERENT directory, per case) will send.
+    """
+    lookup: dict[str, str] = {}
+    for case in cases:
+        dest_dir = _case_scope_dir(workdir / "precompute", case)
+        members = materialise_members(case, dest_dir)
+        for member_a, member_b in candidate_pairs(members):
+            page_a = page_from_auto_memory_file(member_a)
+            page_b = page_from_auto_memory_file(member_b)
+            msg = comparator_mod._build_content_relation_messages(page_a, page_b)
+            lookup[msg] = case.outcome_class
+
+    client = MagicMock()
+
+    def _create(**params: Any) -> Any:
+        messages = params.get("messages")
+        content = ""
+        if isinstance(messages, list) and messages:
+            content = str(messages[0].get("content", ""))
+        outcome_class = lookup.get(content)
+        if outcome_class is None:
+            raise AssertionError(
+                f"no precomputed case matches this Gate-2 prompt: {content[:200]!r}"
+            )
+        return _canned_response(_content_relation_payload(outcome_class))
+
+    client.messages.create.side_effect = _create
+    return client
 
 
 class TestShadowParityRecast:
-    def test_all_18_cases_recast_with_source_and_scored_correctness(
+    def test_all_18_cases_recast_end_to_end_via_run_shadow_parity(
         self, tmp_path: Path
     ) -> None:
         cases = _all_cases()
         assert len(cases) == 18
+        detector_suite_cases = [c for c in cases if c.declared_detector is None]
+        resolver_suite_cases = [c for c in cases if c.declared_detector is not None]
+        assert len(detector_suite_cases) == 10
+        assert len(resolver_suite_cases) == 8
 
-        items = [_recast_one_case(case, tmp_path) for case in cases]
+        detector_client = _ordered_detector_client(cases)
+        comparator_client = _case_scoped_comparator_client(cases, tmp_path)
 
-        assert len(items) == 18
-        assert {item.case_id for item in items} == {c.case_id for c in cases}
+        report = run_shadow_parity(
+            cases,
+            detector_client=detector_client,
+            comparator_client=comparator_client,
+            workdir=tmp_path,
+        )
 
-        detector_items = [item for item in items if item.source == "detector"]
-        resolver_items = [item for item in items if item.source == "resolver"]
+        assert len(report.items) == 18
+        assert {item.case_id for item in report.items} == {c.case_id for c in cases}
+
+        detector_items = [item for item in report.items if item.source == "detector"]
+        resolver_items = [item for item in report.items if item.source == "resolver"]
         assert len(detector_items) == 10
         assert len(resolver_items) == 8
 
-        for item in items:
+        for item in report.items:
             assert item.source in ("detector", "resolver")
             # Every item carries a comparator_correct verdict of
             # True/False/None -- present, not missing (``in`` over the
             # 3-tuple also rejects an accidental falsy-but-wrong sentinel).
             assert item.comparator_correct in (True, False, None)
 
-        matrix = AgreementMatrix()
-        for item in items:
-            matrix.add(item.detector_verdict, item.comparator_verdict)
-        assert matrix.total == 18
+        assert report.matrix.total == 18
 
-        # Resolver-suite items cost zero detector calls (declared verdict,
-        # never dispatched); detector-suite items cost exactly one each.
+        # Resolver-suite items took the declared-detector branch: zero
+        # detector calls. Detector-suite items (all >= 2 members) cost
+        # exactly one detector call each -- matching the number of
+        # detector-suite cases, per the AC's own wording.
         for item in resolver_items:
             assert item.detector_calls == 0
         for item in detector_items:
             assert item.detector_calls == 1
+        assert report.detector_calls == len(detector_suite_cases) == 10
+        assert detector_client.messages.create.call_count == 10
