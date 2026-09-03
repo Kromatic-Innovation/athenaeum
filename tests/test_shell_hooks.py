@@ -2489,3 +2489,47 @@ class TestKillSwitchHooks:
 
         monkeypatch.setenv("ATHENAEUM_DISABLED", value)
         assert killswitch.is_disabled("recall", cache_dir=cache_dir) is False
+
+    # The four behavioural tests above probe ONE hook (`pre-compact-save.sh`,
+    # the only one that needs neither a wiki nor a python subprocess). That is
+    # sound only for as long as all six copies of the helper stay identical —
+    # and "six hand-maintained copies drifted from the Python reference" is
+    # precisely the defect athenaeum#1354 fixed. So assert the invariant the
+    # behavioural coverage rests on, rather than leaving it to inspection.
+    def test_kill_switch_helper_is_identical_across_all_six_hooks(self) -> None:
+        """All six copies of `__athenaeum_recall_disabled` are byte-identical.
+
+        Also pins the helper to bash 3.2: `#!/usr/bin/env bash` on stock macOS
+        resolves to `/bin/bash`, GNU bash 3.2.57, where the case-folding
+        expansion `${v,,}` is a PARSE-time syntax error — it would take the
+        whole script down, not just the kill switch, breaking these hooks'
+        "must never block session startup" contract. Same reason the bash-4
+        `mapfile` was removed in athenaeum#1104 and bash arrays were rejected
+        in athenaeum#1343.
+        """
+        hooks = [
+            SESSION_START,
+            USER_PROMPT,
+            PRE_COMPACT,
+            PENDING_QUESTIONS,
+            WIKI_INJECT,
+            REBUILD_INDEX,
+        ]
+        bodies: dict[str, str] = {}
+        for hook in hooks:
+            lines = hook.read_text().splitlines()
+            start = next(
+                i for i, ln in enumerate(lines) if ln.startswith("__athenaeum_recall_disabled()")
+            )
+            end = next(i for i, ln in enumerate(lines[start:], start) if ln == "}")
+            # Comments differ between copies by design; the code must not.
+            bodies[hook.name] = "\n".join(
+                ln for ln in lines[start : end + 1] if not ln.strip().startswith("#")
+            )
+
+        reference = bodies[PRE_COMPACT.name]
+        for name, body in bodies.items():
+            assert body == reference, f"{name}'s kill-switch helper has drifted from the others"
+
+        # bash 4.0+ case folding (`${v,,}` / `${v^^}`) must not reappear.
+        assert ",,}" not in reference and "^^}" not in reference
