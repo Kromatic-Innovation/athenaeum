@@ -852,6 +852,18 @@ def resolve_thinking(
                 if parsed is not None:
                     posture, source = parsed, "yaml"
 
+    # athenaeum#1336. NOTE the forward coupling to ``tests/test_thinking_seam.py``'s
+    # standing invariant (``TestNoXhighOrMaxWithDisabledThinking``): an
+    # ``output_config.effort`` of ``xhigh``/``max`` combined with
+    # ``thinking: {"type": "disabled"}`` returns HTTP 400 on Opus 5. The
+    # downgrade below can produce that ``disabled`` at RUNTIME rather than in
+    # the call site's literal, so the invariant can no longer be read off the
+    # call sites alone. It is inert today only because NO call site sets
+    # ``output_config`` at all — a fact that same test file pins
+    # (``test_no_call_site_sets_output_config_at_all_today``), which is
+    # therefore the tripwire: whoever makes that test fail by adding an
+    # ``effort`` to a stage whose posture can be downgraded here must revisit
+    # this branch at the same time.
     if posture == "adaptive" and adaptive_thinking_supported(model) is False:
         if source == "default":
             log.warning(
