@@ -501,7 +501,9 @@ def _is_isbn13(candidate: str) -> bool:
     phone is a bare 13-digit run beginning 978/979 (there is no such country
     code), so nothing real is dropped.
     """
-    return len(candidate) == 13 and candidate.isdigit() and candidate[:3] in ("978", "979")
+    return (
+        len(candidate) == 13 and candidate.isdigit() and candidate[:3] in ("978", "979")
+    )
 
 
 def _normalize_phone_token(token: str) -> str:
@@ -573,7 +575,11 @@ def _is_excluded_phone_shape(token: str) -> bool:
         return True
 
     candidate = _normalize_phone_token(token)
-    if _looks_like_date(candidate) or _is_bare_id_fragment(candidate) or _is_isbn13(candidate):
+    if (
+        _looks_like_date(candidate)
+        or _is_bare_id_fragment(candidate)
+        or _is_isbn13(candidate)
+    ):
         return True
 
     # Structural segmentation on the paren-free candidate: balanced parens wrap
@@ -1054,7 +1060,9 @@ def resolve_pii_scan_exclude_filenames(config: dict[str, Any] | None) -> frozens
     from athenaeum.config import resolve_pii_scan_exclude
 
     extra = resolve_pii_scan_exclude(config)
-    return DEFAULT_PII_SCAN_EXCLUDE_FILENAMES | {n.strip() for n in extra if n and n.strip()}
+    return DEFAULT_PII_SCAN_EXCLUDE_FILENAMES | {
+        n.strip() for n in extra if n and n.strip()
+    }
 
 
 def scan_excluded_by_name(root: Path, exclude_names: Collection[str]) -> list[Path]:
@@ -1147,7 +1155,9 @@ def scan_corpus_pii(
     (athenaeum#1273).
     """
     findings: list[CorpusPiiFinding] = []
-    for path in iter_corpus_files(wiki_root, exclude=exclude, exclude_names=exclude_names):
+    for path in iter_corpus_files(
+        wiki_root, exclude=exclude, exclude_names=exclude_names
+    ):
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -1230,7 +1240,9 @@ class PiiAdjudication:
     @property
     def unexplained_count(self) -> int:
         """Number of tokens no allowlist entry explains — the gate's subject."""
-        return sum(len(f.unexplained_emails) + len(f.unexplained_phones) for f in self.findings)
+        return sum(
+            len(f.unexplained_emails) + len(f.unexplained_phones) for f in self.findings
+        )
 
     @property
     def adjudicated_count(self) -> int:
@@ -1274,7 +1286,9 @@ def load_pii_allowlist(path: Path) -> tuple[list[PiiAllowlistEntry], list[str]]:
     if raw is None:
         return [], errors
     if not isinstance(raw, list):
-        return [], [f"{path}: top-level YAML must be a list of entries, got {type(raw).__name__}"]
+        return [], [
+            f"{path}: top-level YAML must be a list of entries, got {type(raw).__name__}"
+        ]
 
     entries: list[PiiAllowlistEntry] = []
     seen: set[str] = set()
@@ -1482,7 +1496,11 @@ def append_observation(
         observed_at=observed_at,
         source_msg_id=source_msg_id,
     )
-    target = log_path if log_path is not None else default_observation_log_path(contacts_root)
+    target = (
+        log_path
+        if log_path is not None
+        else default_observation_log_path(contacts_root)
+    )
     _append_jsonl_line(target, json.dumps(record, separators=(",", ":")) + "\n")
     return Observation(
         obs_id=obs_id,
@@ -1523,9 +1541,15 @@ def append_supersession(
     an :class:`Observation`.
     """
     record = build_supersession_record(retracts=retracts, reason=reason, at=at)
-    target = log_path if log_path is not None else default_supersession_log_path(contacts_root)
+    target = (
+        log_path
+        if log_path is not None
+        else default_supersession_log_path(contacts_root)
+    )
     _append_jsonl_line(target, json.dumps(record, separators=(",", ":")) + "\n")
-    return Supersession(retracts=record["retracts"], reason=record["reason"], at=record["at"])
+    return Supersession(
+        retracts=record["retracts"], reason=record["reason"], at=record["at"]
+    )
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -1556,9 +1580,15 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def read_observations(contacts_root: Path, *, log_path: Path | None = None) -> list[Observation]:
+def read_observations(
+    contacts_root: Path, *, log_path: Path | None = None
+) -> list[Observation]:
     """Read every well-formed observation record, in file order."""
-    target = log_path if log_path is not None else default_observation_log_path(contacts_root)
+    target = (
+        log_path
+        if log_path is not None
+        else default_observation_log_path(contacts_root)
+    )
     out: list[Observation] = []
     for rec in _read_jsonl(target):
         try:
@@ -1576,9 +1606,15 @@ def read_observations(contacts_root: Path, *, log_path: Path | None = None) -> l
     return out
 
 
-def read_supersessions(contacts_root: Path, *, log_path: Path | None = None) -> list[Supersession]:
+def read_supersessions(
+    contacts_root: Path, *, log_path: Path | None = None
+) -> list[Supersession]:
     """Read every well-formed supersession record, in file order."""
-    target = log_path if log_path is not None else default_supersession_log_path(contacts_root)
+    target = (
+        log_path
+        if log_path is not None
+        else default_supersession_log_path(contacts_root)
+    )
     out: list[Supersession] = []
     for rec in _read_jsonl(target):
         try:
@@ -1755,6 +1791,117 @@ def detect_hard_bounce_fact(text: str) -> HardBounceFact | None:
         code,
     )
     return HardBounceFact(identifier=emails[0], diagnostic=diagnostic)
+
+
+#: A bare base-class SMTP permanent-failure reply code (RFC 5321 §4.2.3),
+#: restricted to the 550-559 range — the shape a non-DSN-compliant MTA's
+#: reply takes when it carries no RFC 3463 enhanced ``5.x.x`` subcode at all
+#: (``550 user unknown``, ``552 mailbox full``). Deliberately narrower than
+#: "any 5xx": 550-559 is the documented permanent-failure band this contract
+#: recognizes; a code outside it is left to reasoning rather than guessed at.
+_BARE_SMTP_5XX_CODE_RE = re.compile(r"\b55[0-9]\b")
+
+#: Verified-permanent, non-RFC-3463 list-verification verdict tokens this
+#: module additionally recognizes as a hard-undeliverable signal with no
+#: enhanced status code to carry. Sourced from voltaire's own
+#: ``VERIFALIA_VERDICT_TO_RFC3463`` map
+#: (``src/tiers/bounce-bio-backfill.ts``) — the verdicts voltaire itself
+#: treats as verified, permanent, non-guessed failures and normally maps to a
+#: conforming ``5.x.x`` code before submission (which lands on
+#: :func:`detect_hard_bounce_fact`'s path instead). This tuple is a backstop
+#: for the same verdict reaching raw intake UNnormalized — a different
+#: producer, or a note predating that normalization — so it is not left with
+#: no structured home at all. Deliberately excludes ``SmtpConnectionTimeout``:
+#: voltaire's own comment marks it transient/connectivity, not a verified
+#: permanent failure, and it must keep falling through to ordinary reasoning
+#: with no bounce mark of any kind.
+VERIFIED_NON_RFC_BOUNCE_VERDICTS: tuple[str, ...] = (
+    "MailboxDoesNotExist",
+    "DomainDoesNotExist",
+    "DomainHasNullMx",
+)
+
+
+@dataclass(frozen=True)
+class BounceVerdictFact:
+    """A verified-undeliverable, non-RFC-3463 bounce verdict recognized in
+    ordinary free-text raw intake (reversal of athenaeum#852's read-only
+    stance for this narrow class — see ``librarian.tier0_bounce_verdict_mark``).
+
+    ``identifier`` is the single email-shaped token the note names;
+    ``verdict`` is the bare SMTP code or verdict token that matched;
+    ``diagnostic`` is the verbatim line it was found on (falling back to the
+    bare matched verdict if line-splitting yields nothing).
+    """
+
+    identifier: str
+    verdict: str
+    diagnostic: str
+
+
+def find_bare_smtp_5xx_code(text: str) -> str | None:
+    """Return the first bare 550-559 SMTP reply code in *text*, or ``None``.
+
+    Matches independently of whether an RFC 3463 enhanced code is ALSO
+    present elsewhere in *text* — callers that need "non-RFC only" combine
+    this with a :func:`find_hard_bounce_code` check of their own, exactly as
+    :func:`detect_bounce_verdict_fact` does below.
+    """
+    match = _BARE_SMTP_5XX_CODE_RE.search(text or "")
+    return match.group(0) if match is not None else None
+
+
+def find_verified_bounce_verdict_token(text: str) -> str | None:
+    """Return the first :data:`VERIFIED_NON_RFC_BOUNCE_VERDICTS` token found
+    in *text* as a whole word, or ``None``.
+    """
+    body = text or ""
+    for token in VERIFIED_NON_RFC_BOUNCE_VERDICTS:
+        if re.search(rf"\b{re.escape(token)}\b", body):
+            return token
+    return None
+
+
+def detect_bounce_verdict_fact(text: str) -> BounceVerdictFact | None:
+    """Recognize a verified-undeliverable, non-RFC bounce verdict in free
+    text, or ``None`` — never guesses.
+
+    Deliberately conservative, mirroring :func:`detect_hard_bounce_fact`'s
+    shape exactly:
+
+    - exactly ONE email-shaped token — ambiguous otherwise, left to
+      reasoning;
+    - text carries NO RFC 3463 ``5.x.x`` enhanced code — that shape is
+      :func:`detect_hard_bounce_fact`'s territory exclusively (it is checked
+      here for standalone correctness, not merely relied on via dispatch
+      order — see ``librarian.tier0_bounce_verdict_mark``'s docstring); and
+    - a bare 550-559 SMTP reply code (:func:`find_bare_smtp_5xx_code`) OR a
+      :data:`VERIFIED_NON_RFC_BOUNCE_VERDICTS` token
+      (:func:`find_verified_bounce_verdict_token`) appears somewhere in the
+      text.
+
+    A ``4.x`` transient diagnostic, ``SmtpConnectionTimeout``, or any other
+    unrecognized diagnostic never matches — it is left for the reasoning
+    tiers, exactly like today.
+    """
+    emails = find_inline_emails(text or "")
+    if len(emails) != 1:
+        return None
+    if find_hard_bounce_code(text or "") is not None:
+        # Already RFC 3463-conforming — detect_hard_bounce_fact's territory.
+        return None
+    verdict = find_bare_smtp_5xx_code(text or "") or find_verified_bounce_verdict_token(
+        text or ""
+    )
+    if verdict is None:
+        return None
+    diagnostic = next(
+        (line.strip() for line in (text or "").splitlines() if verdict in line),
+        verdict,
+    )
+    return BounceVerdictFact(
+        identifier=emails[0], verdict=verdict, diagnostic=diagnostic
+    )
 
 
 #: Direct-instruction shape: "do not email <address>", "don't email X",
@@ -1976,7 +2123,9 @@ def identifiers_on_record(meta: dict[str, Any] | None) -> list[str]:
             value = [value]
         if not isinstance(value, list):
             continue
-        found += [item.strip() for item in value if isinstance(item, str) and item.strip()]
+        found += [
+            item.strip() for item in value if isinstance(item, str) and item.strip()
+        ]
     return found
 
 
@@ -1985,7 +2134,9 @@ def record_lists_identifier(meta: dict[str, Any] | None, identifier: str) -> boo
     wanted = normalize_identifier(identifier)
     if not wanted:
         return False
-    return any(normalize_identifier(item) == wanted for item in identifiers_on_record(meta))
+    return any(
+        normalize_identifier(item) == wanted for item in identifiers_on_record(meta)
+    )
 
 
 def iter_contact_records(contacts_root: Path) -> list[Path]:
@@ -2358,7 +2509,10 @@ def is_bounced_identifier(
     for entry in identifier_validity_entries(meta):
         if normalize_identifier(str(entry.get("identifier", ""))) == wanted:
             return valid_until_expired(entry, as_of)
-    if isinstance(meta, dict) and normalize_identifier(str(meta.get("identifier", ""))) == wanted:
+    if (
+        isinstance(meta, dict)
+        and normalize_identifier(str(meta.get("identifier", ""))) == wanted
+    ):
         return is_bounced(meta, as_of)
     return False
 
@@ -2424,7 +2578,9 @@ def contact_classification_entries(meta: dict[str, Any] | None) -> list[dict[str
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
-def classification_for_value(meta: dict[str, Any] | None, identifier: str) -> ContactClassification:
+def classification_for_value(
+    meta: dict[str, Any] | None, identifier: str
+) -> ContactClassification:
     """The classification recorded for *identifier* on *meta*.
 
     Always returns a :class:`ContactClassification` — never ``None``. A value
@@ -2451,10 +2607,14 @@ def classification_for_value(meta: dict[str, Any] | None, identifier: str) -> Co
                     usage_class=usage_class or USAGE_CLASS_UNCLASSIFIED,
                     source=entry.get("source"),
                     observed_at=(
-                        str(entry["observed_at"]) if entry.get("observed_at") is not None else None
+                        str(entry["observed_at"])
+                        if entry.get("observed_at") is not None
+                        else None
                     ),
                 )
-    return ContactClassification(identifier=identifier, usage_class=USAGE_CLASS_UNCLASSIFIED)
+    return ContactClassification(
+        identifier=identifier, usage_class=USAGE_CLASS_UNCLASSIFIED
+    )
 
 
 def is_outreach_eligible(meta: dict[str, Any] | None, identifier: str) -> bool:
@@ -2492,7 +2652,9 @@ DO_NOT_EMAIL_FIELD = "do_not_email"
 #: Strings a ``do_not_email:`` value may carry that mean "no mark". Anything
 #: else non-empty means the mark IS set: the failure direction of a typo must
 #: be a false SKIP (recoverable by a human), never a false SEND (not).
-_DO_NOT_EMAIL_FALSEY: frozenset[str] = frozenset({"", "false", "no", "none", "null", "0", "off"})
+_DO_NOT_EMAIL_FALSEY: frozenset[str] = frozenset(
+    {"", "false", "no", "none", "null", "0", "off"}
+)
 
 
 @dataclass(frozen=True)
@@ -2633,7 +2795,10 @@ def _do_not_email_from_page(page_frontmatter: dict[str, Any] | None) -> DoNotEma
     applies to the excluded-record surface: a malformed or unparseable scalar
     reads as MARKED, never silently as "no mark".
     """
-    if not isinstance(page_frontmatter, dict) or DO_NOT_EMAIL_FIELD not in page_frontmatter:
+    if (
+        not isinstance(page_frontmatter, dict)
+        or DO_NOT_EMAIL_FIELD not in page_frontmatter
+    ):
         return DoNotEmailState(marked=False)
     raw = page_frontmatter[DO_NOT_EMAIL_FIELD]
     marked = _coerce_do_not_email_flag(raw)
@@ -2817,7 +2982,10 @@ def validity_for_value(
     for entry in identifier_validity_entries(meta):
         if normalize_identifier(str(entry.get("identifier", ""))) == wanted:
             return _validity_from_entry(identifier, entry, as_of)
-    if isinstance(meta, dict) and normalize_identifier(str(meta.get("identifier", ""))) == wanted:
+    if (
+        isinstance(meta, dict)
+        and normalize_identifier(str(meta.get("identifier", ""))) == wanted
+    ):
         return _validity_from_entry(identifier, meta, as_of)
     return IdentifierValidity(identifier=identifier, closed=False)
 
@@ -3166,7 +3334,9 @@ def find_orphaned_bounce_marks(contacts_root: Path) -> list[OrphanedBounceMark]:
 
     Pure — reads only. Returns pairs in :func:`iter_contact_records` order.
     """
-    records = [(path, read_bounce_record(path)) for path in iter_contact_records(contacts_root)]
+    records = [
+        (path, read_bounce_record(path)) for path in iter_contact_records(contacts_root)
+    ]
     orphaned: list[OrphanedBounceMark] = []
     for path, meta in records:
         identifier = str(meta.get("identifier", "") or "").strip()
@@ -3176,18 +3346,23 @@ def find_orphaned_bounce_marks(contacts_root: Path) -> list[OrphanedBounceMark]:
             (
                 other_path
                 for other_path, other_meta in records
-                if other_path != path and record_lists_identifier(other_meta, identifier)
+                if other_path != path
+                and record_lists_identifier(other_meta, identifier)
             ),
             None,
         )
         if person is not None:
             orphaned.append(
-                OrphanedBounceMark(identifier=identifier, bounce_record=path, person_record=person)
+                OrphanedBounceMark(
+                    identifier=identifier, bounce_record=path, person_record=person
+                )
             )
     return orphaned
 
 
-def fold_orphaned_bounce_marks(contacts_root: Path, *, dry_run: bool = False) -> BounceFoldReport:
+def fold_orphaned_bounce_marks(
+    contacts_root: Path, *, dry_run: bool = False
+) -> BounceFoldReport:
     """Fold every stranded mark onto the person record, reporting the count.
 
     For each pair :func:`find_orphaned_bounce_marks` reports, replays the mark
@@ -3219,7 +3394,8 @@ def fold_orphaned_bounce_marks(contacts_root: Path, *, dry_run: bool = False) ->
         person_meta = read_bounce_record(pair.person_record)
         stamped = dict(meta)
         stamped[FOLDED_INTO_FIELD] = str(
-            person_meta.get("uid") or pair.person_record.relative_to(Path(contacts_root))
+            person_meta.get("uid")
+            or pair.person_record.relative_to(Path(contacts_root))
         )
         _, body = parse_frontmatter(pair.bounce_record.read_text(encoding="utf-8"))
         atomic_write_text(pair.bounce_record, render_frontmatter(stamped) + "\n" + body)
@@ -3335,7 +3511,9 @@ def resolve_excluded_fields(
     if not isinstance(record_meta, Mapping):
         return ()
     return tuple(
-        str(name) for name in record_meta if str(name) not in EXCLUDED_RECORD_BOOKKEEPING_FIELDS
+        str(name)
+        for name in record_meta
+        if str(name) not in EXCLUDED_RECORD_BOOKKEEPING_FIELDS
     )
 
 
@@ -3589,8 +3767,12 @@ class EntityRead:
     # `dataclass_field`, not `field` — two long-standing functions in this
     # module use `field` as a loop variable, and importing the bare name would
     # shadow them (ruff F402).
-    classifications: dict[str, list[ContactClassification]] = dataclass_field(default_factory=dict)
-    validity: dict[str, list[IdentifierValidity]] = dataclass_field(default_factory=dict)
+    classifications: dict[str, list[ContactClassification]] = dataclass_field(
+        default_factory=dict
+    )
+    validity: dict[str, list[IdentifierValidity]] = dataclass_field(
+        default_factory=dict
+    )
     do_not_email: DoNotEmailState = dataclass_field(
         default_factory=lambda: DoNotEmailState(marked=False)
     )
@@ -3606,14 +3788,17 @@ class EntityRead:
             "redactions": [marker.to_dict() for marker in self.redactions],
             "contact_included": self.contact_included,
             "contact_record_path": (
-                str(self.contact_record_path) if self.contact_record_path is not None else None
+                str(self.contact_record_path)
+                if self.contact_record_path is not None
+                else None
             ),
             "classifications": {
                 name: [item.to_dict() for item in values]
                 for name, values in self.classifications.items()
             },
             "validity": {
-                name: [item.to_dict() for item in values] for name, values in self.validity.items()
+                name: [item.to_dict() for item in values]
+                for name, values in self.validity.items()
             },
             "do_not_email": self.do_not_email.to_dict(),
         }
@@ -3709,7 +3894,9 @@ def assemble_excluded_read(
             # Count BEFORE class filtering: the marker reports what the record
             # holds for this field, and a caller who asked for no excluded data
             # never named a class to filter by (issue athenaeum#866).
-            redactions.append(RedactionMarker(field=field_name, value_count=len(values)))
+            redactions.append(
+                RedactionMarker(field=field_name, value_count=len(values))
+            )
             continue
         classified = [classification_for_value(record_meta, value) for value in values]
         if wanted_classes is not None:
@@ -3905,7 +4092,9 @@ def read_entity(
     return _entity_read_from_indexes(
         uid,
         entity_index=(
-            entity_index if entity_index is not None else EntityIndex(knowledge_root / "wiki")
+            entity_index
+            if entity_index is not None
+            else EntityIndex(knowledge_root / "wiki")
         ),
         contact_records=contact_records,
         include_excluded=include_excluded,
@@ -3978,9 +4167,13 @@ class IdentifierFacts:
             "identifier": self.identifier,
             "known": self.known,
             "uid": self.uid,
-            "record_path": (str(self.record_path) if self.record_path is not None else None),
+            "record_path": (
+                str(self.record_path) if self.record_path is not None else None
+            ),
             "classification": (
-                self.classification.to_dict() if self.classification is not None else None
+                self.classification.to_dict()
+                if self.classification is not None
+                else None
             ),
             "validity": self.validity.to_dict() if self.validity is not None else None,
             "do_not_email": self.do_not_email.to_dict(),
@@ -4084,7 +4277,9 @@ def read_identifier_facts(
             entity_index = EntityIndex(knowledge_root / "wiki")
         yield (
             identifier,
-            _facts_for_identifier(identifier, resolved_index, as_of, entity_index=entity_index),
+            _facts_for_identifier(
+                identifier, resolved_index, as_of, entity_index=entity_index
+            ),
         )
 
 
@@ -4268,6 +4463,11 @@ __all__ = [
     "HardBounceFact",
     "find_hard_bounce_code",
     "detect_hard_bounce_fact",
+    "BounceVerdictFact",
+    "VERIFIED_NON_RFC_BOUNCE_VERDICTS",
+    "find_bare_smtp_5xx_code",
+    "find_verified_bounce_verdict_token",
+    "detect_bounce_verdict_fact",
     "default_bounce_record_path",
     "read_bounce_record",
     "is_bounced",
