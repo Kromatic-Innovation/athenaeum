@@ -2212,6 +2212,42 @@ thread through the SAME lock the CLI command already holds.
 is the sanctioned read path (mirrors `athenaeum merges`) — hand-parsing
 `wiki/_verdicts/*.jsonl` directly is not supported.
 
+## Wiki-dedup attribution snapshot (athenaeum#1243)
+
+The wiki-page dedup pass (`wiki_dedupe.propose_wiki_page_merges`, gated by
+`librarian.comparator_enabled` below) writes one durable, machine-readable row
+per candidate pair it examines — **including the pairs that reach no verdict**,
+which the verdict ledger above deliberately does not cover (a pair the
+comparator did not settle has no honest value among the five verdicts). This
+re-sites what athenaeum#1142 guaranteed and athenaeum#1227's cut-over
+stranded: an embedder identity that was computed on every run and read by
+nothing, and a no-verdict pair that left no row and no attributable log line.
+
+**Store layout**, under `wiki/`:
+
+- `_wiki_dedupe_attribution.jsonl` — the canonical **snapshot**, atomically
+  REPLACED on every real run (never appended to), so it is always exactly that
+  run's state. Written even when the run examined zero pairs, so a stale prior
+  run can never be misread as current. A dry run, and a run skipped for want
+  of a lock, write nothing.
+- `_wiki_dedupe_attribution-<YYYYmmddTHHMMSSZ>.jsonl` — timestamped rotations,
+  pruned to `librarian.rotation_retention` (default 30) by the same
+  `clusters.prune_cluster_rotations` helper `raw/_librarian-clusters.jsonl`
+  uses. There is no second retention knob.
+
+**Why a sibling artifact rather than a `wiki/_verdicts/` row.** Besides the
+schema point above: `verdicts.compact()` has no production call site, so
+`wiki/_verdicts/` is unbounded-append in practice today, and this pass examines
+~22,040 pairs per nightly run on the live corpus. A per-run snapshot is bounded
+by construction; a row per pair in an unpruned ledger is not.
+
+**How to inspect it.** `wiki_dedupe_attribution.read_attribution_report` is the
+sanctioned reader, and `wiki_dedupe_attribution.explain_pair` answers
+athenaeum#1005's diagnostic question — "which embedder produced this pair's
+candidacy, and why did it not become a proposal?" — from that single read, with
+no live host log access. Hand-parsing the file is not a supported access
+pattern.
+
 ## Five-verdict comparator (athenaeum#715) — off by default
 
 The pairwise comparator that will eventually POPULATE the verdict ledger

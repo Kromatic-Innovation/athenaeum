@@ -124,6 +124,7 @@ MODULE_LAYER: dict[str, int] = {
     "sensitivity": 3,
     "spend": 3,
     "usage_report": 3,
+    "wiki_dedupe_attribution": 3,
     # L4 -- domain/pipeline modules.
     "answers": 4,
     "auto_memory_prune": 4,
