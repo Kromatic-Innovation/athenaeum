@@ -498,6 +498,46 @@ class TestAgreementMatrixOverFixtures:
         assert detector_verdicts_seen == {"not-detected", "factual", "prescriptive"}
         assert comparator_verdicts_seen == {"distinct", "contradiction", "underdetermined"}
 
+    def test_declared_detector_case_costs_zero_detector_calls(self, tmp_path: Path) -> None:
+        """A resolver-suite-shaped case (a ``declared_detector``) must never
+        dispatch a detector call, through :func:`run_shadow_parity` itself
+        -- proven with a client that raises if touched."""
+        from athenaeum.shadow_parity import DeclaredDetectorVerdict
+
+        case = _case(
+            "declared_case",
+            (
+                _member("x1.md", "declared body one", {"type": "feedback"}),
+                _member("x2.md", "declared body two", {"type": "feedback"}),
+            ),
+            outcome_class="contradict",
+            declared_detector=DeclaredDetectorVerdict(
+                conflict_type="factual", rationale="pre-declared", passages=["p1", "p2"]
+            ),
+        )
+
+        def _exploding_detector_client() -> MagicMock:
+            client = MagicMock()
+            client.messages.create.side_effect = AssertionError(
+                "a declared-detector case must never dispatch a detector call"
+            )
+            return client
+
+        comparator_client = _uniform_client(_content_relation_payload("compatible"))
+
+        report = run_shadow_parity(
+            [case],
+            detector_client=_exploding_detector_client(),
+            comparator_client=comparator_client,
+            workdir=tmp_path,
+        )
+
+        assert len(report.items) == 1
+        item = report.items[0]
+        assert item.detector_calls == 0
+        assert item.detector_verdict == "factual"
+        assert report.detector_calls == 0
+
 
 # ---------------------------------------------------------------------------
 # AC3 — multiplier over fixtures with a known call count
