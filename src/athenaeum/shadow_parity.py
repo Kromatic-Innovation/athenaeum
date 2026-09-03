@@ -61,7 +61,7 @@ Reused, not reinvented, per this issue's own instruction:
 :mod:`athenaeum.shadow_linkage`'s provenance-stamping helpers
 (:func:`~athenaeum.shadow_linkage._get_version`,
 :func:`~athenaeum.shadow_linkage._get_git_sha`,
-:func:`~athenaeum.shadow_linkage._now_iso`) — mirrored here rather than
+:func:`athenaeum.store.now_iso`) — mirrored here rather than
 reimplemented, this module's own :func:`_corpus_digest_for_cases` follows
 the SAME shape as :func:`athenaeum.shadow_linkage._corpus_digest` but over
 this module's own :class:`ParityCase` corpus rather than a live
@@ -104,7 +104,8 @@ from athenaeum.models import (
     estimate_prompt_tokens,
 )
 from athenaeum.provider import resolve_max_tokens
-from athenaeum.shadow_linkage import _get_git_sha, _get_version, _now_iso
+from athenaeum.shadow_linkage import _get_git_sha, _get_version
+from athenaeum.store import now_iso
 from athenaeum.verdicts import VERDICT_VALUES
 
 if TYPE_CHECKING:
@@ -967,7 +968,7 @@ def _empty_report(
         projection=projection,
         athenaeum_version=_get_version(),
         git_sha=_get_git_sha(),
-        generated=_now_iso(),
+        generated=now_iso(),
         corpus_digest=corpus_digest,
     )
 
@@ -1241,7 +1242,7 @@ def run_shadow_parity(
         projection=projection,
         athenaeum_version=_get_version(),
         git_sha=_get_git_sha(),
-        generated=_now_iso(),
+        generated=now_iso(),
         corpus_digest=corpus_digest,
     )
 

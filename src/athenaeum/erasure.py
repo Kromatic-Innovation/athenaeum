@@ -106,7 +106,6 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Collection
 
@@ -120,13 +119,9 @@ from athenaeum.config import (
 )
 from athenaeum.models import slugify
 from athenaeum.provenance import SourceRef, parse_source
-from athenaeum.store import append_line_durable
+from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -817,7 +812,7 @@ def build_redaction_record(
     ts: str | None = None,
 ) -> RedactionLedgerRecord:
     """Build one :class:`RedactionLedgerRecord`, stamping ``record_id``/``ts``."""
-    stamp = ts or _now_iso()
+    stamp = ts or now_iso()
     return RedactionLedgerRecord(
         record_id=_make_record_id(subject_ref, stamp),
         ts=stamp,

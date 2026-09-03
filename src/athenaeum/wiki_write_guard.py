@@ -59,14 +59,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.entity_schema import declared_entity_classes
 from athenaeum.schemas import KNOWN_TYPES
-from athenaeum.store import append_line_durable
+from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -94,10 +93,6 @@ def resolve_admitted_wiki_types(wiki_root: Path) -> frozenset[str]:
     boundary-guard admission rule.
     """
     return declared_entity_classes(wiki_root) | KNOWN_TYPES
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def guard_entity_write_type(
@@ -139,7 +134,7 @@ def guard_entity_write_type(
     atomic_write_text(rejected_dir / filename, rendered)
 
     record = {
-        "ts": _now_iso(),
+        "ts": now_iso(),
         "filename": filename,
         "type": etype,
         "uid": str(meta.get("uid", "") or ""),

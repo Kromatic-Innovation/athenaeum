@@ -172,7 +172,7 @@ import re
 from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -185,7 +185,7 @@ from athenaeum.models import (
     valid_until_expired,
 )
 from athenaeum.storage import surface_root_for_class
-from athenaeum.store import append_line_durable
+from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -1448,10 +1448,6 @@ def _append_jsonl_line(path: Path, line: str) -> None:
     append_line_durable(path, line.encode("utf-8"))
 
 
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 def build_observation_record(
     *,
     obs_id: str,
@@ -1519,7 +1515,7 @@ def build_supersession_record(
         "v": OBSERVATION_LOG_VERSION,
         "retracts": retracts,
         "reason": reason,
-        "at": at if at is not None else _now_iso(),
+        "at": at if at is not None else now_iso(),
     }
 
 

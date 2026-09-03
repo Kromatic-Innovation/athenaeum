@@ -73,7 +73,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.config import resolve_cache_dir
-from athenaeum.store import append_line_durable
+from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -122,10 +122,6 @@ def resolve_session_id() -> str:
         if value:
             return value
     return ""
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _append_line(path: Path, line: str) -> None:
@@ -306,7 +302,7 @@ def build_push_record(
         )
     return PushRecord(
         session_id=session_id,
-        ts=_now_iso(),
+        ts=now_iso(),
         query_hash=_query_hash(query),
         backend=backend,
         items=items,
@@ -557,7 +553,7 @@ def determine_references(
     referenced = [pid for pid in pushed_ids if pid in blob]
     return ReferenceResult(
         session_id=session_id,
-        ts=_now_iso(),
+        ts=now_iso(),
         pushed_ids=pushed_ids,
         referenced_ids=referenced,
     )
@@ -846,12 +842,12 @@ def compute_baseline(
         precision = (total_referenced / total_pushed) if total_pushed else None
 
     if since is not None:
-        start_str = since.isoformat().replace("+00:00", "Z")
+        start_str = now_iso(since)
     else:
         start_str = "(instrument-enabled)"
     return BaselineWindow(
         start=start_str,
-        end=now.isoformat().replace("+00:00", "Z"),
+        end=now_iso(now),
         session_count=len(sessions),
         push_record_count=len(pushes_in),
         reference_record_count=len(refs_in),
@@ -1284,7 +1280,7 @@ def build_coverage_worksheet(
 
     return {
         "v": SCHEMA_VERSION,
-        "generated": _now_iso(),
+        "generated": now_iso(),
         "wiki_root": str(wiki_root),
         "search_backend": search_backend,
         "sampled_session_count": len(session_ids),

@@ -66,10 +66,9 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Any
 
-from athenaeum.store import FilesystemStore, Store, StoreKey
+from athenaeum.store import FilesystemStore, Store, StoreKey, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -106,10 +105,6 @@ def default_quarantine_ledger_path(wiki_root: Any) -> str:
     object (checked at migration time).
     """
     return os.path.join(os.fspath(wiki_root), QUARANTINE_LEDGER_FILENAME)
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def quarantine_item_id(ref: str, created_at: str) -> str:
@@ -308,7 +303,7 @@ def quarantine_file(
 
     quarantine_key = f"{QUARANTINE_DIR_NAME}/{original_relpath}"
 
-    created_at = _now_iso()
+    created_at = now_iso()
     record = {
         "v": QUARANTINE_LEDGER_VERSION,
         "kind": QUARANTINE_KIND,
@@ -411,7 +406,7 @@ def release_quarantine(
         "v": QUARANTINE_LEDGER_VERSION,
         "kind": RELEASE_KIND,
         "id": quarantine_id,
-        "created_at": _now_iso(),
+        "created_at": now_iso(),
         "ref": quarantined.get("ref"),
         "note": note,
     }
