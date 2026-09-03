@@ -329,7 +329,7 @@ def _extract_frontmatter_fields(text: str) -> tuple[str, str, str, str]:
         # (a continuation is any indented line following the key) so the
         # index holds the whole sentence, not its first 80 characters.
         if in_description and raw_line[:1] in (" ", "\t") and raw_line.strip():
-            description = f"{description} {raw_line.strip()}".strip("\"'")
+            description = f"{description} {raw_line.strip()}"
             continue
         in_description = False
         line = raw_line.strip()
@@ -340,8 +340,13 @@ def _extract_frontmatter_fields(text: str) -> tuple[str, str, str, str]:
         elif line.startswith("aliases:"):
             aliases = line[8:].strip().strip("[]")
         elif line.startswith("description:"):
-            description = line[12:].strip().strip("\"'")
+            description = line[12:].strip()
             in_description = True
+    # Strip the YAML quote delimiters ONCE, over the fully joined value — a
+    # quoted scalar's closing quote sits on its LAST folded line, and
+    # stripping per line would also eat a legitimate apostrophe ending an
+    # interior line.
+    description = description.strip("\"'")
     return name, tags, aliases, description
 
 
