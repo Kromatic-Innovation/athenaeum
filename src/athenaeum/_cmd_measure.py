@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum measure {shadow-linkage,backlog-price,ordinary-night}`` — issue athenaeum#713.
+"""``athenaeum measure {shadow-linkage,backlog-price,ordinary-night,shadow-parity}``
+— issues athenaeum#713 and athenaeum#1333.
 
-Three read-only measurement-pack subcommands, one per artifact the v6
-comparator slice (child of athenaeum#709) is gated on:
+Four read-only measurement-pack subcommands. The first three are one per
+artifact the v6 comparator slice (child of athenaeum#709) is gated on:
 
 - ``shadow-linkage``    :mod:`athenaeum.shadow_linkage` — shadow-mode
                          complete-linkage cluster population, zero LLM calls.
@@ -11,10 +12,24 @@ comparator slice (child of athenaeum#709) is gated on:
 - ``ordinary-night``    :mod:`athenaeum.ordinary_night_table` — ordinary-night
                          steady-state table, closes-or-not verdict.
 
-All three: read-only against the live store (no wiki write, no
+All three of the above: read-only against the live store (no wiki write, no
 ``_pending_merges.md`` mutation, no reindex), write/append their dated
 snapshot into ``docs/memory-model-measurements.md`` unless ``--dry-run`` was
 passed, and print a machine-readable summary with ``--json``.
+
+The fourth is a DIFFERENT shape (issue athenaeum#1333, C4-retirement gate
+athenaeum#1256), so it does not go through :func:`_add_common`:
+
+- ``shadow-parity``     :mod:`athenaeum.shadow_parity` — runs the C4 detector
+                         and the cluster comparator over the SAME corpus and
+                         reports their verdict agreement + call multiplier.
+                         Takes ``--cases`` (a corpus YAML, repeatable) rather
+                         than the live ``--path`` knowledge root — the
+                         live-corpus route is a SEPARATE issue (athenaeum#1258)
+                         and is not wired here. Writes its dated report under
+                         ``measurements/``, not ``docs/``. Unless ``--dry-run``
+                         is passed, it makes real paid LLM calls (both lanes),
+                         so it also takes ``--max-usd``.
 
 Factoring rule (L5 presentation): mirrors :mod:`athenaeum._cmd_push_metrics`'s
 shape exactly — one ``_cmd_measure.py`` for the whole small command family,
@@ -274,13 +289,103 @@ def cmd_ordinary_night(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_shadow_parity(args: argparse.Namespace) -> int:
+    """``athenaeum measure shadow-parity`` (issue athenaeum#1333).
+
+    Unlike the three subcommands above, this one is NOT a live-corpus
+    measurement yet: ``--cases`` (a corpus YAML, repeatable) is the only
+    supported input. ``--path`` is reserved for the live-corpus route,
+    which is a separate issue (athenaeum#1258) and is deliberately not wired
+    here — faking it would hide that gap instead of naming it.
+    """
+    import tempfile
+
+    if not args.cases:
+        print(
+            "error: --cases is required — the live-corpus route (--path) is "
+            "athenaeum#1258 and is not wired here",
+            file=sys.stderr,
+        )
+        return 2
+
+    from athenaeum import shadow_parity
+
+    cases: list[shadow_parity.ParityCase] = []
+    for cases_path in args.cases:
+        resolved = cases_path.expanduser().resolve()
+        cases.extend(shadow_parity.load_parity_cases(resolved))
+
+    with tempfile.TemporaryDirectory(prefix="athenaeum-shadow-parity-") as tmp:
+        workdir = Path(tmp)
+
+        if args.dry_run:
+            projection = shadow_parity.project_shadow_parity(cases, workdir=workdir)
+            if args.json:
+                sys.stdout.write(json.dumps(projection.to_dict()) + "\n")
+            else:
+                mult = (
+                    f"{projection.projected_multiplier:.3f}"
+                    if projection.projected_multiplier is not None
+                    else "n/a"
+                )
+                print(
+                    f"projected_detector_calls: {projection.projected_detector_calls}\n"
+                    f"projected_comparator_calls: {projection.projected_comparator_calls}\n"
+                    f"projected_multiplier: {mult}\n"
+                    f"projected_cost_usd: ${projection.projected_cost_usd_lower:.4f} - "
+                    f"${projection.projected_cost_usd_upper:.4f}\n"
+                    "dry run: nothing written (pass without --dry-run to run for real)"
+                )
+            return 0
+
+        from athenaeum.provider import build_llm_client
+
+        # Two SEPARATE client seams (issue athenaeum#1333) -- each call
+        # constructs its own client instance so the detector and comparator
+        # lanes stay independently stubbable/swappable, matching
+        # run_shadow_parity's own two-argument contract.
+        detector_client = build_llm_client(None)
+        comparator_client = build_llm_client(None)
+
+        report = shadow_parity.run_shadow_parity(
+            cases,
+            detector_client=detector_client,
+            comparator_client=comparator_client,
+            max_usd=args.max_usd,
+            workdir=workdir,
+        )
+
+    out_dir = args.out.expanduser().resolve()
+    written_path = shadow_parity.write_report(report, out_dir=out_dir)
+
+    if args.json:
+        payload = report.to_dict()
+        payload["written_to"] = str(written_path)
+        sys.stdout.write(json.dumps(payload) + "\n")
+    else:
+        banner = f"PARTIAL — {report.abort_reason}\n" if report.aborted else ""
+        mult = f"{report.call_multiplier:.3f}" if report.call_multiplier is not None else "n/a"
+        rate = report.matrix.agreement_rate
+        rate_str = f"{rate:.3f}" if rate is not None else "n/a"
+        print(
+            f"{banner}"
+            f"detector_calls: {report.detector_calls}\n"
+            f"comparator_calls: {report.comparator_calls}\n"
+            f"call_multiplier: {mult}\n"
+            f"agreement_rate: {rate_str}\n"
+            f"cost_usd: ${report.cost_usd:.4f}\n"
+            f"report written to: {written_path}"
+        )
+    return 1 if report.aborted else 0
+
+
 def add_measure_subparser(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``athenaeum measure`` and its three subcommands on ``subparsers``."""
+    """Register ``athenaeum measure`` and its four subcommands on ``subparsers``."""
     m_parser = subparsers.add_parser(
         "measure",
-        help="v6 memory-model measurement pack (issue athenaeum#713): shadow-mode "
-        "complete-linkage population, backlog price sheet, ordinary-night "
-        "steady-state table.",
+        help="v6 memory-model measurement pack (issues athenaeum#713, athenaeum#1333): "
+        "shadow-mode complete-linkage population, backlog price sheet, "
+        "ordinary-night steady-state table, C4-vs-comparator shadow parity.",
     )
     m_parser.set_defaults(func=lambda args: _dispatch(args))
     m_sub = m_parser.add_subparsers(dest="measure_target")
@@ -420,10 +525,60 @@ def add_measure_subparser(subparsers: argparse._SubParsersAction) -> None:
     )
     night_p.set_defaults(func=cmd_ordinary_night)
 
+    from athenaeum.shadow_parity import DEFAULT_MEASUREMENTS_DIR
+
+    parity_p = m_sub.add_parser(
+        "shadow-parity",
+        help="Run the C4 detector and the cluster comparator over the SAME "
+        "corpus and report their verdict agreement matrix + call multiplier "
+        "(issue athenaeum#1333; the live-corpus route is athenaeum#1258).",
+    )
+    parity_p.add_argument(
+        "--cases",
+        type=Path,
+        action="append",
+        default=None,
+        help="A corpus YAML in the eval case shape (repeatable). Required — "
+        "the live-corpus route (--path) is athenaeum#1258 and is not wired here.",
+    )
+    parity_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Reserved for the live-corpus run (athenaeum#1258); unused until then.",
+    )
+    parity_p.add_argument(
+        "--out",
+        type=Path,
+        default=DEFAULT_MEASUREMENTS_DIR,
+        help="Output directory the dated shadow-parity report is written to "
+        "(default: measurements).",
+    )
+    parity_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Projection only: zero paid calls, nothing written.",
+    )
+    parity_p.add_argument(
+        "--max-usd",
+        type=float,
+        default=None,
+        help="Hard cost ceiling in USD — aborts before the run starts if the "
+        "projected lower-bound cost already exceeds it, or mid-run as soon as "
+        "observed spend crosses it (partial report is still written).",
+    )
+    parity_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of plain text.",
+    )
+    parity_p.set_defaults(func=cmd_shadow_parity)
+
 
 def _dispatch(args: argparse.Namespace) -> int:
     print(
-        "usage: athenaeum measure {shadow-linkage,backlog-price,ordinary-night} [...]",
+        "usage: athenaeum measure "
+        "{shadow-linkage,backlog-price,ordinary-night,shadow-parity} [...]",
         file=sys.stderr,
     )
     return 2
