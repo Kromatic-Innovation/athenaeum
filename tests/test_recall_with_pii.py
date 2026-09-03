@@ -3,7 +3,7 @@
 
 The caller-facing generalization of athenaeum#883's primitives, at the Python
 ``recall_search`` / ``_recall_via_backend`` layer only. The MCP tool argument
-and ``athenaeum query entity`` (and the now-removed, athenaeum#888,
+and ``athenaeum entity`` (and the now-removed, athenaeum#888,
 person-shaped ``read_person`` tool / ``athenaeum query person``) are
 athenaeum#886's scope and are untouched here.
 
