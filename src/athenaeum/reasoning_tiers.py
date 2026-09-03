@@ -246,8 +246,9 @@ def _warn_if_tier_model_knob_inert(
     "Reasoning-tier screening" section. With the tier's screen off (the
     default), setting its model knob silently does nothing. This is NOT a
     claim that the tiers are dead: both have real production callers in
-    ``merge.py`` (``t1_screen_rejects_merge_proposal``, athenaeum#518;
-    ``t2_screen_merge_proposal``, athenaeum#602) that run whenever an operator
+    ``reasoning_screens.py`` (``t1_screen_rejects_merge_proposal``, athenaeum#518;
+    ``t2_screen_merge_proposal``, athenaeum#602 — sited there by athenaeum#1257,
+    formerly in ``merge.py``) that run whenever an operator
     opts in — see this module's "Production status" note above. The knob is
     opt-in-only, not inert-by-design.
 

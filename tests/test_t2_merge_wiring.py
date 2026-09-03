@@ -2,7 +2,7 @@
 """T2 wired into the merge path, auto-finalizing safe-class approvals (athenaeum#602).
 
 Mirrors ``test_merge_reasoning_wiring.py`` (T1's own wiring test), but for
-``merge.t2_screen_merge_proposal``: a T1 pass-up is consulted by T2, and a
+``reasoning_screens.t2_screen_merge_proposal``: a T1 pass-up is consulted by T2, and a
 safe-class ``approve`` auto-applies the merge — bypassing the human
 ``_pending_merges.md`` queue — via the EXACT SAME
 ``pending_merges.resolve_merge`` approve-time fold every human approval uses,
@@ -14,6 +14,11 @@ UNRESOLVED block) and NOT the wiki (no `wiki/<slug>.md` is written, no
 provenance record is written). The eight adversarial cases named in the
 issue's acceptance criteria each get an explicit test in
 ``TestFailSafeDirection`` below.
+
+Re-pointed by issue athenaeum#1257: the screen moved from ``athenaeum.merge``
+to ``athenaeum.reasoning_screens``. T2 relocated WITH T1 but, unlike T1, is
+deliberately not wired into the cluster-domain comparator lane — it keeps only
+its existing C4 call site. Every assertion below is unchanged.
 """
 
 from __future__ import annotations
@@ -23,12 +28,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from athenaeum import merge as merge_mod
+from athenaeum import reasoning_screens as screens_mod
 from athenaeum.calibration import calibration_summary, record_audit_review
-from athenaeum.merge import t2_screen_merge_proposal
 from athenaeum.models import TokenUsage
 from athenaeum.pending_merges import parse_pending_merges
 from athenaeum.provenance import read_merge_provenance
+from athenaeum.reasoning_screens import t2_screen_merge_proposal
 from athenaeum.reasoning_tiers import (
     SAFE_CLASS_VIOLATION_AXIOM_MEMBER,
     SAFE_CLASS_VIOLATION_CROSS_MEMORY_CLASS,
@@ -279,7 +284,7 @@ class TestFailSafeDirection:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            merge_mod.spend, "ceiling_tripped", lambda *a, **k: "budget"
+            screens_mod.spend, "ceiling_tripped", lambda *a, **k: "budget"
         )
         wiki = _wiki(tmp_path)
         client = _approve_client()

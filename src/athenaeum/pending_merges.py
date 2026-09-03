@@ -1341,7 +1341,8 @@ def resolve_merge(
         merge_id: Id returned by :func:`list_pending_merges`.
         auto_applied: Issue athenaeum#602. When ``True``, this ``"approve"`` is being
             finalized by the T2 reasoning tier's auto-finalize path, NOT by
-            a human — the caller (:func:`athenaeum.merge.t2_screen_merge_proposal`)
+            a human — the caller
+            (:func:`athenaeum.reasoning_screens.t2_screen_merge_proposal`)
             is the ONLY production caller that ever passes ``True``. This
             reuses the existing approve-time fold/write mechanics byte for
             byte (no second write path); the only effect is two durable
