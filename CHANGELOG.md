@@ -49,6 +49,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collides with and a 150-file pass does not. Documentation only; no behaviour
   change.
 
+### Fixed
+
+- **The `write` knob no longer 400s unconditionally when pointed at a model
+  that cannot honour adaptive thinking (athenaeum#1336).** `tier3_create_params`,
+  `tier3_merge_params`, and `tier3_merge_full_params` requested
+  `thinking: {"type": "adaptive"}` unconditionally — exactly the failure
+  athenaeum#1262's live eval measured against `claude-haiku-4-5` (0/5, every case a
+  400 before a token was billed). `athenaeum.models` gains a fourth
+  longest-prefix capability table, `_ADAPTIVE_THINKING_SUPPORTED_PREFIXES` /
+  `adaptive_thinking_supported`, alongside the existing sampling-params and
+  prompt-caching tables; `provider.resolve_thinking` now takes the serving
+  `model` and downgrades a CODE-DEFAULT `adaptive` posture to `disabled` (with
+  a WARNING) when the model is recorded as unsupporting — an EXPLICIT operator
+  override of `adaptive` is never downgraded, only warned about, since an
+  explicit instruction always wins. An unrecorded model's behaviour is
+  unchanged. Only the three `write`-knob call sites thread the model through;
+  every other stage's `resolve_thinking` call is untouched.
+
 ## [0.20.0] - 2026-09-03
 
 _Supersedes 45 untagged, unpublished patch bumps (0.19.1–0.19.45) that never shipped to PyPI; the last published release was v0.19.0._

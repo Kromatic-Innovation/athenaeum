@@ -824,6 +824,35 @@ silently truncated `ATHENAEUM_REASONING_T1_MAX_TOKENS` to a fragment and
 undercounted. Deliberately-internal vars live in that script's allowlist with a
 one-line reason each.
 
+**The `thinking` posture is MODEL-CONSTRAINED (athenaeum#1336).** `adaptive` is not
+honoured by every model athenaeum can be pointed at — a model that cannot
+honour it returns **HTTP 400 on every call**, not a degraded result. This bit
+the `write` knob specifically: `write`'s three call sites (`tier3_create`,
+`tier3_merge` — anchored patch and full echo) build their `thinking` value from
+the **`…_MERGE_*_THINKING`** knobs above (`ATHENAEUM_MERGE_CREATE_THINKING`,
+`ATHENAEUM_MERGE_PATCH_THINKING`, `ATHENAEUM_MERGE_FULL_THINKING`) —
+**there is no `ATHENAEUM_WRITE_THINKING`.** Its absence is the trap that cost
+the athenaeum#1262 session a run: pointing `ATHENAEUM_WRITE_MODEL` at a model that
+cannot honour `adaptive` and then trying to fix the resulting 400 by setting
+`ATHENAEUM_WRITE_THINKING` changes nothing (there is no such variable) and
+reproduces the identical 400, which reads as "the model is broken" rather than
+"the wrong knob was set."
+
+Two rules keep this from silently misfiring:
+
+- **Downgrade rule.** When a stage's `thinking` resolves to the CODE DEFAULT
+  `adaptive` (no operator override) and the serving model is recorded as not
+  supporting it, `provider.resolve_thinking` downgrades the posture to
+  `disabled` and logs a WARNING naming the knob, the model, and the downgrade.
+  An **explicit** operator override — `…_THINKING=adaptive` via env var or the
+  `thinking.<knob>` yaml key — is **never** downgraded: it is passed through
+  as `adaptive` with a WARNING that the request will likely 400, so the
+  operator can change it. An explicit override always wins.
+- **Unknown-model passthrough rule.** A model id matching no recorded prefix in
+  `athenaeum.models`'s adaptive-thinking capability table is left completely
+  unchanged — this table must never become a gate a newly-released model has
+  to be added to before it works.
+
 ### Sampling parameters are absent by design (athenaeum#579)
 
 Athenaeum sends **no sampling parameters** to any LLM call site, and that is
