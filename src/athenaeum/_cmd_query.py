@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum {recall,query-topics,stopwords,test-mcp}`` — read-only query tools.
+"""``athenaeum {recall,entity,query-topics,stopwords,test-mcp}`` — read-only query tools.
 
 Five subcommands grouped here because each is a shell-accessible, read-only
 query or diagnostic over the compiled wiki / search stack, used by validation
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 
 def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``recall``, ``query-topics``, ``stopwords``, ``test-mcp``."""
+    """Register ``recall``, ``entity``, ``query-topics``, ``stopwords``, ``test-mcp``."""
     # Local, not module-level: keeps this module's import cost off `cli.py`'s
     # top-level path (see the module docstring's factoring rule). Needed here
     # because `--usage-class` pins its `choices` to the canonical tuple rather
