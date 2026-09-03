@@ -49,7 +49,11 @@ set -euo pipefail
 # athenaeum.killswitch.is_disabled("recall"): the "all" scope silences these
 # notifications; the "compile" scope leaves them on. Costs no Python startup.
 __athenaeum_recall_disabled() {
-  case "${ATHENAEUM_DISABLED:-}" in
+  local _val="${ATHENAEUM_DISABLED:-}"
+  _val="${_val#"${_val%%[![:space:]]*}"}"
+  _val="${_val%"${_val##*[![:space:]]}"}"
+  _val="${_val,,}"
+  case "$_val" in
     1 | true | yes | on | all) return 0 ;;
     compile) return 1 ;;
   esac
