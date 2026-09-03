@@ -735,6 +735,80 @@ conn.close()
             timeout=10,
         )
 
+    def test_description_less_page_records_a_nonzero_token_cost(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """Issue athenaeum#1344 AC: "the ledger's cost accounting must not
+        silently keep reporting the old name-only figure."
+
+        Regression test for a field-shift that reported something worse
+        than a stale figure -- it reported ZERO. `description` is absent
+        on ~14% of the corpus, and bash's `read` treats TAB as IFS
+        *whitespace* whatever IFS is set to, so an empty `description`
+        field collapsed and shifted every later field left: `cost` fell
+        off the end, the numeric guard defaulted it to 0, and every
+        description-less page recorded `token_cost: 0`. The ledger's own
+        cost accounting reading as zero is exactly the "reads as zero
+        forever" hazard athenaeum#1343 exists to close.
+
+        Both pages must be present in one push: the described page proves
+        the row is otherwise sane, and the description-less page is the
+        one that used to record zero.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "described-widgetronic.md").write_text(
+            "---\n"
+            "name: Widgetronic Described\n"
+            "tags: [widgetronic]\n"
+            "description: A page about widgetronic devices and their calibration.\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Widgetronic devices discussed here.\n"
+        )
+        # No `description:` key at all -- the ~14% case.
+        (wiki / "bare-widgetronic.md").write_text(
+            "---\n"
+            "name: Widgetronic Bare\n"
+            "tags: [widgetronic]\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Widgetronic devices discussed here too.\n"
+        )
+        self._seed_index(hook_env)
+
+        result = self._run_hook(hook_env, "tell me about widgetronic devices")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "expected hookSpecificOutput JSON on stdout"
+
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        assert len(records) == 1
+        rec = records[0]
+
+        by_id = {it["id"]: it for it in rec["items"]}
+        assert "bare-widgetronic.md" in by_id, (
+            "the description-less page must be pushed and recorded; got "
+            f"{sorted(by_id)}"
+        )
+
+        for page_id, item in by_id.items():
+            assert item["token_cost"] > 0, (
+                f"{page_id} recorded token_cost={item['token_cost']}; every "
+                "pushed bullet costs at least one token, and a 0 here means "
+                "the tab-delimited row shifted and `cost` fell off the end"
+            )
+
+        assert rec["token_cost"] == sum(it["token_cost"] for it in rec["items"]), (
+            "the record's aggregate token_cost must equal the sum of its "
+            "items -- a shifted field understates the aggregate too"
+        )
+
     def test_push_telemetry_round_trips_through_read_push_records(
         self, hook_env: dict[str, str]
     ) -> None:
@@ -1390,6 +1464,509 @@ conn.close()
         records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
         assert len(records) == 1
         assert records[0]["items"][0]["scope"] == "open"
+
+    # -- issue athenaeum#1344: render the page summary, rank by relevance --
+
+    def test_empty_description_renders_without_dangling_separator(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC counter-example: a page with an ABSENT `description` (14%
+        of the corpus, per the issue's own measurement) must render
+        exactly as it did before athenaeum#1344 -- the bare name, no
+        dangling ` — ` separator.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "no-description-page.md").write_text(
+            "---\n"
+            "name: Nodescriptiontest Page\n"
+            "tags: [nodescriptiontest]\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Body text about nodescriptiontest, not indexed.\n"
+        )
+        self._seed_index(hook_env)
+
+        result = self._run_hook(hook_env, "tell me about nodescriptiontest")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout
+
+        payload = json.loads(result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        assert "  - Nodescriptiontest Page\n" in context
+        assert "—" not in context
+
+    def test_long_description_clamped_not_pushed_in_full(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC counter-example: a page whose `description` is 5,000
+        characters must not push a 5,000-character bullet -- it renders
+        clamped to the 200-char authoring-convention bound. Uses an
+        accented multi-byte character (the issue's own "beware
+        truncating mid-UTF-8-character" warning, and the corpus's own
+        accented-name precedent) so a byte-oriented clamp that split a
+        multi-byte sequence would either corrupt the JSON payload (this
+        test's own `json.loads` would raise) or land short of/past 200
+        visible characters -- this test catches either.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        long_desc = "é" * 5000
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "longdesctest-page.md").write_text(
+            "---\n"
+            "name: Longdesctest Page\n"
+            "tags: [longdesctest]\n"
+            f"description: {long_desc}\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Body text about longdesctest, not indexed.\n"
+        )
+        self._seed_index(hook_env)
+
+        result = self._run_hook(hook_env, "tell me about longdesctest")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout
+
+        payload = json.loads(result.stdout)  # raises if the clamp split a byte
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        assert long_desc not in context, (
+            "a 5,000-character description must not be pushed in full"
+        )
+        marker = "Longdesctest Page — "
+        assert marker in context
+        start = context.index(marker) + len(marker)
+        rendered_desc = context[start : context.index("\n", start)]
+        assert rendered_desc == "é" * 200, (
+            f"expected exactly 200 clamped characters, got {len(rendered_desc)}"
+        )
+
+    def test_tab_in_description_does_not_shift_fields(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC counter-example: a literal tab embedded in `description`
+        must not shift the awk field positions in the budget pass -- the
+        SAME class of hazard issue athenaeum#1343 already found and fixed
+        for `name` (see the tab-in-name regression tests above), now
+        closed for `description` at the SQL source (the `${DESC_COL}`
+        expression collapses tab/newline/CR to a space before the value
+        ever reaches the tab-separated pipeline) rather than merely
+        tolerated downstream. The tab is embedded on a single physical
+        line (mirroring the tab-in-`name` fixture's own approach) so it
+        survives the real frontmatter-authoring path intact -- a raw
+        newline, by contrast, cannot (verified separately: the per-line
+        frontmatter parser either truncates at it or folds a continuation
+        line back in with a space), so that hazard is covered by the
+        raw-SQL-built fixture below instead.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "tab-desc-page.md").write_text(
+            "---\n"
+            "name: Tabdesctest Page\n"
+            "tags: [tabdesctest]\n"
+            'description: "A description with a\ttab for tabdesctest regression"\n'
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Body text about tabdesctest, not indexed.\n"
+        )
+        self._seed_index(hook_env)
+
+        result = self._run_hook(hook_env, "tell me about tabdesctest")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "a tab embedded in `description` must not break the push"
+
+        payload = json.loads(result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        assert "\t" not in context
+        assert "A description with a tab for tabdesctest regression" in context
+
+        wiki_root = wiki
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        assert len(records) == 1
+        # The ledger's own token_cost must still be a valid, non-corrupted
+        # number -- proving the tab didn't shift `cost` into `backend`.
+        item = records[0]["items"][0]
+        assert isinstance(item["token_cost"], int)
+        assert item["token_cost"] > 0
+        assert item["backend"] == "fts5"
+
+    def test_description_with_quote_backslash_newline_still_yields_valid_json(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """Required test (issue athenaeum#1344 brief, section 2 "the raw-into-
+        JSON hazard"): a description containing a double quote, a
+        backslash, AND a raw embedded newline -- the exact combination
+        the brief names -- must still round-trip through `json.loads`,
+        and the description must survive READABLY (not silently dropped
+        to protect JSON validity).
+
+        A raw newline can never reach `description` through the normal
+        frontmatter-authoring path (verified separately: the per-line
+        frontmatter parser terminates the value at a raw newline rather
+        than embedding it), so this builds the FTS5 table by hand,
+        matching the legacy-DB tests' approach above, to prove the
+        hook's own SQL-level sanitisation and `_pm_json_escape` call
+        handle a value however it arrived in the index, not just one
+        that could plausibly be authored.
+
+        Proven as a real oracle, not a vacuous pass: reverting the
+        `_pm_json_escape "$bullet"` call in the render loop back to raw
+        `${bullet}` interpolation makes this assertion fail with
+        `json.JSONDecodeError` (verified by hand while building this
+        test) -- the escaping is load-bearing, not redundant.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        db_path = cache_dir / "wiki-index.db"
+
+        hazard_description = (
+            'A "quoted" word, a back\\slash, and\na raw newline, for hazardtest'
+        )
+        build_script = """
+import sqlite3, sys
+
+conn = sqlite3.connect(sys.argv[1])
+conn.execute(
+    'CREATE VIRTUAL TABLE wiki USING fts5'
+    '(filename, name, tags, aliases, description, audience UNINDEXED, '
+    'type UNINDEXED, memory_tier UNINDEXED, '
+    'tokenize="porter unicode61")'
+)
+conn.execute(
+    "INSERT INTO wiki VALUES (?,?,?,?,?,?,?,?)",
+    (
+        "hazard-page.md",
+        "Hazardtest Page",
+        "hazardtest",
+        "",
+        sys.argv[2],
+        "|",
+        "person",
+        "hot",
+    ),
+)
+conn.commit()
+conn.close()
+"""
+        subprocess.run(
+            [
+                hook_env["ATHENAEUM_PYTHON"],
+                "-c",
+                build_script,
+                str(db_path),
+                hazard_description,
+            ],
+            check=True,
+            timeout=10,
+        )
+        (cache_dir / "config.env").write_text("AUTO_RECALL=true\nSEARCH_BACKEND=fts5\n")
+
+        result = self._run_hook(hook_env, "tell me about hazardtest")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "expected a push despite the hazardous description"
+
+        # The real oracle: this must be VALID JSON.
+        payload = json.loads(result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        assert "Hazardtest Page" in context
+        assert '"quoted"' in context
+        assert "back\\slash" in context
+        assert "raw newline" in context
+
+    def test_legacy_db_without_description_column_degrades_to_name_only(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC 'Legacy-DB safety is preserved' / required test 5: mirrors
+        `test_legacy_db_without_memory_tier_column_degrades_to_unfiltered`
+        above, but for `HAS_DESCRIPTION_COLUMN` instead of
+        `HAS_TIER_COLUMN` -- a DB built before `description` existed must
+        still push a NAME-ONLY bullet (not zero bullets, and not an
+        `OperationalError` the hook's own `2>/dev/null || echo ""` would
+        otherwise swallow into a silent empty push).
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        db_path = cache_dir / "wiki-index.db"
+
+        build_script = """
+import sqlite3, sys
+
+conn = sqlite3.connect(sys.argv[1])
+conn.execute(
+    'CREATE VIRTUAL TABLE wiki USING fts5'
+    '(filename, name, tags, aliases, audience UNINDEXED, '
+    'type UNINDEXED, memory_tier UNINDEXED, '
+    'tokenize="porter unicode61")'
+)
+conn.execute(
+    "INSERT INTO wiki VALUES (?,?,?,?,?,?,?)",
+    (
+        "nodesc-page.md",
+        "Nodesccolumntest Page",
+        "nodesccolumntest",
+        "",
+        "|",
+        "person",
+        "hot",
+    ),
+)
+conn.commit()
+conn.close()
+"""
+        subprocess.run(
+            [hook_env["ATHENAEUM_PYTHON"], "-c", build_script, str(db_path)],
+            check=True,
+            timeout=10,
+        )
+        (cache_dir / "config.env").write_text("AUTO_RECALL=true\nSEARCH_BACKEND=fts5\n")
+
+        result = self._run_hook(hook_env, "tell me about nodesccolumntest")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, (
+            "a DB predating the `description` column must degrade to a "
+            "name-only push, not silently return zero recall"
+        )
+        payload = json.loads(result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        assert "Nodesccolumntest Page" in context
+        assert "—" not in context, "no column to render a description from"
+
+    def test_vector_backend_renders_description_not_bare_name(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC 'the vector branch renders identically' / required test 6:
+        a hit surfaced under `SEARCH_BACKEND=vector` must get the SAME
+        `name — description` bullet an FTS5 hit would, resolved from the
+        SAME bounded `VECTOR_META` lookup that already carries
+        `audience`/`memory_tier` through for a vector-sourced item (issue
+        athenaeum#1343). Counter-example this guards against: a bare name
+        here (no ` — `) would mean the vector branch fell back to an
+        empty description while the FTS5 branch renders enriched
+        bullets -- the two backends silently disagreeing.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "hot-vecdesctest.md").write_text(
+            "---\n"
+            "name: Vecdesctest Hot Page\n"
+            "tags: [vecdesctest]\n"
+            "description: A vector-sourced hot page about vecdesctest devices\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Unrelated body text, not matched by the probe query below.\n"
+        )
+        self._seed_index(hook_env)
+
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        (cache_dir / "wiki-vectors").mkdir(parents=True, exist_ok=True)
+        config_env = cache_dir / "config.env"
+        config_env.write_text(
+            config_env.read_text().replace(
+                "SEARCH_BACKEND=fts5", "SEARCH_BACKEND=vector"
+            )
+        )
+
+        fake_pkg = tmp_path / "fake-vector-src" / "src" / "athenaeum"
+        fake_pkg.mkdir(parents=True)
+        vector_env = dict(hook_env)
+        vector_env["ATHENAEUM_SRC"] = str(fake_pkg.parent.parent)
+        (fake_pkg / "search.py").write_text(
+            "def query_vector_index(query, cache_dir, n=3, exclude=None):\n"
+            "    exclude = exclude or set()\n"
+            "    hits = [('hot-vecdesctest.md', 'Vecdesctest Hot Page', 0.9)]\n"
+            "    return [h for h in hits if h[0] not in exclude][:n]\n"
+        )
+
+        probe_prompt = "zzznonmatchingzzz term completely unrelated content"
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "expected a vector hit to surface"
+        payload = json.loads(result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        assert (
+            "Vecdesctest Hot Page — A vector-sourced hot page about "
+            "vecdesctest devices" in context
+        )
+
+    def test_token_cost_increases_with_description(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC: descriptions make `token_cost` go up vs. the same push
+        without them -- the awk budget pass must price the WIDER bullet,
+        not the bare name (the exact regression the brief's "ledger
+        silently keeps reporting the old name-only figure" warning is
+        about).
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "bare-costtest.md").write_text(
+            "---\n"
+            "name: Barecosttest Page\n"
+            "tags: [barecosttest]\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Body text about barecosttest, not indexed.\n"
+        )
+        (wiki / "rich-costtest.md").write_text(
+            "---\n"
+            "name: Richcosttest Page\n"
+            "tags: [richcosttest]\n"
+            "description: A substantially longer description text that adds "
+            "real weight to the rendered bullet for richcosttest\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Body text about richcosttest, not indexed.\n"
+        )
+        self._seed_index(hook_env)
+
+        bare_sid = f"bare-{uuid.uuid4().hex}"
+        rich_sid = f"rich-{uuid.uuid4().hex}"
+        bare_result = self._run_hook(hook_env, "tell me about barecosttest", bare_sid)
+        rich_result = self._run_hook(hook_env, "tell me about richcosttest", rich_sid)
+        assert bare_result.returncode == 0, f"stderr: {bare_result.stderr}"
+        assert rich_result.returncode == 0, f"stderr: {rich_result.stderr}"
+
+        wiki_root = wiki
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        by_session = {r["session_id"]: r for r in records}
+        assert bare_sid in by_session and rich_sid in by_session
+        bare_cost = by_session[bare_sid]["items"][0]["token_cost"]
+        rich_cost = by_session[rich_sid]["items"][0]["token_cost"]
+        assert rich_cost > bare_cost, (
+            f"description must increase token_cost: bare={bare_cost} rich={rich_cost}"
+        )
+
+    def test_over_budget_description_set_is_skipped_not_truncated(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC: 'a deliberately over-long set is truncated by the budget
+        rather than pushed' -- with descriptions in play, a budget sized
+        to afford fewer than all matching candidates must SKIP the excess
+        candidate(s) (the existing greedy-pack behaviour, unchanged by
+        this issue), not truncate a candidate's bullet text to fit. A
+        name-only control over the SAME budget proves the skip is caused
+        by the wider, description-priced bullet specifically.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        long_desc = "A " + ("substantially " * 12) + "long description for budgetdesctest devices"
+        for i in range(3):
+            (wiki / f"budgetdesctest-{i}.md").write_text(
+                "---\n"
+                f"name: Budgetdesctest Page {i}\n"
+                "tags: [budgetdesctest]\n"
+                f"description: {long_desc}\n"
+                "memory_tier: hot\n"
+                "---\n\n"
+                "Body text about budgetdesctest, not indexed.\n"
+            )
+        for i in range(3):
+            (wiki / f"budgetctrltest-{i}.md").write_text(
+                "---\n"
+                f"name: Budgetctrltest Page {i}\n"
+                "tags: [budgetctrltest]\n"
+                "memory_tier: hot\n"
+                "---\n\n"
+                "Body text about budgetctrltest, not indexed.\n"
+            )
+        self._seed_index(hook_env)
+
+        env = dict(hook_env)
+        env["ATHENAEUM_PUSH_TOKEN_BUDGET"] = "70"
+
+        desc_sid = f"desc-{uuid.uuid4().hex}"
+        ctrl_sid = f"ctrl-{uuid.uuid4().hex}"
+        desc_result = self._run_hook(env, "tell me about budgetdesctest", desc_sid)
+        ctrl_result = self._run_hook(env, "tell me about budgetctrltest", ctrl_sid)
+        assert desc_result.returncode == 0, f"stderr: {desc_result.stderr}"
+        assert ctrl_result.returncode == 0, f"stderr: {ctrl_result.stderr}"
+
+        wiki_root = wiki
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        by_session = {r["session_id"]: r for r in records}
+        desc_pushed = by_session[desc_sid]["pushed_count"] if desc_sid in by_session else 0
+        ctrl_pushed = by_session[ctrl_sid]["pushed_count"] if ctrl_sid in by_session else 0
+
+        assert desc_pushed < 3, (
+            "a budget sized below all-3-candidates-with-descriptions must "
+            f"skip at least one candidate rather than push all 3 -- got {desc_pushed}"
+        )
+        assert ctrl_pushed > desc_pushed, (
+            "the SAME budget over a name-only control must afford strictly "
+            f"more candidates than the description-bearing set: "
+            f"control={ctrl_pushed} description={desc_pushed}"
+        )
+
+    def test_no_tier_ranking_term_introduced(self) -> None:
+        """AC 'ordering and selection are by relevance alone': every
+        `ORDER BY` clause in the hook must be exactly `ORDER BY rank`
+        (BM25) -- a structural guard (mirroring
+        `test_scope_from_audience_has_no_bash4_only_array_syntax`'s
+        approach of asserting directly against the shipped source) so a
+        future edit that slips a tier/type term into the ordering, or
+        adds a second ranking expression, fails this test even if no
+        fixture happens to exercise the difference.
+        """
+        # Whole-line matches only (the actual SQL clauses each sit alone
+        # on their own line inside the heredocs) -- excludes prose
+        # mentions of "ORDER BY rank" in surrounding `#` comments, which
+        # would otherwise false-positive this structural guard.
+        lines = USER_PROMPT.read_text().splitlines()
+        order_by_lines = [
+            ln.strip()
+            for ln in lines
+            if ln.strip().startswith("ORDER BY") and not ln.strip().startswith("#")
+        ]
+        assert len(order_by_lines) >= 2, (
+            "expected an ORDER BY clause in both the FTS5 tier and "
+            "no-tier branches"
+        )
+        for clause in order_by_lines:
+            assert clause == "ORDER BY rank", f"unexpected ordering term: {clause!r}"
 
 
 class TestPreCompactSave:
