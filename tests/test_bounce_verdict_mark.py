@@ -30,8 +30,12 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from athenaeum.bounce_contract import (
+    FRONTMATTER_NOT_A_MAPPING,
     MISSING_VERDICT_SIGNAL,
+    NO_EMAIL_IDENTIFIER,
     RFC_CODE_ALREADY_PRESENT,
+    SEVERAL_EMAIL_IDENTIFIERS,
+    UNSUPPORTED_SOURCE_TYPE,
     check_tier0_bounce_verdict_conformance,
 )
 from athenaeum.librarian import (
@@ -170,6 +174,61 @@ class TestDetectBounceVerdictFact:
             is None
         )
 
+    # -- bare-code false positives (issue athenaeum#1341 QA must-fix) -------
+    #
+    # A bare 550-559 number with zero SMTP/diagnostic context must never
+    # match, even with a lone email-shaped token nearby — that combination
+    # would otherwise write a bogus `bounced:` mark onto a real wiki page.
+
+    def test_dollar_amount_near_email_declines(self) -> None:
+        assert (
+            detect_bounce_verdict_fact(
+                "We closed a $550 round with someone@example.com cc'd on the "
+                "announcement."
+            )
+            is None
+        )
+
+    def test_ticket_number_near_email_declines(self) -> None:
+        assert (
+            detect_bounce_verdict_fact(
+                "Please reference ticket #552 when you email someone@example.com."
+            )
+            is None
+        )
+
+    def test_booth_number_near_email_declines(self) -> None:
+        assert (
+            detect_bounce_verdict_fact(
+                "Meet us at booth 550 — email someone@example.com to schedule."
+            )
+            is None
+        )
+
+    def test_invoice_number_near_email_declines(self) -> None:
+        assert (
+            detect_bounce_verdict_fact(
+                "See invoice #559 for details; contact someone@example.com with "
+                "questions."
+            )
+            is None
+        )
+
+    def test_voltaire_shaped_bare_code_note_matches(self) -> None:
+        # The actual buildBounceIntakeBody framing (voltaire
+        # src/tiers/bounce-intake.ts): a "Delivery diagnostic, verbatim:"
+        # intro line ahead of the bare code. Confirms the false-positive
+        # fix above did not also swallow the legitimate case.
+        note = (
+            "Email bounce observed: someone@example.com — hard bounce on "
+            "2026-08-25, reported by voltaire from its triage path.\n\n"
+            "Delivery diagnostic, verbatim: 550 No such user here\n"
+        )
+        fact = detect_bounce_verdict_fact(note)
+        assert fact is not None
+        assert fact.identifier == "someone@example.com"
+        assert fact.verdict == "550"
+
 
 class TestTier0BounceVerdictConformance:
     """The published contract check, mirroring TestDetectBounceVerdictFact
@@ -197,6 +256,52 @@ class TestTier0BounceVerdictConformance:
         check = check_tier0_bounce_verdict_conformance(note)
         assert check.conforms is False
         assert MISSING_VERDICT_SIGNAL in check.reasons
+
+    # -- decline reasons not otherwise covered at the contract level --------
+    # (issue athenaeum#1341 QA should-fix 2). check_tier0_bounce_verdict_
+    # conformance re-implements its own email-counting logic rather than
+    # delegating to detect_bounce_verdict_fact, so it can drift independently
+    # — worth a dedicated test per reason code.
+
+    def test_no_email_identifier_declines_with_reason(self) -> None:
+        note = (
+            "---\nobserved_at: 2026-08-25\nsource: test\n---\n\n"
+            "The address hard-bounced. Delivery diagnostic, verbatim: 550 "
+            "user unknown.\n"
+        )
+        check = check_tier0_bounce_verdict_conformance(note)
+        assert check.conforms is False
+        assert NO_EMAIL_IDENTIFIER in check.reasons
+
+    def test_several_email_identifiers_declines_with_reason(self) -> None:
+        note = (
+            "---\nobserved_at: 2026-08-25\nsource: test\n---\n\n"
+            "a@example.com and b@example.com both got a Delivery diagnostic, "
+            "verbatim: 550 user unknown.\n"
+        )
+        check = check_tier0_bounce_verdict_conformance(note)
+        assert check.conforms is False
+        assert SEVERAL_EMAIL_IDENTIFIERS in check.reasons
+
+    def test_frontmatter_not_a_mapping_declines_with_reason(self) -> None:
+        note = (
+            "---\n- observed_at\n- source\n---\n\n"
+            "someone@example.com: Delivery diagnostic, verbatim: 550 user "
+            "unknown.\n"
+        )
+        check = check_tier0_bounce_verdict_conformance(note)
+        assert check.conforms is False
+        assert FRONTMATTER_NOT_A_MAPPING in check.reasons
+
+    def test_unsupported_source_type_declines_with_reason(self) -> None:
+        note = (
+            "---\nobserved_at: 2026-08-25\nsource:\n  - one\n  - two\n---\n\n"
+            "someone@example.com: Delivery diagnostic, verbatim: 550 user "
+            "unknown.\n"
+        )
+        check = check_tier0_bounce_verdict_conformance(note)
+        assert check.conforms is False
+        assert UNSUPPORTED_SOURCE_TYPE in check.reasons
 
 
 class TestTier0BounceVerdictMarkEligibility:
