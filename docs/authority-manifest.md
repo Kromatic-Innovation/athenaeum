@@ -7,7 +7,9 @@
 > the manifest (rejecting/converting live-source duplicates automatically)
 > belongs to the consumers — athenaeum#423's T1 duplicate bin and athenaeum#432's T2 rejection,
 > both implemented in `src/athenaeum/reasoning_tiers.py`. As of issue athenaeum#602,
-> those tiers have **two** gated production callers in `athenaeum.merge`:
+> those tiers have **two** gated production callers in
+> `athenaeum.reasoning_screens` (sited there by issue athenaeum#1257; formerly
+> `athenaeum.merge`):
 > `t1_screen_rejects_merge_proposal` (T1 — screens every proposal, this
 > manifest loaded once per merge run via `load_authority_manifest_for_pipeline`
 > and threaded in as its `authority_manifest` argument) and

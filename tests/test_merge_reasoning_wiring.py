@@ -2,11 +2,17 @@
 """The T1 reasoning-tier screen wired into the merge path (issue athenaeum#518).
 
 Before this, `reasoning_tiers.run_reasoning_pipeline` had no production caller
-(`DEFAULT_TIER_CHAIN = ()`). `merge.t1_screen_rejects_merge_proposal` is the
-wiring: at the merge-proposal seam, a confident T1 reject drops the proposal
+(`DEFAULT_TIER_CHAIN = ()`). `reasoning_screens.t1_screen_rejects_merge_proposal`
+is the wiring: at the merge-proposal seam, a confident T1 reject drops the proposal
 before it reaches the human queue, gated behind the opt-in
 `reasoning_tier_auditing_enabled` flag (default OFF), with the spend ceiling
 (athenaeum#568) respected and the reject surfaced for the calibration audit loop (athenaeum#438).
+
+Re-pointed by issue athenaeum#1257: the screen moved from ``athenaeum.merge`` to
+``athenaeum.reasoning_screens`` (so retiring merge.py's C4 lane cannot orphan
+it). Every assertion below is unchanged — this file proves the MOVE preserved
+the behaviour verbatim, including the ``spend.ceiling_tripped`` degrade path
+that used to be asserted through ``merge.spend``.
 """
 
 from __future__ import annotations
@@ -16,10 +22,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from athenaeum import merge as merge_mod
+from athenaeum import reasoning_screens as screens_mod
 from athenaeum.calibration import calibration_summary
-from athenaeum.merge import t1_screen_rejects_merge_proposal
 from athenaeum.models import TokenUsage
+from athenaeum.reasoning_screens import t1_screen_rejects_merge_proposal
 
 # High sample rates so a T1 reject is always surfaced to the audit ledger.
 _SAMPLE_CFG = {
@@ -110,7 +116,7 @@ class TestT1ScreenDecision:
     def test_deterministic_reject_drops_counts_and_samples(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(merge_mod.spend, "ceiling_tripped", lambda *a, **k: None)
+        monkeypatch.setattr(screens_mod.spend, "ceiling_tripped", lambda *a, **k: None)
         wiki = _wiki(tmp_path)
         usage = TokenUsage()
         client = MagicMock()
@@ -156,7 +162,7 @@ class TestT1ScreenDecision:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            merge_mod.spend, "ceiling_tripped", lambda *a, **k: "budget"
+            screens_mod.spend, "ceiling_tripped", lambda *a, **k: "budget"
         )
         client = MagicMock()
         usage = TokenUsage()
