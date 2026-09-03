@@ -22,6 +22,15 @@ from pathlib import Path
 
 import pytest
 
+from athenaeum.push_metrics import (
+    _parse_ts,
+    _query_hash,
+    build_push_record,
+    durable_push_records_path,
+    read_push_records,
+    record_push,
+)
+
 HOOKS_DIR = Path(__file__).parent.parent / "examples" / "claude-code"
 SESSION_START = HOOKS_DIR / "session-start-recall.sh"
 USER_PROMPT = HOOKS_DIR / "user-prompt-recall.sh"
@@ -708,6 +717,679 @@ conn.close()
         payload = json.loads(hot_result.stdout)
         context = payload["hookSpecificOutput"]["additionalContext"]
         assert "Vectester Hot Page" in context
+
+    # -- issue athenaeum#1343: sidecar push telemetry -----------------------
+
+    def _run_hook(
+        self, env: dict[str, str], prompt: str, session_id: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        payload = json.dumps(
+            {"prompt": prompt, "session_id": session_id or f"test-{uuid.uuid4().hex}"}
+        )
+        return subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=payload,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def test_push_telemetry_round_trips_through_read_push_records(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC: the record's top-level shape is byte-compatible with
+        `PushRecord.to_dict()` so `read_push_records()` parses a
+        hook-written row unmodified. Also covers the Plan step 6
+        assertion: with the hot-tier gate still in place, every recorded
+        item's `memory_tier` is `"hot"` -- the gate excludes anything
+        else from ever being pushed at all.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        result = self._run_hook(
+            hook_env, "tell me about customer development frameworks"
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "expected hookSpecificOutput JSON on stdout"
+
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        assert len(records) == 1
+        rec = records[0]
+
+        assert rec["v"] == 1
+        assert isinstance(rec["session_id"], str) and rec["session_id"]
+        assert isinstance(rec["ts"], str)
+        assert isinstance(rec["query_hash"], str) and len(rec["query_hash"]) == 16
+        assert rec["backend"] == "fts5"
+        assert isinstance(rec["items"], list) and len(rec["items"]) == 1
+        assert rec["pushed_count"] == len(rec["items"])
+        assert isinstance(rec["token_cost"], int)
+        assert rec["token_cost_estimated"] is True
+        assert rec["source"] == "sidecar"
+
+        item = rec["items"][0]
+        assert isinstance(item["id"], str) and item["id"]
+        assert item["tier"] == "internal"
+        assert isinstance(item["scope"], str)
+        assert isinstance(item["token_cost"], int)
+        assert isinstance(item["relevance"], float)
+        assert item["backend"] == "fts5"
+        # Plan step 6: the gate stays in this issue, so every item pushed
+        # by the hook is, by construction, memory_tier == "hot".
+        assert item["memory_tier"] == "hot"
+
+    def test_id_derivation_uid_prefix_and_timestamp_fallback(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC 'id is never a name-derived slug', both required
+        counter-examples: `49eb5d0e-enrico-bruschini.md` records exactly
+        `49eb5d0e` (and no substring of the person's name appears
+        anywhere in the row); `20260802T023311Z-3f0ea402.md` records the
+        full filename, matching `opaque_push_id`'s Python fallback.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        # The FTS5 `wiki` table indexes filename/name/tags/aliases/
+        # description only (no body text — see the schema in the module
+        # header) — the shared probe term must live in `description`,
+        # matching every other fixture in this file.
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "49eb5d0e-enrico-bruschini.md").write_text(
+            "---\n"
+            "name: Enrico Bruschini\n"
+            "tags: [person]\n"
+            "description: A page about widgetronicuidtest for id-derivation testing\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Enrico Bruschini body text, not indexed.\n"
+        )
+        (wiki / "20260802T023311Z-3f0ea402.md").write_text(
+            "---\n"
+            "name: Raw Intake Page\n"
+            "tags: [raw]\n"
+            "description: A raw intake page about widgetronicuidtest for id-derivation testing\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Raw intake body text, not indexed.\n"
+        )
+        self._seed_index(hook_env)
+
+        result = self._run_hook(hook_env, "tell me about widgetronicuidtest")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout
+
+        wiki_root = wiki
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        assert len(records) == 1
+        ids = {item["id"] for item in records[0]["items"]}
+        assert "49eb5d0e" in ids
+        assert "20260802T023311Z-3f0ea402.md" in ids
+
+        raw_line = durable_push_records_path(wiki_root, cache_dir=cache_dir).read_text()
+        assert "enrico" not in raw_line.lower()
+        assert "bruschini" not in raw_line.lower()
+
+    def test_source_discriminator_partitions_mixed_ledger(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC counter-example: a ledger containing both an MCP `recall`
+        record (no `source` key, written via the real `record_push`) and
+        a sidecar record must partition into exactly 1 + 1 on
+        `rec.get("source") == "sidecar"` (D1).
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        self._seed_index(hook_env)
+
+        wiki_root = wiki
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+
+        # An authentic MCP-path row, written by the real production
+        # function -- not a hand-rolled dict -- to the SAME resolved
+        # ledger location the hook will append to.
+        mcp_record = build_push_record(
+            session_id="mcp-session-1",
+            query="an explicit recall query",
+            backend="fts5",
+            hits=[("some-mcp-page.md", {}, "a rendered snippet of text")],
+        )
+        assert record_push(mcp_record, cache_dir=cache_dir, wiki_root=wiki_root)
+
+        result = self._run_hook(
+            hook_env,
+            "tell me about customer development frameworks",
+            f"sidecar-sess-{uuid.uuid4().hex}",
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout
+
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        assert len(records) == 2
+        sidecar = [r for r in records if r.get("source") == "sidecar"]
+        recall = [r for r in records if r.get("source") != "sidecar"]
+        assert len(sidecar) == 1
+        assert len(recall) == 1
+        assert recall[0]["session_id"] == "mcp-session-1"
+
+    def test_query_hash_matches_push_metrics_query_hash(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC: `query_hash` computed identically to
+        `push_metrics._query_hash` for the SAME probe string -- asserted
+        against the real function, not a hardcoded hex string. The raw
+        prompt text is never written to the ledger.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        probe = "tell me about customer development frameworks"
+        result = self._run_hook(hook_env, probe)
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout
+
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        assert len(records) == 1
+        assert records[0]["query_hash"] == _query_hash(probe)
+
+        raw_line = durable_push_records_path(wiki_root, cache_dir=cache_dir).read_text()
+        assert probe not in raw_line
+
+    def test_ledger_path_legacy_branch_when_only_legacy_populated(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC (post-edit): a populated legacy `<cache_dir>/_push_records.jsonl`
+        with no `<wiki_root>` file -- both the hook and
+        `durable_push_records_path` must resolve LEGACY."""
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        new_path = wiki_root / "_push_records.jsonl"
+        legacy_path = cache_dir / "_push_records.jsonl"
+        assert not new_path.exists()
+        legacy_path.write_text('{"pre-existing":"legacy-row"}\n')
+
+        # Python's own resolution must agree BEFORE the hook ever runs.
+        assert durable_push_records_path(wiki_root, cache_dir=cache_dir) == legacy_path
+
+        result = self._run_hook(hook_env, "tell me about customer development frameworks")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout
+
+        assert not new_path.exists(), "must not also write the new-path ledger"
+        lines = legacy_path.read_text().strip().splitlines()
+        assert len(lines) == 2
+        appended = json.loads(lines[1])
+        assert appended["source"] == "sidecar"
+
+        # And the resolution rule still agrees after the write.
+        assert durable_push_records_path(wiki_root, cache_dir=cache_dir) == legacy_path
+
+    def test_ledger_path_new_branch_when_neither_file_present(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC (post-edit): a tmpdir with NEITHER file present -- both the
+        hook and `durable_push_records_path` resolve to the *new*
+        `<wiki_root>` path. (Paired with the legacy-branch test above --
+        this case alone would pass vacuously and prove nothing.)
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        new_path = wiki_root / "_push_records.jsonl"
+        legacy_path = cache_dir / "_push_records.jsonl"
+        assert not new_path.exists()
+        assert not legacy_path.exists()
+
+        assert durable_push_records_path(wiki_root, cache_dir=cache_dir) == new_path
+
+        result = self._run_hook(hook_env, "tell me about customer development frameworks")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout
+
+        assert new_path.is_file()
+        assert not legacy_path.exists(), "must not also write the legacy ledger"
+        assert durable_push_records_path(wiki_root, cache_dir=cache_dir) == new_path
+
+    def test_push_metrics_enabled_gate_honoured(self, hook_env: dict[str, str]) -> None:
+        """AC: honours `ATHENAEUM_PUSH_METRICS_ENABLED` with the SAME
+        precedence and falsey-token set as
+        `config.resolve_push_metrics_enabled`. Three cases, all required:
+        an explicit falsey token is off; unset is on (default); and a
+        SET-but-EMPTY value is ALSO off (D10's asymmetry) -- a naive
+        `${VAR:-default}` shell expansion would get this case wrong by
+        conflating "unset" with "set empty". In every case the
+        `[Knowledge context]` push itself is unaffected.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        ledger_path = wiki_root / "_push_records.jsonl"
+
+        off_env = dict(hook_env)
+        off_env["ATHENAEUM_PUSH_METRICS_ENABLED"] = "false"
+        off_result = self._run_hook(
+            off_env,
+            "tell me about customer development frameworks",
+            f"gate-off-{uuid.uuid4().hex}",
+        )
+        assert off_result.returncode == 0, f"stderr: {off_result.stderr}"
+        assert "Customer Development" in off_result.stdout, (
+            "the recall push itself must be unaffected by the telemetry gate"
+        )
+        assert not ledger_path.exists(), "an explicit falsey token must write nothing"
+
+        empty_env = dict(hook_env)
+        empty_env["ATHENAEUM_PUSH_METRICS_ENABLED"] = ""
+        empty_result = self._run_hook(
+            empty_env,
+            "tell me about customer development frameworks",
+            f"gate-empty-{uuid.uuid4().hex}",
+        )
+        assert empty_result.returncode == 0, f"stderr: {empty_result.stderr}"
+        assert "Customer Development" in empty_result.stdout
+        assert not ledger_path.exists(), (
+            "D10 asymmetry: a SET-but-EMPTY env value must be treated as "
+            "falsey (off), same as an explicit '0'/'false' token"
+        )
+
+        on_result = self._run_hook(
+            hook_env,
+            "tell me about customer development frameworks",
+            f"gate-default-on-{uuid.uuid4().hex}",
+        )
+        assert on_result.returncode == 0, f"stderr: {on_result.stderr}"
+        assert "Customer Development" in on_result.stdout
+        assert ledger_path.is_file(), "unset env must fall through to the default (on)"
+
+    def test_ledger_write_failure_never_breaks_the_push(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC: a ledger-write failure never breaks or delays the push.
+        Points the ledger's resolved directory at a path that cannot be
+        created (a regular file sits where a parent directory would need
+        to exist -- fails even when the test runs as root, unlike a
+        chmod-based block) and confirms the `[Knowledge context]` block
+        is still emitted unchanged and the hook exits 0.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        # Seed the index against the NORMAL wiki root first -- only the
+        # subsequent hook invocation's ledger-path resolution is broken,
+        # not the index build itself.
+        self._seed_index(hook_env)
+
+        blocker_file = tmp_path / "not-a-directory"
+        blocker_file.write_text("this is a file, not a directory")
+        broken_env = dict(hook_env)
+        broken_env["KNOWLEDGE_WIKI_PATH"] = str(blocker_file / "wiki")
+
+        result = self._run_hook(
+            broken_env, "tell me about customer development frameworks"
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        payload = json.loads(result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        assert "Customer Development" in context
+
+    def test_turn_that_pushes_nothing_writes_nothing(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC: a turn that pushes nothing writes nothing (mirrors
+        `record_push`'s own `if not record.session_id or not
+        record.items: return False`)."""
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        result = self._run_hook(
+            hook_env, "zzznonmatchingzzz query with no candidates at all whatsoever"
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout == "", f"expected no push, got: {result.stdout!r}"
+        assert not (wiki_root / "_push_records.jsonl").exists()
+        assert not (cache_dir / "_push_records.jsonl").exists()
+
+    def test_fts5_path_starts_no_python_interpreter(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """Issue athenaeum#1343 AC: "No Python interpreter start is added to
+        the FTS5 path."
+
+        The wall-clock half of that criterion is hardware-bound and cannot
+        be asserted from a CI container (whose absolute floor already sits
+        above the hook's own <50ms header contract, before AND after this
+        change). The *structural* half can be, permanently and on every
+        machine: point `$ATHENAEUM_PYTHON` at a recording stub and assert
+        the FTS5 path never invokes it. That is the invariant the latency
+        contract actually rests on — a Python interpreter start measured
+        360-450ms warm / ~1090ms cold on the author's box (see this hook's
+        header), i.e. two orders of magnitude above the telemetry append's
+        own cost.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        # Seed AFTER the index build (which legitimately uses Python) so
+        # the stub only observes the per-turn hook.
+        tmp = Path(hook_env["HOME"])
+        marker = tmp / "python-was-started"
+        stub = tmp / "python-stub"
+        stub.write_text(f'#!/usr/bin/env bash\necho started >> {marker}\nexit 1\n')
+        stub.chmod(0o755)
+
+        env = dict(hook_env)
+        env["ATHENAEUM_PYTHON"] = str(stub)
+
+        result = self._run_hook(env, "tell me about customer development frameworks")
+
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "expected the push to still be emitted"
+        assert not marker.exists(), (
+            "the FTS5 path must not start a Python interpreter — the "
+            "telemetry append added by issue athenaeum#1343 is shell/awk plus at "
+            f"most one sha256 subprocess. Stub invocations: "
+            f"{marker.read_text() if marker.exists() else ''!r}"
+        )
+
+    def test_concurrent_hook_runs_never_interleave_a_partial_line(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC: appends are durable and atomic against concurrent
+        sessions -- two hooks running concurrently never interleave a
+        partial line. Fires N concurrent hook invocations (distinct
+        session ids, so no run is suppressed by another's session-scoped
+        dedup file) and asserts every resulting ledger line parses as
+        complete JSON and the line count matches N.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        n = 12
+        procs = [
+            subprocess.Popen(
+                ["bash", str(USER_PROMPT)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=hook_env,
+                text=True,
+            )
+            for _ in range(n)
+        ]
+        for i, proc in enumerate(procs):
+            payload = json.dumps(
+                {
+                    "prompt": "tell me about customer development frameworks",
+                    "session_id": f"conc-{i}-{uuid.uuid4().hex}",
+                }
+            )
+            proc.stdin.write(payload)
+            proc.stdin.close()
+        for proc in procs:
+            assert proc.wait(timeout=15) == 0
+
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        ledger_path = durable_push_records_path(wiki_root, cache_dir=cache_dir)
+        assert ledger_path.is_file()
+        lines = ledger_path.read_text().splitlines()
+        assert len(lines) == n
+        for line in lines:
+            row = json.loads(line)  # raises if a line is torn/interleaved
+            assert row["source"] == "sidecar"
+
+    def test_parse_ts_accepts_the_emitted_ts(self, hook_env: dict[str, str]) -> None:
+        """AC (D9): `_parse_ts` accepts the hook's emitted `ts` — second
+        resolution, Z-suffixed, no microseconds."""
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        result = self._run_hook(hook_env, "tell me about customer development frameworks")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout
+
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        assert len(records) == 1
+        parsed = _parse_ts(records[0]["ts"])
+        assert parsed is not None
+
+    # -- issue athenaeum#1343 review findings (defects 1-3) ------------------
+
+    def test_tab_in_indexed_name_does_not_break_the_push(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """Defect 1 (structural): a page whose indexed `name` column
+        contains a literal tab shifts every field after it in the
+        7-field `read` the telemetry pass parses -- `read` dumps all
+        overflow into the LAST variable (`cost`), which then fails
+        `_pm_is_number` and used to reach bash arithmetic un-guarded.
+        Under `set -euo pipefail`, arithmetic on a non-numeric token that
+        LOOKS like a bare identifier triggers a `set -u` unbound-variable
+        abort -- which, unlike an ordinary command failure, is NOT
+        suppressed by wrapping the caller in `|| true` (see
+        `_pm_record_push`'s header comment for the two verifying probes).
+        The fix moved telemetry construction out of the render loop
+        entirely (into `_pm_record_push`, invoked once, after the render
+        loop already built the `[Knowledge context]` block) so a crash
+        inside telemetry construction can never prevent that block from
+        being emitted. This is a REAL trigger, not a hypothetical -- a
+        tab in an indexed `name` is exactly what athenaeum#1344's
+        `description` field is required to survive too.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "tab-page.md").write_text(
+            "---\n"
+            'name: "Tab\tHere Page"\n'
+            "tags: [tabtest]\n"
+            "description: A page about tabbrokentest for regression testing\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Body text, not indexed.\n"
+        )
+        self._seed_index(hook_env)
+
+        result = self._run_hook(hook_env, "tell me about tabbrokentest")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "the push must survive a tab embedded in an indexed column"
+        payload = json.loads(result.stdout)
+        assert "hookSpecificOutput" in payload
+        assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+        assert payload["hookSpecificOutput"]["additionalContext"]
+
+    def test_degenerate_relevance_field_still_writes_valid_json(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """Defect 3: `relevance` must never be interpolated unquoted when
+        it could be empty or non-numeric -- `"relevance":,` is malformed
+        JSON `read_push_records` cannot parse (the exact "reads as zero
+        forever" hazard this issue exists to prevent). Reuses the same
+        tab-shifted-field trigger as the defect-1 test (a real repro, not
+        a synthetic one) but asserts a DIFFERENT thing: that whatever
+        ledger line results is still syntactically valid JSON, and that
+        the corrupted (non-numeric) `rank` value the shift produces is
+        guarded down to a JSON `null` rather than emitted raw.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "tab-page.md").write_text(
+            "---\n"
+            'name: "Tab\tHere Page"\n'
+            "tags: [tabtest]\n"
+            "description: A page about tabbrokentest for regression testing\n"
+            "memory_tier: hot\n"
+            "---\n\n"
+            "Body text, not indexed.\n"
+        )
+        self._seed_index(hook_env)
+
+        result = self._run_hook(hook_env, "tell me about tabbrokentest")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        wiki_root = wiki
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        ledger_path = durable_push_records_path(wiki_root, cache_dir=cache_dir)
+        assert ledger_path.is_file()
+        lines = ledger_path.read_text().strip().splitlines()
+        assert len(lines) == 1
+        row = json.loads(lines[0])  # raises if malformed -- e.g. "relevance":,
+        assert row["items"][0]["relevance"] is None
+
+    def test_pm_is_number_rejects_non_numeric_and_accepts_scientific_notation(
+        self,
+    ) -> None:
+        """Defect 3 (unit-level): the numeric guard used before ANY value
+        reaches bash arithmetic or unquoted JSON interpolation. Sourced
+        directly from the shipped hook (not reimplemented here) so this
+        test tracks the real function, not a copy that could drift.
+        Sqlite's FTS5 `rank` legitimately produces scientific notation
+        (e.g. `-1.0e-06`) -- that must be ACCEPTED, not rejected as
+        "non-numeric".
+        """
+        _require("bash")
+        extracted = subprocess.run(
+            ["sed", "-n", "/^_pm_is_number() {/,/^}/p", str(USER_PROMPT)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout
+        assert extracted.strip(), "could not extract _pm_is_number from the hook"
+
+        def _check(value: str) -> bool:
+            script = f"{extracted}\n_pm_is_number {value!r} && echo yes || echo no\n"
+            proc = subprocess.run(
+                ["bash", "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            assert proc.returncode == 0, f"stderr: {proc.stderr}"
+            return proc.stdout.strip() == "yes"
+
+        assert _check("12") is True
+        assert _check("-3.64558386950812e-06") is True
+        assert _check("-1.0e-06") is True
+        assert _check("0") is True
+        assert _check("") is False
+        assert _check("fts5") is False
+        assert _check("fts5\t12") is False
+        assert _check("12abc") is False
+
+    def test_scope_from_audience_has_no_bash4_only_array_syntax(self) -> None:
+        """Defect 2 (structural guard): `#!/usr/bin/env bash` on stock
+        macOS resolves to `/bin/bash`, GNU bash 3.2.57 (Apple never
+        shipped a newer bash after the GPLv3 relicense) -- and this repo
+        already has precedent (athenaeum#1104) for removing a bash-4-only
+        construct (`mapfile`) from `scripts/public-safe-lint-gate.sh` for
+        exactly this reason. Under bash 3.2 with `set -u`, referencing an
+        empty array can raise "unbound variable"; `_pm_scope_from_audience`
+        used to reach exactly that state on a public-marker-only audience
+        (a normal public page). This asserts no bash array syntax
+        (`local -a` / `declare -a` / `+=(` array-append) survives
+        anywhere in the hook, not just in that one function -- a
+        regression here is a silent bash-3.2 landmine, not a test
+        failure on THIS box (which runs bash 5.2).
+        """
+        text = USER_PROMPT.read_text()
+        assert "local -a" not in text
+        assert "declare -a" not in text
+        assert "+=(" not in text
+
+    def test_scope_from_audience_public_marker_only_resolves_open(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """Defect 2 (functional): the exact audience shape that used to
+        crash under bash 3.2 -- `|__access_open__|`, a public page with
+        NO roles -- must resolve to `scope: "open"` end to end, proving
+        the array-free rewrite is still correct, not just array-free.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "public-only-page.md").write_text(
+            "---\n"
+            "name: Public Only Page\n"
+            "tags: [pubtest]\n"
+            "description: A page about pubonlytest for scope regression testing\n"
+            "memory_tier: hot\n"
+            "access: open\n"
+            "---\n\n"
+            "Body text, not indexed.\n"
+        )
+        self._seed_index(hook_env)
+
+        result = self._run_hook(hook_env, "tell me about pubonlytest")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout
+
+        wiki_root = wiki
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        assert len(records) == 1
+        assert records[0]["items"][0]["scope"] == "open"
 
 
 class TestPreCompactSave:
