@@ -1799,7 +1799,34 @@ def detect_hard_bounce_fact(text: str) -> HardBounceFact | None:
 #: (``550 user unknown``, ``552 mailbox full``). Deliberately narrower than
 #: "any 5xx": 550-559 is the documented permanent-failure band this contract
 #: recognizes; a code outside it is left to reasoning rather than guessed at.
-_BARE_SMTP_5XX_CODE_RE = re.compile(r"\b55[0-9]\b")
+#:
+#: A BARE word-boundary match on 550-559 is not enough on its own — QA review
+#: (issue athenaeum#1341) empirically confirmed it false-positives on ordinary
+#: prose with zero SMTP/diagnostic context ("closed a $550 round", "ticket
+#: #552", "booth 550", "invoice #559"), which — combined with a lone nearby
+#: email address — would silently write a bogus ``bounced:`` value onto a
+#: real person's wiki page. Unlike the RFC ``5.x.x`` sibling
+#: (:data:`_HARD_BOUNCE_CODE_RE`), whose dotted-triple shape essentially never
+#: appears by coincidence in prose, a bare 3-digit number needs an explicit
+#: diagnostic-context requirement to be safe. voltaire's
+#: ``buildBounceIntakeBody`` (`src/tiers/bounce-intake.ts`) always frames the
+#: verbatim diagnostic behind a recognizable intro phrase containing the word
+#: "diagnostic" — "Delivery diagnostic, verbatim: <code> ..." — or, for a raw
+#: RFC 3464 DSN ``Diagnostic-Code`` field copied verbatim, an ``smtp;``
+#: prefix. This pattern requires one of those context markers (or "DSN
+#: status"/"SMTP reply"/"SMTP response") to appear on the same line, shortly
+#: before the code, rather than matching the bare code anywhere in the body.
+_BARE_SMTP_5XX_CODE_RE = re.compile(
+    r"""
+    (?:
+        \bsmtp;\s*
+        |
+        \b(?:diagnostic|dsn\ status|smtp\ reply|smtp\ response)\b[^\n]{0,40}?
+    )
+    \b(55[0-9])\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 #: Verified-permanent, non-RFC-3463 list-verification verdict tokens this
 #: module additionally recognizes as a hard-undeliverable signal with no
@@ -1842,13 +1869,22 @@ class BounceVerdictFact:
 def find_bare_smtp_5xx_code(text: str) -> str | None:
     """Return the first bare 550-559 SMTP reply code in *text*, or ``None``.
 
+    Requires actual SMTP-diagnostic context around the code — same line as,
+    and shortly after, a recognized diagnostic-intro phrase containing
+    "diagnostic", "DSN status", "SMTP reply", or "SMTP response" — or an
+    ``smtp;`` prefix (RFC 3464 ``Diagnostic-Code`` shape) — not just a
+    word-boundary match anywhere in *text*. See :data:`_BARE_SMTP_5XX_CODE_RE`
+    for why: a bare 3-digit number in the 550-559 range appears in ordinary
+    prose ("closed a $550 round", "ticket #552") far too often to trust
+    without it.
+
     Matches independently of whether an RFC 3463 enhanced code is ALSO
     present elsewhere in *text* — callers that need "non-RFC only" combine
     this with a :func:`find_hard_bounce_code` check of their own, exactly as
     :func:`detect_bounce_verdict_fact` does below.
     """
     match = _BARE_SMTP_5XX_CODE_RE.search(text or "")
-    return match.group(0) if match is not None else None
+    return match.group(1) if match is not None else None
 
 
 def find_verified_bounce_verdict_token(text: str) -> str | None:
