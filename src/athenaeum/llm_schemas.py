@@ -107,7 +107,6 @@ import json
 import logging
 import os
 from collections.abc import Mapping
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -645,9 +644,14 @@ def record_observation(
             "no",
         ):
             return
+        # Deferred import (module scope stays athenaeum-import-free, per this
+        # module's own docstring). :func:`athenaeum.store.now_iso` is the
+        # single shared UTC-ISO rendering (issue athenaeum#1348).
+        from athenaeum.store import now_iso
+
         record = {
             "v": OBSERVATION_SCHEMA_VERSION,
-            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "ts": now_iso(),
             "contract": contract,
             "call_site": call_site,
             "outcome": outcome,

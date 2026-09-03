@@ -601,6 +601,7 @@ def run_tier_sweep(
     from athenaeum.config import resolve_memory_tier_demote_after_days
     from athenaeum.models import parse_frontmatter
     from athenaeum.push_metrics import opaque_push_id
+    from athenaeum.store import now_iso
     from athenaeum.usage_report import get_claim_usage
 
     resolved_now = now if now is not None else datetime.now(tz=timezone.utc)
@@ -659,7 +660,7 @@ def run_tier_sweep(
         if updated_text is None or updated_text == fresh_text:
             continue
         atomic_write_text(path, updated_text)
-        swept_at = resolved_now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        swept_at = now_iso(resolved_now)
         _append_tier_sweep_ledger(change, cache_dir=cache_dir, swept_at=swept_at)
 
     return report
@@ -694,6 +695,7 @@ def demote_axiom_tier(
 
     from athenaeum.atomic_io import atomic_write_text
     from athenaeum.axiom_governance import record_demotion
+    from athenaeum.store import now_iso
 
     slug = path.stem
     record_demotion(wiki_root, slug=slug, reason=reason, by=by, ledger_path=ledger_path, ts=now)
@@ -705,8 +707,7 @@ def demote_axiom_tier(
     updated_text = set_memory_tier_text(text, "warm")
     if updated_text is not None and updated_text != text:
         atomic_write_text(path, updated_text)
-        resolved_now = now if now is not None else datetime.now(tz=timezone.utc)
-        swept_at = resolved_now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        swept_at = now_iso(now)
         _append_tier_sweep_ledger(change, cache_dir=cache_dir, swept_at=swept_at)
     return change
 
