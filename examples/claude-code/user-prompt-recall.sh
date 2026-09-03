@@ -24,6 +24,24 @@
 # feedback loops" -> "Innovation Accounting"). Each backend rescues a
 # class of queries the other handles poorly — the merge is load-bearing.
 #
+# Rendered summary + relevance-only ranking (issue athenaeum#1344). Each
+# pushed bullet used to be a bare page name — "  - book-real-startup" —
+# which gives the reading session nothing to decide whether an explicit
+# `recall` is worth issuing. The `description` FTS5 column (populated on
+# ~86% of the corpus, ~113 chars average) is now rendered alongside the
+# name as "  - ${name} — ${description}", clamped to 200 characters on a
+# UTF-8 character boundary and tab/newline-sanitised entirely in SQL (see
+# `PM_DESC_EXPR` below) before it ever reaches bash. Selection and
+# ordering are UNCHANGED — still `ORDER BY rank` (BM25) alone, still
+# `LIMIT 3`, still the same hot-tier gate — this issue only widens what
+# each already-selected row renders, not which rows are selected. The
+# awk budget pass is now the SINGLE place the bullet is built (priced and
+# emitted from the same field, not two independently-maintained copies —
+# see that section for why that matters), and every bullet is JSON-escaped
+# immediately before being folded into `$MATCHES`, since free-form prose
+# makes the embedded-quote/backslash hazard in the final raw-into-JSON
+# `printf` common rather than rare.
+#
 # Push telemetry (issue athenaeum#1343). This hook used to record NOTHING
 # about what it pushed — the exact reason issue athenaeum#1120's
 # `AND memory_tier = 'hot'` gate (below) was able to silently over-exclude
@@ -305,6 +323,38 @@ _pm_is_number() {
   [[ "$1" =~ ^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$ ]]
 }
 
+# Shift one TAB-delimited field off `$_PM_ROW_REST` into `$_PM_RET`.
+#
+# Why this exists rather than `IFS=$'\t' read -r a b c ...`: bash treats
+# TAB as IFS *whitespace* regardless of what IFS is set to, so a run of
+# delimiters collapses and an EMPTY field is silently dropped, shifting
+# every later field left. Verified directly:
+#
+#   IFS=$'\t' read -r a b c <<< $'a\t\tc'   -> a=a  b=c  c=      (WRONG)
+#   awk -F'\t' on the same line               -> NF=3 $2="" $3=c  (right)
+#
+# That is not hypothetical here: `description` is absent on ~14% of the
+# corpus and `memory_tier` is the empty literal on a legacy DB, so the
+# naive form recorded `token_cost: 0` for every description-less page —
+# the ledger's own cost accounting reading as zero, which is precisely
+# the "reads as zero forever" hazard issue athenaeum#1343 exists to
+# close. Parameter expansion has no such special-casing, costs no fork,
+# and works on bash 3.2 (see the athenaeum#1104 precedent above).
+_pm_shift_field() {
+  case "$_PM_ROW_REST" in
+    *"$_PM_TAB"*)
+      _PM_RET="${_PM_ROW_REST%%"$_PM_TAB"*}"
+      _PM_ROW_REST="${_PM_ROW_REST#*"$_PM_TAB"}"
+      ;;
+    *)
+      _PM_RET="$_PM_ROW_REST"
+      _PM_ROW_REST=""
+      ;;
+  esac
+}
+_PM_TAB=$'\t'
+_PM_ROW_REST=""
+
 # Minimal RFC 8259 string escaper (D11 — no jq/python on this path).
 # Escapes backslash, double-quote, and C0 control characters as
 # `\uXXXX`. The values passed through this are index-derived (filenames,
@@ -313,6 +363,18 @@ _pm_is_number() {
 # question entirely.
 _pm_json_escape() {
   local s="$1" out="" c i len ord hex
+  # Fast path (issue athenaeum#1344): the loop below walks the string one
+  # character at a time in pure bash, which is fine for a page `name` but
+  # is now also asked to walk a description clamped at 200 chars, three
+  # times per turn. The overwhelming majority of those strings contain
+  # nothing that needs escaping at all, and a single glob test settles
+  # that in one operation instead of 200. Anything that DOES need work
+  # still falls through to the exact same loop, so this is a short
+  # circuit, not a second implementation.
+  case "$s" in
+    *[\\\"]* | *[[:cntrl:]]*) : ;;
+    *) _PM_RET="$s"; return ;;
+  esac
   len=${#s}
   for (( i = 0; i < len; i++ )); do
     c="${s:i:1}"
@@ -345,26 +407,43 @@ _pm_json_escape() {
 # immediately regardless of how the failing command's exit status would
 # otherwise be tested (verified separately). A tab embedded in an
 # indexed `name` column shifts the `read -r fname name rank audience
-# mtier backend cost` fields — `read` dumps all overflow into the LAST
-# variable, so `cost` can become a compound non-numeric string, and bash
-# arithmetic on it (`$(( total + cost ))`) tries to resolve a
-# leading-identifier-shaped token as a variable name, which is exactly
-# the unbound-variable abort `|| true` cannot catch. So the render loop
-# below is kept to ONLY what it did before this issue (build MATCHES,
-# write SEEN_FILE) — it can never be broken by this function — and this
-# function additionally guards every value it puts in arithmetic or
-# unquoted JSON with `_pm_is_number` first, so even a shifted/garbled row
-# degrades to a safe default (cost 0, relevance null) instead of
-# crashing.
+# mtier backend description bullet cost` fields — `read` dumps all
+# overflow into the LAST variable, so `cost` can become a compound
+# non-numeric string, and bash arithmetic on it (`$(( total + cost ))`)
+# tries to resolve a leading-identifier-shaped token as a variable name,
+# which is exactly the unbound-variable abort `|| true` cannot catch. So
+# the render loop below is kept to ONLY what it did before this issue
+# (build MATCHES, write SEEN_FILE) — it can never be broken by this
+# function — and this function additionally guards every value it puts
+# in arithmetic or unquoted JSON with `_pm_is_number` first, so even a
+# shifted/garbled row degrades to a safe default (cost 0, relevance null)
+# instead of crashing. `description`/`bullet` (issue athenaeum#1344, fields
+# 7-8) are read into named locals purely to keep `cost` (field 9) in the
+# LAST position this function's arithmetic guard expects — this function
+# never uses either value itself, since `tier`/`scope`/`relevance` etc.
+# don't derive from the rendered bullet text.
 _pm_record_push() {
   [ "$PM_ENABLED" = true ] || return 0
 
-  local fname name rank audience mtier backend cost
+  local fname name rank audience mtier backend description bullet cost
   local _pm_id _pm_scope _pm_id_esc _pm_scope_esc _pm_mtier_esc _pm_backend_esc
   local _pm_cost _pm_relevance _pm_item
   local pm_items_json="" pm_total_cost=0 pm_item_count=0
 
-  while IFS=$'\t' read -r fname name rank audience mtier backend cost; do
+  while IFS= read -r _PM_ROW_REST; do
+    [ -n "$_PM_ROW_REST" ] || continue
+    # Nine TAB-delimited fields, split WITHOUT `read`'s IFS-whitespace
+    # field-squashing — see `_pm_shift_field` above for why that matters
+    # and for the verified counter-example.
+    _pm_shift_field; fname="$_PM_RET"
+    _pm_shift_field; name="$_PM_RET"
+    _pm_shift_field; rank="$_PM_RET"
+    _pm_shift_field; audience="$_PM_RET"
+    _pm_shift_field; mtier="$_PM_RET"
+    _pm_shift_field; backend="$_PM_RET"
+    _pm_shift_field; description="$_PM_RET"
+    _pm_shift_field; bullet="$_PM_RET"
+    _pm_shift_field; cost="$_PM_RET"
     [ -n "$fname" ] || continue
 
     if _pm_is_number "$cost"; then
@@ -560,6 +639,63 @@ if [ -f "$DB_FILE" ] && sqlite3 "$DB_FILE" "PRAGMA table_info(wiki);" 2>/dev/nul
   HAS_TIER_COLUMN=true
 fi
 
+# Issue athenaeum#1344 — same legacy-DB hazard as HAS_TIER_COLUMN above,
+# same probe shape: a DB built before `description` existed would raise
+# `sqlite3.OperationalError` on a SELECT that names it, which this hook's
+# own `2>/dev/null || echo ""` would otherwise swallow into a silent ZERO
+# recall for the whole turn. Probed once and shared by both the FTS5
+# query below and the vector-hit metadata lookup further down, exactly
+# like HAS_TIER_COLUMN.
+#
+# Unlike HAS_TIER_COLUMN, this does NOT need a second whole-query branch:
+# tier changes the WHERE clause (a column that doesn't exist can't be
+# filtered on), but description only changes one SELECT-list expression,
+# so gating just that expression through `DESC_COL` below degrades both
+# the tier and no-tier branches to the SAME name-only render together,
+# rather than duplicating all four combinations of (tier x description)
+# column presence into four near-identical queries.
+HAS_DESCRIPTION_COLUMN=false
+if [ -f "$DB_FILE" ] && sqlite3 "$DB_FILE" "PRAGMA table_info(wiki);" 2>/dev/null | grep -q '|description|'; then
+  HAS_DESCRIPTION_COLUMN=true
+fi
+
+# Issue athenaeum#1344 — the ONE SQL expression that renders `description`
+# for the bullet, reused verbatim everywhere a row is read (both FTS5
+# branches below, and both vector-metadata branches further down) so the
+# render can never disagree with itself between backends or between the
+# tier/no-tier branches (AC "the vector branch renders identically").
+# Two things happen here, deliberately in SQL rather than in awk/bash:
+#   1. `replace(...)` collapses any embedded tab/newline/CR in the
+#      description to a single space BEFORE the value ever reaches the
+#      tab-separated pipeline below — protects the `awk -F'\t'`/`read
+#      -r ... IFS=$'\t'` field positions downstream (AC "does not shift
+#      awk field positions"), the same hazard `name` already has (see
+#      the tab-in-name regression test), now closed for `description` at
+#      the source instead of merely tolerated.
+#   2. `substr(..., 1, 200)` clamps to the 200-char authoring-convention
+#      bound the issue recommends. Done in SQL, not bash, because
+#      SQLite's `substr`/`length` are UTF-8-CHARACTER-aware (counts
+#      codepoints, not bytes) for TEXT values — verified directly against
+#      this box's sqlite3 CLI with a 250-character accented string:
+#      `substr` returns exactly 200 characters, never a byte-split
+#      trailing multi-byte sequence. This closes the "clamp before
+#      sanitise" hazard the issue flags (the corpus contains accented
+#      names): the clamp must happen on RAW text, character-safe, before
+#      `_pm_json_escape` ever runs on it below — escaping first and then
+#      byte-slicing at 200 could otherwise cut a `\uXXXX` escape or a
+#      multi-byte UTF-8 sequence in half.
+# When the column doesn't exist (`HAS_DESCRIPTION_COLUMN=false`), this is
+# just the SQL literal `''` — no column reference at all, so the query is
+# valid against a pre-athenaeum#1344 index and every row's 7th field is
+# simply empty, which the budget pass below already renders as a
+# name-only bullet (AC "empty/absent description renders exactly as
+# today").
+PM_DESC_EXPR="substr(replace(replace(replace(description, char(9), ' '), char(10), ' '), char(13), ' '), 1, 200)"
+DESC_COL="''"
+if [ "$HAS_DESCRIPTION_COLUMN" = true ]; then
+  DESC_COL="$PM_DESC_EXPR"
+fi
+
 FTS_RESULTS=""
 if [ -f "$DB_FILE" ]; then
   if [ "$HAS_TIER_COLUMN" = true ]; then
@@ -567,9 +703,13 @@ if [ -f "$DB_FILE" ]; then
     # to the SELECT list purely to feed the telemetry row below — a wider
     # row from the SAME query, no new query. The trailing literal
     # `'fts5'` tags each row with the backend it came from, so the merge
-    # step downstream never needs to guess.
+    # step downstream never needs to guess. Issue athenaeum#1344 widens
+    # this SAME query once more with `${DESC_COL}` (see above) — still one
+    # query, no second lookup, no new process. Ordering stays `ORDER BY
+    # rank` alone: no tier or description term participates in selection
+    # or ordering (AC "ordering and selection are by relevance alone").
     FTS_RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
-      SELECT filename, name, rank, audience, memory_tier, 'fts5'
+      SELECT filename, name, rank, audience, memory_tier, 'fts5', ${DESC_COL}
       FROM wiki
       WHERE wiki MATCH '${FTS_QUERY}'
       AND memory_tier = 'hot'
@@ -583,7 +723,7 @@ if [ -f "$DB_FILE" ]; then
     # unconditionally; memory_tier is recorded as the literal empty
     # string per item (D8 — the column doesn't exist on this DB).
     FTS_RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
-      SELECT filename, name, rank, audience, '', 'fts5'
+      SELECT filename, name, rank, audience, '', 'fts5', ${DESC_COL}
       FROM wiki
       WHERE wiki MATCH '${FTS_QUERY}'
       ${EXCLUDE}
@@ -651,6 +791,14 @@ fi
 # map), so the telemetry row built below can record `scope` (D5) and
 # `memory_tier` (D8) for a vector-sourced item exactly as it does for an
 # FTS5-sourced one.
+#
+# Issue athenaeum#1344: widened once more (still the SAME bounded lookup,
+# still no new query) to also carry `${DESC_COL}` — the identical
+# clamped/sanitised SQL expression the FTS5 branch above uses — so a
+# vector-sourced hit's description comes from the SAME index row an
+# FTS5-sourced hit's would, and the two backends can never render
+# differently for the same page (AC "the vector branch renders
+# identically").
 VECTOR_META=""
 if [ -f "$DB_FILE" ] && [ -n "$VECTOR_RESULTS" ]; then
   _vector_filenames=$(printf '%s\n' "$VECTOR_RESULTS" | awk -F'\t' 'NF >= 1 && $1 != "" { print $1 }')
@@ -679,7 +827,7 @@ if [ -f "$DB_FILE" ] && [ -n "$VECTOR_RESULTS" ]; then
       # audience/tier lookup AND the authoritative "kept" set for the
       # hot-tier post-filter below.
       VECTOR_META=$(sqlite3 -separator $'\t' "$DB_FILE" "
-        SELECT filename, audience, memory_tier FROM wiki
+        SELECT filename, audience, memory_tier, ${DESC_COL} FROM wiki
         WHERE filename IN (${_vector_in_list})
         AND memory_tier = 'hot';
       " 2>/dev/null || echo "")
@@ -699,22 +847,27 @@ if [ -f "$DB_FILE" ] && [ -n "$VECTOR_RESULTS" ]; then
       # unconditionally; memory_tier per item is recorded as "" (D8 —
       # the column doesn't exist on this DB, nothing truthful to carry).
       VECTOR_META=$(sqlite3 -separator $'\t' "$DB_FILE" "
-        SELECT filename, audience, '' FROM wiki
+        SELECT filename, audience, '', ${DESC_COL} FROM wiki
         WHERE filename IN (${_vector_in_list});
       " 2>/dev/null || echo "")
     fi
   fi
 fi
 
-# Normalize VECTOR_RESULTS (filename, name, score) to the SAME 6-field
+# Normalize VECTOR_RESULTS (filename, name, score) to the SAME 7-field
 # shape the FTS5 branch's widened SELECT already produces (filename,
-# name, rank-or-empty, audience, memory_tier, backend), joining in
-# `VECTOR_META` by filename. `score` is a vector-similarity score, NOT a
-# BM25 rank — recording it as `relevance` would silently mix two
-# incomparable scales, so the rank/relevance field is left EMPTY here;
-# the ledger writer below maps `backend == "vector"` to a JSON `null`
-# relevance instead (D7). Normalizing here means the merge step
-# downstream never needs to know which backend a row came from.
+# name, rank-or-empty, audience, memory_tier, backend, description),
+# joining in `VECTOR_META` by filename. `score` is a vector-similarity
+# score, NOT a BM25 rank — recording it as `relevance` would silently mix
+# two incomparable scales, so the rank/relevance field is left EMPTY
+# here; the ledger writer below maps `backend == "vector"` to a JSON
+# `null` relevance instead (D7). Normalizing here means the merge step
+# downstream never needs to know which backend a row came from. Issue
+# athenaeum#1344 adds `description`, resolved from the SAME `VECTOR_META`
+# lookup above (already clamped/sanitised in SQL) — a filename with no
+# `VECTOR_META` row (shouldn't happen: every surviving vector hit was
+# looked up above) degrades to an empty description, i.e. a name-only
+# bullet, same as the FTS5 branch's own degrade path.
 if [ -n "$VECTOR_RESULTS" ]; then
   VECTOR_RESULTS=$(printf '%s\n' "$VECTOR_RESULTS" | awk -F'\t' -v meta="$VECTOR_META" '
     BEGIN {
@@ -724,17 +877,22 @@ if [ -n "$VECTOR_RESULTS" ]; then
         split(marr[i], f, "\t")
         aud[f[1]] = f[2]
         tier[f[1]] = f[3]
+        desc[f[1]] = f[4]
       }
     }
     NF >= 2 && $1 != "" {
       a = ($1 in aud) ? aud[$1] : "|"
       t = ($1 in tier) ? tier[$1] : ""
-      printf "%s\t%s\t\t%s\t%s\tvector\n", $1, $2, a, t
+      d = ($1 in desc) ? desc[$1] : ""
+      printf "%s\t%s\t\t%s\t%s\tvector\t%s\n", $1, $2, a, t, d
     }
   ')
 fi
 
-# Merge: FTS5 first (lexical precision), then vector, dedupe, cap 3.
+# Merge: FTS5 first (lexical precision), then vector, dedupe, cap 3. Rows
+# are 7 fields wide now (issue athenaeum#1344 added `description` as the
+# 7th — see the SELECTs above); `NF >= 2` only ever checked that a row
+# has at least a filename and a name, so it needed no change.
 RESULTS=$(printf '%s\n%s\n' "$FTS_RESULTS" "$VECTOR_RESULTS" \
   | awk -F'\t' 'NF >= 2 && $1 != "" && !seen[$1]++' \
   | head -3)
@@ -750,8 +908,8 @@ RESULTS=$(printf '%s\n%s\n' "$FTS_RESULTS" "$VECTOR_RESULTS" \
 # loop reproduces).
 #
 # What is metered: the literal text this hook actually emits. Each
-# candidate's own cost is its "  - ${name}\n" bullet line — the exact
-# text built into MATCHES and the final payload below — sized with
+# candidate's own cost is its "  - ${bullet}\n" line — the exact text
+# built into MATCHES and the final payload below — sized with
 # athenaeum.push_metrics.estimate_tokens's formula (`max(0, len(text) //
 # 4)`), expressed here as `int(length(block) / 4)`. The wrapper preamble
 # ("[Knowledge context] ... :\n") is charged ONCE up front rather than
@@ -759,39 +917,109 @@ RESULTS=$(printf '%s\n%s\n' "$FTS_RESULTS" "$VECTOR_RESULTS" \
 # payload regardless of how many bullets follow it, so a per-entry share
 # would both double-count it in aggregate and require knowing the final
 # candidate count before the greedy pass that determines it.
+#
+# Issue athenaeum#1344 (review findings 1 and 3 in the brief this issue was
+# built from — "the bullet is built in two places" and "clamp before
+# sanitise"): this is now the SINGLE place the rendered bullet is built,
+# not just priced. `desc` (field 7) already arrived clamped to 200 chars
+# on a character boundary and tab/newline-sanitised, straight from the
+# `${DESC_COL}` SQL expression above — nothing left to do here but decide
+# whether to append it. An empty description falls back to the bare name
+# (no dangling " — " separator, AC counter-example). The bullet is
+# appended as a NEW trailing field, UNESCAPED — JSON-escaping happens
+# once, in the output loop below, immediately before each bullet is
+# concatenated into MATCHES; escaping here (before every candidate's cost
+# is known) would risk pricing and emitting two different strings if a
+# future edit touched one path and not the other, exactly the drift this
+# refactor exists to make structurally impossible. The two remaining
+# consumers of this stream (`_pm_record_push` and the output loop) both
+# read through to this same field by position, so the priced text and the
+# emitted text are identical by construction.
 PREAMBLE=$(printf '[Knowledge context] Wiki pages relevant to this message (use `recall` MCP tool for full details):\n')
 RESULTS=$(printf '%s' "$RESULTS" | awk -F'\t' -v preamble="$PREAMBLE" -v budget="$BUDGET" '
   BEGIN { total = int(length(preamble) / 4) }
   {
-    block = "  - " $2 "\n"
+    name = $2
+    desc = $7
+    bullet = (desc != "") ? name " — " desc : name
+    block = "  - " bullet "\n"
     cost = int(length(block) / 4)
     if (total + cost > budget) next
     total += cost
-    # Issue athenaeum#1343: append this candidate'"'"'s own token cost as a
-    # trailing 7th field — the telemetry row built below REUSES this
-    # value verbatim (per-item and, summed, in aggregate) rather than
-    # recomputing the estimate a second way.
-    print $0 "\t" cost
+    # Issue athenaeum#1343/#1344: append the rendered `bullet` (8th field)
+    # and this candidate'"'"'s own token cost (9th field) — the telemetry
+    # row built below REUSES `cost` verbatim (per-item and, summed, in
+    # aggregate) rather than recomputing the estimate a second way, and
+    # the output loop below REUSES `bullet` verbatim rather than
+    # re-deriving it from `name` alone.
+    print $0 "\t" bullet "\t" cost
   }
 ')
 
 [ -n "$RESULTS" ] || exit 0
+
+# Issue athenaeum#1344 — narrow `$RESULTS` down to just `filename\tbullet`
+# pairs BEFORE the render loop touches it, via awk (not bash `read`). This
+# is not a style choice: bash's `read` treats TAB as "IFS whitespace"
+# no matter what IFS is set to (`IFS=$'\t' read -r a b c <<< $'a\t\tc'`
+# silently SQUASHES the empty middle field and shifts `c` into `$b` —
+# verified directly against this box's bash 5.2; non-whitespace IFS
+# characters like `,` do not do this, but tab is special-cased regardless
+# of the IFS value). `audience` and `memory_tier` (fields 4-5 of the
+# 9-field row) are BOTH genuinely empty for a legacy pre-athenaeum#1120 DB
+# (see that branch's SQL above) — exactly the shape the legacy-DB test
+# below feeds through this hook — and reading a `read -r` variable list
+# deep enough to reach `bullet` (field 8) over that row would silently
+# swallow it into an earlier field, corrupting the very text this loop
+# exists to render (the render loop has none of `_pm_record_push`'s
+# numeric guards to fail safe with — a shifted field here is just WRONG
+# output, not a caught default). awk's own field splitting has no such
+# whitespace special-casing (verified above, and already relied on by
+# every OTHER awk pass in this file) — extracting just the two fields the
+# render loop needs, in awk, sidesteps the hazard entirely rather than
+# working around it.
+MATCH_LINES=$(printf '%s\n' "$RESULTS" | awk -F'\t' '{ print $1 "\t" $8 }')
 
 # ── Format output ───────────────────────────────────────────────────────
 # Must be wrapped in hookSpecificOutput.hookEventName — Claude Code
 # silently ignores a flat {"additionalContext": ...} payload.
 #
 # Issue athenaeum#1343 review finding (defect 1): this loop does ONLY what
-# it did before this issue — build MATCHES, write SEEN_FILE. It reads
-# just the first two `$RESULTS` fields (the trailing fields collapse into
-# the unused third `read` variable), the exact shape it had pre-athenaeum#1343, so
-# nothing about the wider 7-field row this issue added can affect it.
-# Telemetry is built and appended entirely separately, below.
+# it did before that issue — build MATCHES, write SEEN_FILE — plus, as of
+# issue athenaeum#1344, one JSON-escape call per bullet (see below). It
+# still does no arithmetic and touches no numeric field, so it remains
+# immune to the tab-shifted-field hazard `_pm_record_push`'s header
+# comment describes: even a garbled row just produces a garbled (but
+# non-crashing) bullet here, same tolerance the pre-athenaeum#1344 code had
+# for a tab embedded in `name`. Telemetry is built and appended entirely
+# separately, above/below this loop, not here.
+#
+# Issue athenaeum#1344: consumes the `bullet` field the budget pass above
+# already rendered — name-only or "name — description", already clamped
+# and tab/newline-sanitised — rather than re-deriving it from `name`
+# alone (requirement: the priced text and the emitted text must be the
+# SAME string, not two independently-maintained ones that can drift). It
+# reads from `$MATCH_LINES` (see above), a narrowed 2-field stream, not
+# `$RESULTS` directly.
+#
+# The raw-into-JSON hazard this closes: `$MATCHES` is interpolated RAW
+# into a JSON string literal by the final `printf` below. Before this
+# issue the only thing in a bullet was a page `name`, so a stray `"` or
+# `\` was rare; `description` is free-form prose (quotes and backslashes
+# are common), so every bullet is now run through `_pm_json_escape`
+# (reused from issue athenaeum#1343, not a second escaper) before being
+# concatenated. Escaping happens PER BULLET, before the literal `\n`
+# separator is appended — critical, because escaping the ALREADY-JOINED
+# `$MATCHES` string afterwards would double-escape that intentional
+# literal `\n` (turning it into a literal backslash-n visible in the
+# output instead of a real line break) as well as every earlier bullet's
+# already-escaped characters.
 MATCHES=""
-while IFS=$'\t' read -r fname name _pm_rest; do
-  MATCHES="${MATCHES}  - ${name}\n"
+while IFS=$'\t' read -r fname bullet; do
+  _pm_json_escape "$bullet"
+  MATCHES="${MATCHES}  - ${_PM_RET}\n"
   echo "$fname" >> "$SEEN_FILE"
-done <<< "$RESULTS"
+done <<< "$MATCH_LINES"
 
 # Sidecar push telemetry (issue athenaeum#1343): exactly one call, and the
 # ONLY thing standing between a failure inside `_pm_record_push` and this
