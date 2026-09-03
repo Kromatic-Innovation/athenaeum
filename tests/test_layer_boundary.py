@@ -100,6 +100,13 @@ ALLOWED_UPWARD_EDGES: frozenset[tuple[str, str]] = frozenset(
         ("memory_class_backfill", "provider"),
         ("memory_class_backfill", "push_metrics"),
         ("memory_class_backfill", "spend"),
+        # page_description.py (L2) takes the identical three deferred imports
+        # for the identical reason (issue athenaeum#1324 -- the description
+        # backfill's batched calls route through the shared spend-recording
+        # path); documented in that module's "Layering:" paragraph.
+        ("page_description", "provider"),
+        ("page_description", "push_metrics"),
+        ("page_description", "spend"),
         # merge_type_gate.py ("L0/L1-boundary primitive") imports config.py
         # (L2) at module scope for the librarian.* merge-guardrail knobs --
         # documented in the module's own "Layering:" paragraph.

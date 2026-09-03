@@ -1524,6 +1524,11 @@ class WikiEntity:
     # without any call site having to know the taxonomy. An explicit value
     # always wins; an unmapped ``type`` stays ``None`` and renders no key.
     memory_class: str | None = None
+    # Issue athenaeum#1324: one-line summary for the recall hook's injection
+    # ("what is this and why does it matter"). Set by the Tier-3 create path
+    # from the writer's leading ``Description:`` line, or derived from the
+    # opening paragraph when the writer omits it; ``None`` renders no key.
+    description: str | None = None
     # Issue athenaeum#714 (dimension registry): four NEW write-side coordinate
     # fields, none of which collide with any existing frontmatter key (see
     # ``athenaeum/dimensions.py``'s module docstring for the collision
@@ -1613,6 +1618,12 @@ class WikiEntity:
         # rule map does not decide, never defaulted to a class.
         if self.memory_class:
             meta["memory_class"] = self.memory_class
+        # Issue athenaeum#1324: one-line summary the recall hook injects next to
+        # the page name. Emitted only when set — legacy entities round-trip
+        # unchanged; the backfill (``athenaeum description backfill``) fills
+        # the gap on existing pages.
+        if self.description:
+            meta["description"] = self.description
         if self.aliases:
             meta["aliases"] = self.aliases
         meta["access"] = self.access

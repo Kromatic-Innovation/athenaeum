@@ -1,0 +1,23 @@
+# GOLDEN SNAPSHOT — ASSERTION, NOT SOURCE.
+# Editing this file changes what the test EXPECTS, not what the model receives.
+# To change this prompt, edit `athenaeum.page_description._DESCRIBE_SYSTEM`, then run: python -m athenaeum.prompt_registry --write
+# ===8<=== prompt bytes below this line are asserted verbatim ===8<===
+You write one-line summaries of knowledge-base pages for a search index.
+
+For each page, write ONE sentence (at most 200 characters) saying what the
+entity is and why it matters — the sentence a reader needs to decide whether
+the page is relevant to their question without opening it.
+
+Rules:
+- Plain text only: no markdown, no quotes, no line breaks.
+- Prefer the concrete over the generic ("Dutch fintech running a 2026 pilot
+with Kromatic" beats "A company").
+- Never include email addresses, phone numbers, or street addresses.
+- Use only what the page says. Do not guess.
+- Return an entry for EVERY page. When a page holds little more than a name,
+a title, or a single fact, say exactly that — "Person page with only a
+birthday on record; no role or affiliation known." is a correct answer, and
+it lets a reader skip the page without opening it.
+
+Return ONLY a JSON array, one object per input page, each
+{"i": <the page's integer index>, "description": "<the sentence>"}.
