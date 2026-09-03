@@ -245,6 +245,49 @@ class TestCandidateSelection:
         assert excinfo.value.code == 2
         assert "unknown candidate" in capsys.readouterr().err
 
+    @pytest.mark.parametrize("value", [",", "", "  ,  ,"])
+    def test_rejects_an_empty_selection_as_usage_not_as_no_go(
+        self, tmp_path, capsys, value
+    ):
+        """Exit 1 means NO-GO. A mistyped argument must not borrow that meaning.
+
+        Before this guard, `--candidates ","` reached the verdict block with no
+        candidates measured, raised ValueError out of `min()`, and exited 1 --
+        which a caller reading the documented exit codes would read as "the
+        entry point missed the budget".
+        """
+        index = _build_index(tmp_path / "wiki-index.db", pages=30)
+        with pytest.raises(SystemExit) as excinfo:
+            harness.main(
+                [
+                    "--index", str(index), "--min-pages", "30",
+                    "--candidates", value, "--references", "none",
+                ]
+            )
+        assert excinfo.value.code == 2
+        assert "selected nothing to measure" in capsys.readouterr().err
+
+    def test_rejects_an_unknown_reference(self, tmp_path, capsys):
+        index = _build_index(tmp_path / "wiki-index.db", pages=30)
+        with pytest.raises(SystemExit) as excinfo:
+            harness.main(
+                ["--index", str(index), "--min-pages", "30", "--references", "nope"]
+            )
+        assert excinfo.value.code == 2
+        assert "unknown reference" in capsys.readouterr().err
+
+    def test_references_none_is_not_an_error(self, tmp_path):
+        """'none' skips the reference sweep; it is not an unknown reference name."""
+        index = _build_index(tmp_path / "wiki-index.db", pages=30)
+        rc = harness.main(
+            [
+                "--index", str(index), "--min-pages", "30",
+                "--candidates", "stdlib", "--references", "none",
+                "--warm-runs", "2", "--cold-runs", "1",
+            ]
+        )
+        assert rc in (0, 1)
+
 
 class TestStats:
     def test_p95_is_the_upper_tail_not_the_mean(self):
