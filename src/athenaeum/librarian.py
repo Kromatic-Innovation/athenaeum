@@ -94,7 +94,11 @@ from athenaeum import batch_state, detection_state, push_state, spend, zero_yiel
 from athenaeum._retry import TransientAPIError
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.authority import AuthorityManifest, load_authority_manifest
-from athenaeum.bounce_contract import check_tier0_bounce_conformance
+from athenaeum.bounce_contract import (
+    check_tier0_bounce_conformance,
+    check_tier0_bounce_verdict_conformance,
+)
+from athenaeum.bounce_join import WIKI_BOUNCED_FIELD
 from athenaeum.clusters import (
     EMBEDDER_CHROMADB_DEFAULT,
     EMBEDDER_FALLBACK_HASHING,
@@ -213,7 +217,10 @@ from athenaeum.provider import (
 )
 from athenaeum.quarantine import quarantine_file as _quarantine_file
 from athenaeum.registry import assert_handles_placed, collect_handles
-from athenaeum.rule_proposals import _get_rule_proposals_model, run_rule_proposal_detection
+from athenaeum.rule_proposals import (
+    _get_rule_proposals_model,
+    run_rule_proposal_detection,
+)
 from athenaeum.rules import run_shape_rule_phase
 from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home now
     REGRESSION_ALERT_PREFIX,
@@ -765,7 +772,9 @@ def git_push(
     )
     _push_cache_dir = _resolve_cache_dir(None)
     if result.returncode != 0:
-        reason = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+        reason = (
+            result.stderr or result.stdout or ""
+        ).strip() or f"exit {result.returncode}"
         # Non-fatal: surface the failure with a distinct log line so an
         # operator (or the routine watching the run) can see exactly which
         # remote rejected the push and why. Commits remain intact locally.
@@ -780,10 +789,13 @@ def git_push(
         _previous_push_state = push_state.load_state(_push_cache_dir)
         _consecutive = (
             _previous_push_state["consecutive"] + 1
-            if _previous_push_state["last_reason"] == reason[: push_state.MAX_REASON_LENGTH]
+            if _previous_push_state["last_reason"]
+            == reason[: push_state.MAX_REASON_LENGTH]
             else 1
         )
-        push_state.write_state(_push_cache_dir, consecutive=_consecutive, last_reason=reason)
+        push_state.write_state(
+            _push_cache_dir, consecutive=_consecutive, last_reason=reason
+        )
         _push_alert_threshold = librarian_push_failure_alert_threshold()
         if _consecutive >= _push_alert_threshold:
             log.error(
@@ -1034,7 +1046,9 @@ def tier0_handle_upsert(
                 return None
             uid = resolved_uid
 
-    existing_meta, existing_body = parse_frontmatter(existing_path.read_text(encoding="utf-8"))
+    existing_meta, existing_body = parse_frontmatter(
+        existing_path.read_text(encoding="utf-8")
+    )
     if not existing_meta:
         return None
 
@@ -1076,7 +1090,9 @@ def tier0_handle_upsert(
         ],
         access=str(existing_meta.get("access", "internal")),
         tags=[
-            str(t) for t in (existing_tags if isinstance(existing_tags, list) else []) if t
+            str(t)
+            for t in (existing_tags if isinstance(existing_tags, list) else [])
+            if t
         ],
         created=str(existing_meta.get("created", date.today().isoformat())),
         updated=str(existing_meta.get("updated", date.today().isoformat())),
@@ -1166,7 +1182,9 @@ def tier0_bounce_mark(
     # `conforms` is exactly the conjunction the eligibility list above states,
     # so these three are populated together and never None here.
     fact = check.fact
-    assert fact is not None and check.observed_at is not None and check.source is not None
+    assert (
+        fact is not None and check.observed_at is not None and check.source is not None
+    )
     source: str | dict[str, Any] = check.source
 
     if dry_run:
@@ -1182,6 +1200,190 @@ def tier0_bounce_mark(
         index=excluded_index,
     )
     return fact
+
+
+def tier0_bounce_verdict_mark(
+    raw: RawFile,
+    index: EntityIndex,
+    wiki_root: Path,
+    dry_run: bool = False,
+) -> tuple[WikiEntity, bool] | None:
+    """Deterministically stamp a verified-undeliverable, non-RFC bounce
+    verdict onto an EXISTING wiki page's ``bounced:`` frontmatter field
+    (issue athenaeum#1341 — a narrow, scoped REVERSAL of athenaeum#852's
+    read-only stance on that field).
+
+    **Why athenaeum#852's read-only stance is reversed, narrowly.**
+    athenaeum#852 decided the wiki ``bounced:`` field
+    (:data:`athenaeum.bounce_join.WIKI_BOUNCED_FIELD`) is written by "a
+    producer outside athenaeum" and athenaeum only ever reads it, via
+    :func:`athenaeum.bounce_join.deliverability_for_page`. That held because
+    every non-RFC verdict already had SOME producer. It no longer holds for
+    one narrow class: voltaire's historical bounce-bio backfill normalizes
+    the verifalia verdicts it recognizes into RFC 3463-conforming notes
+    (caught by :func:`tier0_bounce_mark` above), but explicitly leaves a bare
+    SMTP ``550``/``552`` reply — and any other verified-permanent, non-RFC
+    verdict — un-normalized, because "a separate, athenaeum-side structured
+    path handles those, not this one." Before this function, that path did
+    not exist: such a note fell through Tier 0 entirely and compiled as
+    ordinary LLM-reasoned prose, silently losing the structured fact. This
+    function is that path — scoped to exactly the verdict class athenaeum#852
+    left an actual gap for, nothing broader.
+
+    **WIKI surface only — never PII.** This function takes no
+    contacts-root/excluded-surface argument at all (mirroring
+    :func:`tier0_do_not_email_mark`'s own hard constraint) and never calls
+    :func:`athenaeum.pii.mark_bounced`. :mod:`athenaeum.bounce_join`'s
+    ``hard_bounced`` (PII, RFC ``5.x.x`` only) vs. ``wiki_verdict`` (wiki,
+    opaque union) separation is exactly what a verified-but-non-RFC verdict
+    is supposed to land on — the wiki half — and this function writes
+    nothing else. It never promotes a verdict written here into a PII mark;
+    nothing in this codebase reads ``bounced:`` back into
+    :func:`~athenaeum.pii.mark_bounced` either.
+
+    Eligibility is
+    :func:`athenaeum.bounce_contract.check_tier0_bounce_verdict_conformance`,
+    which this function calls and then does nothing but write on top of —
+    same drift-prevention shape as :func:`tier0_bounce_mark` sharing
+    :func:`~athenaeum.bounce_contract.check_tier0_bounce_conformance`. A note
+    already carrying an RFC ``5.x.x`` code is declined by that check
+    directly (not merely left unclaimed by dispatch order), so calling this
+    function out of order, or directly in a test, cannot double-write a note
+    :func:`tier0_bounce_mark` already claimed.
+
+    **Target-page resolution mirrors :func:`tier0_do_not_email_mark`
+    exactly** (issue athenaeum#692's uid-then-name-fallback): the raw's own
+    ``uid`` frontmatter, when present, pins the EXACT target page (an
+    unresolvable pin FAILS LOUDLY — logged at WARNING, declines — rather than
+    silently falling back to name/alias resolution); otherwise the detected
+    address is resolved by name/alias against an existing entity-format page.
+    Either way this is an UPSERT onto an EXISTING page only — a brand-new
+    address is left to the LLM tiers, it never creates a page.
+
+    Idempotent: once the target page already carries a non-empty
+    ``bounced:`` value — whichever producer wrote it, this function included
+    on an earlier run — this is a no-op (``(entity, False)``, no rewrite):
+    existing evidence, from any producer, is never overwritten by a later,
+    possibly differently-worded verdict about the same address. Otherwise
+    ``bounced:`` is set to the verbatim diagnostic line the verdict was found
+    on, and ``(entity, True)`` is returned.
+
+    Respects *dry_run* exactly like :func:`tier0_bounce_mark` /
+    :func:`tier0_do_not_email_mark`: detect and report, never write.
+    """
+    check = check_tier0_bounce_verdict_conformance(raw.content)
+    if not check.conforms:
+        return None
+
+    # `conforms` is exactly the conjunction the eligibility list above
+    # states, so these are populated together and never None here.
+    fact = check.fact
+    assert (
+        fact is not None and check.observed_at is not None and check.source is not None
+    )
+
+    meta, _ = parse_frontmatter(raw.content)
+    pinned_uid = str(meta.get("uid", "") or "").strip()
+    if pinned_uid:
+        existing_path = index.get_by_uid(pinned_uid)
+        if existing_path is None or not existing_path.exists():
+            log.warning(
+                "  T0 bounce-verdict: note pins uid %r but it does not "
+                "resolve to an existing page — mark NOT placed; falling "
+                "through would silently degrade to body prose (fix the "
+                "note's uid)",
+                pinned_uid,
+            )
+            return None
+        resolved_uid = pinned_uid
+    else:
+        resolved = index.lookup(fact.identifier)
+        if resolved is None:
+            # Names no existing entity — this deterministic path only
+            # UPSERTS onto an existing page; a brand-new address is left to
+            # the LLM tiers, matching tier0_do_not_email_mark's fallback shape.
+            log.info(
+                "  T0 bounce-verdict: verdict for %r names no existing "
+                "entity and pins no uid — leaving to LLM tiers",
+                fact.identifier,
+            )
+            return None
+        resolved_uid, existing_path = resolved.uid, resolved.path
+        if (
+            not resolved_uid
+            or not existing_path.exists()
+            or not index.has_entity_format(existing_path)
+        ):
+            log.warning(
+                "  T0 bounce-verdict: verdict for %r matched a non-entity "
+                "page %s — mark not placed",
+                fact.identifier,
+                existing_path.name,
+            )
+            return None
+
+    existing_meta, existing_body = parse_frontmatter(
+        existing_path.read_text(encoding="utf-8")
+    )
+    if not existing_meta:
+        return None
+
+    already_verdicted = bool(
+        str(existing_meta.get(WIKI_BOUNCED_FIELD, "") or "").strip()
+    )
+
+    existing_type = str(existing_meta.get("type", "") or "").strip()
+    existing_name = str(existing_meta.get("name", "") or "").strip()
+    existing_aliases = existing_meta.get("aliases")
+    existing_tags = existing_meta.get("tags")
+    entity = WikiEntity(
+        uid=resolved_uid,
+        type=existing_type,
+        name=existing_name,
+        aliases=[
+            str(a)
+            for a in (existing_aliases if isinstance(existing_aliases, list) else [])
+            if a
+        ],
+        access=str(existing_meta.get("access", "internal")),
+        tags=[
+            str(t)
+            for t in (existing_tags if isinstance(existing_tags, list) else [])
+            if t
+        ],
+        created=str(existing_meta.get("created", date.today().isoformat())),
+        updated=str(existing_meta.get("updated", date.today().isoformat())),
+        body=existing_body,
+    )
+
+    if already_verdicted:
+        # True no-op: some producer (possibly this one, on an earlier run)
+        # already recorded a bounced: value. Do not rewrite, do not clobber
+        # existing evidence with a possibly-differently-worded verdict.
+        return entity, False
+
+    merged_meta = dict(existing_meta)
+    merged_meta[WIKI_BOUNCED_FIELD] = fact.diagnostic
+
+    updated_today = date.today().isoformat()
+    merged_meta["updated"] = updated_today
+    entity.updated = updated_today
+
+    # Schema-gate the merged frontmatter before write — same guarantee
+    # tier0_do_not_email_mark gives, and (like that sibling) BEFORE the
+    # dry-run short-circuit, so a dry-run preview also catches a schema
+    # violation rather than reporting success on a merge that would fail to
+    # write.
+    validate_wiki_meta(merged_meta)
+
+    if dry_run:
+        return entity, True
+
+    atomic_write_text(
+        existing_path,
+        render_frontmatter(merged_meta) + "\n" + existing_body,
+    )
+    return entity, True
 
 
 def tier0_do_not_email_mark(
@@ -1289,7 +1491,9 @@ def tier0_do_not_email_mark(
             )
             return None
 
-    existing_meta, existing_body = parse_frontmatter(existing_path.read_text(encoding="utf-8"))
+    existing_meta, existing_body = parse_frontmatter(
+        existing_path.read_text(encoding="utf-8")
+    )
     if not existing_meta:
         return None
 
@@ -1310,7 +1514,9 @@ def tier0_do_not_email_mark(
         ],
         access=str(existing_meta.get("access", "internal")),
         tags=[
-            str(t) for t in (existing_tags if isinstance(existing_tags, list) else []) if t
+            str(t)
+            for t in (existing_tags if isinstance(existing_tags, list) else [])
+            if t
         ],
         created=str(existing_meta.get("created", date.today().isoformat())),
         updated=str(existing_meta.get("updated", date.today().isoformat())),
@@ -1681,6 +1887,36 @@ def process_one(
             "  T0 bounce-mark: %s marked non-deliverable on the contacts surface",
             bounce_fact.identifier,
         )
+        return result
+
+    # --- Tier 0 (bounce verdict mark): deterministic recognition of a
+    # verified-undeliverable, non-RFC bounce verdict (a bare SMTP 550-559
+    # reply, or an allowlisted verified list-verification verdict token) onto
+    # an EXISTING wiki page's `bounced:` frontmatter field (issue
+    # athenaeum#1341 — a narrow reversal of athenaeum#852's read-only stance
+    # on that field). See tier0_bounce_verdict_mark's docstring for why the
+    # reversal is scoped the way it is, and why it never touches the
+    # PII/contacts surface. A note already carrying an RFC 5.x.x code was
+    # already claimed by tier0_bounce_mark above and never reaches here;
+    # anything else that does not conform (ambiguous identifier, no verdict
+    # signal, no matching existing page) falls through to Tier 1/2/3
+    # completely unchanged.
+    verdict_upsert = tier0_bounce_verdict_mark(raw, index, wiki_root, dry_run=dry_run)
+    if verdict_upsert is not None:
+        verdict_entity, verdict_changed = verdict_upsert
+        if verdict_changed:
+            log.info(
+                "  T0 bounce-verdict: %s → %s (bounced: stamped)",
+                verdict_entity.name,
+                verdict_entity.filename,
+            )
+            result.updated.append(verdict_entity.uid)
+        else:
+            log.info(
+                "  T0 bounce-verdict: %s → %s (already carries a bounced: value, no-op)",
+                verdict_entity.name,
+                verdict_entity.filename,
+            )
         return result
 
     # --- Tier 0 (do-not-email mark): deterministic opt-out recognition onto
@@ -2861,9 +3097,7 @@ def unbatchable_knobs_enabled(config: dict[str, object] | None) -> list[str]:
     return sorted(
         knob
         for knob, value in _librarian_batch_section(config).items()
-        if isinstance(knob, str)
-        and knob not in BATCHABLE_KNOBS
-        and value is True
+        if isinstance(knob, str) and knob not in BATCHABLE_KNOBS and value is True
     )
 
 
@@ -3043,7 +3277,9 @@ def librarian_quarantine_threshold(config: dict[str, object] | None = None) -> i
     return DEFAULT_QUARANTINE_THRESHOLD
 
 
-def librarian_zero_yield_alert_threshold(config: dict[str, object] | None = None) -> int:
+def librarian_zero_yield_alert_threshold(
+    config: dict[str, object] | None = None
+) -> int:
     """Resolve the consecutive-zero-yield count at which the ALERT fires (issue athenaeum#1177).
 
     Mirrors :func:`librarian_stuck_file_threshold` (athenaeum#663) exactly: the
@@ -3364,7 +3600,12 @@ def _record_bound_violation(
     entry = ledger.get(key)
     if not isinstance(entry, dict) or entry.get("hash") != content_hash:
         # New file, or the content changed since the last violation — fresh count.
-        entry = {"hash": content_hash, "violations": 0, "first_violated": now, "escalated": False}
+        entry = {
+            "hash": content_hash,
+            "violations": 0,
+            "first_violated": now,
+            "escalated": False,
+        }
     entry["violations"] = int(entry.get("violations", 0)) + 1
     entry["last_violated"] = now
     entry["last_bound"] = bound
@@ -3744,6 +3985,7 @@ def _write_deferred_manifest(
 # grep it out of a busy nightly log without parsing prose. No phase logic,
 # ordering, or exit code is affected by any of this.
 # ---------------------------------------------------------------------------
+
 
 def _render_schema_fragment_attribution(
     state: "dict[str, tuple[str, bool]]",
@@ -4286,9 +4528,7 @@ class RunContext:
             self.out_run_stats["collected_refs"] = list(self.collected_refs)
             # Issue athenaeum#1146 AC7: the reconciliation tally, machine-detectable
             # rather than only rendered into the run-summary line.
-            self.out_run_stats["batch_reconciliation"] = dict(
-                self.batch_reconciliation
-            )
+            self.out_run_stats["batch_reconciliation"] = dict(self.batch_reconciliation)
             # Issue athenaeum#663: stuck files (crossed the consecutive-failure threshold
             # or skipped because they already had) as machine-detectable state,
             # so a consumer can distinguish a permanent no-progress loop from a
@@ -4300,7 +4540,9 @@ class RunContext:
             # Issue athenaeum#1185: refs skipped this run because they are still
             # within their exponential-backoff window, mirroring stuck_files/
             # quarantined_files above.
-            self.out_run_stats["backoff_skipped_files"] = list(self.backoff_skipped_files)
+            self.out_run_stats["backoff_skipped_files"] = list(
+                self.backoff_skipped_files
+            )
             # Issue athenaeum#669: surface the entity-phase share yield (athenaeum#440) as
             # machine-detectable run state. cron-fleet#94 detects a capped run by
             # DURATION (`LIBRARIAN_CAP_DEADLINE`), which the athenaeum#440 yield made inert
@@ -4356,7 +4598,9 @@ class RunContext:
             frag_state: "dict[str, tuple[str, bool]] | None" = schema_fragment_state(
                 self.wiki_root
             )
-        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive; helper is hardened
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 — pragma: no cover - defensive; helper is hardened
             log.debug("run-summary: schema_fragment_state skipped: %s", exc)
             frag_state = None
         try:
@@ -4694,7 +4938,13 @@ _LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS = frozenset({"topic", "rule_proposals"})
 #: == set(prompt_registry.KNOBS)`` (with no overlap) at TEST time instead, so
 #: a ninth knob added to ``_META_ROWS`` without an explicit routing decision
 #: here still fails loudly — just via a test, not a runtime import.
-_LIBRARIAN_ROUTED_KNOBS = ("classify", "write", "resolve", "reasoning_t1", "reasoning_t2")
+_LIBRARIAN_ROUTED_KNOBS = (
+    "classify",
+    "write",
+    "resolve",
+    "reasoning_t1",
+    "reasoning_t2",
+)
 
 
 def _run_preconditions(ctx: RunContext) -> int | None:
@@ -5188,7 +5438,10 @@ def _run_shape_rule_phase(ctx: RunContext) -> None:
         shape_rules_deadline = time.monotonic() + _shape_rules_share * ctx.max_runtime
 
     def _deadline_check() -> bool:
-        return shape_rules_deadline is not None and time.monotonic() >= shape_rules_deadline
+        return (
+            shape_rules_deadline is not None
+            and time.monotonic() >= shape_rules_deadline
+        )
 
     unclaimed_candidates = discover_unclaimed_shape_rule_candidates(
         ctx.raw_root, ctx.knowledge_root, ctx.config
@@ -5401,7 +5654,9 @@ def _run_rule_proposal_phase(ctx: RunContext) -> None:
         ctx.rule_proposals_summary = {"skipped_deadline_tripped": True}
         return
 
-    _provider = resolve_provider(ctx.config, knob="rule_proposals", default=ctx.provider)
+    _provider = resolve_provider(
+        ctx.config, knob="rule_proposals", default=ctx.provider
+    )
     ctx.knob_providers["rule_proposals"] = _provider
     ctx.knob_models["rule_proposals"] = _get_rule_proposals_model(ctx.config)
     client = build_llm_client(
@@ -5533,7 +5788,9 @@ def _run_correction_phase(ctx: RunContext) -> None:
             key = (outcome.submitter, str(result.field))
             cap_hits[key] = cap_hits.get(key, 0) + 1
             return False
-        target_desc = json.dumps(result.target, sort_keys=True) if result.target else "?"
+        target_desc = (
+            json.dumps(result.target, sort_keys=True) if result.target else "?"
+        )
         is_schema_proposal = result.disposition == "held-schema-proposal"
         description_lines = [
             f"Target: {target_desc}",
@@ -5549,21 +5806,32 @@ def _run_correction_phase(ctx: RunContext) -> None:
         item = EscalationItem(
             raw_ref=f"{outcome.source}/{outcome.path.name}",
             entity_name=result.entity_name or "unknown",
-            conflict_type="schema-amendment" if is_schema_proposal else "field-correction",
+            conflict_type=(
+                "schema-amendment" if is_schema_proposal else "field-correction"
+            ),
             description="\n".join(description_lines),
         )
-        tier4_escalate([item], pending_path, config=ctx.config, projects_root=ctx.projects_root)
+        tier4_escalate(
+            [item], pending_path, config=ctx.config, projects_root=ctx.projects_root
+        )
         open_ids.add(result.correction_id)
         escalated_this_run.add(result.correction_id)
         return True
 
     _corrections_share = resolve_corrections_runtime_share(ctx.config)
     corrections_deadline: float | None = None
-    if ctx.run_deadline is not None and _corrections_share > 0.0 and ctx.max_runtime is not None:
+    if (
+        ctx.run_deadline is not None
+        and _corrections_share > 0.0
+        and ctx.max_runtime is not None
+    ):
         corrections_deadline = time.monotonic() + _corrections_share * ctx.max_runtime
 
     def _deadline_check() -> bool:
-        return corrections_deadline is not None and time.monotonic() >= corrections_deadline
+        return (
+            corrections_deadline is not None
+            and time.monotonic() >= corrections_deadline
+        )
 
     index = EntityIndex(ctx.wiki_root)
     _corrections_calls_before = ctx.usage.api_calls
@@ -5594,8 +5862,7 @@ def _run_correction_phase(ctx: RunContext) -> None:
         )
     if summary["batches_processed"] or summary["batches_carried_over"]:
         log.info(
-            "corrections: %d batch(es) processed, %d carried over, "
-            "dispositions=%s",
+            "corrections: %d batch(es) processed, %d carried over, " "dispositions=%s",
             summary["batches_processed"],
             summary["batches_carried_over"],
             summary["dispositions"],
@@ -5668,9 +5935,7 @@ def _run_name_collision_phase(ctx: RunContext) -> None:
         # run that found zero collisions.
         _fields = {"reason": "failed"}
     finally:
-        ctx.run_profile.append(
-            ("name-collisions", time.monotonic() - _start, _fields)
-        )
+        ctx.run_profile.append(("name-collisions", time.monotonic() - _start, _fields))
 
 
 def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
@@ -5745,7 +6010,9 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
                         "Gate-1-only degraded mode",
                         exc,
                     )
-                except Exception as exc:  # noqa: BLE001 - mirrors the CLI offline degrade
+                except (
+                    Exception
+                ) as exc:  # noqa: BLE001 - mirrors the CLI offline degrade
                     log.warning(
                         "wiki-page dedup: no LLM client (%s); comparator "
                         "Gate 2 unavailable — continuing in Gate-1-only "
@@ -5868,9 +6135,7 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
             {
                 "detector_haiku": _merge_only_stats.get("haiku_calls", 0),
                 "resolver_opus": _merge_only_stats.get("resolve_calls", 0),
-                "sweep_pairs": _merge_only_stats.get(
-                    "pairs_added_via_similarity", 0
-                ),
+                "sweep_pairs": _merge_only_stats.get("pairs_added_via_similarity", 0),
                 "clusters_merged": _merge_only_stats.get("entries_merged", 0),
                 "escalations": _merge_only_stats.get("escalations_written", 0),
                 "reason": _auto_memory_reason(_merge_only_stats),
@@ -5912,7 +6177,10 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
         _reresolve_start = time.monotonic()
         _reresolve_calls_before = ctx.usage.api_calls
         _run_reresolve_pass(
-            ctx.knowledge_root, config=ctx.config, client=ctx.resolve_client, usage=ctx.usage
+            ctx.knowledge_root,
+            config=ctx.config,
+            client=ctx.resolve_client,
+            usage=ctx.usage,
         )
         ctx.run_profile.append(
             (
@@ -6045,9 +6313,7 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
         # Issue athenaeum#1144: a collect that pipelines into a new tier-3 batch
         # is bounded by the same wall-clock budget the submit path is.
         deadline=(
-            ctx.entity_deadline
-            if ctx.entity_deadline is not None
-            else ctx.run_deadline
+            ctx.entity_deadline if ctx.entity_deadline is not None else ctx.run_deadline
         ),
         cache_dir=cache_dir,
     )
@@ -6060,7 +6326,9 @@ def _run_pending_batch_collect_phase(ctx: "RunContext") -> None:
     ctx.total_truncated += outcome.truncated
     ctx.total_oversize_suppressed += outcome.oversize_suppressed  # issue athenaeum#1182
     ctx.total_oversize_split += outcome.oversize_split  # issue athenaeum#1248
-    ctx.total_oversize_log_demoted += outcome.oversize_log_demoted  # issue athenaeum#1248
+    ctx.total_oversize_log_demoted += (
+        outcome.oversize_log_demoted
+    )  # issue athenaeum#1248
     ctx.total_type_rejected += outcome.type_rejected  # issue athenaeum#1196
     ctx.collected_refs = list(outcome.collected_refs)
     ctx.batch_reconciliation = dict(outcome.reconciliation)
@@ -6291,9 +6559,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ", ".join(ctx.starved_sources),
                 )
 
-            valid_types, valid_tags, valid_access = _resolve_schema_lists(
-                ctx.wiki_root
-            )
+            valid_types, valid_tags, valid_access = _resolve_schema_lists(ctx.wiki_root)
 
             index = EntityIndex(ctx.wiki_root)
             log.info("Loaded %d wiki entries into index", len(index))
@@ -6472,11 +6738,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.total_oversize_suppressed = (
                         outcome.oversize_suppressed
                     )  # issue athenaeum#1182
-                    ctx.total_oversize_split = outcome.oversize_split  # issue athenaeum#1248
+                    ctx.total_oversize_split = (
+                        outcome.oversize_split
+                    )  # issue athenaeum#1248
                     ctx.total_oversize_log_demoted = (
                         outcome.oversize_log_demoted
                     )  # issue athenaeum#1248
-                    ctx.total_type_rejected = outcome.type_rejected  # issue athenaeum#1196
+                    ctx.total_type_rejected = (
+                        outcome.type_rejected
+                    )  # issue athenaeum#1196
                     ctx.failed_files = outcome.failed_refs
                     ctx.deferred_refs = outcome.deferred_refs
                     # Issue athenaeum#1144 AC5.
@@ -6493,8 +6763,8 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # Issue athenaeum#1185: exponential backoff BETWEEN a file's
                     # consecutive failures, before it crosses stuck_threshold
                     # above — see _stuck_backoff_seconds's docstring.
-                    stuck_backoff_base_seconds = librarian_stuck_file_backoff_base_seconds(
-                        ctx.config
+                    stuck_backoff_base_seconds = (
+                        librarian_stuck_file_backoff_base_seconds(ctx.config)
                     )
                     # Issue athenaeum#898: the persistent bound-violation ledger (mirrors
                     # the stuck-file ledger's shape, tracked separately — see
@@ -6600,7 +6870,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             and _stuck_backoff_window_open(
                                 _stuck,
                                 base_seconds=stuck_backoff_base_seconds,
-                                now=ctx.now if ctx.now is not None else datetime.now(timezone.utc),
+                                now=(
+                                    ctx.now
+                                    if ctx.now is not None
+                                    else datetime.now(timezone.utc)
+                                ),
                             )
                         ):
                             ctx.backoff_skipped_files.append(raw.ref)
@@ -6837,7 +7111,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     threshold=quarantine_threshold,
                                 )
                                 if _crossed is not None and _quarantine_and_surface(
-                                    ctx, raw, _crossed, bound=exc.bound, detail=exc.detail
+                                    ctx,
+                                    raw,
+                                    _crossed,
+                                    bound=exc.bound,
+                                    detail=exc.detail,
                                 ):
                                     quarantine_candidates.pop(raw.ref, None)
                             continue
@@ -6873,7 +7151,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             # Issue athenaeum#1177: named for the all-calls-failed exit
                             # reason below, mirroring the WARNING line's own
                             # exception-type naming just above.
-                            ctx.entity_last_failure_class = type(exc.last_error).__name__
+                            ctx.entity_last_failure_class = type(
+                                exc.last_error
+                            ).__name__
                             # Issue athenaeum#663: a genuinely transient overload will NOT
                             # recur on the same file N nights running, so counting
                             # it toward "stuck" is safe — only a RELIABLY-failing
@@ -6885,7 +7165,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     stuck_ledger,
                                     raw,
                                     error=f"TransientAPIError:{type(exc.last_error).__name__}",
-                                    action=getattr(exc, "athenaeum_failing_action", None),
+                                    action=getattr(
+                                        exc, "athenaeum_failing_action", None
+                                    ),
                                     threshold=stuck_threshold,
                                     now=ctx.now,
                                 )
@@ -6923,7 +7205,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     stuck_ledger,
                                     raw,
                                     error=type(exc).__name__,
-                                    action=getattr(exc, "athenaeum_failing_action", None),
+                                    action=getattr(
+                                        exc, "athenaeum_failing_action", None
+                                    ),
                                     threshold=stuck_threshold,
                                     now=ctx.now,
                                 )
@@ -6948,7 +7232,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # tolerate a double that predates the ``degraded`` field
                         # (the real ProcessingResult always carries it, default 0).
                         ctx.total_degraded += getattr(result, "degraded", 0)
-                        ctx.total_truncated += getattr(result, "truncated", 0)  # athenaeum#476
+                        ctx.total_truncated += getattr(
+                            result, "truncated", 0
+                        )  # athenaeum#476
                         ctx.total_type_rejected += getattr(
                             result, "type_rejected", 0
                         )  # issue athenaeum#1196
@@ -7007,7 +7293,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # it when empty). Durable cross-run state, committed with the
                     # run's git snapshot exactly like the deferred manifest.
                     if not ctx.dry_run:
-                        _write_quarantine_candidates(ctx.wiki_root, quarantine_candidates)
+                        _write_quarantine_candidates(
+                            ctx.wiki_root, quarantine_candidates
+                        )
                         _write_stuck_ledger(ctx.wiki_root, stuck_ledger)
 
                 # Issue athenaeum#220: a budget-tripped run must be visibly DEGRADED,
@@ -7154,7 +7442,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         elif ctx.deferred_refs:
             _entity_exit_reason = manifest_reason
         elif _entity_attempted > 0 and _entity_calls == 0:
-            _entity_exit_reason = f"all-calls-failed:{ctx.entity_last_failure_class or 'unknown'}"
+            _entity_exit_reason = (
+                f"all-calls-failed:{ctx.entity_last_failure_class or 'unknown'}"
+            )
         elif (
             ctx.processed_count == 0
             and _entity_attempted == 0
@@ -7248,11 +7538,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # Post-fix the pairs are normally equal; they diverge only
                     # when a file crosses a threshold mid-run.
                     **({"held_stuck": n_stuck_held} if n_stuck_held else {}),
-                    **(
-                        {"held_backoff": n_backoff_held}
-                        if n_backoff_held
-                        else {}
-                    ),
+                    **({"held_backoff": n_backoff_held} if n_backoff_held else {}),
                     # athenaeum#1291 AC3: sources with pending intake that got
                     # zero slots in this run's window, as one comma-joined
                     # token (the `reconciled` convention below). Rendered only
@@ -7323,7 +7609,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # athenaeum#476: a truncation drop (max_tokens) is surfaced
                     # separately from a parse ``degraded`` so the two are
                     # never conflated in the summary either.
-                    **({"truncated": ctx.total_truncated} if ctx.total_truncated else {}),
+                    **(
+                        {"truncated": ctx.total_truncated}
+                        if ctx.total_truncated
+                        else {}
+                    ),
                     # athenaeum#1182: pages the page-size invariant suppressed a
                     # merge into this run (routed to "review" escalation
                     # instead, page left unmodified). Only rendered when
@@ -7480,12 +7770,17 @@ def _stamp_unclassified_claim_kinds(
         path = getattr(am, "path", None)
         if path is None:
             continue
-        kind = stamp_claim_kind(path, client, config=config, usage=usage, wiki_root=wiki_root)
+        kind = stamp_claim_kind(
+            path, client, config=config, usage=usage, wiki_root=wiki_root
+        )
         if kind:
             am.claim_kind = kind
             stamped += 1
     if stamped:
-        log.info("claim_kind: stamped %d previously-unclassified auto-memory file(s)", stamped)
+        log.info(
+            "claim_kind: stamped %d previously-unclassified auto-memory file(s)",
+            stamped,
+        )
 
 
 def _run_auto_memory_phase(ctx: RunContext) -> int | None:
@@ -7509,7 +7804,9 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     # intake cannot silently keep degrading push quality with no visibility.
     # Nothing on disk is touched either way; a blocked run simply re-checks
     # (and, if still unhealthy, re-skips) next time.
-    gate_status = check_ingestion_gate(config=ctx.config, cache_dir=_resolve_cache_dir(None))
+    gate_status = check_ingestion_gate(
+        config=ctx.config, cache_dir=_resolve_cache_dir(None)
+    )
     ctx.ingestion_gate_status = gate_status.to_dict()
     if gate_status.blocked:
         log.warning(
@@ -7523,7 +7820,9 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     # merge has a fresh grouping to consume. Scope identity is preserved
     # on each record so the tier pipeline and the cluster pass both see
     # the same routing key.
-    auto_memory_files = discover_auto_memory_files(ctx.knowledge_root, config=ctx.config)
+    auto_memory_files = discover_auto_memory_files(
+        ctx.knowledge_root, config=ctx.config
+    )
     if not auto_memory_files:
         return None
 
@@ -7568,9 +7867,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     )
     if ctx.dry_run:
         for scope, count in sorted(by_scope.items()):
-            log.info(
-                "  [DRY RUN] auto-memory scope %s: %d file(s)", scope, count
-            )
+            log.info("  [DRY RUN] auto-memory scope %s: %d file(s)", scope, count)
     else:
         # Issue athenaeum#742: stamp claim_kind on every not-yet-classified member
         # BEFORE clustering, so the freshly-stamped kind is visible to C2/C3
@@ -7580,7 +7877,11 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         # — mirrors every other LLM-bearing step in this phase, which is
         # already skipped above for dry-run.
         _stamp_unclassified_claim_kinds(
-            auto_memory_files, ctx.classify_client, ctx.config, ctx.usage, wiki_root=ctx.wiki_root
+            auto_memory_files,
+            ctx.classify_client,
+            ctx.config,
+            ctx.usage,
+            wiki_root=ctx.wiki_root,
         )
 
     # Issue athenaeum#463 (slice D of athenaeum#460): the nightly run's own delta
@@ -7706,13 +8007,9 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 {
                     "detector_haiku": _merge_stats.get("haiku_calls", 0),
                     "resolver_opus": _merge_stats.get("resolve_calls", 0),
-                    "sweep_pairs": _merge_stats.get(
-                        "pairs_added_via_similarity", 0
-                    ),
+                    "sweep_pairs": _merge_stats.get("pairs_added_via_similarity", 0),
                     "clusters_merged": _merge_stats.get("entries_merged", 0),
-                    "escalations": _merge_stats.get(
-                        "escalations_written", 0
-                    ),
+                    "escalations": _merge_stats.get("escalations_written", 0),
                     # Issue athenaeum#1279: per-file embedder provenance this run's
                     # C2 cluster pass resolved — see
                     # ``clusters.cluster_auto_memory_files``'s
@@ -7736,20 +8033,14 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             {
                 "detector_haiku": _merge_stats.get("haiku_calls", 0),
                 "resolver_opus": _merge_stats.get("resolve_calls", 0),
-                "sweep_pairs": _merge_stats.get(
-                    "pairs_added_via_similarity", 0
-                ),
+                "sweep_pairs": _merge_stats.get("pairs_added_via_similarity", 0),
                 "clusters_merged": _merge_stats.get("entries_merged", 0),
                 "escalations": _merge_stats.get("escalations_written", 0),
                 # Issue athenaeum#1279: per-file embedder provenance this run's C2
                 # cluster pass resolved — see the deadline-trip branch above
                 # for the full rationale.
-                "embed_chromadb": _embedder_counts.get(
-                    EMBEDDER_CHROMADB_DEFAULT, 0
-                ),
-                "embed_fallback": _embedder_counts.get(
-                    EMBEDDER_FALLBACK_HASHING, 0
-                ),
+                "embed_chromadb": _embedder_counts.get(EMBEDDER_CHROMADB_DEFAULT, 0),
+                "embed_fallback": _embedder_counts.get(EMBEDDER_FALLBACK_HASHING, 0),
                 # Issue athenaeum#1177 (AC3): no longer unconditionally
                 # "completed" -- see ``_auto_memory_reason``.
                 "reason": _auto_memory_reason(_merge_stats),
@@ -7776,13 +8067,9 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             current_snapshot = _auto_memory_hash_snapshot(
                 auto_memory_files, ctx.knowledge_root
             )
-            _write_auto_memory_manifest(
-                auto_memory_manifest_path, current_snapshot
-            )
+            _write_auto_memory_manifest(auto_memory_manifest_path, current_snapshot)
         except Exception as exc:  # noqa: BLE001 — stamp write must not break the run
-            log.warning(
-                "auto-memory delta baseline write failed (non-fatal): %s", exc
-            )
+            log.warning("auto-memory delta baseline write failed (non-fatal): %s", exc)
         if not _delta_taken_out.get("taken", False):
             try:
                 _write_full_compile_stamp(
@@ -7791,9 +8078,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                     _capture_head(ctx.knowledge_root),
                 )
             except Exception as exc:  # noqa: BLE001 — must not break the run
-                log.warning(
-                    "full-compile stamp write failed (non-fatal): %s", exc
-                )
+                log.warning("full-compile stamp write failed (non-fatal): %s", exc)
 
     # Issue athenaeum#909: advance the C4-specific "last completed sweep" stamp
     # whenever the merge call just above actually examined the WHOLE corpus
@@ -7813,9 +8098,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         try:
             _write_timestamp_stamp(contradiction_sweep_stamp_path, run_now)
         except Exception as exc:  # noqa: BLE001 — must not break the run
-            log.warning(
-                "contradiction-sweep stamp write failed (non-fatal): %s", exc
-            )
+            log.warning("contradiction-sweep stamp write failed (non-fatal): %s", exc)
 
     # Issue athenaeum#396: deadline check at the post-compile phase boundary,
     # before the retire + reresolve passes (both can commit / make
@@ -7864,7 +8147,10 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         _reresolve_start = time.monotonic()  # issue athenaeum#464
         _reresolve_calls_before = ctx.usage.api_calls
         _run_reresolve_pass(
-            ctx.knowledge_root, config=ctx.config, client=ctx.resolve_client, usage=ctx.usage
+            ctx.knowledge_root,
+            config=ctx.config,
+            client=ctx.resolve_client,
+            usage=ctx.usage,
         )
         ctx.run_profile.append(
             (
@@ -8120,7 +8406,9 @@ def _run_finalize_phase(ctx: RunContext) -> int:
             files_processed=ctx.files_processed_count,
             wiki_root=ctx.wiki_root,
         )
-        if not _ledger_written and (ctx.usage.api_calls > 0 or ctx.usage.total_tokens > 0):
+        if not _ledger_written and (
+            ctx.usage.api_calls > 0 or ctx.usage.total_tokens > 0
+        ):
             from athenaeum.config import resolve_spend_ledger_enabled
 
             if resolve_spend_ledger_enabled(ctx.config):
@@ -8149,9 +8437,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         # every run.
         _zy_cache_dir = _resolve_cache_dir(None)
         _zy_previous = zero_yield.load_state(_zy_cache_dir)
-        ctx.zero_yield_tripped = _zero_yield_tripped(
-            ctx, _zy_previous["deferred_refs"]
-        )
+        ctx.zero_yield_tripped = _zero_yield_tripped(ctx, _zy_previous["deferred_refs"])
         ctx.zero_yield_consecutive = (
             _zy_previous["consecutive"] + 1 if ctx.zero_yield_tripped else 0
         )
@@ -8169,7 +8455,9 @@ def _run_finalize_phase(ctx: RunContext) -> int:
             # having done nothing at all, the opposite of what this line
             # exists to make visible.
             _zy_calls_spent = (
-                ctx.usage.api_calls if ctx.usage.api_calls > 0 else ctx.usage.attempted_calls
+                ctx.usage.api_calls
+                if ctx.usage.api_calls > 0
+                else ctx.usage.attempted_calls
             )
             log.warning(
                 "%s: run spent %d LLM call(s) over %.1fs and committed %d "
@@ -8262,7 +8550,9 @@ def _run_finalize_phase(ctx: RunContext) -> int:
                     len(_reval.retired),
                 )
         except Exception as exc:  # noqa: BLE001 — advisor must never break a run
-            log.warning("pending-merge revalidation advisor failed (non-fatal): %s", exc)
+            log.warning(
+                "pending-merge revalidation advisor failed (non-fatal): %s", exc
+            )
 
     # Issue athenaeum#712: verdict-ledger night bookkeeping. OFF by default
     # (librarian.verdict_ledger_enabled) — with the flag off, or with no
@@ -8324,9 +8614,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
             if _advisory is not None:
                 log.warning("%s", _advisory.line)
         except Exception as exc:  # noqa: BLE001 — advisor must never break a run
-            log.debug(
-                "backlog-drain advisor skipped (%s): %s", type(exc).__name__, exc
-            )
+            log.debug("backlog-drain advisor skipped (%s): %s", type(exc).__name__, exc)
 
     # Issue athenaeum#396: the entity loop hit the wall-clock deadline and deferred the
     # remaining intake. The partial progress is committed (terminal commit
@@ -8380,7 +8668,9 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         return EXIT_GRACEFUL_PARTIAL
 
     if ctx.failed_files:
-        log.warning("Failed files (will retry next run): %s", ", ".join(ctx.failed_files))
+        log.warning(
+            "Failed files (will retry next run): %s", ", ".join(ctx.failed_files)
+        )
         return 1
 
     # Issue athenaeum#227: opt-in strict mode for exit-code-based alerting. The
@@ -9190,9 +9480,7 @@ def _load_timestamp_stamp(path: Path) -> datetime | None:
     if not isinstance(at, str) or not at:
         return None
     try:
-        return datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=timezone.utc
-        )
+        return datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
 
