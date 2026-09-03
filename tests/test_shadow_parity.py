@@ -277,8 +277,36 @@ class TestDetectorVerdictFromResult:
         result = ContradictionResult(detected=True, conflict_type="factual", incomplete=True)
         assert detector_verdict_from_result(result) == "unavailable"
 
-    def test_not_detected(self) -> None:
+    def test_llm_unavailable_rationale_is_unavailable_not_not_detected(self) -> None:
+        """QA follow-up: a live run with no ANTHROPIC_API_KEY set (client=None)
+        produces exactly this result shape -- detected=False,
+        rationale="llm-unavailable", incomplete=False (client=None never
+        sets incomplete). This must NOT read as "not-detected": a lane that
+        never ran is an absent answer, not a genuine finding of no
+        contradiction."""
         result = ContradictionResult(detected=False, rationale="llm-unavailable")
+        assert detector_verdict_from_result(result) == "unavailable"
+
+    def test_non_transient_call_failure_is_also_unavailable(self) -> None:
+        """detect_contradictions' non-transient-failure fallback ALSO
+        returns rationale="llm-unavailable" with incomplete=False (only the
+        exhausted-retries path sets incomplete=True) -- both must map the
+        same way."""
+        result = ContradictionResult(
+            detected=False, rationale="llm-unavailable", incomplete=False
+        )
+        assert detector_verdict_from_result(result) == "unavailable"
+
+    def test_singleton_is_not_detected_not_unavailable(self) -> None:
+        """A one-member cluster genuinely cannot contradict itself -- a
+        structural fact, not a degradation, so rationale="singleton" must
+        stay "not-detected" even though it shares detected=False with the
+        llm-unavailable case."""
+        result = ContradictionResult(detected=False, rationale="singleton")
+        assert detector_verdict_from_result(result) == "not-detected"
+
+    def test_genuine_not_detected(self) -> None:
+        result = ContradictionResult(detected=False, rationale="no conflict found")
         assert detector_verdict_from_result(result) == "not-detected"
 
     @pytest.mark.parametrize("conflict_type", ["factual", "prescriptive", "stance"])
@@ -503,13 +531,11 @@ class TestAgreementMatrixOverFixtures:
         assert by_id["case_a"].detector_verdict == "not-detected"
         assert by_id["case_a"].comparator_verdict == "distinct"
         assert by_id["case_a"].agreement == "agree"
-        # comparator_calls counts PAIRS run through the comparator (the same
-        # "comparator call" vocabulary athenaeum.cluster_comparator.planned_pair_count
-        # already uses -- gate on or off, LLM spent or not), so the one
-        # Gate-1-resolved pair still counts as 1 here even though it cost
-        # zero tokens; the client-invocation count below is the separate,
-        # LLM-spend-specific fact.
-        assert by_id["case_a"].comparator_calls == 1
+        # comparator_calls counts calls actually DISPATCHED (QA finding B),
+        # NOT pairs merely processed -- case_a's one pair is Gate-1-resolved
+        # (disjoint valid-time windows), so it costs zero dispatches even
+        # though it has a real verdict in pair_verdicts.
+        assert by_id["case_a"].comparator_calls == 0
         assert comparator_client.messages.create.call_count == 3  # cases B, C, D only
 
         assert by_id["case_b"].detector_verdict == "factual"
@@ -523,6 +549,10 @@ class TestAgreementMatrixOverFixtures:
         assert by_id["case_d"].detector_verdict == "prescriptive"
         assert by_id["case_d"].comparator_verdict == "underdetermined"
         assert by_id["case_d"].agreement == "inconclusive"
+
+        # Report-level comparator_calls totals only the 3 DISPATCHED pairs
+        # (B, C, D) -- case_a's Gate-1-resolved pair is excluded.
+        assert report.comparator_calls == 3
 
         matrix = report.matrix
         assert matrix.counts[("not-detected", "distinct")] == 1
@@ -606,6 +636,32 @@ class TestMultiplierKnownCallCount:
         assert report.call_multiplier == pytest.approx(10 / 3)
         assert detector_client.messages.create.call_count == 3
         assert comparator_client.messages.create.call_count == 10
+
+    def test_measured_multiplier_matches_projected_when_every_call_is_made(
+        self, tmp_path: Path
+    ) -> None:
+        """QA finding B: measured and projected multipliers must be
+        computed the SAME way. This fixture has no dimension coordinates on
+        any member (no subject/claimed_scope/valid_from), so Gate 1 never
+        short-circuits a pair -- every planned pair actually dispatches,
+        which is exactly the condition under which the pre-run WORST-CASE
+        projection (raw pair count) and the post-run MEASURED count
+        (calls actually issued) must coincide."""
+        cases = [_sized_case("size2", 2), _sized_case("size3", 3)]
+        detector_client = _uniform_client(_detector_payload(detected=False))
+        comparator_client = _uniform_client(_content_relation_payload("compatible"))
+
+        report = run_shadow_parity(
+            cases,
+            detector_client=detector_client,
+            comparator_client=comparator_client,
+            workdir=tmp_path,
+        )
+
+        assert report.detector_calls == report.projection.projected_detector_calls
+        assert report.comparator_calls == report.projection.projected_comparator_calls
+        assert report.call_multiplier == report.projection.projected_multiplier
+        assert report.call_multiplier == pytest.approx(4 / 2)  # (1+3) pairs / 2 clusters
 
 
 # ---------------------------------------------------------------------------
@@ -719,6 +775,85 @@ class TestComparatorGateEnforced:
         assert report.aborted is True
         assert report.items == []
         assert "gate_enabled=False" in report.abort_reason
+
+
+# ---------------------------------------------------------------------------
+# QA follow-up — missing-client preflight (a live run repro: no
+# ANTHROPIC_API_KEY -> both clients None -> a "clean" fabricated report)
+# ---------------------------------------------------------------------------
+
+
+class TestMissingClientPreflight:
+    """Live-run repro: with no ``ANTHROPIC_API_KEY`` set,
+    ``athenaeum.provider.build_llm_client`` returns ``None`` for both
+    lanes, and (pre-fix) ``run_shadow_parity`` still produced a report
+    claiming ``agreement_rate: 1.000`` -- a parity harness with no model
+    client must abort, not measure "nothing" and call it a finding.
+    """
+
+    def test_both_clients_none_aborts_rather_than_produces_a_report(
+        self, tmp_path: Path
+    ) -> None:
+        cases = [_sized_case("s2", 2)]
+        report = run_shadow_parity(
+            cases, detector_client=None, comparator_client=None, workdir=tmp_path
+        )
+        assert report.aborted is True
+        assert report.items == []
+        assert "detector_client" in report.abort_reason
+        assert "comparator_client" in report.abort_reason
+
+    def test_detector_client_none_alone_aborts(self, tmp_path: Path) -> None:
+        cases = [_sized_case("s2", 2)]
+        comparator_client = _uniform_client(_content_relation_payload("compatible"))
+        report = run_shadow_parity(
+            cases,
+            detector_client=None,
+            comparator_client=comparator_client,
+            workdir=tmp_path,
+        )
+        assert report.aborted is True
+        assert report.items == []
+        assert "detector_client" in report.abort_reason
+        assert "comparator_client" not in report.abort_reason.split("is None")[0]
+
+    def test_comparator_client_none_alone_aborts(self, tmp_path: Path) -> None:
+        cases = [_sized_case("s2", 2)]
+        detector_client = _uniform_client(_detector_payload(detected=False))
+        report = run_shadow_parity(
+            cases,
+            detector_client=detector_client,
+            comparator_client=None,
+            workdir=tmp_path,
+        )
+        assert report.aborted is True
+        assert report.items == []
+        assert "comparator_client" in report.abort_reason
+
+    def test_cli_with_no_client_available_aborts_exit_1(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """End-to-end CLI repro of the exact live-run failure: no client
+        available (simulated here by monkeypatching build_llm_client to
+        return None, exactly what it does with no ANTHROPIC_API_KEY / no
+        claude-cli provider), --dry-run NOT passed -- must abort with exit
+        1 and a report naming the missing clients, never exit 0 with a
+        fabricated agreement_rate."""
+        monkeypatch.setattr("athenaeum.provider.build_llm_client", lambda *_a, **_k: None)
+        cases_path = EVAL_DATA_ROOT / "detector" / "cases.yaml"
+        monkeypatch.chdir(tmp_path)
+        exit_code = athenaeum_cli.main(
+            ["measure", "shadow-parity", "--cases", str(cases_path), "--json"]
+        )
+        assert exit_code == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["aborted"] is True
+        assert payload["items"] == []
+        assert "detector_client" in payload["abort_reason"]
+        assert "comparator_client" in payload["abort_reason"]
 
 
 # ---------------------------------------------------------------------------

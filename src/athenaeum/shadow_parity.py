@@ -327,14 +327,28 @@ COMPARATOR_VERDICTS: tuple[str, ...] = VERDICT_VALUES + ("no-decision",)
 def detector_verdict_from_result(result: ContradictionResult) -> str:
     """Map one :class:`~athenaeum.models.ContradictionResult` onto :data:`DETECTOR_VERDICTS`.
 
-    Precedence (checked in this order): ``incomplete=True`` -> ``"unavailable"``
-    (a fail-open degrade after exhausted retries is a genuinely absent
-    answer, not "not detected" — see
+    Precedence (checked in this order): ``incomplete=True`` OR
+    ``rationale == "llm-unavailable"`` -> ``"unavailable"``. Both are
+    genuinely ABSENT answers, not "no contradiction found": ``incomplete``
+    is the fail-open degrade after exhausted retries (see
     :func:`athenaeum.contradictions.detect_contradictions`'s ``incomplete``
-    contract); else ``detected=False`` -> ``"not-detected"``; else a known
-    ``conflict_type`` -> that type verbatim; else ``"detected-untyped"``.
+    contract); ``rationale == "llm-unavailable"`` is the literal
+    :func:`~athenaeum.contradictions.detect_contradictions` returns for
+    ``client is None`` (no key configured) AND for a non-transient call
+    failure — neither of those sets ``incomplete``, so checking
+    ``incomplete`` alone missed them (QA finding, live-run repro: a
+    ``client=None`` run reported ``detected=False`` for every cluster,
+    which this function used to map straight to ``"not-detected"`` — a
+    lane that never ran rendering as a genuine "no contradiction" finding,
+    scored `agree` against the comparator by :func:`classify_agreement`).
+    Everything else: ``detected=False`` -> ``"not-detected"`` (this
+    correctly still covers ``rationale == "singleton"`` — a one-member
+    cluster genuinely cannot contradict itself; that is a structural fact,
+    not a degradation, so it must NOT be swept into ``"unavailable"``);
+    else a known ``conflict_type`` -> that type verbatim; else
+    ``"detected-untyped"``.
     """
-    if result.incomplete:
+    if result.incomplete or result.rationale == "llm-unavailable":
         return "unavailable"
     if not result.detected:
         return "not-detected"
@@ -381,6 +395,38 @@ def roll_up_comparator_verdict(outcomes: Sequence[CompareOutcome]) -> str:
         if candidate in present:
             return candidate
     return "no-decision"
+
+
+def _comparator_calls_issued(outcomes: Sequence[CompareOutcome]) -> int:
+    """Count pairs whose Gate 2 (:func:`athenaeum.comparator.content_relation`)
+    LLM call was actually DISPATCHED — not merely "processed by the driver"
+    (QA finding B on athenaeum#1333: the two lanes' call counts must mean the
+    same thing, or the measured multiplier is apples-to-oranges against the
+    detector's ``detector_calls``, which already counts calls actually
+    issued).
+
+    Gate 1's typed separator-dimension check can resolve a pair to DISTINCT
+    with ZERO model spend
+    (:attr:`~athenaeum.comparator.CompareOutcome.comparator_version` ==
+    :data:`athenaeum.comparator.COMPARATOR_VERSION_GATE1` — see
+    :func:`athenaeum.comparator.compare_pages`'s early ``disjoint_dims``
+    return). Every OTHER outcome means
+    :func:`~athenaeum.comparator.content_relation` was called: a real
+    verdict via Gate 2 (duplicate/specialization/contradiction/coexist-
+    distinct), or ``verdict=None`` ("no decision") after Gate 2 was reached
+    but the call failed or the response could not be parsed — both of the
+    latter still represent a DISPATCHED request, not a skipped one.
+
+    This count is only meaningful once *comparator_client* is guaranteed
+    non-``None`` (:func:`run_shadow_parity`'s missing-client preflight):
+    a ``None`` client short-circuits ``content_relation`` BEFORE any
+    dispatch, landing on the exact same comparator-version-unset shape as
+    a genuine post-dispatch failure, which this function cannot tell apart
+    from the outside.
+    """
+    return sum(
+        1 for o in outcomes if o.comparator_version != comparator_mod.COMPARATOR_VERSION_GATE1
+    )
 
 
 def classify_agreement(detector_verdict: str, comparator_verdict: str) -> str:
@@ -525,7 +571,14 @@ class AgreementMatrix:
 @dataclass
 class ParityItem:
     """One case's result: both lanes' verdicts, the agreement classification,
-    and the raw pairwise comparator verdicts behind the roll-up."""
+    and the raw pairwise comparator verdicts behind the roll-up.
+
+    ``detector_calls`` and ``comparator_calls`` share ONE definition:
+    calls actually DISPATCHED to a client (QA finding B on athenaeum#1333).
+    ``comparator_calls`` is NOT ``len(pair_verdicts)`` — a Gate-1-resolved
+    pair appears in ``pair_verdicts`` (it has a real verdict) but costs zero
+    dispatches; see :func:`_comparator_calls_issued`.
+    """
 
     case_id: str
     source: str
@@ -561,7 +614,16 @@ class ParityItem:
 @dataclass
 class ParityProjection:
     """A zero-LLM-call sizing of what a real :func:`run_shadow_parity` run
-    over the same cases WOULD cost — see :func:`project_shadow_parity`."""
+    over the same cases WOULD cost — see :func:`project_shadow_parity`.
+
+    ``projected_comparator_calls`` is a WORST-CASE pair count
+    (:func:`athenaeum.cluster_comparator.planned_pair_count`, pure
+    combinatorics) — it does not, and structurally cannot without spending
+    a call, predict which pairs Gate 1 would resolve for free. Contrast
+    with :attr:`ParityReport.comparator_calls`, the MEASURED count of calls
+    actually dispatched; the two coincide exactly when no pair in the run
+    is Gate-1-resolved, and the measured figure is allowed to be lower.
+    """
 
     cluster_count: int
     pairable_cluster_count: int
@@ -756,7 +818,22 @@ def _corpus_digest_for_cases(cases: Sequence[ParityCase]) -> str:
 @dataclass
 class ParityReport:
     """Full shadow-parity measurement: agreement matrix, call multiplier,
-    per-item detail, the zero-call projection, and a provenance stamp."""
+    per-item detail, the zero-call projection, and a provenance stamp.
+
+    ``detector_calls`` / ``comparator_calls`` / ``call_multiplier`` are all
+    MEASURED figures over calls actually DISPATCHED to a client — the SAME
+    definition on both lanes (QA finding B on athenaeum#1333: before this,
+    ``comparator_calls`` counted pairs PROCESSED, which includes pairs
+    Gate 1 resolved with zero model spend, making the multiplier
+    apples-to-oranges against the detector's always-"dispatched" count).
+    Contrast with ``projection.projected_comparator_calls``
+    (:class:`ParityProjection`), a PRE-RUN, zero-call, worst-case pair
+    count (:func:`athenaeum.cluster_comparator.planned_pair_count`) that
+    does NOT attempt to predict which pairs Gate 1 would resolve for free
+    — the two numbers coincide exactly when no pair in the run is
+    Gate-1-resolved, and the measured figure is allowed to be lower
+    otherwise. ``call_multiplier`` is ``None`` when ``detector_calls == 0``.
+    """
 
     items: list[ParityItem]
     matrix: AgreementMatrix
@@ -906,6 +983,16 @@ def run_shadow_parity(
 ) -> ParityReport:
     """Run both lanes over every case in *cases* and report the agreement matrix.
 
+    **Missing-client preflight (QA follow-up on athenaeum#1333 finding 1).**
+    Aborts immediately, before anything else, if *detector_client* or
+    *comparator_client* is ``None`` — naming which one. A live run
+    reproduced this exact failure mode: with no ``ANTHROPIC_API_KEY`` set,
+    :func:`athenaeum.provider.build_llm_client` returns ``None`` for both
+    lanes, ``detect_contradictions`` degraded every cluster to
+    ``detected=False`` ("llm-unavailable"), and the harness reported a
+    clean ``agreement_rate: 1.000`` — a parity harness with no model client
+    measures nothing, and must never render as a legitimate result.
+
     Computes :func:`project_shadow_parity` FIRST. When *max_usd* is given and
     the projection's lower cost bound already exceeds it, returns
     immediately with ``aborted=True`` and NO items — a ceiling that can only
@@ -972,6 +1059,34 @@ def run_shadow_parity(
     """
     projection = project_shadow_parity(cases, config=config, workdir=workdir)
     corpus_digest = _corpus_digest_for_cases(cases)
+
+    if detector_client is None or comparator_client is None:
+        missing = [
+            name
+            for name, client in (
+                ("detector_client", detector_client),
+                ("comparator_client", comparator_client),
+            )
+            if client is None
+        ]
+        return _empty_report(
+            max_usd=max_usd,
+            abort_reason=(
+                f"{' and '.join(missing)} is None -- a shadow-parity run with "
+                "no model client for one or both lanes measures nothing: "
+                "an unavailable detector degrades to detected=False "
+                "('llm-unavailable'), which would otherwise be scored as a "
+                "genuine 'no contradiction found' rather than an absent "
+                "answer, and an unavailable comparator degrades to "
+                "verdict=None the same way. Build a real client for BOTH "
+                "lanes (see athenaeum.provider.build_llm_client -- this "
+                "usually means ANTHROPIC_API_KEY is unset) before running "
+                "for real, or use --dry-run for a zero-call projection "
+                "instead of a run that would otherwise fabricate a report."
+            ),
+            projection=projection,
+            corpus_digest=corpus_digest,
+        )
 
     if max_usd is not None and projection.projected_cost_usd_lower > max_usd:
         return _empty_report(
@@ -1072,7 +1187,9 @@ def run_shadow_parity(
             break
 
         detector_calls += case_detector_calls
-        case_comparator_calls = len(cluster_result.outcomes)
+        case_comparator_calls = _comparator_calls_issued(
+            [outcome for _a, _b, outcome in cluster_result.outcomes]
+        )
         comparator_calls += case_comparator_calls
         comparator_verdict = roll_up_comparator_verdict(
             [outcome for _a, _b, outcome in cluster_result.outcomes]
@@ -1188,6 +1305,14 @@ def render_report(report: ParityReport) -> str:
     lines.append("")
 
     lines.append("## Call multiplier (comparator calls per detector call)")
+    lines.append("")
+    lines.append(
+        "Both counts below are calls actually DISPATCHED to a client "
+        "(never pairs merely processed) -- a pair Gate 1 resolves for free "
+        "(zero model spend) does not count as a comparator call. See the "
+        "Projection section for the pre-run, zero-call, worst-case pair "
+        "count, which this measured figure can legitimately fall below."
+    )
     lines.append("")
     mult_str = f"{report.call_multiplier:.3f}" if report.call_multiplier is not None else "n/a"
     lines.append(f"- detector_calls: {report.detector_calls}")
