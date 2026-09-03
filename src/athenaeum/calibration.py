@@ -178,7 +178,7 @@ def sample_tier_decision(
     ``applied`` (issue athenaeum#602): ``True`` iff the sampled decision was a T2
     ``approve`` that was ALREADY auto-finalized (the merge is live in the
     wiki by the time this is called — see
-    :func:`athenaeum.merge.t2_screen_merge_proposal`), as opposed to a T1
+    :func:`athenaeum.reasoning_screens.t2_screen_merge_proposal`), as opposed to a T1
     reject (never "applied" — a reject never writes anything) or a
     hypothetical future watched verdict that only proposes. Carried through
     unchanged onto a later :func:`record_audit_review` so an overturn of

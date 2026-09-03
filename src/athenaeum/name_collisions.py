@@ -355,7 +355,8 @@ def resolve_name_collisions(
       *dry_run*, are resolved immediately via
       :func:`~athenaeum.pending_merges.resolve_merge` with
       ``auto_applied=True`` — the same non-human-approve marker
-      (issue athenaeum#602) :func:`athenaeum.merge.t2_screen_merge_proposal`
+      (issue athenaeum#602)
+      :func:`athenaeum.reasoning_screens.t2_screen_merge_proposal`
       already uses for its own auto-finalize path. This dispatches to
       ``resolve_merge``'s ``fold-into-existing`` write path, which performs
       the provenance-snapshot commit then the fold commit (AC4, git-

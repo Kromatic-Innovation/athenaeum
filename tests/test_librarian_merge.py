@@ -1621,13 +1621,18 @@ class TestReasoningTierGateSplit:
         )
 
         resolve_merge_auto_applied_values: list[object] = []
-        real_resolve_merge = merge_mod.resolve_merge
+        # athenaeum#1257: T2's auto-finalize write path moved with the screen
+        # into ``athenaeum.reasoning_screens``, so that is where the spy has to
+        # sit — patching ``merge``'s namespace would no longer intercept it.
+        from athenaeum import reasoning_screens as screens_mod
+
+        real_resolve_merge = screens_mod.resolve_merge
 
         def _spy_resolve_merge(*args, **kwargs):
             resolve_merge_auto_applied_values.append(kwargs.get("auto_applied"))
             return real_resolve_merge(*args, **kwargs)
 
-        monkeypatch.setattr(merge_mod, "resolve_merge", _spy_resolve_merge)
+        monkeypatch.setattr(screens_mod, "resolve_merge", _spy_resolve_merge)
 
         merge_clusters_to_wiki(
             contradiction_merge_root,
@@ -1695,13 +1700,18 @@ class TestReasoningTierGateSplit:
         reasoning_t2_client = MagicMock()
 
         resolve_merge_auto_applied_values: list[object] = []
-        real_resolve_merge = merge_mod.resolve_merge
+        # athenaeum#1257: T2's auto-finalize write path moved with the screen
+        # into ``athenaeum.reasoning_screens``, so that is where the spy has to
+        # sit — patching ``merge``'s namespace would no longer intercept it.
+        from athenaeum import reasoning_screens as screens_mod
+
+        real_resolve_merge = screens_mod.resolve_merge
 
         def _spy_resolve_merge(*args, **kwargs):
             resolve_merge_auto_applied_values.append(kwargs.get("auto_applied"))
             return real_resolve_merge(*args, **kwargs)
 
-        monkeypatch.setattr(merge_mod, "resolve_merge", _spy_resolve_merge)
+        monkeypatch.setattr(screens_mod, "resolve_merge", _spy_resolve_merge)
 
         merge_clusters_to_wiki(
             contradiction_merge_root,
