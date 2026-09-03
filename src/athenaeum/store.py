@@ -153,6 +153,48 @@ def append_line_durable(path: Path, line: bytes) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shared UTC-ISO timestamp rendering (issue athenaeum#1348)
+# ---------------------------------------------------------------------------
+
+
+def now_iso(when: datetime | None = None) -> str:
+    """Render *when* (or the current UTC instant, if omitted) as a UTC ISO-8601
+    timestamp at **second precision**: ``"%Y-%m-%dT%H:%M:%SZ"`` (e.g.
+    ``"2026-09-03T19:12:33Z"`` — no fractional seconds).
+
+    THE single implementation of the UTC-ISO rendering rule issue athenaeum#1348
+    found duplicated across 45 call sites and 13 independent module-private
+    ``_now_iso()`` definitions, split between a microsecond-precision
+    rendering (``datetime.isoformat()`` with its ``+00:00`` offset suffix
+    swapped for a bare ``Z``) and a second-precision one (``datetime.strftime``
+    with an explicit second-precision-then-``Z`` format string) — one of
+    which, the second-precision form, is also the exact rendering
+    :data:`athenaeum.fingerprint._RESOLVED_AT_FORMAT` parses back with
+    ``datetime.strptime``. Second precision is the rendering kept here (not
+    widened to also accept microseconds) because that parser is the sole
+    consumer that round-trips this value, and pinning the format in ONE
+    place — rather than teaching the parser two shapes — is what makes a
+    future drift back to microsecond rendering fail loudly instead of
+    silently: any writer that reaches for this helper can no longer produce
+    a timestamp the parser rejects. Mirrors :func:`append_line_durable`
+    (issue athenaeum#980) as the package's shared-primitive home for this
+    class of drift.
+
+    A naive *when* (no ``tzinfo``) is assumed to already be UTC — the
+    convention every existing caller in this package uses when it constructs
+    one via ``datetime.now(timezone.utc)`` and later strips or never sets
+    ``tzinfo``. An aware *when* is converted to UTC via
+    :meth:`datetime.astimezone` rather than assumed.
+    """
+    dt = when if when is not None else datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
 
