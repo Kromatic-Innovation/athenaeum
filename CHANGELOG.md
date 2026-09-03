@@ -67,6 +67,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. Only the three `write`-knob call sites thread the model through;
   every other stage's `resolve_thinking` call is untouched.
 
+- **`fingerprint.is_stale_auto_suppression` no longer fails silently on an
+  unparseable `resolved_at` (athenaeum#1348).** `src/athenaeum/` had thirteen
+  separate module-private `_now_iso()` definitions (plus a fourteenth inline
+  copy in `fingerprint.py`) with no shared helper, split 23/22 between a
+  microsecond-precision rendering and a second-precision one — and the ONE
+  consumer that parses this field back, `fingerprint._RESOLVED_AT_FORMAT`'s
+  `strptime`, only accepts the second-precision minority form. A
+  `resolved_at` written in the microsecond form would silently become
+  permanently immortal: `is_stale_auto_suppression`'s `except ValueError:
+  return False` branch gave no log line and no counter, so a suppression that
+  never lifts had nothing in the record or the logs pointing at the
+  timestamp format. `athenaeum.store` gains `now_iso()`, the single shared
+  UTC-ISO rendering (second precision, matching `_RESOLVED_AT_FORMAT` —
+  documented in its own docstring); all thirteen private definitions now
+  delegate to or are deleted in favor of it (mirroring the `athenaeum#980`
+  `append_line_durable` precedent), and `fingerprint.py`'s inline copy is
+  replaced with a call to it. The parse-failure branch now logs a WARNING
+  naming the offending value before returning `False` — the fail-safe
+  behavior (never expire on a value that can't be trusted) is unchanged, but
+  the failure is no longer invisible.
+
 ## [0.20.0] - 2026-09-03
 
 _Supersedes 45 untagged, unpublished patch bumps (0.19.1–0.19.45) that never shipped to PyPI; the last published release was v0.19.0._
