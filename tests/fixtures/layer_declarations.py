@@ -159,6 +159,7 @@ MODULE_LAYER: dict[str, int] = {
     "rule_proposals": 4,
     "sensitivity_lint": 4,
     "shadow_linkage": 4,
+    "shadow_parity": 4,
     "status": 4,
     "storage_migrate": 4,
     "surface_divergence": 4,
