@@ -70,6 +70,7 @@ from athenaeum.librarian import librarian_max_api_calls, librarian_max_runtime
 from athenaeum.measurement_docs import append_measurement_section
 from athenaeum.run_summary_log import entity_phase_wall_clock_per_file
 from athenaeum.spend import read_ledger, resolve_ledger_path
+from athenaeum.store import now_iso
 
 SECTION_HEADING = "## Ordinary-night steady state"
 REPRODUCE_COMMAND = "athenaeum measure ordinary-night"
@@ -89,10 +90,6 @@ DOCUMENTED_NON_CLOSURE_OPTIONS: tuple[str, ...] = (
 )
 
 ClosureVerdict = Literal["closes", "does-not-close", "indeterminate"]
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _get_version() -> str:
@@ -455,7 +452,7 @@ def build_ordinary_night_table(
         duty_cycle=wave_duty_cycle(nights_in_wave, total_nights),
         athenaeum_version=_get_version(),
         git_sha=_get_git_sha(repo_root),
-        generated=_now_iso(),
+        generated=now_iso(),
     )
 
 

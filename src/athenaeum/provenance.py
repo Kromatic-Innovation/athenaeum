@@ -41,13 +41,13 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from athenaeum.store import append_line_durable
+from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -460,12 +460,9 @@ def build_merge_provenance_record(
     reviewed this write". See ``athenaeum merges provenance`` (:mod:`athenaeum
     ._cmd_merges`) for the human-facing surface that renders this field.
     """
-    stamp = (ts if ts is not None else datetime.now(tz=timezone.utc)).astimezone(
-        timezone.utc
-    )
     return {
         "v": MERGE_PROVENANCE_VERSION,
-        "ts": stamp.isoformat().replace("+00:00", "Z"),
+        "ts": now_iso(ts),
         "merge_id": merge_id,
         "write_kind": write_kind,
         "canonical_slug": canonical_slug,

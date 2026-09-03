@@ -113,7 +113,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from athenaeum.config import resolve_cache_dir
-from athenaeum.store import append_line_durable
+from athenaeum.store import append_line_durable, now_iso
 
 if TYPE_CHECKING:  # avoid an import cycle at runtime (models imports nothing here)
     from athenaeum.models import TokenUsage
@@ -406,10 +406,9 @@ def build_record(
     prov = ledger_provider(provider)
     is_subscription = prov == PROVIDER_CLAUDE_CLI
     usd = 0.0 if is_subscription else round(usage.estimated_cost_usd, 6)
-    stamp = (ts if ts is not None else _now_utc()).astimezone(timezone.utc)
     record = {
         "v": LEDGER_VERSION,
-        "ts": stamp.isoformat().replace("+00:00", "Z"),
+        "ts": now_iso(ts),
         "run_type": run_type,
         "provider": prov,
         # ``billing_mode`` (issue athenaeum#487, cwc#1629) is the canonical vocabulary;

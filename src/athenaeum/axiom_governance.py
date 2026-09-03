@@ -77,11 +77,11 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from athenaeum.store import append_line_durable
+from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -135,14 +135,13 @@ def build_axiom_record(
     if not by or not by.strip():
         raise ValueError("by must be a non-empty string (who authorized this)")
 
-    stamp = (ts if ts is not None else datetime.now(tz=timezone.utc)).astimezone(timezone.utc)
     record: dict[str, Any] = {
         "v": AXIOM_LEDGER_VERSION,
         "slug": slug.strip(),
         "action": action,
         "reason": reason.strip(),
         "by": by.strip(),
-        "at": stamp.isoformat().replace("+00:00", "Z"),
+        "at": now_iso(ts),
     }
     if scope is not None and scope.strip():
         record["scope"] = scope.strip()

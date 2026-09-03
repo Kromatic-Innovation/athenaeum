@@ -170,6 +170,7 @@ from athenaeum.resolutions import (
     render_proposal_block,
     resolve_max_per_run,
 )
+from athenaeum.store import now_iso
 from athenaeum.tiers import tier4_escalate
 
 log = logging.getLogger(__name__)
@@ -2059,7 +2060,7 @@ def merge_clusters_to_wiki(
                     # clock is single-sourced — a re-cleared expired pair's
                     # fresh row resets the clock against the SAME instant the
                     # skip gate decayed against (deterministic refresh).
-                    resolved_at=decay_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    resolved_at=now_iso(decay_now),
                     side_a_norm=side_a,
                     side_b_norm=side_b,
                     member_key=mk,
