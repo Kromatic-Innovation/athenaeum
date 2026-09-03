@@ -163,6 +163,17 @@ from athenaeum.search import embed_texts
 from athenaeum.storage import is_merge_eligible
 from athenaeum.vecmath import mean_pool
 from athenaeum.verdict_effects import apply_verdict_effect
+from athenaeum.wiki_dedupe_attribution import (
+    ERASURE_CLASS_REFUSED_REASON,
+    OUTCOME_CROSS_CLASS_REJECTED,
+    OUTCOME_DECIDED,
+    OUTCOME_FRESH,
+    OUTCOME_NO_VERDICT,
+    OUTCOME_READ_ERROR,
+    AttributionRow,
+    build_attribution_row,
+    write_attribution_report,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from athenaeum.provider import LLMBackend
@@ -189,9 +200,25 @@ EmbeddingProvider = Callable[[list[str]], "list[list[float]] | None"]
 # repeatedly hits the no-chromadb path doesn't spam the log.
 _WIKI_FALLBACK_WARNED = False
 
-# Issue athenaeum#1243: the wiki-dedupe suppression ledger (athenaeum#1142) has no
-# producer under the comparator path — re-site before flipping
-# comparator_enabled on.
+# Issue athenaeum#1243 (AC5 — the gate this comment used to name as open):
+# athenaeum#1227's cut-over removed ``DEFAULT_WIKI_SUPPRESSIONS_FILENAME`` here,
+# stranding athenaeum#1142's suppression ledger with no producer under the
+# comparator path. It is RE-SITED as of this commit:
+# :mod:`athenaeum.wiki_dedupe_attribution` writes one durable, machine-readable
+# row per candidate pair this pass examines — including the pairs that produce
+# no verdict at all, which the measurement in athenaeum#1243 shows is 100% of
+# them on the live corpus today — each row carrying the embedder identity that
+# ``Cluster.embedder`` previously computed on every run and threw away. That
+# module's docstring carries the retention argument (athenaeum#1243 AC4: a
+# per-run snapshot + rotation pruned to ``librarian.rotation_retention``, NOT a
+# row in the unbounded-in-production ``wiki/_verdicts/``).
+#
+# ``comparator_enabled`` remains OFF by default and this commit does not flip
+# it. The observability gate is satisfied; the separate PRECONDITION under it
+# is not — athenaeum#1244 (coordinate backfill for ``subject`` /
+# ``claimed_scope``), without which Gate 1 settles zero of 22,040 pairs and
+# enabling the comparator is a full-cost no-op. See athenaeum#1243's
+# measurement comment.
 # Issue athenaeum#1140 (AC1): chromadb's default ONNX MiniLM embedding function
 # hard-codes ``tokenizer.enable_truncation(max_length=256)`` — content past
 # that window is invisible to the embedder, and the corpus writes
@@ -551,6 +578,15 @@ def propose_wiki_page_merges(
             *dry_run* is also ``False``, this pass is skipped entirely
             (logged, never raised) rather than comparing without a lock.
 
+    Side effects (issue athenaeum#1243): every real (non-dry-run,
+    lock-held) call writes :mod:`athenaeum.wiki_dedupe_attribution`'s
+    per-run snapshot -- one durable row per candidate pair examined,
+    carrying the embedder identity and, for a pair that produced no
+    verdict, exactly why. The return value below covers only the DECIDED
+    pairs; the snapshot covers ALL of them, which is the point: on the
+    live corpus the decided set is empty and the undecided set is 22,040
+    pairs (see athenaeum#1243's measurement comment).
+
     Returns:
         A list of dicts, one per pair this call actually decided a verdict
         for (fresh/memoized pairs are silently skipped — nothing new
@@ -598,7 +634,41 @@ def propose_wiki_page_merges(
         "wiki-dedupe", total=len(clusters), interval_s=heartbeat_interval
     )
     heartbeat.start()
+
+    # Issue athenaeum#1243 (AC1/AC4): this pass writes its per-run attribution
+    # snapshot only when it actually RUNS. A dry run decides and enacts
+    # nothing, and a run skipped for want of a lock examines nothing — neither
+    # has run state to snapshot, and since the canonical file is a REPLACE (not
+    # an append), writing an empty one for either would clobber the last real
+    # run's rows. A run that ran and examined zero pairs DOES write an empty
+    # snapshot, which is athenaeum#1142's own
+    # ``test_ledger_written_even_with_zero_suppressions`` guarantee: the
+    # canonical file always reflects THIS run's state, so a stale prior run can
+    # never be misread as current.
+    writes_attribution = not dry_run and lock is not None
+    attribution_rows: list[AttributionRow] = []
+
+    def _flush_attribution() -> None:
+        if not writes_attribution:
+            return
+        try:
+            write_attribution_report(
+                attribution_rows,
+                wiki_root,
+                knowledge_root=knowledge_root,
+                config=resolved_config,
+            )
+        except OSError as exc:
+            # Observability must never take the pass down with it — the same
+            # posture as the heartbeat and the fallback WARNING above.
+            log.warning(
+                "wiki-page dedup: could not write the attribution snapshot "
+                "(issue athenaeum#1243): %s",
+                exc,
+            )
+
     if not clusters:
+        _flush_attribution()
         heartbeat.done()
         return []
 
@@ -646,6 +716,23 @@ def propose_wiki_page_merges(
                         path_a,
                         path_b,
                     )
+                    # Issue athenaeum#1243 AC1: 46.4% of live-corpus pairs land
+                    # here. The log line above is the only prior evidence, and
+                    # it lives in a rotating log — exactly what athenaeum#1142
+                    # was filed to end.
+                    attribution_rows.append(
+                        build_attribution_row(
+                            path_a,
+                            path_b,
+                            OUTCOME_CROSS_CLASS_REJECTED,
+                            embedder=cluster.embedder,
+                            reason=rejection.reason,
+                            detail=rejection.detail,
+                            cluster_id=cluster.cluster_id,
+                            cluster_threshold=resolved_threshold,
+                            n_cluster_members=len(members),
+                        )
+                    )
                     continue
 
                 try:
@@ -658,6 +745,19 @@ def propose_wiki_page_merges(
                         path_a,
                         path_b,
                         exc,
+                    )
+                    attribution_rows.append(
+                        build_attribution_row(
+                            path_a,
+                            path_b,
+                            OUTCOME_READ_ERROR,
+                            embedder=cluster.embedder,
+                            reason="page-read-failed",
+                            detail=str(exc),
+                            cluster_id=cluster.cluster_id,
+                            cluster_threshold=resolved_threshold,
+                            n_cluster_members=len(members),
+                        )
                     )
                     continue
 
@@ -687,10 +787,66 @@ def propose_wiki_page_merges(
                     usage=usage,
                     lock=lock,
                 )
-                if not record["ok"] or record.get("skipped") == "fresh":
+                # Issue athenaeum#1243 AC1/AC2: one row per examined pair, on
+                # EVERY branch below. ``embedder`` is ``Cluster.embedder``,
+                # which athenaeum#1227's cut-over computed on every run and
+                # then read from nowhere (AC2's "computed and then discarded").
+                row_kwargs: dict[str, Any] = {
+                    "embedder": cluster.embedder,
+                    "cluster_id": cluster.cluster_id,
+                    "cluster_threshold": resolved_threshold,
+                    "n_cluster_members": len(members),
+                    "pair": record.get("pair"),
+                }
+                if not record["ok"]:
+                    # AC1's sharper half. ``record_comparison``'s own docstring
+                    # says "nothing ledgered" here and this caller used to
+                    # discard ``reason`` on the floor; measured on the live
+                    # corpus this is 53.6% of pairs, 100% of them
+                    # ``llm-unavailable``. See
+                    # ERASURE_CLASS_REFUSED_REASON for the ONE pair shape
+                    # deliberately NOT recorded.
+                    if record.get("reason") != ERASURE_CLASS_REFUSED_REASON:
+                        attribution_rows.append(
+                            build_attribution_row(
+                                path_a,
+                                path_b,
+                                OUTCOME_NO_VERDICT,
+                                reason=str(record.get("reason") or ""),
+                                **row_kwargs,
+                            )
+                        )
+                    continue
+                if record.get("skipped") == "fresh":
+                    # Decided on a PRIOR run and still fresh, so this run
+                    # deliberately did not re-decide it. Recorded so a reader
+                    # can tell "examined, memoized" apart from "not examined"
+                    # — a distinction AC1 needs and a bare ``continue`` erased.
+                    attribution_rows.append(
+                        build_attribution_row(
+                            path_a,
+                            path_b,
+                            OUTCOME_FRESH,
+                            reason="memoized-fresh-verdict",
+                            verdict=record.get("verdict"),
+                            **row_kwargs,
+                        )
+                    )
                     continue
                 outcome = record.get("outcome")
                 if outcome is None:
+                    # Defensive: ``ok=True`` and not fresh should always carry
+                    # an outcome. If that contract ever breaks, the pair is
+                    # still accounted for rather than vanishing.
+                    attribution_rows.append(
+                        build_attribution_row(
+                            path_a,
+                            path_b,
+                            OUTCOME_NO_VERDICT,
+                            reason="no-outcome-returned",
+                            **row_kwargs,
+                        )
+                    )
                     continue
                 effect = apply_verdict_effect(
                     page_a,
@@ -700,6 +856,16 @@ def propose_wiki_page_merges(
                     path_a=path_a,
                     path_b=path_b,
                     config=resolved_config,
+                )
+                attribution_rows.append(
+                    build_attribution_row(
+                        path_a,
+                        path_b,
+                        OUTCOME_DECIDED,
+                        verdict=record.get("verdict"),
+                        action=effect.action,
+                        **row_kwargs,
+                    )
                 )
                 results.append(
                     {
@@ -721,5 +887,10 @@ def propose_wiki_page_merges(
         # summary WARNING of whatever this partial pass accumulated, instead of
         # silently discarding the count along with the exception.
         flush_content_relation_unavailable_warning()
+        # Issue athenaeum#1243: in the SAME ``finally``, and for the same
+        # reason athenaeum#1245 put the warning flush here — a mid-loop
+        # exception still snapshots whatever this partial pass accounted for,
+        # instead of discarding every row along with the exception.
+        _flush_attribution()
         heartbeat.done()
     return results

@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every candidate pair the wiki-dedup pass examines now leaves a durable
+  attribution row, embedder included (athenaeum#1243).** athenaeum#1227's
+  comparator cut-over left two holes the verdict ledger does not cover.
+  `Cluster.embedder` was stamped on every run and read by nothing — computed,
+  then discarded — and a pair that reached no verdict left no row and no
+  attributable log line at all (`record_comparison` returning `ok=False`, and
+  a `cross_class_precheck` rejection, were both a bare `continue` that dropped
+  the reason on the floor). Measured against the live corpus that is not an
+  edge case: Gate 1 settles **zero** of 22,040 pairs today, so the hole was
+  the entire pass. A new `wiki_dedupe_attribution` module writes one
+  machine-readable row per examined pair — outcome, reason, detail, embedder,
+  cluster id/threshold, and the verdict when there is one — as a per-run
+  SNAPSHOT (`wiki/_wiki_dedupe_attribution.jsonl`, atomically replaced, never
+  appended) plus timestamped rotations pruned to the existing
+  `librarian.rotation_retention` knob, so it is bounded by construction rather
+  than relying on `verdicts.compact()`, which has no production caller.
+  `explain_pair` answers athenaeum#1005's diagnostic question — which embedder
+  produced this pair's candidacy, and why it did not become a proposal — from
+  one artifact read with no live host log access. athenaeum#1142's deleted
+  tests are recovered from ref `b79efc0` as the executable spec. The one
+  deliberate exclusion: an erasure-class (pii-flagged) pair is not written,
+  since the in-git-ledger refusal outranks an observability record.
+  `comparator_enabled` remains off by default and is not flipped here — the
+  coordinate backfill under it (athenaeum#1244) is a separate precondition.
+
 - **Wiki pages carry a one-line `description:` the recall hook can inject
   next to the page name (athenaeum#1324).** The per-turn `UserPromptSubmit`
   hook injected bare page names, so the model had to `recall` each candidate
