@@ -42,6 +42,7 @@ from athenaeum.shadow_parity import (
     ParityMember,
     ParityProjection,
     ParityReport,
+    _corpus_digest_for_cases,
     classify_agreement,
     comparator_decided_correctly,
     detector_verdict_from_result,
@@ -222,6 +223,48 @@ class TestMaterialiseMembers:
         text = am.path.read_text(encoding="utf-8")
         assert text.startswith("---\n")
         assert "the body text" in text
+
+
+# ---------------------------------------------------------------------------
+# _corpus_digest_for_cases (QA finding 3 -- was 100% line-covered, zero
+# behavioural test; its value is the provenance stamp on every report)
+# ---------------------------------------------------------------------------
+
+
+class TestCorpusDigestForCases:
+    def test_deterministic_for_the_same_cases(self) -> None:
+        cases = [_sized_case("a", 2), _sized_case("b", 3)]
+        assert _corpus_digest_for_cases(cases) == _corpus_digest_for_cases(cases)
+        # A freshly-built, content-identical case list (not the same objects)
+        # must also match -- determinism is about CONTENT, not identity.
+        cases_again = [_sized_case("a", 2), _sized_case("b", 3)]
+        assert _corpus_digest_for_cases(cases) == _corpus_digest_for_cases(cases_again)
+
+    def test_sensitive_to_a_changed_member_body(self) -> None:
+        base = [_case("c1", (_member("a.md", "original body", {"type": "feedback"}),))]
+        changed = [_case("c1", (_member("a.md", "DIFFERENT body", {"type": "feedback"}),))]
+        assert _corpus_digest_for_cases(base) != _corpus_digest_for_cases(changed)
+
+    def test_sensitive_to_changed_frontmatter_with_body_held_constant(self) -> None:
+        base = [_case("c1", (_member("a.md", "same body", {"type": "feedback"}),))]
+        changed = [_case("c1", (_member("a.md", "same body", {"type": "project"}),))]
+        assert _corpus_digest_for_cases(base) != _corpus_digest_for_cases(changed)
+
+    def test_sensitive_to_the_case_set_changing(self) -> None:
+        one_case = [_sized_case("a", 2)]
+        two_cases = [_sized_case("a", 2), _sized_case("b", 2)]
+        assert _corpus_digest_for_cases(one_case) != _corpus_digest_for_cases(two_cases)
+
+    def test_insensitive_to_frontmatter_key_insertion_order(self) -> None:
+        """Two semantically-identical frontmatter dicts that merely differ
+        in key order must hash equal -- the digest is a content address,
+        not an incidental artifact of dict construction order."""
+        fm_a = {"type": "feedback", "source_type": "user-stated"}
+        fm_b = {"source_type": "user-stated", "type": "feedback"}
+        assert fm_a == fm_b  # same content, order asserted different below
+        first = [_case("c1", (_member("a.md", "body", fm_a),))]
+        second = [_case("c1", (_member("a.md", "body", fm_b),))]
+        assert _corpus_digest_for_cases(first) == _corpus_digest_for_cases(second)
 
 
 # ---------------------------------------------------------------------------
@@ -607,6 +650,78 @@ class TestDryRunZeroCalls:
 
 
 # ---------------------------------------------------------------------------
+# QA finding 1 — the comparator-gate belts (env override + gate_enabled)
+# ---------------------------------------------------------------------------
+
+
+class TestComparatorGateEnforced:
+    """QA finding 1 on athenaeum#1333: :func:`athenaeum.config.resolve_comparator_enabled`
+    reads ``ATHENAEUM_COMPARATOR_ENABLED`` FIRST and unconditionally --
+    overriding :func:`athenaeum.shadow_parity._with_comparator_forced_on`'s
+    yaml-key override. A run that silently never enables the comparator
+    must abort, never report a fabricated "zero calls, zero multiplier"
+    success indistinguishable from a genuine finding.
+    """
+
+    def test_env_var_override_aborts_preflight_not_silently_measures_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_COMPARATOR_ENABLED", "false")
+        cases = [_sized_case("s2", 2)]
+
+        def _exploding_client() -> MagicMock:
+            client = MagicMock()
+            client.messages.create.side_effect = AssertionError("must not be called")
+            return client
+
+        report = run_shadow_parity(
+            cases,
+            detector_client=_exploding_client(),
+            comparator_client=_exploding_client(),
+            workdir=tmp_path,
+        )
+
+        assert report.aborted is True
+        assert report.items == []
+        assert report.comparator_calls == 0
+        assert report.call_multiplier is None
+        assert "ATHENAEUM_COMPARATOR_ENABLED" in report.abort_reason
+
+    def test_gate_enabled_false_mid_run_aborts_instead_of_no_decision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The second belt: even when the preflight check passes, a
+        per-case ``gate_enabled=False`` must still abort rather than
+        silently fold an empty ``outcomes`` into the matrix as a
+        fabricated "no-decision"."""
+        from athenaeum.cluster_comparator import ClusterComparatorResult
+
+        def _fake_run_cluster_comparator(*args: Any, **kwargs: Any) -> ClusterComparatorResult:
+            return ClusterComparatorResult(
+                cluster_id=str(kwargs.get("cluster_id", "")), pair_count=1, gate_enabled=False
+            )
+
+        monkeypatch.setattr(
+            "athenaeum.shadow_parity.run_cluster_comparator", _fake_run_cluster_comparator
+        )
+
+        cases = [_sized_case("s2", 2)]
+        detector_client = _uniform_client(_detector_payload(detected=False))
+        comparator_client = _uniform_client(_content_relation_payload("compatible"))
+
+        report = run_shadow_parity(
+            cases,
+            detector_client=detector_client,
+            comparator_client=comparator_client,
+            workdir=tmp_path,
+        )
+
+        assert report.aborted is True
+        assert report.items == []
+        assert "gate_enabled=False" in report.abort_reason
+
+
+# ---------------------------------------------------------------------------
 # AC6 — --max-usd abort, both branches
 # ---------------------------------------------------------------------------
 
@@ -634,30 +749,114 @@ class TestMaxUsdAbort:
 
     def test_mid_run_abort_returns_partial_report(self, tmp_path: Path) -> None:
         cases = [_sized_case("first", 2), _sized_case("second", 2)]
-        # Large token counts so the FIRST case alone blows a tiny ceiling,
-        # while the small synthetic prompts keep the pre-run PROJECTION
-        # well under it (so this exercises the mid-run branch, not the
-        # pre-run one).
+        # Each call (~100k input / 5k output tokens) costs ~$0.125. With
+        # max_usd=0.3: case "first"'s detector+comparator calls land at
+        # ~$0.25 (case completes, item appended, post-case check passes);
+        # case "second"'s detector call pushes to ~$0.375, so the PER-CALL
+        # ceiling guard (QA finding 2) blocks its comparator call before
+        # dispatch -- case "second" contributes NO item. This sizing is
+        # deliberate: it proves a full case can complete under the ceiling
+        # and the NEXT case still aborts mid-case (not merely "eventually"),
+        # now that the ceiling is checked between CALLS, not only cases.
         detector_client = _uniform_client(
-            _detector_payload(detected=False), input_tokens=2_000_000, output_tokens=100_000
+            _detector_payload(detected=False), input_tokens=100_000, output_tokens=5_000
         )
         comparator_client = _uniform_client(
-            _content_relation_payload("compatible"), input_tokens=2_000_000, output_tokens=100_000
+            _content_relation_payload("compatible"), input_tokens=100_000, output_tokens=5_000
         )
 
         report = run_shadow_parity(
             cases,
             detector_client=detector_client,
             comparator_client=comparator_client,
-            max_usd=0.01,
+            max_usd=0.3,
             workdir=tmp_path,
         )
 
         assert report.aborted is True
-        assert len(report.items) >= 1
+        assert len(report.items) == 1
+        assert report.items[0].case_id == "first"
         assert len(report.items) < len(cases)
-        assert report.usage.estimated_cost_usd > 0.01
+        assert report.usage.estimated_cost_usd > 0.3
         assert "PARTIAL" in render_report(report)
+        assert "--max-usd" in report.abort_reason
+
+    def test_abort_fires_mid_cluster_not_only_between_cases(self, tmp_path: Path) -> None:
+        """QA finding 2: run_cluster_comparator loops an ENTIRE cluster's
+        candidate pairs with no cost hook of its own -- a single oversized
+        cluster could otherwise fire every planned pair before a
+        between-cases-only ceiling check is ever re-read. Proves the ceiling
+        is enforced BETWEEN CALLS: a 4-member cluster plans C(4,2)=6
+        comparator pairs, but the run aborts after only 4 of them (a real,
+        counted, sub-planned-pair-count number), not after all 6 and not
+        merely "eventually" at a case boundary.
+        """
+        case = _sized_case("big", 4)
+        # detector call ~= $0.05, each comparator call ~= $0.10 (see the
+        # matching arithmetic in test_mid_run_abort_returns_partial_report's
+        # sibling above). max_usd=0.35: detector (0->0.05) then comparator
+        # calls 1-4 land exactly on 0.05->0.15->0.25->0.35->0.45; call 5's
+        # PRE-DISPATCH check (0.45 > 0.35) blocks it -- 4 of the 6 planned
+        # pairs actually fired.
+        detector_client = _uniform_client(
+            _detector_payload(detected=False), input_tokens=40_000, output_tokens=2_000
+        )
+        comparator_client = _uniform_client(
+            _content_relation_payload("compatible"), input_tokens=80_000, output_tokens=4_000
+        )
+
+        report = run_shadow_parity(
+            [case],
+            detector_client=detector_client,
+            comparator_client=comparator_client,
+            max_usd=0.35,
+            workdir=tmp_path,
+        )
+
+        assert report.aborted is True
+        assert report.items == []  # the one case never completed
+        assert detector_client.messages.create.call_count == 1
+        planned = 4 * 3 // 2  # C(4,2) = 6
+        assert 0 < comparator_client.messages.create.call_count < planned
+        assert comparator_client.messages.create.call_count == 4
+        assert "--max-usd" in report.abort_reason
+        assert "PARTIAL" in render_report(report)
+
+    def test_post_case_check_still_catches_a_boundary_crossing(self, tmp_path: Path) -> None:
+        """The ORIGINAL between-cases check (kept as "belt and braces" per
+        QA finding 2) still has a job: a case whose LAST call pushes cost
+        over the ceiling completes fully (no further call within that case
+        exists for the per-call guard to intercept) -- the post-case check
+        is what stops the NEXT case from starting at all.
+        """
+        cases = [_sized_case("first", 2), _sized_case("second", 2)]
+        # Each call ~= $0.125 (see the sibling tests above). max_usd=0.2:
+        # case "first"'s detector call (0->0.125) and comparator call
+        # (0.125->0.25) both pass their OWN pre-call checks (0 <= 0.2 and
+        # 0.125 <= 0.2) -- the per-call guard never fires. Only AFTER the
+        # case completes does 0.25 > 0.2 trip the post-case check, before
+        # case "second" is even attempted.
+        detector_client = _uniform_client(
+            _detector_payload(detected=False), input_tokens=100_000, output_tokens=5_000
+        )
+        comparator_client = _uniform_client(
+            _content_relation_payload("compatible"), input_tokens=100_000, output_tokens=5_000
+        )
+
+        report = run_shadow_parity(
+            cases,
+            detector_client=detector_client,
+            comparator_client=comparator_client,
+            max_usd=0.2,
+            workdir=tmp_path,
+        )
+
+        assert report.aborted is True
+        assert len(report.items) == 1
+        assert report.items[0].case_id == "first"
+        assert "after case" in report.abort_reason  # the post-case message shape
+        assert detector_client.messages.create.call_count == 1
+        assert comparator_client.messages.create.call_count == 1
 
     def test_cli_max_usd_abort_exits_1(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -757,6 +956,26 @@ class TestReportShape:
         assert "0.0.0-test" in text
         assert "PARTIAL" not in text
 
+    def test_render_report_spells_out_agreement_rate_denominator(self) -> None:
+        """QA finding 4: the rendered rate must name agree/disagree/
+        inconclusive explicitly, not just print a bare number -- a corpus
+        that is mostly inconclusive must not read as "the lanes agree on
+        90% of the corpus" from the rate alone."""
+        report = self._sample_report()  # 2 agree, 0 disagree, 0 inconclusive
+        text = render_report(report)
+        assert "agree / (agree + disagree)" in text
+        assert "INCONCLUSIVE" in text
+        assert "2 agree / (2 agree + 0 disagree)" in text
+        assert "0 inconclusive item(s) excluded from this rate" in text
+
+    def test_render_report_legends_the_decided_correctly_column(self) -> None:
+        report = self._sample_report()
+        text = render_report(report)
+        assert "decided_correctly` legend" in text
+        assert "`True`" in text
+        assert "`False`" in text
+        assert "`None`" in text
+
     def test_render_report_partial_banner_when_aborted(self) -> None:
         report = self._sample_report(aborted=True)
         text = render_report(report)
@@ -770,6 +989,30 @@ class TestReportShape:
         assert written == out_dir / "shadow-parity-2026-01-02.md"
         assert written.is_file()
         assert written.read_text(encoding="utf-8") == render_report(report)
+
+    def test_write_report_does_not_clobber_a_same_day_report(self, tmp_path: Path) -> None:
+        """QA finding 5: the most likely SECOND same-day run is a retry
+        after a --max-usd abort -- overwriting silently would destroy
+        exactly the partial artifact the abort path exists to preserve."""
+        out_dir = tmp_path / "measurements"
+        first_report = self._sample_report()
+        first_path = write_report(first_report, out_dir=out_dir)
+        assert first_path == out_dir / "shadow-parity-2026-01-02.md"
+        first_contents = first_path.read_text(encoding="utf-8")
+
+        second_report = self._sample_report(aborted=True)
+        second_path = write_report(second_report, out_dir=out_dir)
+        assert second_path == out_dir / "shadow-parity-2026-01-02-2.md"
+        assert second_path.is_file()
+
+        # The first file must be untouched -- byte for byte.
+        assert first_path.read_text(encoding="utf-8") == first_contents
+        assert "PARTIAL" not in first_contents
+        assert "PARTIAL" in second_path.read_text(encoding="utf-8")
+
+        # A third same-day write collides with BOTH prior files.
+        third_path = write_report(self._sample_report(), out_dir=out_dir)
+        assert third_path == out_dir / "shadow-parity-2026-01-02-3.md"
 
     def test_to_dict_round_trips_json(self) -> None:
         report = self._sample_report()
