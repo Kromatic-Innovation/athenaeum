@@ -216,7 +216,7 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
         metavar="CLASS",
         help="With --with-pii, return only excluded values of this usage class "
         f"(repeatable; one of {', '.join(USAGE_CLASSES)}). Matches "
-        "`query person --usage-class`. Default: every value.",
+        "`entity --usage-class`. Default: every value.",
     )
     recall_parser.add_argument(
         "--as-of",
@@ -579,12 +579,13 @@ def _read_entity_to_stdout(
     usage_classes: list[str] | None,
     not_found_label: str,
 ) -> int:
-    """Shared body of ``query person`` and ``query entity`` (issue athenaeum#886).
+    """Shared body of the ``entity`` command's read path (issue athenaeum#886).
 
-    Extracted so the two commands cannot drift in what they print: the person
-    command is the generic one with the class fixed, and the only difference
-    between them is the noun in the not-found message — presentation, never
-    behaviour.
+    Its one caller today is :func:`cmd_entity`; it was extracted when the
+    removed ``person`` command (athenaeum#888) shared this body, so that the
+    two could not drift in what they print. ``not_found_label`` remains the
+    only per-caller difference — the noun in the not-found message, which is
+    presentation, never behaviour.
     """
     from athenaeum.config import load_config
     from athenaeum.pii import json_date_default, read_entity, surface_class_for_page_class
