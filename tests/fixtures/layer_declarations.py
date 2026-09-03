@@ -151,6 +151,7 @@ MODULE_LAYER: dict[str, int] = {
     "quarantine": 4,
     "recompare": 4,
     "reconcile": 4,
+    "reasoning_screens": 4,
     "recurring_claims": 4,
     "repair": 4,
     "retire": 4,

@@ -36,8 +36,8 @@ that knob's provider or model affects every function that shares it.
 | Tier-3 wiki writer, create + merge (`tiers.tier3_create`/`tier3_merge`) | `write` | yes |
 | C4 resolver (`resolutions.propose_resolution`) | `resolve` | no — never reaches the Batch transport |
 | Recall query-topic extraction (`athenaeum query-topics`, the recall hot path) | `topic` | no |
-| Reasoning-tier T1 screen (`merge.t1_screen_rejects_merge_proposal`) | `reasoning_t1` | no |
-| Reasoning-tier T2 auto-apply gate (`merge.t2_screen_merge_proposal`) | `reasoning_t2` | no |
+| Reasoning-tier T1 screen (`reasoning_screens.t1_screen_rejects_merge_proposal`) | `reasoning_t1` | no |
+| Reasoning-tier T2 auto-apply gate (`reasoning_screens.t2_screen_merge_proposal`) | `reasoning_t2` | no |
 | Rule-proposal drafting (`rule_proposals.build_rule_proposal_request_params`, athenaeum#1174) | `rule_proposals` | no |
 
 Only `classify` and `write` are ever batched — `batch.py`'s `execute_batch`
