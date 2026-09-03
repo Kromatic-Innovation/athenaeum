@@ -14,7 +14,10 @@ Rules:
 with Kromatic" beats "A company").
 - Never include email addresses, phone numbers, or street addresses.
 - Use only what the page says. Do not guess.
+- Return an entry for EVERY page. When a page holds little more than a name,
+a title, or a single fact, say exactly that — "Person page with only a
+birthday on record; no role or affiliation known." is a correct answer, and
+it lets a reader skip the page without opening it.
 
 Return ONLY a JSON array, one object per input page, each
 {"i": <the page's integer index>, "description": "<the sentence>"}.
-Omit a page entirely if its content is too thin to summarize.

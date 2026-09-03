@@ -772,7 +772,7 @@ Return ONLY a JSON object shaped exactly:
 - **Constant:** `athenaeum.page_description._DESCRIBE_SYSTEM`
 - **Source:** `src/athenaeum/page_description.py`
 - **Model knob:** `classify` &middot; **max_tokens:** `4096`
-- **sha256:** `250f8fb690ff79d8cc2bd9fc12624128c280b0498dc2c63a0d97bf5cf99a855f`
+- **sha256:** `49d6eb3caee3d011a07414c2031fcf23210d75fde976d3270a1b6ed2b304e3d3`
 
 ```text
 You write one-line summaries of knowledge-base pages for a search index.
@@ -787,10 +787,13 @@ Rules:
 with Kromatic" beats "A company").
 - Never include email addresses, phone numbers, or street addresses.
 - Use only what the page says. Do not guess.
+- Return an entry for EVERY page. When a page holds little more than a name,
+a title, or a single fact, say exactly that — "Person page with only a
+birthday on record; no role or affiliation known." is a correct answer, and
+it lets a reader skip the page without opening it.
 
 Return ONLY a JSON array, one object per input page, each
 {"i": <the page's integer index>, "description": "<the sentence>"}.
-Omit a page entirely if its content is too thin to summarize.
 ```
 
 ## `page_description.describe_user_template`
