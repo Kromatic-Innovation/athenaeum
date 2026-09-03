@@ -1395,6 +1395,44 @@ push_metrics:
   enabled: true    # on by default; passive measurement only
 ```
 
+### The sidecar is a second writer (issue athenaeum#1343)
+
+Until athenaeum#1343, `record_push` had exactly one call site —
+`mcp_server.py`'s explicit `recall` MCP tool. The `UserPromptSubmit` sidecar
+hook (`examples/claude-code/user-prompt-recall.sh`) — which injects wiki
+pages into **every** Claude Code turn, unprompted — wrote nothing at all, so
+the deployed unprompted-push surface was entirely unmeasured. That silence is
+the reason issue athenaeum#1120's `AND memory_tier = 'hot'` gate was able to
+exclude 96.56% of the corpus for weeks with nothing watching (see
+athenaeum#1287's postmortem).
+
+The sidecar is now a second writer to the same `_push_records.jsonl` ledger,
+in a shell-native append (pure bash/awk plus at most one `shasum`/
+`sha256sum` subprocess — no Python interpreter start) built specifically to
+respect the hook's own <50ms FTS5-path contract stated in its header. Two
+things distinguish a sidecar row from an MCP `recall` row:
+
+- **`"source": "sidecar"`** on every hook-written record. The MCP path is
+  unchanged and omits the key entirely. Reader rule: `rec.get("source") ==
+  "sidecar"` → sidecar push; anything else (key absent, or any other value)
+  → explicit `recall` push.
+- **`items[].memory_tier`** — a field the MCP path does not write. It carries
+  the FTS5 index's `memory_tier` column value for that page, added
+  specifically so a downstream reader can evidence the tier-mix shift when
+  the hot-tier gate above is loosened or removed.
+
+**Known limitation — `items[].tier` is always `"internal"` on a sidecar row.**
+`build_push_record`'s `tier` field is meant to be the page's frontmatter
+`access` level, but the FTS5 `wiki` table the hook queries has no `access`
+column (its columns are `filename, name, tags, aliases, description,
+audience, type, memory_tier`) — so the shell hook cannot read it. `"internal"`
+is exactly the default `build_push_record` assigns when frontmatter carries
+no `access`, so this is a safe (if imprecise) default, not a fabricated
+value — but it means `tier` on a sidecar row should never be read as the
+page's real access level. Use `items[].memory_tier` (above) for anything
+tier-related on a sidecar-sourced record; `items[].tier` only carries real
+information on an MCP-sourced (`recall`) record.
+
 ## LLM schema-observation ledger (athenaeum#570 / athenaeum#724)
 
 Every in-scope LLM contract's response is validated **observe-only** against a
