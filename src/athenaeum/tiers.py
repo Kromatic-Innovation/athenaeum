@@ -2580,8 +2580,9 @@ def tier3_create_params(
         ),
         entity_template_section=tmpl_section,
     )
+    model = _get_write_model(config)
     return {
-        "model": _get_write_model(config),
+        "model": model,
         "max_tokens": resolve_max_tokens(
             "merge_create",
             "ATHENAEUM_MERGE_CREATE_MAX_TOKENS",
@@ -2592,9 +2593,12 @@ def tier3_create_params(
         # Adaptive thinking benefits this stage — composing a fresh entity
         # page from one observation is a genuine drafting task, not a
         # mechanical transform — so it is enabled explicitly rather than
-        # relying on Sonnet 5's omit-means-adaptive default.
+        # relying on Sonnet 5's omit-means-adaptive default. ``model`` is
+        # threaded through (issue athenaeum#1336) so a ``write`` knob pointed at a
+        # model that cannot honour ``adaptive`` downgrades to ``disabled``
+        # instead of 400ing on every call.
         "thinking": resolve_thinking(
-            "merge_create", "ATHENAEUM_MERGE_CREATE_THINKING", "adaptive", config
+            "merge_create", "ATHENAEUM_MERGE_CREATE_THINKING", "adaptive", config, model=model
         ),
         "system": CREATE_SYSTEM,
         "messages": [{"role": "user", "content": user_msg}],
@@ -3413,8 +3417,9 @@ def tier3_merge_params(
             action.observations, tag="user_document", max_chars=3000
         ),
     )
+    model = _get_write_model(config)
     return {
-        "model": _get_write_model(config),
+        "model": model,
         "max_tokens": resolve_max_tokens(
             "merge_patch",
             "ATHENAEUM_MERGE_PATCH_MAX_TOKENS",
@@ -3425,9 +3430,12 @@ def tier3_merge_params(
         # Adaptive thinking benefits this stage — deciding where anchored
         # edit ops go and whether a contradiction should escalate instead
         # takes real reasoning — so it is enabled explicitly rather than
-        # relying on Sonnet 5's omit-means-adaptive default.
+        # relying on Sonnet 5's omit-means-adaptive default. ``model`` is
+        # threaded through (issue athenaeum#1336) so a ``write`` knob pointed at a
+        # model that cannot honour ``adaptive`` downgrades to ``disabled``
+        # instead of 400ing on every call.
         "thinking": resolve_thinking(
-            "merge_patch", "ATHENAEUM_MERGE_PATCH_THINKING", "adaptive", config
+            "merge_patch", "ATHENAEUM_MERGE_PATCH_THINKING", "adaptive", config, model=model
         ),
         "system": MERGE_SYSTEM,
         "messages": [{"role": "user", "content": user_msg}],
@@ -3457,16 +3465,19 @@ def tier3_merge_full_params(
             action.observations, tag="user_document", max_chars=3000
         ),
     )
+    model = _get_write_model(config)
     return {
-        "model": _get_write_model(config),
+        "model": model,
         "max_tokens": resolve_max_tokens(
             "merge_full", "ATHENAEUM_MERGE_FULL_MAX_TOKENS", _MERGE_MAX_TOKENS, config
         ),
         # Issue athenaeum#578: same ``write``-model / Sonnet-5-bound reasoning as
         # ``tier3_merge_params`` above — this is the fallback path for the
-        # same stage, so it gets the same posture.
+        # same stage, so it gets the same posture. ``model`` is threaded
+        # through (issue athenaeum#1336) for the same downgrade-on-unsupported-model
+        # reason as the other two write call sites.
         "thinking": resolve_thinking(
-            "merge_full", "ATHENAEUM_MERGE_FULL_THINKING", "adaptive", config
+            "merge_full", "ATHENAEUM_MERGE_FULL_THINKING", "adaptive", config, model=model
         ),
         "system": MERGE_SYSTEM_FULL,
         "messages": [{"role": "user", "content": user_msg}],
