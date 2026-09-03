@@ -115,7 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_lifecycle_subparsers(subparsers)  # init, status, disable, enable, spend
     add_serve_subparser(subparsers)  # serve
     add_run_subparser(subparsers)  # run
-    add_query_subparsers(subparsers)  # test-mcp, query-topics, stopwords, recall
+    add_query_subparsers(subparsers)  # test-mcp, entity, query-topics, stopwords, recall
     add_enumerate_subparser(subparsers)  # enumerate (issue athenaeum#965)
     add_explain_routing_subparser(subparsers)  # explain-routing (issue athenaeum#1176)
     add_pending_subparsers(subparsers)  # ingest-answers, ingest-merges, reresolve-questions
