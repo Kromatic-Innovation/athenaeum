@@ -1,0 +1,7 @@
+# GOLDEN SNAPSHOT — ASSERTION, NOT SOURCE.
+# Editing this file changes what the test EXPECTS, not what the model receives.
+# To change this prompt, edit `athenaeum.page_description._DESCRIBE_USER_TEMPLATE`, then run: python -m athenaeum.prompt_registry --write
+# ===8<=== prompt bytes below this line are asserted verbatim ===8<===
+Summarize each page below. Return the JSON array described in the system prompt and nothing else.
+
+{pages}

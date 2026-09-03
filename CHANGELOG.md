@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Wiki pages carry a one-line `description:` the recall hook can inject
+  next to the page name (athenaeum#1324).** The per-turn `UserPromptSubmit`
+  hook injected bare page names, so the model had to `recall` each candidate
+  to judge relevance — the round-trip the injection exists to avoid. The FTS5
+  index already indexed a `description` column; 43 of 24,614 live pages had
+  one. Three pieces: (1) the Tier-3 create prompt asks the writer for a
+  leading `Description: <one sentence>` line in the SAME call that writes the
+  body, parsed off by `tier3_entity_from_text` and rendered as frontmatter
+  (`WikiEntity.description`); a writer that omits it gets a deterministic
+  opening-paragraph fallback, so every new page lands described. (2) A new
+  `athenaeum description backfill` command for the existing tree — dry-run by
+  default, `--apply` to write, `--mechanical` for a zero-LLM opening-paragraph
+  derivation or (default) batched Haiku-class summaries through the
+  `classify` knob with ceiling enforcement and one `spend.jsonl` row per
+  batch (`run_type: description-backfill`); `--limit N` plus the
+  already-described skip make successive runs a resumable drain; never
+  overwrites, never fabricates frontmatter, byte-level no-op on re-run.
+  (3) The index's frontmatter scanner now joins PyYAML-folded continuation
+  lines, so a long description is indexed whole rather than truncated at the
+  first line. Every value is normalized to one line, ≤200 chars, no quotes or
+  backslashes, contact data scrubbed. Companion hook change in
+  code-workspace-config prints `name — description`.
+
 ### Fixed
 
 - **Lane A intake throughput could fall to exactly zero while the run reported

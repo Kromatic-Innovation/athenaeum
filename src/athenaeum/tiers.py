@@ -110,6 +110,10 @@ from athenaeum.models import (
     render_frontmatter,
 )
 from athenaeum.outbound_pii import redact_outbound_text
+from athenaeum.page_description import (
+    derive_description_from_body,
+    split_description_line,
+)
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.prompt_safety import (
     UNTRUSTED_DATA_CLAUSE,
@@ -2270,7 +2274,10 @@ CREATE_SYSTEM = """You are a knowledge librarian. You create entity wiki pages f
 raw observations.
 
 Write a clean, factual entity page in markdown. Follow these rules:
-- Start with `# Entity Name`
+- The very first line must be `Description: ` followed by ONE plain-text
+  sentence (at most 200 characters, no quotes or line breaks) saying what this
+  entity is and why it matters — a search-index summary. Then a blank line.
+- Then start the page with `# Entity Name`
 - Include only facts supported by the raw observation
 - Use footnotes to cite the source: [^1]: source reference
 - Keep it concise — 3-10 lines of content is typical for a new entity
@@ -2293,7 +2300,8 @@ Access: {access}
 {observations}
 {entity_template_section}
 ## Instructions
-Write the body content (no frontmatter) for this entity's wiki page.
+Write the body content (no frontmatter) for this entity's wiki page, led by
+the single `Description: ...` line described in the rules.
 Use footnotes citing the source as: [^1]: {source_ref}
 """
     + UNTRUSTED_DATA_CLAUSE
@@ -2801,6 +2809,14 @@ def tier3_entity_from_text(
     (counted in ``usage.preamble_rejected``) instead of persisting an empty
     page — see that exception's docstring for why reject, not silently drop.
     """
+    # Issue athenaeum#1324: the create prompt asks for a leading
+    # ``Description: <one sentence>`` line ahead of the body — the recall
+    # hook's summary, produced in the SAME call that writes the page. Split
+    # it off before preamble detection so it can neither be mistaken for
+    # preamble nor persist into the body. A writer that omits the line gets
+    # the deterministic opening-paragraph fallback below, so every new page
+    # lands described.
+    description, text = split_description_line(text.strip())
     body, stripped = strip_planning_preamble(text.strip())
     if stripped:
         if not body:
@@ -2832,6 +2848,9 @@ def tier3_entity_from_text(
     model = _get_write_model(config) or "unknown"
     source = f"claude:tier3-create:{model}:{today}"
 
+    if description is None:
+        description = derive_description_from_body(body)
+
     return WikiEntity(
         uid=generate_uid(),
         type=action.entity_type,
@@ -2843,6 +2862,7 @@ def tier3_entity_from_text(
         updated=today,
         body=body,
         source=source,
+        description=description,
     )
 
 

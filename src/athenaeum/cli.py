@@ -78,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_curate import add_curate_subparsers
     from athenaeum._cmd_decay import add_decay_subparser
     from athenaeum._cmd_decisions import add_decisions_subparser
+    from athenaeum._cmd_description import add_description_subparser
     from athenaeum._cmd_dimensions import add_dimensions_subparser
     from athenaeum._cmd_drain import add_drain_subparser
     from athenaeum._cmd_enumerate import add_enumerate_subparser
@@ -142,6 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_usage_report_subparser(subparsers)  # usage-report (issue athenaeum#968)
     add_measure_subparser(subparsers)  # measure (shadow-linkage, backlog-price, ordinary-night)
     add_memory_class_subparser(subparsers)  # memory-class backfill
+    add_description_subparser(subparsers)  # description backfill (issue athenaeum#1324)
     add_verdicts_subparser(subparsers)  # verdicts (issue athenaeum#712)
     add_dimensions_subparser(subparsers)  # dimensions show|compare (issue athenaeum#714)
     add_index_subparsers(

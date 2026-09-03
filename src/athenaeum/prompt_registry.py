@@ -116,6 +116,12 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
     # (`rule_proposals.build_rule_proposal_request_params`), so ``cacheable``
     # is ``False`` like every row above except ``resolutions.resolve_system``.
     ("rule_proposals.system_prompt", "_RULE_PROPOSAL_SYSTEM_PROMPT", "rule_proposals", 4096, False),
+    # athenaeum#1324: the description backfill (``athenaeum description
+    # backfill``) rides the ``classify`` knob like the memory-class residual
+    # pass — a Haiku-class summarization sibling of the Tier-2 classifier,
+    # deliberately NOT a new knob. No cache_control breakpoint at the call site.
+    ("page_description.describe_system", "_DESCRIBE_SYSTEM", "classify", 4096, False),
+    ("page_description.describe_user_template", "_DESCRIBE_USER_TEMPLATE", "classify", 4096, False),
 ]
 
 PROMPT_META: dict[str, PromptMeta] = {
