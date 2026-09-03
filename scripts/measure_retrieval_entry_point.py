@@ -497,6 +497,14 @@ def main(argv: list[str] | None = None) -> int:
     unknown = [name for name in selected if name not in CANDIDATES]
     if unknown:
         parser.error(f"unknown candidate(s): {', '.join(unknown)}")
+    # An empty selection must be a usage error (exit 2), never fall through to
+    # the verdict block: exit 1 is NO-GO, so a mistyped --candidates would read
+    # as "the spike failed" rather than "you passed nothing to measure".
+    if not selected:
+        parser.error(
+            "--candidates selected nothing to measure; choose one or more of "
+            f"{', '.join(CANDIDATES)}"
+        )
 
     refs = [] if args.references.strip() == "none" else [
         name.strip() for name in args.references.split(",") if name.strip()
