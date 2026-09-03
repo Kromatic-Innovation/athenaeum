@@ -99,7 +99,6 @@ import json
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -111,7 +110,7 @@ from athenaeum.authority import (
 )
 from athenaeum.config import resolve_cache_dir
 from athenaeum.models import parse_frontmatter
-from athenaeum.store import append_line_durable
+from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -239,10 +238,6 @@ def classify_never_ingest(
 # ---------------------------------------------------------------------------
 # Refusal ledger — durable, ids-only, append-only.
 # ---------------------------------------------------------------------------
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _append_line(path: Path, line: str) -> None:
@@ -379,7 +374,7 @@ def check_and_refuse(
     if match is None:
         return None
     refusal = NeverIngestRefusal(
-        ts=_now_iso(),
+        ts=now_iso(),
         class_slug=match.class_slug,
         detail=match.detail,
         origin_scope=origin_scope,
