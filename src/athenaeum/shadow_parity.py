@@ -39,10 +39,14 @@ returns a conflict TYPE (or "not detected"); the comparator returns one of
 five OUTCOME verdicts. Neither space is a subset of the other, so this
 module defines the recast explicitly and names it as a judgement, not a
 fact — see :data:`DETECTOR_VERDICTS`, :data:`COMPARATOR_VERDICTS`,
-:func:`classify_agreement`, and :data:`EXPECTED_COMPARATOR_VERDICTS`'s own
-docstrings for the specific calls made and why. athenaeum#1258's live-corpus
-report is where those calls get scrutinised against real data; this issue
-only has to make the recast machinery correct and legible.
+:func:`roll_up_comparator_verdict` (an equally opinionated severity
+ordering — the comparator is pairwise and the detector is N-ary, so N
+pairwise verdicts must collapse to ONE cluster-level verdict before the two
+spaces are even comparable), :func:`classify_agreement`, and
+:data:`EXPECTED_COMPARATOR_VERDICTS`'s own docstrings for the specific
+calls made and why. athenaeum#1258's live-corpus report is where those
+calls get scrutinised against real data; this issue only has to make the
+recast machinery correct and legible.
 
 Reused, not reinvented, per this issue's own instruction:
 :func:`athenaeum.contradictions.detect_contradictions`,
@@ -77,7 +81,7 @@ import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 
@@ -91,7 +95,7 @@ from athenaeum.cluster_comparator import (
     run_cluster_comparator,
 )
 from athenaeum.comparator import CompareOutcome
-from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
+from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_comparator_enabled, resolve_model
 from athenaeum.models import (
     AutoMemoryFile,
     ConflictType,
@@ -727,11 +731,22 @@ def _corpus_digest_for_cases(cases: Sequence[ParityCase]) -> str:
     hash, sorted, then hashed again) over this module's own
     :class:`ParityCase` corpus rather than a live
     :class:`~athenaeum.models.AutoMemoryFile` population — changes whenever a
-    case's member content, or the case SET itself, changes.
+    case's member content, OR its frontmatter (``valid_from``, ``source_type``,
+    ``updated``, etc. all feed the detector/comparator prompts — see
+    :func:`athenaeum.contradictions._member_scope_header`), or the case SET
+    itself, changes. Frontmatter is serialized as sorted ``key=value`` pairs
+    (not dict iteration order) so two semantically-identical frontmatter
+    dicts that merely differ in key insertion order still hash equal.
     """
     parts: list[str] = []
     for case in cases:
-        blob = "".join(f"{m.filename}:{m.body}" for m in case.members)
+        member_parts: list[str] = []
+        for m in case.members:
+            fm_pairs = sorted((str(k), str(v)) for k, v in m.frontmatter.items())
+            fm_repr = ",".join(f"{k}={v}" for k, v in fm_pairs)
+            member_parts.append(f"{m.filename}[{fm_repr}]:{m.body}")
+        # ASCII record separator -- avoids accidental cross-member collision.
+        blob = "\x1e".join(member_parts)
         h = hashlib.sha256(blob.encode("utf-8", errors="replace")).hexdigest()[:12]
         parts.append(f"{case.source}/{case.case_id}:{h}")
     parts.sort()
@@ -783,6 +798,81 @@ class ParityReport:
         }
 
 
+class _CostCeilingExceeded(BaseException):
+    """Raised by :class:`_CeilingGuardedMessages` BEFORE dispatching a call,
+    once the running spend already exceeds ``--max-usd`` (QA finding 2 on
+    issue athenaeum#1333).
+
+    Deliberately inherits from :class:`BaseException`, NOT :class:`Exception`
+    — mirrors ``tests.evals.harness.FixtureStaleError`` /
+    ``EmptyRecordingError``'s identical reasoning, cited here because this
+    module hits the SAME hazard those two guard against:
+    :func:`athenaeum.comparator.content_relation` wraps its
+    ``client.messages.create`` call in :func:`athenaeum._retry.with_retry`
+    inside a ``try: ... except Exception:`` fallback that degrades to
+    :attr:`~athenaeum.comparator.ContentRelation.UNAVAILABLE`, and
+    :func:`athenaeum.contradictions.detect_contradictions` has the
+    equivalent ``detected=False`` fallback. An :class:`Exception` subclass
+    raised from inside the wrapped call would be swallowed by either
+    fallback and the run would silently continue past the ceiling instead
+    of aborting — the exact failure this class exists to prevent.
+    """
+
+
+class _CeilingGuardedMessages:
+    """The ``.messages`` facade for :class:`_CeilingGuardedClient`."""
+
+    def __init__(self, inner_messages: Any, usage: TokenUsage, max_usd: float) -> None:
+        self._inner_messages = inner_messages
+        self._usage = usage
+        self._max_usd = max_usd
+
+    def create(self, **params: Any) -> Any:
+        if self._usage.estimated_cost_usd > self._max_usd:
+            raise _CostCeilingExceeded(
+                f"observed spend ${self._usage.estimated_cost_usd:.4f} exceeds "
+                f"--max-usd ${self._max_usd:.2f} -- aborting before dispatching "
+                "another call"
+            )
+        return self._inner_messages.create(**params)
+
+
+class _CeilingGuardedClient:
+    """Wraps a real ``LLMBackend`` so every ``.messages.create`` call checks
+    the running ``--max-usd`` ceiling BEFORE dispatching, not merely between
+    cases (QA finding 2 on issue athenaeum#1333).
+
+    :func:`athenaeum.cluster_comparator.run_cluster_comparator` loops every
+    :func:`~athenaeum.cluster_comparator.candidate_pairs` entry with no
+    per-call cost hook of its own — a single cluster can plan up to
+    ``C(cluster_size_cap, 2)`` pairs (300 at this repo's own
+    ``resolve_cluster_size_cap`` default of 25 members), all of which could
+    fire inside ONE case before :func:`run_shadow_parity`'s own
+    between-CASES check is re-read. Wrapping the client here — rather than
+    touching :mod:`athenaeum.cluster_comparator` — checks between every
+    CALL instead, for both the detector and comparator lanes.
+    """
+
+    def __init__(self, inner: Any, usage: TokenUsage, max_usd: float) -> None:
+        self._messages = _CeilingGuardedMessages(inner.messages, usage, max_usd)
+
+    @property
+    def messages(self) -> _CeilingGuardedMessages:
+        return self._messages
+
+
+def _wrap_with_ceiling_guard(
+    client: "LLMBackend | None", usage: TokenUsage, max_usd: float | None
+) -> "LLMBackend | None":
+    """Return *client* unchanged when there is no ceiling to guard
+    (``max_usd is None``) or no client to wrap (``client is None`` — the
+    LLM-unavailable fallback path); otherwise wrap it in
+    :class:`_CeilingGuardedClient`."""
+    if max_usd is None or client is None:
+        return client
+    return cast("LLMBackend", _CeilingGuardedClient(client, usage, max_usd))
+
+
 def _empty_report(
     *, max_usd: float | None, abort_reason: str, projection: ParityProjection, corpus_digest: str
 ) -> ParityReport:
@@ -821,6 +911,22 @@ def run_shadow_parity(
     immediately with ``aborted=True`` and NO items — a ceiling that can only
     be discovered mid-run is not a ceiling (athenaeum#1333 AC6).
 
+    **Comparator-gate preflight (QA finding 1).** :func:`_with_comparator_forced_on`
+    overlays ``librarian.comparator_enabled=True`` onto the effective config,
+    but :func:`athenaeum.config.resolve_comparator_enabled` reads the
+    ``ATHENAEUM_COMPARATOR_ENABLED`` environment variable FIRST and
+    unconditionally — a falsy env value overrides the yaml override this
+    module makes. Before running anything, this function re-resolves the
+    gate on the effective config and aborts immediately (no items) if it is
+    still off: a report whose comparator lane never actually ran would
+    otherwise render as a legitimate "zero calls, zero multiplier" result
+    indistinguishable from a genuine finding, and this report gates a real
+    spend decision (athenaeum#1258) and an irreversible C4 retirement
+    (athenaeum#1256). A SECOND belt checks
+    :attr:`~athenaeum.cluster_comparator.ClusterComparatorResult.gate_enabled`
+    after every single :func:`~athenaeum.cluster_comparator.run_cluster_comparator`
+    call, in case the environment changes mid-run.
+
     Per case, in order: materialise members under
     :func:`_case_scope_dir`'s ``workdir/<source>/scope-<case_id>/`` (the
     ``scope-<case_id>`` leaf matches the recorded-fixture convention, so
@@ -837,6 +943,17 @@ def run_shadow_parity(
     both lanes for every case, so ``usage.estimated_cost_usd`` is the true
     running spend across the whole run.
 
+    **Per-call ceiling, not just per-case (QA finding 2).** Both clients are
+    wrapped via :func:`_wrap_with_ceiling_guard`, which checks the running
+    ceiling BEFORE every single ``.messages.create`` dispatch — not merely
+    between cases — because :func:`~athenaeum.cluster_comparator.run_cluster_comparator`
+    loops an entire cluster's candidate pairs (up to 300 at this repo's own
+    25-member cluster-size cap) with no cost hook of its own. The wrapper
+    raises :class:`_CostCeilingExceeded` (caught here, around each case) once
+    already over budget; the ORIGINAL between-cases check below still runs
+    too, for the case where the ceiling is crossed exactly at a case
+    boundary with no further call to trip the per-call guard.
+
     After each case, when *max_usd* is given and the running
     ``usage.estimated_cost_usd`` exceeds it, stops and returns the PARTIAL
     report (the items completed so far, ``aborted=True``) rather than
@@ -847,7 +964,11 @@ def run_shadow_parity(
     :func:`~athenaeum.cluster_comparator.run_cluster_comparator` already
     degrade rather than raise on an LLM failure, so this function adds no
     blanket ``except Exception`` of its own — a genuine bug in either lane
-    surfaces as a real traceback, not a silently-partial report.
+    surfaces as a real traceback, not a silently-partial report. The one
+    exception TYPE this function does catch, :class:`_CostCeilingExceeded`,
+    is deliberately a :class:`BaseException` for exactly that reason (see
+    its docstring) — a blanket ``except Exception`` could never have caught
+    it in the first place.
     """
     projection = project_shadow_parity(cases, config=config, workdir=workdir)
     corpus_digest = _corpus_digest_for_cases(cases)
@@ -865,7 +986,29 @@ def run_shadow_parity(
 
     effective_config = _with_comparator_forced_on(config)
 
+    if not resolve_comparator_enabled(effective_config):
+        return _empty_report(
+            max_usd=max_usd,
+            abort_reason=(
+                "the comparator gate is still OFF after forcing "
+                "librarian.comparator_enabled=True in the effective config -- "
+                "the ATHENAEUM_COMPARATOR_ENABLED environment variable takes "
+                "precedence over that yaml key "
+                "(see athenaeum.config.resolve_comparator_enabled) and is set "
+                "to a value that resolves to False. Unset ATHENAEUM_COMPARATOR_ENABLED "
+                "(or set it to a truthy value: 1/true/yes/on) before running "
+                "this harness -- otherwise the comparator lane never runs and "
+                "every item would report a fabricated 'no-decision', "
+                "indistinguishable from a real zero-agreement finding."
+            ),
+            projection=projection,
+            corpus_digest=corpus_digest,
+        )
+
     usage = TokenUsage()
+    guarded_detector_client = _wrap_with_ceiling_guard(detector_client, usage, max_usd)
+    guarded_comparator_client = _wrap_with_ceiling_guard(comparator_client, usage, max_usd)
+
     matrix = AgreementMatrix()
     items: list[ParityItem] = []
     detector_calls = 0
@@ -877,34 +1020,58 @@ def run_shadow_parity(
         dest_dir = _case_scope_dir(workdir, case)
         members = materialise_members(case, dest_dir)
 
-        if case.declared_detector is not None:
-            det = case.declared_detector
-            result = ContradictionResult(
-                detected=True,
-                conflict_type=det.conflict_type,
-                conflicting_passages=list(det.passages),
-                rationale=det.rationale,
-            )
-            case_detector_calls = 0
-        else:
-            result = contradictions.detect_contradictions(
-                members, detector_client, config=config, usage=usage
-            )
-            # Mirrors detect_contradictions' own short-circuit conditions
-            # (<2 members, or client is None) exactly, rather than guessing
-            # from the result alone -- both short-circuits return
-            # detected=False without ever dispatching a request.
-            case_detector_calls = 1 if (len(members) >= 2 and detector_client is not None) else 0
-        detector_verdict = detector_verdict_from_result(result)
-        detector_calls += case_detector_calls
+        try:
+            if case.declared_detector is not None:
+                det = case.declared_detector
+                result = ContradictionResult(
+                    detected=True,
+                    conflict_type=det.conflict_type,
+                    conflicting_passages=list(det.passages),
+                    rationale=det.rationale,
+                )
+                case_detector_calls = 0
+            else:
+                result = contradictions.detect_contradictions(
+                    members, guarded_detector_client, config=config, usage=usage
+                )
+                # Mirrors detect_contradictions' own short-circuit conditions
+                # (<2 members, or client is None) exactly, rather than guessing
+                # from the result alone -- both short-circuits return
+                # detected=False without ever dispatching a request.
+                case_detector_calls = (
+                    1 if (len(members) >= 2 and detector_client is not None) else 0
+                )
+            detector_verdict = detector_verdict_from_result(result)
 
-        cluster_result: ClusterComparatorResult = run_cluster_comparator(
-            members,
-            comparator_client,
-            config=effective_config,
-            usage=usage,
-            cluster_id=f"{case.source}-{case.case_id}",
-        )
+            cluster_result: ClusterComparatorResult = run_cluster_comparator(
+                members,
+                guarded_comparator_client,
+                config=effective_config,
+                usage=usage,
+                cluster_id=f"{case.source}-{case.case_id}",
+            )
+        except _CostCeilingExceeded as exc:
+            aborted = True
+            abort_reason = f"{exc} (during case {case.source}/{case.case_id!r})"
+            break
+
+        if not cluster_result.gate_enabled:
+            # Belt 2 of QA finding 1: this should be unreachable given the
+            # preflight check above (the SAME effective_config is passed to
+            # every case), but if it ever fires, an empty `outcomes` must
+            # never be folded into the matrix as a fabricated "no-decision"
+            # -- abort instead.
+            aborted = True
+            abort_reason = (
+                f"comparator gate reported disabled (gate_enabled=False) for "
+                f"case {case.source}/{case.case_id!r} -- the comparator lane "
+                "did not run for this case even though the preflight check "
+                "passed; aborting rather than reporting a fabricated "
+                "no-decision result"
+            )
+            break
+
+        detector_calls += case_detector_calls
         case_comparator_calls = len(cluster_result.outcomes)
         comparator_calls += case_comparator_calls
         comparator_verdict = roll_up_comparator_verdict(
@@ -988,12 +1155,36 @@ def render_report(report: ParityReport) -> str:
 
     lines.append("## Agreement")
     lines.append("")
+    lines.append(
+        "`agreement_rate = agree / (agree + disagree)` -- INCONCLUSIVE items "
+        "(either lane reached no real verdict: detector `unavailable`, or "
+        "comparator `no-decision`/`underdetermined`) are EXCLUDED from both "
+        "the numerator and the denominator, never folded into either side. "
+        "A rate computed over a small adjudicated subset describes ONLY that "
+        "subset, not the whole corpus -- always read it alongside "
+        "`inconclusive`, never in isolation (a corpus that is 90% "
+        "inconclusive with 9 of the remaining 10 agreeing still renders "
+        "`0.900`, which is NOT \"the lanes agree on 90% of the corpus\")."
+    )
+    lines.append("")
+    agree_n = report.matrix.agree_count
+    disagree_n = report.matrix.disagree_count
+    inconclusive_n = report.matrix.inconclusive_count
     rate = report.matrix.agreement_rate
-    rate_str = f"{rate:.3f}" if rate is not None else "n/a (no agree/disagree items)"
+    if rate is not None:
+        rate_str = (
+            f"{rate:.3f} ({agree_n} agree / ({agree_n} agree + {disagree_n} disagree); "
+            f"{inconclusive_n} inconclusive item(s) excluded from this rate)"
+        )
+    else:
+        rate_str = (
+            f"n/a (0 agree + 0 disagree; {inconclusive_n} inconclusive item(s) -- "
+            "nothing was adjudicated)"
+        )
     lines.append(f"- agreement_rate: {rate_str}")
-    lines.append(f"- agree: {report.matrix.agree_count}")
-    lines.append(f"- disagree: {report.matrix.disagree_count}")
-    lines.append(f"- inconclusive: {report.matrix.inconclusive_count}")
+    lines.append(f"- agree: {agree_n}")
+    lines.append(f"- disagree: {disagree_n}")
+    lines.append(f"- inconclusive: {inconclusive_n}")
     lines.append("")
 
     lines.append("## Call multiplier (comparator calls per detector call)")
@@ -1013,6 +1204,15 @@ def render_report(report: ParityReport) -> str:
     lines.append("")
 
     lines.append("## Per-item results")
+    lines.append("")
+    lines.append(
+        "`decided_correctly` legend: `True` = the comparator verdict is one "
+        "of this item's `outcome_class`'s expected verdicts "
+        "(`EXPECTED_COMPARATOR_VERDICTS`, a judgement -- see the module "
+        "docstring); `False` = it is not; `None` = not scored (an "
+        "`outcome_class` outside that mapping, or the comparator reached "
+        "`no-decision`)."
+    )
     lines.append("")
     lines.append(
         "| source | case_id | outcome_class | detector_verdict | comparator_verdict "
@@ -1065,11 +1265,26 @@ def write_report(
 
     Default ``filename`` is ``shadow-parity-<YYYY-MM-DD>.md``, dated from
     ``report.generated``'s ISO-timestamp date prefix.
+
+    NON-CLOBBERING (QA finding 5): a second run the same day is the common
+    case for a run that stalls or aborts, and the single most likely
+    "second run today" is an operator RETRY after a ``--max-usd`` abort —
+    which would otherwise silently overwrite exactly the partial artifact
+    the abort path exists to preserve, with no warning. If the target path
+    already exists, a numeric suffix (``-2``, ``-3``, ...) is appended
+    before the extension until an unused path is found. The base dated name
+    is returned unchanged when there is no collision.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if filename is None:
         filename = f"shadow-parity-{report.generated[:10]}.md"
+    name_path = Path(filename)
+    stem, suffix = name_path.stem, name_path.suffix
     path = out_dir / filename
+    n = 2
+    while path.exists():
+        path = out_dir / f"{stem}-{n}{suffix}"
+        n += 1
     path.write_text(render_report(report), encoding="utf-8")
     return path
