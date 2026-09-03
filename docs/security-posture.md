@@ -165,7 +165,7 @@ carries that filter**, which is what keeps the rule from being escapable by
 choosing a different entry point: `pii.read_entity` / `read_entities`; the
 `read_entity` MCP tool (takes `usage_classes`); `recall`'s `with_pii` join
 (which threads `usage_classes` to the same assembly); and, on the shell,
-`athenaeum query entity --usage-class` and `athenaeum recall --with-pii
+`athenaeum entity --usage-class` and `athenaeum recall --with-pii
 --usage-class`. (The person-shaped `pii.read_person` / `read_people`, the
 `read_person` MCP tool, and `athenaeum query person --usage-class` carried
 the identical filter before their removal in athenaeum#888.) A generic tool
