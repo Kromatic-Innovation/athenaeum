@@ -42,6 +42,7 @@ import json
 import sys
 from pathlib import Path
 
+from athenaeum._cli_shared import _resolve_knowledge_root, _resolve_wiki_root
 from athenaeum.answers import raise_pending_question
 from athenaeum.config import (
     DEFAULT_KNOWLEDGE_ROOT,
@@ -49,17 +50,6 @@ from athenaeum.config import (
     resolve_decisions_max_sources_per_merge,
 )
 from athenaeum.decisions import age_days, list_pending_decisions
-
-
-def _resolve_wiki_root(args: argparse.Namespace) -> Path:
-    knowledge_root = (
-        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
-    )
-    return knowledge_root / "wiki"
-
-
-def _resolve_knowledge_root(args: argparse.Namespace) -> Path:
-    return (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
 
 
 def _format_block(decision: dict) -> str:
