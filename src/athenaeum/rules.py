@@ -135,6 +135,7 @@ from athenaeum.store import (
     StoreConflictError,
     StoreKey,
     append_line_durable,
+    now_iso,
 )
 
 log = logging.getLogger(__name__)
@@ -895,7 +896,7 @@ def build_correction_record(
     if spec.observed_at is not None:
         observed_at = resolve_value_expr(spec.observed_at, record)
     else:
-        observed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        observed_at = now_iso()
     note = resolve_value_expr(spec.note, record) if spec.note is not None else None
     if not note:
         note = f"compiled by shape rule {rule_tag}"
@@ -954,7 +955,7 @@ def write_correction_batch(
         "schema_version": 1,
         "submitter": submitter,
         "batch_id": f"{timestamp}-{uuid8}",
-        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "created_at": now_iso(),
     }
     lines = [json.dumps(envelope, sort_keys=True)]
     lines.extend(json.dumps(r, sort_keys=True) for r in records)
@@ -1513,7 +1514,7 @@ def _shape_rule_disposition_row(
     """
     return {
         "schema_version": 1,
-        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "at": now_iso(),
         "source": raw.source,
         "source_ref": raw.ref,
         "key_fingerprint": record_key_fingerprint(record),
@@ -2643,7 +2644,7 @@ def run_shape_rule_phase(
                 wiki_root,
                 {
                     "schema_version": 1,
-                    "run_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "run_at": now_iso(),
                     "rule": rule_tag,
                     "mode": mode,
                     "records_seen": counts_seen.get((rule_tag, mode), records_total),

@@ -176,6 +176,14 @@ def record_resolution(
     """
     if not fingerprint:
         return
+    # Deferred import (module scope stays stdlib-only, per this module's own
+    # docstring) — mirrors the existing deferred ``athenaeum.search`` import
+    # in :func:`find_resolved_record`. :func:`athenaeum.store.now_iso` is the
+    # single shared rendering of the UTC-ISO timestamp rule (issue
+    # athenaeum#1348); its second-precision output is exactly what
+    # ``_RESOLVED_AT_FORMAT`` below parses back.
+    from athenaeum.store import now_iso
+
     record = {
         "fingerprint": fingerprint,
         # ``action`` is the single authoritative key (issue athenaeum#207). Consumers
@@ -184,8 +192,7 @@ def record_resolution(
         "action": verdict,
         "resolved_by": resolved_by,
         "source_verdict_id": source_verdict_id,
-        "resolved_at": resolved_at
-        or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "resolved_at": resolved_at or now_iso(),
         "side_a_norm": side_a_norm,
         "side_b_norm": side_b_norm,
         "member_key": member_key,
@@ -425,7 +432,10 @@ _DEFAULT_NOT_A_CONFLICT_TTL_DAYS = 0
 # stay in sync.
 _SUPPRESS_VERDICT = "not_a_conflict"
 
-# Resolved-at timestamp format stamped by :func:`record_resolution`.
+# Resolved-at timestamp format stamped by :func:`record_resolution`. This is
+# the exact second-precision rendering :func:`athenaeum.store.now_iso`
+# produces (issue athenaeum#1348) — the two must stay in sync, since this is
+# the sole consumer that parses the value back with ``datetime.strptime``.
 _RESOLVED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -490,7 +500,10 @@ def is_stale_auto_suppression(
 
     Fail-safe: a missing or unparseable ``resolved_at`` returns False (the
     record keeps suppressing) so legacy/external undated rows are never
-    expired.
+    expired — but an unparseable value (as opposed to a merely missing one)
+    is no longer SILENT (issue athenaeum#1348): it logs a warning naming the
+    offending value, since a value in the wrong format would otherwise
+    suppress forever with no visible symptom beyond "this never expires".
 
     ``now`` is INJECTED — the helper reads no wall-clock — so callers can
     freeze a single run-start timestamp and tests stay deterministic.
@@ -507,6 +520,12 @@ def is_stale_auto_suppression(
     try:
         resolved_at = datetime.strptime(raw, _RESOLVED_AT_FORMAT)
     except ValueError:
+        log.warning(
+            "fingerprint: resolved_at %r does not match expected format %r — "
+            "treating as not expired (issue athenaeum#1348)",
+            raw,
+            _RESOLVED_AT_FORMAT,
+        )
         return False
     # record_resolution stamps UTC without an offset; compare in UTC. If the
     # caller's ``now`` is tz-aware, normalize the parsed value to match.

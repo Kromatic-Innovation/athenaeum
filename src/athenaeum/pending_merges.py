@@ -80,7 +80,7 @@ import logging
 import re
 import subprocess
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -93,6 +93,7 @@ from athenaeum.sidecar_blocks import (
     scan_fence_state,
     split_blocks,
 )
+from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -1678,8 +1679,7 @@ def ingest_resolved_merges(merges_path: Path) -> int:
     blocks = _split_blocks(text)
 
     archive_path = merges_path.parent / "_pending_merges_archive.md"
-    now = datetime.now(timezone.utc)
-    iso_ts = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    iso_ts = now_iso()
 
     remaining: list[str] = []
     archived: list[str] = []
@@ -1807,7 +1807,7 @@ def revalidate_pending_merges(
     text = merges_path.read_text(encoding="utf-8")
     blocks = _split_blocks(text)
 
-    ts = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = now_iso(now)
     remaining: list[str] = []
     retired_blocks: list[str] = []
 

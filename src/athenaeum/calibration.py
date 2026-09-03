@@ -47,11 +47,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from athenaeum.store import append_line_durable
+from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -75,10 +74,6 @@ _WATCHED_VERDICT: dict[str, str] = {"T1": "reject", "T2": "approve"}
 def default_calibration_ledger_path(wiki_root: Path) -> Path:
     """Default calibration ledger path: ``<wiki_root>/_calibration.jsonl``."""
     return Path(wiki_root) / CALIBRATION_LEDGER_FILENAME
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def audit_item_id(tier: str, proposal_id: str) -> str:
@@ -213,7 +208,7 @@ def sample_tier_decision(
         "v": CALIBRATION_LEDGER_VERSION,
         "kind": AUDIT_KIND,
         "id": item_id,
-        "created_at": _now_iso(),
+        "created_at": now_iso(),
         "tier": tier,
         "verdict": verdict,
         "proposal_id": proposal_id,
@@ -300,7 +295,7 @@ def record_audit_review(
         "v": CALIBRATION_LEDGER_VERSION,
         "kind": REVIEW_KIND,
         "id": audit_id,
-        "created_at": _now_iso(),
+        "created_at": now_iso(),
         "tier": audit.get("tier"),
         "original_verdict": audit.get("verdict"),
         "human_verdict": human_verdict,

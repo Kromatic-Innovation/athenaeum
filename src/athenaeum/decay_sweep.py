@@ -83,13 +83,13 @@ import json
 import logging
 import subprocess
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 from athenaeum.config import resolve_cache_dir
 from athenaeum.models import parse_bucket, parse_frontmatter, valid_until_expired
-from athenaeum.store import append_line_durable
+from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -322,10 +322,6 @@ def sweep_ledger_path(cache_dir: Path | None = None) -> Path:
     return resolve_cache_dir(cache_dir) / SWEEP_LEDGER_FILENAME
 
 
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 def _append_ledger_line(path: Path, line: str) -> None:
     """Append one line durably (``O_APPEND`` + ``fsync``), via
     :func:`athenaeum.store.append_line_durable` — the single shared
@@ -518,7 +514,7 @@ def _apply_off_corpus_routing(
 
     # Ledger write BEFORE removal from the ordinary corpus (same fail-closed
     # ordering as the kill-list flow's issue athenaeum#969 AC1 discipline).
-    swept_at = _now_iso()
+    swept_at = now_iso()
     ledger_records = [
         SweepLedgerRecord(
             page=rel,
@@ -682,7 +678,7 @@ def apply_sweep(
     # runs, so a page can never be archived without a durable record of why.
     # Deliberately not try/except-and-continue past this — see
     # `write_sweep_ledger`'s docstring.
-    swept_at = _now_iso()
+    swept_at = now_iso()
     ledger_records = [
         SweepLedgerRecord(
             page=rel,

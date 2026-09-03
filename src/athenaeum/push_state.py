@@ -38,11 +38,11 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -113,9 +113,8 @@ def write_state(cache_dir: Path, *, consecutive: int, last_reason: str) -> None:
     before an intervening success.
     """
     path = cache_dir / STATE_NAME
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     payload = {
-        "updated": now,
+        "updated": now_iso(),
         "consecutive": consecutive,
         "last_reason": _truncate(last_reason),
     }
