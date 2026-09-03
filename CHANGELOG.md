@@ -49,13 +49,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collides with and a 150-file pass does not. Documentation only; no behaviour
   change.
 
-## [0.19.45] - 2026-09-03
+## [0.20.0] - 2026-09-03
 
-_Supersedes 44 untagged, unpublished patch bumps (0.19.1–0.19.44) that never shipped to PyPI; the last published release was v0.19.0._
+_Supersedes 45 untagged, unpublished patch bumps (0.19.1–0.19.45) that never shipped to PyPI; the last published release was v0.19.0._
+
+_Numbered `0.20.0` rather than `0.19.45` (athenaeum#1335): this release **removes** public entry points — the `athenaeum people`, `athenaeum person` and `athenaeum bounce-divergence` subcommands and the `read_person` MCP tool — and a patch digit tells a dependency resolver the opposite. The removals were always documented under **Removed** below; only the version number disagreed._
 
 ### Release summary
 
-**Athenaeum 0.19.45 is the memory-model v6 release: memory becomes dimensioned,
+**Athenaeum 0.20.0 is the memory-model v6 release: memory becomes dimensioned,
 tiered, and budgeted; the store moves behind a pluggable adapter; sensitive
 data gets a routed, erasable path; and every token and dollar the librarian
 spends is attributed.** Seven themes, each with its landing issues:
@@ -119,6 +121,29 @@ are gone (athenaeum#1079, athenaeum#1111, athenaeum#888); `athenaeum entity`
 exit code `1` now means only "uid not found" (athenaeum#1270).
 
 ### Added
+
+- **A semver guard over the public surface, and the version correction it
+  forced (athenaeum#1335).** This release was numbered `0.19.45` while removing
+  four published entry points; the CHANGELOG said so under **Removed** and the
+  version number said the opposite, which is what a dependency resolver reads.
+  Two zenodotus reviewers caught it by reading (athenaeum#1328) and nothing in
+  CI did. `tests/test_public_surface_guard.py` now fails any release that drops
+  a public name present in the last **published** release without a
+  minor-or-greater bump, across three dimensions: top-level CLI subcommands
+  (from `build_parser()`), `athenaeum.__all__`, and the MCP tool names
+  registered by `mcp_server.py`. It is a set difference rather than a count,
+  because between v0.19.0 and this release the CLI grew 39 → 48 and `__all__`
+  grew 21 → 32 — every count-based check passes while four named entry points
+  are gone. The baseline (`tests/fixtures/public_surface_baseline.json`) is
+  generated from a v0.19.0 checkout by `scripts/snapshot_public_surface.py`,
+  never hand-listed, because a name omitted from it is a name whose removal the
+  guard can never notice; a companion test cross-checks the static MCP
+  extraction against the live FastMCP registration, which is how `recall` —
+  registered by an explicit `mcp.tool()(recall)` call rather than the decorator
+  every other tool uses — was caught being mis-reported as removed. The guard
+  is asserted in both directions on every run: it rejects the literal `0.19.45`
+  against real surface data and accepts `0.20.0`, so it cannot quietly go inert
+  once the version is corrected.
 
 - **Every candidate pair the wiki-dedup pass examines now leaves a durable
   attribution row, embedder included (athenaeum#1243).** athenaeum#1227's
@@ -1647,7 +1672,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   shared `_require_nonblank_reason` field validator), so it takes the
   tier's existing safe fallback (T1 → `pass_up`, T2 → `escalate`) like any
   other schema mismatch, instead of being defaulted through OR crashing.
-  No version bump for this fix — folded into the same `0.19.45` this PR
+  No version bump for this fix — folded into the same release this PR
   had not yet released.
 
 - **`athenaeum entity`'s exit code `1` now means ONLY "uid not found"; a new
