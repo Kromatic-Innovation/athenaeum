@@ -221,7 +221,7 @@ If you are writing a client against athenaeum:
    - **Searching?** `recall` with the excluded-field flag set: the `recall` MCP
      tool's `with_pii=True`, or `athenaeum recall --with-pii` (athenaeum#885,
      athenaeum#886). This is the read you were already making.
-   - **Holding a uid?** The `read_entity` MCP tool, `athenaeum query entity
+   - **Holding a uid?** The `read_entity` MCP tool, `athenaeum entity
      --uid ... --class ... [--include-excluded]`, or `pii.read_entity`
      (athenaeum#883, athenaeum#886). **Resolving more than one uid in one
      process: use `pii.read_entities`**, which pays the store's O(corpus) scans
