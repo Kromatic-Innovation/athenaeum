@@ -1803,7 +1803,7 @@ def detect_hard_bounce_fact(text: str) -> HardBounceFact | None:
 #: A BARE word-boundary match on 550-559 is not enough on its own — QA review
 #: (issue athenaeum#1341) empirically confirmed it false-positives on ordinary
 #: prose with zero SMTP/diagnostic context ("closed a $550 round", "ticket
-#: #552", "booth 550", "invoice #559"), which — combined with a lone nearby
+#: number 552", "booth 550", "invoice number 559"), which — combined with a lone nearby
 #: email address — would silently write a bogus ``bounced:`` value onto a
 #: real person's wiki page. Unlike the RFC ``5.x.x`` sibling
 #: (:data:`_HARD_BOUNCE_CODE_RE`), whose dotted-triple shape essentially never
@@ -1875,7 +1875,7 @@ def find_bare_smtp_5xx_code(text: str) -> str | None:
     ``smtp;`` prefix (RFC 3464 ``Diagnostic-Code`` shape) — not just a
     word-boundary match anywhere in *text*. See :data:`_BARE_SMTP_5XX_CODE_RE`
     for why: a bare 3-digit number in the 550-559 range appears in ordinary
-    prose ("closed a $550 round", "ticket #552") far too often to trust
+    prose ("closed a $550 round", "ticket number 552") far too often to trust
     without it.
 
     Matches independently of whether an RFC 3463 enhanced code is ALSO
