@@ -1335,3 +1335,113 @@ class TestNamedAsAGate:
             "the gate comment must name the coordinate-backfill precondition "
             "sitting under this issue"
         )
+
+
+class TestEveryRemainingBranchIsAccountedFor:
+    """QA review of athenaeum#1243: the three ``propose_wiki_page_merges``
+    branches that a green suite left unproven. Each mutates the WIRING
+    (``monkeypatch`` on the collaborator this pass calls) rather than the
+    logic under test, so the branch is exercised through the real pass."""
+
+    def test_page_read_error_leaves_a_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pair whose page cannot be read off disk is still accounted for.
+        Unreachable through candidate discovery (which reads every page first),
+        so the read must be made to fail at the comparator's own read site."""
+        import athenaeum.wiki_dedupe as wd
+        from athenaeum.wiki_dedupe_attribution import OUTCOME_READ_ERROR
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+
+        def _boom(path: Path):
+            raise OSError("simulated unreadable page")
+
+        monkeypatch.setattr(wd, "page_from_path", _boom)
+        results = _run_pass(knowledge_root)
+
+        assert results == []
+        rows = _rows(knowledge_root)
+        assert len(rows) == 3
+        for row in rows:
+            assert row.outcome == OUTCOME_READ_ERROR
+            assert row.reason == "page-read-failed"
+            assert "simulated unreadable page" in row.detail
+            assert row.became_proposal is False
+
+    def test_erasure_class_pair_is_deliberately_NOT_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ONE deliberate carve-out from AC1's "every examined pair leaves
+        a row": an erasure-class (pii-flagged) pair must not reach this in-git
+        artifact, because
+        :func:`athenaeum.verdicts.refuse_if_erasure_class`'s posture outranks
+        an observability record.
+
+        Unreachable through the real pass today —
+        ``discover_wiki_dedupe_candidates`` filters pii-flagged pages upstream
+        — which is exactly why it needs a test: nothing would otherwise catch
+        either an accidental leak (if that upstream filter is loosened) or an
+        accidental REMOVAL of the carve-out."""
+        import athenaeum.wiki_dedupe as wd
+        from athenaeum.wiki_dedupe_attribution import ERASURE_CLASS_REFUSED_REASON
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+
+        def _refused(wiki_root, page_a, page_b, **kw):
+            return {
+                "ok": False,
+                "pair": f"{page_a.id}+{page_b.id}",
+                "verdict": None,
+                "skipped": None,
+                "reason": ERASURE_CLASS_REFUSED_REASON,
+                "outcome": None,
+            }
+
+        monkeypatch.setattr(wd, "record_comparison", _refused)
+        results = _run_pass(knowledge_root)
+
+        assert results == []
+        # The snapshot is still WRITTEN (the pass ran) -- it is simply empty,
+        # which is the honest artifact: no row, and no pii-derived value.
+        # Asserted on the FILE, not just on ``_rows``: an empty read is
+        # ambiguous between "written empty" and "never written", and only the
+        # former is correct here.
+        from athenaeum.wiki_dedupe_attribution import attribution_path
+
+        canonical = attribution_path(knowledge_root / "wiki")
+        assert canonical.is_file(), "the pass ran, so the snapshot is written"
+        assert canonical.read_text(encoding="utf-8") == ""
+        assert _rows(knowledge_root) == []
+
+    def test_a_missing_outcome_still_accounts_for_the_pair(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defensive branch: ``ok=True`` with no ``skipped`` should always
+        carry an outcome under ``record_comparison``'s current contract. If
+        that contract ever drifts, the pair must still be recorded rather than
+        silently vanishing — which is what the pre-athenaeum#1243 bare
+        ``continue`` did to every branch."""
+        import athenaeum.wiki_dedupe as wd
+        from athenaeum.wiki_dedupe_attribution import OUTCOME_NO_VERDICT
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+
+        def _contract_drift(wiki_root, page_a, page_b, **kw):
+            return {
+                "ok": True,
+                "pair": f"{page_a.id}+{page_b.id}",
+                "verdict": "distinct",
+                "skipped": None,
+                "reason": None,
+                "outcome": None,
+            }
+
+        monkeypatch.setattr(wd, "record_comparison", _contract_drift)
+        results = _run_pass(knowledge_root)
+
+        assert results == [], "no outcome means no effect can be enacted"
+        rows = _rows(knowledge_root)
+        assert len(rows) == 3
+        assert all(r.outcome == OUTCOME_NO_VERDICT for r in rows)
+        assert all(r.reason == "no-outcome-returned" for r in rows)
