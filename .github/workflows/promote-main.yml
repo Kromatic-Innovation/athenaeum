@@ -1,189 +1,55 @@
 name: Promote Main
 
-# ⚠️  CANONICAL TEMPLATE — DO NOT HAND-EDIT PER REPO.
+# ⚠️  CANONICAL CONSUMER STUB — DO NOT HAND-EDIT PER REPO.
 #
-# This is the single source of truth for `promote-main.yml` across every
-# Internal Platform repo (registry `family: platform` + `promotionModel:
-# develop-main`). It is versioned in code-workspace-config at
-# `templates/promote-main.yml` and synced into each platform repo by
-# `scripts/sync_promote_workflows.py` (mirror of `derive_repo_configs.py`).
+# cwc#2756: this is no longer a copy of the full promotion workflow. The full
+# implementation now lives ONCE, in code-workspace-config's own
+# `.github/workflows/promote-main.yml`, as a `workflow_call` reusable
+# workflow. This file is the SHORT stub every platform repo (registry
+# `family: platform` + `promotionModel: develop-main`) commits as its own
+# `.github/workflows/promote-main.yml` — it keeps the `workflow_dispatch`
+# entry point `hestia promote`/`hestia ship` already speak, and forwards
+# straight through to the canonical implementation.
 #
 # THIS COPY IS GENERATED. If you are reading this in a consumer repo, do not
 # hand-edit it — the next sync overwrites any local change with canonical
-# content again. Edit `templates/promote-main.yml` in code-workspace-config
-# instead.
+# content again. Edit THIS template in code-workspace-config instead:
+# `templates/promote-main.yml`, synced by `scripts/sync_promote_workflows.py`
+# (same mechanism as before cwc#2756 — only the CONTENT being synced shrank).
 #
-# Enforcement is PRODUCER-SIDE, in cwc, not in this consumer repo:
-#   - `code-workspace-config/.github/workflows/promote-workflow-drift.yml`
-#     (`--check`) is BLOCKING, but only for cwc's OWN committed copy of this
-#     workflow against `templates/promote-main.yml` — it does not run here and
-#     has no visibility into any consumer repo's copy.
-#   - Fleet-wide conformance (every consumer's committed copy vs. canonical) is
-#     checked by cwc's `fleet-drift-guard.yml` / `scripts/check_fleet_drift.py`
-#     ("property 4", cwc#1889) — BLOCKING as of cwc#2015. A diverged consumer
-#     copy FAILS cwc's fleet drift guard; it is no longer merely reported.
+# `@main` is a FLOATING pin, not a SHA or tag (operator decision, cwc#2756): a
+# bad merge to cwc's `main` changes every consumer's promotion path at once,
+# with no propagation step to catch it first. That risk was weighed and
+# accepted deliberately — see the cwc#2756 decision comments — specifically
+# to delete the propagation-lag failure mode this stub-and-sync arrangement
+# used to have (a canonical edit not yet synced into a consumer's committed
+# copy). Do not "fix" this to a SHA or `@v1` pin without raising that risk
+# call again; it is not a local judgment call for a synced copy.
 #
-# WHAT COUNTS AS DIVERGENCE (cwc#2554). Conformance is compared on NORMALIZED
-# content: this header comment block is ADVISORY, not load-bearing. An edit
-# confined to it is semantically null, so it reports as a non-blocking
-# `header drift` finding and desyncs nobody — a comment-only change must not
-# cost a fan-out across every consumer (cwc#2532 cost 14 PRs across 14 repos).
-# Everything else, including comments further down this file, is compared
-# byte-for-byte and still FAILS the guard.
+# `permissions:` below is intentionally non-empty even though this job does
+# almost nothing itself: a called `workflow_call` job's permissions can only
+# be NARROWED by the caller relative to what it declares, never widened, so
+# the canonical implementation's actual needs (contents: write, actions:
+# write, statuses/checks: read, pull-requests: read — see its own header for
+# why) must be granted here too, or the call fails on a permissions error
+# despite the canonical workflow asking correctly.
 #
-# Header drift is reported, never discarded, and never accumulates: the next
-# substantive sync writes canonical bytes WHOLESALE and carries it. To sweep it
-# deliberately, or to propagate any canonical edit without checking out a
-# single consumer repo:
+# `secrets: inherit` passes every secret this repo's Action run holds through
+# to the canonical workflow (which loads `OP_SERVICE_ACCOUNT_TOKEN` from it).
+# The canonical side deliberately declares no `secrets:` block of its own —
+# see its header — so nothing here needs to be named explicitly either.
 #
-#     python3 scripts/propagate_template_edit.py --workflow promote-main
-#     python3 scripts/propagate_template_edit.py --workflow promote-main --apply
+# Fleet-wide conformance of this file (every consumer's committed copy vs.
+# THIS template) is enforced by cwc's `fleet-drift-guard.yml` /
+# `scripts/check_fleet_drift.py` ("property 4", cwc#1889) — BLOCKING as of
+# cwc#2015. During the cwc#2756→cwc#2760 cutover, a consumer that still
+# carries the OLD pre-cutover full body (frozen at
+# `templates/promote-main.pre-cutover.yml`) is ALSO accepted, report-only, so
+# converting repos one at a time never reds cwc's own develop CI — see that
+# guard's `check_template_conformance` for the exact acceptance logic and the
+# report-only expiry.
 #
-# That opens one PR per out-of-sync consumer via the GitHub API (cwc#2554
-# Route 2). It skips any repo whose copy is waiver-backed. Auto-MERGING those
-# PRs is a separate grant that is NOT authorized: `--auto-merge` defaults off
-# and refuses every repo not explicitly named.
-# In short: nothing in THIS repo's CI enforces that this file matches
-# canonical, but drift is NOT invisible — cwc's fleet-drift-guard fails on its
-# next scheduled (or `templates/**`-triggered) run, and the fix is a re-sync
-# from cwc, never a local edit. The one-flag rollback lever is
-# `check_fleet_drift.py --skip-template-conformance`; a deliberate divergence
-# is declared as a `driftGuard.templateDeviations` waiver in
-# `docs/project-registry.yaml` in cwc, never as a local edit here.
-#
-# To change the promotion contract, edit THIS template and re-run the sync
-# script — never hand-edit a repo's `.github/workflows/promote-main.yml`.
 # cwc#1468. End home: cron-fleet (rides cwc#1107).
-#
-# Contract — `{source_branch, target_branch, reason}` plus an OPTIONAL `sha`
-# (cwc#1866 / hestia#1021). The base contract is the `{source_branch,
-# target_branch, reason}` winner (rejecting the old REQUIRED-`{sha, reason}` +
-# hardcoded-`ci.yml` shape). The optional `sha` re-introduces SHA pinning as an
-# ADD-ON, never a replacement:
-#
-#   - Absent (the default, and every un-migrated caller): behavior is exactly as
-#     before — the source SHA is re-resolved from the `source_branch` tip at
-#     runtime.
-#   - Present: promote that EXACT commit. `hestia promote` reads develop's tip at
-#     gate time and passes it here, so a commit landing on develop mid-flight
-#     cannot divert the promotion to a newer, still-building SHA (hestia#1021).
-#     The workflow asserts the pinned SHA is reachable from `source_branch` and
-#     that `main` fast-forwards to it, gates `CI Required` on that exact SHA, and
-#     fast-forwards `main` to it WITHOUT re-resolving the branch. The hestia half
-#     is a safe no-op until this template accepts `sha`.
-#
-# Platform repos are `develop-main`: `main` is the deliberate deploy ref (the
-# launchd registry deploy checkout is main-pinned; deploy-guard.sh
-# fast-forwards+reloads it from origin/main before every dispatch, so advancing
-# `main` IS the deploy). `main` is push-restricted (branch-protection
-# allowlist), so a local `octokit.git.updateRef` under a daemon App returns
-# HTTP 422. This workflow does the fast-forward IN CI under the
-# kromatic-workflow-bot App, which holds the protected-branch bypass.
-# `hestia promote --repo <name>` dispatches this workflow.
-#
-# The chain is develop -> main and the `to_main` gate is `ci_green`. This
-# workflow refuses to promote unless the `CI Required` aggregate check is green
-# for the exact develop tree being promoted (resolved via the generic check-runs
-# API, not a hardcoded `ci.yml` context), then fast-forwards `main` via the refs
-# API (force=false, never a force-push). Triggered by workflow_dispatch.
-#
-# WHERE THE `CI Required` EVIDENCE COMES FROM (cwc#2627). The gate used to query
-# check-runs on the promoted SHA and nothing else. That SHA is a develop merge
-# commit, and only a `push: [develop]`-triggered CI run ever stamps it —
-# `pull_request` runs attach their check-runs to the PR HEAD, a parent of the
-# merge commit. So the duplicate post-merge push run was load-bearing for
-# promotion in every consumer repo, and dropping it (epic cwc#2251 / cwc#2342,
-# athenaeum#816 / athenaeum#1031) would have resolved `blocked` forever. The
-# gate now resolves the evidence in this order, still fail-closed at every step:
-#
-#   1. Check-runs on the promoted SHA itself. A repo that still runs
-#      `push: [develop]` CI is green here and behaves exactly as before.
-#   2. Otherwise, the PR head that produced the promoted SHA:
-#        a. the merge commit's SECOND PARENT (`<sha>^2`), which is the PR head
-#           for a GitHub "Merge pull request #N" commit; or
-#        b. for a squash/rebase merge (no second parent), the single merged PR
-#           whose `merge_commit_sha` IS the promoted SHA, fetched as
-#           `refs/pull/<n>/head`.
-#      The candidate is accepted ONLY if `git rev-parse <candidate>^{tree}`
-#      equals the promoted SHA's tree. That check is what makes the substitution
-#      safe: identical tree means the green CI ran on byte-identical content, so
-#      it is evidence about the code being promoted, not merely about a commit
-#      nearby. Strict required status checks (the fleet `develop-ci-required`
-#      ruleset) are what normally make the trees equal — but this workflow
-#      VERIFIES it rather than assuming it, and refuses on a mismatch.
-#
-# DIRECT PUSHES TO `develop` (no associated PR) fail closed. Such a commit has
-# no PR head to resolve, so unless a CI run stamped the SHA directly (path 1),
-# the gate errors and the promotion stops. That is deliberate — the remedy is to
-# land the change through a PR, or dispatch CI on that SHA so path 1 resolves.
-# The same applies when more than one merged PR claims the SHA (ambiguous, so
-# no candidate is chosen) — but a tree MISMATCH on a resolved candidate now has
-# a third path below, rather than failing closed outright.
-#
-# RUNG 3 — EVIDENCE PRODUCTION FOR A TREE-MISMATCHED CANDIDATE (cwc#2749). A
-# squash/rebase merge landed while develop was behind base (or any merge whose
-# tree provably differs from the resolved candidate's) leaves rungs 1-2 with no
-# usable evidence — the candidate's green CI ran on content that is NOT the
-# promoted tree, so path 2 correctly refuses it. Rung 3 does not weaken that
-# refusal or introduce a new evidence class: the acceptance predicate stays
-# rung 1's own SHA-keyed query. It fires ONLY on a tree mismatch, and:
-#
-#   1. requires `source_sha` to still equal the CURRENT `origin/${SOURCE_BRANCH}`
-#      tip (a develop that has advanced meanwhile makes any run we produce stamp
-#      a different SHA, so failing this precondition up front avoids a doomed
-#      30-minute poll);
-#   2. discovers the consumer's CI workflow id from the candidate's own
-#      `CI Required` check-run — never from per-repo config, because the fleet
-#      drift guard byte-compares this template across every consumer
-#      (check-runs -> `check_suite.id` -> `actions/runs?head_sha=<candidate>` ->
-#      `workflow_id`);
-#   3. ADOPTS an existing run at the promoted SHA if one already exists (any
-#      status, including a completed/red one — that IS the poisoned-SHA case
-#      below), or DISPATCHES that workflow on `ref = ${SOURCE_BRANCH}` (a
-#      branch, per the `workflow_dispatch` API — never a SHA) only when none
-#      exists. This is MANDATORY, not an optimization: a second concurrent
-#      dispatch on the same ref cancels the first under a consumer's
-#      `cancel-in-progress: true`, and a single cancelled/failed sibling
-#      `CI Required` check-run permanently poisons the promoted SHA (the
-#      all-success jq filter above never recovers once ANY check-run on that
-#      SHA is non-success);
-#   4. re-polls RUNG 1's existing check-runs query on the promoted SHA — never
-#      the dispatched run's own `conclusion` — until green or timeout.
-#
-# CONSUMER PREREQUISITE: the discovered workflow must declare `workflow_dispatch`
-# on the branch used here; a repo whose `ci.yml` only triggers on `pull_request`
-# gets an immediate 422 and the gate fails closed naming that gap, without
-# consuming a poll timeout.
-#
-# POLL DEFAULTS: `CI_EVIDENCE_POLL_TIMEOUT_S` (default 1800) and
-# `CI_EVIDENCE_POLL_INTERVAL_S` (default 15), both env-overridable.
-#
-# POISONED-SHA RECOVERY: a non-success `CI Required` check-run cannot be un-poisoned
-# — a new run ADDS a check-run, it never replaces one. The only remedy is to
-# land a new commit on `${SOURCE_BRANCH}` and promote that; do not re-run the
-# same promotion expecting a retry to help.
-#
-# Rung 3 deliberately does NOT fire when the tree MATCHES and the resolved
-# candidate is red — that would turn this gate into an auto-retry-until-green
-# loop instead of a promotion gate.
-#
-# The optional pinned `sha` input needs no special handling: whatever commit it
-# names becomes the promoted SHA and goes through the identical ladder above.
-#
-# RE-SYNC PATH. This gate lives in the canonical template only. Consumer repos
-# pick it up by SYNC, never by a local edit (a local edit fails cwc's fleet drift
-# guard and is overwritten by the next sync):
-#
-#     python3 scripts/sync_promote_workflows.py --check      # dry run
-#     python3 scripts/sync_promote_workflows.py --apply      # local workspace
-#     python3 scripts/propagate_template_edit.py --workflow promote-main --apply
-#                                                            # one PR per consumer
-#
-# A consumer only stops depending on its `push: [develop]` CI trigger AFTER its
-# copy has been re-synced; dropping the trigger first re-creates the outage.
-#
-# Precondition: `main` is an ancestor of `develop` (fast-forward possible).
-# If it isn't, open a `chore: sync develop with main` PR first.
 
 on:
   workflow_dispatch:
@@ -213,325 +79,16 @@ permissions: {}
 jobs:
   promote:
     name: Fast-forward Promote develop → main
-    runs-on: ubuntu-latest
-    # cwc#2749: two concurrent promotions of the same target branch must never
-    # run the to_main gate in parallel — rung 3's adopt-or-dispatch protects
-    # against a second DISPATCH, but a second whole gate run racing the first
-    # is still a needless duplicate. `cancel-in-progress: false` because a
-    # promotion in flight must run to completion, never be cancelled mid-push.
-    concurrency:
-      group: promote-main-${{ github.repository }}-${{ github.event.inputs.target_branch }}
-      cancel-in-progress: false
     permissions:
       contents: write
       actions: write
       statuses: read
       checks: read
-      # cwc#2627: the gate resolves the merged PR that produced the promoted
-      # SHA when the SHA itself carries no `CI Required` check-run.
-      # cwc#2749: `write` (widened from `read`) — rung 3 dispatches the
-      # consumer's CI workflow via `POST .../dispatches` when the resolved PR
-      # head's tree differs from the promoted tree.
       pull-requests: read
-    outputs:
-      promoted_sha: ${{ steps.set_promoted_sha.outputs.promoted_sha }}
-    env:
-      SOURCE_BRANCH: ${{ github.event.inputs.source_branch }}
-      TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
-      PROMOTION_REASON: ${{ github.event.inputs.reason }}
-      PROMOTE_SHA: ${{ github.event.inputs.sha }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Load workflow-bot App credentials from 1Password
-        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2  # v5.0.1
-        with:
-          export-env: true
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          KROMATIC_WORKFLOW_BOT_APP_ID: op://Infrastructure/kromatic-workflow-bot/app-id
-          KROMATIC_WORKFLOW_BOT_PRIVATE_KEY: op://Infrastructure/kromatic-workflow-bot/private-key
-
-      - name: Mint GitHub App installation token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
-        with:
-          app-id: ${{ env.KROMATIC_WORKFLOW_BOT_APP_ID }}
-          private-key: ${{ env.KROMATIC_WORKFLOW_BOT_PRIVATE_KEY }}
-
-      - name: Validate promotion inputs and fast-forward precondition
-        run: |
-          set -euo pipefail
-
-          if [ "$SOURCE_BRANCH" != "develop" ]; then
-            echo "::error::source_branch must be 'develop'. Got '$SOURCE_BRANCH'."
-            exit 1
-          fi
-
-          if [ "$TARGET_BRANCH" != "main" ]; then
-            echo "::error::target_branch must be 'main'. Got '$TARGET_BRANCH'."
-            exit 1
-          fi
-
-          git fetch --no-tags --prune origin "$SOURCE_BRANCH" "$TARGET_BRANCH"
-
-          SOURCE_SHA="$(git rev-parse "origin/${SOURCE_BRANCH}")"
-          TARGET_SHA="$(git rev-parse "origin/${TARGET_BRANCH}")"
-
-          # Optional pinned `sha` (cwc#1866 / hestia#1021): when supplied, promote
-          # that EXACT commit instead of the branch tip resolved just above, so a
-          # commit landing on ${SOURCE_BRANCH} mid-flight cannot divert the
-          # promotion to a newer, still-building SHA. The pinned commit must be
-          # reachable from ${SOURCE_BRANCH} (its tip, or an ancestor of it — the
-          # gated commit hestia read). When absent, this block is skipped and the
-          # source SHA stays the branch tip: behavior is unchanged.
-          if [ -n "${PROMOTE_SHA:-}" ]; then
-            if ! git merge-base --is-ancestor "$PROMOTE_SHA" "$SOURCE_SHA"; then
-              echo "::error::Pinned sha ${PROMOTE_SHA} is not reachable from origin/${SOURCE_BRANCH} (tip ${SOURCE_SHA}). Promote only a commit that is on ${SOURCE_BRANCH}."
-              exit 1
-            fi
-            echo "Promoting pinned sha ${PROMOTE_SHA} (origin/${SOURCE_BRANCH} tip is ${SOURCE_SHA})."
-            SOURCE_SHA="$PROMOTE_SHA"
-          fi
-
-          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_ENV"
-          echo "target_sha=$TARGET_SHA" >> "$GITHUB_ENV"
-
-          # cwc#2283: a duplicate/racing promotion (e.g. `autoPromoteToMain`
-          # firing seconds after an orchestrator's own trigger already landed
-          # the same SHA) is NOT a promotion failure — it is a no-op that
-          # arrived late. Distinguish it from a genuine failure: exit 0 with a
-          # clear "nothing to promote" notice and skip the CI-gate + push
-          # steps below, rather than exiting 1 and reporting a red run for
-          # work that already succeeded.
-          if [ "$SOURCE_SHA" = "$TARGET_SHA" ]; then
-            echo "::notice::${SOURCE_BRANCH} and ${TARGET_BRANCH} are already at ${SOURCE_SHA}. Nothing to promote (no-op)."
-            echo "NOTHING_TO_PROMOTE=true" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          echo "NOTHING_TO_PROMOTE=false" >> "$GITHUB_ENV"
-
-          if ! git merge-base --is-ancestor "$TARGET_SHA" "$SOURCE_SHA"; then
-            echo "::error::Fast-forward precondition failed: ${TARGET_BRANCH} is not an ancestor of ${SOURCE_BRANCH}. Open a 'chore: sync ${SOURCE_BRANCH} with ${TARGET_BRANCH}' PR first."
-            exit 1
-          fi
-
-      - name: Enforce to_main gate — CI Required green on source SHA
-        if: env.NOTHING_TO_PROMOTE != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          # `to_main` gate is `ci_green`; the enforcing context is the `CI
-          # Required` aggregate check. Fail closed unless it is an UNAMBIGUOUS
-          # success on whichever SHA the evidence is read from (the ladder
-          # below): there must be at least one `CI Required` check-run AND every
-          # one must have concluded 'success'.
-          #
-          # cron-fleet#138 / cwc#1903: the prior `head -n 1` logic picked a
-          # single conclusion nondeterministically, so two same-named check-runs
-          # that DISAGREE (a stale success + a failed rerun) could resolve to
-          # 'success' and promote a failed tree. The single-source-of-truth jq
-          # filter below encodes "≥1 match and all success"; it is exercised
-          # verbatim (extracted, not reimplemented) by
-          # scripts/test_sync_promote_workflows.py against recorded check-run
-          # payloads. `length > 0` is required because jq's `all(empty; …)` is
-          # vacuously true — an empty match must fail closed, not pass.
-          CI_REQUIRED_JQ='[.check_runs[] | select(.name == "CI Required") | .conclusion] as $c | if ($c | length) > 0 and (all($c[]; . == "success")) then "success" else "blocked" end'
-
-          # cwc#2627: the promoted SHA is a develop merge commit, and only a
-          # `push: [develop]`-triggered CI run ever stamps it — `pull_request`
-          # runs stamp the PR HEAD. Querying the promoted SHA alone therefore
-          # made the duplicate post-merge push run load-bearing for promotion.
-          # Resolve the evidence in order, fail-closed at every step:
-          #   1. the promoted SHA itself (unchanged fast path);
-          #   2. the PR head that produced it — merge commit second parent, or
-          #      the single merged PR whose merge_commit_sha IS the promoted SHA
-          #      (squash/rebase) — accepted ONLY when its TREE is identical, so
-          #      the green CI provably ran on the code being promoted.
-          # A direct push with no PR, an ambiguous PR match, or a tree mismatch
-          # yields no usable evidence and the gate stops the promotion.
-          ci_required_verdict() {
-            gh api "repos/${GITHUB_REPOSITORY}/commits/$1/check-runs" \
-              --jq "$CI_REQUIRED_JQ"
-          }
-
-          verdict=$(ci_required_verdict "$source_sha")
-          evidence_sha="$source_sha"
-
-          if [ "$verdict" != "success" ]; then
-            echo "No unambiguous 'CI Required' success on ${source_sha} (verdict='${verdict}'); resolving the PR head that produced it."
-            candidate=""
-            if git rev-parse -q --verify "${source_sha}^2" >/dev/null 2>&1; then
-              candidate=$(git rev-parse "${source_sha}^2")
-              echo "Merge commit: second parent ${candidate} is the PR head."
-            else
-              pr_number=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${source_sha}/pulls" \
-                --jq "[.[] | select(.merge_commit_sha == \"${source_sha}\") | .number] | unique | if length == 1 then .[0] else empty end" || true)
-              if [ -n "${pr_number:-}" ]; then
-                git fetch --no-tags --quiet origin "refs/pull/${pr_number}/head"
-                candidate=$(git rev-parse FETCH_HEAD)
-                echo "Squash/rebase merge: PR #${pr_number} head is ${candidate}."
-              fi
-            fi
-
-            if [ -z "$candidate" ]; then
-              echo "::error::No 'CI Required' evidence for ${source_sha}: it carries no unambiguous 'CI Required' success and no single merged PR head could be resolved for it (a direct push to ${SOURCE_BRANCH}, or an ambiguous PR match). Land the change through a PR, or dispatch CI on ${source_sha}, then re-run this promotion."
-              exit 1
-            fi
-
-            source_tree=$(git rev-parse "${source_sha}^{tree}")
-            candidate_tree=$(git rev-parse "${candidate}^{tree}")
-            if [ "$source_tree" != "$candidate_tree" ]; then
-              echo "::warning::Refusing to reuse CI evidence from ${candidate}: its tree ${candidate_tree} differs from the promoted tree ${source_tree}. The required check must have run on the exact content being promoted. Attempting rung 3: producing fresh evidence for ${source_sha} itself."
-
-              # cwc#2749 — rung 3: this is evidence PRODUCTION, not a new evidence
-              # class. The acceptance predicate stays exactly rung 1's: a green
-              # 'CI Required' check-run on the promoted SHA itself, re-queried
-              # below via the SAME ci_required_verdict() used at the top of this
-              # step. Never trust a dispatched run's own conclusion.
-              #
-              # Precondition: source_sha must still be the current branch tip.
-              # If develop advanced, the run we produce would stamp a DIFFERENT
-              # sha than source_sha, rung 1 would never resolve, and we would
-              # time out fail-closed anyway — but failing the precondition up
-              # front gives a clear, distinct message instead of a 30-minute
-              # wait for an unwinnable poll.
-              if ! current_tip=$(git rev-parse -q --verify "origin/${SOURCE_BRANCH}" 2>/dev/null); then
-                echo "::error::Could not resolve origin/${SOURCE_BRANCH} to confirm it is still at ${source_sha}; refusing to attempt rung 3 without that precondition. This is distinct from 'no evidence available' above — ensure origin/${SOURCE_BRANCH} is fetched and re-run."
-                exit 1
-              fi
-              if [ "$source_sha" != "$current_tip" ]; then
-                echo "::error::${SOURCE_BRANCH} has advanced to ${current_tip} since ${source_sha} was resolved for this promotion; rung 3 only produces evidence for the CURRENT ${SOURCE_BRANCH} tip. Re-run the promotion against the current tip."
-                exit 1
-              fi
-
-              # Discover the consumer's CI workflow id from the candidate's own
-              # 'CI Required' check-run — never from per-repo config, because the
-              # drift guard byte-compares this template across every consumer.
-              # Join check-runs -> check_suite.id -> actions/runs -> workflow_id.
-              # Collect ALL suite ids carrying 'CI Required' (same-named
-              # check-runs are NOT deduped across distinct suites — verified
-              # empirically, cwc#2749) and require them to resolve to exactly
-              # ONE workflow id; more than one is a genuine ambiguity.
-              check_runs_json=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${candidate}/check-runs")
-              suite_ids_json=$(printf '%s' "$check_runs_json" | jq -c '[.check_runs[] | select(.name == "CI Required") | .check_suite.id // empty] | unique')
-              if [ "$(printf '%s' "$suite_ids_json" | jq 'length')" -eq 0 ]; then
-                echo "::error::No 'CI Required' check-run found on candidate ${candidate}; cannot discover the CI workflow to produce evidence for ${source_sha}. Ensure the consumer repo declares a 'CI Required' aggregate check."
-                exit 1
-              fi
-
-              candidate_runs_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${candidate}")
-              workflow_id=$(printf '%s' "$candidate_runs_json" | jq -r --argjson ids "$suite_ids_json" \
-                '[.workflow_runs[] | select(.check_suite_id as $s | $ids | index($s) != null) | .workflow_id] | unique | if length == 1 then .[0] else empty end')
-              if [ -z "${workflow_id:-}" ]; then
-                echo "::error::Could not resolve a single workflow id from candidate ${candidate}'s 'CI Required' check suite(s) ${suite_ids_json}; cannot produce evidence for ${source_sha}."
-                exit 1
-              fi
-
-              # Adopt-or-dispatch is MANDATORY, not a nicety (cwc#2749): two
-              # concurrent dispatches on the same ref cancel each other under a
-              # consumer's `cancel-in-progress: true`, and a cancelled sibling
-              # 'CI Required' check-run permanently poisons the sha (a single
-              # non-success check-run makes CI_REQUIRED_JQ's all(...=="success")
-              # false forever — a poisoned sha cannot be un-poisoned; the only
-              # remedy is a new commit on ${SOURCE_BRANCH}). So: adopt an
-              # existing run at source_sha if one exists (including a completed
-              # one — that IS the poisoned-sha case, and never dispatching a
-              # second run is the whole point); dispatch only when none exists.
-              source_runs_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}")
-              existing_count=$(printf '%s' "$source_runs_json" | jq --argjson wf "$workflow_id" \
-                '[.workflow_runs[] | select(.workflow_id == $wf and (.status == "queued" or .status == "in_progress" or .status == "completed"))] | length')
-              if [ "${existing_count:-0}" -gt 0 ]; then
-                echo "An evidence run for workflow ${workflow_id} already exists at ${source_sha}; adopting it (polling) instead of dispatching a second one (cwc#2749)."
-              else
-                if ! gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/dispatches" -X POST -f "ref=${SOURCE_BRANCH}" 2>/tmp/rung3_dispatch_err.txt; then
-                  echo "::error::Failed to dispatch workflow ${workflow_id} on ${SOURCE_BRANCH} to produce evidence for ${source_sha} — the consumer's ci.yml likely lacks a 'workflow_dispatch' trigger (cwc#2749 prerequisite): $(cat /tmp/rung3_dispatch_err.txt 2>/dev/null)"
-                  exit 1
-                fi
-                echo "Dispatched workflow ${workflow_id} on ${SOURCE_BRANCH} to produce fresh 'CI Required' evidence for ${source_sha}."
-              fi
-
-              # Poll rung 1's EXISTING sha-keyed query — never the dispatched
-              # run's own conclusion — until it resolves green or times out.
-              # Timeout/interval are env-overridable so the timeout path is
-              # testable without actually sleeping 30 minutes.
-              poll_timeout="${CI_EVIDENCE_POLL_TIMEOUT_S:-1800}"
-              poll_interval="${CI_EVIDENCE_POLL_INTERVAL_S:-15}"
-              poll_deadline=$(( $(date +%s) + poll_timeout ))
-              verdict=$(ci_required_verdict "$source_sha" || echo "blocked")
-              while [ "$verdict" != "success" ] && [ "$(date +%s)" -lt "$poll_deadline" ]; do
-                sleep "$poll_interval"
-                verdict=$(ci_required_verdict "$source_sha" || echo "blocked")
-              done
-              evidence_sha="$source_sha"
-              if [ "$verdict" != "success" ]; then
-                echo "::error::Evidence for ${source_sha} did not arrive within ${poll_timeout}s of adopting/dispatching workflow ${workflow_id} on ${SOURCE_BRANCH} (verdict='${verdict}'). No retry — a second dispatch would race the adopted run and poison this sha further. Land a new commit on ${SOURCE_BRANCH} and re-run the promotion against it."
-                exit 1
-              fi
-            else
-              verdict=$(ci_required_verdict "$candidate")
-              evidence_sha="$candidate"
-            fi
-          fi
-
-          if [ "$verdict" != "success" ]; then
-            echo "::error::Required check 'CI Required' is not an unambiguous success on ${evidence_sha} (verdict='${verdict}'). Every 'CI Required' check-run must have concluded success. Wait for CI or investigate failures."
-            exit 1
-          fi
-          echo "ok: CI Required = success (evidence sha ${evidence_sha}, tree of ${source_sha})"
-
-      - name: Set promoted SHA output
-        id: set_promoted_sha
-        run: echo "promoted_sha=${source_sha}" >> "$GITHUB_OUTPUT"
-
-      - name: Push fast-forward promotion via refs API
-        if: env.NOTHING_TO_PROMOTE != 'true'
-        env:
-          # App-minted token required because main's branch protection rejects
-          # direct ref writes by the default GITHUB_TOKEN with HTTP 422. The
-          # kromatic-workflow-bot App has the bypass for promotion refs.
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          set -euo pipefail
-
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::App-minted promotion token is empty; GitHub App token minting likely failed."
-            exit 1
-          fi
-
-          update_payload=$(jq -nc --arg sha "$source_sha" '{sha:$sha,force:false}')
-          update_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/git/refs/heads/${TARGET_BRANCH}"
-          http_status=$(curl -sS -o /tmp/promote_main_ref_update.json -w "%{http_code}" -L -X PATCH \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "$update_url" \
-            -d "$update_payload")
-          if [ "$http_status" != "200" ]; then
-            echo "::error::Failed to fast-forward ${TARGET_BRANCH} to ${source_sha} via refs API (HTTP ${http_status})."
-            cat /tmp/promote_main_ref_update.json
-            exit 1
-          fi
-
-      - name: Write promotion audit summary
-        run: |
-          {
-            echo "## Main Promotion"
-            if [ "${NOTHING_TO_PROMOTE:-false}" = "true" ]; then
-              echo "- status: no-op — ${SOURCE_BRANCH} and ${TARGET_BRANCH} were already at \`${source_sha}\`. Nothing to promote (cwc#2283)."
-            else
-              echo "- status: promoted"
-            fi
-            echo "- repository: \`${GITHUB_REPOSITORY}\`"
-            echo "- initiated_by: \`${GITHUB_ACTOR}\`"
-            echo "- source_branch: \`${SOURCE_BRANCH}\`"
-            echo "- target_branch: \`${TARGET_BRANCH}\`"
-            echo "- promoted_sha: \`${source_sha}\`"
-            echo "- reason: ${PROMOTION_REASON}"
-            echo "- run_url: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          } >> "$GITHUB_STEP_SUMMARY"
+    uses: Kromatic-Innovation/code-workspace-config/.github/workflows/promote-main.yml@main
+    with:
+      source_branch: ${{ inputs.source_branch }}
+      target_branch: ${{ inputs.target_branch }}
+      reason: ${{ inputs.reason }}
+      sha: ${{ inputs.sha }}
+    secrets: inherit
