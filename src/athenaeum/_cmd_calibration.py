@@ -31,6 +31,7 @@ import json
 import sys
 from pathlib import Path
 
+from athenaeum._cli_shared import _resolve_wiki_root
 from athenaeum.calibration import calibration_summary, record_audit_review
 from athenaeum.config import (
     DEFAULT_KNOWLEDGE_ROOT,
@@ -51,13 +52,6 @@ _NOT_ENABLED_MSG = (
     "librarian.reasoning_tier_t2_auto_apply_enabled: true for T2, to enable "
     "the reasoning tiers and their calibration loop)"
 )
-
-
-def _resolve_wiki_root(args: argparse.Namespace) -> Path:
-    knowledge_root = (
-        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
-    )
-    return knowledge_root / "wiki"
 
 
 def cmd_calibration(args: argparse.Namespace) -> int:
