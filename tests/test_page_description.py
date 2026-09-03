@@ -87,7 +87,11 @@ class TestWriterField:
     def test_index_scanner_keeps_an_interior_apostrophe_in_a_folded_value(self) -> None:
         """Quote delimiters are stripped once over the joined value, never per
         continuation line, so a line ending in an apostrophe survives."""
-        text = "---\nname: Sample\ndescription: \"Kromatic's\n  partners' pilot\n  ran in 2026\"\n---\nBody.\n"
+        text = (
+            "---\nname: Sample\n"
+            "description: \"Kromatic's\n  partners' pilot\n  ran in 2026\"\n"
+            "---\nBody.\n"
+        )
         _name, _tags, _aliases, description = _extract_frontmatter_fields(text)
         assert description == "Kromatic's partners' pilot ran in 2026"
 
