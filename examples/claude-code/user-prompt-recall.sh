@@ -105,13 +105,17 @@ set -euo pipefail
 # athenaeum.killswitch.is_disabled("recall"): the "all" scope no-ops every
 # hook; the "compile" scope leaves recall on. Costs no Python startup.
 __athenaeum_recall_disabled() {
-  local _val="${ATHENAEUM_DISABLED:-}"
-  _val="${_val#"${_val%%[![:space:]]*}"}"
-  _val="${_val%"${_val##*[![:space:]]}"}"
-  _val="${_val,,}"
+  # Normalize like killswitch._env_scope()'s `raw.strip().lower()`. `read`
+  # with default IFS strips leading/trailing whitespace while preserving
+  # internal (so `tr ue` stays unrecognised, matching Python). The case
+  # patterns fold case explicitly: `${_val,,}` is bash 4.0+ and stock macOS
+  # ships bash 3.2.57 -- see the athenaeum#1104 / athenaeum#1343 precedents
+  # in user-prompt-recall.sh. Both constructs are fork-free.
+  local _val=""
+  read -r _val <<< "${ATHENAEUM_DISABLED:-}" || true
   case "$_val" in
-    1 | true | yes | on | all) return 0 ;;
-    compile) return 1 ;;
+    1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss] | [Oo][Nn] | [Aa][Ll][Ll]) return 0 ;;
+    [Cc][Oo][Mm][Pp][Ii][Ll][Ee]) return 1 ;;
   esac
   local f="${ATHENAEUM_CACHE_DIR:-$HOME/.cache/athenaeum}/disabled"
   [ -f "$f" ] || return 1
