@@ -219,11 +219,19 @@ class TestExplicitOverrideNeverDowngraded:
 # model that cannot honour adaptive thinking, all three write call sites must
 # build a request carrying {"type": "disabled"}, not "adaptive".
 #
-# Verified BY HAND to fail on unmodified origin/develop (stashing this
-# change): before the fix, all three assertions below fail with
-# `{'type': 'adaptive'} != {'type': 'disabled'}` — see the PR/issue body for
-# the captured output. An anti-recurrence test that would have passed before
-# the fix is worthless; this one does not.
+# Verified BY HAND to fail on unmodified origin/develop. Two distinct
+# pre-fix failures, depending on how much of the change is reverted, and both
+# are load-bearing:
+#
+# - reverting ONLY ``src/athenaeum/tiers.py`` (the model threading) leaves this
+#   module importable and fails all three assertions below with
+#   `{'type': 'adaptive'} != {'type': 'disabled'}` — the precise defect
+#   athenaeum#1262 hit;
+# - reverting the whole change fails EARLIER still, at collection, with
+#   `ImportError: cannot import name '_ADAPTIVE_THINKING_SUPPORTED_PREFIXES'`.
+#
+# An anti-recurrence test that would have passed before the fix is worthless;
+# this one fails either way.
 # ---------------------------------------------------------------------------
 
 
