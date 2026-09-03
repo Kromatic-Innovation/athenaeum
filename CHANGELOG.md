@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The real write-knob model-tier comparison table, and the finding that
+  blocks the downgrade (athenaeum#1262).** athenaeum#1139 built the harness but
+  could only ship a STUB table — the build lane's `ANTHROPIC_API_KEY` was
+  present but empty. With a live credential provisioned,
+  `tests/evals/test_write_tier_compare.py` was run against the real API and
+  `tests/evals/data/write_tier_compare/comparison_table.md` now carries measured
+  numbers. The headline is not a quality result: **`claude-haiku-4-5` cannot
+  serve the `write` knob at all as the code stands.** All three write call sites
+  (`merge_create`, `merge_patch`, `merge_full`) request
+  `thinking: {"type": "adaptive"}` unconditionally, and Haiku 4.5 rejects that
+  with `400 invalid_request_error: adaptive thinking is not supported on this
+  model` — 0/5 cases, every one a 400 before a single token was billed. With
+  the posture overridden to `disabled` (which is the only posture Haiku 4.5
+  supports, and is already what the `classify`/`topic` knobs use), Haiku passes
+  5/5 on the same corpus — including the prompt-injection canary case and the
+  large-page content-preservation merge — at $0.0127 against Sonnet 5's
+  $0.0559, a 4.4x cost reduction at roughly half the wall clock. The corpus is
+  4 cases / 5 entities, which is enough to establish that the thinking posture
+  is the blocker and nowhere near enough to justify a production downgrade on
+  its own.
+
 - **The Lane A intake cap and its drain budget are documented
   (athenaeum#1322).** `librarian.max_files` was documented as a knob ("stop
   after processing this many raw files per run") but never as the thing a large
