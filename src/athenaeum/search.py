@@ -321,8 +321,18 @@ def _extract_frontmatter_fields(text: str) -> tuple[str, str, str, str]:
     if end <= 0:
         return name, tags, aliases, description
     fm = text[4:end]
-    for line in fm.splitlines():
-        line = line.strip()
+    in_description = False
+    for raw_line in fm.splitlines():
+        # Issue athenaeum#1324: PyYAML folds a plain scalar longer than ~80
+        # columns onto indented continuation lines, so a ``description:``
+        # written by ``render_frontmatter`` may span several. Join them back
+        # (a continuation is any indented line following the key) so the
+        # index holds the whole sentence, not its first 80 characters.
+        if in_description and raw_line[:1] in (" ", "\t") and raw_line.strip():
+            description = f"{description} {raw_line.strip()}".strip("\"'")
+            continue
+        in_description = False
+        line = raw_line.strip()
         if line.startswith("name:"):
             name = line[5:].strip().strip("\"'")
         elif line.startswith("tags:"):
@@ -331,6 +341,7 @@ def _extract_frontmatter_fields(text: str) -> tuple[str, str, str, str]:
             aliases = line[8:].strip().strip("[]")
         elif line.startswith("description:"):
             description = line[12:].strip().strip("\"'")
+            in_description = True
     return name, tags, aliases, description
 
 
