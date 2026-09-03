@@ -355,3 +355,97 @@ grep -hE "resolutions: SUPPRESSED" ~/Library/Logs/pre-dawn-sweep.out.log \
 3. A "T1 rejected N" number is only interpretable against the **52% obvious-reject**
    share measured here, and only once proposal generation resumes — inflow was
    **0/night across all 9 observed nights**.
+
+---
+
+## Window 1 — post-enable check, 2026-09-03 (T1 armed 11 days; T2 never armed)
+
+Recorded for athenaeum#787. Tiers armed for this window, per athenaeum#1200's split
+gate (see the attributability note above):
+
+| | |
+|---|---|
+| Measured | 2026-09-03 |
+| Store | `~/knowledge` (live) |
+| athenaeum version | `0.20.0` |
+| Deploy checkout git SHA | `2aa8d38df2a014ecddc04682125a9e3afd86486e` (2026-09-03 09:29:08 -0400) |
+| `librarian.reasoning_tier_auditing_enabled` (T1) | `true` — set 2026-08-23 (operator decision), **11 days elapsed**, exceeds the 7-day window |
+| `librarian.reasoning_tier_t2_auto_apply_enabled` (T2) | **absent → defaults `false`.** athenaeum#1200's migration (shipped after 2026-08-23) silently narrowed the operator's original combined `true` to T1-only; the T2 auto-apply authority the operator originally armed was never explicitly re-armed under the new key. T2 has therefore been **off for this entire window**, not just briefly. |
+| Tiers armed | **T1 only** |
+
+### Anomaly: T1 shows zero recorded activity despite 11 days armed and confirmed proposal inflow
+
+This is the headline finding and the reason this window does **not** close out
+athenaeum#787.
+
+- `wiki/_reasoning_tier_decisions.jsonl` **does not exist** — T1 has never written a
+  decision.
+- `athenaeum spend --by-knob` at 7d, 14d, and 30d windows shows **no `reasoning_t1`
+  or `reasoning_t2` line at all** — a hard $0.00 / 0 calls, identical to the
+  pre-enable baseline's zero.
+- Proposal inflow has demonstrably resumed since the baseline: the pending-merge
+  queue grew from **405 → 752 unresolved entries** (0 resolved in both), with new
+  `created_at` dates on 2026-08-21, 08-22, 08-23, 08-24, 08-25, 08-31, 09-01,
+  09-02, 09-03. The rotated `pre-dawn-sweep.out.log.1.gz` confirms non-suppressed
+  `wiki-page dedup` proposal writes on 08-21 (216), 08-22 (213), 08-23 (214),
+  08-24 (243), 08-25 (251), 08-31 (259) — i.e. proposals were actively being
+  generated throughout the window T1 was armed.
+
+**So T1 being "on" for 11 days produced no observable screening behavior despite
+proposals flowing the entire time.** This is not the same finding as the baseline's
+zero (baseline zero was explained by zero inflow; this zero has confirmed inflow and
+is unexplained). Either T1 is not actually being invoked on the live nightly path
+despite the flag, or its decisions are not being persisted where expected. Root
+cause was **not** investigated here — out of scope for athenaeum#787 per its own
+"out of scope" section (no tuning/logic changes), and diagnosing the live code path
+belongs in a dedicated follow-up bug, not folded into this measurement pass.
+
+### Current queue snapshot (for the record; not attributable to T1/T2 behavior)
+
+752 unresolved, 0 resolved. Safe-class breakdown:
+
+| safe_class_violation | entries |
+|---|---|
+| `SAFE` | 472 |
+| `cross_memory_class` | 153 |
+| `too_many_pages` | 127 |
+| `pii_flagged` | 0 |
+| `axiom_member` | 0 |
+
+Note `cross_memory_class` is no longer structurally inert as it was at baseline —
+some wiki frontmatter now carries a `memory_class` key. This changes the safe-class
+math from Baseline 0's "collapses to `len(sources) <= 3`" simplification; it should
+be re-derived, not assumed, in any future window.
+
+### AC status — not satisfiable this window
+
+- T1 proposals seen/rejected/passed-up: **0/0/0** (decisions log absent).
+- Sampled review of T1 rejects: **sample size 0** — nothing to sample.
+- T2 approve/amend/draft/escalate/auto-applied counts: **0 across the board** — T2
+  was never armed this window (see table above).
+- Sampled review of T2 auto-applies: **sample size 0**.
+- LLM spend on `reasoning_t1` / `reasoning_t2`: **$0.00 / 0 calls**, unchanged from
+  baseline's $0.00.
+- Recommendation: **cannot yet be made.** The armed mechanism (T1) shows no
+  evidence of having exercised its intended behavior despite 11 days and confirmed
+  inflow — that needs to be root-caused (a new issue) before a keep/off/adjust call
+  means anything. Separately, whether to re-arm T2's auto-apply (silently
+  disarmed by athenaeum#1200's migration) is an explicit operator decision that
+  was never made and should not be assumed either way.
+
+### Exact commands (delta from Baseline 0)
+
+```sh
+PY=~/local-deploys/athenaeum/.venv/bin/python
+BIN=~/local-deploys/athenaeum/.venv/bin/athenaeum
+
+ls -la ~/knowledge/wiki/_reasoning_tier_decisions.jsonl   # does not exist
+"$BIN" spend --by-knob
+"$BIN" spend --since 14d --by-knob
+"$BIN" spend --since 30d --by-knob
+
+grep -n "reasoning_tier_auditing_enabled\|reasoning_tier_t2_auto_apply_enabled" ~/knowledge/athenaeum.yaml
+
+zgrep -h "wiki-page dedup" ~/Library/Logs/pre-dawn-sweep.out.log.1.gz \
+  | grep -v SUPPRESSED | awk '{print substr($1,1,10)}' | sort | uniq -c
+```
