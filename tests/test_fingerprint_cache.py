@@ -434,6 +434,20 @@ class TestIsStaleAutoSuppression:
         rec = _auto_suppress("not-a-date")
         assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is False
 
+    def test_microsecond_resolved_at_not_stale_but_warns(self, caplog) -> None:
+        """Issue athenaeum#1348 AC4 counter-example: a ``resolved_at`` in the
+        microsecond form (the shape 12 of the package's 13 old ``_now_iso()``
+        copies rendered, before this issue collapsed them onto
+        :func:`athenaeum.store.now_iso`'s second-precision rendering) still
+        fails ``_RESOLVED_AT_FORMAT``'s ``strptime`` and keeps returning
+        ``False`` (fail-safe, unchanged) — but MUST now warn naming the
+        offending value, unlike the plain-garbage case above."""
+        rec = _auto_suppress("2026-09-03T19:12:33.123456Z")
+        with caplog.at_level(logging.WARNING, logger="athenaeum"):
+            result = is_stale_auto_suppression(rec, ttl_days=30, now=_NOW)
+        assert result is False
+        assert "2026-09-03T19:12:33.123456Z" in caplog.text
+
     def test_verdict_key_fallback(self) -> None:
         # Legacy rows may carry ``verdict`` instead of ``action``.
         rec = {
@@ -443,6 +457,22 @@ class TestIsStaleAutoSuppression:
             "resolved_at": _stamp(40),
         }
         assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is True
+
+    def test_now_iso_round_trip_expires_when_old(self) -> None:
+        """Issue athenaeum#1348 AC5: a ``resolved_at`` stamped by the shared
+        :func:`athenaeum.store.now_iso` helper is parseable by
+        ``_RESOLVED_AT_FORMAT``'s ``strptime`` (unlike the AC4 microsecond
+        counter-example above) and expires exactly like a hand-built
+        ``_stamp(...)`` record does."""
+        from datetime import timedelta
+
+        from athenaeum.store import now_iso
+
+        old_rec = _auto_suppress(now_iso(_NOW - timedelta(days=40)))
+        assert is_stale_auto_suppression(old_rec, ttl_days=30, now=_NOW) is True
+
+        fresh_rec = _auto_suppress(now_iso(_NOW - timedelta(days=10)))
+        assert is_stale_auto_suppression(fresh_rec, ttl_days=30, now=_NOW) is False
 
 
 class TestResolveNotAConflictTtlDays:
