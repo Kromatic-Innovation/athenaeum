@@ -281,6 +281,9 @@ class TestClusterComparatorResultToRow:
             "pair_count": 6,
             "gate_enabled": False,
             "outcomes": [],
+            # athenaeum#1257: the T1 screen's drop list, always present and
+            # empty unless a ClusterScreenContext armed the screen.
+            "screened_out": [],
         }
 
     def test_to_row_gate_on_shape(self, tmp_path: Path) -> None:
