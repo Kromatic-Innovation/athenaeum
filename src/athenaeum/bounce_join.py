@@ -69,9 +69,15 @@ from athenaeum.storage_migrate import iter_entity_pages
 
 log = logging.getLogger(__name__)
 
-#: The wiki frontmatter field consumers read at segment time. Written today by
-#: a producer OUTSIDE athenaeum (see ``docs/deprecated-email-tracking.md``'s Q3
-#: and maecenas#42); athenaeum reads it and never writes it (issue athenaeum#852).
+#: The wiki frontmatter field consumers read at segment time. Historically
+#: written only by a producer OUTSIDE athenaeum (see
+#: ``docs/deprecated-email-tracking.md``'s Q3 and maecenas#42), with athenaeum
+#: reading it and never writing it (issue athenaeum#852). athenaeum#1341
+#: reverses that read-only stance for a narrow, bounded verdict vocabulary:
+#: :func:`athenaeum.librarian.tier0_bounce_verdict_mark` now writes
+#: ``bounced:`` deterministically for a verified-undeliverable, non-RFC bounce
+#: verdict recognized in raw intake. Other producers still write it too —
+#: athenaeum is not the sole writer, just no longer read-only.
 WIKI_BOUNCED_FIELD = "bounced"
 
 #: The frontmatter field carrying a page's durable id on BOTH surfaces — the
@@ -219,7 +225,9 @@ def join_identifier(
     marked = is_bounced_identifier(meta, identifier, as_of)
     uid = _uid_of(meta)
     if uid is None:
-        return BounceJoin(identifier=identifier, person_record=person, pii_marked=marked)
+        return BounceJoin(
+            identifier=identifier, person_record=person, pii_marked=marked
+        )
 
     page = wiki_page_for_uid(wiki_root, uid)
     if page is None:
