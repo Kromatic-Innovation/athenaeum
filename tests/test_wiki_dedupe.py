@@ -944,3 +944,504 @@ class TestWikiDedupeMinBodyCharsKnob:
 
         monkeypatch.setenv("ATHENAEUM_WIKI_DEDUPE_MIN_BODY_CHARS", "500")
         assert resolve_wiki_dedupe_min_body_chars({"librarian": {}}) == 0
+
+
+# --- Issue athenaeum#1243: athenaeum#1142's requirement, re-sited ---------
+#
+# athenaeum#1227's cut-over stranded athenaeum#1142's suppression ledger with
+# no producer and left two holes the comparator's own verdict ledger does not
+# cover: an embedder identity computed on every run and read by nothing, and a
+# pair that produces no verdict leaving no row at all. The tests below are
+# athenaeum#1142's executable spec (recovered from ref ``b79efc0``, per
+# athenaeum#1243's "recover it from git, do not rewrite it") adapted to the
+# comparator path: field names follow the re-sited artifact
+# (:mod:`athenaeum.wiki_dedupe_attribution`), the assertions' INTENT carries
+# over verbatim.
+#
+# Measured on the live corpus (athenaeum#1243's measurement comment): the
+# comparator reaches a Gate 1 verdict for ZERO of 22,040 pairs today, so with
+# ``client=None`` — the production wiring — the no-verdict branch is not an
+# edge case, it is every pair. ``client=None`` is therefore the DEFAULT
+# posture of these tests, not a degraded variant of them.
+
+
+def _identical_embed(texts: list[str]) -> list[list[float]]:
+    """Every chunk to the same unit vector — one cohesive cluster at any
+    threshold, independent of page bodies."""
+    return [[1.0, 0.0] for _ in texts]
+
+
+def _seed_identical_pages(root: Path, n: int = 3) -> Path:
+    """*n* byte-identical-body ``concept`` pages; returns the knowledge_root."""
+    wiki_root = root / "knowledge" / "wiki"
+    for i in range(n):
+        _write_page(
+            wiki_root,
+            f"dup-{i}.md",
+            body="Shared identical body text for the run-comparison fixture.",
+        )
+    return wiki_root.parent
+
+
+def _run_pass(knowledge_root: Path, **kw):
+    """Run the pass with a held lock and the comparator enabled."""
+    from athenaeum.runlock import RunLock
+    from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+    kw.setdefault("config", _COMPARATOR_CONFIG)
+    kw.setdefault("threshold", 0.8)
+    kw.setdefault("embedding_provider", _identical_embed)
+    kw.setdefault("client", None)
+    lock = RunLock(knowledge_root)
+    with lock:
+        return propose_wiki_page_merges(knowledge_root, lock=lock, **kw)
+
+
+def _rows(knowledge_root: Path):
+    from athenaeum.wiki_dedupe_attribution import read_attribution_report
+
+    return read_attribution_report(knowledge_root / "wiki")
+
+
+class TestEveryExaminedPairLeavesADurableRow:
+    """AC1: every candidate pair the pass examines leaves a durable,
+    machine-readable row — including the pairs that produce no verdict, which
+    were both a bare ``continue`` before this issue."""
+
+    def test_no_verdict_pairs_each_leave_a_row_with_the_discarded_reason(
+        self, tmp_path: Path
+    ) -> None:
+        """``record_comparison`` -> ``ok=False``: its own docstring says
+        "nothing ledgered", and this caller used to drop ``reason`` on the
+        floor. 53.6% of live-corpus pairs land here."""
+        from athenaeum.wiki_dedupe_attribution import OUTCOME_NO_VERDICT
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+        results = _run_pass(knowledge_root)
+
+        assert results == [], "client=None settles nothing, so nothing is decided"
+        rows = _rows(knowledge_root)
+        # itertools.combinations over a 3-member cluster = 3 pairs.
+        assert len(rows) == 3
+        assert {r.pair for r in rows} == {"dup-0+dup-1", "dup-0+dup-2", "dup-1+dup-2"}
+        for row in rows:
+            assert row.outcome == OUTCOME_NO_VERDICT
+            assert row.reason, "the reason record_comparison returned must survive"
+            assert row.became_proposal is False
+            assert len(row.sources) == 2
+            assert row.at  # non-empty ISO timestamp
+            assert row.cluster_threshold == 0.8
+            assert row.n_cluster_members == 3
+
+    def test_no_verdict_pair_is_not_written_into_the_verdict_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        """The row is re-sited to a SIBLING artifact, deliberately. A pair the
+        comparator did not settle has no honest home in ``wiki/_verdicts/``
+        (``build_verdict_entry`` validates against the five verdict values),
+        and ``verdicts.compact()`` has no production caller, so that ledger is
+        unbounded-append in production today (AC4)."""
+        from athenaeum.verdicts import lookup_pair
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+        _run_pass(knowledge_root)
+
+        wiki_root = knowledge_root / "wiki"
+        assert lookup_pair(wiki_root, "dup-0+dup-1") is None
+        assert _rows(knowledge_root), "but the attribution snapshot HAS the row"
+
+    def test_cross_class_rejected_pair_leaves_a_row(self, tmp_path: Path) -> None:
+        """``cross_class_precheck`` rejects before any comparison — 46.4% of
+        live-corpus pairs. The only prior evidence was a ``log.info``, i.e. a
+        rotating log, which is exactly what athenaeum#1142 was filed to end."""
+        from athenaeum.wiki_dedupe_attribution import OUTCOME_CROSS_CLASS_REJECTED
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        body = "Shared identical body text for the cross-class fixture."
+        for name, mem_class in (("policy-a.md", "guideline"), ("policy-b.md", "fact")):
+            path = _write_page(wiki_root, name, body=body)
+            text = path.read_text(encoding="utf-8")
+            path.write_text(
+                text.replace("type: concept", f"type: concept\nmemory_class: {mem_class}"),
+                encoding="utf-8",
+            )
+
+        knowledge_root = wiki_root.parent
+        client = _fake_llm_client(_content_payload("equivalent"))
+        results = _run_pass(knowledge_root, client=client)
+
+        assert results == []
+        assert client.messages.create.call_count == 0, "must not reach Gate 2"
+        rows = _rows(knowledge_root)
+        assert len(rows) == 1
+        assert rows[0].outcome == OUTCOME_CROSS_CLASS_REJECTED
+        assert rows[0].reason == "cross_class_incompatible"
+        assert rows[0].detail, "the human-readable rejection detail must survive too"
+        assert rows[0].became_proposal is False
+
+    def test_decided_pairs_also_leave_a_row_so_one_read_covers_the_pass(
+        self, duplicate_topic_wiki: Path
+    ) -> None:
+        """A decided pair is in ``wiki/_verdicts/`` already, but it is recorded
+        here too so AC3's diagnostic needs exactly ONE artifact read rather
+        than a join across two."""
+        from athenaeum.wiki_dedupe_attribution import OUTCOME_DECIDED
+
+        client = _fake_llm_client(_content_payload("equivalent"))
+        results = _run_pass(
+            duplicate_topic_wiki, embedding_provider=_fake_embed, client=client
+        )
+
+        assert results, "the venture-a/b/c cluster must yield decided pairs"
+        rows = _rows(duplicate_topic_wiki)
+        assert len(rows) == len(results)
+        for row in rows:
+            assert row.outcome == OUTCOME_DECIDED
+            assert row.verdict == "duplicate"
+            assert row.action and row.action != "noop"
+            assert row.became_proposal is True
+
+    def test_memoized_fresh_pair_leaves_a_row_distinguishing_it_from_unexamined(
+        self, duplicate_topic_wiki: Path
+    ) -> None:
+        """A pair decided on a PRIOR run is skipped, not re-decided. A bare
+        ``continue`` made "examined, memoized" indistinguishable from "never
+        examined" — a distinction AC1 needs."""
+        from athenaeum.wiki_dedupe_attribution import OUTCOME_FRESH
+
+        client = _fake_llm_client(_content_payload("equivalent"))
+        first = _run_pass(
+            duplicate_topic_wiki, embedding_provider=_fake_embed, client=client
+        )
+        assert first
+        second = _run_pass(
+            duplicate_topic_wiki, embedding_provider=_fake_embed, client=client
+        )
+        assert second == [], "second run is memoized, nothing newly decided"
+
+        rows = _rows(duplicate_topic_wiki)
+        assert rows, "the memoized run still accounts for every pair it examined"
+        assert all(r.outcome == OUTCOME_FRESH for r in rows)
+        assert all(r.verdict == "duplicate" for r in rows)
+        assert all(r.became_proposal is True for r in rows)
+
+
+class TestAttributionSnapshotIsBoundedAndCurrent:
+    """AC4, recovered from athenaeum#1142's ``TestSuppressionLedger``."""
+
+    def test_written_even_when_the_run_examines_zero_pairs(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#1142's ``test_ledger_written_even_with_zero_suppressions``:
+        written every real run, even to empty, so the canonical file always
+        reflects THIS run's state, never a stale prior one."""
+        from athenaeum.wiki_dedupe_attribution import attribution_path
+
+        # Two ORTHOGONAL pages (cosine 0.0 under ``_fake_embed``): no cluster
+        # of size >= 2 forms, so the pass runs and examines zero pairs.
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        _write_page(wiki_root, "venture.md", body=_BODY_A)
+        _write_page(wiki_root, "hobby.md", body=_BODY_UNRELATED)
+        knowledge_root = wiki_root.parent
+
+        results = _run_pass(knowledge_root, embedding_provider=_fake_embed)
+        assert results == []
+        canonical = attribution_path(wiki_root)
+        assert canonical.is_file(), "the snapshot is written even to empty"
+        assert canonical.read_text(encoding="utf-8") == ""
+
+    def test_dry_run_never_writes_the_snapshot(self, tmp_path: Path) -> None:
+        """athenaeum#1142's ``test_dry_run_never_writes_the_ledger``: a dry run
+        decides and enacts nothing, so it has no run state to snapshot."""
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+        from athenaeum.wiki_dedupe_attribution import attribution_path
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+        propose_wiki_page_merges(
+            knowledge_root,
+            config=_COMPARATOR_CONFIG,
+            threshold=0.8,
+            embedding_provider=_identical_embed,
+            dry_run=True,
+        )
+        assert not attribution_path(knowledge_root / "wiki").exists()
+
+    def test_skipped_for_want_of_a_lock_never_writes_the_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        """A pass skipped for want of a lock examined nothing, so it must not
+        clobber the last REAL run's rows — the canonical file is a replace,
+        not an append."""
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+        _run_pass(knowledge_root)
+        before = _rows(knowledge_root)
+        assert len(before) == 3
+
+        propose_wiki_page_merges(
+            knowledge_root,
+            config=_COMPARATOR_CONFIG,
+            threshold=0.8,
+            embedding_provider=_identical_embed,
+            lock=None,
+        )
+        assert _rows(knowledge_root) == before
+
+    def test_canonical_file_is_replaced_not_appended_across_runs(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#1142's
+        ``test_canonical_file_is_replaced_not_appended_across_runs`` (AC4): a
+        current-run SNAPSHOT, not an accumulating append-only artifact — the
+        exact asymmetry athenaeum#1229's 1.4M-row unbounded ledger shows the
+        cost of."""
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+        _run_pass(knowledge_root)
+        assert len(_rows(knowledge_root)) == 3
+
+        # Same corpus, same posture: an identical second run must REPLACE the
+        # three rows, never append a second set of three.
+        _run_pass(knowledge_root)
+        assert len(_rows(knowledge_root)) == 3
+
+    def test_rotations_are_pruned_to_the_shared_retention_knob(
+        self, tmp_path: Path
+    ) -> None:
+        """AC4: rotation retention reuses ``librarian.rotation_retention`` —
+        the SAME knob and the SAME pruning helper
+        ``raw/_librarian-clusters.jsonl`` uses, not a second policy."""
+        from athenaeum.wiki_dedupe_attribution import attribution_path
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+        wiki_root = knowledge_root / "wiki"
+        stem = attribution_path(wiki_root).stem
+        for stamp in ["20260101T000000Z", "20260102T000000Z", "20260103T000000Z"]:
+            (wiki_root / f"{stem}-{stamp}.jsonl").write_text("{}\n", encoding="utf-8")
+
+        _run_pass(
+            knowledge_root,
+            config={
+                "librarian": {"comparator_enabled": True, "rotation_retention": 2}
+            },
+        )
+        assert len(list(wiki_root.glob(f"{stem}-*.jsonl"))) == 2
+
+
+class TestEmbedderAttributionDiffersByRun:
+    """AC2's non-constant-field guard, recovered from athenaeum#1142's
+    ``test_suppression_ledger_embedder_field_differs_between_runs``: the
+    embedder field must DIFFER between a real-provider run and a
+    ``provider -> None`` fallback run, so it cannot silently go constant."""
+
+    def test_attribution_embedder_field_differs_between_runs(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.clusters import (
+            EMBEDDER_CHROMADB_DEFAULT,
+            EMBEDDER_FALLBACK_HASHING,
+        )
+
+        real_root = _seed_identical_pages(tmp_path / "real", n=3)
+        _run_pass(real_root)
+        real_rows = _rows(real_root)
+
+        fallback_root = _seed_identical_pages(tmp_path / "fallback", n=3)
+        # 0.6, not 0.8: the fallback-hashing embedder folds in each page's
+        # distinct filename token, so even byte-identical bodies land at
+        # ~0.667 pairwise — 0.8 would form no cluster at all here.
+        _run_pass(
+            fallback_root, threshold=0.6, embedding_provider=lambda texts: None
+        )
+        fallback_rows = _rows(fallback_root)
+
+        assert real_rows and fallback_rows
+        assert {r.embedder for r in real_rows} == {EMBEDDER_CHROMADB_DEFAULT}
+        assert {r.embedder for r in fallback_rows} == {EMBEDDER_FALLBACK_HASHING}
+        assert real_rows[0].embedder != fallback_rows[0].embedder
+
+    def test_embedder_is_persisted_not_merely_computed(self, tmp_path: Path) -> None:
+        """AC2's headline: before this issue ``Cluster.embedder`` was stamped
+        on every run and read by NOTHING. It must now survive to disk and be
+        readable back without re-running the pass."""
+        from athenaeum.clusters import EMBEDDER_CHROMADB_DEFAULT
+        from athenaeum.wiki_dedupe_attribution import read_attribution_report
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+        _run_pass(knowledge_root)
+        # A fresh read off disk, in a different call, with no pass re-run.
+        reread = read_attribution_report(knowledge_root / "wiki")
+        assert reread
+        assert all(r.embedder == EMBEDDER_CHROMADB_DEFAULT for r in reread)
+
+
+class TestOneArtifactReadAnswersTheDiagnosticQuestion:
+    """AC3: the reproduction target is athenaeum#1005's diagnostic question —
+    "which embedder produced this pair's candidacy, and why did it not become
+    a proposal?" — answered by a SINGLE artifact read with no live host log
+    access. That is the exact question two independent diagnostic passes
+    failed to answer, each reaching a wrong conclusion."""
+
+    def test_a_single_read_answers_both_halves_for_a_non_proposal_pair(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.clusters import EMBEDDER_CHROMADB_DEFAULT
+        from athenaeum.wiki_dedupe_attribution import explain_pair
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+        _run_pass(knowledge_root)
+
+        answer = explain_pair(knowledge_root / "wiki", "dup-0+dup-1")
+        assert answer is not None
+        # "which embedder produced this pair's candidacy"
+        assert answer["embedder"] == EMBEDDER_CHROMADB_DEFAULT
+        # "...and why did it not become a proposal?"
+        assert answer["became_proposal"] is False
+        assert answer["outcome"] == "no-verdict"
+        assert answer["reason"]
+        assert answer["cluster_threshold"] == 0.8
+        assert len(answer["sources"]) == 2
+        assert answer["at"]
+
+
+class TestNamedAsAGate:
+    """AC5: ``comparator_enabled`` is not flipped on by this change, and
+    ``wiki_dedupe`` cross-references the re-sited ledger at the site where
+    ``DEFAULT_WIKI_SUPPRESSIONS_FILENAME`` was removed."""
+
+    def test_comparator_enabled_default_is_still_off(self) -> None:
+        from athenaeum.config import resolve_comparator_enabled
+
+        assert resolve_comparator_enabled({}) is False
+        assert resolve_comparator_enabled(None) is False
+
+    def test_wiki_dedupe_cross_references_the_re_sited_ledger(self) -> None:
+        """Structural, not textual: the pass must actually depend on the
+        re-sited module, so the pointer cannot rot into a stale comment."""
+        import athenaeum.wiki_dedupe as wd
+
+        assert wd.write_attribution_report.__module__ == (
+            "athenaeum.wiki_dedupe_attribution"
+        )
+
+    def test_the_removal_site_still_names_this_issue(self) -> None:
+        from pathlib import Path as _Path
+
+        import athenaeum.wiki_dedupe as wd
+
+        source = _Path(wd.__file__).read_text(encoding="utf-8")
+        assert "athenaeum#1243" in source
+        assert "athenaeum#1244" in source, (
+            "the gate comment must name the coordinate-backfill precondition "
+            "sitting under this issue"
+        )
+
+
+class TestEveryRemainingBranchIsAccountedFor:
+    """QA review of athenaeum#1243: the three ``propose_wiki_page_merges``
+    branches that a green suite left unproven. Each mutates the WIRING
+    (``monkeypatch`` on the collaborator this pass calls) rather than the
+    logic under test, so the branch is exercised through the real pass."""
+
+    def test_page_read_error_leaves_a_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pair whose page cannot be read off disk is still accounted for.
+        Unreachable through candidate discovery (which reads every page first),
+        so the read must be made to fail at the comparator's own read site."""
+        import athenaeum.wiki_dedupe as wd
+        from athenaeum.wiki_dedupe_attribution import OUTCOME_READ_ERROR
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+
+        def _boom(path: Path):
+            raise OSError("simulated unreadable page")
+
+        monkeypatch.setattr(wd, "page_from_path", _boom)
+        results = _run_pass(knowledge_root)
+
+        assert results == []
+        rows = _rows(knowledge_root)
+        assert len(rows) == 3
+        for row in rows:
+            assert row.outcome == OUTCOME_READ_ERROR
+            assert row.reason == "page-read-failed"
+            assert "simulated unreadable page" in row.detail
+            assert row.became_proposal is False
+
+    def test_erasure_class_pair_is_deliberately_NOT_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ONE deliberate carve-out from AC1's "every examined pair leaves
+        a row": an erasure-class (pii-flagged) pair must not reach this in-git
+        artifact, because
+        :func:`athenaeum.verdicts.refuse_if_erasure_class`'s posture outranks
+        an observability record.
+
+        Unreachable through the real pass today —
+        ``discover_wiki_dedupe_candidates`` filters pii-flagged pages upstream
+        — which is exactly why it needs a test: nothing would otherwise catch
+        either an accidental leak (if that upstream filter is loosened) or an
+        accidental REMOVAL of the carve-out."""
+        import athenaeum.wiki_dedupe as wd
+        from athenaeum.wiki_dedupe_attribution import ERASURE_CLASS_REFUSED_REASON
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+
+        def _refused(wiki_root, page_a, page_b, **kw):
+            return {
+                "ok": False,
+                "pair": f"{page_a.id}+{page_b.id}",
+                "verdict": None,
+                "skipped": None,
+                "reason": ERASURE_CLASS_REFUSED_REASON,
+                "outcome": None,
+            }
+
+        monkeypatch.setattr(wd, "record_comparison", _refused)
+        results = _run_pass(knowledge_root)
+
+        assert results == []
+        # The snapshot is still WRITTEN (the pass ran) -- it is simply empty,
+        # which is the honest artifact: no row, and no pii-derived value.
+        # Asserted on the FILE, not just on ``_rows``: an empty read is
+        # ambiguous between "written empty" and "never written", and only the
+        # former is correct here.
+        from athenaeum.wiki_dedupe_attribution import attribution_path
+
+        canonical = attribution_path(knowledge_root / "wiki")
+        assert canonical.is_file(), "the pass ran, so the snapshot is written"
+        assert canonical.read_text(encoding="utf-8") == ""
+        assert _rows(knowledge_root) == []
+
+    def test_a_missing_outcome_still_accounts_for_the_pair(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defensive branch: ``ok=True`` with no ``skipped`` should always
+        carry an outcome under ``record_comparison``'s current contract. If
+        that contract ever drifts, the pair must still be recorded rather than
+        silently vanishing — which is what the pre-athenaeum#1243 bare
+        ``continue`` did to every branch."""
+        import athenaeum.wiki_dedupe as wd
+        from athenaeum.wiki_dedupe_attribution import OUTCOME_NO_VERDICT
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=3)
+
+        def _contract_drift(wiki_root, page_a, page_b, **kw):
+            return {
+                "ok": True,
+                "pair": f"{page_a.id}+{page_b.id}",
+                "verdict": "distinct",
+                "skipped": None,
+                "reason": None,
+                "outcome": None,
+            }
+
+        monkeypatch.setattr(wd, "record_comparison", _contract_drift)
+        results = _run_pass(knowledge_root)
+
+        assert results == [], "no outcome means no effect can be enacted"
+        rows = _rows(knowledge_root)
+        assert len(rows) == 3
+        assert all(r.outcome == OUTCOME_NO_VERDICT for r in rows)
+        assert all(r.reason == "no-outcome-returned" for r in rows)
