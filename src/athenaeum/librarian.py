@@ -4598,9 +4598,7 @@ class RunContext:
             frag_state: "dict[str, tuple[str, bool]] | None" = schema_fragment_state(
                 self.wiki_root
             )
-        except (
-            Exception
-        ) as exc:  # noqa: BLE001 — pragma: no cover - defensive; helper is hardened
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive; helper is hardened
             log.debug("run-summary: schema_fragment_state skipped: %s", exc)
             frag_state = None
         try:
@@ -6010,9 +6008,7 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
                         "Gate-1-only degraded mode",
                         exc,
                     )
-                except (
-                    Exception
-                ) as exc:  # noqa: BLE001 - mirrors the CLI offline degrade
+                except Exception as exc:  # noqa: BLE001 - mirrors the CLI offline degrade
                     log.warning(
                         "wiki-page dedup: no LLM client (%s); comparator "
                         "Gate 2 unavailable — continuing in Gate-1-only "

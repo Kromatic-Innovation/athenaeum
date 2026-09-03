@@ -192,7 +192,7 @@ class TestDetectBounceVerdictFact:
     def test_ticket_number_near_email_declines(self) -> None:
         assert (
             detect_bounce_verdict_fact(
-                "Please reference ticket #552 when you email someone@example.com."
+                "Please reference ticket number 552 when you email someone@example.com."
             )
             is None
         )
@@ -208,7 +208,7 @@ class TestDetectBounceVerdictFact:
     def test_invoice_number_near_email_declines(self) -> None:
         assert (
             detect_bounce_verdict_fact(
-                "See invoice #559 for details; contact someone@example.com with "
+                "See invoice number 559 for details; contact someone@example.com with "
                 "questions."
             )
             is None
