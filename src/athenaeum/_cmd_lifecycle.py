@@ -331,6 +331,7 @@ def cmd_spend(args: argparse.Namespace) -> int:
 
     from athenaeum import spend
     from athenaeum.config import load_config, resolve_cache_dir
+    from athenaeum.store import now_iso
 
     target = args.path.expanduser().resolve()
     config = load_config(target) if target.exists() else None
@@ -375,7 +376,7 @@ def cmd_spend(args: argparse.Namespace) -> int:
             print(
                 json.dumps(
                     {
-                        "since": since_dt.isoformat().replace("+00:00", "Z"),
+                        "since": now_iso(since_dt),
                         "ledger_path": str(ledger_path),
                         "reprice": repriced,
                     },
@@ -423,7 +424,7 @@ def cmd_spend(args: argparse.Namespace) -> int:
 
     if args.json:
         payload = {
-            "since": since_dt.isoformat().replace("+00:00", "Z"),
+            "since": now_iso(since_dt),
             "ledger_path": str(ledger_path),
             **summary,
         }

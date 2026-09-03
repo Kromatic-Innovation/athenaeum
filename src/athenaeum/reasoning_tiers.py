@@ -132,7 +132,7 @@ import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -155,7 +155,7 @@ from athenaeum.pending_merges import PendingMerge
 from athenaeum.pii import is_pii_flagged
 from athenaeum.prompt_safety import data_only_clause, fence_untrusted
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
-from athenaeum.store import append_line_durable
+from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -499,12 +499,9 @@ def _build_log_record_fields(
     shape itself. This is what "T2 logs in the same shape as T1" means
     concretely: one schema, one file, a ``tier`` tag distinguishing rows.
     """
-    stamp = (ts if ts is not None else datetime.now(tz=timezone.utc)).astimezone(
-        timezone.utc
-    )
     return {
         "v": REASONING_TIER_LOG_VERSION,
-        "ts": stamp.isoformat().replace("+00:00", "Z"),
+        "ts": now_iso(ts),
         "tier": tier,
         "decision": verdict,
         "reason": reason,

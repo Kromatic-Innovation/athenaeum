@@ -63,7 +63,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.config import resolve_cache_dir
-from athenaeum.store import append_line_durable
+from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -302,16 +302,13 @@ def build_run_summary_ledger_record(
     the version bump already signals the shape changed. See
     :func:`refusal_in_record` for the reader that consumes all three states.
     """
-    stamp = (ts if ts is not None else datetime.now(tz=timezone.utc)).astimezone(
-        timezone.utc
-    )
     total_secs = sum(secs for _phase, secs, _fields in profile)
     phases: dict[str, dict[str, Any]] = {}
     for phase, secs, fields in profile:
         phases[phase] = {"secs": round(secs, 3), **fields}
     record: dict[str, Any] = {
         "v": RUN_SUMMARY_LEDGER_VERSION,
-        "ts": stamp.isoformat().replace("+00:00", "Z"),
+        "ts": now_iso(ts),
         "total_secs": round(total_secs, 3),
         "phases": phases,
     }
