@@ -85,7 +85,7 @@ predicate helpers) live in `src/athenaeum/librarian.py` next to
 `EXIT_GRACEFUL_PARTIAL` / `EXIT_EXTERNAL_KILL`.
 
 **Deliberately separate from the athenaeum#899 zero-yield alarm**
-(`_zero_yield_tripped`, `src/athenaeum/zero_yield.py`): that predicate
+(`_zero_yield_tripped`, `src/athenaeum/librarian.py`): that predicate
 requires `api_calls > 0` (a run that made zero calls is idle, not
 wasteful) — exactly the gap `EXIT_LIBRARIAN_REFUSAL` fills, since a
 budget-already-exhausted run trips the ceiling check BEFORE spending a
