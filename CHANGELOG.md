@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.45] - 2026-09-03
+
+_Supersedes 44 untagged, unpublished patch bumps (0.19.1–0.19.44) that never shipped to PyPI; the last published release was v0.19.0._
+
+### Release summary
+
+**Athenaeum 0.19.45 is the memory-model v6 release: memory becomes dimensioned,
+tiered, and budgeted; the store moves behind a pluggable adapter; sensitive
+data gets a routed, erasable path; and every token and dollar the librarian
+spends is attributed.** Seven themes, each with its landing issues:
+
+1. **Memory model v6 substrate.** The dimension registry and kernel dimensions
+   (athenaeum#714), retrieval-cost memory tiers with a token-denominated push
+   budget (athenaeum#718), the usage sensor, never-ingest class list, and
+   ingestion gate (athenaeum#968), the decay-sweep ledger (athenaeum#969), the
+   verdict ledger (athenaeum#712), and the measurement pack with its first
+   live-store snapshots (athenaeum#713). The five-verdict comparator landed dark,
+   gained its verdict effects and supersession substrate, and then replaced the
+   old wiki-dedup algorithm outright (athenaeum#715, athenaeum#1140,
+   athenaeum#1142, athenaeum#1243, athenaeum#1245); wiki-page name collisions
+   are now detected at create time and swept nightly (athenaeum#1170).
+2. **Whole-store adapter seam.** The `Store` protocol and `FilesystemStore`
+   (athenaeum#976), recoverability and lease as declared capabilities
+   (athenaeum#978, athenaeum#979), quarantine migrated onto the seam
+   (athenaeum#982), the published `Store` contract (athenaeum#983), off-corpus
+   indexable storage with federated recall and single-store erasure
+   (athenaeum#984), and the `storage.mapping` completeness lint (athenaeum#993).
+3. **Sensitivity, PII, and erasure.** Sensitivity routing in four slices
+   (athenaeum#1022 through athenaeum#1025), the `street-address` recogniser
+   (athenaeum#991), erasure classification and taint propagation wired into the
+   write and recall paths (athenaeum#985, athenaeum#1116), anchored PII-restore
+   repair (athenaeum#1037, athenaeum#1228), `lint-pii` scope corrections
+   (athenaeum#1049, athenaeum#1273), the per-field `surface-divergence` guard
+   (athenaeum#963, athenaeum#1039, athenaeum#1111), person pages demoted to a
+   consult-only registry (athenaeum#1183), and the removal of the per-person
+   read surfaces (athenaeum#888).
+4. **Spend, batch, and run accounting.** Batch spend reservation and settlement
+   (athenaeum#1147), per-knob batch selection and provider routing
+   (athenaeum#1175, athenaeum#841), reconciliation of every un-collectible
+   batch handle (athenaeum#1146), collect-only adoption and a deadline-bounded
+   poll (athenaeum#1145, athenaeum#1144), run-type attribution and a
+   local-day ceiling (athenaeum#1136), the ~56x subscription undercount fix
+   (athenaeum#1137), and per-surface input-token attribution (athenaeum#1289).
+5. **Librarian intake and run hygiene.** A durable run-summary ledger with
+   per-phase exit reasons (athenaeum#1102), per-file LLM/wall-clock bounds
+   that keep completed work (athenaeum#994), fair intake scheduling that can no
+   longer starve a source or fill a window with unworkable files
+   (athenaeum#1291, athenaeum#1295, athenaeum#1322), a heartbeating ingest lock
+   (athenaeum#1230), oversize-page dispositions (athenaeum#1248), and
+   shape-rule discovery and disposition-log pruning (athenaeum#974,
+   athenaeum#1274).
+6. **LLM contract strictness (M17).** Per-contract strictness decisions for the
+   Tier-2/Tier-3 and reasoning-tier contracts (athenaeum#608, athenaeum#609,
+   athenaeum#1035), observable coarse-embedding fallback (athenaeum#1032),
+   deterministic fallback embeddings (athenaeum#1050), and the write-knob
+   model-tier comparison eval (athenaeum#1139).
+7. **Recall and operator surface.** The generalized `enumerate_entities` /
+   `athenaeum enumerate` primitive replaces `athenaeum people` (athenaeum#965,
+   athenaeum#966, athenaeum#1079), the unprompted-recall hook honours the same
+   tier filter and push budget as prompted recall, wiki pages carry a one-line
+   `description:` the hook injects next to the page name (athenaeum#1324), and
+   `athenaeum entity` exit codes are disambiguated (athenaeum#1270).
+
+Upgrade notes: the per-day spend ceiling now accounts against the operator's
+local day rather than UTC (athenaeum#1136); `athenaeum people`,
+`bounce-divergence`, `do-not-email-divergence`, and the `read_person` surfaces
+are gone (athenaeum#1079, athenaeum#1111, athenaeum#888); `athenaeum entity`
+exit code `1` now means only "uid not found" (athenaeum#1270).
+
 ### Added
 
 - **Every candidate pair the wiki-dedup pass examines now leaves a durable
@@ -57,40 +126,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backslashes, contact data scrubbed. Companion hook change in
   code-workspace-config prints `name — description`.
 
-### Fixed
-
-- **Lane A intake throughput could fall to exactly zero while the run reported
-  `reason=completed` (athenaeum#1322).** Two independent window-COMPOSITION
-  defects, neither visible from a pending count. **First**, the athenaeum#900
-  caller-scoped pin bypassed athenaeum#1291's round-robin: the pinned prefix
-  was head-truncated to `max_files`, and `discover_raw_files` groups by source
-  name, so whenever a caller named more files than the window the schedule
-  collapsed back to pre-athenaeum#1291 head truncation on the
-  alphabetically-earliest source. That is not a rare case — `compile_changed`
-  derives the caller scope from a raw-tree hash snapshot, and a file that has
-  never been compiled stays "new" forever, so on a backlogged corpus the pin
-  grows to mean the whole backlog (observed: `Caller-scoped compile: 5969 of
-  5970 raw file(s)`). The pinned partition is now round-robined too; a genuine
-  session scope names fewer files than the window and hits
-  `round_robin_by_source`'s `len(files) <= limit` short-circuit, so
-  athenaeum#900's behaviour is unchanged in the case it was written for.
-  **Second**, athenaeum#663 (stuck) and athenaeum#1185 (in-backoff) skipped
-  their files INSIDE the per-file loop — i.e. after each had already won a
-  `max_files` slot. An unworkable file was free of LLM cost but not of
-  scheduling cost, so a stuck head froze its source permanently. Both classes
-  are now held out of the candidate set BEFORE the window is filled
-  (`_hold_out_unworkable_raw`), keeping every athenaeum#663/#1185 guarantee —
-  the file stays on disk, the ledger still keys on content hash, a content
-  edit still resets it, the skip is still surfaced loudly — while making the
-  window a window of *workable* files. Only ledger-named files are hashed, so
-  the hold-out never hashes the backlog. Measured on the reference deployment
-  2026-09-02: 50 permanently-stuck files (48 `mural-board-summary` + 2
-  `claude-session`) filled the entire 50-slot window on every run for six
-  hours — `files=0 calls=0 stuck=50 reason=completed` — while 4,181 healthy
-  `relationship-stub` records behind them were never scheduled once.
-
-### Added
-
 - **The librarian's run summary now reports how its intake window was filled
   (athenaeum#1322).** The entity segment gains `considered=` (candidates the
   scheduler saw, before any hold-out) and `window=` (slots actually filled),
@@ -108,8 +143,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports `reason=all-slots-skipped` instead of `reason=completed`. That reason
   is deliberately NOT in `_LIBRARIAN_EARLY_STOP_REASONS`: it is not a resource
   stop and must not change the athenaeum#1135 zero-progress refusal's exit code.
-
-### Added
 
 - **M17 phase 2 — the per-contract strictness decision for the remaining four
   LLM contracts (athenaeum#608).** athenaeum#570 shipped observe-only schema
@@ -165,217 +198,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ceiling or policy changes, and pre-v4 ledger rows stay readable (counted
   `surface_unattributed_records`, never dropped).
 
-### Changed
-
-- **`reasoning_tiers` T1/T2 retrofitted onto the M17 response-model
-  convention, with a deliberately stricter posture than the observe-only
-  sites (athenaeum#609).** `_parse_t1_response`/`_parse_t2_response` now
-  validate the model's raw JSON verdict through a Pydantic response model
-  (`T1VerdictResponse` / `T2VerdictResponse`) — one model per contract,
-  `Literal` over each tier's own verdict vocabulary, matching
-  `athenaeum.llm_schemas`' athenaeum#570 convention. Two things are
-  deliberately NOT that module's convention, per athenaeum#608's decided
-  strictness posture applied to this authority boundary: both models default
-  to `extra="forbid"` (not `extra="allow"` — there is no ledger measurement
-  for these contracts, and a tolerated unknown key at an authority boundary
-  is a widening risk, not a neutral one), and a validation failure drives
-  the tier's existing safe fallback directly (T1 → `pass_up`, T2 →
-  `escalate`) rather than being logged-and-passed-through the way
-  `athenaeum.llm_schemas.observe` treats every other contract's mismatch.
-  Every structural guarantee the module already carried is unchanged: T1's
-  two-member `Literal` (`"approve"` remains unrepresentable) and
-  `run_t2_tier`'s `safe_class_violation` gate (the single enforcement point
-  for an approved T2 decision) are untouched. One documented, intentional
-  behavior change: a payload that previously succeeded despite an
-  unexpected extra key (e.g. `{"verdict": "reject", "reason": "ok",
-  "surprise": "x"}`) now fails validation and falls back to the tier's
-  safe default instead — always landing on the OTHER already-safe outcome,
-  never a widened one. New tests: adversarial cases per invariant, an
-  exhaustive parametrized directional test enumerating every failure path
-  the retrofit touches, an AST-walk test proving `"approve"` is produced on
-  exactly one code path dominated by the `safe_class_violation` gate, and a
-  negative-control test proving both checks fail against a deliberately
-  eroded variant (never committed to the production module). **Post-review
-  fix (Seer thread on `reasoning_tiers.py:717`):** a *present but
-  blank/whitespace-only* `reason` (e.g. `{"verdict": "reject", "reason":
-  "   "}`) satisfied the initial `reason: str` field and reached
-  `ReasoningTierDecision`/`ReasoningTierT2Decision` construction
-  unvalidated, where each dataclass's own non-empty-reason guard raised an
-  uncaught `ValueError` — a failure path outside the safe set that the
-  original exhaustive-directional enumeration missed. Both response models
-  now reject a blank/whitespace-only `reason` at the Pydantic layer (a
-  shared `_require_nonblank_reason` field validator), so it takes the
-  tier's existing safe fallback (T1 → `pass_up`, T2 → `escalate`) like any
-  other schema mismatch, instead of being defaulted through OR crashing.
-  No version bump for this fix — folded into the same `0.19.45` this PR
-  had not yet released.
-
-### Fixed
-
-- **Intake starvation: a scheduled source that never gets *reached* is now
-  named (athenaeum#1295).** athenaeum#1291 fixed one starvation channel
-  (ordering) and made it observable — but its `starved_sources` signal counts
-  **scheduled slots**, not files processed. `round_robin_by_source` guarantees
-  a source gets slots in the window; it does not guarantee those slots are
-  ever reached. The entity loop can stop part-way through an already-scheduled
-  window on either `max_runtime` or `max_api_calls`, both enforced *downstream*
-  of window selection, so a source whose slots consistently land past the trip
-  point gets a non-zero slot count and a zero starvation streak, run after run,
-  while processing nothing. Interleaving the window bounds that damage; it does
-  not eliminate it. Every athenaeum#1291 acceptance criterion is worded in
-  terms of slots, so nothing that shipped there is false — this is the second,
-  independent channel that signal is blind to by construction.
-  A per-source count of files **actually processed** is now accumulated in the
-  entity loop and read back at the end of the run: a source with pending
-  intake, non-zero slots and zero processed files is reported as `stalled`,
-  on its own `librarian-source-processing-stall` prefix and its own streak,
-  kept deliberately distinct from athenaeum#1291's zero-slot `starved` channel
-  so the two are never conflated. It rides the entity profile segment, so the
-  athenaeum#1102 run-summary ledger carries it forward for free — no new state
-  file. A stalled source also ages into the scheduler's turn-order head
-  (`combined_starvation_priority`: the slot channel's ranking is preserved
-  exactly and unshifted, so athenaeum#1291's `ceil(n_sources / limit)` bound is
-  untouched, with stall-only sources appended after it), because a signal
-  nothing reads back into the schedule is diagnostic only and self-corrects
-  nothing. Per-run budget semantics are unchanged: this adds reporting and
-  turn order, never a new way to exceed a budget.
-
-- **`athenaeum status` no longer reads healthy after a zero-progress budget
-  refusal (athenaeum#1283).** athenaeum#1135 already detected, at run time, a run
-  that stopped early for a resource reason (budget / deadline / spend ceiling)
-  and committed nothing — it logs `librarian-run-degraded` and exits
-  `EXIT_LIBRARIAN_REFUSAL`. But that verdict died with the process, so nothing
-  *between* runs could see it, and the one counter `athenaeum status` did
-  surface — athenaeum#899's zero-yield streak — excludes this case **by
-  design**: it requires `api_calls > 0` (or `attempted_calls > 0`), and a run
-  refused on an exhausted budget makes zero calls. Status therefore read clean
-  straight through the exact incident athenaeum#1135 was filed about. The
-  refusal verdict is now computed once, at a single site in
-  `_run_finalize_phase`, and persisted through the existing athenaeum#1102
-  run-summary ledger (schema v3, new optional `refusal` field) — no new state
-  file — from which `status` reads a consecutive-refusal streak and renders a
-  `librarian-run-refusal:` line naming the reason. The line fires at a streak
-  of **one**: a single run that refused all work must not read as healthy, so
-  this is deliberately not a threshold alarm like the athenaeum#1291 starvation
-  warning. Run behaviour, the athenaeum#899 predicate, and the athenaeum#1135
-  exit codes and marker line are all unchanged — this makes an
-  already-correct verdict outlive the run that reached it.
-  Because the field must distinguish three states, a v3 record now carries
-  `refusal` whenever the verdict was *evaluated* (`{"tripped": false}` on a
-  clean run), and omits it only when the verdict was never reached — e.g. the
-  `stop_on_deadline` path, which emits its summary and returns before
-  `_run_finalize_phase` runs. Readers treat both an omitted field and a pre-v3
-  record as "cannot speak", never as "confirmed clean"; the streak stops at
-  such a record rather than counting through it, so it can under-report a real
-  streak but never fabricate one.
-
-- **The shape-rule disposition log no longer records the 99.8% that nothing
-  reads (athenaeum#1274).** `wiki/_shape_rule_dispositions.jsonl` reached 341 MB
-  / 1,488,689 rows in 9 days on a real deployment, of which 1,485,942 (99.8%)
-  were `disposition: "no-match"` — a negative result, regenerated on every
-  nightly pass and re-derivable by re-running the phase, accumulating inside a
-  git repo whose stated value is being small and diffable. Those rows are now
-  written only when the new `librarian.shape_rules.log_no_match` is on, and it
-  is **off by default**. That is safe because their sole consumer —
-  athenaeum#905's shape-frequency detector, which reads exactly the `tier:
-  null` rows `no-match` dominates — is reached only through
-  `librarian._run_rule_proposal_phase`, itself gated on
-  `librarian.rule_proposals.enabled` (also default off), which returns before
-  any disposition-ledger read. An operator enabling `rule_proposals` must
-  enable `log_no_match` too and allow `librarian.rule_proposals.window_days`
-  for fresh history to accumulate; the coupling is documented rather than
-  wired as a derived default so that "enable detection" never quietly means
-  "wait a month" with nothing in config to show for it. Suppression is never
-  silent: the phase logs the count at INFO naming the key, and reports
-  `no_match_rows_suppressed` in its run summary.
-
-  Retention also gained its own key. athenaeum#1229 had
-  `prune_shape_rule_dispositions` reusing `librarian.rule_proposals.window_days`
-  — a READ window doing double duty as a RETENTION policy. Coupled, narrowing
-  the detector's window silently deleted ledger history, and an operator who
-  disabled `rule_proposals` outright still had retention governed by a key
-  belonging to a phase they had turned off. Retention is now
-  `librarian.shape_rules.dispositions_retention_days`, same default (30), so
-  no existing deployment's behaviour changes.
-
-  Both resolve env > yaml > default
-  (`ATHENAEUM_SHAPE_RULES_LOG_NO_MATCH`,
-  `ATHENAEUM_SHAPE_RULES_DISPOSITIONS_RETENTION_DAYS`), matching every other
-  resolver in `athenaeum.config`. Note this is a WRITE-path fix only: an
-  existing oversized ledger is not pruned retroactively, and the log's
-  placement under `wiki/` is unchanged — both remain open on athenaeum#1274.
-
-- **Intake scheduling no longer starves a source indefinitely
-  (athenaeum#1291).** `discover_raw_files` returns its result grouped by
-  source directory in `sorted()` order, and the librarian's run loop filled
-  its `max_files` window by head-truncating that list. Because the list was
-  ordered by source NAME and cut from the HEAD, the window could only ever
-  advance past a source once that source's own backlog fell below the cap —
-  so a large, alphabetically-early, continuously-refilled source starved
-  every lexicographically later source forever. On the deployment that
-  surfaced it, ~2,200 records sat frozen in `raw/mural-board-summary/` across
-  at least 8 consecutive runs while `raw/auto-memory/` (79 files) alone
-  exceeded the entire 50-file per-run budget. The window is now filled
-  ROUND-ROBIN across sources (`athenaeum.intake.round_robin_by_source`),
-  with the turn order rotated each run by how long each source has been
-  waiting (`read_starvation_priority`, longest-starved first) so the bound
-  also holds when `max_files` is narrower than the source count. Worst-case
-  wait is now `ceil(n_sources / max_files)` runs regardless of sort position
-  or any other source's backlog; within-source ordering is preserved, the
-  athenaeum#900 caller-scoped prefix stays pinned at the head, and the per-run
-  budget semantics (`max_files`, `max_api_calls`, `max_runtime`) are unchanged —
-  this decides *which* files fill the window, never how many. Starvation is
-  also now observable rather than inferred: the entity phase records its
-  zero-slot sources on its run-summary segment (`starved=`), and
-  `emit_run_summary` computes a consecutive-run streak from the durable
-  athenaeum#1102 run-summary ledger (no new state file), naming any source
-  at or over `STARVATION_STREAK_THRESHOLD` runs in the summary head
-  (`starved_sources=<name>:<runs>`) and on a greppable
-  `librarian-source-starvation` WARNING. The previous `beyond_window` count
-  read as ordinary backpressure while describing a permanent stall.
-- **`storage lint-pii` no longer scans machine-generated audit logs under
-  `wiki/` (athenaeum#1273).** `_shape_rule_dispositions.jsonl` — a 341+ MB,
-  ~1.49M-record log the shape-rule engine regenerates every nightly run —
-  made the command itself unusable (two full runs killed at 68 and 106
-  minutes against a ~7-10 minute baseline) and made a clean exit
-  structurally unreachable: the real detectors misread its epoch-millisecond
-  timestamps as 100,533 phone-axis matches (2,583 distinct values), and
-  because the file regenerates nightly with fresh timestamps, no allowlist
-  entry (athenaeum#936) could ever stay valid against it. Fixed with a
-  filename-based, operator-configurable scan exclusion —
-  `storage.pii_scan_exclude` (`athenaeum.config.resolve_pii_scan_exclude`),
-  additive on top of a shipped default
-  (`athenaeum.pii.DEFAULT_PII_SCAN_EXCLUDE_FILENAMES`) containing only the
-  confirmed offender — consulted by `iter_corpus_files` / `scan_corpus_pii`
-  via a new `exclude_names` parameter. `lint-pii` prints every excluded path
-  to stderr and lists it under the JSON payload's new `excluded` key, so the
-  exclusion is never silent. `_corrections_applied.jsonl` and
-  `_shape_rules_applied.jsonl` were checked (not just assumed) and left out
-  of the default: both are small run-summary logs, not per-record like the
-  file above, with no observed email matches on the live corpus. Verified
-  against the live `~/knowledge` corpus by calling the patched
-  `scan_corpus_pii`/`iter_corpus_files` directly (a full CLI run wasn't
-  reproduced on purpose, per the issue's own "don't burn another 100 minutes
-  re-proving a known failure"): the `wiki/` scan the exclusion covers now
-  runs in ~9-12s including allowlist adjudication (`iter_corpus_files` 1.2s
-  + `scan_corpus_pii` 8.2s + adjudication <0.01s over 24k files), down from
-  the 68/106-minute kills that kept exit 0 permanently out of reach.
-  Adjudicating against the current 516-entry allowlist, `wiki/`'s unexplained
-  residue is now 190 findings (was 100,533+ before this fix, dominated by
-  one file) — a small, stable, genuinely adjudicable set, so `exit 0` is now
-  reachable given a complete allowlist for what remains (it was not,
-  structurally, before). `raw/` (a separate, non-gating surface per
-  athenaeum#1049) is unaffected by this change either way and remains slow
-  independently of it — a 47 MB `raw/athenaeum-437-phase2/lint-pii-*.json`
-  (a prior scan's own JSON output, now itself sitting in `raw/`) looks like
-  the same problem class one layer over; flagged for a follow-up issue,
-  deliberately not fixed here since `raw/` was out of this issue's scope.
-  See `docs/configuration.md` → "PII scan exclusion — machine-generated audit
-  logs". Unblocks athenaeum#437's acceptance criterion, which was
-  structurally unreachable while this file was in scope.
-
-### Added
-
 - **`athenaeum storage prune-dispositions`: one-time prune of
   `_shape_rule_dispositions.jsonl` to its positive-disposition records
   (athenaeum#1274 AC3/AC4).** athenaeum#1293/athenaeum#1229 already stopped the ledger
@@ -393,6 +215,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count, and (on `--apply`) acquires the single-machine run lock (issue
   athenaeum#309) so it can never race the nightly's own concurrent appends to
   this file. See `docs/configuration.md`'s shape-rules section.
+
 - **The `split` and `log_demote` oversize-page dispositions are implemented
   (athenaeum#1248).** athenaeum#1182 shipped the page-size gate with only
   `review` (escalate, leave the page unmodified) live; `split`/`log_demote`
@@ -429,6 +252,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other `librarian.*` knobs. Unblocks athenaeum#1214 (the operator
   disposition sweep), whose per-page dispositions are only executable once
   all three actions exist.
+
 - **`type: person` wiki pages are demoted from general wiki entities to a
   new consult-only person registry (athenaeum#1183).** A CRM-imported contact
   record is not a wiki entity — treating it as one let a person page be
@@ -458,6 +282,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root itself, so an unmigrated corpus degrades sanely) lets the one-time
   physical relocation of person pages in a live corpus — issue athenaeum#1247,
   blocked by this one — repoint the registry without a code change.
+
 - **Write-knob (Tier-3 CREATE/MERGE) model-tier comparison eval
   (athenaeum#1139).** The `write` knob is ~99.2% of athenaeum's metered
   spend and is pinned to `claude-sonnet-5`, with nothing measuring whether
@@ -488,166 +313,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/evals/data/write_tier_compare/comparison_table.md`) is committed
   showing the generator's shape, and the real run is tracked as a
   follow-up.
-
-### Changed
-
-- **`athenaeum entity`'s exit code `1` now means ONLY "uid not found"; a new
-  code `70` covers everything else that can go wrong after the uid resolves
-  (issue athenaeum#1270).** Before this change, an uncaught exception past
-  the uid lookup (e.g. the `json.dumps` `TypeError` on a `date`-typed
-  frontmatter value fixed independently in athenaeum#1110) fell through to
-  Python's default uncaught-exception exit status, which is ALSO `1` — the
-  same code "no page for this uid" already returned. A caller keying off
-  the exit status alone could not tell an existing-but-broken record from a
-  genuinely absent one; `google-contact-sync`'s `read_person()` is exactly
-  such a caller, mapping every nonzero exit that isn't argparse's
-  `invalid choice` to "unknown uid." **Anyone scripting against
-  `athenaeum entity`'s exit code should update to treat `1` and `70`
-  distinctly** — `1` (`EXIT_NOT_FOUND`) still means "no such uid," while `70`
-  (`EXIT_INTERNAL_ERROR`, BSD `sysexits.h`'s `EX_SOFTWARE`) is new and means
-  "the uid exists but the read/serialize path failed." Both constants are
-  defined in `src/athenaeum/_cli_shared.py` next to the existing
-  `EXIT_LOCK_HELD`; documented in `athenaeum entity --help` and
-  `docs/exit-codes.md`.
-
-- **The unprompted-recall `UserPromptSubmit` hook now enforces the same
-  `hot`-tier filter and `push_budget.tokens_per_turn` budget as the
-  prompted `recall` path (athenaeum#1120).** `examples/claude-code/user-prompt-recall.sh`
-  queried the FTS5 index directly and never called `recall_search`, so it
-  never saw the `hot`-tier filter or the token budget that athenaeum#718 /
-  PR athenaeum#1117 built — `push_budget.tokens_per_turn` was a real, tested dial
-  nothing unprompted actually turned. Fixed with an index-carried tier
-  verdict plus shell-native budget enforcement rather than a thin-CLI
-  wrapper: measured on-box, `import athenaeum.mcp_server` costs
-  ~360-450ms warm (~1090ms cold) against this hook's `<50ms` FTS5-only
-  contract, an 8-10x regression on every turn of every session. Instead,
-  `athenaeum.memory_tiers.resolve_tier` now runs ONCE at index-build time
-  (`athenaeum.search.FTS5Backend._row_for`, FTS5 schema bumped 3 -> 4) and
-  stores its verdict in a new `memory_tier UNINDEXED` column — the same
-  pattern `audience` (athenaeum#312) and `type` (athenaeum#964) already
-  established so shell/SQL can filter without Python. The hook adds
-  `AND memory_tier = 'hot'` to its SQL and a small `awk` pass that greedily
-  packs candidates into the token budget in rank order, skipping (never
-  truncating) an entry that would exceed it — mirroring
-  `memory_tiers.select_for_push`. The tier model itself is NOT
-  reimplemented in shell; only the budget-accumulation loop and
-  `push_metrics.estimate_tokens`'s `len(text)//4` formula are duplicated,
-  as a single arithmetic expression. `session-start-recall.sh` now also
-  caches the resolved budget as `PUSH_TOKEN_BUDGET` in `config.env`
-  (deliberately not the library's own `ATHENAEUM_PUSH_TOKEN_BUDGET` name,
-  since `config.env` is sourced under `set -a` and would otherwise shadow
-  the library's own env-over-yaml precedence for every child process). A
-  DB built by an older athenaeum (no `memory_tier` column) is detected via
-  a `PRAGMA table_info` probe and falls back to the pre-athenaeum#1120 unfiltered
-  query rather than raising `OperationalError` into a silent zero-recall.
-
-- **Wiki-page dedup cut over to the five-verdict comparator; its own old
-  duplicate-detection algorithm is retired, not run alongside it
-  (athenaeum#715).** `athenaeum.wiki_dedupe.propose_wiki_page_merges` used to
-  cluster candidate wiki pages (unchanged) and then run its OWN
-  confidence-scored suppression-gate pipeline
-  (`merge_type_gate._merge_proposal_suppression_reason`, deterministic draft
-  synthesis, a direct `write_pending_merge` append) — a second,
-  independent duplicate-detection implementation running in parallel with
-  the five-verdict comparator (`athenaeum.comparator`, landed dark in
-  athenaeum#1128/#1131). That old algorithm is deleted outright: clustering
-  still only proposes candidate PAIRS (never a verdict), and every pair is
-  now decided by the comparator and enacted via `athenaeum.verdict_effects`
-  — a `duplicate` verdict writes fold EVIDENCE (never a merged body,
-  never `_pending_merges.md`), `specialization` writes `refines:`,
-  `contradiction` routes to supersession-or-queue, `distinct`/
-  `underdetermined` are ledger-only. `merge_type_gate.cross_class_precheck`
-  is kept as a pre-comparator filter (the comparator's own `MEMORY_CLASS`
-  dimension is not yet `enforced`). Gated on the SAME pre-existing
-  `librarian.comparator_enabled` / `ATHENAEUM_COMPARATOR_ENABLED` knob
-  (still default OFF) — not a new flag; with it off, this pass is now a
-  complete no-op (old or new), which is the intended shape of a real
-  cut-over rather than a second parallel path. `athenaeum.comparator.record_comparison`
-  now also returns the decided `CompareOutcome` (`"outcome"` key, `None`
-  except on a freshly-ledgered pair) so a caller can enact its effect
-  without a second, redundant Gate 2 call.
-
-  **This is a partial cut-over, not the full one athenaeum#715 ultimately
-  requires.** The separate C1-C4 auto-memory compile pipeline
-  (`athenaeum.merge`'s `merge_clusters_to_wiki`, the ~940-line intra-cluster
-  LLM contradiction detector + Opus resolver + T1/T2 reasoning-tier screens
-  + cross-scope similarity sweep) is UNCHANGED and still runs
-  unconditionally — it is deeply interleaved with run-level deadline
-  checkpointing, the detection-incomplete retry queue
-  (`athenaeum.detection_state`), and the shared API-call/spend-ceiling
-  budget across multiple `librarian.py` call sites, none of which this PR
-  touches. Retiring it safely needs its own dedicated pass; see the PR
-  description and the athenaeum#715 issue comment for the precise scope
-  handed to a follow-up lane.
-
-- **A misconfigured LLM provider no longer aborts the librarian's whole
-  wiki-dedup phase (athenaeum#715, Seer finding on the athenaeum#1227
-  cut-over).** With `librarian.comparator_enabled` ON,
-  `librarian._run_wiki_dedup_phase` built its Gate-2 client outside any
-  local `try`, so a `ProviderConfigError` unwound to the phase's generic
-  `except Exception` — skipping the pass wholesale (including the
-  deterministic Gate 1 work, which needs no LLM at all) and logging a
-  misleading `wiki-page dedup pass failed`. The client build is now wrapped
-  to mirror the CLI sibling `_cmd_curate._cmd_dedupe_wiki_pages`: the
-  provider error is logged as what it is, `client` stays `None`, and
-  `propose_wiki_page_merges` runs in Gate-1-only degraded mode (a pair Gate
-  1 cannot settle reports no verdict, never a fabricated one).
-
-- **athenaeum#1142's wiki-dedupe suppression ledger is left without a producer
-  by this cut-over (tracked in athenaeum#1243).** The comparator path writes no
-  `wiki/_pending_merges.md` proposal block and no
-  `_wiki_dedupe_suppressions.jsonl` sidecar, so athenaeum#1142's embedder- and
-  suppression-attribution surfaces (and the tests that asserted on them) no
-  longer have anything to observe. `DEFAULT_WIKI_SUPPRESSIONS_FILENAME` and
-  those tests are removed here rather than left asserting on a dead path;
-  athenaeum#1243 ("Re-site athenaeum#1142's embedder + non-proposal attribution
-  into the comparator's verdict ledger") recovers them verbatim from ref
-  `b79efc0` and gates re-siting on enabling `comparator_enabled`.
-
-### Fixed
-
-- **`comparator.content_relation` no longer floods the log with one unattributable
-  WARNING per unsettled pair when no LLM client is available (athenaeum#1245).**
-  On the live corpus this was 11,815 identical, pair-key-less WARNING lines per
-  nightly run once `comparator_enabled` is flipped on with no
-  `ANTHROPIC_API_KEY` — enough volume to push diagnostically useful log lines
-  out via rotation before anyone reads them (the failure mode athenaeum#1142
-  was filed to end). Two other exits sharing the exact same
-  `rationale="llm-unavailable"` outcome — exhausted transient-error retries,
-  and a Gate 2 call that raised — had the identical per-pair/no-key/WARNING
-  shape (an AC4 audit finding: an API outage or bad credentials would flood
-  the log identically to a missing client) and are fixed the same way. All
-  three now route through `comparator._content_relation_unavailable`, which
-  logs the pair-keyed detail at DEBUG and tracks a running count; callers with
-  a comparison loop (`wiki_dedupe.propose_wiki_page_merges`,
-  `recompare`'s pass, `comparator_instruments.run_sibling_widening`) call the
-  new `comparator.flush_content_relation_unavailable_warning` once after their
-  loop finishes, emitting a single WARNING naming the total affected-pair
-  count — following `wiki_dedupe._warn_wiki_fallback_engaged_once`'s existing
-  warn-once pattern (athenaeum#1032) rather than a second mechanism. Two other
-  per-pair WARNINGs in `comparator.py` (malformed/no-JSON Gate 2 responses)
-  were read-audited and deliberately left as-is: a different failure family
-  (the model responded, but its content was unusable, not that Gate 2 was
-  unavailable) with no evidence of run-invariant recurrence in this
-  deployment, unlike the client-unavailable case.
-
-- **The push-boundary public-safe-lint gate no longer dies on stock macOS
-  bash 3.2 (athenaeum#1104).** `scripts/public-safe-lint-gate.sh` used
-  `mapfile -t` at two call sites; `mapfile` is a bash 4.0 builtin and stock
-  macOS ships GNU bash 3.2.57 at `/bin/bash`, which `.githooks/pre-push`
-  invokes the gate through. Every macOS contributor's push aborted with
-  `mapfile: command not found` -- a leak gate broken on the majority
-  developer platform. Both sites now use a bash-3.2-portable
-  `while IFS= read -r` loop over an explicitly-initialized array, keeping the
-  `"${ARR[@]:-}"` guards that `set -u` still needs in 3.2.
-  `scripts/run-tests.sh` (athenaeum#1105) carried the identical defect and is
-  fixed the same way. `tests/test_public_safe_lint_gate.py` now asserts every
-  push-path shell script is free of bash-4-only constructs (`mapfile`,
-  `readarray`, `declare -A`/`-g`, `${var^^}`/`${var,,}`, `coproc`,
-  `globstar`, `wait -n`, `read -i`/`-N`, `|&`, `&>>`), plus an executable
-  companion that runs the gate under a real 3.2 `/bin/bash` where one exists.
-
-### Added
 
 - **Wiki-page name-collision detection and repair, split into a create-path
   gate and a nightly deterministic scan (athenaeum#1170).**
@@ -736,138 +401,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     corpus) rather than failing closed, but emit a structured, greppable
     `erasure-taint-not-routed` warning naming the taint and the page.
 
-### Removed
-
-- **`athenaeum bounce-divergence` and `athenaeum do-not-email-divergence` CLI
-  subcommands (athenaeum#1111).** Both were fully superseded by `athenaeum
-  surface-divergence --field {bounced,do_not_email}` (athenaeum#963): running
-  either superseded command and the generalized equivalent against the live
-  store produced byte-identical JSON, and per architectural guidance
-  (`docs/north-star.md` §2.2, "no per-writer entry points") the per-field
-  duplicates should not have kept existing once the generalization landed.
-  `bounce-divergence` had zero remaining callers; `do-not-email-divergence`
-  had exactly one — a redundant third invocation in cron-fleet's nightly
-  `pre-dawn-sweep.sh` Step 3b that duplicated the sweep's own
-  `surface-divergence --field do_not_email` invocation and was removed in
-  the same change. The parser registrations and the `_cmd_bounce_divergence.py`
-  / `_cmd_do_not_email_divergence.py` CLI-wiring modules are removed from
-  `src/athenaeum/cli.py`; the underlying `athenaeum.bounce_divergence` and
-  `athenaeum.do_not_email_divergence` library modules are UNCHANGED and stay
-  in place — `athenaeum.surface_divergence` still wraps their
-  compute/report/render/dict implementations verbatim. The CLI-level tests
-  for the removed commands (`tests/test_bounce_divergence.py::TestCli`,
-  `tests/test_do_not_email_divergence.py::TestCli`) are removed; their
-  coverage already existed, or was added, at the surviving command's own
-  `tests/test_surface_divergence.py::TestCli` / `TestAllowance`.
-
-### Fixed
-
-- **`athenaeum ingest` held the run lock without heartbeating, so
-  `break_stale_after` could break a healthy long run (athenaeum#1230).** Only
-  `librarian.py` refreshed the lock's heartbeat; the ingest path did not, so
-  `heartbeat_age_seconds` equalled its total wall time — a long-running,
-  correctly-progressing ingest looked progressively more "wedged" the longer
-  it ran, and a contending `acquire` could auto-break it under
-  `break_stale_after` (default 6h). Fixed by threading `lock.heartbeat` into
-  `ingest()`/`session_end()` exactly like `athenaeum run`'s athenaeum#526
-  (H10) precedent — both already forward `**run_kwargs` into `run()`, which
-  ticks the heartbeat at phase/per-file boundaries. A full sweep of every
-  `RunLock` acquisition site in `src/athenaeum/` (recorded in
-  `athenaeum.runlock`'s module docstring) found two more holders with the
-  same latent gap and fixed both: `athenaeum drain` (an explicitly unbounded,
-  batch-mode drain that block-polls the Anthropic Batch API for potentially
-  hours, with one lock held across the whole multi-window loop) and
-  `athenaeum merges recompare --apply` (an unbounded-proposal-count,
-  per-pair LLM classify loop that already received the caller's lock but
-  never refreshed it). Every other acquisition site was audited and found
-  correctly bounded (deterministic, or capped well under the 6h default) —
-  see the docstring table for the full per-site reasoning. Regression tests:
-  `tests/test_runlock.py::TestIngestPathHeartbeatWiring`,
-  `tests/test_runlock.py::TestIngestPathLongRunSurvivesContendedBreak`,
-  `tests/test_recompare.py::TestApplyHeartbeatsTheLock`, and
-  `tests/test_drain.py::TestRunDrainLoop::test_heartbeat_is_threaded_into_every_window`.
-
-- **`athenaeum pii-restore` silently reported a false `TOTAL RESTORABLE = 0`
-  when the knowledge root's git history was unreachable (athenaeum#1228).**
-  `_history_with_paths()` returned an empty list on ANY non-zero `git log`
-  exit -- including "there is no repository here" -- indistinguishable from
-  a page genuinely having no pre-migration history, so
-  `_plan_anchored_restore()` forced every marker into
-  `no-pre-image:page-created-after-migration` and the dry-run report showed
-  a clean, plausible-looking `TOTAL RESTORABLE = 0` regardless of what was
-  actually recoverable. This produced a wrong published conclusion on
-  athenaeum#691 when run against an environment whose knowledge root had no
-  `.git`. Fixed by having `_history_with_paths()` raise the new
-  `GitHistoryUnavailableError` on a non-zero git exit (never conflating it
-  with a real empty-but-successful history), routing every marker that hits
-  it into a new, distinctly-named `git-history-unavailable` residue reason,
-  and having `athenaeum pii-restore` refuse to print a dry-run/apply report
-  at all when `RestorePlan.git_history_unavailable_count()` is non-zero --
-  exiting `1` with a loud stderr explanation instead. The legitimate
-  `no-pre-image:page-created-after-migration` bucket is unchanged for a page
-  that genuinely has no pre-image in a healthy repository. Regression
-  tests: `tests/test_pii_restore_tool.py::test_history_with_paths_raises_when_git_itself_fails`,
-  `::test_build_restore_plan_reports_git_history_unavailable_not_false_residue`,
-  `::test_reshaped_page_still_lands_in_legit_bucket_with_real_git_history`,
-  and `tests/test_cmd_pii_restore.py::test_missing_git_repository_fails_loudly_instead_of_reporting_false_zero`.
-
-- **`athenaeum surface-divergence --json`'s `diverged` field could contradict
-  its own exit code (athenaeum#1111).** The wrapped library modules'
-  `report_as_dict` reports `diverged` as true whenever EITHER direction of
-  the two-surface comparison is non-empty, but the command's exit code only
-  fails on the field's declared NOT-tolerated direction
-  (`exceeds_allowance`) — so a wiki-only `do_not_email` mark (the design's
-  own only legal steady state, athenaeum#1039) exited `0` while the JSON
-  body read `"diverged": true`, and the same shape affected `bounced`'s
-  tolerated wiki-only-entry case. A consumer reading `diverged` instead of
-  the exit code got the wrong answer on the design's own legal state. Fixed
-  by having `athenaeum._cmd_surface_divergence` override `diverged` in its
-  JSON output to track `exceeds_allowance` — the same predicate driving the
-  exit code — so the two can never disagree; a direct caller of the wrapped
-  modules' own `report_as_dict` (unchanged) still sees their original,
-  broader both-directions semantics. Regression tests:
-  `tests/test_surface_divergence.py::TestCli::test_json_diverged_do_not_email_wiki_only_mark_matches_exit_code`
-  and `::test_json_diverged_bounced_wiki_only_entry_matches_exit_code`.
-
-- **A populated athenaeum#453 source-handle key that the deterministic Tier-0 path
-  cannot place could still fall through to Tier 2/3 and compile with the
-  handle silently folded into page-body prose instead of frontmatter, so
-  `registry.json` was left silently missing it and nothing reported a
-  failure (athenaeum#1109).** athenaeum#486/#491/#692 already taught the deterministic
-  `tier0_handle_upsert`/`tier0_passthrough` paths to place a populated handle
-  as frontmatter without ever reaching the LLM tiers, and athenaeum#845 pinned the
-  gate's existing "decline cleanly, warn, fall through" contract for every
-  case those paths cannot place a handle onto (no uid and no existing entity
-  by that name; a name that resolves to a non-entity or cross-type page).
-  The residual gap: a fallthrough still proceeds to Tier 2/3, which has no
-  schema awareness of the handle keys (`athenaeum.registry.SOURCE_HANDLE_KEYS`) —
-  so the raw still compiled, just with the WARNING as the only trace. Fixed
-  by a new backstop, `athenaeum.registry.assert_handles_placed`, called from
-  `athenaeum.librarian._apply_tier3_results` immediately before any write:
-  it collects the raw's own populated source handles and refuses the ENTIRE
-  write batch (no partial write) with a new
-  `athenaeum.registry.UnplaceableSourceHandleError` if none of the
-  pages about to be written carry them as frontmatter. The error propagates
-  uncaught out of `process_one`, so the raw file is left on disk untouched
-  and picked up by the sweep loop's existing per-file failure/stuck-file
-  ledger — the same "fails loudly, retried next run" contract every other
-  Tier-2/3 processing failure already gets — rather than a warning-only
-  fallback that still let the defect through. The over-budget partial-progress
-  write path (athenaeum#994) deliberately does not apply this check, to preserve
-  its guarantee that already-computed partial progress always lands
-  durably. No hardcoded second copy of the handle-key set was added — the
-  check reads `registry.py`'s existing `SOURCE_HANDLE_KEYS`/`collect_handles`,
-  the single source of truth the deterministic Tier-0 paths already use.
-  Regression tests: `tests/test_librarian.py::TestUnplaceableSourceHandleFailsLoudly`
-  (the new-entity-with-no-uid case that previously compiled silently, plus a
-  control proving a normally-placed handle does not raise);
-  `tests/test_registry.py::test_ac5_hand_applied_handles_survive_a_recompile`
-  and `::test_ac5_unrelated_reintake_does_not_disturb_hand_applied_handles`
-  (fixture standing in for the operator's private-store hand-correction this
-  issue names, since that store is not reachable from this repo or its CI).
-
-### Added
-
 - **Wiki-dedupe proposals and suppressions now carry durable embedder +
   reason attribution (athenaeum#1142).** athenaeum#1032 stamped `embedder=` onto
   suppression log lines and the raw-intake clusters JSONL, but never
@@ -891,6 +424,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file replaced each run + one timestamped rotation, pruned to the
   existing `librarian.rotation_retention` window) rather than an unbounded
   append-only ledger.
+
 - **Batch spend reservation and settlement — `ceiling_tripped` is no longer
   blind to committed in-flight cost (athenaeum#1147).**
   `TokenUsage.add_batch_tokens` fires at COLLECT, so under the async
@@ -1224,91 +758,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_pending_questions.md` — never minted as an address-named page. A
   non-address classification takes an unchanged fast path with no lookup.
 
-### Changed
-
-- **BEHAVIOUR CHANGE: the per-day spend ceiling now accounts against the
-  operator's LOCAL day by default, not UTC (athenaeum#1136).** `spend.max_usd_per_day`
-  / `spend.max_tokens_per_day` (and the weekly-percent derivation) used to
-  open a fresh accounting window at UTC midnight unconditionally. For an
-  operator running several hours west of UTC, that silently opened the
-  window mid-evening — in US Eastern time (UTC-4 in summer), UTC midnight
-  lands at 20:00 EDT, squarely inside a typical evening working session. A
-  session that ran 20:00-23:00 local could exhaust the WHOLE day's ceiling,
-  and a scheduled job firing later the SAME local night (but still inside
-  the same UTC calendar day) inherited nothing — this was observed in
-  production as a nightly `athenaeum run` compiling **zero** entities on
-  every observed night, refused with `Spend ceiling reached
-  ($15.03/$15.00 today)` roughly three hours after an evening session had
-  already spent it. The new `spend.accounting_timezone` config key (env
-  `ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE`; IANA name, e.g.
-  `America/New_York`) fixes this at the source: it now **defaults to the
-  system's local timezone**, not UTC, so the day boundary tracks the
-  operator's own day without any config at all. An operator who already
-  runs in UTC sees zero behavior change. A misspelled/unresolvable zone
-  name WARNs and falls back to UTC rather than crashing a run. Full
-  rationale and config table: [`docs/configuration.md`](docs/configuration.md).
-  `athenaeum.spend._start_of_utc_day`
-  is renamed `_start_of_accounting_day` (internal, not part of the public
-  API) and `athenaeum.spend.spend_today` gained an optional `config=`
-  parameter; both `ceiling_tripped()` branches (subscription tokens and API
-  dollars) move together.
-
-- **`enumerate_entities` no longer PII-gates `do_not_email` (athenaeum#1122).**
-  `athenaeum.enumeration._PII_GATED_EXACT_FIELDS` is now empty:
-  `is_pii_gated_field("do_not_email")` (and `_reason` / `_date`) returns
-  `False`, so `enumerate_entities(predicates=["do_not_email != true"])` and
-  `athenaeum enumerate --where do_not_email:ne:true` both work without
-  `with_pii=True` / `--with-pii`. Operator-ruled: the field is a plain
-  suppression-opt-out boolean read from ordinary on-page frontmatter, with
-  no excluded-surface record join — not a durable cross-system identifier
-  like `google_contact_*`, which stays gated unchanged. Unrelated to, and
-  does not change, the separate `recall` / `read_entity` reverse-lookup
-  path, where `with_pii=True` stays required because there the lookup key
-  is an email address on the excluded surface.
-
-### Documentation
-
-- **`docs/merge-inflow-restoration.md` §5 and §9 annotated with outcomes
-  (athenaeum#1093).** §5 records the ratification: `librarian.max_merge_sources`
-  raised from 5 to 8 (operator decision, 2026-08-22), written to the operative
-  `~/knowledge/athenaeum.yaml` and runtime-confirmed on 2026-08-23 (commit
-  `f2e862be3`), and the instrument-before-change condition explicitly
-  overridden by the operator with the daily merge-readout routine serving as
-  the instrumentation. Carries forward the two caveats from that ratification:
-  athenaeum#1005 refuted `_fallback_embeddings` as the over-clustering cause
-  (11,066/11,066 stamped suppression lines read `embedder=chromadb-default`),
-  so some fraction of newly-admitted proposals are genuine over-clusters; and
-  the 4,227-suppressions-over-~2.4-days figure is not reconciled against
-  athenaeum#784's measured 127-132/night and must not be used for tuning until
-  a distinct-cluster count exists. §9 is annotated as resolved, citing
-  athenaeum#1088, which fixed `docs/configuration.md`'s two stale
-  `max_merge_sources` default references (25 → 5); the annotation drops the
-  original line numbers (already stale at filing time) in favor of the table
-  row and example-block key. Docs-only; no code changed, and the code default
-  of 5 in `src/athenaeum/config.py` is unchanged — the ratified value lives
-  only in the operator's live store.
-
-### Removed
-
-- **`athenaeum people` CLI subcommand (athenaeum#1079).** Deprecated in
-  athenaeum#966 in favour of the generalized `athenaeum enumerate --type
-  person --where ...` primitive (athenaeum#964/#965); removed now per an
-  operator ruling that the deprecation-window constraint did not apply
-  (every caller is this workspace's own operator/agent sessions, and
-  releases are cut on demand). `--top-touch N` and `--format table|tsv`
-  are dropped without replacement, per `docs/recall-architecture.md`'s
-  capability-parity table — every other surface has a direct `enumerate`
-  equivalent. The parser registration, `cmd_people`, and
-  `PEOPLE_SURFACE_DEPRECATION` are removed from `src/athenaeum/_cmd_query.py`;
-  the tests exercising the removed surface (`tests/test_people_deprecation.py`
-  and the `people`-specific tests in `tests/test_cli.py` /
-  `tests/test_generic_read_surfaces.py`) are removed rather than left
-  asserting against nothing — the replacing `enumerate --type person`
-  coverage in `tests/test_enumeration.py` / `tests/test_cmd_enumerate.py`
-  was already in place.
-
-### Added
-
 - **Memory tiers + push budget — retrieval-cost tiering, token-denominated
   push, and coordinate-fit ranking (athenaeum#718, split (a) of the athenaeum#911
   memory-model v6 three-way split; (b) off-corpus storage is athenaeum#984, (c)
@@ -1488,6 +937,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   otherwise unchanged. `docs/sensitivity-class-vocabulary.md` (§2.1, §5, §9)
   and `docs/configuration.md`'s sensitivity-classes section are updated to
   match.
+
 - **Anchored PII-restore repair tooling: rename-following + retro-filename
   history lookup (athenaeum#1037, repairs the tool athenaeum#691's 2026-08-20 operator
   lane found blind to 673/844 markers).** New `athenaeum pii-restore` CLI
@@ -1530,6 +980,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (propagated-corruption) page, and a retro-filename case, plus the
     email/phone safety-pin and over-restore-refusal cases. No test touches
     a live store — the live-store run stays athenaeum#691's `~operator` job.
+
 - **`athenaeum repair --bounce-fold`: CLI surface for athenaeum#850's
   bounce-fold path (athenaeum#1006).** Exposes
   `find_orphaned_bounce_marks`/`fold_orphaned_bounce_marks` as a new mode in
@@ -1543,6 +994,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the contacts surface (PII-adjacent) rather than reformatting wiki
   frontmatter, a materially bigger blast radius than the existing `--all`
   passes; see the module docstring in `src/athenaeum/_cmd_repair.py`.
+
 - **Merge-inflow restoration analysis: proposed `max_merge_sources` value
   (athenaeum#1030 — athenaeum#787 prerequisite).** `docs/merge-inflow-
   restoration.md`: characterizes what the athenaeum#784 baseline's suppression
@@ -1556,6 +1008,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minimal instrumentation that would make the distribution measurable going
   forward. No default or runtime behavior changes — analysis only; the
   live-config flip stays athenaeum#787's.
+
 - **Publish the whole-store `Store` contract (athenaeum#983 — S8 of the
   whole-store adapter design lock, athenaeum#911).** `athenaeum.store`'s `Store`
   protocol, its data/error types (`StoreKey`, `ObjectMeta`, `Record`,
@@ -1634,158 +1087,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     metadata only, mechanically asserted by a static source scan in
     `tests/test_never_ingest.py::TestNoDeletionStaticScan`.
 
-### Deprecated
-
-- **`athenaeum people` — deprecated in favour of the generalized `athenaeum
-  enumerate` primitive (athenaeum#966).** Now that athenaeum#964 (narrow by
-  declared `type`) and athenaeum#965 (enumerate by declared type + field
-  predicates) have shipped, every question `people` answers is answerable
-  through `athenaeum enumerate --type person --where ...` — see
-  `docs/recall-architecture.md`'s capability-parity table (landed with
-  athenaeum#965) for the exact per-flag mapping, including the two rows
-  generalization deliberately drops: `--top-touch`'s computed composite sort
-  and `--format table|tsv` rendering, both presentation/scoring concerns
-  outside the generalized primitive's contract, not gaps in it. `people`
-  prints a one-line migration notice to **stderr** on every call — never to
-  stdout, which is a table or TSV a script may parse, and a notice there
-  would be a breaking output change dressed up as a deprecation.
-
-  **This changes zero behaviour** — the command keeps working identically;
-  flags, filtering, ordering and output format are byte-identical before and
-  after, asserted by regression test on a synthetic fixture corpus, alongside
-  parity tests proving each reproducible row's `enumerate` expression returns
-  the same set of pages as the `people` invocation it replaces.
-
-  Actual removal is a separate, later issue, gated on a real deprecation
-  window and on known consumers having migrated — **not** on this one
-  closing, and with no removal date set. Per the version-bump policy this
-  issue is a **patch** (a notice, no behaviour change); the removal will be a
-  breaking change and must bump **minor** at minimum, with a `### Removed`
-  entry — the same shape athenaeum#887 (deprecation) / athenaeum#888
-  (removal) already established for `athenaeum query person`.
-
-### Fixed
-
-- **Wiki-page dedup no longer collapses unrelated pages that merely share a
-  lede (athenaeum#1140).** chromadb's default ONNX MiniLM embedding function
-  hard-codes a 256-token truncation window, and the wiki-dedupe pass
-  (`wiki_dedupe.py`) embedded whole page bodies through it — for the
-  majority of eligible pages (measured: 57% of a 2,513-page corpus exceed
-  the window at the corpus's ~1,200-character equivalent), the stored
-  vector represented only the page's lede, and this corpus's pages write a
-  structurally uniform lede, so unrelated pages with divergent bodies
-  collapsed into dense cliques (the persistent `wiki-c0a81d69`-class
-  degenerate clusters tracked on athenaeum#1005). `_resolve_wiki_embeddings`
-  now chunks each candidate page's body into `_CHUNK_CHARS` (900)
-  character pieces before embedding and mean-pools (new
-  `athenaeum.vecmath.mean_pool`) the resulting per-chunk vectors into one
-  representation per page, so content past the first chunk reaches the
-  final vector instead of being silently discarded. Scoped to the
-  wiki-dedupe embedding-resolution path only — `athenaeum.search.embed_texts`
-  itself is unchanged, so `fingerprint.py`, `tiers.py`, `_cmd_curate.py`,
-  and the raw-intake `clusters.py` embedding path are unaffected.
-  `librarian.cluster_threshold` is unchanged (a permissive threshold was
-  independently ruled out as the cause). See the PR body for the full
-  before/after corpus measurement and re-embedding cost estimate.
-- **Shape-rule evaluation now reaches one level below a configured
-  `recall.extra_intake_roots` entry, so a `preserve` rule targeting
-  hestia's lane logs can finally match (athenaeum#1096, closes the second
-  of the two gaps athenaeum#974 was titled to close).** `run_shape_rule_phase`
-  sourced candidates only from `intake.discover_raw_files`, which
-  deliberately never descends into a source directory that is itself an
-  extra-intake root (default `raw/auto-memory`) — correct for intake, but
-  it meant a rule targeting `raw/auto-memory/hestia-lanes/` loaded clean
-  and matched zero candidates forever. Design-note option 1: a new
-  `intake.discover_shape_rule_extra_intake_files` (one level below an
-  extra-intake-root source directory, `RawFile.source` still the
-  top-level source name) feeds the shape-rule phase ONLY — intake
-  discovery is untouched. Also reconciles `_cmd_lifecycle.py`'s
-  `--with-rules` help text, which pointed operators at the aggregate
-  `wiki/_shape_rules_applied.jsonl` (silent when a rule matches nothing —
-  precisely the prior bug's symptom) instead of the per-record
-  `wiki/_shape_rule_dispositions.jsonl` (athenaeum#975) that also logs `no-match`.
-- **`storage lint-pii` now scans `raw/`, reported as a separate,
-  non-gating surface (athenaeum#1049, filed from the athenaeum#949
-  close-out).** `_cmd_storage_lint_pii` resolved its scan root as
-  `knowledge_root / "wiki"` only; `raw/` is a SIBLING of `wiki/`, not a
-  descendant, and was never opened. Once athenaeum#1025's standing
-  sensitivity filter ships, a routed value's original bytes stay in
-  `raw/` in the clear (append-only by contract) while only a pointer
-  reaches `wiki/` — so a clean `lint-pii` would read as "no retained
-  values anywhere" while every original sat unmeasured in `raw/`, the
-  exact blind spot `docs/sensitivity-value-routing.md` §5 names as a
-  real, unresolved measurement gap. `lint-pii` now also scans `raw/`
-  with the same email/phone detectors and reports its count as a
-  DISTINCT surface — both in plain text (a second summary line) and in
-  `--json` (the top-level shape changes from a bare list to `{"wiki":
-  [...], "raw": [...]}`, no other known consumer of the prior shape).
-  Raw findings never flip the exit code: raw retention is today's
-  normal, unavoidable state (nothing in this change scrubs or
-  time-bounds it — athenaeum#437 owns existing residue, out of scope
-  here), so gating on it would fail every corpus permanently and would
-  make a clean wiki look dirty, destroying the wiki gate's existing
-  meaning. See `docs/sensitivity-value-routing.md` §5 for the updated
-  disposition note.
-- **Narrowed the `do_not_email` surface-divergence predicate to the direction
-  the ratified design actually forbids (athenaeum#1039, holds athenaeum#1038).**
-  Both `athenaeum surface-divergence --field do_not_email` and the standalone
-  `athenaeum do-not-email-divergence` command exited non-zero (`EXIT_DIVERGED`)
-  on EITHER direction of disagreement between the wiki and excluded surfaces —
-  but athenaeum#960's Out-of-scope explicitly rejects "any backfill,
-  migration, or dual-write of `do_not_email` marks onto the excluded
-  surface", making the wiki page the sole authoring surface. That means
-  `marked_on_wiki_not_excluded` is the design's ONLY legal steady state, not
-  a divergence, and the check alerted on every legal store state (observed
-  live 2026-08-20: 4 wiki marks / 0 excluded records → `EXIT_DIVERGED`).
-  Both entry points now alert only on `marked_on_excluded_not_wiki` — the
-  excluded surface newly carrying the field, the direction
-  `athenaeum.pii.do_not_email_state`'s precedence note names as this guard's
-  actual job. The `bounced` field's predicate is unchanged; its
-  `marked_not_on_wiki` direction remains a real signal.
-
-- **Aligned code-side entity-type registry mirrors with `_schema/types.md`
-  and gated the `corrections.py` write path (athenaeum#971, follow-up to
-  athenaeum#970).** `schemas.KNOWN_TYPES`/`FALLBACK_TYPES` now include `incident` (the
-  10th declared type per athenaeum#970's audit — previously every incident page
-  warned as "unknown") and no longer include `feedback`/`user` (folded away
-  by athenaeum#970); a page already on disk with one of those values keeps validating
-  without raising (athenaeum#93's non-raising design), it just now takes the
-  ordinary "unknown wiki type" path instead of the silent known-type path.
-  `corrections.py`'s tier-0 create branch (`WikiEntity(type=resolution.
-  entity_type, ...)`) previously had no `valid_types` gate at all, unlike the
-  classifier (`tiers.py`) and the other two deterministic create/upsert
-  paths (`intake.py`, `librarian.py`) — a correction batch could mint a page
-  under any string, including a athenaeum#970-folded type, with zero enforcement.
-  It now loads `_schema/types.md` (falling back to `KNOWN_TYPES`, same
-  pattern `librarian.py`/`entity_schema.py` use) and rejects-and-escalates
-  (`disposition="raised-tier"`) an unrecognized or folded `type`, matching
-  `intake.py`/`librarian.py`'s reject precedent rather than `tiers.py`'s
-  post-LLM coerce-to-`reference` (coercing here would misfile a fold into
-  the wrong bucket instead of preserving it for correct reclassification).
-
-- **`_fallback_embeddings()` hashed tokens with the PYTHONHASHSEED-salted
-  builtin `hash()`, making fallback cluster vectors nondeterministic
-  across processes (athenaeum#1050, flaked CI run 32379062624).** The
-  hashing-trick degradation path (`clusters.py`, engaged when chromadb has
-  no usable index) derived both a token's feature index (`hash(tok) %
-  dim`) and its sign (`hash(tok + "_s") % 2`) from Python's builtin
-  `hash()`, which is salted per-process for `str`/`bytes` as a DoS
-  mitigation — so the same token landed at a different index/sign in
-  every process, and every cosine similarity derived from a fallback
-  vector (and therefore every cluster formed from it) changed run to run.
-  Both call sites now derive their index and sign from a single unsalted
-  `hashlib.sha256` digest per token, so the same token always maps to the
-  same index and sign in every process. **Behaviour change, not a pure
-  bug fix**: this shifts every fallback-path cluster vector, and
-  therefore the content-addressed cluster ids derived from cluster
-  membership, for any corpus whose clustering ever engages the
-  hashing-trick fallback (chromadb absent or its index unbuilt) — a
-  previously-formed fallback-path cluster may now group differently and
-  receive a new id. Real chromadb-embedded clusters (the default, hot
-  path) are unaffected.
-
-### Added
-
 - **`storage.mapping` completeness lint + the deferred `(read_policy,
   adapter)` pair check (athenaeum#993, S5 of athenaeum#910's design note).** New
   `src/athenaeum/sensitivity_lint.py`: given a resolved config and a
@@ -1805,6 +1106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   completeness finding — standalone, not wired into any existing CI gate.
   Neither `athenaeum.storage.resolve_adapter_for_class` nor
   `athenaeum.sensitivity.available_classes` changed.
+
 - **Per-contract LLM schema strictness for `tiers.tier2` and `tiers.tier3-merge`
   (athenaeum#1035, M17 phase 2a, split from athenaeum#608).** Decided from the
   measured observation window 2026-08-05T13:12Z-2026-08-20T10:58Z (3,634
@@ -1825,6 +1127,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`contradictions`, `claim_kind`, `resolutions`) are explicitly untouched and
   remain observe-only, decision deferred to athenaeum#608. See
   `docs/configuration.md`'s "Per-contract strictness decision" section.
+
 - **`sensitivity.routing` config resolver (athenaeum#1022, slice 1/4 of
   athenaeum#949's design note).** New `resolve_sensitivity_routing` in
   `src/athenaeum/config.py`: resolves `{"enabled": bool, "classes":
@@ -1838,6 +1141,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing reads this resolver yet; the routing/redaction mechanism, the
   read path, and the librarian wiring are follow-on slices
   (athenaeum#1023-athenaeum#1025).
+
 - **Sensitivity routing/redaction mechanism (athenaeum#1023, slice 2/4 of
   athenaeum#949's design note).** New `src/athenaeum/sensitivity_routing.py`:
   `route_sensitive_values()` scans text via `sensitivity.classify()`
@@ -1865,6 +1169,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `librarian.process_one` (athenaeum#1025) are follow-on slices. See
   `docs/configuration.md` → "Sensitivity routing/redaction mechanism" and
   the module's own docstring for the full disposition of every criterion.
+
 - **Sensitivity routing record-keyed read path (athenaeum#1024, slice 3/4 of
   athenaeum#949's design note).** New `resolve_sensitive_record()` in
   `src/athenaeum/sensitivity_routing.py`: resolves a routed pointer's
@@ -1890,6 +1195,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching slices 1 and 2's own precedent (athenaeum#1022, athenaeum#1023)
   of deferring the bump to the slice that actually changes runtime
   behavior.
+
 - **Sensitivity routing wired into the librarian raw sweep (athenaeum#1025,
   slice 4/4 — the FINAL slice — of athenaeum#949's design note).**
   `librarian.process_one` now calls slice 2's `route_sensitive_values()`
@@ -1924,6 +1230,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-sweep idempotency. See `docs/sensitivity-value-routing.md` for the
   full design and `docs/configuration.md` → "Sensitivity routing" for the
   config surface.
+
 - **Dimension registry + kernel dimensions (athenaeum#714).** Root of the
   memory-model v6 dimension chain (child of epic athenaeum#709; athenaeum#715,
   athenaeum#716, athenaeum#719 all depend on this). New `src/athenaeum/dimensions.py`:
@@ -1961,6 +1268,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployment-declared examples in `docs/configuration.md`, not shipped
   defaults); `memory-class` ships at `backfill` state (athenaeum#972 disposition).
   See `docs/configuration.md`'s "Dimension registry" section.
+
 - **Generalized ENUMERATION primitive: `enumerate_entities` (MCP) /
   `athenaeum enumerate` (CLI) (athenaeum#965).** Return every entity of a
   declared type matching field predicates, ordered by a named field — with
@@ -1992,6 +1300,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (that is athenaeum#966); `docs/recall-architecture.md` documents a
   full capability-parity table against it. See
   `src/athenaeum/enumeration.py` for the full contract.
+
 - **Decay-sweep ledger (athenaeum#969).** `athenaeum.decay_sweep.apply_sweep`
   now writes one durable, machine-readable record per archived page —
   which page, bucket + expiry, sweep timestamp, and the recovering commit
@@ -2005,46 +1314,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `bucket:` → policy-pack `delete-after` mapping commitment for the
   athenaeum#718 policy-pack work to consume — a documented mapping, not a
   migration; no sweep/currency/bucket behavior changes.
-
-### Changed
-
-- **Coverage-audit worksheet now reports structural facts instead of an
-  unmarkable relevance column (athenaeum#1036, operator ruling option (c)).**
-  `push_metrics.build_coverage_worksheet` no longer emits a per-candidate
-  `reviewer_verdict` marking column or a `coverage_miss_rate` figure —
-  push records retain only a query HASH, never the raw query text
-  (deliberate athenaeum#711 design), so nothing recoverable exists to judge
-  candidate relevance and a miss rate computed anyway would be a
-  policy-set bracket dressed as a measurement. The worksheet now opens
-  with a plain-language `limitation` statement and reports the structural
-  facts hash-only records DO support: tier/scope concentration of the
-  pushed set (flagging a degenerate single-pairing distribution rather
-  than silently averaging over it), each session's `candidate_pool_size`
-  and window-mate `filter_removed_fraction` (aggregate + range), and
-  `policy_set_miss_rate_bounds` with both endpoints explicitly labelled
-  policy-set, never measured. The push-record ledger schema
-  (`src/athenaeum/push_metrics.py`) is unchanged; a new test asserts no
-  raw query text reaches the ledger file on the default `record_push`
-  path. The optional AC (a config key to opt into storing query text
-  alongside the hash) is skipped — see the PR description for why.
-
-- **Dropped the redundant `push: [develop]` trigger from `oss-readiness.yml`
-  (athenaeum#816).** The workflow now runs on `pull_request: branches:
-  [develop]` only. Develop's strict required-status-checks ruleset
-  (`develop-ci-required`) already guarantees a merge commit's tree is
-  identical to the tree its PR run tested, so the post-merge `push` run only
-  ever reproduced the same result — pure noise on every merge. `OSS
-  Readiness` is not in develop's required-check set and
-  `promote-main.yml`'s promotion gate never queries it (re-confirmed live:
-  `gh api repos/Kromatic-Innovation/athenaeum/rules/branches/develop` lists
-  only `CI Required`), so this is safe in isolation. `ci.yml` intentionally
-  keeps its own `push: [develop]` trigger — it is the only run that stamps
-  `CI Required` check-runs onto develop's tip SHA, which
-  `promote-main.yml`'s develop -> main gate resolves by SHA. That will be
-  revisited once athenaeum#1031 lands. The `concurrency` block (keyed on
-  `${{ github.workflow }}-${{ github.ref }}`) is unchanged.
-
-### Added
 
 - **`quarantine.py` migrated onto the whole-store adapter seam (athenaeum#982,
   S7 of the whole-store adapter design lock, athenaeum#911 — "the slice that
@@ -2091,6 +1360,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     line now states the embedder that produced the suppressed cluster's
     vectors. Pre-athenaeum#1032 JSONL rows without the field still
     deserialize (default `unknown`).
+
 - **Whole-store adapter seam: `Store` protocol + `FilesystemStore` (athenaeum#976,
   S1 of the whole-store adapter design lock, athenaeum#911).** New
   `athenaeum/store.py` (L0/L1) defines `StoreKey`, `ObjectMeta`,
@@ -2293,31 +1563,784 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (athenaeum#963)" for the operator-invocation contract this registers for
   an unattended nightly pass against the live store.
 
-### Documentation
+### Changed
 
-- **Design note: standing sensitive-value filter at raw-sweep intake
-  (athenaeum#949).** New `docs/sensitivity-value-routing.md` answers the
-  issue's AC1–AC13 — placement and pointer contract (AC1/AC2), the uid
-  problem and the proposed record-keyed read-path disposition (AC3), the
-  raw-tree observability gap stated as open rather than solved (AC4),
-  disposition of the existing `screen_intake` stage (AC5), per-write-path
-  redaction mechanics (AC6), precedence and fail-closed behavior (AC7/AC10),
-  usage-classification default (AC9), idempotency (AC11), the correlation
-  trade (AC12), the migration story relative to athenaeum#437 (AC13), and
-  the relationship to `pii.RedactionMarker` left as an explicit open
-  question (AC8). Cites a working spike (branch
-  `prototype/949-sensitivity-routing-spike`, not merged and not part of
-  this change) as verification evidence for specific mechanical claims —
-  the note's decisions are proposals for review, not settled by the spike
-  having been built. Implementation is explicitly deferred to the
-  follow-on slices the note's §10 lists — athenaeum#1022 (config resolver),
-  athenaeum#1023 (routing/redaction mechanism), athenaeum#1024
-  (record-keyed read path), athenaeum#1025 (wire into the librarian raw
-  sweep) — filed as separate issues against this note (AC14's filing half;
-  review of the note itself is routed separately). Docs-only; no code
-  changed.
+- **`reasoning_tiers` T1/T2 retrofitted onto the M17 response-model
+  convention, with a deliberately stricter posture than the observe-only
+  sites (athenaeum#609).** `_parse_t1_response`/`_parse_t2_response` now
+  validate the model's raw JSON verdict through a Pydantic response model
+  (`T1VerdictResponse` / `T2VerdictResponse`) — one model per contract,
+  `Literal` over each tier's own verdict vocabulary, matching
+  `athenaeum.llm_schemas`' athenaeum#570 convention. Two things are
+  deliberately NOT that module's convention, per athenaeum#608's decided
+  strictness posture applied to this authority boundary: both models default
+  to `extra="forbid"` (not `extra="allow"` — there is no ledger measurement
+  for these contracts, and a tolerated unknown key at an authority boundary
+  is a widening risk, not a neutral one), and a validation failure drives
+  the tier's existing safe fallback directly (T1 → `pass_up`, T2 →
+  `escalate`) rather than being logged-and-passed-through the way
+  `athenaeum.llm_schemas.observe` treats every other contract's mismatch.
+  Every structural guarantee the module already carried is unchanged: T1's
+  two-member `Literal` (`"approve"` remains unrepresentable) and
+  `run_t2_tier`'s `safe_class_violation` gate (the single enforcement point
+  for an approved T2 decision) are untouched. One documented, intentional
+  behavior change: a payload that previously succeeded despite an
+  unexpected extra key (e.g. `{"verdict": "reject", "reason": "ok",
+  "surprise": "x"}`) now fails validation and falls back to the tier's
+  safe default instead — always landing on the OTHER already-safe outcome,
+  never a widened one. New tests: adversarial cases per invariant, an
+  exhaustive parametrized directional test enumerating every failure path
+  the retrofit touches, an AST-walk test proving `"approve"` is produced on
+  exactly one code path dominated by the `safe_class_violation` gate, and a
+  negative-control test proving both checks fail against a deliberately
+  eroded variant (never committed to the production module). **Post-review
+  fix (Seer thread on `reasoning_tiers.py:717`):** a *present but
+  blank/whitespace-only* `reason` (e.g. `{"verdict": "reject", "reason":
+  "   "}`) satisfied the initial `reason: str` field and reached
+  `ReasoningTierDecision`/`ReasoningTierT2Decision` construction
+  unvalidated, where each dataclass's own non-empty-reason guard raised an
+  uncaught `ValueError` — a failure path outside the safe set that the
+  original exhaustive-directional enumeration missed. Both response models
+  now reject a blank/whitespace-only `reason` at the Pydantic layer (a
+  shared `_require_nonblank_reason` field validator), so it takes the
+  tier's existing safe fallback (T1 → `pass_up`, T2 → `escalate`) like any
+  other schema mismatch, instead of being defaulted through OR crashing.
+  No version bump for this fix — folded into the same `0.19.45` this PR
+  had not yet released.
+
+- **`athenaeum entity`'s exit code `1` now means ONLY "uid not found"; a new
+  code `70` covers everything else that can go wrong after the uid resolves
+  (issue athenaeum#1270).** Before this change, an uncaught exception past
+  the uid lookup (e.g. the `json.dumps` `TypeError` on a `date`-typed
+  frontmatter value fixed independently in athenaeum#1110) fell through to
+  Python's default uncaught-exception exit status, which is ALSO `1` — the
+  same code "no page for this uid" already returned. A caller keying off
+  the exit status alone could not tell an existing-but-broken record from a
+  genuinely absent one; `google-contact-sync`'s `read_person()` is exactly
+  such a caller, mapping every nonzero exit that isn't argparse's
+  `invalid choice` to "unknown uid." **Anyone scripting against
+  `athenaeum entity`'s exit code should update to treat `1` and `70`
+  distinctly** — `1` (`EXIT_NOT_FOUND`) still means "no such uid," while `70`
+  (`EXIT_INTERNAL_ERROR`, BSD `sysexits.h`'s `EX_SOFTWARE`) is new and means
+  "the uid exists but the read/serialize path failed." Both constants are
+  defined in `src/athenaeum/_cli_shared.py` next to the existing
+  `EXIT_LOCK_HELD`; documented in `athenaeum entity --help` and
+  `docs/exit-codes.md`.
+
+- **The unprompted-recall `UserPromptSubmit` hook now enforces the same
+  `hot`-tier filter and `push_budget.tokens_per_turn` budget as the
+  prompted `recall` path (athenaeum#1120).** `examples/claude-code/user-prompt-recall.sh`
+  queried the FTS5 index directly and never called `recall_search`, so it
+  never saw the `hot`-tier filter or the token budget that athenaeum#718 /
+  PR athenaeum#1117 built — `push_budget.tokens_per_turn` was a real, tested dial
+  nothing unprompted actually turned. Fixed with an index-carried tier
+  verdict plus shell-native budget enforcement rather than a thin-CLI
+  wrapper: measured on-box, `import athenaeum.mcp_server` costs
+  ~360-450ms warm (~1090ms cold) against this hook's `<50ms` FTS5-only
+  contract, an 8-10x regression on every turn of every session. Instead,
+  `athenaeum.memory_tiers.resolve_tier` now runs ONCE at index-build time
+  (`athenaeum.search.FTS5Backend._row_for`, FTS5 schema bumped 3 -> 4) and
+  stores its verdict in a new `memory_tier UNINDEXED` column — the same
+  pattern `audience` (athenaeum#312) and `type` (athenaeum#964) already
+  established so shell/SQL can filter without Python. The hook adds
+  `AND memory_tier = 'hot'` to its SQL and a small `awk` pass that greedily
+  packs candidates into the token budget in rank order, skipping (never
+  truncating) an entry that would exceed it — mirroring
+  `memory_tiers.select_for_push`. The tier model itself is NOT
+  reimplemented in shell; only the budget-accumulation loop and
+  `push_metrics.estimate_tokens`'s `len(text)//4` formula are duplicated,
+  as a single arithmetic expression. `session-start-recall.sh` now also
+  caches the resolved budget as `PUSH_TOKEN_BUDGET` in `config.env`
+  (deliberately not the library's own `ATHENAEUM_PUSH_TOKEN_BUDGET` name,
+  since `config.env` is sourced under `set -a` and would otherwise shadow
+  the library's own env-over-yaml precedence for every child process). A
+  DB built by an older athenaeum (no `memory_tier` column) is detected via
+  a `PRAGMA table_info` probe and falls back to the pre-athenaeum#1120 unfiltered
+  query rather than raising `OperationalError` into a silent zero-recall.
+
+- **Wiki-page dedup cut over to the five-verdict comparator; its own old
+  duplicate-detection algorithm is retired, not run alongside it
+  (athenaeum#715).** `athenaeum.wiki_dedupe.propose_wiki_page_merges` used to
+  cluster candidate wiki pages (unchanged) and then run its OWN
+  confidence-scored suppression-gate pipeline
+  (`merge_type_gate._merge_proposal_suppression_reason`, deterministic draft
+  synthesis, a direct `write_pending_merge` append) — a second,
+  independent duplicate-detection implementation running in parallel with
+  the five-verdict comparator (`athenaeum.comparator`, landed dark in
+  athenaeum#1128/#1131). That old algorithm is deleted outright: clustering
+  still only proposes candidate PAIRS (never a verdict), and every pair is
+  now decided by the comparator and enacted via `athenaeum.verdict_effects`
+  — a `duplicate` verdict writes fold EVIDENCE (never a merged body,
+  never `_pending_merges.md`), `specialization` writes `refines:`,
+  `contradiction` routes to supersession-or-queue, `distinct`/
+  `underdetermined` are ledger-only. `merge_type_gate.cross_class_precheck`
+  is kept as a pre-comparator filter (the comparator's own `MEMORY_CLASS`
+  dimension is not yet `enforced`). Gated on the SAME pre-existing
+  `librarian.comparator_enabled` / `ATHENAEUM_COMPARATOR_ENABLED` knob
+  (still default OFF) — not a new flag; with it off, this pass is now a
+  complete no-op (old or new), which is the intended shape of a real
+  cut-over rather than a second parallel path. `athenaeum.comparator.record_comparison`
+  now also returns the decided `CompareOutcome` (`"outcome"` key, `None`
+  except on a freshly-ledgered pair) so a caller can enact its effect
+  without a second, redundant Gate 2 call.
+
+  **This is a partial cut-over, not the full one athenaeum#715 ultimately
+  requires.** The separate C1-C4 auto-memory compile pipeline
+  (`athenaeum.merge`'s `merge_clusters_to_wiki`, the ~940-line intra-cluster
+  LLM contradiction detector + Opus resolver + T1/T2 reasoning-tier screens
+  + cross-scope similarity sweep) is UNCHANGED and still runs
+  unconditionally — it is deeply interleaved with run-level deadline
+  checkpointing, the detection-incomplete retry queue
+  (`athenaeum.detection_state`), and the shared API-call/spend-ceiling
+  budget across multiple `librarian.py` call sites, none of which this PR
+  touches. Retiring it safely needs its own dedicated pass; see the PR
+  description and the athenaeum#715 issue comment for the precise scope
+  handed to a follow-up lane.
+
+- **A misconfigured LLM provider no longer aborts the librarian's whole
+  wiki-dedup phase (athenaeum#715, Seer finding on the athenaeum#1227
+  cut-over).** With `librarian.comparator_enabled` ON,
+  `librarian._run_wiki_dedup_phase` built its Gate-2 client outside any
+  local `try`, so a `ProviderConfigError` unwound to the phase's generic
+  `except Exception` — skipping the pass wholesale (including the
+  deterministic Gate 1 work, which needs no LLM at all) and logging a
+  misleading `wiki-page dedup pass failed`. The client build is now wrapped
+  to mirror the CLI sibling `_cmd_curate._cmd_dedupe_wiki_pages`: the
+  provider error is logged as what it is, `client` stays `None`, and
+  `propose_wiki_page_merges` runs in Gate-1-only degraded mode (a pair Gate
+  1 cannot settle reports no verdict, never a fabricated one).
+
+- **athenaeum#1142's wiki-dedupe suppression ledger is left without a producer
+  by this cut-over (tracked in athenaeum#1243).** The comparator path writes no
+  `wiki/_pending_merges.md` proposal block and no
+  `_wiki_dedupe_suppressions.jsonl` sidecar, so athenaeum#1142's embedder- and
+  suppression-attribution surfaces (and the tests that asserted on them) no
+  longer have anything to observe. `DEFAULT_WIKI_SUPPRESSIONS_FILENAME` and
+  those tests are removed here rather than left asserting on a dead path;
+  athenaeum#1243 ("Re-site athenaeum#1142's embedder + non-proposal attribution
+  into the comparator's verdict ledger") recovers them verbatim from ref
+  `b79efc0` and gates re-siting on enabling `comparator_enabled`.
+
+- **BEHAVIOUR CHANGE: the per-day spend ceiling now accounts against the
+  operator's LOCAL day by default, not UTC (athenaeum#1136).** `spend.max_usd_per_day`
+  / `spend.max_tokens_per_day` (and the weekly-percent derivation) used to
+  open a fresh accounting window at UTC midnight unconditionally. For an
+  operator running several hours west of UTC, that silently opened the
+  window mid-evening — in US Eastern time (UTC-4 in summer), UTC midnight
+  lands at 20:00 EDT, squarely inside a typical evening working session. A
+  session that ran 20:00-23:00 local could exhaust the WHOLE day's ceiling,
+  and a scheduled job firing later the SAME local night (but still inside
+  the same UTC calendar day) inherited nothing — this was observed in
+  production as a nightly `athenaeum run` compiling **zero** entities on
+  every observed night, refused with `Spend ceiling reached
+  ($15.03/$15.00 today)` roughly three hours after an evening session had
+  already spent it. The new `spend.accounting_timezone` config key (env
+  `ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE`; IANA name, e.g.
+  `America/New_York`) fixes this at the source: it now **defaults to the
+  system's local timezone**, not UTC, so the day boundary tracks the
+  operator's own day without any config at all. An operator who already
+  runs in UTC sees zero behavior change. A misspelled/unresolvable zone
+  name WARNs and falls back to UTC rather than crashing a run. Full
+  rationale and config table: [`docs/configuration.md`](docs/configuration.md).
+  `athenaeum.spend._start_of_utc_day`
+  is renamed `_start_of_accounting_day` (internal, not part of the public
+  API) and `athenaeum.spend.spend_today` gained an optional `config=`
+  parameter; both `ceiling_tripped()` branches (subscription tokens and API
+  dollars) move together.
+
+- **`enumerate_entities` no longer PII-gates `do_not_email` (athenaeum#1122).**
+  `athenaeum.enumeration._PII_GATED_EXACT_FIELDS` is now empty:
+  `is_pii_gated_field("do_not_email")` (and `_reason` / `_date`) returns
+  `False`, so `enumerate_entities(predicates=["do_not_email != true"])` and
+  `athenaeum enumerate --where do_not_email:ne:true` both work without
+  `with_pii=True` / `--with-pii`. Operator-ruled: the field is a plain
+  suppression-opt-out boolean read from ordinary on-page frontmatter, with
+  no excluded-surface record join — not a durable cross-system identifier
+  like `google_contact_*`, which stays gated unchanged. Unrelated to, and
+  does not change, the separate `recall` / `read_entity` reverse-lookup
+  path, where `with_pii=True` stays required because there the lookup key
+  is an email address on the excluded surface.
+
+- **Coverage-audit worksheet now reports structural facts instead of an
+  unmarkable relevance column (athenaeum#1036, operator ruling option (c)).**
+  `push_metrics.build_coverage_worksheet` no longer emits a per-candidate
+  `reviewer_verdict` marking column or a `coverage_miss_rate` figure —
+  push records retain only a query HASH, never the raw query text
+  (deliberate athenaeum#711 design), so nothing recoverable exists to judge
+  candidate relevance and a miss rate computed anyway would be a
+  policy-set bracket dressed as a measurement. The worksheet now opens
+  with a plain-language `limitation` statement and reports the structural
+  facts hash-only records DO support: tier/scope concentration of the
+  pushed set (flagging a degenerate single-pairing distribution rather
+  than silently averaging over it), each session's `candidate_pool_size`
+  and window-mate `filter_removed_fraction` (aggregate + range), and
+  `policy_set_miss_rate_bounds` with both endpoints explicitly labelled
+  policy-set, never measured. The push-record ledger schema
+  (`src/athenaeum/push_metrics.py`) is unchanged; a new test asserts no
+  raw query text reaches the ledger file on the default `record_push`
+  path. The optional AC (a config key to opt into storing query text
+  alongside the hash) is skipped — see the PR description for why.
+
+- **Dropped the redundant `push: [develop]` trigger from `oss-readiness.yml`
+  (athenaeum#816).** The workflow now runs on `pull_request: branches:
+  [develop]` only. Develop's strict required-status-checks ruleset
+  (`develop-ci-required`) already guarantees a merge commit's tree is
+  identical to the tree its PR run tested, so the post-merge `push` run only
+  ever reproduced the same result — pure noise on every merge. `OSS
+  Readiness` is not in develop's required-check set and
+  `promote-main.yml`'s promotion gate never queries it (re-confirmed live:
+  `gh api repos/Kromatic-Innovation/athenaeum/rules/branches/develop` lists
+  only `CI Required`), so this is safe in isolation. `ci.yml` intentionally
+  keeps its own `push: [develop]` trigger — it is the only run that stamps
+  `CI Required` check-runs onto develop's tip SHA, which
+  `promote-main.yml`'s develop -> main gate resolves by SHA. That will be
+  revisited once athenaeum#1031 lands. The `concurrency` block (keyed on
+  `${{ github.workflow }}-${{ github.ref }}`) is unchanged.
+
+### Deprecated
+
+- **`athenaeum people` — deprecated in favour of the generalized `athenaeum
+  enumerate` primitive (athenaeum#966).** Now that athenaeum#964 (narrow by
+  declared `type`) and athenaeum#965 (enumerate by declared type + field
+  predicates) have shipped, every question `people` answers is answerable
+  through `athenaeum enumerate --type person --where ...` — see
+  `docs/recall-architecture.md`'s capability-parity table (landed with
+  athenaeum#965) for the exact per-flag mapping, including the two rows
+  generalization deliberately drops: `--top-touch`'s computed composite sort
+  and `--format table|tsv` rendering, both presentation/scoring concerns
+  outside the generalized primitive's contract, not gaps in it. `people`
+  prints a one-line migration notice to **stderr** on every call — never to
+  stdout, which is a table or TSV a script may parse, and a notice there
+  would be a breaking output change dressed up as a deprecation.
+
+  **This changes zero behaviour** — the command keeps working identically;
+  flags, filtering, ordering and output format are byte-identical before and
+  after, asserted by regression test on a synthetic fixture corpus, alongside
+  parity tests proving each reproducible row's `enumerate` expression returns
+  the same set of pages as the `people` invocation it replaces.
+
+  Actual removal is a separate, later issue, gated on a real deprecation
+  window and on known consumers having migrated — **not** on this one
+  closing, and with no removal date set. Per the version-bump policy this
+  issue is a **patch** (a notice, no behaviour change); the removal will be a
+  breaking change and must bump **minor** at minimum, with a `### Removed`
+  entry — the same shape athenaeum#887 (deprecation) / athenaeum#888
+  (removal) already established for `athenaeum query person`.
+
+### Removed
+
+- **`athenaeum bounce-divergence` and `athenaeum do-not-email-divergence` CLI
+  subcommands (athenaeum#1111).** Both were fully superseded by `athenaeum
+  surface-divergence --field {bounced,do_not_email}` (athenaeum#963): running
+  either superseded command and the generalized equivalent against the live
+  store produced byte-identical JSON, and per architectural guidance
+  (`docs/north-star.md` §2.2, "no per-writer entry points") the per-field
+  duplicates should not have kept existing once the generalization landed.
+  `bounce-divergence` had zero remaining callers; `do-not-email-divergence`
+  had exactly one — a redundant third invocation in cron-fleet's nightly
+  `pre-dawn-sweep.sh` Step 3b that duplicated the sweep's own
+  `surface-divergence --field do_not_email` invocation and was removed in
+  the same change. The parser registrations and the `_cmd_bounce_divergence.py`
+  / `_cmd_do_not_email_divergence.py` CLI-wiring modules are removed from
+  `src/athenaeum/cli.py`; the underlying `athenaeum.bounce_divergence` and
+  `athenaeum.do_not_email_divergence` library modules are UNCHANGED and stay
+  in place — `athenaeum.surface_divergence` still wraps their
+  compute/report/render/dict implementations verbatim. The CLI-level tests
+  for the removed commands (`tests/test_bounce_divergence.py::TestCli`,
+  `tests/test_do_not_email_divergence.py::TestCli`) are removed; their
+  coverage already existed, or was added, at the surviving command's own
+  `tests/test_surface_divergence.py::TestCli` / `TestAllowance`.
+
+- **`athenaeum people` CLI subcommand (athenaeum#1079).** Deprecated in
+  athenaeum#966 in favour of the generalized `athenaeum enumerate --type
+  person --where ...` primitive (athenaeum#964/#965); removed now per an
+  operator ruling that the deprecation-window constraint did not apply
+  (every caller is this workspace's own operator/agent sessions, and
+  releases are cut on demand). `--top-touch N` and `--format table|tsv`
+  are dropped without replacement, per `docs/recall-architecture.md`'s
+  capability-parity table — every other surface has a direct `enumerate`
+  equivalent. The parser registration, `cmd_people`, and
+  `PEOPLE_SURFACE_DEPRECATION` are removed from `src/athenaeum/_cmd_query.py`;
+  the tests exercising the removed surface (`tests/test_people_deprecation.py`
+  and the `people`-specific tests in `tests/test_cli.py` /
+  `tests/test_generic_read_surfaces.py`) are removed rather than left
+  asserting against nothing — the replacing `enumerate --type person`
+  coverage in `tests/test_enumeration.py` / `tests/test_cmd_enumerate.py`
+  was already in place.
+
+- **`pii.read_person` / `pii.read_people`, the `read_person` MCP tool, and the
+  `athenaeum query person` CLI command (athenaeum#888).** Deprecated in
+  athenaeum#887 once the generalized `recall(with_pii=True)` path
+  (athenaeum#885/#886) became the sanctioned entry point; removed now that
+  every known consumer has migrated. Use `pii.read_entity` / `read_entities`
+  (or `recall(with_pii=True)` when searching rather than resolving a uid you
+  already hold) instead — both answer for any entity class, not only
+  persons. The `PersonRead = EntityRead` back-compat alias (added in
+  athenaeum#883) is removed alongside them, having no remaining referrers.
+  The `athenaeum query entity` / `read_entity` generalized surfaces this
+  replaces are unaffected, as is the unrelated `athenaeum query people`
+  command (filter/list, not a single-uid read).
 
 ### Fixed
+
+- **Lane A intake throughput could fall to exactly zero while the run reported
+  `reason=completed` (athenaeum#1322).** Two independent window-COMPOSITION
+  defects, neither visible from a pending count. **First**, the athenaeum#900
+  caller-scoped pin bypassed athenaeum#1291's round-robin: the pinned prefix
+  was head-truncated to `max_files`, and `discover_raw_files` groups by source
+  name, so whenever a caller named more files than the window the schedule
+  collapsed back to pre-athenaeum#1291 head truncation on the
+  alphabetically-earliest source. That is not a rare case — `compile_changed`
+  derives the caller scope from a raw-tree hash snapshot, and a file that has
+  never been compiled stays "new" forever, so on a backlogged corpus the pin
+  grows to mean the whole backlog (observed: `Caller-scoped compile: 5969 of
+  5970 raw file(s)`). The pinned partition is now round-robined too; a genuine
+  session scope names fewer files than the window and hits
+  `round_robin_by_source`'s `len(files) <= limit` short-circuit, so
+  athenaeum#900's behaviour is unchanged in the case it was written for.
+  **Second**, athenaeum#663 (stuck) and athenaeum#1185 (in-backoff) skipped
+  their files INSIDE the per-file loop — i.e. after each had already won a
+  `max_files` slot. An unworkable file was free of LLM cost but not of
+  scheduling cost, so a stuck head froze its source permanently. Both classes
+  are now held out of the candidate set BEFORE the window is filled
+  (`_hold_out_unworkable_raw`), keeping every athenaeum#663/#1185 guarantee —
+  the file stays on disk, the ledger still keys on content hash, a content
+  edit still resets it, the skip is still surfaced loudly — while making the
+  window a window of *workable* files. Only ledger-named files are hashed, so
+  the hold-out never hashes the backlog. Measured on the reference deployment
+  2026-09-02: 50 permanently-stuck files (48 `mural-board-summary` + 2
+  `claude-session`) filled the entire 50-slot window on every run for six
+  hours — `files=0 calls=0 stuck=50 reason=completed` — while 4,181 healthy
+  `relationship-stub` records behind them were never scheduled once.
+
+- **Intake starvation: a scheduled source that never gets *reached* is now
+  named (athenaeum#1295).** athenaeum#1291 fixed one starvation channel
+  (ordering) and made it observable — but its `starved_sources` signal counts
+  **scheduled slots**, not files processed. `round_robin_by_source` guarantees
+  a source gets slots in the window; it does not guarantee those slots are
+  ever reached. The entity loop can stop part-way through an already-scheduled
+  window on either `max_runtime` or `max_api_calls`, both enforced *downstream*
+  of window selection, so a source whose slots consistently land past the trip
+  point gets a non-zero slot count and a zero starvation streak, run after run,
+  while processing nothing. Interleaving the window bounds that damage; it does
+  not eliminate it. Every athenaeum#1291 acceptance criterion is worded in
+  terms of slots, so nothing that shipped there is false — this is the second,
+  independent channel that signal is blind to by construction.
+  A per-source count of files **actually processed** is now accumulated in the
+  entity loop and read back at the end of the run: a source with pending
+  intake, non-zero slots and zero processed files is reported as `stalled`,
+  on its own `librarian-source-processing-stall` prefix and its own streak,
+  kept deliberately distinct from athenaeum#1291's zero-slot `starved` channel
+  so the two are never conflated. It rides the entity profile segment, so the
+  athenaeum#1102 run-summary ledger carries it forward for free — no new state
+  file. A stalled source also ages into the scheduler's turn-order head
+  (`combined_starvation_priority`: the slot channel's ranking is preserved
+  exactly and unshifted, so athenaeum#1291's `ceil(n_sources / limit)` bound is
+  untouched, with stall-only sources appended after it), because a signal
+  nothing reads back into the schedule is diagnostic only and self-corrects
+  nothing. Per-run budget semantics are unchanged: this adds reporting and
+  turn order, never a new way to exceed a budget.
+
+- **`athenaeum status` no longer reads healthy after a zero-progress budget
+  refusal (athenaeum#1283).** athenaeum#1135 already detected, at run time, a run
+  that stopped early for a resource reason (budget / deadline / spend ceiling)
+  and committed nothing — it logs `librarian-run-degraded` and exits
+  `EXIT_LIBRARIAN_REFUSAL`. But that verdict died with the process, so nothing
+  *between* runs could see it, and the one counter `athenaeum status` did
+  surface — athenaeum#899's zero-yield streak — excludes this case **by
+  design**: it requires `api_calls > 0` (or `attempted_calls > 0`), and a run
+  refused on an exhausted budget makes zero calls. Status therefore read clean
+  straight through the exact incident athenaeum#1135 was filed about. The
+  refusal verdict is now computed once, at a single site in
+  `_run_finalize_phase`, and persisted through the existing athenaeum#1102
+  run-summary ledger (schema v3, new optional `refusal` field) — no new state
+  file — from which `status` reads a consecutive-refusal streak and renders a
+  `librarian-run-refusal:` line naming the reason. The line fires at a streak
+  of **one**: a single run that refused all work must not read as healthy, so
+  this is deliberately not a threshold alarm like the athenaeum#1291 starvation
+  warning. Run behaviour, the athenaeum#899 predicate, and the athenaeum#1135
+  exit codes and marker line are all unchanged — this makes an
+  already-correct verdict outlive the run that reached it.
+  Because the field must distinguish three states, a v3 record now carries
+  `refusal` whenever the verdict was *evaluated* (`{"tripped": false}` on a
+  clean run), and omits it only when the verdict was never reached — e.g. the
+  `stop_on_deadline` path, which emits its summary and returns before
+  `_run_finalize_phase` runs. Readers treat both an omitted field and a pre-v3
+  record as "cannot speak", never as "confirmed clean"; the streak stops at
+  such a record rather than counting through it, so it can under-report a real
+  streak but never fabricate one.
+
+- **The shape-rule disposition log no longer records the 99.8% that nothing
+  reads (athenaeum#1274).** `wiki/_shape_rule_dispositions.jsonl` reached 341 MB
+  / 1,488,689 rows in 9 days on a real deployment, of which 1,485,942 (99.8%)
+  were `disposition: "no-match"` — a negative result, regenerated on every
+  nightly pass and re-derivable by re-running the phase, accumulating inside a
+  git repo whose stated value is being small and diffable. Those rows are now
+  written only when the new `librarian.shape_rules.log_no_match` is on, and it
+  is **off by default**. That is safe because their sole consumer —
+  athenaeum#905's shape-frequency detector, which reads exactly the `tier:
+  null` rows `no-match` dominates — is reached only through
+  `librarian._run_rule_proposal_phase`, itself gated on
+  `librarian.rule_proposals.enabled` (also default off), which returns before
+  any disposition-ledger read. An operator enabling `rule_proposals` must
+  enable `log_no_match` too and allow `librarian.rule_proposals.window_days`
+  for fresh history to accumulate; the coupling is documented rather than
+  wired as a derived default so that "enable detection" never quietly means
+  "wait a month" with nothing in config to show for it. Suppression is never
+  silent: the phase logs the count at INFO naming the key, and reports
+  `no_match_rows_suppressed` in its run summary.
+
+  Retention also gained its own key. athenaeum#1229 had
+  `prune_shape_rule_dispositions` reusing `librarian.rule_proposals.window_days`
+  — a READ window doing double duty as a RETENTION policy. Coupled, narrowing
+  the detector's window silently deleted ledger history, and an operator who
+  disabled `rule_proposals` outright still had retention governed by a key
+  belonging to a phase they had turned off. Retention is now
+  `librarian.shape_rules.dispositions_retention_days`, same default (30), so
+  no existing deployment's behaviour changes.
+
+  Both resolve env > yaml > default
+  (`ATHENAEUM_SHAPE_RULES_LOG_NO_MATCH`,
+  `ATHENAEUM_SHAPE_RULES_DISPOSITIONS_RETENTION_DAYS`), matching every other
+  resolver in `athenaeum.config`. Note this is a WRITE-path fix only: an
+  existing oversized ledger is not pruned retroactively, and the log's
+  placement under `wiki/` is unchanged — both remain open on athenaeum#1274.
+
+- **Intake scheduling no longer starves a source indefinitely
+  (athenaeum#1291).** `discover_raw_files` returns its result grouped by
+  source directory in `sorted()` order, and the librarian's run loop filled
+  its `max_files` window by head-truncating that list. Because the list was
+  ordered by source NAME and cut from the HEAD, the window could only ever
+  advance past a source once that source's own backlog fell below the cap —
+  so a large, alphabetically-early, continuously-refilled source starved
+  every lexicographically later source forever. On the deployment that
+  surfaced it, ~2,200 records sat frozen in `raw/mural-board-summary/` across
+  at least 8 consecutive runs while `raw/auto-memory/` (79 files) alone
+  exceeded the entire 50-file per-run budget. The window is now filled
+  ROUND-ROBIN across sources (`athenaeum.intake.round_robin_by_source`),
+  with the turn order rotated each run by how long each source has been
+  waiting (`read_starvation_priority`, longest-starved first) so the bound
+  also holds when `max_files` is narrower than the source count. Worst-case
+  wait is now `ceil(n_sources / max_files)` runs regardless of sort position
+  or any other source's backlog; within-source ordering is preserved, the
+  athenaeum#900 caller-scoped prefix stays pinned at the head, and the per-run
+  budget semantics (`max_files`, `max_api_calls`, `max_runtime`) are unchanged —
+  this decides *which* files fill the window, never how many. Starvation is
+  also now observable rather than inferred: the entity phase records its
+  zero-slot sources on its run-summary segment (`starved=`), and
+  `emit_run_summary` computes a consecutive-run streak from the durable
+  athenaeum#1102 run-summary ledger (no new state file), naming any source
+  at or over `STARVATION_STREAK_THRESHOLD` runs in the summary head
+  (`starved_sources=<name>:<runs>`) and on a greppable
+  `librarian-source-starvation` WARNING. The previous `beyond_window` count
+  read as ordinary backpressure while describing a permanent stall.
+
+- **`storage lint-pii` no longer scans machine-generated audit logs under
+  `wiki/` (athenaeum#1273).** `_shape_rule_dispositions.jsonl` — a 341+ MB,
+  ~1.49M-record log the shape-rule engine regenerates every nightly run —
+  made the command itself unusable (two full runs killed at 68 and 106
+  minutes against a ~7-10 minute baseline) and made a clean exit
+  structurally unreachable: the real detectors misread its epoch-millisecond
+  timestamps as 100,533 phone-axis matches (2,583 distinct values), and
+  because the file regenerates nightly with fresh timestamps, no allowlist
+  entry (athenaeum#936) could ever stay valid against it. Fixed with a
+  filename-based, operator-configurable scan exclusion —
+  `storage.pii_scan_exclude` (`athenaeum.config.resolve_pii_scan_exclude`),
+  additive on top of a shipped default
+  (`athenaeum.pii.DEFAULT_PII_SCAN_EXCLUDE_FILENAMES`) containing only the
+  confirmed offender — consulted by `iter_corpus_files` / `scan_corpus_pii`
+  via a new `exclude_names` parameter. `lint-pii` prints every excluded path
+  to stderr and lists it under the JSON payload's new `excluded` key, so the
+  exclusion is never silent. `_corrections_applied.jsonl` and
+  `_shape_rules_applied.jsonl` were checked (not just assumed) and left out
+  of the default: both are small run-summary logs, not per-record like the
+  file above, with no observed email matches on the live corpus. Verified
+  against the live `~/knowledge` corpus by calling the patched
+  `scan_corpus_pii`/`iter_corpus_files` directly (a full CLI run wasn't
+  reproduced on purpose, per the issue's own "don't burn another 100 minutes
+  re-proving a known failure"): the `wiki/` scan the exclusion covers now
+  runs in ~9-12s including allowlist adjudication (`iter_corpus_files` 1.2s
+  + `scan_corpus_pii` 8.2s + adjudication <0.01s over 24k files), down from
+  the 68/106-minute kills that kept exit 0 permanently out of reach.
+  Adjudicating against the current 516-entry allowlist, `wiki/`'s unexplained
+  residue is now 190 findings (was 100,533+ before this fix, dominated by
+  one file) — a small, stable, genuinely adjudicable set, so `exit 0` is now
+  reachable given a complete allowlist for what remains (it was not,
+  structurally, before). `raw/` (a separate, non-gating surface per
+  athenaeum#1049) is unaffected by this change either way and remains slow
+  independently of it — a 47 MB `raw/athenaeum-437-phase2/lint-pii-*.json`
+  (a prior scan's own JSON output, now itself sitting in `raw/`) looks like
+  the same problem class one layer over; flagged for a follow-up issue,
+  deliberately not fixed here since `raw/` was out of this issue's scope.
+  See `docs/configuration.md` → "PII scan exclusion — machine-generated audit
+  logs". Unblocks athenaeum#437's acceptance criterion, which was
+  structurally unreachable while this file was in scope.
+
+- **`comparator.content_relation` no longer floods the log with one unattributable
+  WARNING per unsettled pair when no LLM client is available (athenaeum#1245).**
+  On the live corpus this was 11,815 identical, pair-key-less WARNING lines per
+  nightly run once `comparator_enabled` is flipped on with no
+  `ANTHROPIC_API_KEY` — enough volume to push diagnostically useful log lines
+  out via rotation before anyone reads them (the failure mode athenaeum#1142
+  was filed to end). Two other exits sharing the exact same
+  `rationale="llm-unavailable"` outcome — exhausted transient-error retries,
+  and a Gate 2 call that raised — had the identical per-pair/no-key/WARNING
+  shape (an AC4 audit finding: an API outage or bad credentials would flood
+  the log identically to a missing client) and are fixed the same way. All
+  three now route through `comparator._content_relation_unavailable`, which
+  logs the pair-keyed detail at DEBUG and tracks a running count; callers with
+  a comparison loop (`wiki_dedupe.propose_wiki_page_merges`,
+  `recompare`'s pass, `comparator_instruments.run_sibling_widening`) call the
+  new `comparator.flush_content_relation_unavailable_warning` once after their
+  loop finishes, emitting a single WARNING naming the total affected-pair
+  count — following `wiki_dedupe._warn_wiki_fallback_engaged_once`'s existing
+  warn-once pattern (athenaeum#1032) rather than a second mechanism. Two other
+  per-pair WARNINGs in `comparator.py` (malformed/no-JSON Gate 2 responses)
+  were read-audited and deliberately left as-is: a different failure family
+  (the model responded, but its content was unusable, not that Gate 2 was
+  unavailable) with no evidence of run-invariant recurrence in this
+  deployment, unlike the client-unavailable case.
+
+- **The push-boundary public-safe-lint gate no longer dies on stock macOS
+  bash 3.2 (athenaeum#1104).** `scripts/public-safe-lint-gate.sh` used
+  `mapfile -t` at two call sites; `mapfile` is a bash 4.0 builtin and stock
+  macOS ships GNU bash 3.2.57 at `/bin/bash`, which `.githooks/pre-push`
+  invokes the gate through. Every macOS contributor's push aborted with
+  `mapfile: command not found` -- a leak gate broken on the majority
+  developer platform. Both sites now use a bash-3.2-portable
+  `while IFS= read -r` loop over an explicitly-initialized array, keeping the
+  `"${ARR[@]:-}"` guards that `set -u` still needs in 3.2.
+  `scripts/run-tests.sh` (athenaeum#1105) carried the identical defect and is
+  fixed the same way. `tests/test_public_safe_lint_gate.py` now asserts every
+  push-path shell script is free of bash-4-only constructs (`mapfile`,
+  `readarray`, `declare -A`/`-g`, `${var^^}`/`${var,,}`, `coproc`,
+  `globstar`, `wait -n`, `read -i`/`-N`, `|&`, `&>>`), plus an executable
+  companion that runs the gate under a real 3.2 `/bin/bash` where one exists.
+
+- **`athenaeum ingest` held the run lock without heartbeating, so
+  `break_stale_after` could break a healthy long run (athenaeum#1230).** Only
+  `librarian.py` refreshed the lock's heartbeat; the ingest path did not, so
+  `heartbeat_age_seconds` equalled its total wall time — a long-running,
+  correctly-progressing ingest looked progressively more "wedged" the longer
+  it ran, and a contending `acquire` could auto-break it under
+  `break_stale_after` (default 6h). Fixed by threading `lock.heartbeat` into
+  `ingest()`/`session_end()` exactly like `athenaeum run`'s athenaeum#526
+  (H10) precedent — both already forward `**run_kwargs` into `run()`, which
+  ticks the heartbeat at phase/per-file boundaries. A full sweep of every
+  `RunLock` acquisition site in `src/athenaeum/` (recorded in
+  `athenaeum.runlock`'s module docstring) found two more holders with the
+  same latent gap and fixed both: `athenaeum drain` (an explicitly unbounded,
+  batch-mode drain that block-polls the Anthropic Batch API for potentially
+  hours, with one lock held across the whole multi-window loop) and
+  `athenaeum merges recompare --apply` (an unbounded-proposal-count,
+  per-pair LLM classify loop that already received the caller's lock but
+  never refreshed it). Every other acquisition site was audited and found
+  correctly bounded (deterministic, or capped well under the 6h default) —
+  see the docstring table for the full per-site reasoning. Regression tests:
+  `tests/test_runlock.py::TestIngestPathHeartbeatWiring`,
+  `tests/test_runlock.py::TestIngestPathLongRunSurvivesContendedBreak`,
+  `tests/test_recompare.py::TestApplyHeartbeatsTheLock`, and
+  `tests/test_drain.py::TestRunDrainLoop::test_heartbeat_is_threaded_into_every_window`.
+
+- **`athenaeum pii-restore` silently reported a false `TOTAL RESTORABLE = 0`
+  when the knowledge root's git history was unreachable (athenaeum#1228).**
+  `_history_with_paths()` returned an empty list on ANY non-zero `git log`
+  exit -- including "there is no repository here" -- indistinguishable from
+  a page genuinely having no pre-migration history, so
+  `_plan_anchored_restore()` forced every marker into
+  `no-pre-image:page-created-after-migration` and the dry-run report showed
+  a clean, plausible-looking `TOTAL RESTORABLE = 0` regardless of what was
+  actually recoverable. This produced a wrong published conclusion on
+  athenaeum#691 when run against an environment whose knowledge root had no
+  `.git`. Fixed by having `_history_with_paths()` raise the new
+  `GitHistoryUnavailableError` on a non-zero git exit (never conflating it
+  with a real empty-but-successful history), routing every marker that hits
+  it into a new, distinctly-named `git-history-unavailable` residue reason,
+  and having `athenaeum pii-restore` refuse to print a dry-run/apply report
+  at all when `RestorePlan.git_history_unavailable_count()` is non-zero --
+  exiting `1` with a loud stderr explanation instead. The legitimate
+  `no-pre-image:page-created-after-migration` bucket is unchanged for a page
+  that genuinely has no pre-image in a healthy repository. Regression
+  tests: `tests/test_pii_restore_tool.py::test_history_with_paths_raises_when_git_itself_fails`,
+  `::test_build_restore_plan_reports_git_history_unavailable_not_false_residue`,
+  `::test_reshaped_page_still_lands_in_legit_bucket_with_real_git_history`,
+  and `tests/test_cmd_pii_restore.py::test_missing_git_repository_fails_loudly_instead_of_reporting_false_zero`.
+
+- **`athenaeum surface-divergence --json`'s `diverged` field could contradict
+  its own exit code (athenaeum#1111).** The wrapped library modules'
+  `report_as_dict` reports `diverged` as true whenever EITHER direction of
+  the two-surface comparison is non-empty, but the command's exit code only
+  fails on the field's declared NOT-tolerated direction
+  (`exceeds_allowance`) — so a wiki-only `do_not_email` mark (the design's
+  own only legal steady state, athenaeum#1039) exited `0` while the JSON
+  body read `"diverged": true`, and the same shape affected `bounced`'s
+  tolerated wiki-only-entry case. A consumer reading `diverged` instead of
+  the exit code got the wrong answer on the design's own legal state. Fixed
+  by having `athenaeum._cmd_surface_divergence` override `diverged` in its
+  JSON output to track `exceeds_allowance` — the same predicate driving the
+  exit code — so the two can never disagree; a direct caller of the wrapped
+  modules' own `report_as_dict` (unchanged) still sees their original,
+  broader both-directions semantics. Regression tests:
+  `tests/test_surface_divergence.py::TestCli::test_json_diverged_do_not_email_wiki_only_mark_matches_exit_code`
+  and `::test_json_diverged_bounced_wiki_only_entry_matches_exit_code`.
+
+- **A populated athenaeum#453 source-handle key that the deterministic Tier-0 path
+  cannot place could still fall through to Tier 2/3 and compile with the
+  handle silently folded into page-body prose instead of frontmatter, so
+  `registry.json` was left silently missing it and nothing reported a
+  failure (athenaeum#1109).** athenaeum#486/#491/#692 already taught the deterministic
+  `tier0_handle_upsert`/`tier0_passthrough` paths to place a populated handle
+  as frontmatter without ever reaching the LLM tiers, and athenaeum#845 pinned the
+  gate's existing "decline cleanly, warn, fall through" contract for every
+  case those paths cannot place a handle onto (no uid and no existing entity
+  by that name; a name that resolves to a non-entity or cross-type page).
+  The residual gap: a fallthrough still proceeds to Tier 2/3, which has no
+  schema awareness of the handle keys (`athenaeum.registry.SOURCE_HANDLE_KEYS`) —
+  so the raw still compiled, just with the WARNING as the only trace. Fixed
+  by a new backstop, `athenaeum.registry.assert_handles_placed`, called from
+  `athenaeum.librarian._apply_tier3_results` immediately before any write:
+  it collects the raw's own populated source handles and refuses the ENTIRE
+  write batch (no partial write) with a new
+  `athenaeum.registry.UnplaceableSourceHandleError` if none of the
+  pages about to be written carry them as frontmatter. The error propagates
+  uncaught out of `process_one`, so the raw file is left on disk untouched
+  and picked up by the sweep loop's existing per-file failure/stuck-file
+  ledger — the same "fails loudly, retried next run" contract every other
+  Tier-2/3 processing failure already gets — rather than a warning-only
+  fallback that still let the defect through. The over-budget partial-progress
+  write path (athenaeum#994) deliberately does not apply this check, to preserve
+  its guarantee that already-computed partial progress always lands
+  durably. No hardcoded second copy of the handle-key set was added — the
+  check reads `registry.py`'s existing `SOURCE_HANDLE_KEYS`/`collect_handles`,
+  the single source of truth the deterministic Tier-0 paths already use.
+  Regression tests: `tests/test_librarian.py::TestUnplaceableSourceHandleFailsLoudly`
+  (the new-entity-with-no-uid case that previously compiled silently, plus a
+  control proving a normally-placed handle does not raise);
+  `tests/test_registry.py::test_ac5_hand_applied_handles_survive_a_recompile`
+  and `::test_ac5_unrelated_reintake_does_not_disturb_hand_applied_handles`
+  (fixture standing in for the operator's private-store hand-correction this
+  issue names, since that store is not reachable from this repo or its CI).
+
+- **Wiki-page dedup no longer collapses unrelated pages that merely share a
+  lede (athenaeum#1140).** chromadb's default ONNX MiniLM embedding function
+  hard-codes a 256-token truncation window, and the wiki-dedupe pass
+  (`wiki_dedupe.py`) embedded whole page bodies through it — for the
+  majority of eligible pages (measured: 57% of a 2,513-page corpus exceed
+  the window at the corpus's ~1,200-character equivalent), the stored
+  vector represented only the page's lede, and this corpus's pages write a
+  structurally uniform lede, so unrelated pages with divergent bodies
+  collapsed into dense cliques (the persistent `wiki-c0a81d69`-class
+  degenerate clusters tracked on athenaeum#1005). `_resolve_wiki_embeddings`
+  now chunks each candidate page's body into `_CHUNK_CHARS` (900)
+  character pieces before embedding and mean-pools (new
+  `athenaeum.vecmath.mean_pool`) the resulting per-chunk vectors into one
+  representation per page, so content past the first chunk reaches the
+  final vector instead of being silently discarded. Scoped to the
+  wiki-dedupe embedding-resolution path only — `athenaeum.search.embed_texts`
+  itself is unchanged, so `fingerprint.py`, `tiers.py`, `_cmd_curate.py`,
+  and the raw-intake `clusters.py` embedding path are unaffected.
+  `librarian.cluster_threshold` is unchanged (a permissive threshold was
+  independently ruled out as the cause). See the PR body for the full
+  before/after corpus measurement and re-embedding cost estimate.
+
+- **Shape-rule evaluation now reaches one level below a configured
+  `recall.extra_intake_roots` entry, so a `preserve` rule targeting
+  hestia's lane logs can finally match (athenaeum#1096, closes the second
+  of the two gaps athenaeum#974 was titled to close).** `run_shape_rule_phase`
+  sourced candidates only from `intake.discover_raw_files`, which
+  deliberately never descends into a source directory that is itself an
+  extra-intake root (default `raw/auto-memory`) — correct for intake, but
+  it meant a rule targeting `raw/auto-memory/hestia-lanes/` loaded clean
+  and matched zero candidates forever. Design-note option 1: a new
+  `intake.discover_shape_rule_extra_intake_files` (one level below an
+  extra-intake-root source directory, `RawFile.source` still the
+  top-level source name) feeds the shape-rule phase ONLY — intake
+  discovery is untouched. Also reconciles `_cmd_lifecycle.py`'s
+  `--with-rules` help text, which pointed operators at the aggregate
+  `wiki/_shape_rules_applied.jsonl` (silent when a rule matches nothing —
+  precisely the prior bug's symptom) instead of the per-record
+  `wiki/_shape_rule_dispositions.jsonl` (athenaeum#975) that also logs `no-match`.
+
+- **`storage lint-pii` now scans `raw/`, reported as a separate,
+  non-gating surface (athenaeum#1049, filed from the athenaeum#949
+  close-out).** `_cmd_storage_lint_pii` resolved its scan root as
+  `knowledge_root / "wiki"` only; `raw/` is a SIBLING of `wiki/`, not a
+  descendant, and was never opened. Once athenaeum#1025's standing
+  sensitivity filter ships, a routed value's original bytes stay in
+  `raw/` in the clear (append-only by contract) while only a pointer
+  reaches `wiki/` — so a clean `lint-pii` would read as "no retained
+  values anywhere" while every original sat unmeasured in `raw/`, the
+  exact blind spot `docs/sensitivity-value-routing.md` §5 names as a
+  real, unresolved measurement gap. `lint-pii` now also scans `raw/`
+  with the same email/phone detectors and reports its count as a
+  DISTINCT surface — both in plain text (a second summary line) and in
+  `--json` (the top-level shape changes from a bare list to `{"wiki":
+  [...], "raw": [...]}`, no other known consumer of the prior shape).
+  Raw findings never flip the exit code: raw retention is today's
+  normal, unavoidable state (nothing in this change scrubs or
+  time-bounds it — athenaeum#437 owns existing residue, out of scope
+  here), so gating on it would fail every corpus permanently and would
+  make a clean wiki look dirty, destroying the wiki gate's existing
+  meaning. See `docs/sensitivity-value-routing.md` §5 for the updated
+  disposition note.
+
+- **Narrowed the `do_not_email` surface-divergence predicate to the direction
+  the ratified design actually forbids (athenaeum#1039, holds athenaeum#1038).**
+  Both `athenaeum surface-divergence --field do_not_email` and the standalone
+  `athenaeum do-not-email-divergence` command exited non-zero (`EXIT_DIVERGED`)
+  on EITHER direction of disagreement between the wiki and excluded surfaces —
+  but athenaeum#960's Out-of-scope explicitly rejects "any backfill,
+  migration, or dual-write of `do_not_email` marks onto the excluded
+  surface", making the wiki page the sole authoring surface. That means
+  `marked_on_wiki_not_excluded` is the design's ONLY legal steady state, not
+  a divergence, and the check alerted on every legal store state (observed
+  live 2026-08-20: 4 wiki marks / 0 excluded records → `EXIT_DIVERGED`).
+  Both entry points now alert only on `marked_on_excluded_not_wiki` — the
+  excluded surface newly carrying the field, the direction
+  `athenaeum.pii.do_not_email_state`'s precedence note names as this guard's
+  actual job. The `bounced` field's predicate is unchanged; its
+  `marked_not_on_wiki` direction remains a real signal.
+
+- **Aligned code-side entity-type registry mirrors with `_schema/types.md`
+  and gated the `corrections.py` write path (athenaeum#971, follow-up to
+  athenaeum#970).** `schemas.KNOWN_TYPES`/`FALLBACK_TYPES` now include `incident` (the
+  10th declared type per athenaeum#970's audit — previously every incident page
+  warned as "unknown") and no longer include `feedback`/`user` (folded away
+  by athenaeum#970); a page already on disk with one of those values keeps validating
+  without raising (athenaeum#93's non-raising design), it just now takes the
+  ordinary "unknown wiki type" path instead of the silent known-type path.
+  `corrections.py`'s tier-0 create branch (`WikiEntity(type=resolution.
+  entity_type, ...)`) previously had no `valid_types` gate at all, unlike the
+  classifier (`tiers.py`) and the other two deterministic create/upsert
+  paths (`intake.py`, `librarian.py`) — a correction batch could mint a page
+  under any string, including a athenaeum#970-folded type, with zero enforcement.
+  It now loads `_schema/types.md` (falling back to `KNOWN_TYPES`, same
+  pattern `librarian.py`/`entity_schema.py` use) and rejects-and-escalates
+  (`disposition="raised-tier"`) an unrecognized or folded `type`, matching
+  `intake.py`/`librarian.py`'s reject precedent rather than `tiers.py`'s
+  post-LLM coerce-to-`reference` (coercing here would misfile a fold into
+  the wrong bucket instead of preserving it for correct reclassification).
+
+- **`_fallback_embeddings()` hashed tokens with the PYTHONHASHSEED-salted
+  builtin `hash()`, making fallback cluster vectors nondeterministic
+  across processes (athenaeum#1050, flaked CI run 32379062624).** The
+  hashing-trick degradation path (`clusters.py`, engaged when chromadb has
+  no usable index) derived both a token's feature index (`hash(tok) %
+  dim`) and its sign (`hash(tok + "_s") % 2`) from Python's builtin
+  `hash()`, which is salted per-process for `str`/`bytes` as a DoS
+  mitigation — so the same token landed at a different index/sign in
+  every process, and every cosine similarity derived from a fallback
+  vector (and therefore every cluster formed from it) changed run to run.
+  Both call sites now derive their index and sign from a single unsalted
+  `hashlib.sha256` digest per token, so the same token always maps to the
+  same index and sign in every process. **Behaviour change, not a pure
+  bug fix**: this shifts every fallback-path cluster vector, and
+  therefore the content-addressed cluster ids derived from cluster
+  membership, for any corpus whose clustering ever engages the
+  hashing-trick fallback (chromadb absent or its index unbuilt) — a
+  previously-formed fallback-path cluster may now group differently and
+  receive a new id. Real chromadb-embedded clusters (the default, hot
+  path) are unaffected.
 
 - **The librarian's per-raw-file LLM-call/wall-clock bounds rejected
   ordinary files instead of catching loopers, and an over-bound file's
@@ -2347,8 +2370,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (athenaeum#898) is unchanged and still backstops a file that keeps
   tripping the bound after it is quarantined out of the discovery set, so a
   chronically over-bound file is still never retried identically forever.
-
-### Fixed
 
 - **Subscription spend ceilings undercounted real consumption by ~56x
   (athenaeum#1137).** `TokenUsage.total_tokens` (`input_tokens +
@@ -2383,20 +2404,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropped from the ledger entirely by the same `total_tokens`-gated
   no-op guard; it is now recorded.
 
-### Removed
+### Documentation
 
-- **`pii.read_person` / `pii.read_people`, the `read_person` MCP tool, and the
-  `athenaeum query person` CLI command (athenaeum#888).** Deprecated in
-  athenaeum#887 once the generalized `recall(with_pii=True)` path
-  (athenaeum#885/#886) became the sanctioned entry point; removed now that
-  every known consumer has migrated. Use `pii.read_entity` / `read_entities`
-  (or `recall(with_pii=True)` when searching rather than resolving a uid you
-  already hold) instead — both answer for any entity class, not only
-  persons. The `PersonRead = EntityRead` back-compat alias (added in
-  athenaeum#883) is removed alongside them, having no remaining referrers.
-  The `athenaeum query entity` / `read_entity` generalized surfaces this
-  replaces are unaffected, as is the unrelated `athenaeum query people`
-  command (filter/list, not a single-uid read).
+- **`docs/merge-inflow-restoration.md` §5 and §9 annotated with outcomes
+  (athenaeum#1093).** §5 records the ratification: `librarian.max_merge_sources`
+  raised from 5 to 8 (operator decision, 2026-08-22), written to the operative
+  `~/knowledge/athenaeum.yaml` and runtime-confirmed on 2026-08-23 (commit
+  `f2e862be3`), and the instrument-before-change condition explicitly
+  overridden by the operator with the daily merge-readout routine serving as
+  the instrumentation. Carries forward the two caveats from that ratification:
+  athenaeum#1005 refuted `_fallback_embeddings` as the over-clustering cause
+  (11,066/11,066 stamped suppression lines read `embedder=chromadb-default`),
+  so some fraction of newly-admitted proposals are genuine over-clusters; and
+  the 4,227-suppressions-over-~2.4-days figure is not reconciled against
+  athenaeum#784's measured 127-132/night and must not be used for tuning until
+  a distinct-cluster count exists. §9 is annotated as resolved, citing
+  athenaeum#1088, which fixed `docs/configuration.md`'s two stale
+  `max_merge_sources` default references (25 → 5); the annotation drops the
+  original line numbers (already stale at filing time) in favor of the table
+  row and example-block key. Docs-only; no code changed, and the code default
+  of 5 in `src/athenaeum/config.py` is unchanged — the ratified value lives
+  only in the operator's live store.
+
+- **Design note: standing sensitive-value filter at raw-sweep intake
+  (athenaeum#949).** New `docs/sensitivity-value-routing.md` answers the
+  issue's AC1–AC13 — placement and pointer contract (AC1/AC2), the uid
+  problem and the proposed record-keyed read-path disposition (AC3), the
+  raw-tree observability gap stated as open rather than solved (AC4),
+  disposition of the existing `screen_intake` stage (AC5), per-write-path
+  redaction mechanics (AC6), precedence and fail-closed behavior (AC7/AC10),
+  usage-classification default (AC9), idempotency (AC11), the correlation
+  trade (AC12), the migration story relative to athenaeum#437 (AC13), and
+  the relationship to `pii.RedactionMarker` left as an explicit open
+  question (AC8). Cites a working spike (branch
+  `prototype/949-sensitivity-routing-spike`, not merged and not part of
+  this change) as verification evidence for specific mechanical claims —
+  the note's decisions are proposals for review, not settled by the spike
+  having been built. Implementation is explicitly deferred to the
+  follow-on slices the note's §10 lists — athenaeum#1022 (config resolver),
+  athenaeum#1023 (routing/redaction mechanism), athenaeum#1024
+  (record-keyed read path), athenaeum#1025 (wire into the librarian raw
+  sweep) — filed as separate issues against this note (AC14's filing half;
+  review of the note itself is routed separately). Docs-only; no code
+  changed.
 
 ## [0.19.0] - 2026-08-15
 
