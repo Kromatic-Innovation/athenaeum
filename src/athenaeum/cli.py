@@ -99,6 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_run import add_run_subparser
     from athenaeum._cmd_serve import add_serve_subparser
     from athenaeum._cmd_storage import add_storage_subparser
+    from athenaeum._cmd_subject import add_subject_subparser
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
     from athenaeum._cmd_usage_report import add_usage_report_subparser
     from athenaeum._cmd_verdicts import add_verdicts_subparser
@@ -146,6 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_description_subparser(subparsers)  # description backfill (issue athenaeum#1324)
     add_verdicts_subparser(subparsers)  # verdicts (issue athenaeum#712)
     add_dimensions_subparser(subparsers)  # dimensions show|compare (issue athenaeum#714)
+    add_subject_subparser(subparsers)  # subject backfill (issue athenaeum#1244)
     add_index_subparsers(
         subparsers
     )  # reindex/rebuild-index, compile, registry, ingest, session-end
