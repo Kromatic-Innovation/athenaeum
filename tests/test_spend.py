@@ -3036,3 +3036,278 @@ class TestSpendReportsOutstandingReservations:
         target, cache_dir = self._seed(tmp_path)
         out = self._report(target, cache_dir, as_json=False)
         assert "committed but not yet billed" not in out
+
+
+# ---------------------------------------------------------------------------
+# Ceiling backtest (issue athenaeum#1407) — replay candidate ceilings
+# ---------------------------------------------------------------------------
+
+
+def _sub_row(ts: str, *, billable: int, **overrides: Any) -> dict[str, Any]:
+    """A synthetic subscription-path row whose four cache-inclusive counters
+    sum to *billable* exactly (all of it as input, for simplicity)."""
+    base = {
+        "v": spend.LEDGER_VERSION,
+        "ts": ts,
+        "provider": "claude-cli",
+        "billing_mode": "subscription",
+        "input_tokens": billable,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": billable,
+        "estimated_cost_usd": 0.0,
+    }
+    base.update(overrides)
+    return base
+
+
+def _api_row(ts: str, *, usd: float, **overrides: Any) -> dict[str, Any]:
+    base = {
+        "v": spend.LEDGER_VERSION,
+        "ts": ts,
+        "provider": "anthropic",
+        "billing_mode": "api",
+        "input_tokens": 100,
+        "output_tokens": 0,
+        "total_tokens": 100,
+        "estimated_cost_usd": usd,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestCeilingBacktest:
+    def test_no_data_on_empty_ledger_is_distinct_from_zero_trips(self, ledger: Path) -> None:
+        # AC6 / athenaeum#724 failure mode: "nothing to measure" must never
+        # read like "measured it, 0% trips."
+        report = spend.ceiling_backtest([], {"max_tokens_per_run": 1000})
+        assert report["no_data"] is True
+        out = spend.format_ceiling_backtest(report)
+        assert "no ledger data" in out.lower()
+        assert "0%" not in out
+        assert "0.0%" not in out
+
+    def test_no_data_when_no_candidate_supplied(self, ledger: Path) -> None:
+        records = [_sub_row("2026-08-01T00:00:00Z", billable=1000)]
+        report = spend.ceiling_backtest(records, {})
+        assert report["no_data"] is True
+
+    def test_candidate_below_every_observed_value_trips_every_run(self, ledger: Path) -> None:
+        records = [
+            _sub_row("2026-08-01T01:00:00Z", billable=1_000),
+            _sub_row("2026-08-01T02:00:00Z", billable=2_000),
+            _sub_row("2026-08-02T01:00:00Z", billable=3_000),
+        ]
+        report = spend.ceiling_backtest(records, {"max_tokens_per_run": 1})
+        knob = report["knobs"]["max_tokens_per_run"]
+        assert knob["runs_tripped"] == knob["runs_evaluated"] == 3
+        assert knob["run_trip_rate"] == 1.0
+
+    def test_candidate_above_every_observed_value_trips_no_run(self, ledger: Path) -> None:
+        records = [
+            _sub_row("2026-08-01T01:00:00Z", billable=1_000),
+            _sub_row("2026-08-01T02:00:00Z", billable=2_000),
+            _sub_row("2026-08-02T01:00:00Z", billable=3_000),
+        ]
+        report = spend.ceiling_backtest(records, {"max_tokens_per_run": 10_000_000})
+        knob = report["knobs"]["max_tokens_per_run"]
+        assert knob["runs_tripped"] == 0
+        assert knob["run_trip_rate"] == 0.0
+
+    def test_reuses_the_production_predicate_not_a_reimplementation(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2: a backtest that agrees with the real gate only by coincidence
+        must fail this test. Changing ceiling_tripped's behaviour behind the
+        backtest must change the report."""
+        records = [_sub_row("2026-08-01T01:00:00Z", billable=1_000)]
+
+        baseline = spend.ceiling_backtest(records, {"max_tokens_per_run": 5_000})
+        assert baseline["knobs"]["max_tokens_per_run"]["runs_tripped"] == 0
+
+        def _always_trips(*args: Any, **kwargs: Any) -> str:
+            return "forced trip for test"
+
+        monkeypatch.setattr(spend, "ceiling_tripped", _always_trips)
+        patched = spend.ceiling_backtest(records, {"max_tokens_per_run": 5_000})
+        assert patched["knobs"]["max_tokens_per_run"]["runs_tripped"] == 1
+
+    def test_day_bucketing_agrees_with_production_local_day(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3: two runs straddling a LOCAL-day boundary (but not a UTC one)
+        must land in the SAME accounting day under a local-timezone config,
+        and in DIFFERENT UTC days under a UTC-forced config -- a fixture that
+        doesn't straddle a boundary would pass either way and prove nothing.
+
+        23:30 and 00:30 UTC on consecutive UTC dates are the same New York
+        LOCAL calendar day (UTC-4 in August): 19:30 and 20:30 New York time,
+        both August 1st.
+
+        The env var takes precedence over the config dict (same resolver
+        precedence as everywhere else -- env > yaml), and conftest.py's
+        autouse ``_pin_spend_accounting_timezone_utc`` fixture already sets
+        ``ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE=UTC`` for every test, so the
+        NY case must override it explicitly via monkeypatch, not just via
+        the *config* argument.
+        """
+        records = [
+            _sub_row("2026-08-01T23:30:00Z", billable=100),
+            _sub_row("2026-08-02T00:30:00Z", billable=100),
+        ]
+        monkeypatch.setenv("ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE", "America/New_York")
+        ny_report = spend.ceiling_backtest(
+            records,
+            {"max_tokens_per_day": 150},
+            config={"spend": {"accounting_timezone": "America/New_York"}},
+        )
+        monkeypatch.setenv("ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE", "UTC")
+        utc_report = spend.ceiling_backtest(
+            records,
+            {"max_tokens_per_day": 150},
+            config={"spend": {"accounting_timezone": "UTC"}},
+        )
+        assert ny_report["days_evaluated"] == 1  # same NY calendar day
+        assert utc_report["days_evaluated"] == 2  # different UTC calendar days
+
+        # Same day (NY): the second run's day-total (200) crosses 150 -> trips.
+        assert ny_report["knobs"]["max_tokens_per_day"]["runs_tripped"] == 1
+        # Different days (UTC): neither run's OWN day ever reaches 150 alone.
+        assert utc_report["knobs"]["max_tokens_per_day"]["runs_tripped"] == 0
+
+    def test_performs_no_write_ledger_untouched(self, ledger: Path, tmp_path: Path) -> None:
+        """AC5: mtime and byte content of the real ledger are unchanged
+        across an invocation, and no config file is touched."""
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        before_bytes = ledger.read_bytes()
+        before_mtime = ledger.stat().st_mtime_ns
+
+        config_path = tmp_path / "athenaeum.yaml"
+        assert not config_path.exists()
+
+        records = spend.read_ledger(ledger)
+        report = spend.ceiling_backtest(records, {"max_tokens_per_run": 10})
+        assert report["knobs"]["max_tokens_per_run"]["runs_tripped"] == 1
+
+        assert ledger.read_bytes() == before_bytes
+        assert ledger.stat().st_mtime_ns == before_mtime
+        assert not config_path.exists()
+
+    def test_an_empty_or_absent_ledger_produces_explicit_no_data(self, ledger: Path) -> None:
+        # The ledger file itself doesn't even exist yet.
+        assert not ledger.exists()
+        records = spend.read_ledger(ledger)
+        report = spend.ceiling_backtest(records, {"max_tokens_per_run": 10})
+        assert report["no_data"] is True
+
+    def test_token_and_usd_knobs_are_isolated_per_billing_path(self, ledger: Path) -> None:
+        records = [
+            _sub_row("2026-08-01T01:00:00Z", billable=50),
+            _api_row("2026-08-01T02:00:00Z", usd=999.0),
+        ]
+        report = spend.ceiling_backtest(
+            records,
+            {"max_tokens_per_run": 10, "max_usd_per_run": 1.0},
+        )
+        # The token candidate never trips against the (huge, but dollar-priced)
+        # API run, and the dollar candidate never trips against the (huge,
+        # relative to its own tiny cap, but token-priced) subscription run.
+        tok = report["knobs"]["max_tokens_per_run"]
+        usd = report["knobs"]["max_usd_per_run"]
+        assert tok["runs_tripped"] == 1  # only the subscription row qualifies
+        assert usd["runs_tripped"] == 1  # only the API row qualifies
+        assert tok["metric"]["count"] == 1
+        assert usd["metric"]["count"] == 1
+
+    def test_weekly_pct_pair_requires_both_halves(self, ledger: Path) -> None:
+        records = [_sub_row("2026-08-01T01:00:00Z", billable=100)]
+        # Only one half of the pair supplied -> not a candidate at all,
+        # mirroring ceiling_tripped's own opt-in-together contract.
+        only_weekly = spend.ceiling_backtest(records, {"weekly_token_limit": 700})
+        only_pct = spend.ceiling_backtest(records, {"max_pct_per_day": 50})
+        assert only_weekly["no_data"] is True
+        assert only_pct["no_data"] is True
+
+        both = spend.ceiling_backtest(records, {"weekly_token_limit": 700, "max_pct_per_day": 10})
+        assert spend._WEEKLY_PCT_KNOB in both["knobs"]
+
+    def test_reads_synthetic_fixtures_only_never_the_real_ledger(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC7: this test itself must never touch the operator's real
+        ~/.cache/athenaeum/spend.jsonl -- the `ledger` fixture redirects
+        ATHENAEUM_SPEND_LEDGER, and ceiling_backtest is given records
+        in-memory rather than a path, so there is nothing here that could
+        fall back to a default path."""
+        real_home_ledger = spend.default_ledger_path()
+        assert str(real_home_ledger) != str(ledger)
+        records = [_sub_row("2026-08-01T01:00:00Z", billable=100)]
+        spend.ceiling_backtest(records, {"max_tokens_per_run": 10})
+        # The fixture's isolated ledger was never written to by the backtest.
+        assert not ledger.exists() or ledger.read_bytes() == b""
+
+    def test_cli_ceiling_backtest_json_shape(
+        self, ledger: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        rc = main(
+            [
+                "spend",
+                "--since",
+                "30d",
+                "--json",
+                "--ledger",
+                str(ledger),
+                "--ceiling-backtest",
+                "--candidate-max-tokens-per-run",
+                "10",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        cb = payload["ceiling_backtest"]
+        assert cb["no_data"] is False
+        assert cb["knobs"]["max_tokens_per_run"]["runs_tripped"] == 1
+
+    def test_cli_ceiling_backtest_human_output_names_no_ceiling_armed(
+        self, ledger: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        rc = main(
+            [
+                "spend",
+                "--since",
+                "30d",
+                "--ledger",
+                str(ledger),
+                "--ceiling-backtest",
+                "--candidate-max-tokens-per-run",
+                "10",
+            ]
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "nothing armed" in out
+        assert "max_tokens_per_run" in out
+
+    def test_cli_ceiling_backtest_does_not_write_the_ledger(
+        self, ledger: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        before = ledger.read_bytes()
+        rc = main(
+            [
+                "spend",
+                "--since",
+                "30d",
+                "--ledger",
+                str(ledger),
+                "--ceiling-backtest",
+                "--candidate-max-tokens-per-run",
+                "10",
+            ]
+        )
+        assert rc == 0
+        capsys.readouterr()
+        assert ledger.read_bytes() == before
