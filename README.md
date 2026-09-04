@@ -305,15 +305,6 @@ athenaeum run --dry-run         # inspect without writing
 athenaeum status
 ```
 
-**Library consumers:** `import athenaeum` no longer eagerly imports every
-submodule (`dir(athenaeum)` went from 78 names in v0.19.0 to 50 in v0.20.0 —
-see the [`0.20.0` CHANGELOG entry](CHANGELOG.md#0200---2026-09-04) under
-Removed). Every name in `__all__` still resolves via `from athenaeum import
-<name>`; to reach a submodule that was never in `__all__` (e.g. `config`,
-`pii`, `spend`, `storage`), import it directly — `import athenaeum.<submodule>`
-or `from athenaeum import <submodule>` — rather than relying on
-`athenaeum.<submodule>` attribute access after a bare `import athenaeum`.
-
 Full run with custom paths and budgets (`--max-api-calls 200` here
 deliberately lowers the per-run API budget below the default of 800 —
 omit the flag to accept the default):
