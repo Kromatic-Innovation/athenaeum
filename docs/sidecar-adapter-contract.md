@@ -35,13 +35,13 @@ truth a test enforces against.
 | Field | Type | Contract | Notes |
 |---|---|---|---|
 | `v` | `int` | required | Schema version. `1` today. |
-| `query` | `str` | required | **The raw prompt text.** See [§1.1](#11-a-named-finding-query-is-not-a-hash) — this is a deliberate departure from this codebase's usual `query_hash`-only convention, flagged rather than silently shipped. |
+| `query` | `str` | required | **The raw prompt text.** See §1.1 below — this is a deliberate departure from this codebase's usual `query_hash`-only convention, flagged rather than silently shipped. |
 | `session_id` | `str` | required | Opaque session identifier, as passed to `build_context()`. |
 | `candidates` | `list[object]` | required | Ranked, deduped, budget-filtered hits. See below. Empty on a no-hit or kill-switched turn — never absent. |
 | `budget` | `object` | required | `{"tokens": int, "used": int}` — the token budget applied and how much of it this turn's candidates consumed. |
 | `render` | `object` | required | `{"text": str, "preamble": str}` — host-neutral rendered text. `text` is empty (not absent) when `candidates` is empty. |
 | `backend` | `str` | required | `"fts5"` or `"vector"` — which backend produced this turn's candidates. |
-| `elapsed_ms` | `float` | **diagnostic, not versioned** | Wall-clock cost of this call. See [§1.2](#12-elapsed_ms-is-diagnostic-not-contract). |
+| `elapsed_ms` | `float` | **diagnostic, not versioned** | Wall-clock cost of this call. See §1.2 below. |
 
 ### `candidates[]` fields
 
@@ -53,7 +53,7 @@ truth a test enforces against.
 | `backend` | `str` | `"fts5"` or `"vector"` — which backend surfaced THIS candidate (a merged turn can mix both). |
 | `relevance` | `float \| null` | BM25 rank for an `fts5` candidate; **always `null` for a `vector` candidate** — a vector similarity score is a different scale and must never be read as comparable to a BM25 rank. |
 | `memory_tier` | `str` | **Metadata only — see §2.3.** Empty string, never absent, when the index predates the `memory_tier` column. |
-| `audience` | `str` | The index's delimiter-anchored audience string (`"|__access_open__|"`, `"|role|role|"`, `"|"`). See [§2.4](#24-audience-is-an-access-control-token-not-a-display-field) for what an adapter may do with it. |
+| `audience` | `str` | The index's delimiter-anchored audience string (`"|__access_open__|"`, `"|role|role|"`, `"|"`). See §2.4 below for what an adapter may do with it. |
 | `token_cost` | `int` | This candidate's estimated token cost (`athenaeum.context.estimate_tokens`), as counted against `budget`. |
 
 ### 1.1 A named finding: `query` is not a hash
