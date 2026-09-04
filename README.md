@@ -169,20 +169,24 @@ built-in consumer (the PII-exclusion surface), not a general policy engine.
 
 ## The MCP surface
 
-Athenaeum ships an MCP server (`athenaeum serve`) exposing **11 tools** so AI
+Athenaeum ships an MCP server (`athenaeum serve`) exposing **15 tools** so AI
 agents can write to raw intake, search the compiled wiki, and triage the
-human-decision queue — 7 read-only, 4 that mutate human-decision state.
+human-decision queue — 10 read-only, 5 that mutate human-decision state.
 
 | Tool | R/W | What it does |
 |---|---|---|
 | `recall` | READ | Searches the compiled wiki for pages relevant to a query (keyword/FTS5/vector depending on configured backend). |
+| `entity_schema` | READ | Reports the entity classes this deployment declares and/or observes, plus the fields each carries and the fields `recall`/`enumerate_entities` can filter on — call this before narrowing either by `type` when you don't already know this deployment's classes. |
+| `enumerate_entities` | READ | Unranked, criteria-based listing of every entity of a declared type — the counterpart to `recall` for "every entity matching X" queries, where `recall`'s ranked search would return an incomplete answer. |
 | `list_pending_questions` | READ | Lists unanswered contradiction-detector questions from `wiki/_pending_questions.md`. |
 | `list_pending_merges` | READ | Lists unresolved resolver-proposed page merges from `wiki/_pending_merges.md`. |
 | `list_pending_decisions` | READ | Unified queue — pending questions **and** merge proposals in one call, oldest first. |
 | `list_axiom_audit` | READ | Per-slug history of `memory_class: axiom` promotions/demotions, so axiom status is auditable without a write tool. |
 | `scan_retraction_cascade` | READ | Flags completed merges that relied on a since-retracted source; never auto-unmerges. |
 | `calibration_summary` | READ | Per-tier sampled/reviewed/overturned counts for the tiered-reasoning calibration loop (reports "not enabled" when the opt-in above is off). |
+| `read_entity` | READ | One-call entity read by uid for any entity class — one of two sanctioned paths to a page's excluded (withheld) fields when you already hold its uid. |
 | `remember` | WRITE | Appends a piece of knowledge to raw intake (append-only; compiled into the wiki on the next run). |
+| `raise_decision` | WRITE | Files a new agent-raised question or confirmation into the pending-decisions queue, so a mid-session flag has somewhere durable to live instead of evaporating when the session ends. |
 | `resolve_question` | WRITE | Flips a pending question to answered and records the answer body. |
 | `resolve_merge` | WRITE | Approves or rejects a pending merge proposal; approval folds/creates the merged wiki page. |
 | `review_audit_item` | WRITE | Records a human's confirm/overturn verdict on a sampled tier-audit item (calibration signal only, never re-executes a merge). |
