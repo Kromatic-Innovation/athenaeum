@@ -166,6 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_axiom import add_axiom_subparser
     from athenaeum._cmd_bounce_contract import add_bounce_contract_subparser
     from athenaeum._cmd_calibration import add_calibration_subparser
+    from athenaeum._cmd_context import add_context_subparser
     from athenaeum._cmd_curate import add_curate_subparsers
     from athenaeum._cmd_decay import add_decay_subparser
     from athenaeum._cmd_decisions import add_decisions_subparser
@@ -222,6 +223,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_authority_subparser(subparsers)  # authority
     add_axiom_subparser(subparsers)  # axiom
     add_calibration_subparser(subparsers)  # calibration
+    add_context_subparser(subparsers)  # context (issue athenaeum#1358)
     add_outbound_subparser(subparsers)  # outbound-lint
     add_bounce_contract_subparser(subparsers)  # bounce-contract
     add_surface_divergence_subparser(subparsers)  # surface-divergence
