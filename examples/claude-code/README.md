@@ -1,9 +1,10 @@
 # Claude Code integration
 
-Three hook scripts that wire Athenaeum into Claude Code as a transparent
-recall sidecar. The scripts are plain bash + sqlite3 + (optional) Python;
-nothing here is Claude-Code-specific that couldn't be ported to another
-agent runtime.
+Seven hook scripts that wire Athenaeum into Claude Code as a transparent
+recall sidecar — including `stop-hook-validate.sh`, a `Stop`-hook template
+described in full under "Auto-memory integration" below. The scripts are
+plain bash + sqlite3 + (optional) Python; nothing here is Claude-Code-specific
+that couldn't be ported to another agent runtime.
 
 | Hook                     | When it fires        | What it does                                                    |
 |--------------------------|----------------------|------------------------------------------------------------------|
@@ -13,6 +14,7 @@ agent runtime.
 | `pre-compact-save.sh`    | Before compaction    | Reminds the model to call `remember` on anything load-bearing    |
 | `pending-questions-surface.sh` | Start of each session | Surfaces unresolved `_pending_questions.md` entries with a snooze cache |
 | `rebuild-index.sh`       | SessionEnd (optional)| Out-of-band index rebuild with atomic dir lock — wire when synchronous SessionStart rebuild becomes painful (large wikis, vector backend) |
+| `stop-hook-validate.sh`  | Stop (optional)      | Warns when auto-memory frontmatter is missing citation fields — see "Auto-memory integration" below |
 
 ## How the sidecar works (read this first)
 
