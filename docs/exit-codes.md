@@ -14,7 +14,7 @@ command's `1` means something else.
 | `0` | — | Clean run — no failed files, no budget/deadline/spend-ceiling trip, no `EXIT_LIBRARIAN_REFUSAL`-eligible zero-progress trip; or `--strict-budget` is off and a non-zero-progress trip happened anyway; or `--allow-degraded` waived an otherwise-refusal-eligible zero-progress trip. | n/a |
 | `1` | — | A file failed processing (retried next run), or `--strict-budget` is set and the run deferred work under any resource budget/ceiling. | Yes — deferred/failed work is picked up by the next run. |
 | `3` | `EXIT_LIBRARIAN_REFUSAL` | **DEGRADED REFUSAL (issue athenaeum#1135): the run stopped early for a resource reason (`reason=budget` / `spend-ceiling` / `entity-share`) AND committed ZERO files.** Before this code existed, this case fell through to `0` — indistinguishable from a genuine success by exit code, the exact gap this issue closes (`athenaeum drain` already refused loudly on the analogous "made ZERO progress" condition; this brings `athenaeum run` up to the same standard). The `librarian-run-degraded reason=<reason> files=0 [spend=<consumed>/<cap>]` marker line (ERROR) is ALWAYS logged when the predicate holds, regardless of this code — see "Why 3 is its own code" below. Default-ON (no flag needed to opt in); `--allow-degraded` opts OUT (exits `0` instead, marker line still fires); `--strict-budget` takes precedence when both flags are set (its broader "any deferral" check runs first and returns `1`). | **Yes** — nothing was lost; the deferred intake is picked up exactly like any other budget/deadline trip. |
-| `75` | `EXIT_GRACEFUL_PARTIAL` | **athenaeum's own internal wall-clock deadline tripped.** Partial progress is committed (`git_snapshot`), the remaining/deferred intake is left on disk (`wiki/_deferred_work.md`), and the run stopped itself *before* anything external intervened. | **Yes.** Nothing was killed; the next run continues from where this one stopped. |
+| `75` | `EXIT_GRACEFUL_PARTIAL` **or** `EXIT_LOCK_HELD` | **Two unrelated constants both evaluate to `75` — see "`75` also collides with `EXIT_LOCK_HELD`" below (issue athenaeum#1379).** (1) `EXIT_GRACEFUL_PARTIAL` (`src/athenaeum/librarian.py`): athenaeum's own internal wall-clock deadline tripped. Partial progress is committed (`git_snapshot`), the remaining/deferred intake is left on disk (`wiki/_deferred_work.md`), and the run stopped itself *before* anything external intervened. (2) `EXIT_LOCK_HELD` (`src/athenaeum/_cli_shared.py`): `athenaeum run` (and every `athenaeum curate` subcommand) failed to acquire the run lock in `_acquire_or_exit` — **before any pipeline work started.** Nothing was committed and nothing was deferred to disk, so no clause of the `EXIT_GRACEFUL_PARTIAL` description above applies to it. | **Depends which producer.** `EXIT_GRACEFUL_PARTIAL`: **Yes** — nothing was killed, the next run continues from where this one stopped. `EXIT_LOCK_HELD`: **N/A** — no run happened, so there is nothing to resume; retry once the lock is free. |
 | `124` | `EXIT_EXTERNAL_KILL` | **An external kill signal (SIGTERM/SIGINT) was delivered to the process** — matching coreutils `timeout`(1) semantics, which itself exits 124 when it SIGTERMs a child that overran its wall clock. athenaeum's opt-in signal handler (`install_signal_handlers=True`, the CLI default) makes a best-effort partial-progress commit before re-raising this code, but the STOP REQUEST originated outside athenaeum's own deadline logic. | Best-effort — whatever was committed before the signal is resumable, but the commit itself is not guaranteed (a SIGKILL after the `timeout` grace period gives the handler no chance to run at all). |
 
 ## Why 75 and 124 are two different codes (issue athenaeum#897)
@@ -41,6 +41,41 @@ reacting to a delivered SIGTERM/SIGINT. Every internal deadline-check path —
 branch, and every `RunDeadlineExceeded` catch site — returns `75`
 (`EXIT_GRACEFUL_PARTIAL`) instead. Both constants are defined in
 `src/athenaeum/librarian.py` next to `DEFAULT_MAX_RUNTIME`.
+
+## `75` also collides with `EXIT_LOCK_HELD` (issue athenaeum#1379)
+
+The section above fixed one `75` collision (the internal-deadline case vs an
+external kill) by giving the external-kill case its own code, `124`. `75`
+itself turns out not to be unique either: a second, unrelated constant
+evaluates to the same integer.
+
+`EXIT_LOCK_HELD = 75` (`src/athenaeum/_cli_shared.py`) is returned by the
+`_acquire_or_exit` helper (also in `_cli_shared.py`, issue athenaeum#309) when a
+mutating command — `athenaeum run` (`src/athenaeum/_cmd_run.py`) or any
+`athenaeum curate` subcommand (`src/athenaeum/_cmd_curate.py`) — cannot
+acquire the run lock. This happens **before any pipeline work starts**: no
+file is compiled, no `git_snapshot` commit happens, and
+`wiki/_deferred_work.md` is never written. None of the "partial progress
+committed, remaining/deferred intake left on disk, resumable" language that
+describes `EXIT_GRACEFUL_PARTIAL` above applies to a `75` produced this way —
+a run that exits `75` for lock contention did not run at all, so there is
+nothing to resume.
+
+So a caller keying `rc == 75` off this document alone cannot tell "partial
+progress committed, resumable" (`EXIT_GRACEFUL_PARTIAL`) apart from "another
+process holds the lock, zero work done, nothing to resume, just retry"
+(`EXIT_LOCK_HELD`) — the exact shape of collision the `75`/`124` split above
+was written to prevent, now reproduced within `75` itself. Today the only
+way to tell them apart from outside the process is the stderr text:
+`_acquire_or_exit` prints `error: <LockHeld message>` before returning,
+while a deadline trip logs through the normal `librarian-run-*` marker lines
+instead and never prints that string.
+
+**Renumbering `EXIT_LOCK_HELD` or `EXIT_GRACEFUL_PARTIAL` so the two no
+longer share a value is a separate, open decision.** It is a caller-visible
+contract change with its own review, out of scope for the issue that added
+this section. This section only makes the existing collision legible; it
+does not resolve it.
 
 ## Why 3 is its own code (issue athenaeum#1135)
 
