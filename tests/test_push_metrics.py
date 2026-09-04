@@ -243,8 +243,115 @@ class TestBuildPushRecordRedaction:
             assert key in d
         assert d["session_id"] == "sess-9"
         item = d["items"][0]
-        for key in ("id", "tier", "scope", "token_cost"):
+        for key in ("id", "tier", "scope", "token_cost", "memory_tier"):
             assert key in item
+
+
+class TestBuildPushRecordMemoryTier:
+    """athenaeum#1345 AC7: telemetry records each pushed page's ``memory_tier``
+    (the retrieval-cost tier), separate from the pre-existing ``tier`` field
+    (the ACCESS tier). Before this, ``PushedItem.tier`` was the only tier
+    on a ledger record and it was never ``memory_tier`` — closing that gap
+    is the field this class pins.
+
+    ``build_push_record`` takes the resolved value via the caller-supplied
+    ``memory_tier_by_filename`` map rather than calling
+    :func:`athenaeum.memory_tiers.resolve_tier` itself — see that
+    parameter's own docstring for why a same-module import would close a
+    genuine 3-node import cycle (``{memory_tiers, push_metrics,
+    usage_report}``) that ``tests/test_import_graph_acyclic.py`` forbids.
+    The production caller (``mcp_server._recall_via_backend``) resolves via
+    ``resolve_tier`` and passes the map in; these tests exercise
+    ``build_push_record``'s side of that contract directly.
+    """
+
+    def test_memory_tier_populated_from_the_caller_supplied_map(self) -> None:
+        """A filename present in ``memory_tier_by_filename`` is recorded
+        with that exact value."""
+        fm = {"uid": "p1", "access": "open"}
+        record = push_metrics.build_push_record(
+            session_id="sess-mt",
+            query="q",
+            backend="fts5",
+            hits=[("p1-page.md", fm, "some body text")],
+            memory_tier_by_filename={"p1-page.md": "hot"},
+        )
+        item = record.to_dict()["items"][0]
+        assert item["memory_tier"] == "hot"
+        # The pre-existing ACCESS tier is untouched by this change.
+        assert item["tier"] == "open"
+
+    def test_memory_tier_defaults_to_empty_when_filename_absent_from_map(self) -> None:
+        """A filename NOT present in the map (or no map at all) records
+        ``""`` — additive default, never a fabricated guess."""
+        fm = {"uid": "p2", "access": "internal"}
+        record = push_metrics.build_push_record(
+            session_id="sess-mt2",
+            query="q",
+            backend="fts5",
+            hits=[("p2-page.md", fm, "body")],
+        )
+        item = record.to_dict()["items"][0]
+        assert item["memory_tier"] == ""
+
+    def test_memory_tier_matches_resolve_tier_end_to_end(self) -> None:
+        """End-to-end sanity check: a caller that resolves via the real
+        :func:`athenaeum.memory_tiers.resolve_tier` (the way
+        ``mcp_server._recall_via_backend`` does) and passes the result
+        through round-trips unchanged onto the record."""
+        from athenaeum.memory_tiers import resolve_tier
+
+        fm = {"uid": "p3", "access": "open", "type": "principle"}
+        resolved = resolve_tier(fm)
+        record = push_metrics.build_push_record(
+            session_id="sess-mt-e2e",
+            query="q",
+            backend="fts5",
+            hits=[("p3-page.md", fm, "body")],
+            memory_tier_by_filename={"p3-page.md": resolved},
+        )
+        item = record.to_dict()["items"][0]
+        assert item["memory_tier"] == resolved == "hot"
+
+    def test_memory_tier_distinct_per_item_in_the_same_record(self) -> None:
+        """Two hits in one push record with different tiers are each
+        recorded with their OWN memory_tier — never a single record-level
+        value applied to every item."""
+        fm_hot = {"uid": "h1", "access": "open"}
+        fm_warm = {"uid": "w1", "access": "open"}
+        record = push_metrics.build_push_record(
+            session_id="sess-mt3",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("h1-page.md", fm_hot, "a"),
+                ("w1-page.md", fm_warm, "b"),
+            ],
+            memory_tier_by_filename={"h1-page.md": "hot", "w1-page.md": "warm"},
+        )
+        items = record.to_dict()["items"]
+        by_id = {it["id"]: it["memory_tier"] for it in items}
+        assert by_id == {"h1": "hot", "w1": "warm"}
+
+    def test_directly_constructed_pushed_item_without_memory_tier_still_round_trips(
+        self,
+    ) -> None:
+        """Additive-field contract: a pre-existing direct
+        :class:`push_metrics.PushedItem` construction that doesn't pass
+        ``memory_tier`` (e.g. ``tests/test_usage_report.py``) keeps working
+        unchanged — SCHEMA_VERSION is not bumped for this addition, matching
+        this module's established precedent of adding fields without a
+        version bump (e.g. the athenaeum#1036 coverage-audit fields)."""
+        record = push_metrics.PushRecord(
+            session_id="old-shape",
+            ts="2020-01-01T00:00:00Z",
+            query_hash="deadbeef",
+            backend="fts5",
+            items=[push_metrics.PushedItem(id="x", tier="internal", scope="owner", token_cost=1)],
+        )
+        d = record.to_dict()
+        assert d["v"] == push_metrics.SCHEMA_VERSION == 1
+        assert d["items"][0]["memory_tier"] == ""
 
 
 # ---------------------------------------------------------------------------

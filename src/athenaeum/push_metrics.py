@@ -200,12 +200,22 @@ class PushedItem:
     """One pushed page, as it will appear in a push record's ``items`` list.
 
     Every field is an id, a classification token, or a count — never content.
+
+    ``tier`` is the ACCESS tier (frontmatter ``access:`` -> ``open``/
+    ``internal``), not the retrieval-cost tier — kept as-is for backward
+    compatibility with every existing reader of this field. ``memory_tier``
+    (issue athenaeum#1345 AC7) is the separate retrieval-cost classification
+    (:func:`athenaeum.memory_tiers.resolve_tier` -> ``hot``/``warm``/
+    ``cold``/``refused``); additive, defaulted to ``""`` so a pre-existing
+    direct construction (e.g. a test fixture) that doesn't pass it keeps
+    working unchanged.
     """
 
     id: str
     tier: str
     scope: str
     token_cost: int
+    memory_tier: str = ""
 
 
 @dataclass
@@ -242,6 +252,7 @@ class PushRecord:
                     "tier": it.tier,
                     "scope": it.scope,
                     "token_cost": it.token_cost,
+                    "memory_tier": it.memory_tier,
                 }
                 for it in self.items
             ],
@@ -264,6 +275,7 @@ def build_push_record(
     query: str,
     backend: str,
     hits: list[tuple[str, dict[str, object], str]],
+    memory_tier_by_filename: dict[str, str] | None = None,
 ) -> PushRecord:
     """Build a :class:`PushRecord` from rendered recall hits.
 
@@ -280,7 +292,33 @@ def build_push_record(
             filtering — a hit dropped before rendering was never pushed).
             ``snippet_text`` is used ONLY to size the token-cost estimate; it
             is never retained on the record.
+        memory_tier_by_filename: optional ``{filename: resolved memory_tier}``
+            map (issue athenaeum#1345 AC7) — the retrieval-cost classification
+            (``hot``/``warm``/``cold``/``refused``), distinct from ``tier``
+            below (the ACCESS tier). A filename absent from the map (or the
+            map itself being ``None``) records ``""`` (additive default,
+            never a fabricated guess).
+
+            **Deliberately a caller-supplied map, not a same-module
+            :func:`athenaeum.memory_tiers.resolve_tier` call**, even though
+            that would read more directly as "populate from frontmatter
+            here": :mod:`athenaeum.memory_tiers` already imports FROM this
+            module (``opaque_push_id``, used by ``run_tier_sweep``) and from
+            :mod:`athenaeum.usage_report` (which itself imports FROM this
+            module) — so a same-module import of ``athenaeum.memory_tiers``
+            would close a 3-node cycle ``{memory_tiers, push_metrics,
+            usage_report}`` that ``tests/test_import_graph_acyclic.py``
+            hard-fails on (the allowed-SCC baseline has been pinned empty
+            since issue athenaeum#640; ANY new cycle is a regression).
+            Verified empirically while implementing this issue. The one
+            production caller (``athenaeum.mcp_server._recall_via_backend``)
+            already computes ``memory_tiers.resolve_tier(fm, config=config)``
+            per hit (issue athenaeum#718, unconditionally, before this
+            function is ever called) — reusing that already-resolved value
+            here is strictly cheaper than a second call, not just
+            cycle-avoiding.
     """
+    tier_map = memory_tier_by_filename or {}
     items: list[PushedItem] = []
     for filename, fm, snippet_text in hits:
         pid = opaque_push_id(filename, fm)
@@ -298,6 +336,7 @@ def build_push_record(
                 tier=tier,
                 scope=scope,
                 token_cost=estimate_tokens(snippet_text),
+                memory_tier=tier_map.get(filename, ""),
             )
         )
     return PushRecord(

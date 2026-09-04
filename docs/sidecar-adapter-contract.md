@@ -162,6 +162,32 @@ the converged core deliberately removed (see athenaeum#1358's own scope
 note and the `test_memory_tier_swap_does_not_change_selection_or_order`
 test).
 
+#### 2.3.1 Rollback path for this invariant
+
+If a future change reintroduces a tier predicate on the push path (the
+`AND memory_tier = 'hot'` shape §2.3 forbids, on either the FTS5 or the
+vector surface — see `tests/test_context_core.py::test_no_tier_predicate_in_source`),
+two independent stops apply:
+
+- **No-deploy stop-gap: the athenaeum#379 kill switch.** `athenaeum disable`
+  (or `ATHENAEUM_DISABLED=all` in the environment, or a hand-written
+  `{cache_dir}/disabled` state file — see `athenaeum.killswitch` and
+  `athenaeum.context._recall_disabled`, which reimplements the same check
+  inline for this module's own import-weight reasons) short-circuits
+  `build_context()` to the empty envelope on every call, immediately, with
+  no code deploy. This stops a regressed gate from reaching any live
+  session while the code fix lands.
+- **Revert-is-sufficient.** Reverting whatever commit reintroduced the
+  predicate is sufficient on its own — **no migration and no reindex**.
+  Every criterion above leaves `memory_tier` untouched: it stays populated
+  in the FTS5 index (`_probe_schema`/`_query_fts5`/`_query_vector` only ever
+  SELECT it, never write it) and in page frontmatter (`athenaeum.context`
+  contains no write path at all — confirmed by grep: no `write_text`,
+  `open(..., "w")`, or `atomic_write` call anywhere in the module). A
+  revert therefore restores relevance-alone ranking with the index already
+  in the correct shape; there is no drifted or half-migrated state to
+  reconcile.
+
 ### 2.4 `audience` is an access-control token, not a display field
 
 `audience` carries the index's raw, delimiter-anchored access-control string
