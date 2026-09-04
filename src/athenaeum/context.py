@@ -47,6 +47,7 @@ import at module scope (see the import-weight contract above).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -54,6 +55,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 ENVELOPE_VERSION = 1
 
@@ -193,6 +196,25 @@ class _Schema:
     has_memory_tier: bool
 
 
+def _open_ro(db_file: Path) -> sqlite3.Connection:
+    """Open the index read-only, with a busy timeout.
+
+    Read-only (``mode=ro``) so this reader never itself becomes the lock
+    contender. The busy timeout matters more than it looks: an index build
+    (``build_fts5_index``, or the CLI ``repair``/``ingest`` paths) can hold
+    a write lock for real work, and a per-turn query racing that write is
+    the NORMAL case for a background sidecar, not an edge case. Retrying
+    for up to 2s inside sqlite (rather than raising immediately) absorbs
+    that ordinary contention; 2s is well over this module's own FTS5-path
+    wall-clock budget, but it is a bounded worst case for an uncommon race,
+    not the common path — see the callers' own ``OperationalError`` handling
+    for what happens if contention still outlasts it.
+    """
+    conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True)
+    conn.execute("PRAGMA busy_timeout = 2000")
+    return conn
+
+
 def _probe_schema(conn: sqlite3.Connection) -> _Schema:
     """Issue athenaeum#1344 / athenaeum#1358 — legacy-DB safety, probed ONCE per
     connection. A DB built by an older athenaeum predates the
@@ -237,10 +259,17 @@ def _query_fts5(
     params: list[Any] = [fts_query, *exclude_list, n]
     try:
         rows = conn.execute(sql, params).fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
         # Belt-and-suspenders beyond the PRAGMA probe above (e.g. an FTS5
-        # query-syntax edge case) — degrade to no FTS5 candidates rather
-        # than raising out of the whole context build.
+        # query-syntax edge case, or lock contention that outlasted
+        # `_open_ro`'s busy_timeout) — degrade to no FTS5 candidates rather
+        # than raising out of the whole context build. Logged, not silently
+        # swallowed: a silent empty-result here for "database is locked" is
+        # exactly the "reads as zero forever" hazard athenaeum#1343's
+        # telemetry motivation exists to catch — it must at least be
+        # observable, even though this module doesn't write telemetry
+        # itself (that's issue athenaeum#1362).
+        log.warning("FTS5 query failed, degrading to no candidates: %s", exc)
         return []
     out: list[Candidate] = []
     for filename, name, rank, audience, memory_tier, description in rows:
@@ -300,7 +329,8 @@ def _query_vector(
                 filenames,
             ).fetchall()
             meta = {r[0]: (r[1] or "", r[2] or "", r[3] or "") for r in rows}
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            log.warning("vector-hit metadata lookup failed, degrading to name-only: %s", exc)
             meta = {}
     for filename, name, _score in hits:
         audience, memory_tier, description = meta.get(filename, ("", "", ""))
@@ -471,7 +501,7 @@ def build_context(
     schema: _Schema | None = None
 
     if terms and db_file.is_file():
-        conn = sqlite3.connect(str(db_file))
+        conn = _open_ro(db_file)
         try:
             schema = _probe_schema(conn)
             fts_query = build_fts_query(terms)

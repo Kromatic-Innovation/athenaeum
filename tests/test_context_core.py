@@ -24,13 +24,6 @@ CONTEXT_PY = Path(__file__).resolve().parent.parent / "src" / "athenaeum" / "con
 BUDGET_MS = 127.0
 MIN_PAGES = 1000
 
-_CREATE_SQL = (
-    "CREATE VIRTUAL TABLE wiki USING fts5("
-    "filename, name, tags, aliases, description, "
-    "audience UNINDEXED, type UNINDEXED, memory_tier UNINDEXED, "
-    'tokenize="porter unicode61")'
-)
-
 
 def _run(code: str) -> str:
     result = subprocess.run(
@@ -389,7 +382,7 @@ def test_missing_index_returns_empty_envelope_not_an_error(tmp_path: Path) -> No
 
 # ---------------------------------------------------------------------------
 # `exclude` — the seam session dedup (this issue) and issues athenaeum#1361/
-# #1362 both build against
+# athenaeum#1362 both build against
 # ---------------------------------------------------------------------------
 
 
