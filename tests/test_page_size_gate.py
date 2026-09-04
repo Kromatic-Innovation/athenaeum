@@ -39,6 +39,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 from athenaeum import rules as rules_module
 from athenaeum import tiers as tiers_module
@@ -659,6 +660,45 @@ class TestOversizePageLogDemote:
         assert len(dest_candidates) == 1
         assert dest_candidates[0].read_text() == original_full_text  # no content lost
 
+    def test_log_demote_via_reactive_gate_also_writes_a_retired_record(
+        self, tmp_path: Path
+    ) -> None:
+        """issue athenaeum#1406: the reactive ``check_page_size_gate`` call
+        site shares :func:`_perform_oversize_log_demote` with the operator
+        entrypoint (:func:`demote_oversize_pages`), so it gets the
+        retired-name guard for free -- pinned here so the two call sites
+        cannot silently drift."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        path, meta, existing_body = _make_flat_fixture_page(wiki)
+        action = _update_action(name="Huge Log", existing_uid="cccc3333")
+        config = {
+            "librarian": {
+                "oversize_page_action": "log_demote",
+                "preserved_log_dir": "logs",
+            }
+        }
+
+        check_page_size_gate(
+            action,
+            existing_body,
+            "sessions/x.md",
+            config,
+            existing_path=path,
+            existing_meta=meta,
+            wiki_root=wiki,
+        )
+
+        payload = yaml.safe_load((wiki / "_retired_names.yaml").read_text())
+        assert payload["retired"][0] == {
+            "uid": "cccc3333",
+            "name": "Huge Log",
+            "aliases": [],
+            "demoted_to": payload["retired"][0]["demoted_to"],
+            "demoted_on": payload["retired"][0]["demoted_on"],
+        }
+        assert (tmp_path / "logs").exists()
+
     def test_log_demote_unconfigured_falls_back_to_review_untouched(
         self, tmp_path: Path
     ) -> None:
@@ -947,3 +987,139 @@ class TestDemoteOversizePages:
         assert by_path[target_ok].demoted is True
         assert by_path[missing].demoted is False
         assert by_path[missing].reason == "missing"
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1406: log_demote must leave a retired-name record a
+# subsequent validate_create_name() call can see -- otherwise the name is
+# silently re-mintable the next time it is mentioned.
+# ---------------------------------------------------------------------------
+
+
+def _make_person_fixture_page(
+    wiki: Path,
+    *,
+    uid: str = "aaaa1111",
+    name: str = "dijkstra",
+    aliases: list[str] | None = None,
+) -> Path:
+    """A small ``type: person`` page -- ``demote_oversize_pages`` (the
+    operator entrypoint under test here) demotes exactly the paths it is
+    given, with no size check of its own, so this fixture does not need to
+    be oversize like ``_make_flat_fixture_page``."""
+    wiki.mkdir(parents=True, exist_ok=True)
+    aliases_yaml = ""
+    if aliases:
+        aliases_yaml = "aliases:\n" + "".join(f"  - {a}\n" for a in aliases)
+    path = wiki / f"{uid}-{name.lower()}.md"
+    path.write_text(
+        f"---\nuid: {uid}\ntype: person\nname: {name}\n{aliases_yaml}---\n\n"
+        "Some persona/session-log content mistyped as person.\n"
+    )
+    return path
+
+
+class TestLogDemoteRetiredNameGuard:
+    def test_demote_writes_a_retired_name_record(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        target = _make_person_fixture_page(
+            wiki, uid="aaaa1111", name="dijkstra", aliases=["Dijkstra the Developer"]
+        )
+        config = {"librarian": {"preserved_log_dir": "logs"}}
+
+        results = demote_oversize_pages([target], wiki, config)
+
+        assert results[0].demoted is True
+        sidecar = wiki / "_retired_names.yaml"
+        assert sidecar.exists()
+        payload = yaml.safe_load(sidecar.read_text())
+        [record] = payload["retired"]
+        assert record["uid"] == "aaaa1111"
+        assert record["name"] == "dijkstra"
+        assert record["aliases"] == ["Dijkstra the Developer"]
+        assert record["demoted_to"] == str(results[0].dest)
+
+    def test_retired_sidecar_is_excluded_from_entity_index(self, tmp_path: Path) -> None:
+        """The sidecar's leading underscore keeps :meth:`EntityIndex._load`
+        from ever reading it (that method skips any ``wiki_root.glob("*.md")``
+        match starting with ``_``) -- so a retired record can never re-enter
+        :meth:`EntityIndex.items`'s raw-text MENTION-matching fan-out merely
+        by having been written (issue athenaeum#1406 AC3)."""
+        wiki = tmp_path / "wiki"
+        target = _make_person_fixture_page(wiki)
+        config = {"librarian": {"preserved_log_dir": "logs"}}
+        demote_oversize_pages([target], wiki, config)
+
+        index = EntityIndex(wiki)
+
+        assert index.lookup("dijkstra") is None
+        assert list(index.items()) == []
+        assert len(index) == 0
+
+    def test_demote_move_failure_leaves_no_retired_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Atomicity (issue athenaeum#1406 AC4 / Plan step 3): a fixture in
+        which the move fails leaves neither a retired-name record nor a
+        half-moved page. ``preserve_raw_file`` fails closed internally (an
+        ``OSError`` from ``shutil.move`` is caught there and turned into a
+        ``None`` return, never raised) -- this pins that "failed move" and
+        "no record written" are the exact same branch."""
+        wiki = tmp_path / "wiki"
+        target = _make_person_fixture_page(wiki)
+        before = target.read_text()
+
+        def _flaky_move(*_a: object, **_kw: object) -> None:
+            raise OSError("simulated move failure")
+
+        monkeypatch.setattr(rules_module.shutil, "move", _flaky_move)
+        config = {"librarian": {"preserved_log_dir": "logs"}}
+
+        results = demote_oversize_pages([target], wiki, config)
+
+        assert results[0].demoted is False
+        assert target.exists()
+        assert target.read_text() == before
+        assert not (wiki / "_retired_names.yaml").exists()
+
+    def test_demote_with_no_uid_or_name_frontmatter_still_moves_unguarded(
+        self, tmp_path: Path
+    ) -> None:
+        """A page with no wiki-entity frontmatter at all has no name to
+        guard -- it still demotes (unchanged pre-athenaeum#1406 behaviour),
+        just without a retired-name record."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        path = wiki / "no-frontmatter.md"
+        path.write_text("Just prose, no frontmatter at all.\n")
+        config = {"librarian": {"preserved_log_dir": "logs"}}
+
+        results = demote_oversize_pages([path], wiki, config)
+
+        assert results[0].demoted is True
+        assert not (wiki / "_retired_names.yaml").exists()
+
+    @pytest.mark.parametrize(
+        "uid,name",
+        [
+            ("d1", "dijkstra"),
+            ("d2", "cicero"),
+            ("d3", "lane"),
+            ("d4", "unknown"),
+            ("d5", "owner"),
+        ],
+    )
+    def test_each_pr_1395_demoted_name_gets_a_record(
+        self, tmp_path: Path, uid: str, name: str
+    ) -> None:
+        """issue athenaeum#1406 AC: the five names PR athenaeum#1395 demoted
+        (dijkstra/cicero/lane/unknown/owner) are each covered."""
+        wiki = tmp_path / "wiki"
+        target = _make_person_fixture_page(wiki, uid=uid, name=name)
+        config = {"librarian": {"preserved_log_dir": "logs"}}
+
+        results = demote_oversize_pages([target], wiki, config)
+
+        assert results[0].demoted is True
+        payload = yaml.safe_load((wiki / "_retired_names.yaml").read_text())
+        assert payload["retired"][0]["name"] == name
