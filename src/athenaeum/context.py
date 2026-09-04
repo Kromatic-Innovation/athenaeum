@@ -671,17 +671,19 @@ def record_context_push(
                 )
             )
 
-        # Same construction as `push_metrics._query_hash` (SHA-256,
-        # truncated to 16 hex chars) — not imported directly (that name is
-        # module-private); replicated per `docs/sidecar-adapter-contract.md`
-        # §1.1's own citation of this exact construction for a persisting
-        # adapter. The envelope's `query` field is the RAW prompt (§1.1) —
-        # only its hash is ever retained here, same as the MCP path.
-        import hashlib
-
-        query_hash = hashlib.sha256(
-            str(envelope.get("query", "")).encode("utf-8")
-        ).hexdigest()[:16]
+        # `push_metrics._query_hash` is called directly rather than
+        # reimplemented here, DESPITE the leading underscore: this issue's
+        # own second acceptance criterion names "two independent
+        # serializers drifting apart" as the hazard it closes by
+        # construction, and a second copy of the hash construction is
+        # exactly that hazard at a smaller scale — a later change to the
+        # digest or its truncation would silently decorrelate sidecar rows
+        # from recall rows written the same day. Same-package private
+        # access, one call site, in preference to a duplicate. The
+        # envelope's `query` field is the RAW prompt
+        # (`docs/sidecar-adapter-contract.md` §1.1) — only its hash is ever
+        # retained here, same as the MCP path.
+        query_hash = push_metrics._query_hash(str(envelope.get("query", "")))
 
         record = push_metrics.PushRecord(
             session_id=session_id,
