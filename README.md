@@ -944,6 +944,7 @@ specific piece:
 
 - [`docs/why-athenaeum.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/why-athenaeum.md) — full design rationale, comparison with mem0/Letta/Zep/Cognee/RAG/Claude memory, and production lessons.
 - [`docs/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/recall-architecture.md) — the hybrid FTS5 + vector recall path and its invariants.
+- [`docs/sidecar-adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/sidecar-adapter-contract.md) — the `athenaeum context` sidecar core's envelope schema and the may/may-not rules for a host-specific adapter.
 - [`docs/contradiction-detection.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/contradiction-detection.md) — contradiction pipeline, cross-scope modes, cost model.
 - [`docs/conflict-resolution.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/conflict-resolution.md) and [`docs/auto-resolve.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/auto-resolve.md) — the resolver's action taxonomy and auto-apply lane.
 - [`docs/authority-manifest.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/authority-manifest.md) and [`docs/source-handles.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/source-handles.md) — source precedence and provenance handles.
