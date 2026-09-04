@@ -317,6 +317,14 @@ DEFAULT_MAX_RUNTIME = 3600  # 1 hour
 # trips: partial progress is already committed, the deferred intake is left
 # on disk, and the next run picks it up. This is the ONLY code an athenaeum
 # internal check returns for a deadline trip — never 124.
+#
+# Shares its integer value with the UNRELATED EXIT_LOCK_HELD
+# (`src/athenaeum/_cli_shared.py`) — a run-lock-contention code returned
+# before any pipeline work starts, so none of this constant's
+# "partial-progress, resumable" semantics apply to it. See
+# docs/exit-codes.md ("`75` also collides with `EXIT_LOCK_HELD`", issue
+# athenaeum#1379) for the collision; renumbering either constant is a
+# separate, open decision not made there.
 EXIT_GRACEFUL_PARTIAL = 75
 
 # Reserved for the EXTERNAL killer — matches coreutils `timeout`(1), which
