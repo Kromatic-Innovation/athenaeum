@@ -201,7 +201,7 @@ class TestTheHistoricalDefect:
 class TestDirAttrsDimension:
     """The fourth dimension, added for athenaeum#1401.
 
-    PR #1373's lazy-export rewrite dropped ~40 submodule names from
+    PR athenaeum#1373's lazy-export rewrite dropped ~40 submodule names from
     ``dir(athenaeum)`` (78 -> 50) without touching ``__all__``, so the three
     original dimensions passed it through silently. This class demonstrates
     the guard now catches it, in both directions, the same way
@@ -218,7 +218,7 @@ class TestDirAttrsDimension:
             "(athenaeum#1373) but the guard sees no dir_attrs removal at all — "
             "either the baseline is stale or the dimension isn't wired up"
         )
-        # A representative sample of the submodule names #1373's PEP-562
+        # A representative sample of the submodule names athenaeum#1373's PEP-562
         # rewrite stopped exposing as side-effect module attributes.
         assert {"config", "pii", "spend", "storage", "models"} <= set(removed["dir_attrs"])
 

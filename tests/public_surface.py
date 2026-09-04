@@ -29,7 +29,7 @@ MCP tools                     static, AST over       ``read_person``
                               ``mcp_server.py``
 ============================  =====================  =========================
 
-A fourth dimension, ``dir_attrs``, was added for athenaeum#1401. PR #1373
+A fourth dimension, ``dir_attrs``, was added for athenaeum#1401. PR athenaeum#1373
 rewrote ``src/athenaeum/__init__.py`` to lazily export via PEP 562
 ``__getattr__`` instead of eagerly importing ``athenaeum.librarian``, and as a
 side effect stopped populating ~40 submodule names (``athenaeum.config``,
