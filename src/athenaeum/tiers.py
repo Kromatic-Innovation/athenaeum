@@ -57,13 +57,26 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-import anthropic
-
 if TYPE_CHECKING:
     # Annotation-only (athenaeum#1126) — mirrors the lazy-import convention
     # athenaeum.identity_resolution already follows: the real import stays
     # local to the one function that needs it, to avoid a
     # tiers <-> identity_resolution import cycle at module load time.
+    #
+    # ``anthropic`` joined this block for the same reason plus a measured one
+    # (issue athenaeum#1360): its ONLY use in this module is the annotation on
+    # ``_record_usage``'s *response* parameter, and ``from __future__ import
+    # annotations`` (above) means that annotation is never evaluated at runtime.
+    # Imported eagerly it cost ~440 ms, and it was reached far beyond the LLM
+    # call sites: several modules import a lone CONSTANT from here
+    # (``drain_advisor`` wants ``DEFAULT_WRITE_MODEL``, ``rule_proposals`` wants
+    # ``_record_usage``), and through them the SDK landed on the path of every
+    # ``athenaeum`` CLI invocation while ``cli.build_parser()`` assembled its
+    # subcommand tree. The SDK is still a hard dependency and every real call
+    # site imports it locally — it just is not paid for by commands that never
+    # talk to a model.
+    import anthropic
+
     from athenaeum.pii import ExcludedRecordIndex
 
 from athenaeum._retry import with_retry
