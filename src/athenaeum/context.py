@@ -56,9 +56,34 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from athenaeum.context_schema import SCHEMA_VERSION
+
 log = logging.getLogger(__name__)
 
-ENVELOPE_VERSION = 1
+# Single-sourced from athenaeum.context_schema (issue athenaeum#1359 review
+# finding, Seer/Sentry HIGH): this module's envelope version and the
+# schema module's SCHEMA_VERSION were previously two independent literals
+# both hand-set to 1, with nothing keeping them equal — a future schema
+# bump in one file without the matching edit in the other would silently
+# desync, and every envelope this module builds would then fail
+# `context_schema.validate_envelope()`'s version check.
+#
+# This import adds NO marginal cost against this module's import-weight
+# contract, but not for the reason `_recall_disabled`'s docstring might
+# suggest at a glance: `context.py` IS `athenaeum.context`, a submodule, so
+# simply reaching this line has ALREADY forced Python to run
+# `athenaeum/__init__.py` (a submodule import always initializes its parent
+# package first) — that cost is paid unconditionally by anyone who does
+# `import athenaeum.context`, before this module's own body even starts.
+# `context_schema.py` then adds nothing further: it has zero athenaeum
+# imports of its own (stdlib-only, see its module docstring), so loading it
+# is just reading one more small file, not a second trip through the
+# package root. Contrast `_recall_disabled` below, whose avoided
+# `athenaeum.killswitch` import would have added REAL marginal cost —
+# killswitch.py's own chain (`athenaeum.atomic_io`, `athenaeum.config` ->
+# `yaml`) — on top of the already-paid package-root cost, on every single
+# call.
+ENVELOPE_VERSION = SCHEMA_VERSION
 
 DEFAULT_BUDGET_TOKENS = 1200
 
