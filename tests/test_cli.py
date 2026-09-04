@@ -1373,3 +1373,57 @@ class TestEverySubparserHelpRenders:
         assert excinfo.value.code == 0
         out = capsys.readouterr().out
         assert "97%" in out
+
+
+class TestSubcommandLoaderRegistryStaysInSync:
+    """Guard athenaeum#1360 residual: ``main()``'s lazy dispatch registry
+    (``cli._SUBCOMMAND_LOADERS``) must name every subcommand ``build_parser()``
+    actually registers, aliases included — a subcommand added to a ``_cmd_*``
+    module without a matching registry entry would silently fall back to the
+    slow (but still correct) eager path in ``main()``, which is safe but would
+    make the fast path quietly stop covering new commands with nobody
+    noticing. This walks the real, eagerly-built top-level parser and diffs
+    its subcommand name set against the registry's keys.
+    """
+
+    def test_registry_key_set_matches_top_level_choices(self) -> None:
+        from athenaeum.cli import _SUBCOMMAND_LOADERS
+
+        parser = build_parser()
+        top = next(
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        actual = set(top.choices)
+        registered = set(_SUBCOMMAND_LOADERS)
+        missing, extra = actual - registered, registered - actual
+        assert not missing and not extra, (
+            "cli._SUBCOMMAND_LOADERS is out of sync with build_parser()'s "
+            f"top-level subcommands.\n  missing from registry: {sorted(missing)}\n"
+            f"  registry entries with no matching subcommand: {sorted(extra)}"
+        )
+
+    def test_each_registry_entry_resolves_and_dispatches_lazily(self) -> None:
+        """Every registry entry must actually import cleanly and produce a
+        parser whose subcommand matches what the eager build produced —
+        proving the fast path is not just present but functionally identical.
+        """
+        from athenaeum.cli import _build_lazy_parser
+
+        parser = build_parser()
+        top = next(
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        for name in top.choices:
+            lazy_parser = _build_lazy_parser(name)
+            lazy_top = next(
+                action
+                for action in lazy_parser._actions
+                if isinstance(action, argparse._SubParsersAction)
+            )
+            assert name in lazy_top.choices, (
+                f"_build_lazy_parser({name!r}) did not register {name!r}"
+            )
