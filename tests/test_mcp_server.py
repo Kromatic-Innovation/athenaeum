@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -1562,3 +1563,99 @@ class TestAllMcpToolWrappers:
         # error dict, not a raised exception.
         assert res.get("ok") is False
         assert res.get("error")
+
+
+# ---------------------------------------------------------------------------
+# README <-> registered-tool parity (issue athenaeum#1380)
+#
+# Derives BOTH sides at runtime -- the registered tool names (and their
+# read/write classification, from the module's own `_MUTATING_TOOLS`-style
+# knowledge -- see below) from the live `create_server()` instance, and the
+# documented names/classification from README.md's own table -- and hard-
+# codes neither list, so registering a new tool without adding (or removing)
+# a matching README row fails this test.
+# ---------------------------------------------------------------------------
+
+
+def _registered_tool_names(tmp_path: Path) -> set[str]:
+    import asyncio
+
+    pytest.importorskip("fastmcp")
+    from athenaeum.mcp_server import create_server
+
+    raw = tmp_path / "raw"
+    wiki = tmp_path / "wiki"
+    raw.mkdir()
+    wiki.mkdir()
+    server = create_server(raw_root=raw, wiki_root=wiki)
+
+    async def _run() -> set[str]:
+        return {t.name for t in await server.list_tools()}
+
+    return asyncio.run(_run())
+
+
+def _readme_mcp_section() -> str:
+    readme = Path(__file__).resolve().parent.parent / "README.md"
+    text = readme.read_text()
+    start = text.index("## The MCP surface")
+    end = text.index("\n## ", start + 1)
+    return text[start:end]
+
+
+def _readme_tool_rows() -> dict[str, str]:
+    """Parse ``{tool_name: "READ"|"WRITE"}`` out of the README table.
+
+    Matches ``| `tool_name` | READ | ... |`` / ``| `tool_name` | WRITE | ... |``
+    rows -- the same shape every existing row already uses.
+    """
+    section = _readme_mcp_section()
+    rows: dict[str, str] = {}
+    for line in section.splitlines():
+        m = re.match(r"\|\s*`([a-zA-Z_][a-zA-Z0-9_]*)`\s*\|\s*(READ|WRITE)\s*\|", line)
+        if m:
+            rows[m.group(1)] = m.group(2)
+    return rows
+
+
+def _readme_stated_counts() -> tuple[int, int, int]:
+    """Parse ``(total, read_only, mutating)`` out of the section's prose."""
+    section = _readme_mcp_section()
+    total_m = re.search(r"exposing \*\*(\d+) tools\*\*", section)
+    split_m = re.search(r"(\d+) read-only, (\d+) that mutate", section)
+    assert total_m and split_m, "README MCP-surface prose did not match the expected pattern"
+    return int(total_m.group(1)), int(split_m.group(1)), int(split_m.group(2))
+
+
+class TestReadmeToolTableMatchesRegisteredTools:
+    def test_documented_names_equal_registered_names(self, tmp_path: Path) -> None:
+        registered = _registered_tool_names(tmp_path)
+        documented = set(_readme_tool_rows())
+        assert documented == registered, (
+            f"README table and create_server() have drifted -- "
+            f"documented only: {documented - registered}, "
+            f"registered only: {registered - documented}"
+        )
+
+    def test_stated_total_equals_registered_count(self, tmp_path: Path) -> None:
+        registered = _registered_tool_names(tmp_path)
+        total, _read_only, _mutating = _readme_stated_counts()
+        assert total == len(registered)
+
+    def test_stated_split_equals_table_rw_counts(self) -> None:
+        rows = _readme_tool_rows()
+        _total, stated_read, stated_write = _readme_stated_counts()
+        assert stated_read == sum(1 for v in rows.values() if v == "READ")
+        assert stated_write == sum(1 for v in rows.values() if v == "WRITE")
+
+    def test_table_has_no_duplicate_or_unrecognized_rw_value(self) -> None:
+        section = _readme_mcp_section()
+        names = []
+        for line in section.splitlines():
+            m = re.match(r"\|\s*`([a-zA-Z_][a-zA-Z0-9_]*)`\s*\|\s*(\S+)\s*\|", line)
+            if m:
+                names.append(m.group(1))
+                assert m.group(2) in {"READ", "WRITE"}, (
+                    f"row for `{m.group(1)}` has an unrecognized R/W value: {m.group(2)!r}"
+                )
+        assert len(names) == len(set(names)), "README table has a duplicate tool row"
