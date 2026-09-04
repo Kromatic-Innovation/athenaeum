@@ -1988,3 +1988,299 @@ def outstanding_reservation_usd(
         except (TypeError, ValueError):
             continue
     return total
+
+
+# ---------------------------------------------------------------------------
+# Ceiling backtest (issue athenaeum#1407) — replay candidate ceilings, read-only
+# ---------------------------------------------------------------------------
+
+#: The ceiling-shaped keys under ``spend:`` in config/CLI-candidate terms
+#: (issue athenaeum#1407's plan point 1: reuse the existing config key names,
+#: so a candidate this backtest names can be pasted straight into config once
+#: chosen). ``weekly_token_limit`` / ``max_pct_per_day`` are a PAIR — see
+#: :func:`ceiling_tripped` — and are only ever tested TOGETHER, never alone.
+_CEILING_CONFIG_KEYS: tuple[str, ...] = (
+    "max_tokens_per_run",
+    "max_tokens_per_day",
+    "max_usd_per_run",
+    "max_usd_per_day",
+    "weekly_token_limit",
+    "max_pct_per_day",
+)
+
+#: The compound name the weekly-limit + max-pct-per-day pair reports under —
+#: neither of its two config keys alone identifies it.
+_WEEKLY_PCT_KNOB = "weekly_token_limit+max_pct_per_day"
+
+
+class _ReplayUsage:
+    """Duck-typed stand-in for :class:`athenaeum.models.TokenUsage`, built from
+    one ledger RECORD instead of a live accumulator.
+
+    :func:`ceiling_tripped` reads exactly two attributes off its ``usage``
+    argument in the (non-batch, no ``wiki_root``) path this backtest replays:
+    ``billable_tokens`` (subscription branch) and ``estimated_cost_usd`` (API
+    branch). Constructing a full :class:`~athenaeum.models.TokenUsage` from a
+    persisted row would require re-deriving internal per-model rate state this
+    module has no business reconstructing; exposing only what the predicate
+    actually reads keeps the replay honest about what it does and does not
+    reproduce.
+    """
+
+    __slots__ = ("billable_tokens", "estimated_cost_usd")
+
+    def __init__(self, record: dict[str, Any]) -> None:
+        self.billable_tokens = _record_billable_tokens(record)
+        self.estimated_cost_usd = float(record.get("estimated_cost_usd", 0.0) or 0.0)
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    """Nearest-rank percentile of *values* (0 <= pct <= 100). Assumes non-empty."""
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = max(0, min(len(ordered) - 1, int(round(pct / 100 * (len(ordered) - 1)))))
+    return ordered[rank]
+
+
+def _metric_distribution(values: list[float]) -> dict[str, Any] | None:
+    if not values:
+        return None
+    return {
+        "count": len(values),
+        "max": max(values),
+        "p95": _percentile(values, 95),
+        "median": _percentile(values, 50),
+    }
+
+
+def _knob_configs(
+    candidates: dict[str, Any], base_config: dict[str, Any] | None
+) -> dict[str, dict[str, Any]]:
+    """Build one isolated single-knob config per supplied candidate.
+
+    Each candidate is tested in isolation against the OTHER candidates (a
+    knob's trip rate answers "what would THIS value alone have done", not
+    "what would the whole armed set have done together") — carrying forward
+    only non-ceiling ``spend:`` config (e.g. ``accounting_timezone``, issue
+    athenaeum#1136) from *base_config* so the day-bucketing AC is honoured
+    faithfully. ``weekly_token_limit`` and ``max_pct_per_day`` are only
+    included together, under :data:`_WEEKLY_PCT_KNOB`, mirroring
+    :func:`ceiling_tripped`'s own opt-in-together contract for that pair.
+    """
+    base_config = base_config or {}
+    base_spend = {
+        k: v
+        for k, v in (base_config.get("spend") or {}).items()
+        if k not in _CEILING_CONFIG_KEYS
+    }
+    base_rest = {k: v for k, v in base_config.items() if k != "spend"}
+
+    def _cfg(spend_overrides: dict[str, Any]) -> dict[str, Any]:
+        spend_cfg = dict(base_spend)
+        spend_cfg.update(spend_overrides)
+        return {**base_rest, "spend": spend_cfg}
+
+    configs: dict[str, dict[str, Any]] = {}
+    for key in (
+        "max_tokens_per_run",
+        "max_tokens_per_day",
+        "max_usd_per_run",
+        "max_usd_per_day",
+    ):
+        value = candidates.get(key)
+        if value is not None:
+            configs[key] = _cfg({key: value})
+
+    weekly = candidates.get("weekly_token_limit")
+    pct = candidates.get("max_pct_per_day")
+    if weekly is not None and pct is not None:
+        configs[_WEEKLY_PCT_KNOB] = _cfg(
+            {"weekly_token_limit": weekly, "max_pct_per_day": pct}
+        )
+
+    return configs
+
+
+def ceiling_backtest(
+    records: list[dict[str, Any]],
+    candidates: dict[str, Any],
+    *,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Replay candidate spend ceilings against a historical ledger (issue athenaeum#1407).
+
+    For each supplied candidate, replays :func:`ceiling_tripped` — the SAME
+    production predicate ``librarian.py``/``batch.py`` gate a live run on —
+    against *records* IN TIMESTAMP ORDER, feeding it a ledger that, at the
+    moment run *i* is checked, contains only runs ``0..i-1`` (never run *i*
+    itself, never a later run) — exactly the view the predicate has when it
+    actually gates a run, before that run's own record is appended. This is
+    what makes the per-day trip determination agree with production day-
+    bucketing (:func:`_start_of_accounting_day` via :func:`spend_today`)
+    rather than a reimplementation of it (AC2/AC3).
+
+    A run is evaluated against a candidate ceiling only via the SAME
+    subscription-vs-API branch :func:`ceiling_tripped` itself takes (keyed
+    off each record's ``provider``) — a token candidate never "trips" against
+    an API-priced run and vice versa, matching production exactly.
+
+    Read-only throughout (AC5): the replay ledger is a private temp file this
+    function creates and discards; *records*' own source ledger is never
+    opened for writing, and no config file is touched.
+
+    Returns a "no data" result (AC6), distinguishable from a real zero-trip
+    result, when *records* is empty or contains no parseable timestamps, or
+    when *candidates* names no ceiling. Otherwise returns
+    ``{"no_data": False, "runs_evaluated": N, "days_evaluated": M, "knobs": {...}}``,
+    one entry per requested knob name (the config key, or
+    :data:`_WEEKLY_PCT_KNOB` for the paired knob) carrying
+    ``runs_evaluated``/``runs_tripped``/``run_trip_rate``,
+    ``days_evaluated``/``days_tripped``/``day_trip_rate``, and ``metric`` (the
+    observed max/p95/median of the value that knob bounds — ``None`` when no
+    replayed run had a value on that knob's billing path).
+    """
+    dated: list[tuple[datetime, dict[str, Any]]] = []
+    for record in records:
+        ts = _parse_ts(record.get("ts"))
+        if ts is not None:
+            dated.append((ts, record))
+    dated.sort(key=lambda pair: pair[0])
+
+    knob_configs = _knob_configs(candidates, config)
+
+    if not dated or not knob_configs:
+        return {
+            "no_data": True,
+            "runs_evaluated": len(dated),
+            "days_evaluated": 0,
+            "knobs": {},
+        }
+
+    def _day_key(ts: datetime) -> str:
+        return _start_of_accounting_day(ts, config).date().isoformat()
+
+    all_days = {_day_key(ts) for ts, _ in dated}
+
+    state: dict[str, dict[str, Any]] = {
+        name: {
+            "runs_tripped": 0,
+            "days_tripped": set(),
+            "run_values": [],  # per-run metric values (run-scoped knobs)
+        }
+        for name in knob_configs
+    }
+    day_sub_tokens: dict[str, float] = {}
+    day_api_usd: dict[str, float] = {}
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="athenaeum-ceiling-backtest-") as tmp:
+        replay_path = Path(tmp) / "replay.jsonl"
+
+        for ts, record in dated:
+            usage = _ReplayUsage(record)
+            provider = str(record.get("provider") or "")
+            day_key = _day_key(ts)
+            is_subscription = ledger_provider(provider) == PROVIDER_CLAUDE_CLI
+
+            for name, knob_cfg in knob_configs.items():
+                # _ReplayUsage is a deliberate duck-typed stand-in for
+                # TokenUsage (see its docstring) — ceiling_tripped only reads
+                # the two attributes it exposes, so the structural mismatch
+                # mypy would otherwise flag here is intentional.
+                reason = ceiling_tripped(
+                    usage,  # type: ignore[arg-type]
+                    provider=provider,
+                    config=knob_cfg,
+                    ledger_path=replay_path,
+                    now=ts,
+                )
+                if reason is not None:
+                    state[name]["runs_tripped"] += 1
+                    state[name]["days_tripped"].add(day_key)
+                # Per-run metric: only the runs on the knob's OWN billing path
+                # inform its distribution — a token knob's distribution is
+                # never diluted by dollar-priced runs and vice versa.
+                is_token_knob = name in (
+                    "max_tokens_per_run",
+                    "max_tokens_per_day",
+                    _WEEKLY_PCT_KNOB,
+                )
+                if is_token_knob and is_subscription:
+                    state[name]["run_values"].append(float(usage.billable_tokens))
+                elif not is_token_knob and not is_subscription:
+                    state[name]["run_values"].append(float(usage.estimated_cost_usd))
+
+            if is_subscription:
+                day_sub_tokens[day_key] = day_sub_tokens.get(day_key, 0.0) + usage.billable_tokens
+            else:
+                day_api_usd[day_key] = day_api_usd.get(day_key, 0.0) + usage.estimated_cost_usd
+
+            with replay_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record) + "\n")
+
+    knobs: dict[str, Any] = {}
+    day_scoped = {
+        "max_tokens_per_day": day_sub_tokens,
+        "max_usd_per_day": day_api_usd,
+        _WEEKLY_PCT_KNOB: day_sub_tokens,
+    }
+    for name, res in state.items():
+        runs_tripped = res["runs_tripped"]
+        days_tripped = len(res["days_tripped"])
+        scope = "day" if name in day_scoped else "run"
+        metric_values = (
+            list(day_scoped[name].values()) if scope == "day" else res["run_values"]
+        )
+        knobs[name] = {
+            "scope": scope,
+            "runs_evaluated": len(dated),
+            "runs_tripped": runs_tripped,
+            "run_trip_rate": runs_tripped / len(dated),
+            "days_evaluated": len(all_days),
+            "days_tripped": days_tripped,
+            "day_trip_rate": days_tripped / len(all_days) if all_days else 0.0,
+            "metric": _metric_distribution(metric_values),
+        }
+
+    return {
+        "no_data": False,
+        "runs_evaluated": len(dated),
+        "days_evaluated": len(all_days),
+        "knobs": knobs,
+    }
+
+
+def format_ceiling_backtest(report: dict[str, Any]) -> str:
+    """Render a human-readable ceiling-backtest report."""
+    if report.get("no_data"):
+        if report.get("runs_evaluated", 0) == 0:
+            return "Ceiling backtest: no ledger data in the requested window."
+        return "Ceiling backtest: no candidate ceiling supplied (nothing to replay)."
+
+    lines = [
+        f"Ceiling backtest — replayed {report['runs_evaluated']} run(s) over "
+        f"{report['days_evaluated']} accounting day(s), read-only (ceiling_tripped "
+        f"unchanged, nothing armed):"
+    ]
+    for name, knob in sorted(report["knobs"].items()):
+        lines.append(
+            f"  {name} ({knob['scope']}-scoped): "
+            f"{knob['runs_tripped']}/{knob['runs_evaluated']} runs tripped "
+            f"({knob['run_trip_rate'] * 100:.1f}%), "
+            f"{knob['days_tripped']}/{knob['days_evaluated']} days tripped "
+            f"({knob['day_trip_rate'] * 100:.1f}%)"
+        )
+        metric = knob["metric"]
+        if metric is not None:
+            lines.append(
+                f"    observed {knob['scope']} value — "
+                f"max {metric['max']:,.0f}, p95 {metric['p95']:,.0f}, "
+                f"median {metric['median']:,.0f} ({metric['count']} sample(s))"
+            )
+        else:
+            lines.append(
+                "    no runs on this knob's billing path in the replayed window"
+            )
+    return "\n".join(lines)
