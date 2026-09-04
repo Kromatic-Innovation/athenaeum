@@ -74,6 +74,7 @@ import yaml
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter
+from athenaeum.store import now_iso
 
 if TYPE_CHECKING:  # pragma: no cover - type-checking only, avoids a hard import
     from athenaeum.runlock import RunLock
@@ -92,10 +93,6 @@ VALID_DECISION_TYPES: frozenset[str] = frozenset(
 #: the two formats are distinguishable at a glance even before checking for
 #: ``decision_id``.
 DECISION_ANSWER_SOURCE_TAG = "decision_answer"
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class MalformedDecisionAnswer(ValueError):
@@ -178,7 +175,7 @@ def render_decision_answer(
         "decision_id": decision_id.strip(),
         "decision_type": decision_type,
         "verdict": verdict,
-        "resolved_at": resolved_at or _now_iso(),
+        "resolved_at": resolved_at or now_iso(),
     }
     if note and note.strip():
         meta["note"] = note
@@ -214,7 +211,7 @@ def write_decision_answer(
     answers_dir.mkdir(parents=True, exist_ok=True)
 
     now = datetime.now(timezone.utc)
-    iso_ts = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    iso_ts = now_iso(now)
     filename_ts = now.strftime("%Y%m%dT%H%M%SZ")
 
     text = render_decision_answer(

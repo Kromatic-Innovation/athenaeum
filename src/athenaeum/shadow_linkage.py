@@ -54,7 +54,6 @@ import hashlib
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +67,7 @@ from athenaeum.clusters import (
 from athenaeum.config import load_config
 from athenaeum.measurement_docs import append_measurement_section
 from athenaeum.models import AutoMemoryFile
+from athenaeum.store import now_iso
 from athenaeum.wiki_dedupe import _resolve_wiki_embeddings, discover_wiki_dedupe_candidates
 
 #: The section this artifact writes into ``docs/memory-model-measurements.md``.
@@ -78,10 +78,6 @@ SECTION_HEADING = "## Shadow-mode complete-linkage population"
 REPRODUCE_COMMAND = "athenaeum measure shadow-linkage"
 
 EmbeddingProvider = Callable[[list[str]], "list[list[float]] | None"]
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _get_version() -> str:
@@ -269,7 +265,7 @@ def run_shadow_linkage(
         corpus_digest=_corpus_digest(files),
         athenaeum_version=_get_version(),
         git_sha=_get_git_sha(repo_root),
-        generated=_now_iso(),
+        generated=now_iso(),
     )
 
 

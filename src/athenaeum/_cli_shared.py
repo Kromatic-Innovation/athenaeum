@@ -25,8 +25,33 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
+
 if TYPE_CHECKING:
     from athenaeum.runlock import RunLock
+
+
+def _resolve_knowledge_root(args: argparse.Namespace) -> Path:
+    """Resolve the ``--path``/``args.path`` knowledge root (issue athenaeum#1349).
+
+    Shared by every ``_cmd_*`` subcommand that accepts ``--path``: falls back
+    to :data:`athenaeum.config.DEFAULT_KNOWLEDGE_ROOT` when ``args`` carries
+    no ``path`` attribute or it is ``None``, then expands a ``~`` prefix and
+    resolves to an absolute path. Formerly re-derived independently in nine
+    modules (seven ``_resolve_wiki_root`` copies plus two of this function's
+    own name); collapsed here so ``.expanduser().resolve()`` is applied in
+    exactly one place.
+    """
+    return (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+
+
+def _resolve_wiki_root(args: argparse.Namespace) -> Path:
+    """Resolve the wiki root under the knowledge root (issue athenaeum#1349).
+
+    Built on top of :func:`_resolve_knowledge_root` rather than re-deriving
+    it, so the ``.expanduser().resolve()`` call stays written in one place.
+    """
+    return _resolve_knowledge_root(args) / "wiki"
 
 
 def _iso_date(value: str) -> date:
@@ -64,6 +89,16 @@ def _positive_int(value: str) -> int:
 #: Exit code returned when a mutating command cannot acquire the run lock
 #: (issue athenaeum#309). Non-zero so cron / alerting sees the contention; distinct
 #: from the generic error (1) and dry-run-found (2) codes some commands use.
+#:
+#: Shares its value (75) with the UNRELATED
+#: :data:`~athenaeum.librarian.EXIT_GRACEFUL_PARTIAL`
+#: (`src/athenaeum/librarian.py`) — an internal wall-clock-deadline code.
+#: The two are not interchangeable: this code fires before any pipeline
+#: work starts, so nothing is committed and nothing is deferred to disk,
+#: unlike EXIT_GRACEFUL_PARTIAL's "partial progress, resumable" case. See
+#: docs/exit-codes.md ("`75` also collides with `EXIT_LOCK_HELD`", issue
+#: athenaeum#1379); renumbering either constant is a separate, open decision
+#: not made there.
 EXIT_LOCK_HELD = 75
 
 #: Exit code for "the requested uid/resource does not exist" (issue athenaeum#1270).

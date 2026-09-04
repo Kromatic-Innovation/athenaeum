@@ -123,7 +123,7 @@ from athenaeum.models import TokenUsage, parse_frontmatter
 from athenaeum.prompt_safety import data_only_clause, fence_untrusted
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
 from athenaeum.rules import ShapeRule, default_shape_rule_dispositions_path
-from athenaeum.store import append_line_durable
+from athenaeum.store import append_line_durable, now_iso
 from athenaeum.tiers import _record_usage
 
 log = logging.getLogger(__name__)
@@ -151,10 +151,12 @@ def default_rule_proposals_ledger_path(wiki_root: Path) -> Path:
 
 
 def _now_iso(now: datetime | None = None) -> str:
-    dt = now or datetime.now(timezone.utc)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Thin delegation to :func:`athenaeum.store.now_iso` (issue athenaeum#1348),
+    kept as a module-private wrapper only because its ``now: datetime | None``
+    parameter name/position differs from the shared helper's ``when`` — the
+    rendering rule itself lives in exactly one place, per the athenaeum#980
+    ``_append_jsonl_line``-style wrapper convention."""
+    return now_iso(now)
 
 
 def proposal_item_id(source: str, key_fingerprint: str) -> str:

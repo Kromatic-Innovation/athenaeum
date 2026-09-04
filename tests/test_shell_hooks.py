@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from athenaeum import killswitch
 from athenaeum.push_metrics import (
     _parse_ts,
     _query_hash,
@@ -2396,3 +2397,139 @@ class TestKillSwitchHooks:
         )
         assert result.returncode == 0
         assert not (tmp_path / ".cache" / "athenaeum" / "wiki-index.db").exists()
+
+    # -- Mixed-case / whitespace-padded ATHENAEUM_DISABLED (athenaeum#1354) --
+    #
+    # `_env_scope()` in killswitch.py normalizes with `raw.strip().lower()`
+    # before matching; the shell copies of the same rule used a bare `case`
+    # statement with no normalization, so `TRUE`, `All`, `" true "` etc. were
+    # silently ignored by every hook while the Python entry points honoured
+    # them. These use `pre-compact-save.sh` as the probe hook because it
+    # needs neither a wiki nor a python subprocess to demonstrate "ran
+    # normally" vs. "no-opped" — the same `__athenaeum_recall_disabled`
+    # helper (copy-pasted verbatim into all six hooks) gates every one.
+    # Each case is cross-checked against `killswitch.is_disabled("recall")`
+    # given the identical env value, so the hook and the Python reference
+    # cannot silently diverge again.
+
+    def _run_pre_compact(self, tmp_path: Path, value: str) -> subprocess.CompletedProcess[str]:
+        env = {
+            "HOME": str(tmp_path),
+            "ATHENAEUM_CACHE_DIR": str(tmp_path / ".cache" / "athenaeum"),
+            "PATH": os.environ.get("PATH", ""),
+            "ATHENAEUM_DISABLED": value,
+        }
+        return subprocess.run(
+            ["bash", str(PRE_COMPACT)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on", "all"])
+    def test_env_override_lowercase_all_scope_still_disables(
+        self, value: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pre-existing canonical lowercase spellings must keep working unchanged."""
+        _require("bash")
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        result = self._run_pre_compact(tmp_path, value)
+        assert result.returncode == 0
+        assert result.stdout == ""
+
+        monkeypatch.setenv("ATHENAEUM_DISABLED", value)
+        assert killswitch.is_disabled("recall", cache_dir=cache_dir) is True
+
+    @pytest.mark.parametrize("value", ["TRUE", "All", "ON", "Yes", " true "])
+    def test_env_override_mixed_case_and_whitespace_disables(
+        self, value: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mixed-case and whitespace-padded values must disable too, matching
+        `killswitch.is_disabled("recall")` for the identical value."""
+        _require("bash")
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        result = self._run_pre_compact(tmp_path, value)
+        assert result.returncode == 0
+        assert result.stdout == ""
+
+        monkeypatch.setenv("ATHENAEUM_DISABLED", value)
+        assert killswitch.is_disabled("recall", cache_dir=cache_dir) is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "off", "", "maybe"])
+    def test_env_override_negative_values_defer_to_state_file(
+        self, value: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Counter-examples must NOT be treated as a disable — with no state
+        file present, the hook must run normally, matching
+        `killswitch.is_disabled("recall")` returning False for each."""
+        _require("bash")
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        result = self._run_pre_compact(tmp_path, value)
+        assert result.returncode == 0
+        payload = json.loads(result.stdout)
+        assert "Knowledge checkpoint" in payload["systemMessage"]
+
+        monkeypatch.setenv("ATHENAEUM_DISABLED", value)
+        assert killswitch.is_disabled("recall", cache_dir=cache_dir) is False
+
+    @pytest.mark.parametrize("value", ["compile", "COMPILE", "Compile"])
+    def test_env_override_compile_scope_leaves_recall_running(
+        self, value: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The compile arm of the case statement must be normalized too, not
+        just the disable arm — `compile` keeps recall hooks running whatever
+        case it's typed in."""
+        _require("bash")
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        result = self._run_pre_compact(tmp_path, value)
+        assert result.returncode == 0
+        payload = json.loads(result.stdout)
+        assert "Knowledge checkpoint" in payload["systemMessage"]
+
+        monkeypatch.setenv("ATHENAEUM_DISABLED", value)
+        assert killswitch.is_disabled("recall", cache_dir=cache_dir) is False
+
+    # The four behavioural tests above probe ONE hook (`pre-compact-save.sh`,
+    # the only one that needs neither a wiki nor a python subprocess). That is
+    # sound only for as long as all six copies of the helper stay identical —
+    # and "six hand-maintained copies drifted from the Python reference" is
+    # precisely the defect athenaeum#1354 fixed. So assert the invariant the
+    # behavioural coverage rests on, rather than leaving it to inspection.
+    def test_kill_switch_helper_is_identical_across_all_six_hooks(self) -> None:
+        """All six copies of `__athenaeum_recall_disabled` are byte-identical.
+
+        Also pins the helper to bash 3.2: `#!/usr/bin/env bash` on stock macOS
+        resolves to `/bin/bash`, GNU bash 3.2.57, where the case-folding
+        expansion `${v,,}` is a PARSE-time syntax error — it would take the
+        whole script down, not just the kill switch, breaking these hooks'
+        "must never block session startup" contract. Same reason the bash-4
+        `mapfile` was removed in athenaeum#1104 and bash arrays were rejected
+        in athenaeum#1343.
+        """
+        hooks = [
+            SESSION_START,
+            USER_PROMPT,
+            PRE_COMPACT,
+            PENDING_QUESTIONS,
+            WIKI_INJECT,
+            REBUILD_INDEX,
+        ]
+        bodies: dict[str, str] = {}
+        for hook in hooks:
+            lines = hook.read_text().splitlines()
+            start = next(
+                i for i, ln in enumerate(lines) if ln.startswith("__athenaeum_recall_disabled()")
+            )
+            end = next(i for i, ln in enumerate(lines[start:], start) if ln == "}")
+            # Comments differ between copies by design; the code must not.
+            bodies[hook.name] = "\n".join(
+                ln for ln in lines[start : end + 1] if not ln.strip().startswith("#")
+            )
+
+        reference = bodies[PRE_COMPACT.name]
+        for name, body in bodies.items():
+            assert body == reference, f"{name}'s kill-switch helper has drifted from the others"
+
+        # bash 4.0+ case folding (`${v,,}` / `${v^^}`) must not reappear.
+        assert ",,}" not in reference and "^^}" not in reference

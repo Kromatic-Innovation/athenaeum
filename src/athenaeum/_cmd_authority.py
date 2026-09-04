@@ -32,6 +32,7 @@ import json
 import sys
 from pathlib import Path
 
+from athenaeum._cli_shared import _resolve_knowledge_root
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.authority import (
     AuthorityManifestError,
@@ -44,10 +45,6 @@ from athenaeum.config import (
     load_config,
     resolve_authority_manifest_path,
 )
-
-
-def _resolve_knowledge_root(args: argparse.Namespace) -> Path:
-    return (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
 
 
 def _load_manifest_or_exit(knowledge_root: Path):

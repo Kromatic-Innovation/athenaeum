@@ -70,6 +70,7 @@ from athenaeum.fingerprint import (
     record_resolution,
 )
 from athenaeum.sidecar_blocks import GENERIC_FENCE_OPEN_RE, split_blocks
+from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -1013,7 +1014,7 @@ def ingest_answers(
     ingested = 0
 
     now = datetime.now(timezone.utc)
-    iso_ts = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    iso_ts = now_iso(now)
     filename_ts = now.strftime("%Y%m%dT%H%M%SZ")
 
     for block_text in blocks:
@@ -1641,7 +1642,7 @@ def raise_pending_question(
     header = f'## [{created_at}] Entity: "{escaped_entity}" (from {ref})'
     lines = [header, f"- [ ] {q}", "", f"**Description**: {ctx}"]
     if kind == "confirmation":
-        raised_at_iso = when.strftime("%Y-%m-%dT%H:%M:%SZ")
+        raised_at_iso = now_iso(when)
         lines += [
             f"{_DECISION_KIND_PREFIX} {_DECISION_KIND_CONFIRMATION}",
             f"{_RAISER_PREFIX} {raiser.strip()}",

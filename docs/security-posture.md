@@ -50,7 +50,7 @@ The threat model is "**library consumer drift**" — a dep that ships a subtle b
 
 ### 2.1 MCP tool audience scoping (athenaeum#312 → athenaeum#538)
 
-> Scope note: this section decides *who* may read what **across the 13 MCP
+> Scope note: this section decides *who* may read what **across the 15 MCP
 > tools**. It does not, and is not meant to, establish that the MCP surface is
 > the only way to reach a store — that is the egress half of the invariant in
 > [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md), which this
@@ -65,9 +65,9 @@ The decided model (this is the "write it down" outcome athenaeum#538 asked for):
 
 | Tool group | Tools | Restricted (`caller_audience != None`) behavior |
 |---|---|---|
-| Scoped reads | `recall`, `list_pending_questions`, `list_pending_merges`, `list_pending_decisions`, `read_entity` | Fail-closed by the SAME predicate `recall` uses (`is_page_authorized`): an item is withheld unless the caller is authorized for **every** source page behind it. A restricted caller can never obtain page content `recall` would refuse. `read_entity` additionally never returns an excluded value for a page it withholds — the authorization check runs before any excluded data is assembled (issues athenaeum#864, athenaeum#886). `recall`'s `with_pii` join likewise runs strictly AFTER that predicate, so it can never be used to probe whether a record exists behind a page the caller may not read (issue athenaeum#885). (The person-shaped `read_person` tool applied the identical check before its removal in athenaeum#888.) |
+| Scoped reads | `recall`, `list_pending_questions`, `list_pending_merges`, `list_pending_decisions`, `read_entity`, `enumerate_entities`, `entity_schema` | Fail-closed by the SAME predicate `recall` uses (`is_page_authorized`): an item is withheld unless the caller is authorized for **every** source page behind it. A restricted caller can never obtain page content `recall` would refuse. `read_entity` additionally never returns an excluded value for a page it withholds — the authorization check runs before any excluded data is assembled (issues athenaeum#864, athenaeum#886). `recall`'s `with_pii` join likewise runs strictly AFTER that predicate, so it can never be used to probe whether a record exists behind a page the caller may not read (issue athenaeum#885). (The person-shaped `read_person` tool applied the identical check before its removal in athenaeum#888.) `enumerate_entities` (issue athenaeum#965) applies the identical per-candidate check before a row is included in its result — `src/athenaeum/enumeration.py` re-checks `is_page_authorized(meta, caller_audience)` for every candidate, commented "Layer C fail-closed audience re-check (issue athenaeum#538), identical predicate to every other read tool" — and its `with_pii` gate on PII-scoped predicate/output fields mirrors `recall`'s. `entity_schema` (issue athenaeum#964) is scoped the same way one level up: its per-class `count` and `fields` are computed only over pages the caller may read, because `resolve_entity_classes_cached`/`resolve_entity_classes` thread `caller_audience` into that same `is_page_authorized` filter (`src/athenaeum/entity_schema.py`) — a restricted caller's schema can never reveal the existence of, or the field keys carried by, a page it cannot read. It never returns page body or excluded values, only aggregate counts and field-key names. |
 | Owner-only writes | `resolve_question`, `resolve_merge`, `review_audit_item` | **Fail closed** — adjudicating the operator's contradiction/merge/calibration queue is an owner action. `list_pending_decisions` likewise withholds the `retraction`/`audit` calibration items (no readable source-page path to authorize against). |
-| Intentionally open | `remember` | **Not** audience-scoped. Intake is write-only and compiles through the read-time screening path (athenaeum#320); a restricted secondary agent contributing raw memories is the intended use. It cannot read anything back it isn't authorized for. |
+| Intentionally open | `remember`, `raise_decision` | **Not** audience-scoped. Intake is write-only and compiles through the read-time screening path (athenaeum#320); a restricted secondary agent contributing raw memories is the intended use. It cannot read anything back it isn't authorized for. `raise_decision` (issue athenaeum#912) is open by the same logic, stated explicitly in its own docstring: unlike the three owner-only mutators above, it only ever ADDS a new item to `_pending_questions.md` — it never adjudicates an existing one — which puts it in the same category as `remember` rather than `resolve_question`/`resolve_merge`/`review_audit_item`. A restricted agent filing a question or confirmation into the human-decision queue is this tool's intended caller; gating it owner-only would defeat its purpose. |
 | Metadata reads | `list_axiom_audit`, `scan_retraction_cascade`, `calibration_summary` | Not page-content bearing (governance history, provenance flags, tier counts). Left unscoped; revisit if any starts echoing page bodies. |
 
 Rationale for the write split: the three decision-queue mutators change
@@ -165,7 +165,7 @@ carries that filter**, which is what keeps the rule from being escapable by
 choosing a different entry point: `pii.read_entity` / `read_entities`; the
 `read_entity` MCP tool (takes `usage_classes`); `recall`'s `with_pii` join
 (which threads `usage_classes` to the same assembly); and, on the shell,
-`athenaeum query entity --usage-class` and `athenaeum recall --with-pii
+`athenaeum entity --usage-class` and `athenaeum recall --with-pii
 --usage-class`. (The person-shaped `pii.read_person` / `read_people`, the
 `read_person` MCP tool, and `athenaeum query person --usage-class` carried
 the identical filter before their removal in athenaeum#888.) A generic tool

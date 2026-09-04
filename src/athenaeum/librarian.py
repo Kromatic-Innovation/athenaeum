@@ -240,7 +240,7 @@ from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home 
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
-from athenaeum.store import FilesystemStore
+from athenaeum.store import FilesystemStore, now_iso
 from athenaeum.tiers import (
     TIER2_ADDRESS_RESOLVED_MARKER,
     TIER2_ADDRESS_UNRESOLVED_MARKER,
@@ -317,6 +317,14 @@ DEFAULT_MAX_RUNTIME = 3600  # 1 hour
 # trips: partial progress is already committed, the deferred intake is left
 # on disk, and the next run picks it up. This is the ONLY code an athenaeum
 # internal check returns for a deadline trip — never 124.
+#
+# Shares its integer value with the UNRELATED EXIT_LOCK_HELD
+# (`src/athenaeum/_cli_shared.py`) — a run-lock-contention code returned
+# before any pipeline work starts, so none of this constant's
+# "partial-progress, resumable" semantics apply to it. See
+# docs/exit-codes.md ("`75` also collides with `EXIT_LOCK_HELD`", issue
+# athenaeum#1379) for the collision; renumbering either constant is a
+# separate, open decision not made there.
 EXIT_GRACEFUL_PARTIAL = 75
 
 # Reserved for the EXTERNAL killer — matches coreutils `timeout`(1), which
@@ -3395,8 +3403,7 @@ def _write_stuck_ledger(wiki_root: Path, ledger: dict[str, dict[str, Any]]) -> N
         if path.exists():
             path.unlink()
         return
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    payload = {"updated": now, "files": ledger}
+    payload = {"updated": now_iso(), "files": ledger}
     atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
@@ -3427,8 +3434,7 @@ def _record_stuck_failure(
     """
     key = raw.ref
     content_hash = _stuck_content_hash(raw)
-    _now_dt = now if now is not None else datetime.now(timezone.utc)
-    now_str = _now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_str = now_iso(now)
     entry = ledger.get(key)
     if not isinstance(entry, dict) or entry.get("hash") != content_hash:
         # New file, or the content changed since the last failure — fresh count.
@@ -3568,8 +3574,7 @@ def _write_quarantine_candidates(
         if path.exists():
             path.unlink()
         return
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    payload = {"updated": now, "files": ledger}
+    payload = {"updated": now_iso(), "files": ledger}
     atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
@@ -3596,7 +3601,7 @@ def _record_bound_violation(
     """
     key = raw.ref
     content_hash = _quarantine_content_hash(raw, bound=bound)
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = now_iso()
     entry = ledger.get(key)
     if not isinstance(entry, dict) or entry.get("hash") != content_hash:
         # New file, or the content changed since the last violation — fresh count.
@@ -3886,7 +3891,7 @@ def _write_deferred_manifest(
     way; only the explanatory header differs.
     """
     path = wiki_root / DEFERRED_MANIFEST_NAME
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = now_iso()
     total_deferred = len(deferred_refs) + beyond_window
     if reason == "deadline":
         header = [
@@ -9411,7 +9416,7 @@ def _write_full_compile_stamp(path: Path, at: datetime, head: str | None) -> Non
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
-        "at": at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "at": now_iso(at),
         "head": head,
     }
     atomic_write_text(path, json.dumps(payload))
@@ -9490,7 +9495,7 @@ def _write_timestamp_stamp(path: Path, at: datetime) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
-        "at": at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        "at": now_iso(at)
     }
     atomic_write_text(path, json.dumps(payload))
 

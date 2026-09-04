@@ -55,7 +55,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from athenaeum.runlock import RunLock
 
-from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args
+from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _resolve_knowledge_root
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
 from athenaeum.pending_merges_pii import scrub_pending_merges
@@ -108,12 +108,6 @@ EXIT_MAPPING_ISSUES = 2
 #: 11.5k-page run is indistinguishable from a hung one (issue athenaeum#495), so
 #: progress is reported every this-many pages plus a final summary.
 _PROGRESS_EVERY = 500
-
-
-def _resolve_knowledge_root(args: argparse.Namespace) -> Path:
-    return (
-        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
-    )
 
 
 def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
