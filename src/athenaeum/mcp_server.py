@@ -1204,6 +1204,12 @@ def _recall_via_backend(
 
     blocks: list[str] = [row.block for row in _rows]
     _pushed_hits: list[tuple[str, dict[str, object], str]] = [row.pushed_hit for row in _rows]
+    # Issue athenaeum#1345 AC7: reuse each row's ALREADY-resolved
+    # `memory_tiers.resolve_tier` verdict (`row.tier`, computed unconditionally
+    # above) for the push-metrics record below — see
+    # `push_metrics.build_push_record`'s `memory_tier_by_filename` docstring
+    # for why this is resolved HERE rather than inside that function.
+    _memory_tier_by_filename: dict[str, str] = {row.pushed_hit[0]: row.tier for row in _rows}
 
     if not blocks:
         return f"No wiki pages matched query: {query!r}{unrecognized_note}"
@@ -1231,6 +1237,7 @@ def _recall_via_backend(
                 query=query,
                 backend=backend_name,
                 hits=_pushed_hits,
+                memory_tier_by_filename=_memory_tier_by_filename,
             )
             push_metrics.record_push(
                 record, cache_dir=cache_dir, config=config, wiki_root=wiki_root
