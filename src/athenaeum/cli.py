@@ -49,9 +49,29 @@ transitive pull of the whole L1-L4 graph, e.g. ``anthropic``/embedding
 backends) for callers that only need argv-parsing helpers like
 ``_iso_date`` (re-exported here from ``_cli_shared`` for backward
 compatibility).
+
+Second non-obvious invariant (issue athenaeum#1360 residual, see
+``_SUBCOMMAND_LOADERS`` below): :func:`build_parser` itself stays fully
+eager — it is a documented introspection contract (``tests/test_cli.py``
+walks its ENTIRE tree, every leaf, to assert every subcommand binds
+``func`` and every subcommand's ``--help`` renders without crashing) — but
+``main()`` does not call it for the common case. ``main()`` peeks the raw
+argv for the subcommand token *before* building any parser and, when that
+token names a known subcommand, imports only that subcommand's owning
+``_cmd_*`` module via ``_SUBCOMMAND_LOADERS`` and builds a parser containing
+just it. Every other ``_cmd_*`` module — 30 of the current 31 — is never
+imported. ``athenaeum --version`` needs no subcommand module at all and
+short-circuits before any lazy-loader lookup. Anything the peek can't
+resolve (bare ``athenaeum``, top-level ``-h``/``--help``, an unrecognized
+command) falls back to the fully eager :func:`build_parser`, so a wrong or
+absent guess costs performance, never correctness — dispatch always goes
+through the real ``add_*_subparser`` function, so a single-command run
+parses with the exact same argument definitions ``build_parser()`` would
+have given it.
 """
 
 import argparse
+import importlib
 import sys
 
 from athenaeum._cli_shared import (
@@ -61,6 +81,76 @@ from athenaeum._cli_shared import (
     _iso_date,  # noqa: F401 — re-exported for `from athenaeum.cli import _iso_date`
     _positive_int,  # noqa: F401 — re-exported; some tests/tools import via cli
 )
+
+# Subcommand name -> (owning module, its `add_*_subparser` loader function
+# name). Keys are every name `build_parser()` registers on the top-level
+# subparsers action, aliases included (`reindex`'s `rebuild-index` alias is
+# both a key here, same target). This is intentionally a literal table, not
+# something extracted from each module at runtime — extracting it without
+# importing the module is exactly the thing we're avoiding. Kept honest by
+# `TestSubcommandLoaderRegistryStaysInSync` in `tests/test_cli.py`, which
+# builds the real (eager) parser and asserts this table's key set matches
+# its top-level `choices` exactly, so a subcommand added without a registry
+# entry fails CI instead of silently losing its fast path.
+_SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
+    "init": ("athenaeum._cmd_lifecycle", "add_lifecycle_subparsers"),
+    "status": ("athenaeum._cmd_lifecycle", "add_lifecycle_subparsers"),
+    "disable": ("athenaeum._cmd_lifecycle", "add_lifecycle_subparsers"),
+    "enable": ("athenaeum._cmd_lifecycle", "add_lifecycle_subparsers"),
+    "spend": ("athenaeum._cmd_lifecycle", "add_lifecycle_subparsers"),
+    "serve": ("athenaeum._cmd_serve", "add_serve_subparser"),
+    "run": ("athenaeum._cmd_run", "add_run_subparser"),
+    "test-mcp": ("athenaeum._cmd_query", "add_query_subparsers"),
+    "entity": ("athenaeum._cmd_query", "add_query_subparsers"),
+    "query-topics": ("athenaeum._cmd_query", "add_query_subparsers"),
+    "stopwords": ("athenaeum._cmd_query", "add_query_subparsers"),
+    "recall": ("athenaeum._cmd_query", "add_query_subparsers"),
+    "enumerate": ("athenaeum._cmd_enumerate", "add_enumerate_subparser"),
+    "explain-routing": (
+        "athenaeum._cmd_explain_routing",
+        "add_explain_routing_subparser",
+    ),
+    "ingest-answers": ("athenaeum._cmd_pending", "add_pending_subparsers"),
+    "ingest-merges": ("athenaeum._cmd_pending", "add_pending_subparsers"),
+    "reresolve-questions": ("athenaeum._cmd_pending", "add_pending_subparsers"),
+    "dedupe": ("athenaeum._cmd_curate", "add_curate_subparsers"),
+    "claims": ("athenaeum._cmd_curate", "add_curate_subparsers"),
+    "auto-memory": ("athenaeum._cmd_curate", "add_curate_subparsers"),
+    "decay-sweep": ("athenaeum._cmd_decay", "add_decay_subparser"),
+    "reconcile": ("athenaeum._cmd_reconcile", "add_reconcile_subparser"),
+    "repair": ("athenaeum._cmd_repair", "add_repair_subparser"),
+    "pii-restore": ("athenaeum._cmd_pii_restore", "add_pii_restore_subparser"),
+    "questions": ("athenaeum._cmd_questions", "add_questions_subparser"),
+    "merges": ("athenaeum._cmd_merges", "add_merges_subparser"),
+    "decisions": ("athenaeum._cmd_decisions", "add_decisions_subparser"),
+    "authority": ("athenaeum._cmd_authority", "add_authority_subparser"),
+    "axiom": ("athenaeum._cmd_axiom", "add_axiom_subparser"),
+    "calibration": ("athenaeum._cmd_calibration", "add_calibration_subparser"),
+    "outbound-lint": ("athenaeum._cmd_outbound", "add_outbound_subparser"),
+    "bounce-contract": (
+        "athenaeum._cmd_bounce_contract",
+        "add_bounce_contract_subparser",
+    ),
+    "surface-divergence": (
+        "athenaeum._cmd_surface_divergence",
+        "add_surface_divergence_subparser",
+    ),
+    "drain": ("athenaeum._cmd_drain", "add_drain_subparser"),
+    "storage": ("athenaeum._cmd_storage", "add_storage_subparser"),
+    "push-metrics": ("athenaeum._cmd_push_metrics", "add_push_metrics_subparser"),
+    "usage-report": ("athenaeum._cmd_usage_report", "add_usage_report_subparser"),
+    "measure": ("athenaeum._cmd_measure", "add_measure_subparser"),
+    "memory-class": ("athenaeum._cmd_memory_class", "add_memory_class_subparser"),
+    "description": ("athenaeum._cmd_description", "add_description_subparser"),
+    "verdicts": ("athenaeum._cmd_verdicts", "add_verdicts_subparser"),
+    "dimensions": ("athenaeum._cmd_dimensions", "add_dimensions_subparser"),
+    "reindex": ("athenaeum._cmd_index", "add_index_subparsers"),
+    "rebuild-index": ("athenaeum._cmd_index", "add_index_subparsers"),
+    "compile": ("athenaeum._cmd_index", "add_index_subparsers"),
+    "registry": ("athenaeum._cmd_index", "add_index_subparsers"),
+    "ingest": ("athenaeum._cmd_index", "add_index_subparsers"),
+    "session-end": ("athenaeum._cmd_index", "add_index_subparsers"),
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -153,8 +243,78 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _peek_subcommand(argv: list[str]) -> str | None:
+    """Return the first non-option token in ``argv``, or ``None``.
+
+    A cheap, regex-free pre-parse used only to decide which single
+    ``_cmd_*`` module (if any) ``main()`` needs to import — never used to
+    validate or dispatch. The top-level parser has exactly one positional
+    (the subcommand) and no options that consume a value (``--version`` and
+    ``-h``/``--help`` are both zero-arg), so "first token not starting with
+    ``-``" is unambiguous. A wrong guess (there isn't one today, but a
+    future top-level value-taking option would produce one) just means
+    ``main()`` falls through to the fully eager :func:`build_parser`.
+    """
+    for token in argv:
+        if not token.startswith("-"):
+            return token
+    return None
+
+
+def _build_lazy_parser(command: str) -> argparse.ArgumentParser:
+    """Build a parser carrying ``--version`` plus only ``command``'s group.
+
+    ``command`` must already be a known key of ``_SUBCOMMAND_LOADERS`` —
+    callers check that before calling this. Imports exactly one ``_cmd_*``
+    module and calls its real ``add_*_subparser`` loader, so the resulting
+    subparser (arguments, nested subcommands, ``func`` binding, help text)
+    is identical to what :func:`build_parser` would have produced for that
+    same command — only the other ~30 modules are never imported.
+    """
+    module_path, loader_name = _SUBCOMMAND_LOADERS[command]
+    module = importlib.import_module(module_path)
+    loader = getattr(module, loader_name)
+
+    parser = argparse.ArgumentParser(
+        prog="athenaeum",
+        description="Knowledge management pipeline — append-only intake, tiered compilation",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
+    subparsers = parser.add_subparsers(dest="command")
+    loader(subparsers)
+    return parser
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    command = _peek_subcommand(argv)
+
+    if command is None and "--version" in argv:
+        # No subcommand token at all -- e.g. `athenaeum --version`. The
+        # version action fires and exits before any subcommand is ever
+        # consulted, so building even one `_cmd_*` module for it is pure
+        # waste (issue athenaeum#1360 residual: this was the single biggest
+        # remaining cost on the `--version`/`--help` path).
+        parser = argparse.ArgumentParser(
+            prog="athenaeum",
+            description="Knowledge management pipeline — append-only intake, tiered compilation",
+        )
+        parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
+        parser.parse_args(argv)
+        # Unreachable in practice: the version action above always exits.
+        # Kept only so this branch has a well-defined return if argparse's
+        # exit-on-version behavior is ever weakened.
+        return 0
+
+    if command in _SUBCOMMAND_LOADERS:
+        parser = _build_lazy_parser(command)
+    else:
+        # Bare `athenaeum`, top-level -h/--help, or an unrecognized command
+        # -- all need the full subcommand listing (names + help text) to
+        # answer correctly, which only the eager build provides. Pays the
+        # known ~31-module cost, same as before this change.
+        parser = build_parser()
+
     args = parser.parse_args(argv)
 
     if args.command is None:
