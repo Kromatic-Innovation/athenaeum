@@ -83,7 +83,7 @@ def _append_seen(path: Path, filenames: list[str]) -> None:
 
 
 def cmd_context(args: argparse.Namespace) -> int:
-    from athenaeum.context import build_context
+    from athenaeum.context import build_context, record_context_push
 
     prompt = args.prompt
     session_id = args.session_id
@@ -118,6 +118,14 @@ def cmd_context(args: argparse.Namespace) -> int:
         llm_timeout=args.llm_timeout,
     )
     _append_seen(seen_path, [c["filename"] for c in envelope["candidates"]])
+
+    # Issue athenaeum#1362: route this turn's push through the same durable
+    # ledger the MCP `recall` path writes, tagged `"source":"sidecar"`.
+    # `record_context_push` is itself best-effort and never raises (see its
+    # own docstring) — this CLI's exit code and printed envelope must never
+    # depend on the ledger write succeeding.
+    record_context_push(envelope, cache_dir=cache_dir)
+
     print(json.dumps(envelope))
     return 0
 

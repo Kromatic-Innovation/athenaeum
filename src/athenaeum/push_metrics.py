@@ -65,6 +65,7 @@ import json
 import logging
 import os
 import random
+import re
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -190,6 +191,39 @@ def opaque_push_id(filename: str, fm: dict[str, object] | None) -> str:
     return filename
 
 
+#: Matches the leading ``<8-hex-uid-prefix>-`` an entity's on-disk filename
+#: carries (``athenaeum.models.WikiEntity.filename``: ``<uid>-<slug>.md``).
+#: A raw-intake filename (``<timestamp>Z-<hash>.md``, e.g.
+#: ``20260802T023311Z-3f0ea402.md``) never matches: its 9th character is
+#: ``T``, never ``-``. Mirrors the pre-convergence shell hook's
+#: ``_pm_opaque_push_id`` case pattern (issue athenaeum#1343, issue athenaeum#1362).
+_UID_PREFIX_RE = re.compile(r"^[0-9a-f]{8}-")
+
+
+def opaque_push_id_from_filename(filename: str) -> str:
+    """Return a PII-safe push id derived from a filename ALONE — no frontmatter.
+
+    For a caller that only has an index row (issue athenaeum#1362's sidecar
+    path: the FTS5 ``wiki`` table has no ``uid`` column, so
+    :func:`opaque_push_id` — which requires *fm* to find one — is not
+    usable there). Reproduces the pre-convergence shell hook's
+    ``_pm_opaque_push_id`` behaviour in Python:
+
+    - A compiled entity's filename (``<8-hex-uid-prefix>-<slug>.md``) is
+      truncated to just the 8-hex-char uid prefix, so the name-derived slug
+      never reaches the ledger.
+    - Anything else (a raw-intake filename, which is never name-derived) is
+      recorded whole, same as :func:`opaque_push_id`'s no-``uid`` branch.
+
+    Prefer :func:`opaque_push_id` when frontmatter is available (the MCP
+    ``recall`` path) — it is exact rather than pattern-matched. This
+    function exists only for a caller with no frontmatter to consult.
+    """
+    if _UID_PREFIX_RE.match(filename):
+        return filename[:8]
+    return filename
+
+
 # ---------------------------------------------------------------------------
 # Push records
 # ---------------------------------------------------------------------------
@@ -227,6 +261,17 @@ class PushRecord:
     pushed block — plus a ``query`` HASH (never the raw query text, which can
     carry PII) so a later reproducibility check can correlate two pushes of
     the same query without storing content.
+
+    ``source`` (issue athenaeum#1362, additive, SCHEMA_VERSION unchanged —
+    same precedent as ``PushedItem.memory_tier``): ``"sidecar"`` for a row
+    written by :func:`athenaeum.context.record_context_push` (the
+    ``athenaeum context`` CLI adapter's unprompted push path); left at its
+    default ``""`` for the MCP ``recall`` path, which must keep OMITTING the
+    key entirely rather than writing an explicit ``"recall"`` value — every
+    row written before this issue has no ``source`` key at all, and the
+    documented reader rule (``docs/configuration.md``) is "key absent, or
+    any other value, means an explicit ``recall`` push" — changing that
+    default would reinterpret every historical row.
     """
 
     session_id: str
@@ -234,13 +279,14 @@ class PushRecord:
     query_hash: str
     backend: str
     items: list[PushedItem] = field(default_factory=list)
+    source: str = ""
 
     @property
     def total_token_cost(self) -> int:
         return sum(item.token_cost for item in self.items)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "v": SCHEMA_VERSION,
             "session_id": self.session_id,
             "ts": self.ts,
@@ -260,6 +306,9 @@ class PushRecord:
             "token_cost": self.total_token_cost,
             "token_cost_estimated": True,
         }
+        if self.source:
+            d["source"] = self.source
+        return d
 
 
 def _query_hash(query: str) -> str:
