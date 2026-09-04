@@ -8,6 +8,7 @@ counter-example the issue names as a comment on the test it defeats.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -327,6 +328,281 @@ def test_memory_tier_swap_does_not_change_selection_or_order(tmp_path: Path) -> 
     order_a = [c["filename"] for c in env_a["candidates"]]
     order_b = [c["filename"] for c in env_b["candidates"]]
     assert order_a == order_b, "swapping memory_tier values changed selection/order"
+
+
+def test_no_tier_predicate_in_source() -> None:
+    """athenaeum#1345 AC1 — source-level grep, modeled on
+    ``test_no_hook_specific_output_in_core_source`` above: ``memory_tier``
+    must never appear in a ``WHERE``, ``ORDER BY``, or scoring expression,
+    on EITHER surface this module queries.
+
+    Counter-example that must fail: any surviving ``AND memory_tier =
+    'hot'`` (the original gate's exact shape) on the FTS5 lexical query
+    built in ``_query_fts5``, OR on the vector-hit metadata lookup built in
+    ``_query_vector`` — the original gate had two enforcement surfaces, and
+    a fix that only closes one reintroduces the divergence with the sign
+    flipped. Also checked: no call into the tier-weight scoring machinery
+    (:mod:`athenaeum.memory_tiers`'s ``TIER_WEIGHTS``/``tier_weight``/
+    ``push_score``), which this module must never import for ranking.
+    """
+    text = CONTEXT_PY.read_text(encoding="utf-8")
+
+    # No hardcoded SQL predicate/comparison on memory_tier anywhere.
+    for forbidden in (
+        "AND memory_tier",
+        "OR memory_tier",
+        "memory_tier =",
+        "memory_tier ==",
+        "memory_tier !=",
+        "memory_tier IN",
+        "memory_tier LIKE",
+    ):
+        assert forbidden not in text, f"forbidden tier predicate found: {forbidden!r}"
+
+    # No ORDER BY clause (on either the FTS5 or the vector-metadata SQL
+    # surface) names memory_tier. Restricted to a single line via `[^"\n]*`
+    # so this only matches an actual same-line SQL f-string clause, never
+    # the module docstring's own prose mention of "WHERE"/"ORDER BY".
+    order_by_clauses = re.findall(r'ORDER BY ([^"\n]*)"', text)
+    assert order_by_clauses, "expected at least one ORDER BY clause in this module"
+    for clause in order_by_clauses:
+        assert "memory_tier" not in clause, f"ORDER BY clause references memory_tier: {clause!r}"
+
+    # No tier-weight scoring machinery imported or called for ranking.
+    for forbidden in (
+        "import athenaeum.memory_tiers",
+        "from athenaeum.memory_tiers",
+        "from athenaeum import memory_tiers",
+        "tier_weight(",
+        "push_score(",
+        "TIER_WEIGHTS",
+    ):
+        assert forbidden not in text, f"forbidden tier-scoring reference found: {forbidden!r}"
+
+
+def _build_tier_mix_fixture(path: Path) -> tuple[list[str], list[str]]:
+    """Seed an FTS5 index approximating the real corpus's tier mix (issue
+    athenaeum#1345's motivation section: measured 23,768 warm / 848 hot of
+    24,616 pages, ~96.56%/3.44%, hot confined to ``principle``/
+    ``preference``/``auto-memory``-ish pages) for ONE query, so a before/
+    after comparison can demonstrate substitution rather than mere absence.
+
+    - 3 SIGNAL warm pages (``concept`` type): "gizmotron" in both name and
+      tags — the true best BM25 matches for the query below.
+    - 3 NOISE hot pages (``principle`` type, the class the real corpus's
+      hot pool is confined to): "gizmotron" in tags only, so they still
+      match the query but rank strictly worse than the signal pages
+      (verified: BM25 rank -3.31 for signal vs. -2.42 for noise).
+    - 69 FILLER warm pages that do not match the query at all, bringing the
+      mix to 72 warm / 3 hot of 75 total (96%/4%) — approximating the real
+      ratio; neither all-hot nor all-warm.
+
+    Returns ``(signal_warm_filenames, noise_hot_filenames)``.
+    """
+    cols = [
+        "filename",
+        "name",
+        "tags",
+        "aliases",
+        "description",
+        "audience UNINDEXED",
+        "type UNINDEXED",
+        "memory_tier UNINDEXED",
+    ]
+    ddl = f'CREATE VIRTUAL TABLE wiki USING fts5({", ".join(cols)}, tokenize="porter unicode61")'
+    insert_cols = [
+        "filename",
+        "name",
+        "tags",
+        "aliases",
+        "description",
+        "audience",
+        "type",
+        "memory_tier",
+    ]
+
+    conn = sqlite3.connect(path)
+    conn.execute(ddl)
+    rows = []
+    signal_filenames: list[str] = []
+    for i in range(3):
+        fn = f"signal-warm-{i}.md"
+        signal_filenames.append(fn)
+        rows.append(
+            (
+                fn,
+                f"Gizmotron Field Guide {i}",
+                "gizmotron field guide",
+                "",
+                f"the real answer, entry {i}",
+                "|__access_open__|",
+                "concept",
+                "warm",
+            )
+        )
+    noise_filenames: list[str] = []
+    for i in range(3):
+        fn = f"noise-hot-{i}.md"
+        noise_filenames.append(fn)
+        rows.append(
+            (
+                fn,
+                f"Documentation Principle {i}",
+                "gizmotron",
+                "",
+                f"a general principle, not the answer, entry {i}",
+                "|__access_open__|",
+                "principle",
+                "hot",
+            )
+        )
+    for i in range(69):
+        rows.append(
+            (
+                f"filler-warm-{i}.md",
+                f"Unrelated Note {i}",
+                "unrelated filler",
+                "",
+                f"nothing to do with the query, entry {i}",
+                "|__access_open__|",
+                "concept",
+                "warm",
+            )
+        )
+    placeholders = ",".join("?" for _ in insert_cols)
+    conn.executemany(
+        f"INSERT INTO wiki ({', '.join(insert_cols)}) VALUES ({placeholders})",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    return signal_filenames, noise_filenames
+
+
+def _gated_query_simulation(db_file: Path, fts_query: str, n: int) -> list[str]:
+    """TEST-ONLY simulation of the OLD gate this issue removes — never
+    production code, never imported by ``athenaeum.context``. Mirrors the
+    exact shape the issue's own counter-example names: ``AND memory_tier =
+    'hot'`` appended to the lexical query.
+    """
+    conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT filename FROM wiki WHERE wiki MATCH ? AND memory_tier = 'hot' "
+            "ORDER BY rank LIMIT ?",
+            (fts_query, n),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows]
+
+
+def test_fixture_index_before_after_demonstrates_tier_substitution(tmp_path: Path) -> None:
+    """athenaeum#1345 AC3/AC4: a tier-mix fixture approximating the real
+    corpus (~96% warm; hot confined to a ``principle`` page), where the
+    query's best BM25 matches are warm.
+
+    Counter-example that must fail: a fixture that is all-hot or all-warm
+    (this one is neither — 72 warm / 3 hot); or an assertion on hit COUNT
+    alone (this asserts filename IDENTITY via set comparison, not len()).
+    """
+    db_file = tmp_path / "wiki-index.db"
+    signal_filenames, noise_filenames = _build_tier_mix_fixture(db_file)
+
+    from athenaeum.context import build_context, build_fts_query
+
+    fts_query = build_fts_query(["gizmotron"])
+
+    # OLD gated behaviour, simulated locally (never production code): with
+    # `AND memory_tier = 'hot'`, the only candidates left are the 3 noise
+    # pages — materially worse matches that happen to be `principle`s.
+    gated = _gated_query_simulation(db_file, fts_query, 3)
+    assert sorted(gated) == sorted(noise_filenames), (
+        "gate-simulation sanity check failed: expected the hot noise pages"
+    )
+
+    # Converged behaviour: relevance alone, memory_tier untouched.
+    env = build_context("gizmotron field guide", "sess", cache_dir=tmp_path, use_llm=False, n=3)
+    pushed_filenames = [c["filename"] for c in env["candidates"]]
+
+    # Hit IDENTITY, not hit count (AC4's own counter-example: "still returns
+    # 3 results" passes the bug) — the exact 3 signal pages, none of the
+    # noise substitutes.
+    assert sorted(pushed_filenames) == sorted(signal_filenames)
+    assert set(pushed_filenames).isdisjoint(noise_filenames)
+
+    # The substitution itself: the two behaviours diverge completely.
+    assert set(pushed_filenames).isdisjoint(gated)
+
+    # AC6 (partial): the envelope still carries each pushed page's
+    # memory_tier, untouched from the fixture's own "warm" value, even
+    # though it played no role in selection.
+    for c in env["candidates"]:
+        assert c["memory_tier"] == "warm"
+
+
+def test_cold_and_refused_pages_never_enter_the_index(tmp_path: Path) -> None:
+    """athenaeum#1345: cold and refused stay absolutely excluded — enforced
+    UPSTREAM of this module (never-ingest for refused, index-build
+    ``is_embedded`` for cold), never by a tier predicate here. This test
+    proves the exclusion at the REAL boundary using the actual production
+    functions (the same ones ``athenaeum.search``'s index-build ``_decode``
+    and the never-ingest intake choke point consult), then shows a fixture
+    index built the same way (only a survivor page inserted) never
+    surfaces a refused/cold filename through ``build_context()``.
+
+    Counter-example that must fail: a test that only checks "warm pages now
+    appear" — this must show the refused/cold page is still absent.
+    """
+    from athenaeum.authority import AuthorityManifest
+    from athenaeum.never_ingest import classify_never_ingest
+    from athenaeum.storage import is_embedded
+
+    # -- refused: the never-ingest gate matches BEFORE any index build
+    #    (issue athenaeum#968) — verified with the real classifier, same
+    #    call shape tests/test_never_ingest.py uses.
+    manifest = AuthorityManifest(
+        version=1, sources=(), never_ingest_classes=("pending-state-todo",)
+    )
+    refused_meta = {"name": "Scratch Todo", "pending_state": True}
+    match = classify_never_ingest(refused_meta, "body text", manifest=manifest)
+    assert match is not None, "fixture's refused page must actually be classified as refused"
+
+    # -- cold: a class mapped to the built-in "excluded" storage adapter is
+    #    not embedded (issue athenaeum#532/#911) — verified with the real
+    #    predicate, the same one search.py's index-build ``_decode`` calls.
+    cold_config = {"storage": {"mapping": {"scratch-class": "excluded"}}}
+    assert is_embedded("scratch-class", cold_config) is False
+    assert is_embedded("concept", cold_config) is True  # unmapped classes: default surface
+
+    # Build a fixture index the way a real index build would: insert only
+    # the page that survives BOTH gates. The refused and cold pages
+    # deliberately never make it into this index at all — that is the real
+    # exclusion mechanism, not a predicate in athenaeum.context.
+    _build_index(
+        tmp_path / "wiki-index.db",
+        0,
+        extra_rows=[
+            (
+                "survivor-page.md",
+                "Survivor Widget",
+                "survivor",
+                "",
+                "the only page that made it past both upstream gates",
+                "|__access_open__|",
+                "ref",
+                "warm",
+            ),
+        ],
+    )
+
+    from athenaeum.context import build_context
+
+    env = build_context("survivor widget", "sess", cache_dir=tmp_path, use_llm=False)
+    filenames = [c["filename"] for c in env["candidates"]]
+    assert filenames == ["survivor-page.md"]
+    assert "scratch-todo.md" not in filenames
+    assert "scratch-page.md" not in filenames
 
 
 # ---------------------------------------------------------------------------
