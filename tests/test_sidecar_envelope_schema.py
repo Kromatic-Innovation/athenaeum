@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from athenaeum import context_schema
-from athenaeum.context import build_context
+from athenaeum.context import ENVELOPE_VERSION, build_context
 from athenaeum.context_schema import (
     BUDGET_REQUIRED_FIELDS,
     CANDIDATE_REQUIRED_FIELDS,
@@ -78,6 +78,26 @@ def golden_envelope(tmp_path: Path) -> dict:
 
 def test_golden_envelope_validates(golden_envelope: dict) -> None:
     validate_envelope(golden_envelope)  # must not raise
+
+
+def test_envelope_version_is_single_sourced_from_schema_version() -> None:
+    """Sentry/Seer review finding on this issue's own PR: `context.py`'s
+    `ENVELOPE_VERSION` and `context_schema.py`'s `SCHEMA_VERSION` were two
+    independent literals that could silently desync on a future schema
+    bump in one file without the matching edit in the other.
+    `athenaeum.context` imports `SCHEMA_VERSION` directly (see its source)
+    rather than hand-copying the literal, and this asserts the value that
+    reaches a real, built envelope matches the schema module's version."""
+    assert ENVELOPE_VERSION == SCHEMA_VERSION
+
+
+def test_context_module_imports_schema_version_not_a_literal() -> None:
+    """Belt-and-suspenders on the same finding: greps context.py's source
+    for the import, so a future edit that reverts to a hand-copied literal
+    (which could still equal 1 today and pass the value-equality test
+    above) is caught at the source level too."""
+    text = CONTEXT_PY.read_text(encoding="utf-8")
+    assert "from athenaeum.context_schema import SCHEMA_VERSION" in text
 
 
 def test_golden_envelope_has_a_hit(golden_envelope: dict) -> None:
