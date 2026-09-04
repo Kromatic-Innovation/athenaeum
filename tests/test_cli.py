@@ -1427,3 +1427,76 @@ class TestSubcommandLoaderRegistryStaysInSync:
             assert name in lazy_top.choices, (
                 f"_build_lazy_parser({name!r}) did not register {name!r}"
             )
+
+
+class TestHelpFlagOrderingMatchesEagerParser:
+    """Regression for a review-caught bug: a help flag *before* the
+    subcommand token must still render the FULL top-level subcommand
+    listing, not whatever single group the lazy path happens to import.
+
+    ``athenaeum -h recall`` used to build a lazy parser scoped to
+    ``recall``'s owning module (5 names) and print *that* parser's
+    ``-h`` output, silently hiding every other subcommand. ``-h``/
+    ``--help`` *after* the subcommand token is unaffected -- it belongs
+    to that subcommand's own subparser either way, which the lazy path
+    builds identically to the eager one (covered by
+    ``TestEverySubparserHelpRenders.test_memory_class_backfill_help_exits_zero``).
+    """
+
+    @staticmethod
+    def _full_subcommand_names() -> set[str]:
+        parser = build_parser()
+        top = next(
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        return set(top.choices)
+
+    @pytest.mark.parametrize("help_flag", ["-h", "--help"])
+    def test_help_before_subcommand_lists_every_subcommand(
+        self, help_flag: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main([help_flag, "recall"])
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        missing = [name for name in self._full_subcommand_names() if name not in out]
+        assert not missing, (
+            f"`athenaeum {help_flag} recall` did not list every subcommand "
+            f"-- missing: {sorted(missing)}"
+        )
+
+    def test_help_before_version_still_shows_full_help(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``-h`` ahead of ``--version`` must win with the full listing, not
+        the minimal ``--version``-only parser the fast path would build.
+        """
+        with pytest.raises(SystemExit) as excinfo:
+            main(["-h", "--version"])
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        missing = [name for name in self._full_subcommand_names() if name not in out]
+        assert not missing, (
+            f"`athenaeum -h --version` did not list every subcommand -- "
+            f"missing: {sorted(missing)}"
+        )
+
+    def test_help_after_subcommand_still_scopes_to_that_subcommand(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Sanity check that the fix didn't overcorrect: ``<cmd> --help``
+        (subcommand-first) must still show that subcommand's own help, not
+        the full top-level listing.
+        """
+        with pytest.raises(SystemExit) as excinfo:
+            main(["recall", "--help"])
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        assert "usage: athenaeum recall" in out
+        # Only recall's own group siblings may legitimately appear (e.g. as
+        # substrings of its own help text); unrelated top-level commands
+        # from other groups must not.
+        assert "memory-class" not in out
+        assert "push-metrics" not in out
