@@ -29,6 +29,39 @@ MCP tools                     static, AST over       ``read_person``
                               ``mcp_server.py``
 ============================  =====================  =========================
 
+A fourth dimension, ``dir_attrs``, was added for athenaeum#1401. PR athenaeum#1373
+rewrote ``src/athenaeum/__init__.py`` to lazily export via PEP 562
+``__getattr__`` instead of eagerly importing ``athenaeum.librarian``, and as a
+side effect stopped populating ~40 submodule names (``athenaeum.config``,
+``.pii``, ``.spend``, ... — never listed in ``__all__``, only ever reachable
+because the eager import happened to leave them as module attributes).
+``dir(athenaeum)`` went 78 -> 50 names between v0.19.0 and 0.20.0 and none of
+the other three dimensions saw it: ``__all__`` was untouched, nothing CLI- or
+MCP-shaped was removed. ``dir_attrs`` is guarded by the exact same rule as the
+other three — a name gone from ``dir(<module>)`` requires a minor-or-greater
+version bump, same as a name gone from ``__all__`` — deliberately, not a new
+mechanism: an accidental side-effect export is still something a consumer's
+code may depend on (``athenaeum.config`` worked and someone may have written
+``import athenaeum; athenaeum.config.something``), so it gets the same
+explicit-acceptance-via-version-bump treatment as a declared one. The
+alternative (hard-fail any ``dir()`` removal forever, even on a proper minor
+bump) would make PEP 562 lazy-export adoption impossible in any future
+package, and the existing three dimensions already establish "a minor bump IS
+the explicit accept" as this guard's idiom — inventing a second, stricter
+gate for the fourth dimension alone would be inconsistent for no
+detection-power gain (the version-bump rule still requires the bump to
+actually happen, at which point the corresponding CHANGELOG entry — see
+athenaeum#1400 — is where the specific delta gets *named* for a human
+reader).
+
+**Why extracted via a fresh subprocess, unlike the other three.** PEP 562
+``__getattr__`` MAY cache resolved attributes onto the module's ``__dict__``
+after first access (CPython does). An earlier test in the same pytest run
+that did ``athenaeum.config`` would warm the cache and make ``dir_attrs()``
+over-report if it ran in-process against the already-imported module. Every
+other dimension is immune to this (``__all__`` is a static list; CLI/MCP
+don't touch ``__getattr__``), so ``dir_attrs`` alone always subprocesses.
+
 **Why the CLI and Python surfaces are extracted at RUNTIME and MCP statically.**
 Subcommands are registered across ~20 ``_cmd_*.py`` modules, and several of them
 register nested sub-subparsers (``athenaeum query person`` was one). A static
@@ -50,11 +83,19 @@ from __future__ import annotations
 
 import ast
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
-#: The three dimensions, in the order reports render them.
-SURFACE_DIMENSIONS: tuple[str, ...] = ("cli_subcommands", "python_all", "mcp_tools")
+#: The four dimensions, in the order reports render them.
+SURFACE_DIMENSIONS: tuple[str, ...] = (
+    "cli_subcommands",
+    "python_all",
+    "mcp_tools",
+    "dir_attrs",
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_PATH = _REPO_ROOT / "tests" / "fixtures" / "public_surface_baseline.json"
@@ -160,18 +201,50 @@ def mcp_tool_names(source_root: Path | None = None) -> list[str]:
     return sorted(names)
 
 
-def extract_surface(source_root: Path | None = None) -> dict[str, list[str]]:
-    """All three dimensions of the public surface.
+def dir_attrs(source_root: Path | None = None) -> list[str]:
+    """``dir(athenaeum)`` from a FRESH interpreter (issue athenaeum#1401).
 
-    *source_root* selects the tree the STATIC dimension is read from; the
-    runtime dimensions always reflect whatever ``athenaeum`` is importable, so a
-    caller snapshotting a historical tree must put it on ``sys.path`` first (see
-    ``scripts/snapshot_public_surface.py``).
+    Always subprocesses, even for the working-tree case: PEP 562
+    ``__getattr__`` may cache a resolved name onto the module's ``__dict__``
+    on first access, so an in-process call sharing an interpreter with earlier
+    tests could see names an untouched import would not. A subprocess starts
+    with a module that has never had ``__getattr__`` called on it.
+
+    *source_root*, when given, is prepended to the subprocess's
+    ``PYTHONPATH`` so a historical checkout can be measured the same way
+    :func:`mcp_tool_names` reads one statically — matching how
+    ``scripts/snapshot_public_surface.py`` already snapshots dimensions
+    against a tree that isn't the one currently installed.
+    """
+    env = os.environ.copy()
+    if source_root is not None:
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(source_root) + (os.pathsep + existing if existing else "")
+    code = "import json, athenaeum; print(json.dumps(sorted(dir(athenaeum))))"
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+    )
+    return list(json.loads(result.stdout))
+
+
+def extract_surface(source_root: Path | None = None) -> dict[str, list[str]]:
+    """All four dimensions of the public surface.
+
+    *source_root* selects the tree the STATIC dimension is read from and the
+    subprocessed :func:`dir_attrs` dimension imports from; the two in-process
+    runtime dimensions always reflect whatever ``athenaeum`` is importable, so
+    a caller snapshotting a historical tree must put it on ``sys.path`` first
+    (see ``scripts/snapshot_public_surface.py``).
     """
     return {
         "cli_subcommands": cli_subcommands(),
         "python_all": python_all(),
         "mcp_tools": mcp_tool_names(source_root),
+        "dir_attrs": dir_attrs(source_root),
     }
 
 
