@@ -2035,6 +2035,17 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
 
 ### Fixed
 
+- **An internal agent run-log shipped in the published sdist.**
+  `.tmp/ledgers/work_session.jsonl` was tracked in git and, because hatchling's
+  sdist target includes VCS-tracked files by default, was packaged into
+  `athenaeum-<version>.tar.gz` (confirmed by building the sdist and listing it).
+  The wheel was never affected — it is built from `packages = ["src/athenaeum"]`
+  plus explicit force-includes, so `.tmp/` was always outside it. The file held
+  issue references, branch names and task summaries; no credentials. It is now
+  untracked and `.tmp/` is ignored. This condition predates this release — the
+  same file is present in the v0.19.0 tree — so source installs of earlier
+  versions carry it too.
+
 - **Lane A intake throughput could fall to exactly zero while the run reported
   `reason=completed` (athenaeum#1322).** Two independent window-COMPOSITION
   defects, neither visible from a pending count. **First**, the athenaeum#900
