@@ -60,7 +60,11 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from athenaeum.config import resolve_cache_dir, resolve_push_token_budget
+from athenaeum.config import (
+    resolve_cache_dir,
+    resolve_person_registry_root,
+    resolve_push_token_budget,
+)
 from athenaeum.entity_schema import (
     QUERYABLE_FIELDS,
     declared_entity_classes,
@@ -83,6 +87,7 @@ from athenaeum.models import (
     valid_until_expired,
     validity_bound_str,
 )
+from athenaeum.person_registry import PersonRegistry
 from athenaeum.provenance import resolve_remember_extras, resolve_remember_sources
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
 from athenaeum.storage import (
@@ -421,7 +426,24 @@ def entity_read(
     from athenaeum import pii
 
     wiki_root = knowledge_root / "wiki"
-    page_path = EntityIndex(wiki_root).get_by_uid(uid)
+    entity_index = EntityIndex(wiki_root)
+    page_path = entity_index.get_by_uid(uid)
+    if page_path is None:
+        # athenaeum#1394: EntityIndex only scans `wiki_root`, so a `type:
+        # person` page relocated by athenaeum#1247 is invisible to it even
+        # though it still exists on disk. PersonRegistry is the sanctioned
+        # index for wherever `person_registry.root` now points — it defaults
+        # to `wiki_root` itself pre-relocation (see
+        # `resolve_person_registry_root`), in which case this fallback never
+        # fires and behavior on an unmigrated corpus is unchanged. Register
+        # a hit directly on the index already built above so the SAME
+        # instance, passed to `pii.read_entity` below, resolves it too —
+        # rather than building a second index only this function would see.
+        registry_root = resolve_person_registry_root(knowledge_root, config)
+        entry = PersonRegistry(registry_root).get_by_uid(uid)
+        if entry is not None:
+            page_path = entry.path
+            entity_index._by_uid[uid] = page_path
     if page_path is None:
         return json.dumps(
             {"ok": False, "error": f"{not_found_label} not found: uid={uid!r}"}, indent=2
@@ -447,6 +469,7 @@ def entity_read(
         surface_class=pii.surface_class_for_page_class(page_class, config),
         include_excluded=include_excluded,
         usage_classes=usage_classes,
+        entity_index=entity_index,
     )
     if result is None:
         return json.dumps(

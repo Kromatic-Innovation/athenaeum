@@ -254,6 +254,152 @@ class TestMcpReadEntityTool:
         assert payload["contact"] == {"emails": ["alex@example.org"]}
 
 
+class TestPersonRegistryFallback:
+    """athenaeum#1394: `entity_read` falls back to `PersonRegistry` once a
+    person's uid no longer resolves through `EntityIndex`'s `wiki_root` scan.
+
+    The migrated state (athenaeum#1247) is produced purely by config —
+    `person_registry.root` pointed at a `tmp_path` directory other than
+    `wiki/` — no corpus mutation, per the issue's "buildable today" scoping.
+    """
+
+    def _relocated_corpus(
+        self, tmp_path: Path, *, extra: str = "", with_record: bool = True
+    ) -> tuple[Path, Path]:
+        knowledge = tmp_path / "knowledge"
+        retired = tmp_path / "retired-persons"
+        _write_page(retired, "alex", name="Alex Widget", extra=extra)
+        if with_record:
+            _write_record(
+                pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG),
+                "alex-contact.md",
+                uid="alex",
+                fields="emails:\n  - alex@example.org\n",
+            )
+        return knowledge, retired
+
+    def test_resolves_a_relocated_person_uid(self, tmp_path: Path) -> None:
+        knowledge, retired = self._relocated_corpus(tmp_path)
+        config = dict(EXCLUDED_CONFIG, person_registry={"root": str(retired)})
+
+        payload = json.loads(
+            entity_read(
+                knowledge,
+                "alex",
+                page_class="person",
+                include_excluded=True,
+                config=config,
+            )
+        )
+
+        assert payload["uid"] == "alex"
+        assert payload["contact"] == {"emails": ["alex@example.org"]}
+
+    def test_matches_the_unmigrated_payload_shape(self, tmp_path: Path) -> None:
+        """Same page/record shape, read once via the ordinary wiki-root path
+        and once via the relocated fallback — the AC's "same `EntityRead`
+        payload it returns today" requirement, asserted directly rather than
+        inferred from a couple of spot-checked fields."""
+        unmigrated = tmp_path / "unmigrated"
+        _write_page(unmigrated / "wiki", "alex", name="Alex Widget")
+        _write_record(
+            pii.contacts_surface_root(unmigrated, EXCLUDED_CONFIG),
+            "alex-contact.md",
+            uid="alex",
+            fields="emails:\n  - alex@example.org\n",
+        )
+        unmigrated_payload = json.loads(
+            entity_read(
+                unmigrated,
+                "alex",
+                page_class="person",
+                include_excluded=True,
+                config=EXCLUDED_CONFIG,
+            )
+        )
+
+        migrated, retired = self._relocated_corpus(tmp_path)
+        config = dict(EXCLUDED_CONFIG, person_registry={"root": str(retired)})
+        migrated_payload = json.loads(
+            entity_read(
+                migrated,
+                "alex",
+                page_class="person",
+                include_excluded=True,
+                config=config,
+            )
+        )
+
+        for key in (
+            "uid",
+            "frontmatter",
+            "body",
+            "contact",
+            "redactions",
+            "contact_included",
+            "classifications",
+            "validity",
+            "do_not_email",
+        ):
+            assert unmigrated_payload[key] == migrated_payload[key], key
+
+    def test_unknown_uid_still_reports_not_found(self, tmp_path: Path) -> None:
+        """A relocated registry that finds nothing for this uid must not turn
+        a genuinely unknown uid into anything but the existing wording — a
+        fallback that answered `not None` for every uid would pass a naive
+        assertion and be wrong."""
+        knowledge, retired = self._relocated_corpus(tmp_path)
+        config = dict(EXCLUDED_CONFIG, person_registry={"root": str(retired)})
+
+        payload = json.loads(
+            entity_read(knowledge, "nobody", page_class="person", config=config)
+        )
+
+        assert payload["ok"] is False
+        assert "not found" in payload["error"]
+
+    def test_fail_closed_audience_check_applies_on_the_fallback_path(
+        self, tmp_path: Path
+    ) -> None:
+        """A restricted caller must not receive a value for a relocated
+        person — the audience check has to run against the registry-resolved
+        page, not only the ordinary wiki-root path."""
+        knowledge, retired = self._relocated_corpus(tmp_path)
+        config = dict(EXCLUDED_CONFIG, person_registry={"root": str(retired)})
+
+        generic = entity_read(
+            knowledge,
+            "alex",
+            page_class="person",
+            include_excluded=True,
+            caller_audience=RESTRICTED,
+            config=config,
+        )
+        payload = json.loads(generic)
+
+        assert "alex@example.org" not in generic
+        assert payload["error_code"] == "forbidden"
+
+    def test_authorized_restricted_caller_receives_the_value_on_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        knowledge, retired = self._relocated_corpus(tmp_path, extra="access: open\n")
+        config = dict(EXCLUDED_CONFIG, person_registry={"root": str(retired)})
+
+        payload = json.loads(
+            entity_read(
+                knowledge,
+                "alex",
+                page_class="person",
+                include_excluded=True,
+                caller_audience=RESTRICTED,
+                config=config,
+            )
+        )
+
+        assert payload["contact"] == {"emails": ["alex@example.org"]}
+
+
 class TestDateTypedFrontmatterCoercion:
     """A bare YAML date/datetime must not crash JSON serialization (athenaeum#1002).
 
