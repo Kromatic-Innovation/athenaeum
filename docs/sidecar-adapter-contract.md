@@ -122,12 +122,15 @@ allowed to do on its side of that boundary.
 - **Cache / persist the envelope**, subject to §1.1's rule on `query`
   (strip or hash it first) and to whatever access-control handling §2.4
   requires for `audience`.
-- **Call `athenaeum.context.record_context_push()`** *(planned — issue
-  athenaeum#1362, not yet landed as of this document)* after rendering, to
-  route push telemetry through the same durable ledger the MCP `recall`
-  path uses. Listed here so an adapter author designs for its existence
-  rather than rediscovering the need for it independently — the exact
-  signature is athenaeum#1362's to decide, not pinned by this document.
+- **Call `athenaeum.context.record_context_push(envelope, *, cache_dir,
+  wiki_root=None, config=None) -> bool`** (issue athenaeum#1362, landed)
+  after rendering, to route push telemetry through the same durable ledger
+  the MCP `recall` path uses. Best-effort like
+  `push_metrics.record_push` itself — never raises, returns `False` when
+  instrumentation is disabled or the envelope has no session id / no
+  candidates. `_cmd_context.py` is the reference call site: it calls this
+  immediately after building the envelope it is about to print, and does
+  not (and must not) let the return value affect its own exit code.
 
 ### 2.2 An adapter MAY NOT
 
@@ -202,16 +205,13 @@ derives a push record's `scope` field from it.
 - An adapter MAY NOT render `audience`'s raw delimited form directly into
   user-facing text — it is an internal representation
   (`"|__access_open__|"`, `"|ops|ops-admin|"`), not a display string.
-- **No inverse-parsing helper for `audience`'s delimited-string form exists
-  in `athenaeum.models` today** (confirmed while drafting this contract —
-  only the forward direction, `audience_index_string(meta) -> str`, is
-  public). An adapter or downstream consumer that needs the parsed role
-  list back out should add that inverse function to `athenaeum.models`
-  rather than hand-rolling a second parser — this is exactly the drift
-  §2.2's "no adapter does its own retrieval/parsing" rule exists to
-  prevent, applied to a smaller surface. Issue athenaeum#1362 (push
-  telemetry) needs this and should add it there rather than duplicating the
-  pre-convergence shell hook's own ad hoc `_pm_scope_from_audience`.
+- **The inverse-parsing helper landed as `athenaeum.models.parse_audience_index_string(audience_str)
+  -> tuple[list[str], bool]`** (issue athenaeum#1362), alongside the forward
+  direction (`audience_index_string(meta) -> str`). Returns `(roles,
+  is_public)`. `record_context_push` uses it to derive a sidecar push
+  record's `scope` field — the same construction the pre-convergence shell
+  hook's ad hoc `_pm_scope_from_audience` performed by hand, now a single
+  shared implementation instead of a second parser.
 
 ---
 

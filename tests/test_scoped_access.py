@@ -25,6 +25,7 @@ from athenaeum.models import (
     effective_audience,
     is_page_authorized,
     parse_audience,
+    parse_audience_index_string,
 )
 
 # Backends to prove the filter on. ``vector`` is skipped when chromadb is
@@ -190,6 +191,37 @@ class TestAudienceHelpers:
         assert is_page_authorized(meta, {"operations"}) is False
         assert audience_index_string(meta) == "|"
         assert "__access_open__" not in audience_index_string(meta)
+
+    def test_parse_audience_index_string_is_the_inverse(self) -> None:
+        """``parse_audience_index_string`` (issue athenaeum#1362) round-trips
+        every shape ``audience_index_string`` can produce — the inverse-
+        parsing helper ``docs/sidecar-adapter-contract.md`` §2.4 calls out
+        as missing, for a caller (the sidecar push-telemetry path) that only
+        has the stored delimited string, never the original frontmatter."""
+        for meta in (
+            {"audience": ["opsadmin"], "access": "internal"},
+            {"access": "open"},
+            {"access": "internal"},
+            {"audience": ["opsadmin", "marketing"], "access": "open"},
+        ):
+            encoded = audience_index_string(meta)
+            roles, is_public = parse_audience_index_string(encoded)
+            want_roles, want_public = effective_audience(meta)
+            assert set(roles) == want_roles
+            assert is_public == want_public
+            # No duplicate/empty tokens, and roles arrive pre-sorted (same
+            # order `delimited_index_string`'s own `sorted({...})` emits).
+            assert roles == sorted(set(roles))
+
+    def test_parse_audience_index_string_empty_and_public_only(self) -> None:
+        assert parse_audience_index_string("|") == ([], False)
+        assert parse_audience_index_string("") == ([], False)
+        assert parse_audience_index_string("|__access_open__|") == ([], True)
+        assert parse_audience_index_string("|opsadmin|") == (["opsadmin"], False)
+        # Anchoring survives the round trip too: "|ops|" must not be produced
+        # from "|opsadmin|" (would silently grant a narrower role than stored).
+        roles, _ = parse_audience_index_string("|opsadmin|")
+        assert "ops" not in roles
 
 
 # ---------------------------------------------------------------------------
