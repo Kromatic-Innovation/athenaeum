@@ -100,6 +100,7 @@ MODULE_LAYER: dict[str, int] = {
     "calibration": 3,
     "clusters": 3,
     "context": 3,
+    "context_schema": 3,
     "contradictions": 3,
     "cross_scope": 3,
     "delta": 3,
