@@ -38,12 +38,23 @@ into this always-imported package root would make ``pytest`` a hard runtime
 dependency of every ``athenaeum`` import; import it directly
 (``from athenaeum.store_conformance import StoreConformanceTests``) instead.
 
-Layering: sits above L5 by necessity (it imports the CLI-adjacent
-:mod:`athenaeum.librarian` pipeline entry points as well as the L1
-:mod:`athenaeum.models` hub, L1 :mod:`athenaeum.init`, and L1
+Layering: sits above L5 by necessity (its public surface includes the
+CLI-adjacent :mod:`athenaeum.librarian` pipeline entry points as well as the
+L1 :mod:`athenaeum.models` hub, L1 :mod:`athenaeum.init`, and L1
 :mod:`athenaeum.store` contract types) — this file is the one place layering
 is deliberately collapsed, since a package root must expose the whole stack's
 public surface in one namespace.
+
+Issue athenaeum#1360: the ``athenaeum.librarian`` names in ``__all__`` are
+resolved LAZILY, via a module-level ``__getattr__`` (PEP 562) at the bottom
+of this file, rather than an eager top-level ``from athenaeum.librarian
+import (...)``. ``librarian`` transitively imports the ``anthropic`` SDK
+(through :mod:`athenaeum.tiers`/:mod:`athenaeum.batch`), which cost ~520ms on
+every ``import athenaeum`` — paid by ``athenaeum.search``/
+``athenaeum.push_metrics`` callers and by ``athenaeum --version`` alike, since
+importing any submodule runs this file first. Do not move a librarian name
+back to an eager top-level import; add it to ``_LAZY_LIBRARIAN_EXPORTS``
+instead.
 """
 
 from importlib.metadata import PackageNotFoundError
@@ -63,17 +74,6 @@ except PackageNotFoundError:
     __version__ = "0.0.0+unknown"
 
 from athenaeum.init import init_knowledge_dir
-from athenaeum.librarian import (
-    IngestResult,
-    SessionEndResult,
-    discover_raw_files,
-    ingest,
-    process_one,
-    rebuild_index,
-    reindex,
-    run,
-    session_end,
-)
 from athenaeum.models import (
     ClassifiedEntity,
     EntityAction,
@@ -135,3 +135,41 @@ __all__ = [
     "session_end",
     "slugify",
 ]
+
+# Issue athenaeum#1360: ``athenaeum.librarian`` transitively imports the
+# ``anthropic`` SDK (via ``athenaeum.tiers``/``athenaeum.batch``), costing
+# ~520ms on every ``import athenaeum`` regardless of whether the caller
+# touches an LLM. These names stay in ``__all__`` (they are still part of
+# the public, semver-covered surface) but resolve lazily via PEP 562
+# module ``__getattr__`` instead of an eager top-level import, so a plain
+# ``import athenaeum`` — or ``import athenaeum.search`` /
+# ``import athenaeum.push_metrics``, which must run this file first as
+# their parent package — no longer pays the librarian/LLM import chain.
+# Actually touching one of these names (``athenaeum.run(...)``,
+# ``from athenaeum import ingest``, etc.) still imports ``librarian`` at
+# that point, same as before; only the package-root cost is removed.
+_LAZY_LIBRARIAN_EXPORTS = frozenset(
+    {
+        "IngestResult",
+        "SessionEndResult",
+        "discover_raw_files",
+        "ingest",
+        "process_one",
+        "rebuild_index",
+        "reindex",
+        "run",
+        "session_end",
+    }
+)
+
+
+def __getattr__(name: str) -> object:
+    if name in _LAZY_LIBRARIAN_EXPORTS:
+        from athenaeum import librarian
+
+        return getattr(librarian, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | _LAZY_LIBRARIAN_EXPORTS)
