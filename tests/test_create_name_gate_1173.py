@@ -52,8 +52,10 @@ from athenaeum.models import ClassifiedEntity, EntityIndex, RawFile, TokenUsage
 from athenaeum.tiers import (
     DEFAULT_CREATE_NAME_ESCALATE_MAX_CHARS,
     CreateNameCollisionError,
+    CreateNameDemotedError,
     CreateNameEscalatedError,
     CreateNameRejectedError,
+    demote_oversize_pages,
     gate_create_name_classifications,
     resolve_create_name_escalate_max_chars,
     validate_create_name,
@@ -895,3 +897,122 @@ class TestFullRunDisambiguatesAcrossRuns:
         assert "A second fact about Acme." in pages_after_run2[0].read_text(
             encoding="utf-8"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1406: a log-demoted page's name must not be re-mintable --
+# validate_create_name()/gate_create_name_classifications()'s half of the
+# guard. tests/test_page_size_gate.py::TestLogDemoteRetiredNameGuard covers
+# the record demote_oversize_pages() writes; this covers what a subsequent
+# create attempt does with it.
+# ---------------------------------------------------------------------------
+
+
+def _demoted_wiki(
+    tmp_path: Path,
+    *,
+    uid: str = "aaaa1111",
+    name: str = "dijkstra",
+    aliases: list[str] | None = None,
+) -> Path:
+    wiki = tmp_path / "wiki"
+    target = _write_page(wiki, f"{uid}.md", uid=uid, name=name, type_="person", aliases=aliases)
+    config = {"librarian": {"preserved_log_dir": "logs"}}
+    results = demote_oversize_pages([target], wiki, config)
+    assert results[0].demoted is True
+    return wiki
+
+
+class TestValidateCreateNameRetiredGuard:
+    def test_demoted_name_is_refused(self, tmp_path: Path) -> None:
+        wiki = _demoted_wiki(tmp_path)
+        index = EntityIndex(wiki)
+
+        with pytest.raises(CreateNameDemotedError) as exc_info:
+            validate_create_name("dijkstra", index=index, entity_type="person")
+
+        assert exc_info.value.existing_uid == "aaaa1111"
+        assert "logs" in exc_info.value.demoted_to
+
+    def test_demoted_alias_is_also_refused(self, tmp_path: Path) -> None:
+        wiki = _demoted_wiki(tmp_path, aliases=["Dijkstra the Developer"])
+        index = EntityIndex(wiki)
+
+        with pytest.raises(CreateNameDemotedError):
+            validate_create_name(
+                "Dijkstra the Developer", index=index, entity_type="person"
+            )
+
+    def test_a_name_that_was_never_demoted_still_passes(self, tmp_path: Path) -> None:
+        """Counter-example (issue athenaeum#1406 AC1): a guard that refuses
+        every create passes a naive assertion and is wrong -- an unrelated
+        name in the SAME wiki (with its own retired-name sidecar present)
+        must still be approved."""
+        wiki = _demoted_wiki(tmp_path)
+
+        index = EntityIndex(wiki)
+        validate_create_name("Someone Else Entirely", index=index, entity_type="person")
+
+    def test_rolled_back_demotion_is_approved_again(self, tmp_path: Path) -> None:
+        """Counter-example (issue athenaeum#1406 AC1): a name whose
+        demotion was rolled back (the sidecar record removed) must be
+        approved again, not refused forever."""
+        wiki = _demoted_wiki(tmp_path)
+        (wiki / "_retired_names.yaml").unlink()
+
+        index = EntityIndex(wiki)
+        validate_create_name("dijkstra", index=index, entity_type="person")
+
+    def test_no_index_supplied_skips_the_retired_check(self, tmp_path: Path) -> None:
+        """Byte-identical-behavior guard, same shape as the uniqueness
+        check's own: with index=None every pre-athenaeum#1406 caller is
+        unaffected."""
+        _demoted_wiki(tmp_path)
+
+        validate_create_name("dijkstra")  # must not raise -- no index given
+
+
+class TestGateCreateNameClassificationsDemoted:
+    def test_demoted_name_is_escalated_not_disambiguated(self, tmp_path: Path) -> None:
+        """The load-bearing distinction from an ordinary collision: a
+        demoted name must NEVER disambiguate into a merge dispatch (there
+        is no page left in the wiki to safely fold into) -- it always
+        escalates, unlike :class:`CreateNameCollisionError`'s
+        known-existing-type branch."""
+        wiki = _demoted_wiki(tmp_path)
+        index = EntityIndex(wiki)
+        c = _classified("dijkstra", entity_type="person", observations="A note about dijkstra.")
+
+        outcome = gate_create_name_classifications(
+            [c], "raw/ref.md", "A note about dijkstra.", index=index
+        )
+
+        assert outcome.kept == []
+        assert outcome.disambiguated == ()
+        assert outcome.rejected == ()
+        assert len(outcome.escalations) == 1
+        item = outcome.escalations[0]
+        assert item.entity_name == "dijkstra"
+        assert item.conflict_type == "name_demoted"
+        assert "logs" in item.description
+        assert "A note about dijkstra." in item.description
+
+    def test_demoted_name_produces_zero_additional_index_entries(
+        self, tmp_path: Path
+    ) -> None:
+        """issue athenaeum#1406 AC3, asserted directly: a corpus fixture
+        containing a demoted record plus a raw file mentioning that name
+        produces ZERO additional entity-index entries (and therefore zero
+        additional tier-1 raw-text mention matches, since
+        ``tier1_programmatic_match`` walks ``EntityIndex.items()``) versus
+        the same fixture with the record absent -- not inferred from index
+        size, but from the escalate-not-disambiguate outcome above plus the
+        index staying empty here."""
+        wiki = _demoted_wiki(tmp_path)
+
+        index_with_record = EntityIndex(wiki)
+        assert list(index_with_record.items()) == []
+
+        (wiki / "_retired_names.yaml").unlink()
+        index_without_record = EntityIndex(wiki)
+        assert list(index_without_record.items()) == list(index_with_record.items())
