@@ -51,3 +51,6 @@ eval-summary.json
 # frozen-lock policy) and the lockfile has never been tracked. If the team
 # later adopts `uv sync --frozen` in CI, remove this line and commit uv.lock.
 uv.lock
+
+# Internal agent run-logs — never ship in the sdist (v0.20.0 release gate)
+.tmp/
