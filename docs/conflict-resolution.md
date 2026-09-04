@@ -332,8 +332,8 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 - **Resolution rule (unchanged for existing tiers):** the taxonomy is
   ordered highest-to-lowest; ties break by newer source date. The tiers
   are the SourceRef `<type>:<ref>` shorthand's type component (`user:`,
-  `linkedin:`, `api:`, `wikipedia:`, `agent-observed:`, `claude:`,
-  `script:`, `model-prior:`, `unsourced`).
+  `linkedin:`, `twitter:`, `api:`, `wikipedia:`, `agent-observed:`,
+  `claude:`, `script:`, `model-prior:`, `unsourced`).
 - **Change (athenaeum#326):** issue athenaeum#326 introduced a NEW tier `model-prior:<model-id>`
   ranked BELOW `script:<slug>`. Rationale is locked in
   `docs/provenance-shape.md` §10.1 — a training prior is unverifiable and
