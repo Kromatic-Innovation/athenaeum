@@ -4812,7 +4812,7 @@ def demote_oversize_pages(
     attempted into an already-oversize page, and only when
     ``librarian.oversize_page_action`` is configured to ``log_demote`` for
     the WHOLE corpus. Neither of those is what an operator disposition
-    sweep needs: #1214 asks for judgement per page (a persona page
+    sweep needs: athenaeum#1214 asks for judgement per page (a persona page
     mistyped as ``person`` should demote; a real colleague's oversize
     person page should not), so this calls the same underlying move --
     :func:`_perform_oversize_log_demote`, which itself reuses
