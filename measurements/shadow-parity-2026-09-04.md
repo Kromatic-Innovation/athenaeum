@@ -178,6 +178,81 @@ size at 25, so 300 pairs is the structural worst case, but nothing near it is re
 This is the one place the report is *better* news than athenaeum#1258 expected — and it does
 not rescue the go/no-go, because the blocker is correctness, not cost.
 
+## Measurement caveats — two corrections that cut against this report's headline
+
+Added after review. Both are direct harness output, and both weaken the framing above.
+They are recorded here because this report gates an irreversible deletion.
+
+### 1. On both items where the lanes disagree, the harness scores the COMPARATOR correct
+
+`agreement == disagree` occurs exactly twice in the run, and in both the comparator is the
+one that matches ground truth:
+
+| case | detector | comparator | outcome_class | comparator_correct |
+| --- | --- | --- | --- | --- |
+| `restatement_pto_days` | factual | duplicate | `pass` | **True** |
+| `sequential_snapshot_headcount` | factual | distinct | `pass` | **True** |
+
+`EXPECTED_COMPARATOR_VERDICTS["pass"] = {distinct, duplicate, specialization}`
+(`shadow_parity.py:486-491`), i.e. the golden set says *no contradiction is present* in
+either case. **C4 produced two false-positive contradictions on this corpus; the comparator
+produced zero.**
+
+The "contradiction recall 0/12 = 0%" figure above is arithmetically correct but uses **C4 as
+the reference standard**, which the eval corpus does not. Scored against `outcome_class`
+instead — the actual ground truth — the result is:
+
+| outcome_class | n | comparator correct | expected verdicts |
+| --- | --- | --- | --- |
+| `pass` | 7 | **7 / 7** | distinct / duplicate / specialization |
+| `escalate` | 4 | **4 / 4** | underdetermined / contradiction |
+| `contradict` | 5 | **0 / 5** | contradiction |
+| `merge` | 2 | **0 / 2** | duplicate / specialization |
+| **total** | **18** | **11 / 18** | |
+
+**The NO-GO is unchanged, and the ground-truth framing is the more defensible one:** the
+comparator is perfect on the 11 cases that require it to say "these are separable or need a
+human," and scores **0 / 7** on the cases that require it to *name a contradiction or a
+merge*. It never emits `contradiction` at all. That is a categorical capability gap, not a
+recall shortfall against a rival.
+
+**But the honest counterweight belongs on the record:** C4 is not a clean gold standard here
+either. It was wrong on the only two items where the two lanes were both conclusive and
+differed. A disposition that reads this report as "C4 is accurate and the comparator is not"
+would be over-reading it. The defensible reading is narrower: *the comparator cannot do the
+contradiction and merge jobs at all on this corpus, so it cannot replace C4 today* — which is
+independent of how accurate C4 itself is.
+
+### 2. The 1.700 eval-corpus multiplier has mismatched denominators — do not use it as a cost figure
+
+All 8 `resolver`-source items carry a **declared** detector verdict, so they issue
+`detector_calls: 0` while still issuing comparator calls. The reported
+`call_multiplier: 1.700` therefore divides a numerator drawn from all 18 clusters by a
+denominator drawn from only 10.
+
+On the like-for-like `detector`-source subset — the 10 clusters where both lanes actually
+dispatched — the ratio is **9 comparator calls / 10 detector calls = 0.90×**.
+
+So `1.700` is not a cost multiplier in either direction, and the reason is the denominator
+mismatch, not merely the small cluster sizes noted earlier.
+
+> **The measured LLM-call cost multiplier that AC #1 asks for is the live-shape
+> `1.543×`** (426 planned pairs / 276 pairable clusters, over 520 live clusters). The
+> eval-corpus figures — `1.700` reported, `0.90` like-for-like — are not comparable to it
+> and should not be quoted as costs.
+
+### 3. One claim elsewhere in this document is an inference, not a check
+
+The corpus-safety section states that `~/knowledge/.athenaeum.lock` was held by the two
+long-lived `athenaeum serve` processes rather than a librarian pass. That is a `pgrep`
+inference, not a verified fact — and the cluster JSONLs show librarian output at 15:34Z
+against this run generating at 16:08Z, so a librarian pass plausibly ran concurrently.
+
+Nothing was at risk either way: this run made **zero** writes to `~/knowledge` and held no
+lock, so a concurrent librarian pass could not have been disturbed by it. The non-mutation
+claim is genuinely verified (the `--cases`-only contract and the `TemporaryDirectory`
+workdir); the lock-ownership attribution is downgraded here to an inference.
+
 ## Go / no-go recommendation
 
 ### **NO-GO.** Do not retire C4 (athenaeum#1256) on the strength of this run.
