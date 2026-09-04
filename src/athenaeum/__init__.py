@@ -50,10 +50,21 @@ importing the submodule directly, nor by loading it via
 ``importlib.util.spec_from_file_location`` — measured and recorded in
 ``docs/retrieval-entry-point-measurements.md`` (issue athenaeum#1357).
 
-The contract is unchanged: every name in ``__all__`` still resolves on the
-package, ``from athenaeum import ingest`` still works, and ``dir(athenaeum)``
-still lists the full surface. Only the *timing* of the underlying module import
-moved — from import time to first attribute access. ``tests/test_import_budget.py``
+The ``__all__`` contract is unchanged: every name in ``__all__`` still
+resolves on the package, and ``from athenaeum import ingest`` still works.
+``dir(athenaeum)`` is NOT unchanged (issue athenaeum#1402): it dropped from
+78 names (v0.19.0) to 50 (0.20.0, `CHANGELOG.md`). The ~40 names lost were
+never in ``__all__`` — they were submodule attributes (``athenaeum.config``,
+``.pii``, ``.spend``, ``.storage``, ``.models``, ``.init``, …) that only
+resolved because the old eager ``athenaeum.librarian`` import happened to
+leave them as side-effect module attributes. ``import athenaeum;
+athenaeum.config`` now raises ``AttributeError`` where it used to work;
+``import athenaeum.config`` (or ``from athenaeum import config``) remains the
+supported way to reach it — same as it already was for every module not
+promoted into ``__all__``. Beyond ``__all__``, the only thing whose *timing*
+merely moved (not its result) is the underlying module import for names in
+``__all__`` itself — from import time to first attribute access.
+``tests/test_import_budget.py``
 pins the transitive import set so the chain cannot silently return; adding a
 module-scope ``from athenaeum.librarian import run`` to this file, or to
 :mod:`athenaeum.search`, fails it.

@@ -28,6 +28,7 @@ from tests.public_surface import (
     BASELINE_PATH,
     bump_is_at_least_minor,
     check_surface_against_version,
+    dir_attrs,
     extract_surface,
     load_baseline,
     mcp_tool_names,
@@ -93,7 +94,12 @@ class TestVersionArithmetic:
 class TestGuardLogic:
     """The rule, over synthetic surfaces: removals need a minor-or-greater bump."""
 
-    BEFORE = {"cli_subcommands": ["alpha", "beta"], "python_all": ["A"], "mcp_tools": ["t"]}
+    BEFORE = {
+        "cli_subcommands": ["alpha", "beta"],
+        "python_all": ["A"],
+        "mcp_tools": ["t"],
+        "dir_attrs": ["x", "y"],
+    }
 
     def _check(self, current_surface: dict[str, list[str]], version: str) -> str | None:
         return check_surface_against_version(
@@ -135,7 +141,7 @@ class TestGuardLogic:
         assert "beta" in message
 
     def test_every_dimension_is_checked(self) -> None:
-        for dimension in ("cli_subcommands", "python_all", "mcp_tools"):
+        for dimension in ("cli_subcommands", "python_all", "mcp_tools", "dir_attrs"):
             shrunk = {**self.BEFORE, dimension: []}
             message = self._check(shrunk, "0.19.45")
             assert message is not None, f"{dimension} removal went unnoticed"
@@ -192,6 +198,76 @@ class TestTheHistoricalDefect:
         )
 
 
+class TestDirAttrsDimension:
+    """The fourth dimension, added for athenaeum#1401.
+
+    PR #1373's lazy-export rewrite dropped ~40 submodule names from
+    ``dir(athenaeum)`` (78 -> 50) without touching ``__all__``, so the three
+    original dimensions passed it through silently. This class demonstrates
+    the guard now catches it, in both directions, the same way
+    `TestTheHistoricalDefect` does for the 0.19.45 case: a patch-only bump
+    over the real dir_attrs removal is REJECTED, and the actual minor bump to
+    0.20.0 is ACCEPTED — the version bump IS the explicit-acceptance
+    mechanism, same idiom the other three dimensions already use.
+    """
+
+    def test_the_real_dir_attrs_removal_is_detected(self) -> None:
+        removed = removed_names(load_baseline(), extract_surface())
+        assert "dir_attrs" in removed, (
+            "dir(athenaeum) shrank 78 -> 50 between v0.19.0 and HEAD "
+            "(athenaeum#1373) but the guard sees no dir_attrs removal at all — "
+            "either the baseline is stale or the dimension isn't wired up"
+        )
+        # A representative sample of the submodule names #1373's PEP-562
+        # rewrite stopped exposing as side-effect module attributes.
+        assert {"config", "pii", "spend", "storage", "models"} <= set(removed["dir_attrs"])
+
+    def test_a_patch_bump_over_the_dir_attrs_removal_is_rejected(self) -> None:
+        """FAILS today: the real 78->50 delta, held to a patch-only bump."""
+        baseline = load_baseline()
+        message = check_surface_against_version(
+            baseline_version=baseline["version"],
+            baseline_surface=baseline,
+            current_version="0.19.1",
+            current_surface=extract_surface(),
+        )
+        assert message is not None, (
+            "a patch bump over a real dir_attrs removal MUST be rejected — "
+            "the guard is inert on this dimension"
+        )
+        assert "dir_attrs" in message
+        assert "config" in message
+
+    def test_the_actual_0_20_0_minor_bump_is_accepted(self) -> None:
+        """PASSES once explicitly recorded: the real 0.20.0 minor bump."""
+        baseline = load_baseline()
+        assert (
+            check_surface_against_version(
+                baseline_version=baseline["version"],
+                baseline_surface=baseline,
+                current_version="0.20.0",
+                current_surface=extract_surface(),
+            )
+            is None
+        )
+
+    def test_dir_attrs_extraction_is_stable_across_repeated_access(self) -> None:
+        """athenaeum#1401's caution: PEP 562 may cache a name on first access.
+
+        ``athenaeum.__dir__`` (added alongside ``__getattr__``) already
+        unions ``globals()`` with the full ``_LAZY_EXPORTS`` key set, so an
+        in-process ``dir()`` is stable regardless of what earlier tests in
+        this run resolved — but the extractor still subprocesses defensively
+        (a future ``__dir__`` edit could regress that guarantee silently, and
+        the extractor should not depend on it). Access a real lazy export
+        here to prove the subprocessed count is unaffected either way.
+        """
+        import athenaeum
+
+        assert athenaeum.ingest is not None
+        assert len(dir_attrs()) == len(extract_surface()["dir_attrs"])
+
+
 class TestExtractorFidelity:
     """A static extractor that under-reports turns the guard into a rubber stamp.
 
@@ -228,7 +304,7 @@ class TestBaselineHygiene:
         assert BASELINE_PATH.exists(), f"missing baseline: {BASELINE_PATH}"
         baseline = load_baseline()
         assert parse_version(baseline["version"])
-        for dimension in ("cli_subcommands", "python_all", "mcp_tools"):
+        for dimension in ("cli_subcommands", "python_all", "mcp_tools", "dir_attrs"):
             assert baseline[dimension], f"baseline {dimension} is empty"
             assert baseline[dimension] == sorted(baseline[dimension])
 

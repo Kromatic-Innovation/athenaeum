@@ -7,90 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [0.20.0] - 2026-09-04
 
-- **The real write-knob model-tier comparison table, and the finding that
-  blocks the downgrade (athenaeum#1262).** athenaeum#1139 built the harness but
-  could only ship a STUB table — the build lane's `ANTHROPIC_API_KEY` was
-  present but empty. With a live credential provisioned,
-  `tests/evals/test_write_tier_compare.py` was run against the real API and
-  `tests/evals/data/write_tier_compare/comparison_table.md` now carries measured
-  numbers. The headline is not a quality result: **`claude-haiku-4-5` cannot
-  serve the `write` knob at all as the code stands.** All three write call sites
-  (`merge_create`, `merge_patch`, `merge_full`) request
-  `thinking: {"type": "adaptive"}` unconditionally, and Haiku 4.5 rejects that
-  with `400 invalid_request_error: adaptive thinking is not supported on this
-  model` — 0/5 cases, every one a 400 before a single token was billed. With
-  the posture overridden to `disabled` (which is the only posture Haiku 4.5
-  supports, and is already what the `classify`/`topic` knobs use), Haiku passes
-  5/5 on the same corpus — including the prompt-injection canary case and the
-  large-page content-preservation merge — at $0.0127 against Sonnet 5's
-  $0.0559, a 4.4x cost reduction at roughly half the wall clock. The corpus is
-  4 cases / 5 entities, which is enough to establish that the thinking posture
-  is the blocker and nowhere near enough to justify a production downgrade on
-  its own.
-
-- **The Lane A intake cap and its drain budget are documented
-  (athenaeum#1322).** `librarian.max_files` was documented as a knob ("stop
-  after processing this many raw files per run") but never as the thing a large
-  prose submission has to be budgeted against, so athenaeum-adapters#182 spent
-  ~$10.70 minting 4,181 records and then discovered the queue-drain time
-  afterwards. `docs/configuration.md` gains "Intake window composition and the
-  Lane A drain budget": the three properties of the cap that are easy to get
-  wrong from outside (it counts FILES not records, it is a scheduling cap and
-  not a rate limit, and the window is filled round-robin across sources), a
-  field-by-field table of the athenaeum#1322 window-composition instrumentation
-  (`considered=`, `window=`, `caller_scoped=`, `pinned=`, `rr=`, `held_stuck=`,
-  `held_backoff=`, `reason=all-slots-skipped`) including the subset caveat on
-  the held-out counts, the arithmetic for projecting a submission's drain time
-  and cost with the measured per-file constants, and the `--max-files` ceiling
-  — the binding constraint is neither the call budget nor the entity deadline
-  but the run lock against the caller's own cadence, which a 200-file pass
-  collides with and a 150-file pass does not. Documentation only; no behaviour
-  change.
-
-### Fixed
-
-- **The `write` knob no longer 400s unconditionally when pointed at a model
-  that cannot honour adaptive thinking (athenaeum#1336).** `tier3_create_params`,
-  `tier3_merge_params`, and `tier3_merge_full_params` requested
-  `thinking: {"type": "adaptive"}` unconditionally — exactly the failure
-  athenaeum#1262's live eval measured against `claude-haiku-4-5` (0/5, every case a
-  400 before a token was billed). `athenaeum.models` gains a fourth
-  longest-prefix capability table, `_ADAPTIVE_THINKING_SUPPORTED_PREFIXES` /
-  `adaptive_thinking_supported`, alongside the existing sampling-params and
-  prompt-caching tables; `provider.resolve_thinking` now takes the serving
-  `model` and downgrades a CODE-DEFAULT `adaptive` posture to `disabled` (with
-  a WARNING) when the model is recorded as unsupporting — an EXPLICIT operator
-  override of `adaptive` is never downgraded, only warned about, since an
-  explicit instruction always wins. An unrecorded model's behaviour is
-  unchanged. Only the three `write`-knob call sites thread the model through;
-  every other stage's `resolve_thinking` call is untouched.
-
-- **`fingerprint.is_stale_auto_suppression` no longer fails silently on an
-  unparseable `resolved_at` (athenaeum#1348).** `src/athenaeum/` had thirteen
-  separate module-private `_now_iso()` definitions (plus a fourteenth inline
-  copy in `fingerprint.py`) with no shared helper, split 23/22 between a
-  microsecond-precision rendering and a second-precision one — and the ONE
-  consumer that parses this field back, `fingerprint._RESOLVED_AT_FORMAT`'s
-  `strptime`, only accepts the second-precision minority form. A
-  `resolved_at` written in the microsecond form would silently become
-  permanently immortal: `is_stale_auto_suppression`'s `except ValueError:
-  return False` branch gave no log line and no counter, so a suppression that
-  never lifts had nothing in the record or the logs pointing at the
-  timestamp format. `athenaeum.store` gains `now_iso()`, the single shared
-  UTC-ISO rendering (second precision, matching `_RESOLVED_AT_FORMAT` —
-  documented in its own docstring); all thirteen private definitions now
-  delegate to or are deleted in favor of it (mirroring the `athenaeum#980`
-  `append_line_durable` precedent), and `fingerprint.py`'s inline copy is
-  replaced with a call to it. The parse-failure branch now logs a WARNING
-  naming the offending value before returning `False` — the fail-safe
-  behavior (never expire on a value that can't be trusted) is unchanged, but
-  the failure is no longer invisible.
-
-## [0.20.0] - 2026-09-03
-
-_Supersedes 45 untagged, unpublished patch bumps (0.19.1–0.19.45) that never shipped to PyPI; the last published release was v0.19.0._
+_Supersedes 45 untagged, unpublished patch bumps (0.19.1–0.19.45) that never shipped to PyPI; the last published release was v0.19.0. Section closed at commit `bbe8637` on 2026-09-03 and folded in the 91 commits that landed on `develop`/`main` afterward (through `0798b6d`, 2026-09-04) per athenaeum#1400 — including the `dir(athenaeum)` attribute-access removal from athenaeum#1373, documented under Removed below._
 
 _Numbered `0.20.0` rather than `0.19.45` (athenaeum#1335): this release **removes** public entry points — the `athenaeum people`, `athenaeum person` and `athenaeum bounce-divergence` subcommands and the `read_person` MCP tool — and a patch digit tells a dependency resolver the opposite. The removals were always documented under **Removed** below; only the version number disagreed._
 
@@ -2553,6 +2472,195 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   sweep) — filed as separate issues against this note (AC14's filing half;
   review of the note itself is routed separately). Docs-only; no code
   changed.
+
+
+### Added (post-2026-09-03, folded in for the 0.20.0 cut)
+
+- **The real write-knob model-tier comparison table, and the finding that
+  blocks the downgrade (athenaeum#1262).** athenaeum#1139 built the harness but
+  could only ship a STUB table — the build lane's `ANTHROPIC_API_KEY` was
+  present but empty. With a live credential provisioned,
+  `tests/evals/test_write_tier_compare.py` was run against the real API and
+  `tests/evals/data/write_tier_compare/comparison_table.md` now carries measured
+  numbers. The headline is not a quality result: **`claude-haiku-4-5` cannot
+  serve the `write` knob at all as the code stands.** All three write call sites
+  (`merge_create`, `merge_patch`, `merge_full`) request
+  `thinking: {"type": "adaptive"}` unconditionally, and Haiku 4.5 rejects that
+  with `400 invalid_request_error: adaptive thinking is not supported on this
+  model` — 0/5 cases, every one a 400 before a single token was billed. With
+  the posture overridden to `disabled` (which is the only posture Haiku 4.5
+  supports, and is already what the `classify`/`topic` knobs use), Haiku passes
+  5/5 on the same corpus — including the prompt-injection canary case and the
+  large-page content-preservation merge — at $0.0127 against Sonnet 5's
+  $0.0559, a 4.4x cost reduction at roughly half the wall clock.
+
+- **The Lane A intake cap and its drain budget are documented
+  (athenaeum#1322).** `librarian.max_files` was documented as a knob but never
+  as the thing a large prose submission has to be budgeted against.
+  `docs/configuration.md` gains "Intake window composition and the Lane A
+  drain budget" — how the cap counts FILES not records, is a scheduling cap
+  not a rate limit, and fills round-robin across sources; a field-by-field
+  table of the athenaeum#1322 window-composition instrumentation; the
+  arithmetic for projecting a submission's drain time/cost; and the
+  `--max-files` ceiling. Documentation only; no behaviour change.
+
+- **`athenaeum measure shadow-parity`: the C4-vs-comparator harness
+  (athenaeum#1333).** New CLI subcommand and core harness module drive the
+  five-verdict comparator against the legacy C4 wiki-dedup detector over both
+  eval corpora, materialising results under `scope-<case_id>` and reporting a
+  per-call declared-detector digest. Landed across eight commits fixing
+  unavailable-detector fabrication, call-count consistency, comparator-gate
+  and per-call-ceiling QA findings, and clobbering/wording issues found along
+  the way (all still athenaeum#1333) — the harness never shipped without the
+  fixes it needed.
+
+- **`athenaeum.context` — the agent-neutral sidecar core, and its push
+  telemetry (athenaeum#1358, athenaeum#1359, athenaeum#1345, athenaeum#1362).**
+  Extracted the sidecar adapter's agent-neutral core into its own module with
+  a versioned envelope schema and a documented adapter contract. Sidecar
+  pushes now route through `push_metrics.record_push` (reusing
+  `push_metrics._query_hash` rather than reimplementing it) so every
+  unprompted sidecar push lands in the same durable ledger the rest of the
+  push-telemetry pipeline reads, with a test pinning the no-tier-gate
+  invariant and the telemetry `memory_tier` field end to end.
+
+- **Sidecar push rendering: rank purely by relevance, and record every push
+  (athenaeum#1343, athenaeum#1344).** The sidecar hook renders the page
+  summary and ranks candidates purely by relevance (no tier-shaped
+  tie-breaking baked in), and every unprompted sidecar push is now recorded
+  to the durable ledger, not just the pushes an operator happened to act on.
+
+- **`demote_oversize_pages` operator entrypoint, and a persona/session-log
+  page-type sweep (athenaeum#1392).** New operator entrypoint to demote
+  oversize wiki pages, landed alongside a one-off sweep correcting
+  persona/session-log pages that were mistyped as `person`.
+
+- **`athenaeum.dimensions`: subject-coordinate derivation and the Gate 1
+  settle-rate measurement (athenaeum#1244).** Derives the subject/coordinate
+  dimension backfill and measures its Gate 1 settle rate. Implemented but
+  deliberately not applied to the live corpus pending a ratified-identity
+  hazard review (see athenaeum#1403's "known findings" list) — the code
+  ships; the backfill does not run against production data yet.
+
+- **`check_env_docs.py` gains a docs -> code direction**, and its drift-guard
+  comment/tests now name every bound test site — closing the half of the
+  doc/code drift check that previously only ran code -> docs.
+
+- **A README/registration parity guard, and four previously-undocumented MCP
+  tools documented (athenaeum#1382).**
+
+### Changed
+
+- **`athenaeum` no longer eagerly imports `athenaeum.librarian` on package
+  import (athenaeum#1373, athenaeum#1360) — see Removed below for the
+  attribute-access surface this drops.** `src/athenaeum/__init__.py` now
+  lazily re-exports every `__all__` name via PEP 562 `__getattr__` instead of
+  importing `athenaeum.librarian` (and, through it, the `anthropic` SDK) at
+  module-import time. Saves ~440ms on every CLI invocation that never
+  touches an LLM. `from athenaeum import ingest` and every other `__all__`
+  name still resolves identically; only the *timing* of the underlying
+  module import moved from import time to first attribute access.
+
+- **CLI subcommand loading is lazy (athenaeum#1391).** `main()` no longer
+  imports every `_cmd_*` module up front; each subcommand's module loads
+  only when that subcommand is actually invoked. Two follow-up fixes:
+  `--help` before a subcommand name must still use the eager parser (so
+  `athenaeum --help` keeps listing every subcommand), and the `context` and
+  `subject` subcommands needed explicit registration in the lazy loader
+  after they shipped.
+
+- **Seven duplicated `_resolve_wiki_root` copies and two undeclared
+  `_resolve_knowledge_root` copies now route through one shared resolver in
+  `_cli_shared` (athenaeum#1349).** Tilde expansion, relative-path handling,
+  and the config-fallback order are now pinned by one contract test instead
+  of being reimplemented (and able to drift) nine times.
+
+- **Thirteen module-private `_now_iso()` definitions (plus a fourteenth
+  inline copy in `fingerprint.py`) collapsed into one shared
+  `athenaeum.store.now_iso()` (athenaeum#1348).** Second-precision UTC-ISO
+  rendering, matching the one format `fingerprint._RESOLVED_AT_FORMAT`'s
+  `strptime` actually accepts — the split had been 23 callers on a
+  microsecond-precision rendering the parser silently rejected. See Fixed
+  below for the parse-failure behaviour this uncovered.
+
+- **`ATHENAEUM_DISABLED` kill-switch normalization now handles mixed
+  case/whitespace, and the six shell copies of the kill-switch helper are
+  pinned to one another** — `${var,,}` (bash 4+ only) was dropped from the
+  normalization in favor of a portable form.
+
+- **`oss-readiness.yml` drops its redundant `push: [develop]` trigger
+  (athenaeum#816).** Develop's required-status-checks ruleset already
+  guarantees a merge commit's tree matches its PR run's tree, so the
+  post-merge run only ever reproduced the same result.
+
+### Removed
+
+- **`import athenaeum; athenaeum.<submodule>` no longer works for
+  submodules not in `__all__` (athenaeum#1373, athenaeum#1400, athenaeum#1402).**
+  Eagerly importing `athenaeum.librarian` used to leave ~40 submodule names —
+  `athenaeum.config`, `.pii`, `.spend`, `.storage`, `.models`, `.init`, and
+  others — reachable as module attributes purely as a side effect, even
+  though none of them were ever declared in `__all__`. `dir(athenaeum)` went
+  from 78 names (v0.19.0) to 50 (0.20.0). None of these names were part of
+  the published `__all__` contract, and `from athenaeum import ingest`-style
+  access to every `__all__` name is unaffected — but code that wrote `import
+  athenaeum; athenaeum.config.something` now gets `AttributeError` where it
+  used to work. **Fix for anyone who hits this:** `import athenaeum.config`
+  or `from athenaeum import config` instead — that has always been, and
+  remains, the supported way to reach a module not promoted into `__all__`.
+  athenaeum#1401 extended `tests/test_public_surface_guard.py` with a fourth
+  guarded dimension (`dir_attrs`) so a future removal like this one fails CI
+  on a patch-only bump instead of shipping silently the way this one did.
+
+### Fixed
+
+- **The `write` knob no longer 400s unconditionally when pointed at a model
+  that cannot honour adaptive thinking (athenaeum#1336).** `tier3_create_params`,
+  `tier3_merge_params`, and `tier3_merge_full_params` requested
+  `thinking: {"type": "adaptive"}` unconditionally — exactly the failure
+  athenaeum#1262's live eval measured against `claude-haiku-4-5` (0/5, every case a
+  400 before a token was billed). `athenaeum.models` gains a fourth
+  longest-prefix capability table, `_ADAPTIVE_THINKING_SUPPORTED_PREFIXES` /
+  `adaptive_thinking_supported`, alongside the existing sampling-params and
+  prompt-caching tables; `provider.resolve_thinking` now takes the serving
+  `model` and downgrades a CODE-DEFAULT `adaptive` posture to `disabled` (with
+  a WARNING) when the model is recorded as unsupporting — an EXPLICIT operator
+  override of `adaptive` is never downgraded, only warned about. An
+  unrecorded model's behaviour is unchanged. Only the three `write`-knob call
+  sites thread the model through; every other stage's `resolve_thinking` call
+  is untouched.
+
+- **`fingerprint.is_stale_auto_suppression` no longer fails silently on an
+  unparseable `resolved_at` (athenaeum#1348).** The parse-failure branch now
+  logs a WARNING naming the offending value before returning `False` — the
+  fail-safe behavior (never expire on a value that can't be trusted) is
+  unchanged, but the failure is no longer invisible. See Changed above for
+  the `now_iso()` consolidation that made the split-format bug visible.
+
+- **`athenaeum.bench` rejects an empty `--candidates` selection as a usage
+  error instead of silently running zero candidates.**
+
+- **The librarian recognizes non-RFC bounce verdicts and writes them to the
+  wiki `bounced:` field**, requiring diagnostic context for a bare SMTP 5xx
+  match rather than treating any 5xx line as a hard bounce on its own.
+
+- **`public-safe-lint`'s bare-issue-ref check and a ruff `noqa` placement
+  fixed in CI.**
+
+### Documentation
+
+- **Doc/code drift corrections:** exit code 75's two producers named
+  (athenaeum#1379); all ten `EXIT_LOCK_HELD` producers named in
+  `exit-codes.md` (athenaeum#1383); all 15 registered MCP tools classified in
+  `security-posture.md` §2.1 (athenaeum#1384); the hook count in
+  `examples/claude-code/README.md` corrected; two stale references in
+  `exit-codes.md` pointed at what actually exists; a missing `twitter:`
+  token added to `conflict-resolution.md` §11; the medical-screening actions
+  `configuration.md` accepts named inline; the `athenaeum query entity`
+  command spelling corrected where it had drifted to `query-entity`.
+
+- **`workflows/promote-main.yml` re-synced from its canonical copy
+  (cwc#2554).**
 
 ## [0.19.0] - 2026-08-15
 
