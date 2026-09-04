@@ -1239,8 +1239,12 @@ class TestRecallPushMetricsInstrumentation:
         assert "a1b2c3d4" in ids
         # Records still carry NO claim content and NO personal data — ids,
         # tiers, scopes, counts only (athenaeum#711's criterion, unchanged).
+        # `memory_tier` (issue athenaeum#1345 AC7) is an additive closed-
+        # vocabulary classification token (hot/warm/cold/refused/""), the
+        # same content-free shape as the pre-existing `tier`/`scope` fields.
         for item in rows[0]["items"]:
-            assert set(item) <= {"id", "tier", "scope", "token_cost"}
+            assert set(item) <= {"id", "tier", "scope", "token_cost", "memory_tier"}
+            assert item["memory_tier"] in ("hot", "warm", "cold", "refused", "")
 
     def test_code_session_id_wins_over_legacy(
         self, wiki_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
