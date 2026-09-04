@@ -35,6 +35,12 @@ athenaeum.search` until athenaeum#1360 lands, and athenaeum#1360's fix must reac
 **the retrieval module**, not merely the package root — which is exactly what
 that issue's second acceptance criterion already demands.
 
+> **Update — athenaeum#1360 has since landed and the condition is discharged.**
+> `import athenaeum.search` fell from ~460 ms to ~62 ms and a
+> `package-import` entry point now fits the budget on warm and cold p50. See
+> [Re-measured after athenaeum#1360](#re-measured-after-athenaeum1360--the-condition-is-discharged)
+> for what that does and does not license.
+
 ---
 
 ## Provenance
@@ -240,6 +246,44 @@ The margin is real but it is not unconditional. It belongs to an entry point tha
 imports nothing from athenaeum. Any design that wants to *reuse*
 `athenaeum.search` — rather than reimplement the query — needs athenaeum#1360
 resolved at the retrieval-module level first.
+
+---
+
+## Re-measured after athenaeum#1360 — the condition is discharged
+
+The verdict above was **GO, conditional**: the budget was met only by an entry
+point importing no athenaeum module, because reaching `athenaeum.search` cost
+~440 ms. athenaeum#1360 made the package root's re-exports lazy (PEP 562) and
+moved `athenaeum.tiers`' `anthropic` import — annotation-only, and therefore
+never evaluated at runtime — under `TYPE_CHECKING`. Re-running the same harness
+on the same box, same index, immediately after:
+
+| candidate | warm p50 | | cold p50 | | cold p95 |
+|---|---|---|---|---|---|
+| | **before** | **after** | **before** | **after** | **after** |
+| `stdlib` | 16.3 | 16.6 | 30.1 | 30.3 | 37.9 |
+| `direct-load` | 442.1 | **62.6** | 617.6 | **91.8** | 181.8 |
+| `package-import` | 447.1 | **61.8** | 715.4 | **101.3** | 214.8 |
+
+Reference points move the same way: `import athenaeum` **471.2 → 12.4 ms**,
+`import athenaeum.search` **460.5 → 61.9 ms**.
+
+**What this changes.** A retrieval entry point may now *reuse* `athenaeum.search`
+rather than reimplement the FTS5 query, and stay inside 127 ms on warm p50
+(61.8 ms) and cold p50 (101.3 ms). Before the fix that was a NO-GO by 5–6×.
+
+**What it does not change.** `package-import`'s **cold p95 of 214.8 ms is still
+over budget**, where `stdlib`'s is 37.9 ms. A per-turn hook is felt at its tail,
+so a design that reuses `athenaeum.search` is buying a ~45 ms warm cost and a
+cold tail that needs watching, in exchange for not maintaining a second copy of
+the query. That is a real trade, not a free one, and it belongs to whoever builds
+the core. The unconditional headroom still belongs to the stdlib path.
+
+Finding 2 below is also now stale in a specific, good way: the file-path bypass
+still does not bypass the package root — that is structural — but the package
+root it re-enters no longer costs anything, so the bypass is pointless rather
+than harmful. The comment in `examples/claude-code/user-prompt-recall.sh` is
+still wrong about *why* it is there.
 
 ---
 
