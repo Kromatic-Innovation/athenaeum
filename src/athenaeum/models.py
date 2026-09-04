@@ -1181,6 +1181,43 @@ def audience_index_string(meta: dict[str, object] | None) -> str:
     return delimited_index_string(parts + sorted(roles))
 
 
+def parse_audience_index_string(audience_str: str) -> tuple[list[str], bool]:
+    """Inverse of :func:`audience_index_string`: recover ``(roles, is_public)``
+    from an already-serialized, delimiter-anchored audience string.
+
+    For a caller that only has the INDEX's stored representation — no
+    frontmatter dict to re-derive it from (issue athenaeum#1362's sidecar
+    push-telemetry path: ``athenaeum.context``'s FTS5 candidates carry this
+    string, not the page's frontmatter). Named here, alongside the forward
+    direction, rather than hand-rolled per caller — the sidecar-adapter
+    contract (``docs/sidecar-adapter-contract.md`` §2.4) calls out exactly
+    this gap: "No inverse-parsing helper for ``audience``'s delimited-string
+    form exists... an adapter or downstream consumer that needs the parsed
+    role list back out should add that inverse function to
+    ``athenaeum.models`` rather than hand-rolling a second parser."
+
+    - ``"|"`` (or empty) → ``([], False)`` — audience-∅.
+    - ``"|__access_open__|"`` → ``([], True)``.
+    - ``"|a|b|"`` → ``(["a", "b"], False)``.
+    - ``"|__access_open__|a|b|"`` → ``(["a", "b"], True)`` — a page can be
+      both public AND carry explicit role grants; the public sentinel and
+      role tokens are independent.
+
+    Roles are returned already sorted: :func:`delimited_index_string`
+    (`audience_index_string`'s own serializer) always emits its tokens
+    ``sorted({v for v in values if v})``, so splitting on ``|`` and
+    dropping the public sentinel reproduces that order without a second
+    sort.
+    """
+    trimmed = audience_str.strip("|") if audience_str else ""
+    if not trimmed:
+        return [], False
+    tokens = [t for t in trimmed.split("|") if t]
+    is_public = AUDIENCE_PUBLIC_TOKEN in tokens
+    roles = [t for t in tokens if t != AUDIENCE_PUBLIC_TOKEN]
+    return roles, is_public
+
+
 def audience_string_authorized(
     audience_str: str,
     caller_audience: set[str] | None,

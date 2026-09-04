@@ -185,6 +185,38 @@ class TestOpaquePushId:
         assert "wonderland" not in pid.lower()
 
 
+class TestOpaquePushIdFromFilename:
+    """``opaque_push_id_from_filename`` (issue athenaeum#1362): the id-safety
+    fallback for a caller with only a filename, no frontmatter — the sidecar
+    push-telemetry path, which sees an FTS5 index row (no ``uid`` column),
+    never the compiled page's frontmatter. Reproduces the pre-convergence
+    shell hook's ``_pm_opaque_push_id`` case pattern (both branches)."""
+
+    def test_entity_filename_truncates_to_the_8_hex_uid_prefix(self) -> None:
+        # A compiled entity's on-disk filename is `<uid>-<slug>.md`
+        # (`WikiEntity.filename`) — the name-derived slug must never reach
+        # the ledger, even with no frontmatter to consult.
+        pid = push_metrics.opaque_push_id_from_filename("deadbeef-alice-wonderland.md")
+        assert pid == "deadbeef"
+        assert "alice" not in pid.lower()
+        assert "wonderland" not in pid.lower()
+
+    def test_raw_intake_filename_is_recorded_whole(self) -> None:
+        # Raw-intake filenames are `<timestamp>Z-<hash>.md` — the 9th
+        # character is `T`, never `-`, so the uid-prefix pattern never
+        # matches and the (name-free) filename is safe to record as-is.
+        fname = "20260802T023311Z-3f0ea402.md"
+        assert push_metrics.opaque_push_id_from_filename(fname) == fname
+
+    def test_non_matching_filename_returned_whole(self) -> None:
+        assert push_metrics.opaque_push_id_from_filename("raw/foo.md") == "raw/foo.md"
+
+    def test_short_hex_like_prefix_without_dash_is_not_truncated(self) -> None:
+        # Exactly 8 hex chars but no trailing dash: not the entity shape,
+        # must not be mistaken for one.
+        assert push_metrics.opaque_push_id_from_filename("deadbeef.md") == "deadbeef.md"
+
+
 class TestBuildPushRecordRedaction:
     def test_no_content_or_pii_in_record(self) -> None:
         fm = {
@@ -352,6 +384,36 @@ class TestBuildPushRecordMemoryTier:
         d = record.to_dict()
         assert d["v"] == push_metrics.SCHEMA_VERSION == 1
         assert d["items"][0]["memory_tier"] == ""
+
+    def test_source_defaults_to_omitted_the_recall_path_contract(self) -> None:
+        """Issue athenaeum#1362's ``source`` field: additive, no SCHEMA_VERSION
+        bump, and — the load-bearing part — a record built with NO ``source``
+        (every MCP ``recall``-path call site, unchanged by this issue) must
+        OMIT the key entirely, never write an explicit ``"recall"`` value.
+        The documented reader rule is "key absent, or any other value, means
+        an explicit recall push" — a record from before this issue has no
+        ``source`` key, so the default must reproduce that exactly."""
+        record = push_metrics.PushRecord(
+            session_id="s",
+            ts="2020-01-01T00:00:00Z",
+            query_hash="deadbeef",
+            backend="fts5",
+            items=[push_metrics.PushedItem(id="x", tier="internal", scope="owner", token_cost=1)],
+        )
+        d = record.to_dict()
+        assert "source" not in d
+
+    def test_source_sidecar_is_written_when_set(self) -> None:
+        record = push_metrics.PushRecord(
+            session_id="s",
+            ts="2020-01-01T00:00:00Z",
+            query_hash="deadbeef",
+            backend="fts5",
+            items=[push_metrics.PushedItem(id="x", tier="internal", scope="owner", token_cost=1)],
+            source="sidecar",
+        )
+        d = record.to_dict()
+        assert d["source"] == "sidecar"
 
 
 # ---------------------------------------------------------------------------
