@@ -89,6 +89,16 @@ def _positive_int(value: str) -> int:
 #: Exit code returned when a mutating command cannot acquire the run lock
 #: (issue athenaeum#309). Non-zero so cron / alerting sees the contention; distinct
 #: from the generic error (1) and dry-run-found (2) codes some commands use.
+#:
+#: Shares its value (75) with the UNRELATED
+#: :data:`~athenaeum.librarian.EXIT_GRACEFUL_PARTIAL`
+#: (`src/athenaeum/librarian.py`) — an internal wall-clock-deadline code.
+#: The two are not interchangeable: this code fires before any pipeline
+#: work starts, so nothing is committed and nothing is deferred to disk,
+#: unlike EXIT_GRACEFUL_PARTIAL's "partial progress, resumable" case. See
+#: docs/exit-codes.md ("`75` also collides with `EXIT_LOCK_HELD`", issue
+#: athenaeum#1379); renumbering either constant is a separate, open decision
+#: not made there.
 EXIT_LOCK_HELD = 75
 
 #: Exit code for "the requested uid/resource does not exist" (issue athenaeum#1270).
