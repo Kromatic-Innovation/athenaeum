@@ -252,13 +252,28 @@ def _peek_subcommand(argv: list[str]) -> str | None:
     A cheap, regex-free pre-parse used only to decide which single
     ``_cmd_*`` module (if any) ``main()`` needs to import — never used to
     validate or dispatch. The top-level parser has exactly one positional
-    (the subcommand) and no options that consume a value (``--version`` and
-    ``-h``/``--help`` are both zero-arg), so "first token not starting with
-    ``-``" is unambiguous. A wrong guess (there isn't one today, but a
-    future top-level value-taking option would produce one) just means
-    ``main()`` falls through to the fully eager :func:`build_parser`.
+    (the subcommand) and no options that consume a value (``--version`` is
+    zero-arg), so "first token not starting with ``-``" is unambiguous. A
+    wrong guess (there isn't one today, but a future top-level
+    value-taking option would produce one) just means ``main()`` falls
+    through to the fully eager :func:`build_parser`.
+
+    ``-h``/``--help`` gets special handling: if either appears *before*
+    the first non-option token, argparse's own top-level ``-h`` fires on
+    the parser we hand back, and that parser's ``--help`` renders its own
+    subcommand list -- which must be the FULL list, not whatever single
+    group a lazily-built parser happens to carry (a real bug caught in
+    review: ``athenaeum -h recall`` was rendering only the 5 names in
+    ``recall``'s group instead of all subcommands). So a help flag ahead
+    of the subcommand token forces ``None`` here, which routes ``main()``
+    to the eager :func:`build_parser` regardless of what (if anything)
+    follows it. A help flag *after* the subcommand token is unaffected --
+    it belongs to that subcommand's own subparser, which the lazy path
+    builds identically to the eager one either way.
     """
     for token in argv:
+        if token in ("-h", "--help"):
+            return None
         if not token.startswith("-"):
             return token
     return None
@@ -292,12 +307,16 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     command = _peek_subcommand(argv)
 
-    if command is None and "--version" in argv:
-        # No subcommand token at all -- e.g. `athenaeum --version`. The
-        # version action fires and exits before any subcommand is ever
-        # consulted, so building even one `_cmd_*` module for it is pure
-        # waste (issue athenaeum#1360 residual: this was the single biggest
-        # remaining cost on the `--version`/`--help` path).
+    if command is None and "--version" in argv and "-h" not in argv and "--help" not in argv:
+        # No subcommand token, and no help flag that could out-race
+        # `--version` -- e.g. `athenaeum --version`. The version action
+        # fires and exits before any subcommand is ever consulted, so
+        # building even one `_cmd_*` module for it is pure waste (issue
+        # athenaeum#1360 residual: this was the single biggest remaining
+        # cost on the `--version`/`--help` path). A help flag anywhere in
+        # argv routes to the eager fallback below instead, so whichever of
+        # `-h`/`--help`/`--version` argparse would have honored first
+        # still gets the FULL top-level parser to answer with.
         parser = argparse.ArgumentParser(
             prog="athenaeum",
             description="Knowledge management pipeline — append-only intake, tiered compilation",
