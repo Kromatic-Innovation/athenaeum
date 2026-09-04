@@ -144,6 +144,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "description": ("athenaeum._cmd_description", "add_description_subparser"),
     "verdicts": ("athenaeum._cmd_verdicts", "add_verdicts_subparser"),
     "dimensions": ("athenaeum._cmd_dimensions", "add_dimensions_subparser"),
+    "subject": ("athenaeum._cmd_subject", "add_subject_subparser"),
     "reindex": ("athenaeum._cmd_index", "add_index_subparsers"),
     "rebuild-index": ("athenaeum._cmd_index", "add_index_subparsers"),
     "compile": ("athenaeum._cmd_index", "add_index_subparsers"),
