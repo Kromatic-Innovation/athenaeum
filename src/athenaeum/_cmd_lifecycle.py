@@ -176,6 +176,54 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
         "READ-ONLY — the ledger file is never modified.",
     )
     spend_parser.add_argument(
+        "--ceiling-backtest",
+        action="store_true",
+        help="Replay candidate spend ceilings (--candidate-* below) against the "
+        "ledger in the --since window and report per-run/per-day trip rates, "
+        "using the SAME ceiling_tripped() predicate a live run is gated on. "
+        "Does not choose or arm any ceiling — that is an operator decision "
+        "(athenaeum#1153) — this only reports what a candidate value would have "
+        "done. READ-ONLY — the ledger file is never modified.",
+    )
+    spend_parser.add_argument(
+        "--candidate-max-tokens-per-run",
+        type=float,
+        default=None,
+        help="Ceiling backtest: candidate spend.max_tokens_per_run value to replay.",
+    )
+    spend_parser.add_argument(
+        "--candidate-max-tokens-per-day",
+        type=float,
+        default=None,
+        help="Ceiling backtest: candidate spend.max_tokens_per_day value to replay.",
+    )
+    spend_parser.add_argument(
+        "--candidate-max-usd-per-run",
+        type=float,
+        default=None,
+        help="Ceiling backtest: candidate spend.max_usd_per_run value to replay.",
+    )
+    spend_parser.add_argument(
+        "--candidate-max-usd-per-day",
+        type=float,
+        default=None,
+        help="Ceiling backtest: candidate spend.max_usd_per_day value to replay.",
+    )
+    spend_parser.add_argument(
+        "--candidate-weekly-token-limit",
+        type=float,
+        default=None,
+        help="Ceiling backtest: candidate spend.weekly_token_limit value to replay "
+        "(only takes effect paired with --candidate-max-pct-per-day).",
+    )
+    spend_parser.add_argument(
+        "--candidate-max-pct-per-day",
+        type=float,
+        default=None,
+        help="Ceiling backtest: candidate spend.max_pct_per_day value to replay "
+        "(only takes effect paired with --candidate-weekly-token-limit).",
+    )
+    spend_parser.add_argument(
         "--json",
         action="store_true",
         help="Emit machine-readable JSON (what /good-morning consumes).",
@@ -386,6 +434,36 @@ def cmd_spend(args: argparse.Namespace) -> int:
             )
         else:
             print(spend.format_reprice(repriced, since_label=args.since))
+        return 0
+
+    if getattr(args, "ceiling_backtest", False):
+        # Issue athenaeum#1407: replay candidate ceilings against the ledger
+        # via the SAME ceiling_tripped() predicate a live run is gated on.
+        # Deliberately does not choose or arm anything — that stays an
+        # operator decision on athenaeum#1153.
+        candidates = {
+            "max_tokens_per_run": args.candidate_max_tokens_per_run,
+            "max_tokens_per_day": args.candidate_max_tokens_per_day,
+            "max_usd_per_run": args.candidate_max_usd_per_run,
+            "max_usd_per_day": args.candidate_max_usd_per_day,
+            "weekly_token_limit": args.candidate_weekly_token_limit,
+            "max_pct_per_day": args.candidate_max_pct_per_day,
+        }
+        report = spend.ceiling_backtest(records, candidates, config=config)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "since": now_iso(since_dt),
+                        "ledger_path": str(ledger_path),
+                        "ceiling_backtest": report,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(spend.format_ceiling_backtest(report))
         return 0
 
     summary = spend.summarize(
