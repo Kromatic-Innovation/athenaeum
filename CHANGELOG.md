@@ -2033,6 +2033,16 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   guarded dimension (`dir_attrs`) so a future removal like this one fails CI
   on a patch-only bump instead of shipping silently the way this one did.
 
+- **`.tmp/ledgers/work_session.jsonl` untracked and gitignored.** The
+  internal agent work-session ledger was git-tracked and, via hatchling's
+  VCS-default sdist inclusion, shipped inside the published `athenaeum`
+  sdist on PyPI (confirmed present in the v0.19.0 sdist too — inherited
+  debt, not a v0.20.0 regression; the wheel, which most installs pull, was
+  never affected since `packages = ["src/athenaeum"]` already excluded it).
+  The file itself is unaffected on disk and keeps being appended to by
+  `scripts/log_work_session.sh`; only its git tracking and packaging
+  presence are removed, via `.tmp/ledgers/` in `.gitignore`.
+
 ### Fixed
 
 - **Lane A intake throughput could fall to exactly zero while the run reported
