@@ -4787,6 +4787,68 @@ def enumerate_oversize_pages(
     return results
 
 
+@dataclass
+class DemoteResult:
+    """Outcome of one page's ``log_demote`` disposition (issue athenaeum#1214,
+    the operator-directed counterpart to :func:`enumerate_oversize_pages`)."""
+
+    path: Path
+    dest: Path | None
+    demoted: bool
+    reason: str
+
+
+def demote_oversize_pages(
+    paths: list[Path] | list[str],
+    wiki_root: Path,
+    config: dict[str, Any] | None = None,
+    *,
+    dry_run: bool = False,
+) -> list[DemoteResult]:
+    """Operator entrypoint: ``log_demote`` a NAMED, operator-chosen set of
+    oversize wiki pages (issue athenaeum#1214).
+
+    :func:`check_page_size_gate` only fires *reactively*, when a merge is
+    attempted into an already-oversize page, and only when
+    ``librarian.oversize_page_action`` is configured to ``log_demote`` for
+    the WHOLE corpus. Neither of those is what an operator disposition
+    sweep needs: #1214 asks for judgement per page (a persona page
+    mistyped as ``person`` should demote; a real colleague's oversize
+    person page should not), so this calls the same underlying move --
+    :func:`_perform_oversize_log_demote`, which itself reuses
+    :func:`athenaeum.rules.preserve_raw_file` -- directly, against exactly
+    the paths the operator names, without touching
+    ``librarian.oversize_page_action`` or any other page.
+
+    Each path in *paths* may be absolute or relative to *wiki_root*. A
+    missing page, or one :func:`_perform_oversize_log_demote` could not
+    move (typically because ``librarian.preserved_log_dir`` is not
+    configured), is reported with ``demoted=False`` and a *reason* -- it is
+    never silently skipped, and no other page is touched. ``dry_run=True``
+    reports what would happen without moving anything, so the operator can
+    preview a batch before committing to it.
+    """
+    results: list[DemoteResult] = []
+    for raw_path in paths:
+        p = Path(raw_path)
+        if not p.is_absolute():
+            p = wiki_root / p
+        if not p.exists():
+            results.append(DemoteResult(p, None, False, "missing"))
+            continue
+        if dry_run:
+            results.append(DemoteResult(p, None, False, "dry_run"))
+            continue
+        dest = _perform_oversize_log_demote(p, wiki_root, config)
+        if dest is None:
+            results.append(
+                DemoteResult(p, None, False, "not_configured_or_move_failed")
+            )
+        else:
+            results.append(DemoteResult(p, dest, True, "demoted"))
+    return results
+
+
 def tier3_derive_actions(
     raw: RawFile,
     actions: list[EntityAction],

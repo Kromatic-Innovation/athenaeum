@@ -56,6 +56,7 @@ from athenaeum.tiers import (
     DEFAULT_PAGE_SIZE_THRESHOLD_CHARS,
     VALID_OVERSIZE_PAGE_ACTIONS,
     check_page_size_gate,
+    demote_oversize_pages,
     enumerate_oversize_pages,
     resolve_oversize_page_action,
     resolve_page_size_threshold_chars,
@@ -851,3 +852,98 @@ class TestOversizeDispositionCountersDistinguished:
         assert result.oversize_split == 2
         assert result.oversize_log_demoted == 1
         assert len(result.escalated) == 5
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1214: demote_oversize_pages — the operator entrypoint that
+# log_demotes a NAMED set of pages directly, instead of waiting for a merge
+# attempt to trip check_page_size_gate reactively.
+# ---------------------------------------------------------------------------
+
+
+class TestDemoteOversizePages:
+    def test_demotes_named_page_and_leaves_others_untouched(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target, _meta, _body = _make_flat_fixture_page(wiki)
+        original_full_text = target.read_text()
+        other = wiki / "deadbeef-other.md"
+        other.write_text("---\nuid: deadbeef\ntype: person\nname: Other\n---\n\nshort\n")
+
+        config = {"librarian": {"preserved_log_dir": "logs"}}
+
+        results = demote_oversize_pages([target], wiki, config)
+
+        assert len(results) == 1
+        assert results[0].demoted is True
+        assert results[0].reason == "demoted"
+        assert not target.exists()
+        assert other.exists()  # untouched — only the named page moved
+
+        dest_candidates = list((tmp_path / "logs").rglob("*.md"))
+        assert len(dest_candidates) == 1
+        assert dest_candidates[0].read_text() == original_full_text
+
+    def test_relative_path_resolves_against_wiki_root(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target, _meta, _body = _make_flat_fixture_page(wiki)
+        config = {"librarian": {"preserved_log_dir": "logs"}}
+
+        results = demote_oversize_pages([target.name], wiki, config)
+
+        assert results[0].demoted is True
+        assert not target.exists()
+
+    def test_missing_page_reported_not_raised(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        config = {"librarian": {"preserved_log_dir": "logs"}}
+
+        results = demote_oversize_pages([wiki / "nope.md"], wiki, config)
+
+        assert len(results) == 1
+        assert results[0].demoted is False
+        assert results[0].reason == "missing"
+
+    def test_unconfigured_preserved_log_dir_leaves_page_untouched(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target, _meta, _body = _make_flat_fixture_page(wiki)
+        before = target.read_text()
+
+        results = demote_oversize_pages([target], wiki, config=None)
+
+        assert results[0].demoted is False
+        assert results[0].reason == "not_configured_or_move_failed"
+        assert target.exists()
+        assert target.read_text() == before
+
+    def test_dry_run_moves_nothing(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target, _meta, _body = _make_flat_fixture_page(wiki)
+        before = target.read_text()
+        config = {"librarian": {"preserved_log_dir": "logs"}}
+
+        results = demote_oversize_pages([target], wiki, config, dry_run=True)
+
+        assert results[0].demoted is False
+        assert results[0].reason == "dry_run"
+        assert target.exists()
+        assert target.read_text() == before
+        assert not (tmp_path / "logs").exists()
+
+    def test_multiple_pages_each_reported_independently(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target_ok, _m, _b = _make_flat_fixture_page(wiki)
+        missing = wiki / "absent.md"
+        config = {"librarian": {"preserved_log_dir": "logs"}}
+
+        results = demote_oversize_pages([target_ok, missing], wiki, config)
+
+        by_path = {r.path: r for r in results}
+        assert by_path[target_ok].demoted is True
+        assert by_path[missing].demoted is False
+        assert by_path[missing].reason == "missing"
