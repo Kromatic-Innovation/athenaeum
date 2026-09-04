@@ -592,3 +592,108 @@ def _empty_envelope(
     zero candidates, so a caller never has to special-case a disabled turn.
     """
     return _make_envelope(prompt, session_id, budget, search_backend, [], t0)
+
+
+# ---------------------------------------------------------------------------
+# Push telemetry (issue athenaeum#1362)
+# ---------------------------------------------------------------------------
+
+
+def record_context_push(
+    envelope: dict[str, Any],
+    *,
+    cache_dir: Path,
+    wiki_root: Path | None = None,
+    config: dict[str, Any] | None = None,
+) -> bool:
+    """Route one rendered envelope's push into the durable push-metrics
+    ledger, tagged ``"source": "sidecar"`` (issue athenaeum#1362,
+    ``docs/sidecar-adapter-contract.md`` §2.1's planned function, now
+    landed).
+
+    Re-homes the push-telemetry requirement issue athenaeum#1343 shipped as a
+    ~430-line bash reimplementation (``examples/claude-code/user-prompt-recall.sh``,
+    a file no hook invokes) into the converged core, by calling the SAME
+    :func:`athenaeum.push_metrics.record_push` / :class:`PushRecord` /
+    :class:`PushedItem` the MCP ``recall`` path already writes through — so
+    the two paths can never drift onto independently-shaped ledger rows.
+
+    Callers: an adapter, after rendering — never :func:`build_context`
+    itself (see that function's own docstring: it does no I/O beyond
+    reading the index). ``_cmd_context.py`` is the one production caller
+    today, immediately after building the envelope it is about to print.
+
+    Best-effort, like :func:`athenaeum.push_metrics.record_push` itself:
+    catches everything, including a failure of the import below, and
+    NEVER raises — a telemetry failure must never fail or delay the turn
+    this envelope is part of (issue athenaeum#1362 AC3). Returns ``False``
+    (never raises) when instrumentation is disabled, the envelope has no
+    session id or no candidates, or the write itself fails.
+
+    ``push_metrics`` and ``athenaeum.models`` are imported HERE, function-
+    local, never at this module's top level — this module's import-weight
+    contract (see the module docstring) is paid by every ``build_context``
+    caller on the hot path; this function is not on that path.
+    """
+    try:
+        candidates = envelope.get("candidates") or []
+        session_id = envelope.get("session_id") or ""
+        if not session_id or not candidates:
+            return False
+
+        from athenaeum import push_metrics
+        from athenaeum.models import parse_audience_index_string
+
+        items: list[Any] = []
+        for c in candidates:
+            filename = str(c.get("filename", ""))
+            roles, is_public = parse_audience_index_string(str(c.get("audience", "") or ""))
+            if roles:
+                scope = ",".join(roles)
+            elif is_public:
+                scope = "open"
+            else:
+                scope = "owner"
+            items.append(
+                push_metrics.PushedItem(
+                    id=push_metrics.opaque_push_id_from_filename(filename),
+                    # Always "internal": the FTS5 `wiki` table this module
+                    # queries has no `access` column to read a real value
+                    # from (docs/configuration.md, "Known limitation" —
+                    # same default `build_push_record` assigns when
+                    # frontmatter carries no `access`; see `memory_tier`
+                    # below for the field that DOES carry real information
+                    # on a sidecar-sourced row).
+                    tier="internal",
+                    scope=scope,
+                    token_cost=int(c.get("token_cost", 0) or 0),
+                    memory_tier=str(c.get("memory_tier", "") or ""),
+                )
+            )
+
+        # Same construction as `push_metrics._query_hash` (SHA-256,
+        # truncated to 16 hex chars) — not imported directly (that name is
+        # module-private); replicated per `docs/sidecar-adapter-contract.md`
+        # §1.1's own citation of this exact construction for a persisting
+        # adapter. The envelope's `query` field is the RAW prompt (§1.1) —
+        # only its hash is ever retained here, same as the MCP path.
+        import hashlib
+
+        query_hash = hashlib.sha256(
+            str(envelope.get("query", "")).encode("utf-8")
+        ).hexdigest()[:16]
+
+        record = push_metrics.PushRecord(
+            session_id=session_id,
+            ts=push_metrics.now_iso(),
+            query_hash=query_hash,
+            backend=str(envelope.get("backend", "")),
+            items=items,
+            source="sidecar",
+        )
+        return push_metrics.record_push(
+            record, cache_dir=cache_dir, wiki_root=wiki_root, config=config
+        )
+    except Exception:  # must never break the turn this envelope serves
+        log.debug("context: push-metrics instrumentation failed", exc_info=True)
+        return False
