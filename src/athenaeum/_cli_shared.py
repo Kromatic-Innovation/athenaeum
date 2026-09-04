@@ -7,8 +7,9 @@ code that BOTH ``cli.py`` AND the per-subcommand ``_cmd_*.py`` modules need. Ext
 here (issue athenaeum#545) so a ``_cmd_*`` module can reuse them WITHOUT importing
 ``cli.py`` — the ``cli`` <-> ``_cmd_drain`` back-edge that formed a 2-node import
 cycle. ``_cmd_drain`` was the only ``_cmd_*`` module reaching back into ``cli``
-(``_add_lock_args``/``_positive_int``/``_acquire_or_exit``); the other eight import
-nothing from ``cli`` and are the shape this move restores ``_cmd_drain`` to.
+(``_add_lock_args``/``_positive_int``/``_acquire_or_exit``); the other
+``_cmd_*`` modules import nothing from ``cli`` and are the shape this move
+restores ``_cmd_drain`` to.
 
 Layering: L5 presentation-support leaf. Imports only stdlib plus
 :mod:`athenaeum.config` and :mod:`athenaeum.runlock` (both low, neither imports
