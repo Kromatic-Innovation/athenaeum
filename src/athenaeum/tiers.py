@@ -57,6 +57,8 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+import yaml
+
 if TYPE_CHECKING:
     # Annotation-only (athenaeum#1126) — mirrors the lazy-import convention
     # athenaeum.identity_resolution already follows: the real import stays
@@ -1292,6 +1294,168 @@ class CreateNameCollisionError(Exception):
         super().__init__(f"tier3 create name {name!r} collides: {reason}")
 
 
+class CreateNameDemotedError(Exception):
+    """*name* (or one of its aliases) was retired by ``log_demote`` (issue athenaeum#1406).
+
+    Raised by :func:`validate_create_name` when *name* resolves to a
+    :class:`RetiredNameRecord` written by :func:`_perform_oversize_log_demote`
+    -- the page used to live in the wiki under this name, but ``log_demote``
+    moved it into ``librarian.preserved_log_dir`` and left no page behind in
+    the wiki root for :meth:`~athenaeum.models.EntityIndex.lookup` to find.
+    Without this check the create path sees no collision at all and quietly
+    re-mints a fresh page under the retired name -- athenaeum#1406's whole
+    defect, and the reason the 2.47 MB / -7.1% reduction PR athenaeum#1395
+    achieved was not retained: the next mention of a demoted name restarted
+    accretion from zero.
+
+    Deliberately NOT a :class:`CreateNameCollisionError`: that error's
+    DISAMBIGUATE branch (see :func:`gate_create_name_classifications`) folds
+    the observation into ``existing_uid``'s page via a tier-3 merge dispatch
+    -- exactly the entity-match fan-out athenaeum#1406 exists to keep from
+    re-entering. There is no page left in the wiki to safely fold into, so
+    this is always an ESCALATE outcome.
+
+    ``demoted_to`` is the preserved-log destination :func:`_perform_oversize_log_demote`
+    recorded — surfaced in the escalation description so an operator can
+    still find the content (issue athenaeum#1406 AC2).
+    """
+
+    def __init__(self, name: str, reason: str, *, demoted_to: str, existing_uid: str) -> None:
+        self.name = name
+        self.reason = reason
+        self.demoted_to = demoted_to
+        self.existing_uid = existing_uid
+        super().__init__(f"tier3 create name {name!r} was demoted: {reason}")
+
+
+#: Sidecar filename holding retired (log-demoted) name/alias records, issue
+#: athenaeum#1406. Written into the WIKI ROOT itself (not a subdirectory) so it
+#: travels with the wiki, but its leading underscore keeps it OUT of
+#: :meth:`~athenaeum.models.EntityIndex._load`'s ``wiki_root.glob("*.md")``
+#: walk (skipped by that method's own ``fpath.name.startswith("_")`` guard)
+#: -- and therefore out of :meth:`~athenaeum.models.EntityIndex.items`'s
+#: raw-text MENTION-matching fan-out too. A retired name must block CREATE
+#: (this module's :func:`validate_create_name`) without ever re-entering the
+#: entity-match fan-out that produced the 2.47 MB reduction PR athenaeum#1395
+#: in the first place -- a stub reusing the demoted page's own filename would
+#: need a second exclusion mechanism (mirroring :data:`~athenaeum.models.DEMOTED_NAME_MATCH_TYPES`)
+#: to get the same guarantee; a file :meth:`EntityIndex._load` never opens
+#: gets it for free.
+_RETIRED_NAMES_FILENAME = "_retired_names.yaml"
+
+
+@dataclass(frozen=True)
+class RetiredNameRecord:
+    """One log-demoted page's retired-name record (issue athenaeum#1406).
+
+    Written to the wiki root's :data:`_RETIRED_NAMES_FILENAME` sidecar by
+    :func:`_perform_oversize_log_demote` immediately BEFORE the page move
+    itself, so :func:`validate_create_name` can refuse to re-mint *name* (or
+    any of *aliases*) once the page is gone from the wiki.
+    """
+
+    uid: str
+    name: str
+    aliases: tuple[str, ...]
+    demoted_to: str
+    demoted_on: str
+
+
+def _retired_names_path(wiki_root: Path) -> Path:
+    return wiki_root / _RETIRED_NAMES_FILENAME
+
+
+def _load_retired_names(wiki_root: Path) -> dict[str, RetiredNameRecord]:
+    """Load the retired-name sidecar, keyed by lower-cased name AND each alias.
+
+    Fail-open, matching every other frontmatter/config reader in this
+    module: a missing, unreadable, or malformed sidecar returns ``{}``
+    rather than raising -- a corrupt sidecar must never crash the compile,
+    it must only fail to protect a retired name (degrading to athenaeum#1406's
+    pre-fix behavior for that one name, not a hard failure).
+    """
+    path = _retired_names_path(wiki_root)
+    if not path.is_file():
+        return {}
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    entries = raw.get("retired")
+    if not isinstance(entries, list):
+        return {}
+    by_key: dict[str, RetiredNameRecord] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        uid = entry.get("uid")
+        name = entry.get("name")
+        demoted_to = entry.get("demoted_to")
+        if not (
+            isinstance(uid, str)
+            and uid
+            and isinstance(name, str)
+            and name
+            and isinstance(demoted_to, str)
+            and demoted_to
+        ):
+            continue
+        aliases_raw = entry.get("aliases")
+        aliases = (
+            tuple(a for a in aliases_raw if isinstance(a, str) and a)
+            if isinstance(aliases_raw, list)
+            else ()
+        )
+        record = RetiredNameRecord(
+            uid=uid,
+            name=name,
+            aliases=aliases,
+            demoted_to=demoted_to,
+            demoted_on=str(entry.get("demoted_on") or ""),
+        )
+        by_key[name.strip().lower()] = record
+        for alias in aliases:
+            by_key[alias.strip().lower()] = record
+    return by_key
+
+
+def _retired_records_by_uid(wiki_root: Path) -> dict[str, RetiredNameRecord]:
+    """Collapse the name/alias-keyed sidecar map to one record per uid."""
+    by_uid: dict[str, RetiredNameRecord] = {}
+    for record in _load_retired_names(wiki_root).values():
+        by_uid[record.uid] = record
+    return by_uid
+
+
+def _write_retired_names(wiki_root: Path, records_by_uid: dict[str, RetiredNameRecord]) -> None:
+    """Persist *records_by_uid* to the sidecar via one atomic write.
+
+    Uses :func:`~athenaeum.atomic_io.atomic_write_text` -- the same
+    same-dir-temp-file-then-``os.replace`` primitive
+    :func:`_perform_oversize_page_split` already uses for its own hub
+    rewrite -- so this write is torn-write-safe on its own. Raises
+    ``OSError`` on failure (never swallowed here); callers decide how to
+    react, since this function is used on BOTH the write and the
+    rollback-on-move-failure path, which need opposite fail-open/fail-closed
+    handling (see :func:`_perform_oversize_log_demote`).
+    """
+    payload = {
+        "retired": [
+            {
+                "uid": r.uid,
+                "name": r.name,
+                "aliases": list(r.aliases),
+                "demoted_to": r.demoted_to,
+                "demoted_on": r.demoted_on,
+            }
+            for r in sorted(records_by_uid.values(), key=lambda r: r.uid)
+        ]
+    }
+    atomic_write_text(_retired_names_path(wiki_root), yaml.safe_dump(payload, sort_keys=False))
+
+
 def validate_create_name(
     name: str,
     config: dict[str, Any] | None = None,
@@ -1309,7 +1473,11 @@ def validate_create_name(
     1. :data:`_BARE_ISSUE_REF_RE` — AC1, raises :class:`CreateNameRejectedError`.
     2. :func:`_is_short_lowercase_token` — AC2, raises
        :class:`CreateNameEscalatedError`.
-    3. Name-uniqueness (issue athenaeum#1170), only when *index* is supplied —
+    3. Retired-name check (issue athenaeum#1406), only when *index* is
+       supplied — raises :class:`CreateNameDemotedError`. Runs BEFORE the
+       uniqueness check below since a demoted name has no page left in the
+       wiki for :meth:`~athenaeum.models.EntityIndex.lookup` to find at all.
+    4. Name-uniqueness (issue athenaeum#1170), only when *index* is supplied —
        raises :class:`CreateNameCollisionError`.
 
     Returns ``None`` (no exception) when *name* passes every check — the
@@ -1341,6 +1509,16 @@ def validate_create_name(
             name, f"short single lowercase token (<= {max_chars} chars)"
         )
     if index is not None:
+        retired = _load_retired_names(index.wiki_root)
+        retired_hit = retired.get(name.strip().lower())
+        if retired_hit is not None:
+            raise CreateNameDemotedError(
+                name,
+                f"name was log_demoted to {retired_hit.demoted_to} "
+                "(issue athenaeum#1248); refusing to re-mint a retired name",
+                demoted_to=retired_hit.demoted_to,
+                existing_uid=retired_hit.uid,
+            )
         hit = index.lookup(name)
         if hit is not None:
             if (
@@ -1452,6 +1630,29 @@ def gate_create_name_classifications(
             continue
         try:
             validate_create_name(c.name, config, index=index, entity_type=c.entity_type)
+        except CreateNameDemotedError as exc:
+            log.warning(
+                "tier3-create-name-demoted ref=%s name=%r demoted_to=%s reason=%s",
+                raw_ref,
+                exc.name,
+                exc.demoted_to,
+                exc.reason,
+            )
+            escalations.append(
+                EscalationItem(
+                    raw_ref=raw_ref,
+                    entity_name=c.name,
+                    conflict_type="name_demoted",
+                    description=(
+                        f"Tier-3 create for {c.name!r} was suppressed (issue "
+                        f"athenaeum#1406): {exc.reason}. The retired page's "
+                        f"content is preserved at {exc.demoted_to}. No page "
+                        "was created; the observation follows so the fact "
+                        f"is not lost:\n\n{raw_content[:2000]}"
+                    ),
+                )
+            )
+            continue
         except CreateNameCollisionError as exc:
             if exc.existing_type is not None:
                 log.info(
@@ -4350,6 +4551,20 @@ def _perform_oversize_log_demote(
     itself could not be made (mirrors :func:`~athenaeum.rules.preserve_raw_file`'s
     own ``None`` contract exactly); the caller falls back to the
     ``review`` disposition in either case.
+
+    **Retired-name record (issue athenaeum#1406).** On a successful move, this
+    also writes a :class:`RetiredNameRecord` for the page's ``uid``/``name``/
+    ``aliases`` to the wiki root's :data:`_RETIRED_NAMES_FILENAME` sidecar --
+    the durable trace :func:`validate_create_name` consults so the name
+    cannot be silently re-minted once the page itself is gone. The write
+    happens strictly AFTER :func:`~athenaeum.rules.preserve_raw_file` returns
+    a real destination (never before, never speculatively): that function
+    already fails closed on its own (an internal ``OSError`` is caught and
+    turned into a ``None`` return, never raised here), so "the move failed"
+    and "no record was written" are the exact same branch -- there is no
+    window in which a failed move could leave a record behind. A page with no
+    ``uid``/``name`` frontmatter (not the shape of this issue's five named
+    pages) still demotes, just without a record -- there is no name to guard.
     """
     from athenaeum.rules import preserve_raw_file
 
@@ -4362,14 +4577,61 @@ def _perform_oversize_log_demote(
             existing_path.name,
         )
         return None
+
+    # Captured from the page's OWN on-disk frontmatter before it moves --
+    # read-only, so this never risks corrupting what preserve_raw_file is
+    # about to move.
+    try:
+        existing_meta, _ = parse_frontmatter(existing_path.read_text(encoding="utf-8"))
+    except OSError:
+        existing_meta = {}
+    uid = str(existing_meta.get("uid") or "")
+    name = str(existing_meta.get("name") or "")
+    aliases_raw = existing_meta.get("aliases")
+    aliases = (
+        tuple(a for a in aliases_raw if isinstance(a, str) and a)
+        if isinstance(aliases_raw, list)
+        else ()
+    )
+
     knowledge_root = wiki_root.parent
-    return preserve_raw_file(
+    dest = preserve_raw_file(
         knowledge_root,
         existing_path,
         preserved_dir=preserved_dir,
         source="oversize-wiki-pages",
         rule_tag="oversize-page-gate",
     )
+    if dest is None or not uid or not name:
+        if dest is not None:
+            log.warning(
+                "oversize-page-gate: demoted %s to %s with no uid/name "
+                "frontmatter -- no retired-name record written (issue "
+                "athenaeum#1406); the name is NOT guarded against re-mint",
+                existing_path.name,
+                dest,
+            )
+        return dest
+
+    records = _retired_records_by_uid(wiki_root)
+    records[uid] = RetiredNameRecord(
+        uid=uid,
+        name=name,
+        aliases=aliases,
+        demoted_to=str(dest),
+        demoted_on=date.today().isoformat(),
+    )
+    try:
+        _write_retired_names(wiki_root, records)
+    except OSError:
+        log.error(
+            "oversize-page-gate: demoted %s to %s but FAILED to write its "
+            "retired-name record (issue athenaeum#1406) -- the name is NOT "
+            "guarded against re-mint until this is corrected manually",
+            existing_path.name,
+            dest,
+        )
+    return dest
 
 
 def check_page_size_gate(
