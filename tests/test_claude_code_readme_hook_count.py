@@ -74,7 +74,10 @@ def parse_lead_hook_count(text: str) -> int:
         num = _WORD_TO_NUM.get(token.lower())
         if num is not None:
             return num
-        raise ValueError(f"lead sentence hook count is an unrecognized word: {token!r}")
+        # Matched "<word> hook scripts" but the word isn't a number we know
+        # (e.g. a coincidental "These hook scripts..." elsewhere in the
+        # file) -- keep scanning for the real lead sentence rather than
+        # failing on the first superficial match.
     raise ValueError(
         "could not find a lead sentence of the form '<N> hook scripts' "
         "(count spelled as a word or a digit) in the given README text"
@@ -199,3 +202,17 @@ def test_parsers_fail_loudly_when_nothing_matches() -> None:
     no_table = "# Claude Code integration\n\nThree hook scripts, no table below.\n"
     with pytest.raises(ValueError):
         parse_hook_table_row_count(no_table)
+
+
+def test_lead_count_scan_skips_an_unparseable_false_match() -> None:
+    """A coincidental '<word> hook scripts' phrase with a non-numeric word
+    (e.g. in unrelated prose) must not abort the scan — the parser should
+    keep looking and return the real count further down."""
+    text = (
+        "# Claude Code integration\n"
+        "\n"
+        "These hook scripts are handy.\n"
+        "\n"
+        "Four hook scripts that wire Athenaeum into Claude Code.\n"
+    )
+    assert parse_lead_hook_count(text) == 4
