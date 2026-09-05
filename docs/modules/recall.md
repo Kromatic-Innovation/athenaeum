@@ -23,8 +23,8 @@ questions a ranked search answers only partially. `read_entity` is a one-call re
 single entity by uid, for any declared class. `entity_schema` reports which entity classes
 this deployment declares and observes, and which fields each carries — call it before
 narrowing `recall` or `enumerate_entities` by `type`, since the tool schemas exposed at
-server start advertise only the cheap declared set (a full corpus scan at server-start time
-measured 28 seconds on a 23,500-page corpus and blew every client's MCP connect budget).
+server start advertise only the cheap declared set — scanning the whole corpus to enumerate
+observed classes is too slow to sit inside a client's MCP connect budget.
 
 Example: `recall("Jordan Reyes")` ranks Jordan Reyes's wiki page against every other match by
 relevance. `enumerate_entities(entity_type="person", predicates=[{"fields": "company",

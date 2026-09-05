@@ -93,9 +93,10 @@ of the two sanctioned paths below, does.
   by default** — ahead of any retention-pack lookup, so no pack can loosen the classification
   by omission. Content re-entering the corpus by way of an off-corpus recall is erasure-class
   by provenance, never re-guessed from its content.
-- **Erasure does not reach an already-emitted session transcript.** That copy is documented
-  as enumerable but unreachable by the erasure cascade — a stated limitation, not a bug to
-  paper over.
+- **Erasure does not reach an already-emitted session transcript.** The cascade names such a
+  copy "enumerable but unreachable" and discloses it rather than papering over it — a stated
+  limitation. The same applies to a cache built downstream of a push. See
+  [security posture](../design/security-posture.md) for the disclosure text.
 - **Every sensitivity-class configuration error fails loud, never silently.** A recognizer
   name that shadows a built-in, a duplicate registration without `replace=True`, a class
   citing an unknown recognizer, a recognizer bound to two classes, an `inherits` cycle, a
@@ -108,8 +109,10 @@ of the two sanctioned paths below, does.
   to an embedded (non-excluded) adapter is flagged but does **not** block — `is_clean`
   explicitly excludes that one finding, since the mismatch may be an intentional operator
   choice.
-- **The outbound-egress PII scanner is not wired into the model-prompt path.** It redacts
-  PII in log lines only; sending an excluded field to a live LLM prompt is a deliberately
+- **The outbound-egress PII scanner is not wired into the model-prompt path.** It backs log
+  redaction and the `athenaeum outbound-lint` CLI, which scans arbitrary outbound text — an
+  email draft, a social post, a public issue body — on request. What it does *not* do is sit
+  in front of the model prompt: sending an excluded field to a live LLM is a deliberately
   separate, unsolved boundary, not something this module claims to cover.
 
 ## See also
