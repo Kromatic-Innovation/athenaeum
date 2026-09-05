@@ -1600,15 +1600,19 @@ def _registered_tool_names(tmp_path: Path) -> set[str]:
 
 
 def _readme_mcp_section() -> str:
-    readme = Path(__file__).resolve().parent.parent / "README.md"
-    text = readme.read_text()
-    start = text.index("## The MCP surface")
-    end = text.index("\n## ", start + 1)
-    return text[start:end]
+    """The documented MCP surface.
+
+    Lives in ``docs/modules/mcp.md``, not the README: the tool table moved out
+    when the README became a marketing document. The parity guarantee is
+    unchanged -- a tool registered in ``create_server()`` without a matching
+    documented row still fails this test.
+    """
+    doc = Path(__file__).resolve().parent.parent / "docs" / "modules" / "mcp.md"
+    return doc.read_text()
 
 
 def _readme_tool_rows() -> dict[str, str]:
-    """Parse ``{tool_name: "READ"|"WRITE"}`` out of the README table.
+    """Parse ``{tool_name: "READ"|"WRITE"}`` out of the documented table.
 
     Matches ``| `tool_name` | READ | ... |`` / ``| `tool_name` | WRITE | ... |``
     rows -- the same shape every existing row already uses.
@@ -1627,7 +1631,9 @@ def _readme_stated_counts() -> tuple[int, int, int]:
     section = _readme_mcp_section()
     total_m = re.search(r"exposing \*\*(\d+) tools\*\*", section)
     split_m = re.search(r"(\d+) read-only, (\d+) that mutate", section)
-    assert total_m and split_m, "README MCP-surface prose did not match the expected pattern"
+    assert total_m and split_m, (
+        "docs/modules/mcp.md prose did not match the expected pattern"
+    )
     return int(total_m.group(1)), int(split_m.group(1)), int(split_m.group(2))
 
 

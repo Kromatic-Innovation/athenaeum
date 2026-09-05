@@ -7,9 +7,9 @@
 ## What it does
 
 `athenaeum serve` runs an MCP server exposing **15 tools** so agents can write to raw
-intake, search the compiled wiki, and triage the human-decision queue. Ten are read-only;
-five mutate human-decision state. No tool writes a wiki page directly — the librarian is
-the only writer.
+intake, search the compiled wiki, and triage the human-decision queue.
+10 read-only, 5 that mutate human-decision state.
+No tool writes a wiki page directly — the librarian is the only writer.
 
 ```bash
 pip install 'athenaeum[mcp]'
@@ -17,30 +17,23 @@ athenaeum serve --path ~/knowledge
 athenaeum test-mcp          # smoke-test the round-trip without a live session
 ```
 
-### Read tools
-
-| Tool | What it does |
-|---|---|
-| `recall` | Searches the compiled wiki for pages relevant to a query (keyword/FTS5/vector, depending on the configured backend). |
-| `entity_schema` | Reports the entity classes this deployment declares and observes, the fields each carries, and which fields `recall`/`enumerate_entities` can filter on. Call this before narrowing by `type`. |
-| `enumerate_entities` | Unranked, criteria-based listing of every entity of a declared type — the counterpart to `recall` for "every entity matching X", where a ranked search returns an incomplete answer. |
-| `read_entity` | One-call entity read by uid, for any entity class. One of the two sanctioned paths to a page's excluded fields. |
-| `list_pending_questions` | Unanswered contradiction-detector questions. |
-| `list_pending_merges` | Unresolved resolver-proposed page merges. |
-| `list_pending_decisions` | Unified queue — questions and merge proposals in one call, oldest first. |
-| `list_axiom_audit` | Per-slug history of axiom promotions and demotions, so axiom status is auditable without a write tool. |
-| `scan_retraction_cascade` | Flags completed merges that relied on a since-retracted source. Never auto-unmerges. |
-| `calibration_summary` | Per-tier sampled/reviewed/overturned counts for the tiered-reasoning calibration loop. Reports "not enabled" when the opt-in is off. |
-
-### Write tools
-
-| Tool | What it does |
-|---|---|
-| `remember` | Appends a piece of knowledge to raw intake. Append-only; compiled into the wiki on the next run. |
-| `raise_decision` | Files a new agent-raised question or confirmation into the pending-decisions queue, so a mid-session flag has somewhere durable to live. |
-| `resolve_question` | Flips a pending question to answered and records the answer body. |
-| `resolve_merge` | Approves or rejects a pending merge proposal. Approval folds or creates the merged wiki page. |
-| `review_audit_item` | Records a human's confirm/overturn verdict on a sampled tier-audit item. Calibration signal only; never re-executes a merge. |
+| Tool | R/W | What it does |
+|---|---|---|
+| `recall` | READ | Searches the compiled wiki for pages relevant to a query (keyword/FTS5/vector, depending on the configured backend). |
+| `entity_schema` | READ | Reports the entity classes this deployment declares and observes, the fields each carries, and which fields `recall`/`enumerate_entities` can filter on. Call this before narrowing by `type`. |
+| `enumerate_entities` | READ | Unranked, criteria-based listing of every entity of a declared type — the counterpart to `recall` for "every entity matching X", where a ranked search returns an incomplete answer. |
+| `read_entity` | READ | One-call entity read by uid, for any entity class. One of the two sanctioned paths to a page's excluded fields. |
+| `list_pending_questions` | READ | Unanswered contradiction-detector questions. |
+| `list_pending_merges` | READ | Unresolved resolver-proposed page merges. |
+| `list_pending_decisions` | READ | Unified queue — questions and merge proposals in one call, oldest first. |
+| `list_axiom_audit` | READ | Per-slug history of axiom promotions and demotions, so axiom status is auditable without a write tool. |
+| `scan_retraction_cascade` | READ | Flags completed merges that relied on a since-retracted source. Never auto-unmerges. |
+| `calibration_summary` | READ | Per-tier sampled/reviewed/overturned counts for the tiered-reasoning calibration loop. Reports "not enabled" when the opt-in is off. |
+| `remember` | WRITE | Appends a piece of knowledge to raw intake. Append-only; compiled into the wiki on the next run. |
+| `raise_decision` | WRITE | Files a new agent-raised question or confirmation into the pending-decisions queue, so a mid-session flag has somewhere durable to live. |
+| `resolve_question` | WRITE | Flips a pending question to answered and records the answer body. |
+| `resolve_merge` | WRITE | Approves or rejects a pending merge proposal. Approval folds or creates the merged wiki page. |
+| `review_audit_item` | WRITE | Records a human's confirm/overturn verdict on a sampled tier-audit item. Calibration signal only; never re-executes a merge. |
 
 ## What it reads
 
