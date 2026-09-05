@@ -97,7 +97,7 @@ def _positive_int(value: str) -> int:
 #: The two are not interchangeable: this code fires before any pipeline
 #: work starts, so nothing is committed and nothing is deferred to disk,
 #: unlike EXIT_GRACEFUL_PARTIAL's "partial progress, resumable" case. See
-#: docs/exit-codes.md ("`75` also collides with `EXIT_LOCK_HELD`", issue
+#: docs/reference/exit-codes.md ("`75` also collides with `EXIT_LOCK_HELD`", issue
 #: athenaeum#1379); renumbering either constant is a separate, open decision
 #: not made there.
 EXIT_LOCK_HELD = 75

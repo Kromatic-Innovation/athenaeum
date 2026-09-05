@@ -27,7 +27,7 @@ jobs:
           UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
           DEPS: ${{ steps.meta.outputs.dependency-names }}
         run: |
-          # Policy (see docs/security-posture.md §3.1):
+          # Policy (see docs/design/security-posture.md §3.1):
           #   - Auto-merge all patch updates.
           #   - Auto-merge minor updates EXCEPT for deps where pyproject.toml
           #     explicitly comments "bumps are explicit PRs":
@@ -68,7 +68,7 @@ jobs:
               ;;
             version-update:semver-major)
               echo "eligible=false" >> "$GITHUB_OUTPUT"
-              echo "reason=major update — see docs/security-posture.md §3.2" >> "$GITHUB_OUTPUT"
+              echo "reason=major update — see docs/design/security-posture.md §3.2" >> "$GITHUB_OUTPUT"
               ;;
             *)
               echo "eligible=false" >> "$GITHUB_OUTPUT"

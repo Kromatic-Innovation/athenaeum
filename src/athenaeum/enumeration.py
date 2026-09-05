@@ -3,7 +3,7 @@
 
 ``recall`` narrows a **relevance-ranked** search — it cannot answer "give me
 every entity of type X whose field Y matches, ordered by field Z" because
-there is no query text to rank against (see ``docs/recall-architecture.md``
+there is no query text to rank against (see ``docs/design/recall-architecture.md``
 §"Type filter..." for why the type filter alone does not solve this). This
 module is the distinct code path the issue asks for: given a DECLARED entity
 type, zero or more field predicates, a sort key, and a limit — and no query
@@ -40,7 +40,7 @@ from :func:`athenaeum.entity_schema.resolve_entity_classes` — the SAME
 resolver ``recall``'s dynamic tool-schema description and the ``entity_schema``
 MCP tool already use (issue athenaeum#964) — never a hardcoded list. Predicate
 and output field names are intentionally OPAQUE at the API boundary, exactly
-like ``recall``'s ``type`` filter already is (``docs/recall-architecture.md``:
+like ``recall``'s ``type`` filter already is (``docs/design/recall-architecture.md``:
 "never validated against wiki/_schema/types.md"): frontmatter is open-schema
 (:func:`athenaeum.models.parse_frontmatter`'s own contract), so a predicate on
 a field this deployment doesn't use simply matches nothing rather than being
@@ -81,7 +81,7 @@ durable cross-system identifier than the boolean they annotate. This is
 unrelated to, and does not change, the separate ``recall`` / ``read_entity``
 reverse-lookup path, where ``with_pii=True`` stays required because there the
 lookup KEY is an email address on the excluded surface (see
-``docs/authorized-reader-contract.md``) — this module never looks anything
+``docs/extending/authorized-reader-contract.md``) — this module never looks anything
 up by address.
 
 A caller that needs the full excluded-surface record for an enumerated hit

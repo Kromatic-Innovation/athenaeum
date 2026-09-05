@@ -9,7 +9,7 @@ from pathlib import Path
 from athenaeum.measurement_docs import DOCS_HEADER, append_measurement_section
 
 _REPO_DOCS_PATH = (
-    Path(__file__).resolve().parents[1] / "docs" / "memory-model-measurements.md"
+    Path(__file__).resolve().parents[1] / "docs" / "measurements" / "memory-model-measurements.md"
 )
 
 
@@ -155,7 +155,7 @@ def _find_subparsers_action(parser: argparse.ArgumentParser) -> argparse._SubPar
 
 
 class TestReproducingSectionInvocations:
-    """Issue athenaeum#1095 AC7(c): docs/memory-model-measurements.md's own
+    """Issue athenaeum#1095 AC7(c): docs/measurements/memory-model-measurements.md's own
     'Reproducing the measurement pack' section must list all three exact
     invocations, pinned against each module's own REPRODUCE_COMMAND constant
     so the doc cannot silently drift out of sync with the CLI.

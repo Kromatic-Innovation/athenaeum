@@ -4,7 +4,7 @@
 ``tests/test_storage.py`` already unit-tests the ``is_embedded`` /
 ``is_recallable`` predicates in isolation. Those predicates existed but were
 *unenforced* — no index builder consulted ``is_embedded`` and no recall path
-consulted ``is_recallable``, so ``docs/storage-adapter-contract.md`` sold three
+consulted ``is_recallable``, so ``docs/extending/storage-adapter-contract.md`` sold three
 fail-closed guarantees while two did nothing (a class configured
 ``recallable: false`` was still returned by ``recall``).
 

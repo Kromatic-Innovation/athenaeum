@@ -18,7 +18,7 @@
 # Ships in "observe" mode: review wiki/_shape_rules_applied.jsonl after a few
 # runs -- confirm the drop count matches your expected skip volume, and that
 # nothing you wanted compiled is landing here -- before flipping this rule's
-# own copy to `mode: live`. See docs/shape-rules.md for the rule-schema
+# own copy to `mode: live`. See docs/design/shape-rules.md for the rule-schema
 # reference.
 
 version: 1

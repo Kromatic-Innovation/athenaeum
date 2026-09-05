@@ -22,10 +22,10 @@ AC mapping (see issue athenaeum#752):
 2. re-derives from transcript, NEVER reads stored ``source_type``.
 3. ``agent-observed`` / ``inferred`` / ``unavailable`` each escalate.
 4. missing/rolled-off transcript (``unavailable``) escalates.
-5. threshold not consulted for correct_* (see docs/configuration.md).
+5. threshold not consulted for correct_* (see docs/reference/configuration.md).
 6. ``forget_a``/``forget_b`` unchanged — no authorship check.
 7. gate decision (channel + ref) logged for every correct_* verdict.
-8. docs/conflict-resolution.md records the rule + known limits.
+8. docs/design/conflict-resolution.md records the rule + known limits.
 """
 
 from __future__ import annotations

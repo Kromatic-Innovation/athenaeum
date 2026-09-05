@@ -24,7 +24,7 @@ All Anthropic calls are mocked; no live API, no network.
 Post-athenaeum#897: this signal-driven exit is the ONE remaining path that
 returns 124 (`EXIT_EXTERNAL_KILL`) — athenaeum's own internal deadline check
 (`tests/test_librarian_deadline.py`) now returns a distinct 75
-(`EXIT_GRACEFUL_PARTIAL`) instead. See docs/exit-codes.md for the full
+(`EXIT_GRACEFUL_PARTIAL`) instead. See docs/reference/exit-codes.md for the full
 contract.
 """
 

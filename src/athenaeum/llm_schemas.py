@@ -140,7 +140,7 @@ SCHEMA_MISMATCH_MARKER = "llm-schema-mismatch"
 #: explicitly: pass ``cache_dir=`` (wins over the env var per
 #: :func:`athenaeum.config.resolve_cache_dir`'s precedence) and/or
 #: ``monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1")``. See
-#: ``docs/configuration.md`` § "LLM schema-observation ledger".
+#: ``docs/reference/configuration.md`` § "LLM schema-observation ledger".
 OBSERVATIONS_FILENAME = "_llm_schema_observations.jsonl"
 
 #: Schema version stamped on every observation record.

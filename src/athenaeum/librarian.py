@@ -309,7 +309,7 @@ DEFAULT_MAX_RUNTIME = 3600  # 1 hour
 # Issue athenaeum#897: distinct exit codes for a graceful internal stop vs a hard
 # external kill, so the SessionEnd wrapper (and any other rc-reading caller)
 # can tell "clean, resumable, partial-progress run" apart from "the process
-# was killed" without parsing log text. Full contract/table: docs/exit-codes.md.
+# was killed" without parsing log text. Full contract/table: docs/reference/exit-codes.md.
 #
 # EX_TEMPFAIL (BSD sysexits.h, /usr/include/sysexits.h on most systems) —
 # "temporary failure; user is invited to retry". `run()` returns this when
@@ -322,7 +322,7 @@ DEFAULT_MAX_RUNTIME = 3600  # 1 hour
 # (`src/athenaeum/_cli_shared.py`) — a run-lock-contention code returned
 # before any pipeline work starts, so none of this constant's
 # "partial-progress, resumable" semantics apply to it. See
-# docs/exit-codes.md ("`75` also collides with `EXIT_LOCK_HELD`", issue
+# docs/reference/exit-codes.md ("`75` also collides with `EXIT_LOCK_HELD`", issue
 # athenaeum#1379) for the collision; renumbering either constant is a
 # separate, open decision not made there.
 EXIT_GRACEFUL_PARTIAL = 75
@@ -1168,7 +1168,7 @@ def tier0_bounce_mark(
     this function calls and then does nothing but write on top of (issue athenaeum#854).
     That is deliberate: the same decision is published as a read-only
     conformance check a producer can run BEFORE submitting a batch
-    (``athenaeum bounce-contract``, ``docs/tier0-bounce-note-contract.md``),
+    (``athenaeum bounce-contract``, ``docs/extending/tier0-bounce-note-contract.md``),
     and sharing one code path is what stops the published contract from
     drifting away from the gate it describes. Behaviour here is unchanged —
     a non-conforming note still falls through to Tier 1/2/3 with no error.
@@ -1754,7 +1754,7 @@ def process_one(
     result = ProcessingResult(raw_file=raw)
 
     # --- Sensitivity routing (issue athenaeum#1025; design note
-    # docs/sensitivity-value-routing.md, the standing filter at raw-sweep
+    # docs/design/sensitivity-value-routing.md, the standing filter at raw-sweep
     # intake — slice 4/4, wiring slices 2/3's already-tested mechanism in).
     # Runs FIRST, before Tier 0's passthrough write and before Tier 1/2/3
     # read `raw.content` at all (§0/§1/§4) — this is the ONE dispatch point
@@ -3120,7 +3120,7 @@ def librarian_run_type(config: dict[str, object] | None = None) -> str:
     there is no meaningful yaml default to define. The env var exists
     because athenaeum ships no nightly cron wrapper of its own — the actual
     wrapper lives in a DIFFERENT repo (``code-workspace-config``, not this
-    one; see docs/configuration.md "Reasoning-tier triggers") — and setting
+    one; see docs/reference/configuration.md "Reasoning-tier triggers") — and setting
     an env var in that external cron/launchd invocation is far less
     invasive than threading a new CLI flag through it. A blank/whitespace-
     only env value falls through to the default. Default is
@@ -5394,7 +5394,7 @@ def _arm_run_deadline(ctx: RunContext) -> None:
 
 
 def _run_shape_rule_phase(ctx: RunContext) -> None:
-    """Shape-rule engine (issue athenaeum#901, `docs/field-corrections.md`).
+    """Shape-rule engine (issue athenaeum#901, `docs/design/field-corrections.md`).
 
     Runs in the SAME deterministic phase slot as, and immediately BEFORE,
     :func:`_run_correction_phase` — ordering is load-bearing: a rule that
@@ -5568,7 +5568,7 @@ def _run_raw_retention_phase(ctx: RunContext) -> None:
     `raw-oversize-file` / `raw-oversize-source` and names the offending
     paths/sources in `ctx.raw_retention_summary`, mirroring
     `_run_intake_audit_phase`'s summary-dict convention. See
-    `docs/shape-rules.md` §3.5 for the full rationale (size is a reported
+    `docs/design/shape-rules.md` §3.5 for the full rationale (size is a reported
     condition, never a shape-rule match predicate).
     """
     summary = check_raw_retention(ctx.raw_root, ctx.config)
@@ -5748,10 +5748,10 @@ def _run_memory_tier_sweep_phase(ctx: RunContext) -> None:
 
 
 def _run_correction_phase(ctx: RunContext) -> None:
-    """Field-correction fast path (issue athenaeum#797, `docs/field-corrections.md`).
+    """Field-correction fast path (issue athenaeum#797, `docs/design/field-corrections.md`).
 
     Runs immediately after :func:`_arm_run_deadline` and BEFORE the entity
-    tier phase (`docs/field-corrections.md` §10.1) — a corpus where the
+    tier phase (`docs/design/field-corrections.md` §10.1) — a corpus where the
     reasoning tiers routinely exhaust the wall-clock budget must not starve
     this deterministic, LLM-free path; ordering it first on its own small
     fixed share means an overrun degrades the (already-degrading) expensive
@@ -8729,7 +8729,7 @@ def run(
     """Run the librarian pipeline. Returns 0 on success, 1 on error,
     EXIT_GRACEFUL_PARTIAL (75) on its own internal deadline trip (issue
     athenaeum#897), EXIT_LIBRARIAN_REFUSAL (3) on a zero-progress DEGRADED
-    refusal (issue athenaeum#1135; full exit-code contract: docs/exit-codes.md).
+    refusal (issue athenaeum#1135; full exit-code contract: docs/reference/exit-codes.md).
 
     When ``cluster_only`` is True, only the C2 auto-memory discovery +
     clustering pass runs; the entity tier pipeline is skipped entirely.
@@ -8981,7 +8981,7 @@ def run(
 
     # Phase: field-correction fast path (issue athenaeum#797) -- deterministic,
     # LLM-free, own runtime share. Ordered here (after the deadline is armed,
-    # before the entity tier phase) per docs/field-corrections.md §10.1 so an
+    # before the entity tier phase) per docs/design/field-corrections.md §10.1 so an
     # entity-phase overrun never starves this cheap path.
     _run_correction_phase(ctx)
 

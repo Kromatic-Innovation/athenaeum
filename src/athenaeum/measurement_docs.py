@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared idempotent-append helper for ``docs/memory-model-measurements.md``.
+"""Shared idempotent-append helper for ``docs/measurements/memory-model-measurements.md``.
 
 Issue athenaeum#713 (v6 MVP (c), the measurement pack) needs the SAME idempotent-
 append shape :func:`athenaeum.push_metrics.write_snapshot` already established
@@ -57,7 +57,7 @@ def append_measurement_section(
     """Idempotently write/append one dated *entry_markdown* under *section_heading*.
 
     Args:
-        docs_path: ``docs/memory-model-measurements.md`` (or a test-owned
+        docs_path: ``docs/measurements/memory-model-measurements.md`` (or a test-owned
             stand-in).
         section_heading: e.g. ``"## Shadow-mode complete-linkage population"``
             — matched as a literal substring, exactly as

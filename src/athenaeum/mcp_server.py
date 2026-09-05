@@ -44,7 +44,7 @@ widen its own scope) and governs the whole process:
     is an owner-only action.
   - ``remember`` is intentionally NOT audience-scoped: intake is write-only and
     compiles through the normal read-time screening path (issue athenaeum#320). See
-    ``docs/security-posture.md``.
+    ``docs/design/security-posture.md``.
 
 Requires the ``mcp`` extra: ``pip install athenaeum[mcp]``
 """
@@ -271,7 +271,7 @@ def recall_search(
             :func:`athenaeum.pii.read_entity` accepts it. ``None`` (default)
             returns every value. Only meaningful with *with_pii* — the flag is
             not usage-class-blind, so a caller that must not receive a
-            provider-sourced address (``docs/security-posture.md`` §2.3) can
+            provider-sourced address (``docs/design/security-posture.md`` §2.3) can
             filter it here the same way ``read_entity``'s callers already can.
         history: Opt into a HISTORY query (issue athenaeum#904) — the caller is
             explicitly asking about the past, not the current state, so an
@@ -1156,7 +1156,7 @@ def _recall_via_backend(
         # Issue athenaeum#964: uid + type on EVERY hit — without a uid an agent can
         # only reach `read_entity` by string-parsing the `<uid>-<slug>.md`
         # filename (exactly the storage-layout parsing
-        # `docs/one-way-in-one-way-out.md` exists to prevent). Always
+        # `docs/design/one-way-in-one-way-out.md` exists to prevent). Always
         # rendered (never omit-at-default like the athenaeum#325 header above), since
         # "go dig further" is the whole point of the field.
         uid = str(fm.get("uid") or "—")
@@ -1294,7 +1294,7 @@ def remember_write(
             **Not** the per-claim provenance source — see ``sources``.
         wiki_root: Optional wiki root for path-traversal guards.
         sources: Per-claim provenance (issue athenaeum#90, design-lock §4 in
-            ``docs/provenance-shape.md``). Three accepted shapes:
+            ``docs/design/provenance-shape.md``). Three accepted shapes:
 
             1. Scalar ``str`` of form ``"<type>:<ref>"`` (e.g.
                ``"api:apollo:2026-05-09"``) — applied as the wiki-level
@@ -1336,7 +1336,7 @@ def remember_write(
                  asserted on their behalf.
                * ``_asserter`` → IdP-compatible identity block for
                  ``user-stated`` claims (see
-                 ``docs/provenance-shape.md`` §10). Keyed on
+                 ``docs/design/provenance-shape.md`` §10). Keyed on
                  (``iss``, ``sub``) with a Microsoft Entra
                  (``entra_tid``, ``entra_oid``) branch. ``email`` is
                  display-only — an email change does NOT orphan the
@@ -1616,7 +1616,7 @@ def create_server(
     # observed-undeclared class (athenaeum#964's own ``auto-memory`` case) is still
     # fully usable as a ``type``/``entity_type`` value, and the ``entity_schema``
     # tool remains authoritative for the complete live list — the descriptions
-    # say so. See docs/recall-architecture.md.
+    # say so. See docs/design/recall-architecture.md.
     #
     # A ``types.md`` or corpus edit still takes effect on the NEXT server start
     # (unchanged from athenaeum#964; nothing here precludes wiring
@@ -1733,7 +1733,7 @@ def create_server(
                 off-corpus for any other entity class (issue athenaeum#885). This is
                 the sanctioned way to read excluded data for a hit you found
                 here; do not open an excluded surface directly
-                (``docs/one-way-in-one-way-out.md`` section 3). Default ``False``, and
+                (``docs/design/one-way-in-one-way-out.md`` section 3). Default ``False``, and
                 free when unset: no excluded surface is scanned at all.
 
                 It cannot widen what you can see. Excluded values are never
@@ -1788,7 +1788,7 @@ def create_server(
         here and is usable as a `type` value, but is not named there.
         A `wiki/_schema/types.md` edit takes effect on the next server start
         (this issue does not implement hot reload — see
-        docs/recall-architecture.md).
+        docs/design/recall-architecture.md).
 
         Returns:
             A dict with:
@@ -1885,7 +1885,7 @@ def create_server(
 
         `athenaeum people` (deprecated by athenaeum#966) has been REMOVED
         (athenaeum#1079) now that this generalized primitive covers every
-        reproducible surface — see docs/recall-architecture.md's
+        reproducible surface — see docs/design/recall-architecture.md's
         capability-parity table for the historical per-flag mapping.
 
         Args:
@@ -1953,7 +1953,7 @@ def create_server(
                 ``"claude-session"``, ``"manual"``. **Not** a per-claim
                 provenance source — pass ``sources`` for that.
             sources: Per-claim provenance (issue athenaeum#90, design-lock §4 in
-                ``docs/provenance-shape.md``). Three accepted shapes:
+                ``docs/design/provenance-shape.md``). Three accepted shapes:
 
                 - scalar ``"<type>:<ref>"`` (e.g.
                   ``"api:apollo:2026-05-09"``) — wiki-level default,
@@ -2357,7 +2357,7 @@ def create_server(
         The generic form of the former ``read_person`` tool (removed in
         athenaeum#888) and the sanctioned way to read an
         entity's EXCLUDED fields when you already have its uid — do not open an
-        excluded surface directly (``docs/one-way-in-one-way-out.md`` §3). Use
+        excluded surface directly (``docs/design/one-way-in-one-way-out.md`` §3). Use
         ``recall(with_pii=True)`` instead when you are searching rather than
         resolving a uid you already hold; both reach the same read.
 

@@ -188,7 +188,7 @@ def render_decision_answer(
         f"{frontmatter}"
         "---\n\n"
         "(decision answer — applied deterministically at tier 0 by "
-        "`athenaeum ingest-answers`; see docs/conflict-resolution.md)\n"
+        "`athenaeum ingest-answers`; see docs/design/conflict-resolution.md)\n"
     )
 
 

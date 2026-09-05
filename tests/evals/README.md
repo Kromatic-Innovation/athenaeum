@@ -21,7 +21,7 @@ Layers exercised end-to-end against a real Claude API call:
 | Backfill  | deferred until athenaeum#328                | —               | —      |
 
 Classify and Merge (issue athenaeum#552) cover `tiers.py`'s Tier-2 CLASSIFY and
-Tier-3 WRITE/MERGE stages — see `docs/evals-inventory.md` for the full
+Tier-3 WRITE/MERGE stages — see `docs/measurements/evals-inventory.md` for the full
 module-by-module inventory of which stages warrant a live eval and why.
 
 Each per-case test appends its outcome to the session accumulator; only

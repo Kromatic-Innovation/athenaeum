@@ -3,7 +3,7 @@
 reappear duplicated outside :class:`athenaeum.store.FilesystemStore`, and the
 KNOWN set of remaining knowledge-store git-argv call sites does not grow
 (issue athenaeum#978, slice S3, AC6; design note
-``docs/whole-store-adapter-design.md`` §4.2 / §4.4 / §9.2's S3 row).
+``docs/extending/whole-store-adapter-design.md`` §4.2 / §4.4 / §9.2's S3 row).
 
 **What this scans, precisely:** every ``src/athenaeum/*.py`` module (i.e. only
 real, non-test, non-``.github`` source — the AST walk below parses each file

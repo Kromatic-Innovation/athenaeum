@@ -48,10 +48,10 @@ protection issue athenaeum#963's CI acceptance criterion (as amended
 2026-08-20) asks for, since GitHub Actions has no access to a live store.
 Against the LIVE store, this repository ships no in-repo scheduler (see
 "There is no shipped nightly cron wrapper in this repo" in
-``docs/configuration.md``) — the in-repo registration this issue's AC asks
+``docs/reference/configuration.md``) — the in-repo registration this issue's AC asks
 for is this command's documented contract itself (this docstring, the
-``docs/configuration.md`` operator-invocation note, and the exit-code table
-in ``docs/exit-codes.md``): an operator's own external cron/launchd (or the
+``docs/reference/configuration.md`` operator-invocation note, and the exit-code table
+in ``docs/reference/exit-codes.md``): an operator's own external cron/launchd (or the
 Hestia nightly sweep in a different repo) invokes
 ``athenaeum surface-divergence --field <name> --path ~/knowledge`` once per
 registered field and treats a non-zero, non-``EXIT_SURFACE_UNREADABLE`` exit

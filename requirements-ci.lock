@@ -26,7 +26,7 @@
 #     # then restore this header
 #
 # Dependabot proposes bumps against pyproject.toml's ranges (see
-# .github/workflows/dependabot-auto-merge.yml and docs/security-posture.md
+# .github/workflows/dependabot-auto-merge.yml and docs/design/security-posture.md
 # §3.1); regenerate this lock when a dependency bump lands so CI tracks it.
 aiofile==3.11.1
 aiohappyeyeballs==2.7.1

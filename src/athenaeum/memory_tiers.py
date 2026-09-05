@@ -15,7 +15,7 @@ the collision cannot silently reappear.
 ## The four tiers
 
 Retrieval-COST classes, not storage classes — every tier shares the same
-disk (`docs/whole-store-adapter-design.md` §8 governs storage-adapter
+disk (`docs/extending/whole-store-adapter-design.md` §8 governs storage-adapter
 placement; this module never decides where bytes live):
 
 - **hot** — indexed, eligible for unprompted push under the token budget

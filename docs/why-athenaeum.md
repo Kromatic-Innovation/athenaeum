@@ -178,7 +178,7 @@ To close that gap, Athenaeum makes four specific design choices. Each
 corresponds to one of the failure modes above.
 
 > **Before you write a client, read the one rule they all rest on:
-> [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md).** Every write
+> [`docs/design/one-way-in-one-way-out.md`](design/one-way-in-one-way-out.md).** Every write
 > reaches the knowledge base as raw intake compiled by exactly one writer, and
 > every read reaches a caller through the recall/read interface — no program
 > opens a store directly. That holds for the off-corpus contact-data surface
@@ -228,8 +228,8 @@ the agent that saw the observation, because it doesn't have the whole wiki in
 view.
 
 Each entity carries a stable UID and a list of aliases in its frontmatter,
-and search weights both well above body text. That's how "Amanda" still finds
-Amanda Smith the next time someone drops her first name, and how the
+and search weights both well above body text. That's how "Priya" still finds
+Priya Raman the next time someone drops their first name, and how the
 librarian merges onto the existing page instead of quietly creating a
 duplicate.
 
@@ -283,9 +283,9 @@ loaded. There's no need to spell everything out in a giant prompt.
 
 For the deep dive on the hybrid FTS5 + vector architecture (including why
 both backends are load-bearing), see
-[`recall-architecture.md`](./recall-architecture.md).
+[`recall-architecture.md`](./design/recall-architecture.md).
 
-### 4. The notetaker — a configurable, editable observation filter
+### 4. The observation filter — a prompt you can read and edit
 
 > _Addresses: the agent doesn't know what to remember._
 
@@ -297,20 +297,29 @@ filter. Sometimes it saves trivia — a passing comment about a preference —
 and misses the context that actually matters, like the rationale behind a
 decision we just spent an hour debating. There's no way to tune it.
 
-Athenaeum's notetaker replaces that with a configurable observation filter: a
-prompt the librarian uses to decide what's worth writing to raw intake.
-Because the filter is a prompt and not a black box, it's easy to inspect,
-edit, and tune. When we notice memory saving things we don't care about or
-missing things we do, we revise the prompt and the next pass improves.
+Athenaeum replaces that with an **observation filter**: an ordinary markdown
+file that the classification pass reads and injects into its prompt when
+deciding which entities are worth extracting from a raw observation. A
+bundled default ships with the package; `athenaeum init` copies it write-once
+to `wiki/_schema/observation-filter.md`, and from then on it is yours. Edit
+it, and the next compile pass behaves differently.
 
-Better still, the filter itself is a wiki page the agent can edit during a
-session when we push back on a save, and every change is logged to raw intake
-as an audit trail. The notetaker learns from feedback in the moment, instead
-of waiting for us to remember to tune it later.
+Because it is a file rather than a black box, three things follow. You can
+read it, so you know why something was or wasn't captured. You can revise it
+when memory saves things you don't care about or misses things you do. And
+every run reports whether the filter is still the shipped default or has been
+edited, so a surprising result can be traced to a tuning change.
 
-Between the notetaker and the librarian, important context lands in memory
-even when the agent isn't paying attention, and it lands in a form we can
-audit and improve over time.
+A convention we use ourselves — and ship as an example in
+`examples/claude-code/` — has the agent edit the filter mid-session when you
+push back on something it saved, then record the edit through `remember` so
+the tuning leaves a trail. That is a habit you opt into, not something
+athenaeum enforces: the filter changes when someone changes it. It does not
+yet tune itself.
+
+Between the observation filter and the librarian, important context lands in
+memory even when the agent isn't paying attention, and it lands in a form we
+can audit and improve over time.
 
 ### 5. The wiki is a graph, not a document store
 
@@ -332,7 +341,7 @@ default 8192 bytes) and a louder **flag** threshold
 (`librarian.page_flag_bytes`, default 16384 bytes); `athenaeum run` logs a
 non-fatal warning for flagged pages. Nothing is ever blocked or split
 automatically — the guardrail is a nudge to break the page into linked
-entities by hand. See [configuration.md](configuration.md) for the knobs.
+entities by hand. See [configuration.md](reference/configuration.md) for the knobs.
 
 ## Key takeaways
 

@@ -31,7 +31,7 @@ Memory taxonomy (issue athenaeum#424):
   (``models.py``: feedback/project/reference/user/recall). It is NOT a
   replacement for either — a person page keeps ``type: person`` and may
   additionally gain ``memory_class: entity``. See
-  ``docs/memory-taxonomy.md`` for the full axis-reconciliation writeup and
+  ``docs/design/memory-taxonomy.md`` for the full axis-reconciliation writeup and
   merge-vs-cite semantics (enforcement of those semantics is athenaeum#433).
 
 Axiom governance (issue athenaeum#434):

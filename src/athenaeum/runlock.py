@@ -114,7 +114,7 @@ tighter) number than ``break_stale_after``/``warn_stale_after``, which remain
 the only thresholds that ever trigger an automatic break, and whose own
 defaults are UNCHANGED by this issue — this module now bumps far more
 reliably, but nothing here makes it any easier to break a live lock. See
-``docs/configuration.md``'s "Run lock" section for the full contract written
+``docs/reference/configuration.md``'s "Run lock" section for the full contract written
 up for operators.
 ``flock``, no other cooperating athenaeum process may proceed past
 :meth:`RunLock.acquire` on the same ``knowledge_root`` — that is the entire

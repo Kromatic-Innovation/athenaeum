@@ -259,7 +259,7 @@ class TestSourceRefToScalar:
 class TestResolveRememberSources:
     """Disambiguation helper for MCP ``remember(sources=...)`` (issue athenaeum#96).
 
-    Locks design-lock §4 in ``docs/provenance-shape.md``: explicit
+    Locks design-lock §4 in ``docs/design/provenance-shape.md``: explicit
     ``_source`` / ``_field_sources`` wrappers; the bare-dict heuristic
     is removed; bare scalar shorthand stays.
     """
@@ -333,7 +333,7 @@ class TestResolveRememberSources:
 class TestResolveRememberExtras:
     """Channel-split extras on ``remember(sources=...)`` (issue athenaeum#326).
 
-    Locks §10 in ``docs/provenance-shape.md`` — the ``_source_type`` /
+    Locks §10 in ``docs/design/provenance-shape.md`` — the ``_source_type`` /
     ``_source_ref`` / ``_model`` / ``_on_behalf_of`` / ``_asserter``
     wrappers extract into frontmatter keys under their sans-underscore
     names. Same fail-open discipline as ``resolve_remember_sources``.

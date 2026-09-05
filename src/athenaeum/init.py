@@ -186,7 +186,7 @@ def copy_example_rules(dest: Path, *, force: bool = False) -> tuple[list[str], l
     pre-existing destination files are skipped (not overwritten). With
     ``force``, existing files are overwritten. Mirrors :func:`copy_templates`
     exactly — same opt-in-copy shape, same idempotence contract. Every
-    copied example ships ``mode: observe`` (`docs/shape-rules.md` §5); this
+    copied example ships ``mode: observe`` (`docs/design/shape-rules.md` §5); this
     function only copies bytes, it never activates anything.
     """
     dest = dest.expanduser().resolve()

@@ -5,7 +5,7 @@ Two subcommands over :mod:`athenaeum.push_metrics`:
 
 - ``baseline``       compute precision + coverage over a stated window and
                        write/append a dated snapshot into
-                       ``docs/memory-model-measurements.md`` — unless
+                       ``docs/measurements/memory-model-measurements.md`` — unless
                        ``--dry-run`` was passed (inspect only, never write),
                        or the window has zero reference-determination
                        records, in which case the write is REFUSED (issue
@@ -180,7 +180,7 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
     baseline_p = p_sub.add_parser(
         "baseline",
         help="Compute precision + coverage over a window; write the dated "
-        "snapshot to docs/memory-model-measurements.md. Refuses to write "
+        "snapshot to docs/measurements/memory-model-measurements.md. Refuses to write "
         "(exit 1) when the window has zero reference-determination records. "
         "See --dry-run to inspect without writing.",
     )
@@ -194,9 +194,9 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
     baseline_p.add_argument(
         "--docs-path",
         type=Path,
-        default=Path("docs/memory-model-measurements.md"),
+        default=Path("docs/measurements/memory-model-measurements.md"),
         help="Where the snapshot section is written/appended "
-        "(default: docs/memory-model-measurements.md).",
+        "(default: docs/measurements/memory-model-measurements.md).",
     )
     baseline_p.add_argument(
         "--dry-run",

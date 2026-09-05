@@ -2,7 +2,7 @@
 """Sensitive-value routing/redaction mechanism (issues athenaeum#1023, athenaeum#1024).
 
 Slices 2/4 and 3/4 of athenaeum#949's design note
-(`docs/sensitivity-value-routing.md`). :func:`route_sensitive_values` (slice
+(`docs/design/sensitivity-value-routing.md`). :func:`route_sensitive_values` (slice
 2, athenaeum#1023) scans text for :func:`athenaeum.sensitivity.classify`
 matches, routes each configured-on match's value to the secret vault (the
 existing ``excluded`` storage surface, athenaeum#429), and returns the text
@@ -37,7 +37,7 @@ explicitly rather than left implicit:
 
     The existing excluded-surface read path (``with_pii``/``read_entity``,
     ``mcp_server._excluded_block_for_hit``) and the settled contact-record
-    routing story (``docs/field-corrections.md`` §7.1, issue athenaeum#872)
+    routing story (``docs/design/field-corrections.md`` §7.1, issue athenaeum#872)
     are both uid-keyed BY CONSTRUCTION — they resolve through
     :class:`athenaeum.pii.ExcludedRecordIndex.by_uid`. This stage runs
     during the RAW sweep, before Tier 2/3 classification has decided
@@ -64,7 +64,7 @@ way to recognise they are the same underlying value. **Vault record count
 is therefore not a proxy for distinct-secret count.** This is the accepted
 trade, not a bug — treat unexplained vault growth accordingly.
 
-**AC1 — composition with ``docs/field-corrections.md`` §7.1.** §7.1 settled
+**AC1 — composition with ``docs/design/field-corrections.md`` §7.1.** §7.1 settled
 (athenaeum#872) that CONTACT-value routing (email/phone tied to an existing
 entity) reads and writes through the shared contact-record path
 (``pii.resolve_contact_record_for_uid`` / ``classify_contact_value`` /
@@ -101,7 +101,7 @@ for an email/phone tied to a person) — most sensitivity classes this
 routes (an operator's ``secret``/``api_key`` class, for instance) are not
 contact-shaped at all, and even for the built-in ``pii`` class's own
 email/phone matches, this module has no entity/uid to classify usage
-AGAINST at raw-sweep time (see AC3 above). Per ``docs/field-corrections.md``
+AGAINST at raw-sweep time (see AC3 above). Per ``docs/design/field-corrections.md``
 §7.1's own rule ("a correction that omits ``usage_class`` ... reads back as
 ``unclassified`` (never outreach-eligible) ... the safe direction"), a
 vault record this module writes carries no usage marker at all, which reads
@@ -522,7 +522,7 @@ def resolve_sensitive_record(
     docstring and design note §2. :func:`route_sensitive_values` mints the
     pointer this function resolves; the two are the write/read halves of one
     contract, standalone from each other in this slice (see the "Follow-on
-    implementation slices" list in ``docs/sensitivity-value-routing.md``
+    implementation slices" list in ``docs/design/sensitivity-value-routing.md``
     §10) but sharing :func:`_vault_root_for_class` so a read is always
     resolved against the SAME root a write landed on.
 

@@ -334,7 +334,7 @@ class TestAC7RemediationPath:
         assert erasure.HISTORY_REWRITE_REMEDIATION_REASON in erasure.REDACTION_REASON_CODES
 
     def test_security_posture_doc_names_the_blast_radius(self) -> None:
-        doc = Path(__file__).resolve().parents[1] / "docs" / "security-posture.md"
+        doc = Path(__file__).resolve().parents[1] / "docs" / "design" / "security-posture.md"
         text = doc.read_text(encoding="utf-8")
         assert "history-rewrite" in text.lower() or "history rewrite" in text.lower()
         assert "re-clone" in text.lower()
@@ -549,7 +549,7 @@ class TestAC9RetentionPacks:
         assert not us_rule.is_erasure_class()  # retain-until, not erasure-class
 
     def test_bucket_daily_reconciliation_honors_provenance_shape_869(self) -> None:
-        """docs/provenance-shape.md §8.8: bucket: daily compiles to a
+        """docs/design/provenance-shape.md §8.8: bucket: daily compiles to a
         delete-after rule keyed by (memory_class, data_class). Once a pack
         exists, it is the authority for that reconciliation."""
         pack = erasure.available_retention_packs(None)["eu-gdpr"]

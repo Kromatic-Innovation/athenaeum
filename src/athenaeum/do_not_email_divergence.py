@@ -17,7 +17,7 @@ and importing rather than re-deriving them keeps there from being two
 definitions of "a surface could not be read".
 
 **Why this field's residual is zero, unlike bounce's — but only in ONE
-direction (issue athenaeum#1039).** `docs/bounce-surface-convergence.md`
+direction (issue athenaeum#1039).** `docs/design/bounce-surface-convergence.md`
 documents that a bounce-surface difference is often expected (a
 list-verification verdict is not a hard bounce, so it correctly never mints
 a wiki page tag). `do_not_email` carries no such evidence-class asymmetry

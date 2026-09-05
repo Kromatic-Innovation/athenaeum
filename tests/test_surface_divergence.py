@@ -483,7 +483,7 @@ class TestCli:
     ) -> None:
         """Same anti-recurrence test as above, for the `bounced` field's own
         tolerated direction (the documented evidence-class asymmetry,
-        docs/bounce-surface-convergence.md)."""
+        docs/design/bounce-surface-convergence.md)."""
         contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
         contacts_root.mkdir()
         _bounce_wiki_page(wiki_root, bounced="MailboxDoesNotExist")

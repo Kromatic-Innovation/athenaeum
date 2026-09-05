@@ -116,7 +116,7 @@ class TestMatched:
     def test_resolves_through_pii_and_never_builds_a_surface_path_itself(
         self, corpus: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """docs/one-way-in-one-way-out.md §3 — the applier asks `pii`, always."""
+        """docs/design/one-way-in-one-way-out.md §3 — the applier asks `pii`, always."""
         called: list[str] = []
         original_root = pii.contacts_surface_root
         original_records = pii.resolve_contact_records

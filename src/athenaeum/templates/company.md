@@ -12,7 +12,7 @@ employee_count: 0
 # to the corpus handles the fact-mining pipeline resolves against, and are
 # indexed into `registry.json` by `athenaeum registry`. Leave empty until
 # real handles are known; the index builder tolerates the empty case. See
-# docs/source-handles.md for the field-by-field contract. No client PII
+# docs/extending/source-handles.md for the field-by-field contract. No client PII
 # belongs in this public template — populate on private wiki pages only.
 domains: []
 alt_emails: []

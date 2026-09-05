@@ -35,7 +35,7 @@ entity class to it under ``storage.mapping``. The deferred skill-file-sync
 surface (athenaeum#426's out-of-scope idea) is a future consumer of exactly this seam.
 
 Naming note — this is a STORAGE-surface adapter, a different concept from the
-source → raw-intake *adapter* documented in ``docs/adapter-contract.md`` and
+source → raw-intake *adapter* documented in ``docs/extending/adapter-contract.md`` and
 the bundled ``adapter-authoring`` skill. An intake adapter turns an external
 source into ``raw/`` files; a storage adapter governs where a compiled entity
 class is persisted and whether that surface joins the corpus. They sit on
@@ -45,7 +45,7 @@ Like :class:`athenaeum.search.SearchBackend` and
 :func:`athenaeum.provider.build_llm_client`, this is an INTERNAL seam: it is
 importable but not part of the stable ``__all__`` surface, and its signatures
 may change between minor releases until the extension point is promoted with a
-companion ``docs/storage-adapter-contract.md``.
+companion ``docs/extending/storage-adapter-contract.md``.
 
 Layering: L1 (data model — storage-surface resolution for wiki entity
 classes). Imports :mod:`athenaeum.atomic_io` (L0) for the actual write and
@@ -396,7 +396,7 @@ def resolve_store_for_class(
 
     Lives HERE, alongside :func:`surface_root_for_class` (the issue's
     acceptance criterion), rather than in :mod:`athenaeum.store` the way
-    ``docs/whole-store-adapter-design.md`` §6.4's layering paragraph
+    ``docs/extending/whole-store-adapter-design.md`` §6.4's layering paragraph
     describes. That module is deliberately built with no import of this one
     (see its docstring) so this module can import IT — a real, one-directional,
     module-level import — without the two forming a 2-node import-graph SCC

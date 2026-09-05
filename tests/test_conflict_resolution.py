@@ -2,7 +2,7 @@
 """Conflict-resolution lock suite (issue athenaeum#91).
 
 Pins the CURRENT behavior of every conflict-resolving code path under
-``src/athenaeum/`` as documented in ``docs/conflict-resolution.md``. These
+``src/athenaeum/`` as documented in ``docs/design/conflict-resolution.md``. These
 tests are intentionally behavioral — when an audit found surprising or
 buggy behavior, the test still asserts what the code DOES today, and the
 surprise is filed as a separate issue (linked in the PR body).
@@ -605,7 +605,7 @@ class TestDedupeMergePrimitives:
         assert out is None  # pruned everything → None
 
     def test_merge_field_sources_per_value_survives_list_reorder(self) -> None:
-        """Per docs/provenance-shape.md §2.1: per-value attribution is
+        """Per docs/design/provenance-shape.md §2.1: per-value attribution is
         co-indexed BY VALUE, not by position. Reordering the underlying
         list must carry attributions with the values."""
         cmeta = {
@@ -628,7 +628,7 @@ class TestDedupeMergePrimitives:
         ]
 
     def test_merge_field_sources_list_of_dicts_employment_history(self) -> None:
-        """Per docs/provenance-shape.md §2.2: per-value attribution
+        """Per docs/design/provenance-shape.md §2.2: per-value attribution
         attaches to the WHOLE dict for list-of-dicts fields like
         ``apollo_employment_history``. After merge both dicts present
         with their respective sources."""
@@ -666,7 +666,7 @@ class TestDedupeMergePrimitives:
         ]
 
     def test_merge_field_sources_prunes_stale_per_value_entry(self) -> None:
-        """Per docs/provenance-shape.md §2.4: a per-value attribution
+        """Per docs/design/provenance-shape.md §2.4: a per-value attribution
         entry whose ``value`` no longer appears in the merged list is
         dropped at write time, mirroring the prune-dangling rule."""
         cmeta = {
@@ -831,7 +831,7 @@ class TestDedupePerformMerge:
 # 9. Disjoint temporal validity — sequential states are not conflicts (athenaeum#324)
 # ---------------------------------------------------------------------------
 #
-# Doc: docs/conflict-resolution.md § 9. Two claims whose validity windows do
+# Doc: docs/design/conflict-resolution.md § 9. Two claims whose validity windows do
 # not overlap describe sequential states of the world and cannot contradict.
 # Windows use FUTURE dates so neither member is filtered as expired-inactive
 # (athenaeum#308) — the disjointness itself, not staleness, is what these assert.
@@ -1513,7 +1513,7 @@ class TestIntervalCloseSlice2:
 # Section 11 — resolver source-precedence taxonomy (issue athenaeum#326)
 # ---------------------------------------------------------------------------
 #
-# `docs/conflict-resolution.md` §11 (and `docs/provenance-shape.md` §10.1)
+# `docs/design/conflict-resolution.md` §11 (and `docs/design/provenance-shape.md` §10.1)
 # lock the taxonomy the resolver LLM applies when a keep_a/keep_b decision
 # names a winner. Issue athenaeum#326 added `model-prior:<model-id>` BELOW
 # `script:<slug>` — a training prior is unverifiable and silently stale, a
