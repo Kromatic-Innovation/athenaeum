@@ -133,8 +133,7 @@ intake queue and is re-examined on every run.
 > **Related destructive operation.** `athenaeum auto-memory prune --apply` is a
 > second opt-in command that `git rm`s pages (operational `wiki/auto-*.md`),
 > with the same git-only recovery story as move-then-retire. It is dry-run by
-> default — see [Maintenance & inspection commands](#maintenance--inspection-commands)
-> above.
+> default — see [Daily operation](../guides/daily-operation.md).
 
 
 ## See also
