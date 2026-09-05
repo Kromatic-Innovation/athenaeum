@@ -316,9 +316,9 @@ Both observed slugs are context-free. No `linkedin` bare-slug exists
 that would need a username pulled from elsewhere in the wiki. If one
 ever appears (it would fail the inventory check above and abort the
 migration), the implementation issue gets reopened with a discussion of
-context-extraction rules. **OPEN QUESTION — Tristan to decide before
-athenaeum#97 lands**: only if a non-context-free bare slug appears in a future
-inventory.
+context-extraction rules. **OPEN QUESTION — for the operator to decide before
+the migration lands**: only if a non-context-free bare slug appears in a
+future inventory.
 
 ### 5.4 Idempotency and dry-run
 
