@@ -185,10 +185,10 @@ Per-scope clusters only. Equivalent to the pre-athenaeum#125 behavior. Use when:
 
 Each per-scope cluster is pooled with members from any *ancestor* scope
 before the detector runs. Scope identifiers follow the
-`-Users-tristankromer-Code-foo` convention (slashes replaced with dashes);
+`-Users-jordan-Code-foo` convention (slashes replaced with dashes);
 ancestors are produced by dropping trailing segments. So a cluster from
-`-Users-tristankromer-Code-foo` is pooled with members from
-`-Users-tristankromer-Code` and `-Users-tristankromer` and `-Users`.
+`-Users-jordan-Code-foo` is pooled with members from
+`-Users-jordan-Code` and `-Users-jordan` and `-Users`.
 
 This catches the most common contradiction shape: a *general rule* the
 user stated at the workspace level conflicts with a *project override* the
@@ -211,8 +211,8 @@ pseudo-cluster.
 This catches:
 
 - Cross-tree-branch contradictions where two scopes are siblings (no
-  ancestor relationship), e.g. `-Users-tristankromer-Code-foo` and
-  `-Users-tristankromer-Code-bar`.
+  ancestor relationship), e.g. `-Users-jordan-Code-foo` and
+  `-Users-jordan-Code-bar`.
 
 **Known limitation (issue athenaeum#262):** wiki-vs-wiki pairs are NOT compared.
 `cross_scope_similarity_pairs`'s `require_raw_side` defaults `True` and is
@@ -282,29 +282,29 @@ The resolver receives each member's `source:` value, the relevant
 The full body is also included when it fits under the configured token
 budget. Token economy is enforced at prompt assembly.
 
-### Worked example — "Tristan is German"
+### Worked example — "Jordan is German"
 
-Two auto-memory files cluster together because both discuss Tristan's
+Two auto-memory files cluster together because both discuss Jordan's
 nationality. Their frontmatter:
 
 ```yaml
-# raw/auto-memory/-Users-tristankromer-Code/auto-tristan-nationality-2026-04-10.md
+# raw/auto-memory/-Users-jordanreyes-Code/auto-jordan-nationality-2026-04-10.md
 ---
 type: claim
-name: Tristan nationality
+name: Jordan nationality
 source: claude:tier3-classify-2026-04-08
 ---
-Tristan is German.
+Jordan is German.
 ```
 
 ```yaml
-# raw/auto-memory/-Users-tristankromer-Code/auto-tristan-citizenship-2026-04-10.md
+# raw/auto-memory/-Users-jordanreyes-Code/auto-jordan-citizenship-2026-04-10.md
 ---
 type: claim
-name: Tristan citizenship
+name: Jordan citizenship
 source: user:session-2026-04-10-rosie-intake
 ---
-Tristan holds American and British citizenship; not German.
+Jordan holds American and British citizenship; not German.
 ```
 
 Haiku detector emits:
@@ -313,11 +313,11 @@ Haiku detector emits:
 {
   "detected": true,
   "conflict_type": "factual",
-  "members_involved": ["-Users-.../auto-tristan-nationality-2026-04-10.md",
-                       "-Users-.../auto-tristan-citizenship-2026-04-10.md"],
-  "conflicting_passages": ["Tristan is German.",
-                           "Tristan holds American and British citizenship; not German."],
-  "rationale": "Members state incompatible facts about Tristan's nationality."
+  "members_involved": ["-Users-.../auto-jordan-nationality-2026-04-10.md",
+                       "-Users-.../auto-jordan-citizenship-2026-04-10.md"],
+  "conflicting_passages": ["Jordan is German.",
+                           "Jordan holds American and British citizenship; not German."],
+  "rationale": "Members state incompatible facts about Jordan's nationality."
 }
 ```
 
@@ -337,13 +337,13 @@ returns:
 Resulting block in `~/knowledge/wiki/_pending_questions.md`:
 
 ```markdown
-## [2026-04-10] Entity: "tristan-nationality" (from wiki/auto-tristan-nationality.md)
-- [ ] Resolve contradiction in cluster auto-tristan-nationality.
+## [2026-04-10] Entity: "jordan-nationality" (from wiki/auto-jordan-nationality.md)
+- [ ] Resolve contradiction in cluster auto-jordan-nationality.
 **Conflict type**: factual
-**Description**: Members state incompatible facts about Tristan's nationality.
-Passage 1: Tristan is German.
-Passage 2: Tristan holds American and British citizenship; not German.
-Members involved: -Users-.../auto-tristan-nationality-2026-04-10.md, -Users-.../auto-tristan-citizenship-2026-04-10.md
+**Description**: Members state incompatible facts about Jordan's nationality.
+Passage 1: Jordan is German.
+Passage 2: Jordan holds American and British citizenship; not German.
+Members involved: -Users-.../auto-jordan-nationality-2026-04-10.md, -Users-.../auto-jordan-citizenship-2026-04-10.md
 **Proposed resolution**: keep_b
 **Confidence**: 0.95
 **Rationale**: User-direct statement (precedence 1) overrides Claude-generated tier3 classification (precedence 6).

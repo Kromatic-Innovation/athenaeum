@@ -188,7 +188,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 | Field class | Keys | Rule |
 |-------------|------|------|
 | List union | `emails`, `tags`, `aliases` | Canonical entries first, then absorbed entries not already seen. Order preserved within each side. |
-| Coalesce (canonical wins if truthy) | Apollo namespace (`apollo_id`, `apollo_headline`, `apollo_location`, `apollo_employment_history`, `current_title`, `current_company`); LinkedIn namespace (`linkedin_url`, `linkedin_position_at_connect`, `linkedin_company_at_connect`, `linkedin_connected_on`); Google namespace (`google_contact`, `google_contact_kromatic`, `google_contact_tristankromer`) | If canonical is truthy, canonical wins. Else absorbed wins. **`None`/`""`/`[]`/`{}` count as falsy.** |
+| Coalesce (canonical wins if truthy) | Apollo namespace (`apollo_id`, `apollo_headline`, `apollo_location`, `apollo_employment_history`, `current_title`, `current_company`); LinkedIn namespace (`linkedin_url`, `linkedin_position_at_connect`, `linkedin_company_at_connect`, `linkedin_connected_on`); Google namespace (`google_contact`, `google_contact_kromatic`, `google_contact_personal`) | If canonical is truthy, canonical wins. Else absorbed wins. **`None`/`""`/`[]`/`{}` count as falsy.** |
 | Max numeric | `warm_score`, `meeting_count_24mo`, `sent_count_24mo` | Higher number wins. Non-numeric → `-inf`. `None` on one side → other wins. |
 | Max date (lexicographic ISO compare) | `last_touch`, `updated`, `apollo_enriched_on` | Later date wins by string comparison. Empty/None on one side → other wins. |
 | Implicit alias | `aliases` | If absorbed's `name` differs from canonical's `name`, absorbed's `name` is appended to `aliases`. |
@@ -208,7 +208,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   contract.
 - **Known edge cases:**
   - When BOTH wikis have a non-empty `google_contact` and they differ, both
-    sub-keys (`google_contact_kromatic` + `google_contact_tristankromer`) are
+    sub-keys (`google_contact_kromatic` + `google_contact_personal`) are
     coalesced from absorbed into canonical (lines 383–390) — keeps both sides'
     Google account attribution.
   - List union uses `repr(item)` as the dedupe key for dict/list members — a

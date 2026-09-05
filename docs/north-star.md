@@ -10,8 +10,8 @@ obvious winner, this page is the tie-breaker.
 
 Companion to [`docs/why-athenaeum.md`](why-athenaeum.md) (why this system
 exists at all, and what it replaces),
-[`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md) (the two-path
-invariant), and [`docs/field-corrections.md`](field-corrections.md) (the
+[`docs/design/one-way-in-one-way-out.md`](design/one-way-in-one-way-out.md) (the two-path
+invariant), and [`docs/design/field-corrections.md`](design/field-corrections.md) (the
 conformance fast path and the tier ladder).
 
 ---
@@ -50,7 +50,7 @@ Every write enters as raw intake compiled by a single writer (the
 librarian); every read leaves through the recall/read interface. No caller
 opens a store directly. This is what makes any rule about the data statable
 and enforceable in one place. Canonical:
-[`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md).
+[`docs/design/one-way-in-one-way-out.md`](design/one-way-in-one-way-out.md).
 
 ### 2.2 One ladder — conformance sets depth, never admission
 
@@ -60,7 +60,7 @@ already conforms to a shape the librarian understands enters low and costs
 nearly nothing; one that does not climbs until something can absorb it.
 There are no per-writer entry points and no typed interfaces at the gate —
 there is exactly one conformance format, and the librarian owns routing and
-schema. Canonical: [`docs/field-corrections.md`](field-corrections.md) §1.1.
+schema. Canonical: [`docs/design/field-corrections.md`](design/field-corrections.md) §1.1.
 
 ### 2.3 Everything is dispositioned — and not everything is memory
 
@@ -103,18 +103,18 @@ differently; duration is metadata, never a second store.
 
 Athenaeum is a memory system. Recall returns what is known — values,
 per-value provenance and usage classification, validity dates, dispute
-markers — as clear, parseable fields. What a caller may *do* with those
-facts is the caller's policy: an outreach system decides for itself whether
-an address may be used for a campaign; athenaeum only reports what kind of
-address it is and how that is known. No action-policy predicate ships on
-athenaeum's API surface.
+markers — as clear, parseable fields. Athenaeum might report an individual's
+email address and how that address is known; what a caller may *do* with it is
+the caller's policy — an outreach system decides for itself whether the address
+may be used for a campaign. No action-policy predicate ships on athenaeum's API
+surface.
 
 The same principle governs the sensitive surface: an external caller is an
 agent that can parse structured or unstructured text, and it needs exactly
 one knob — *with* or *without* excluded fields. All mechanics behind that
 knob (surfaces, joins, identity resolution) are athenaeum's internal
-business. See [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md)
-§3 and [`docs/security-posture.md`](security-posture.md) §2.
+business. See [`docs/design/one-way-in-one-way-out.md`](design/one-way-in-one-way-out.md)
+§3 and [`docs/design/security-posture.md`](design/security-posture.md) §2.
 
 ### 2.7 Rules are data; humans adopt them
 
@@ -142,7 +142,7 @@ intake, applied deterministically. Even human answers use the one way in.
 
 ### 2.9 Producers conform out of courtesy, never obligation
 
-A producer whose output is expensive or wrong-shaped is asked — via an
+A memory producer whose output is expensive or wrong-shaped is asked — via an
 issue on the producer, framed as a courtesy — to emit something cheaper.
 Athenaeum absorbs what arrives regardless. Conformance buys the producer a
 cheaper tier; it is never an admission requirement (§2.2).
@@ -163,9 +163,9 @@ fixed boundary. The physical layer is an adapter seam: a deployment may back
 the wiki or any excluded surface with encrypted storage, a database, or a
 synced filesystem, and no caller can tell, because callers only ever touch
 intake and recall. See
-[`docs/storage-adapter-contract.md`](storage-adapter-contract.md) for the seam
+[`docs/extending/storage-adapter-contract.md`](extending/storage-adapter-contract.md) for the seam
 as it exists today, and
-[`docs/whole-store-adapter-design.md`](whole-store-adapter-design.md) for the
+[`docs/extending/whole-store-adapter-design.md`](extending/whole-store-adapter-design.md) for the
 design lock generalising it to the whole store — which confirms this boundary
 and adds the two classes it is silent about: *operational* state (ledgers and
 queues, durable but not reconstructible) and *config* (§2.7's operator-authored
