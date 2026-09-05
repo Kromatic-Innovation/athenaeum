@@ -69,14 +69,14 @@ On-disk YAML:
 
 ```yaml
 emails:
-  - tristan@kromatic.com
-  - tristan@trikro.com
+  - jordan@acme.com
+  - jordan@example.org
 field_sources:
   emails:
-    - value: tristan@kromatic.com
+    - value: jordan@acme.com
       source: api:apollo:2026-04-29
-    - value: tristan@trikro.com
-      source: linkedin:tristankromer
+    - value: jordan@example.org
+      source: linkedin:jordanreyes
 ```
 
 `source` follows the existing `provenance.py` contract — scalar
@@ -109,7 +109,7 @@ field_sources:
         company: SECUDE
         title: Director of Product
         start_date: 2010-06
-      source: linkedin:tristankromer
+      source: linkedin:jordanreyes
 ```
 
 Match key for "is this the same value": `repr(value)` of the dict, the
@@ -132,8 +132,8 @@ Legacy shape (still accepted on read):
 
 ```yaml
 emails:
-  - tristan@kromatic.com
-  - tristan@trikro.com
+  - jordan@acme.com
+  - jordan@example.org
 field_sources:
   emails: api:apollo:2026-04-29
 ```
@@ -232,7 +232,7 @@ remember(text="...", sources={"_source": {
 # (c) per-field map — explicit wrapper.
 remember(text="...", sources={"_field_sources": {
     "current_title": "api:apollo:2026-05-09",
-    "linkedin_url":  "linkedin:tristankromer",
+    "linkedin_url":  "linkedin:jordanreyes",
 }})
 ```
 
