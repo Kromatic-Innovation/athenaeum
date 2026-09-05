@@ -12,6 +12,29 @@
 Athenaeum is an entity-centric long-term memory system for AI agents.
 Published to PyPI; tagged releases ship to real users.
 
+## Deployment boundary — this repo ships mechanism, not policy
+
+Athenaeum is the engine. A *running deployment* — its configuration, its
+corpus, and the state of that corpus — lives outside this repository, at a
+location the operator configures. Nothing tracked here should name, assume, or
+depend on any particular deployment.
+
+Two consequences for anything you write in this repo:
+
+- **No operator specifics in tracked files.** No real names, addresses, or
+  identifiers drawn from a live corpus; no absolute or home-relative paths to
+  one. Documentation examples use invented people and organizations.
+- **Corpus-state work is not tracked here.** An issue of the form "repair these
+  N pages", "relocate these records", "provision this credential", or "arm this
+  ceiling on the live deployment" describes one operator's data, not a defect in
+  the engine. It belongs in that deployment's own tracker.
+
+The dividing line is **what the work is about**, not **who can run it**. An
+issue only the operator can execute — because it needs a host, a credential, or
+a human decision — still belongs *here* when what it produces is evidence about
+the engine: a parity report, a benchmark, a comparison that informs the design.
+Label those `~operator` and leave them in place.
+
 ## Strategy tier
 
 **T1.** The relationship substrate the outreach machinery reads.
