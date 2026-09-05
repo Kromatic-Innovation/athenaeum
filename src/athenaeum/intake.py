@@ -26,7 +26,7 @@ break). ``librarian`` re-exports these three names for backward compatibility,
 so existing ``from athenaeum.librarian import discover_raw_files`` call sites
 (and the public ``athenaeum.discover_raw_files`` re-export) keep working.
 
-Issue athenaeum#797 (`docs/field-corrections.md` §3.1): a field-correction batch is
+Issue athenaeum#797 (`docs/design/field-corrections.md` §3.1): a field-correction batch is
 a `.jsonl` file living in the ORDINARY `raw/<source>/` tree — no reserved
 subtree, no second discovery walk. :func:`discover_raw_files` recognizes one
 by shape (its first line parses as a valid batch envelope, per
@@ -93,7 +93,7 @@ log = logging.getLogger(__name__)
 
 # Raw file naming: {timestamp}-{uuid8}.md or (issue athenaeum#797) {timestamp}-{uuid8}.jsonl
 # -- the same filename convention a correction batch uses
-# (docs/field-corrections.md §3.1), widened here so a batch's timestamp/uuid
+# (docs/design/field-corrections.md §3.1), widened here so a batch's timestamp/uuid
 # still parse like any other raw-intake file. The extension is NOT what
 # decides whether a .jsonl is claimed by the correction phase -- shape
 # (parse_batch_envelope on the first line) decides that, in the caller below.
@@ -476,7 +476,7 @@ def discover_auto_memory_files(
 
 def _is_claimed_correction_batch(fpath: Path) -> bool:
     """True when *fpath* is a `.jsonl` whose first line is a valid batch
-    envelope (issue athenaeum#797, `docs/field-corrections.md` §3.1) — claimed by
+    envelope (issue athenaeum#797, `docs/design/field-corrections.md` §3.1) — claimed by
     the correction phase, which reads it directly, rather than by this
     discovery function.
 
@@ -571,7 +571,7 @@ def discover_raw_files(
     hardcoded ``answers`` skip below. ``None`` (the default, preserving the
     pre-athenaeum#843 call signature) excludes nothing.
 
-    Issue athenaeum#797 (`docs/field-corrections.md` §3.1): globs `*.jsonl` in
+    Issue athenaeum#797 (`docs/design/field-corrections.md` §3.1): globs `*.jsonl` in
     addition to `*.md` so a correction batch — which lives in this SAME
     ordinary `raw/<source>/` tree, no reserved subtree — is visible at all.
     A `.jsonl` is skipped (claimed by the correction phase instead of being

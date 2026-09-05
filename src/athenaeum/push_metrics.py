@@ -269,7 +269,7 @@ class PushRecord:
     default ``""`` for the MCP ``recall`` path, which must keep OMITTING the
     key entirely rather than writing an explicit ``"recall"`` value — every
     row written before this issue has no ``source`` key at all, and the
-    documented reader rule (``docs/configuration.md``) is "key absent, or
+    documented reader rule (``docs/reference/configuration.md``) is "key absent, or
     any other value, means an explicit ``recall`` push" — changing that
     default would reinterpret every historical row.
     """
@@ -531,7 +531,7 @@ def _find_session_transcript(
 
     Push records carry only a session id (mirroring ``CLAUDE_CODE_SESSION_ID``,
     the ambient identifier the rest of athenaeum already keys telemetry on —
-    see ``query_topics.py`` and ``docs/configuration.md`` "Ambient telemetry
+    see ``query_topics.py`` and ``docs/reference/configuration.md`` "Ambient telemetry
     variable"), never the Claude Code project-path-hash "scope" directory
     name. There is no existing session-id -> scope registry anywhere in this
     codebase (``transcript_verify.verify_user_stated`` always takes scope as

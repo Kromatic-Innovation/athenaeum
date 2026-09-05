@@ -50,7 +50,7 @@ def test_baseline_empty_ledger_is_honest(tmp_path: Path) -> None:
     computable) must be REFUSED — the athenaeum#711 incident this issue
     fixes was exactly this case silently writing a placeholder snapshot.
     """
-    docs_path = tmp_path / "docs" / "memory-model-measurements.md"
+    docs_path = tmp_path / "docs" / "measurements" / "memory-model-measurements.md"
     rc, out, err = _run_capture_stderr(
         [
             "push-metrics",
@@ -324,7 +324,7 @@ def test_baseline_dry_run_does_not_write(tmp_path: Path) -> None:
 def test_baseline_dry_run_inspects_invalid_baseline_without_writing(tmp_path: Path) -> None:
     """This is the exact athenaeum#711 incident scenario: check whether a
     baseline is computable, over an empty/dead-instrument ledger, without
-    mutating ``docs/memory-model-measurements.md``. ``--dry-run --json`` is
+    mutating ``docs/measurements/memory-model-measurements.md``. ``--dry-run --json`` is
     the safe way to do that — no refusal, no write, exit 0.
     """
     docs_path = tmp_path / "docs.md"
@@ -378,7 +378,7 @@ def test_baseline_default_docs_path_not_written_for_invalid_baseline(
 ) -> None:
     """AC ("cover the default docs_path"): every other CLI test above passes
     an explicit ``--docs-path`` under ``tmp_path``. The default relative
-    ``docs_path=Path("docs/memory-model-measurements.md")`` — resolved
+    ``docs_path=Path("docs/measurements/memory-model-measurements.md")`` — resolved
     against cwd, and the thing that actually wrote into the repo during the
     athenaeum#711 incident — is exercised here instead, by chdir-ing into a
     tmp directory first so a bug in this test can never write into the real
@@ -397,7 +397,7 @@ def test_baseline_default_docs_path_not_written_for_invalid_baseline(
     )
     assert rc == 1
     assert "reference_records" in err
-    assert not (tmp_path / "docs" / "memory-model-measurements.md").exists()
+    assert not (tmp_path / "docs" / "measurements" / "memory-model-measurements.md").exists()
 
 
 def test_coverage_audit_writes_worksheet_file(tmp_path: Path) -> None:

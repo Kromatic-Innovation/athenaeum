@@ -2,7 +2,7 @@
 
 Athenaeum's raw-intake write API is the seam any external source uses to feed
 data into the wiki. The rule is structural, not trust-based (see
-[`docs/why-athenaeum.md`](why-athenaeum.md)): **a source may only _append_ a
+[`docs/why-athenaeum.md`](../why-athenaeum.md)): **a source may only _append_ a
 raw file to the intake tree; a separate compiler — the librarian — is the only
 writer to the wiki.** An "adapter" is any script or integration that turns some
 external source (an API, an export file, a message feed, a scraper) into
@@ -12,10 +12,10 @@ This document is that contract. It is deliberately narrow and stable:
 athenaeum's OSS surface stops at **the on-disk raw-intake shape and the MCP
 write API** — everything downstream (clustering, merge, contradiction
 detection, retirement) is the librarian's job, not the adapter's (see
-[`docs/provenance-shape.md`](provenance-shape.md) §6, "Enricher Protocol").
+[`docs/design/provenance-shape.md`](../design/provenance-shape.md) §6, "Enricher Protocol").
 
 > **Want a guided walkthrough instead of a spec?** The bundled
-> [`adapter-authoring`](../skills/adapter-authoring/SKILL.md) skill teaches an
+> [`adapter-authoring`](../../skills/adapter-authoring/SKILL.md) skill teaches an
 > agent (or a human) how to build a custom adapter step by step. This document
 > is the reference it points at.
 
@@ -39,7 +39,7 @@ write helper (the MCP `remember` tool), and it flows through the full tiered
 compile. Lane B is a specialised lane for bridging an agent runtime's own
 first-party memory directory; it is documented end to end, with a complete
 worked example, in
-[`docs/integrations/claude-code.md`](integrations/claude-code.md) — read that if
+[`docs/guides/claude-code.md`](../guides/claude-code.md) — read that if
 your "source" is really an agent's memory folder.
 
 The rest of this document specifies **Lane A**.
@@ -50,7 +50,7 @@ graph writer, an enrichment service). **Lane C — field corrections** is not a
 new write path — it is a `.jsonl` file recognized by shape inside the SAME
 Lane A `raw/<source>/` tree, giving that writer a conformance format to enter
 the tier ladder at its cheapest, LLM-free rung. See
-[`docs/field-corrections.md`](field-corrections.md).
+[`docs/design/field-corrections.md`](../design/field-corrections.md).
 
 ---
 
@@ -116,7 +116,7 @@ The keys the compiler actually reads:
 | `source` | **strongly recommended** | Provenance. Scalar `<type>:<ref>` (e.g. `external:<url>`, `api:<vendor>:<date>`, `document:<path>`). Declares the *ultimate* origin of the fact. |
 | `name` | optional | Short slug for the entity/topic; helps the compiler place and title the entry. |
 | `description` | optional | One-line summary. |
-| `field_sources` | optional | Per-field / per-value attribution (see [`docs/provenance-shape.md`](provenance-shape.md) §2). |
+| `field_sources` | optional | Per-field / per-value attribution (see [`docs/design/provenance-shape.md`](../design/provenance-shape.md) §2). |
 | `access` | optional | Read-time audience label (intake screening, see the MCP `remember` tool). |
 
 **Cite the ultimate source, never the raw file.** A `source:` of
@@ -124,8 +124,8 @@ The keys the compiler actually reads:
 actually came from. The provenance grammar and the full `source_type`
 vocabulary (`external`, `document`, `api:*`, `user-stated`, `agent-observed`,
 `model-prior`, …) are specified in
-[`docs/provenance-shape.md`](provenance-shape.md) §10 and
-[`policies/auto-memory-citation.md`](../policies/auto-memory-citation.md).
+[`docs/design/provenance-shape.md`](../design/provenance-shape.md) §10 and
+[`policies/auto-memory-citation.md`](../../policies/auto-memory-citation.md).
 
 Provenance validation is **fail-open**: a malformed or unknown `source_type`
 downgrades to `inferred` with a breadcrumb rather than crashing the nightly
@@ -175,7 +175,7 @@ happen so it can shape its writes sensibly:
 3. **Dedupe / merge** — near-duplicate claims are coalesced; `source` and
    `field_sources` are carried forward and merged (canonical wins per key,
    absorbed-only keys retained) — see
-   [`docs/conflict-resolution.md`](conflict-resolution.md).
+   [`docs/design/conflict-resolution.md`](../design/conflict-resolution.md).
 4. **Detect contradictions** — when a new claim disagrees with an existing one,
    the pair surfaces in `wiki/_pending_questions.md` for review rather than
    silently overwriting.
@@ -198,7 +198,7 @@ There are two supported mechanisms.
 
 If your integration can speak the MCP protocol, the sanctioned write path is the
 `remember` tool exposed by `athenaeum serve` (see the
-[MCP memory server](../README.md#mcp-memory-server) section of the README). It:
+[MCP memory server](../../README.md#mcp-memory-server) section of the README). It:
 
 - writes to `raw/<source>/<timestamp>-<uuid8>.md` for you,
 - path-guards the write (stays in `raw/`, never `wiki/`),
@@ -216,7 +216,7 @@ remember(
 The `sources=` argument grammar (scalar shorthand, `_source`,
 `_field_sources`, and the channel-split extras `_source_type` / `_source_ref` /
 `_model` / `_on_behalf_of` / `_asserter`) is specified in
-[`docs/provenance-shape.md`](provenance-shape.md) §4 and §10.4.
+[`docs/design/provenance-shape.md`](../design/provenance-shape.md) §4 and §10.4.
 
 ### 5b. Direct file drop
 
@@ -238,10 +238,10 @@ ls /tmp/kb/wiki                                     # see the compiled entity
 
 ## See also
 
-- [`skills/adapter-authoring/SKILL.md`](../skills/adapter-authoring/SKILL.md) — the bundled, user-invocable adapter-authoring skill (the guided version of this contract).
+- [`skills/adapter-authoring/SKILL.md`](../../skills/adapter-authoring/SKILL.md) — the bundled, user-invocable adapter-authoring skill (the guided version of this contract).
 - [`examples/adapters/minimal_adapter.py`](../examples/adapters/minimal_adapter.py) — the synthetic worked example (Lane A, direct drop).
-- [`docs/integrations/claude-code.md`](integrations/claude-code.md) — a complete worked adapter for Lane B (auto-memory), including the frontmatter/citation contract.
-- [`docs/field-corrections.md`](field-corrections.md) — "Lane C": a conformance format a writer that already knows the target entity, attribute, and value MAY use to arrive with the work already done, entering the tier ladder at its cheapest (LLM-free) rung instead of paying prose compilation per fact. Same `raw/<source>/<timestamp>-<uuid8>` tree as Lane A — no reserved subtree, recognized by shape (`.jsonl` + a `record: "batch"` first line), not by a separate write path.
-- [`docs/provenance-shape.md`](provenance-shape.md) — the design lock for on-disk provenance shape and the MCP `remember` API.
-- [`docs/why-athenaeum.md`](why-athenaeum.md) — why the append-only-intake / single-compiler split exists.
-- [`policies/auto-memory-citation.md`](../policies/auto-memory-citation.md) — "cite the ultimate source, never the raw file."
+- [`docs/guides/claude-code.md`](../guides/claude-code.md) — a complete worked adapter for Lane B (auto-memory), including the frontmatter/citation contract.
+- [`docs/design/field-corrections.md`](../design/field-corrections.md) — "Lane C": a conformance format a writer that already knows the target entity, attribute, and value MAY use to arrive with the work already done, entering the tier ladder at its cheapest (LLM-free) rung instead of paying prose compilation per fact. Same `raw/<source>/<timestamp>-<uuid8>` tree as Lane A — no reserved subtree, recognized by shape (`.jsonl` + a `record: "batch"` first line), not by a separate write path.
+- [`docs/design/provenance-shape.md`](../design/provenance-shape.md) — the design lock for on-disk provenance shape and the MCP `remember` API.
+- [`docs/why-athenaeum.md`](../why-athenaeum.md) — why the append-only-intake / single-compiler split exists.
+- [`policies/auto-memory-citation.md`](../../policies/auto-memory-citation.md) — "cite the ultimate source, never the raw file."

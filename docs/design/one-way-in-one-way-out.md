@@ -6,11 +6,11 @@
 canonical statement of the rule; every other document that touches one half of
 it references this page rather than restating it.
 
-Companion to [`docs/adapter-contract.md`](adapter-contract.md) (the source →
-intake seam), [`docs/field-corrections.md`](field-corrections.md) (the
+Companion to [`docs/extending/adapter-contract.md`](../extending/adapter-contract.md) (the source →
+intake seam), [`docs/design/field-corrections.md`](field-corrections.md) (the
 conformance fast path on the ingress side),
-[`docs/recall-architecture.md`](recall-architecture.md) (how recall assembles a
-read) and [`docs/security-posture.md`](security-posture.md) (audience scoping,
+[`docs/design/recall-architecture.md`](recall-architecture.md) (how recall assembles a
+read) and [`docs/design/security-posture.md`](security-posture.md) (audience scoping,
 one enforcement of the egress half).
 
 ---
@@ -39,7 +39,7 @@ enforced at all without finding and changing every one of them.
 
 A source appends to raw intake. The librarian is the only writer to the wiki.
 This is the structural guarantee the rest of the system rests on
-([`docs/why-athenaeum.md`](why-athenaeum.md)), and it is what makes provenance,
+([`docs/why-athenaeum.md`](../why-athenaeum.md)), and it is what makes provenance,
 deduplication and contradiction detection possible at all: if a source could
 write the store directly, the compiled record would carry no reliable account of
 where it came from.
@@ -47,7 +47,7 @@ where it came from.
 Conformance changes *how cheaply* a submission is absorbed, never *whether* it
 goes through the librarian. A prose note enters at the top of the tier ladder; a
 conformant field correction enters at the bottom
-([`docs/field-corrections.md`](field-corrections.md) §1.1). Neither one is a
+([`docs/design/field-corrections.md`](field-corrections.md) §1.1). Neither one is a
 side door — a correction is a file in the ordinary raw-intake tree, recognized
 by its shape, and the librarian's routing remains authoritative.
 
@@ -144,7 +144,7 @@ order:
 |---|---|---|
 | Question | *Where does data cross the boundary?* | *Who may receive what, once it does?* |
 | Status | **Load-bearing now.** Binding on every caller today. | **Deliberately open.** Not yet decided. |
-| Enforced by | Code review, and the fact that the sanctioned entry points are the only ones that resolve store paths | Partially: audience scoping over the MCP tool surface ([`docs/security-posture.md`](security-posture.md) §2.1) |
+| Enforced by | Code review, and the fact that the sanctioned entry points are the only ones that resolve store paths | Partially: audience scoping over the MCP tool surface ([`docs/design/security-posture.md`](security-posture.md) §2.1) |
 
 There is no authentication on the contact-data surface, no capability check, and
 no audit trail. Both stores are unencrypted on a single host. **None of that
@@ -198,7 +198,7 @@ operator's, ratified 2026-08-13 on athenaeum#858/#859:
   FIELDS rather than identity, §3's one read path answers for any entity class.
 - **A zero-match address still does not create a page.** The resolution is
   identity resolution, not entity creation — see
-  [`docs/field-corrections.md`](field-corrections.md) §8's carve-out for why
+  [`docs/design/field-corrections.md`](field-corrections.md) §8's carve-out for why
   that distinction is load-bearing given the volume of addresses an ordinary
   intake path sees.
 
@@ -212,7 +212,7 @@ If you are writing a client against athenaeum:
 
 1. **To write:** append to raw intake — as prose, or as a conformant correction
    if your writer already knows the entity, field and provenance
-   ([`docs/field-corrections.md`](field-corrections.md)). Do not write the store.
+   ([`docs/design/field-corrections.md`](field-corrections.md)). Do not write the store.
 2. **To read the corpus:** use `recall` / the MCP read tools / `athenaeum query`.
 3. **To read excluded fields** — a person's contact data, or whatever else the
    operator routes off-corpus for any other entity class — use **the one read
@@ -249,13 +249,13 @@ If you are writing a client against athenaeum:
 This page is the statement of the rule. These pages carry the detail, and
 reference the rule rather than restating it:
 
-- [`docs/field-corrections.md`](field-corrections.md) §1.1 — the ingress half:
+- [`docs/design/field-corrections.md`](field-corrections.md) §1.1 — the ingress half:
   conformance sets tier depth, never whether a submission enters.
-- [`docs/security-posture.md`](security-posture.md) §2 / §2.1 — the egress half
+- [`docs/design/security-posture.md`](security-posture.md) §2 / §2.1 — the egress half
   as far as it is currently enforced: MCP tool audience scoping.
-- [`docs/recall-architecture.md`](recall-architecture.md) — the read path, and
+- [`docs/design/recall-architecture.md`](recall-architecture.md) — the read path, and
   the load-bearing-invariants table.
-- [`docs/adapter-contract.md`](adapter-contract.md) — the source → intake seam.
-- [`docs/storage-adapter-contract.md`](storage-adapter-contract.md) — how an
+- [`docs/extending/adapter-contract.md`](../extending/adapter-contract.md) — the source → intake seam.
+- [`docs/extending/storage-adapter-contract.md`](../extending/storage-adapter-contract.md) — how an
   entity class resolves to a surface, including the excluded-policy adapter that
   puts the contact-data surface outside the corpus.

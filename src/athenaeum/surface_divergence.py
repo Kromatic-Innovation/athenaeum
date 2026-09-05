@@ -72,7 +72,7 @@ class FieldSpec:
 
 
 def _bounced_exceeds_allowance(report: bounce_divergence.DivergenceReport) -> bool:
-    """``bounced``'s declared allowance (docs/bounce-surface-convergence.md).
+    """``bounced``'s declared allowance (docs/design/bounce-surface-convergence.md).
 
     Tolerated: a wiki-surface entry with no pii mark
     (``report.on_wiki_not_marked``) — the documented evidence-class
@@ -118,7 +118,7 @@ _register(
         join_key="uid (address -> contacts-surface person record -> uid -> wiki page)",
         allowance=(
             "wiki-surface entries with no pii mark are TOLERATED (documented "
-            "evidence-class asymmetry, docs/bounce-surface-convergence.md); "
+            "evidence-class asymmetry, docs/design/bounce-surface-convergence.md); "
             "pii marks with no wiki entry are NOT tolerated (zero)."
         ),
         compute=lambda wiki_root, contacts_root, as_of: bounce_divergence.compute_divergence(

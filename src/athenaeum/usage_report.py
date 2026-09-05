@@ -26,7 +26,7 @@ rules MUST call :func:`get_claim_usage` (single-claim) or
 ``_push_records.jsonl``/``_push_references.jsonl`` directly. This is the one
 seam through which usage data crosses from the push-metrics ledgers to any
 tier-movement consumer; a future ledger-format change only has to update
-this module, not every downstream reader. See ``docs/configuration.md``
+this module, not every downstream reader. See ``docs/reference/configuration.md``
 "Usage report (athenaeum#968)" for the operator-facing writeup and the CLI
 (``athenaeum usage-report``) this module backs.
 

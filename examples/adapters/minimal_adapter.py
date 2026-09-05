@@ -2,13 +2,13 @@
 """Minimal synthetic source → raw-intake adapter (illustrative).
 
 This is a *generic, synthetic* worked example of the adapter contract
-documented in ``docs/adapter-contract.md``. It writes a single raw-intake
+documented in ``docs/extending/adapter-contract.md``. It writes a single raw-intake
 file that the librarian will pick up on the next ``athenaeum run`` and
 compile into the wiki. It contains **no** Kromatic-specific integration
 details, credentials, or PII — real production adapters (LinkedIn, Gmail,
 contact-sync, …) live in their own private host repositories by design;
 athenaeum's OSS contract stops at the on-disk raw-intake shape (see
-``docs/provenance-shape.md`` §6).
+``docs/design/provenance-shape.md`` §6).
 
 The example targets **Lane A** — the general entity-schema intake lane:
 
@@ -72,7 +72,7 @@ def write_raw_intake(
 ) -> Path:
     """Write one raw-intake file under ``raw/<source>/`` and return its path.
 
-    Contract highlights (full detail in ``docs/adapter-contract.md``):
+    Contract highlights (full detail in ``docs/extending/adapter-contract.md``):
 
     * **Location** — ``<knowledge-root>/raw/<source>/<timestamp>-<uuid8>.md``.
       ``source`` names the adapter and becomes the intake subdirectory.

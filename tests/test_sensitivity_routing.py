@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the ``sensitivity.routing`` config resolver (athenaeum#1022).
 
-Slice 1/4 of athenaeum#949's design note (`docs/sensitivity-value-routing.md`
+Slice 1/4 of athenaeum#949's design note (`docs/design/sensitivity-value-routing.md`
 §8): `resolve_sensitivity_routing` in `athenaeum.config`. This slice is
 behaviour-free — nothing reads the resolver yet — so these tests cover only
 the resolver's own contract: default-off, an explicit `enabled: true`, a

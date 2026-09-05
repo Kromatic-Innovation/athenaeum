@@ -206,7 +206,7 @@ consult the pending-question queue before trusting the snippet.
 ## Currency-aware ranking and decay buckets (athenaeum#904)
 
 A page may declare `bucket: daily | weekly | durable` (optionally alongside
-a suggested `valid_until`) — see `docs/provenance-shape.md` §8.8 for the
+a suggested `valid_until`) — see `docs/design/provenance-shape.md` §8.8 for the
 full frontmatter contract. Recall uses it for exactly one thing: an EXPIRED
 `bucket: daily` page is reordered to the bottom of the result set it would
 already have occupied, rather than ranking equally alongside current
@@ -226,7 +226,7 @@ issue's own scope forbids an LLM anywhere near the expiry decision.
 An expired `bucket: daily` page stays *findable* in ordinary (non-history)
 recall too — it does not disappear, it just ranks lower. This required a
 small divergence from the pre-existing "expired claims are hard-filtered by
-default" behavior (`docs/provenance-shape.md` §8.3):
+default" behavior (`docs/design/provenance-shape.md` §8.3):
 `athenaeum.search._is_recall_inactive` is a recall-scoped sibling of
 `athenaeum.models.is_inactive_memory` that exempts an expired
 `bucket: daily` page from that hard filter (every other case — a
@@ -251,7 +251,7 @@ athenaeum#969).
 expiry filter (issue athenaeum#969).** `_is_recall_inactive`'s divergence
 from `is_inactive_memory`, above, is scoped to exactly one condition —
 `bucket: daily` AND expired — and nothing else. Every other case the §8.3
-"currently-valid-by-default" filter governs (`docs/provenance-shape.md`
+"currently-valid-by-default" filter governs (`docs/design/provenance-shape.md`
 §8.3) — a superseded/deprecated page, an expired `weekly`/`durable`/
 unbucketed page — stays hard-excluded exactly as before. There is no second
 carve-out anywhere in the recall path; a future one needs its own issue and
@@ -259,7 +259,7 @@ its own review of this invariant, not a quiet extension of this one.
 
 **Swept ≠ cold.** Do not conflate this section's sweep with the memory
 model's planned cold tier (`embedded: false`, the storage-adapter
-`corpus_policy` bit — `docs/whole-store-adapter-design.md` §8 "Surface 1").
+`corpus_policy` bit — `docs/extending/whole-store-adapter-design.md` §8 "Surface 1").
 A COLD page stays on disk in the live wiki tree: it is excluded from the
 FTS5/vector index, but it remains reachable through `KeywordBackend`'s
 full-corpus scan (`cheap_local_scan` — a deep-recall path that does not
@@ -596,7 +596,7 @@ deliberately left `do_not_email_reason` / `do_not_email_date` ungated too,
 for the identical reason. This is unrelated to the separate `recall` /
 `read_entity` reverse-lookup path, where `with_pii=True` stays required
 because there the lookup KEY is an email address on the excluded surface
-(`docs/authorized-reader-contract.md`) — enumeration never looks anything up
+(`docs/extending/authorized-reader-contract.md`) — enumeration never looks anything up
 by address, so that constraint never applied here.
 
 **Capability parity with `athenaeum people`.** `athenaeum people` was
@@ -628,7 +628,7 @@ only. Off-corpus federation lives in the Python `recall` MCP tool
 explicitly, not the hook: `athenaeum.off_corpus.query_off_corpus` queries a
 second, independent index shard (its own FTS5 db + vector collection, under
 `<cache_dir>/off-corpus/`, never git-tracked — see
-[`docs/configuration.md`](configuration.md#off-corpus-store-athenaeum984--off-by-default))
+[`docs/reference/configuration.md`](../reference/configuration.md#off-corpus-store-athenaeum984--off-by-default))
 with the SAME `backend_name` the primary corpus query just used, and
 `athenaeum.off_corpus.merge_ranked_hits` sorts the two hit lists together by
 score before the existing render pipeline (Layer C authorization, the
@@ -652,7 +652,7 @@ second resolution path. `athenaeum.off_corpus.erase_off_corpus_record`
 deletes the content key and incrementally rebuilds both off-corpus index
 shards in the same call, so a caller that erases a record and then calls
 `recall` again observes it gone from BOTH content and the federated result
-set — see [`docs/security-posture.md`](security-posture.md#off-corpus-erasure-boundary-athenaeum984)
+set — see [`docs/design/security-posture.md`](security-posture.md#off-corpus-erasure-boundary-athenaeum984)
 for the full erasure-boundary account.
 
 **Off by default.** With `off_corpus.enabled` unset, `query_off_corpus`
@@ -671,7 +671,7 @@ Do not simplify any of these without reading this page and the related commit hi
 | `hookSpecificOutput.hookEventName` wrapper | Claude Code discards flat `{"additionalContext":...}` payloads without logging; the hook runs CI-green, `bash -n` is clean, stdout is valid JSON. | `additionalContext` never reaches the model. Zero recall signal. Only detectable by asking the model "did you receive a knowledge context block?" or by reading Claude Code source. |
 | Console API key vs `CLAUDE_CODE_OAUTH_TOKEN` | Messages API rejects OAuth tokens with `401 OAuth authentication is currently not supported`. The tokens look similar (both start `sk-ant-`). | `query-topics` returns empty on every call. Silent fallback to regex extractor. Detectable only by reading the 401 body, which the hook swallows to avoid noisy stderr. |
 | Audience filter applied INSIDE each backend query AND re-checked at render (athenaeum#312) | The filter must gate ranking/top-k, not just titles. If moved to a post-hoc filter over already-selected hits, a forbidden page still consumes a BM25/kNN slot and starves a permitted page — and a title-only filter leaks the body. | A restricted routine silently receives fewer permitted pages (forbidden ones ate the slots) or a forbidden page's snippet/body. No error — recall "works", it just leaks or under-serves. Do NOT collapse the three layers (index-time audience column, in-query predicate, fresh-frontmatter re-check) into a single post-hoc title filter. |
-| Reads reach a caller through the recall/read interface — never by opening a store path (athenaeum#863) | The interface is the one place a rule about the data can be stated, changed or enforced. A store is an ordinary directory: going around the interface *works*, so nothing signals that it happened. This is doubly true of the off-corpus excluded surfaces, which are excluded from recall by construction but are not access-controlled. Since athenaeum#883/#885/#886 they are reachable THROUGH the interface for every entity class — `recall(with_pii=True)` when searching, `pii.read_entity` / `read_entities` (or the `read_entity` tool / `athenaeum entity`) when holding a uid — so there is no longer a question the interface cannot answer. The person-shaped `pii.read_person` / `read_people`, the `read_person` tool and `athenaeum query person` were DEPRECATED wrappers over that same read (athenaeum#887) and have been REMOVED (athenaeum#888) now that every known consumer migrated to the generic path above. See [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md). | Every caller grows its own read path. Audience scoping, redaction markers, and any later authorization decision become unenforceable — not because they were removed, but because they are no longer on the path the data actually takes. Silent by nature: the direct read returns correct bytes, so nothing looks broken. |
+| Reads reach a caller through the recall/read interface — never by opening a store path (athenaeum#863) | The interface is the one place a rule about the data can be stated, changed or enforced. A store is an ordinary directory: going around the interface *works*, so nothing signals that it happened. This is doubly true of the off-corpus excluded surfaces, which are excluded from recall by construction but are not access-controlled. Since athenaeum#883/#885/#886 they are reachable THROUGH the interface for every entity class — `recall(with_pii=True)` when searching, `pii.read_entity` / `read_entities` (or the `read_entity` tool / `athenaeum entity`) when holding a uid — so there is no longer a question the interface cannot answer. The person-shaped `pii.read_person` / `read_people`, the `read_person` tool and `athenaeum query person` were DEPRECATED wrappers over that same read (athenaeum#887) and have been REMOVED (athenaeum#888) now that every known consumer migrated to the generic path above. See [`docs/design/one-way-in-one-way-out.md`](one-way-in-one-way-out.md). | Every caller grows its own read path. Audience scoping, redaction markers, and any later authorization decision become unenforceable — not because they were removed, but because they are no longer on the path the data actually takes. Silent by nature: the direct read returns correct bytes, so nothing looks broken. |
 | `with_pii` joins excluded fields at RENDER only — after both Layer-C drops (athenaeum#885) | Excluded values are never indexed and are not searchable; the flag attaches a record to a hit the corpus already produced and already authorized. It runs strictly after (1) the fail-closed `is_page_authorized` re-check and (2) the athenaeum#532 `recallable` drop, so a hit either removes never triggers an excluded-surface lookup at all. Layers A (index build) and B (in-query predicate) are untouched by it. | Moved into Layer A, an excluded value lands in the FTS5/vector store and becomes searchable — permanently, until the index is rebuilt. Moved into Layer B, or run BEFORE either drop, the flag becomes an existence oracle: a restricted caller learns whether a record exists behind a page it may not read, by timing or by the lookup itself. Both fail silently — recall still returns plausible results. |
 | Off-corpus federation always queries with the SAME `backend_name` the primary corpus query used (athenaeum#984) | `merge_ranked_hits` sorts two hit lists by raw `score` — valid only when both scores come from the identical scorer. A future caller that queries the off-corpus shard with a different backend than the primary would silently rank incomparable scores against each other. | Off-corpus hits would rank randomly relative to corpus hits (an FTS5 BM25 score compared against a vector cosine-distance score has no shared meaning) — recall still "works" (returns *a* result), it just orders the merge nonsensically, with no error to signal it. |
 

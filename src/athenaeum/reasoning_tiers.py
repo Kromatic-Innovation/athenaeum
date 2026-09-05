@@ -242,7 +242,7 @@ def _warn_if_tier_model_knob_inert(
 
     ``ATHENAEUM_REASONING_T1_MODEL`` / ``T2_MODEL`` (and their ``models.<knob>``
     yaml equivalents) are read regardless of whether that tier's own screen
-    is armed, but only matter once it is — see ``docs/configuration.md``'s
+    is armed, but only matter once it is — see ``docs/reference/configuration.md``'s
     "Reasoning-tier screening" section. With the tier's screen off (the
     default), setting its model knob silently does nothing. This is NOT a
     claim that the tiers are dead: both have real production callers in

@@ -96,7 +96,7 @@ markdown or in `athenaeum merges` JSON output.
 
 - `skills/adapter-authoring/SKILL.md` — **adapter-authoring**: how to build a
   custom source → raw-intake adapter against the contract in
-  `docs/adapter-contract.md`. Ships inside the published package (under
+  `docs/extending/adapter-contract.md`. Ships inside the published package (under
   `skills/`) so any consumer — human or agent — can invoke it. Point a session
   at it whenever someone wants to feed a new external source into a knowledge
   base.

@@ -29,7 +29,7 @@ from athenaeum.prompt_registry import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _GOLDEN_DIR = _REPO_ROOT / "tests" / "data" / "prompts"
-_DOCS = _REPO_ROOT / "docs" / "prompts.md"
+_DOCS = _REPO_ROOT / "docs" / "design" / "prompts.md"
 _REGEN = "python -m athenaeum.prompt_registry --write"
 
 
@@ -65,7 +65,7 @@ def test_manifest_covers_registry_with_sha256() -> None:
 
 
 def test_docs_prompts_md_is_byte_current() -> None:
-    assert _DOCS.exists(), f"missing docs/prompts.md; regenerate: {_REGEN}"
+    assert _DOCS.exists(), f"missing docs/design/prompts.md; regenerate: {_REGEN}"
     assert _DOCS.read_text(encoding="utf-8") == render_docs(), (
-        f"docs/prompts.md is stale — regenerate in the same commit: {_REGEN}"
+        f"docs/design/prompts.md is stale — regenerate in the same commit: {_REGEN}"
     )

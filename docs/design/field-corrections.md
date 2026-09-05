@@ -5,9 +5,9 @@
 **Status:** DESIGN LOCK. Issue athenaeum#794. Not yet implemented — the librarian fast path is
 a follow-up issue in this repo (athenaeum#797).
 
-Companion to [`docs/adapter-contract.md`](adapter-contract.md) (the source → intake
-seam), [`docs/provenance-shape.md`](provenance-shape.md) (how attribution is
-represented) and [`docs/conflict-resolution.md`](conflict-resolution.md) (how
+Companion to [`docs/extending/adapter-contract.md`](../extending/adapter-contract.md) (the source → intake
+seam), [`docs/design/provenance-shape.md`](provenance-shape.md) (how attribution is
+represented) and [`docs/design/conflict-resolution.md`](conflict-resolution.md) (how
 disagreements are resolved).
 
 ---
@@ -23,7 +23,7 @@ Today every one of them has the same two options: write prose into raw intake an
 compilation per fact, or — the shortcut real deployments actually take — write the wiki
 directly and bypass the librarian entirely. The first does not scale to bulk writers. The
 second breaks the structural guarantee the whole system rests on
-([`docs/why-athenaeum.md`](why-athenaeum.md)): a source appends to intake, and exactly one
+([`docs/why-athenaeum.md`](../why-athenaeum.md)): a source appends to intake, and exactly one
 compiler writes the wiki.
 
 This document specifies a third option that is neither: **a conformance format a writer
@@ -36,7 +36,7 @@ MAY use to arrive with its work already done.**
 
 > **This is the ingress half of the system-wide two-path invariant** — *one path
 > in, one path out* — stated canonically in
-> [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md). That page owns
+> [`docs/design/one-way-in-one-way-out.md`](one-way-in-one-way-out.md). That page owns
 > the rule (including the egress half); this section owns what conformance does
 > to a submission's entry tier once it is on the sanctioned path.
 
@@ -211,7 +211,7 @@ because a batch may carry thousands of records and the applier streams it.
 | `observed_at` | yes* | RFC-3339 UTC — when the submitter *observed* the fact. Breaks same-tier ties. |
 | `note` | optional | Free text. Carried into the audit ledger, and into an escalation if one is raised — the *why*, which is what lets a human or an upper tier act without re-deriving context. |
 | `usage_class` | optional | One of `athenaeum.pii.USAGE_CLASSES` (§7.1). Valid only for an `add` onto a contact-identifier field routed to an excluded surface; absent, the written value stays `unclassified`. |
-| `bucket` | optional | One of `athenaeum.models.MEMORY_BUCKETS` (`daily`/`weekly`/`durable`, issue athenaeum#904). Same ride-alongside shape as `usage_class` — applies to the TARGET entity's page regardless of `field`/`value`. Invalid value raises a tier (never silently coerced). See `docs/provenance-shape.md` §8.8. |
+| `bucket` | optional | One of `athenaeum.models.MEMORY_BUCKETS` (`daily`/`weekly`/`durable`, issue athenaeum#904). Same ride-alongside shape as `usage_class` — applies to the TARGET entity's page regardless of `field`/`value`. Invalid value raises a tier (never silently coerced). See `docs/design/provenance-shape.md` §8.8. |
 | `valid_until` | optional | ISO-8601 date — a SUGGESTED expiry for the target page (issue athenaeum#904). Only fills an ABSENT `valid_until` on the target; never overrides an explicit one (§8.1's semantics stay authoritative). Malformed input is fail-open (dropped), unlike `bucket`. |
 
 \* or supplied by the envelope's `defaults`.
@@ -228,7 +228,7 @@ One of three shapes:
 |---|---|
 | `{"uid": "…"}` | `EntityIndex.get_by_uid`. Unambiguous; preferred. |
 | `{"type": "…", "name": "…"}` | `EntityIndex.lookup`, with the cross-type and entity-format guards `tier0_handle_upsert` already applies. |
-| `{"type": "…", "handle": {"<key>": "<value>"}}` | Resolved through `registry.json` ([`docs/source-handles.md`](source-handles.md)). `<key>` must be a `SOURCE_HANDLE_KEYS` member. |
+| `{"type": "…", "handle": {"<key>": "<value>"}}` | Resolved through `registry.json` ([`docs/extending/source-handles.md`](../extending/source-handles.md)). `<key>` must be a `SOURCE_HANDLE_KEYS` member. |
 | `{"type": "person", "handle": {"email": "…"}}` | Resolved through the **PII/contacts surface**, not `registry.json` — see below (issue athenaeum#884). |
 
 The handle shape exists because external systems key on their own identifiers — an email
@@ -249,7 +249,7 @@ So an `email` handle resolves at **tier 0, with no LLM call**, by walking
 `email → contact record → record uid → wiki page`, entirely through `athenaeum.pii`:
 `contacts_surface_root` for the surface, `resolve_contact_records` for the matches,
 `uid_on_record` for the join key. **The applier never constructs a contacts-surface path
-itself** (§3 of [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md)) — the
+itself** (§3 of [`docs/design/one-way-in-one-way-out.md`](one-way-in-one-way-out.md)) — the
 librarian is not an exception to the one-way-out rule, it is an implementation of it.
 
 Resolution is by `pii.resolve_contact_records` (all matches), *not*
@@ -293,7 +293,7 @@ nothing else to validate a new page's schema against); the created page is valid
 against that type's schema (`schemas.py`) before it is written, and a create that would
 violate it raises a tier instead, same as any other non-conformance. The page carries a
 freshly minted `uid`, the handle key/value that keyed the create (in the
-`docs/source-handles.md` §3 frontmatter shape — list-valued for a `LIST_HANDLE_KEYS`
+`docs/extending/source-handles.md` §3 frontmatter shape — list-valued for a `LIST_HANDLE_KEYS`
 member, scalar otherwise), and `field_sources` provenance for the handle carrying the
 batch's declared `source`. That handle is what makes the next submission carrying the
 same key resolve to this page as an **update** rather than create a second one — creation
@@ -485,11 +485,11 @@ visible failure** — which is precisely why the drift-guard test below must com
 >    `src/athenaeum/resolutions.py` — the canonical prose list, and the source every other
 >    copy derives from;
 > 3. the `9-tier` count in `resolutions.py`'s module docstring;
-> 4. §11 of `docs/conflict-resolution.md`, and this section.
+> 4. §11 of `docs/design/conflict-resolution.md`, and this section.
 >
 > **Derived — already guarded, no new work:** the golden
 > `tests/data/prompts/resolutions.resolve_system.txt`, pinned by
-> `tests/test_prompt_goldens.py::test_prompt_matches_golden`, and `docs/prompts.md`, pinned
+> `tests/test_prompt_goldens.py::test_prompt_matches_golden`, and `docs/design/prompts.md`, pinned
 > byte-current by its own test.
 >
 > *(An earlier draft of this section cited `tests/data/resolve_system.txt` and
@@ -586,7 +586,7 @@ permitted only for the observed class, and an unclassified legacy value is never
 silently treated as usable. The marker lives in the store (`athenaeum.pii` —
 `classify_contact_value` writes it, `is_outreach_eligible` is the predicate a consumer
 calls), so it binds every writer rather than each consumer re-implementing it. See
-`docs/security-posture.md` §2.3 for the permission table and the no-downgrade rule.
+`docs/design/security-posture.md` §2.3 for the permission table and the no-downgrade rule.
 
 **The record-shape question is settled (issue athenaeum#872, decided 2026-08-14).** The
 sensitivity routing above no longer writes a private `{uid}.json` record: it reads and
@@ -704,7 +704,7 @@ fit is deferred to `wiki/_deferred_work.md` and resumed next run, exactly as ord
 intake is. Deferral is bounded and resumable; rejection is lossy.
 
 Submitters should still pre-filter targets against `registry.json`
-([`docs/source-handles.md`](source-handles.md) §4) — a deterministic, LLM-free index
+([`docs/extending/source-handles.md`](../extending/source-handles.md) §4) — a deterministic, LLM-free index
 built for this. But that is a **courtesy that keeps work in the cheap tier**, not an
 admission requirement.
 
@@ -779,7 +779,7 @@ submission takes the reasoning path. A fresh deployment cannot have its wiki wri
 mechanical writer until an operator opts in per-attribute. Sensitivity classification
 (§7.1) is likewise deployment config.
 
-The implementation adds these to `docs/configuration.md` in the same change; a key in
+The implementation adds these to `docs/reference/configuration.md` in the same change; a key in
 code and not in that table is drift.
 
 ---
@@ -911,7 +911,7 @@ proposed here.
 
 This is the same boundary athenaeum has always had — the append-only-intake /
 single-compiler split is a structural guarantee about *who writes the wiki*, not an
-authentication scheme for who may report a fact ([`docs/why-athenaeum.md`](why-athenaeum.md)).
+authentication scheme for who may report a fact ([`docs/why-athenaeum.md`](../why-athenaeum.md)).
 A correction changes nothing about it. But this contract is the first surface that makes
 the consequence sharp, because it lets a writer name an exact field and an exact
 precedence tier, so it is stated here rather than left implied.
@@ -952,14 +952,14 @@ steady-state one. Expected, not a defect.
 
 ## See also
 
-- [`docs/adapter-contract.md`](adapter-contract.md) — the intake lanes; §3 there is the
+- [`docs/extending/adapter-contract.md`](../extending/adapter-contract.md) — the intake lanes; §3 there is the
   idempotency convention §5 here parallels.
-- [`docs/provenance-shape.md`](provenance-shape.md) — §2 per-value `field_sources`
+- [`docs/design/provenance-shape.md`](provenance-shape.md) — §2 per-value `field_sources`
   (the shape §4 writes), §10 the source-type vocabulary.
-- [`docs/conflict-resolution.md`](conflict-resolution.md) — §11 the source-precedence
+- [`docs/design/conflict-resolution.md`](conflict-resolution.md) — §11 the source-precedence
   taxonomy (prompt-only until §6.1 here), §4 the single-writer assumption §1.2 explains
   this contract must not violate.
-- [`docs/source-handles.md`](source-handles.md) — `registry.json`, the pre-filter that
+- [`docs/extending/source-handles.md`](../extending/source-handles.md) — `registry.json`, the pre-filter that
   keeps conformant work in the cheap tier.
-- [`docs/why-athenaeum.md`](why-athenaeum.md) — why the append-only-intake /
+- [`docs/why-athenaeum.md`](../why-athenaeum.md) — why the append-only-intake /
   single-compiler split exists at all.

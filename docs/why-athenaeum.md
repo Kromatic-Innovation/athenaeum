@@ -178,7 +178,7 @@ To close that gap, Athenaeum makes four specific design choices. Each
 corresponds to one of the failure modes above.
 
 > **Before you write a client, read the one rule they all rest on:
-> [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md).** Every write
+> [`docs/design/one-way-in-one-way-out.md`](design/one-way-in-one-way-out.md).** Every write
 > reaches the knowledge base as raw intake compiled by exactly one writer, and
 > every read reaches a caller through the recall/read interface — no program
 > opens a store directly. That holds for the off-corpus contact-data surface
@@ -283,7 +283,7 @@ loaded. There's no need to spell everything out in a giant prompt.
 
 For the deep dive on the hybrid FTS5 + vector architecture (including why
 both backends are load-bearing), see
-[`recall-architecture.md`](./recall-architecture.md).
+[`recall-architecture.md`](./design/recall-architecture.md).
 
 ### 4. The notetaker — a configurable, editable observation filter
 
@@ -332,7 +332,7 @@ default 8192 bytes) and a louder **flag** threshold
 (`librarian.page_flag_bytes`, default 16384 bytes); `athenaeum run` logs a
 non-fatal warning for flagged pages. Nothing is ever blocked or split
 automatically — the guardrail is a nudge to break the page into linked
-entities by hand. See [configuration.md](configuration.md) for the knobs.
+entities by hand. See [configuration.md](reference/configuration.md) for the knobs.
 
 ## Key takeaways
 

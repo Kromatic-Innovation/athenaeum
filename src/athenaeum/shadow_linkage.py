@@ -70,7 +70,7 @@ from athenaeum.models import AutoMemoryFile
 from athenaeum.store import now_iso
 from athenaeum.wiki_dedupe import _resolve_wiki_embeddings, discover_wiki_dedupe_candidates
 
-#: The section this artifact writes into ``docs/memory-model-measurements.md``.
+#: The section this artifact writes into ``docs/measurements/memory-model-measurements.md``.
 SECTION_HEADING = "## Shadow-mode complete-linkage population"
 
 #: ``athenaeum measure shadow-linkage`` — the exact reproducible command

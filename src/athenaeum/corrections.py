@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Deterministic field-correction fast path (issue athenaeum#797).
 
-Implements the conformance format specified in `docs/field-corrections.md`:
+Implements the conformance format specified in `docs/design/field-corrections.md`:
 a `.jsonl` batch a writer MAY submit into the ordinary `raw/<source>/` intake
 tree to have a field-level change applied at tier 0 (mechanical, no LLM),
 instead of paying LLM compilation per fact or bypassing the librarian
@@ -29,7 +29,7 @@ run-loop wiring (`librarian._run_correction_phase`), the escalation writer
 (`tiers.tier4_escalate`) and discovery (`intake.discover_raw_files`) all call
 INTO this module; it never calls back.
 
-This module is organized in the order `docs/field-corrections.md` presents
+This module is organized in the order `docs/design/field-corrections.md` presents
 its sections:
 
 - §3.1 valid-envelope recognition (:func:`parse_batch_envelope`) — the
@@ -119,7 +119,7 @@ log = logging.getLogger(__name__)
 
 #: `schema_version` values this build knows how to process. A batch
 #: declaring any other value is deliberately NOT a valid envelope
-#: (`docs/field-corrections.md` §3.1 condition 3) — it is left as ordinary
+#: (`docs/design/field-corrections.md` §3.1 condition 3) — it is left as ordinary
 #: intake rather than being skipped by discovery and then found
 #: un-processable by the correction phase, which is exactly the silent-drop
 #: bug §3.1 calls out by name.
@@ -130,7 +130,7 @@ def parse_batch_envelope(first_line: str) -> dict[str, Any] | None:
     """Parse a `.jsonl` file's first line as a correction-batch envelope.
 
     Returns the parsed envelope dict when ALL of
-    `docs/field-corrections.md` §3.1's conditions hold:
+    `docs/design/field-corrections.md` §3.1's conditions hold:
 
     1. It parses as JSON.
     2. ``record == "batch"``.
@@ -339,7 +339,7 @@ def _resolve_email_handle(
 
     **Every step goes through :mod:`athenaeum.pii`.** This function never
     constructs a contacts-surface path itself
-    (``docs/one-way-in-one-way-out.md`` §3) — it asks ``pii`` for the surface
+    (``docs/design/one-way-in-one-way-out.md`` §3) — it asks ``pii`` for the surface
     root, for the matching records, and for the uid on a record. The librarian
     is not an exception to the one-way-out rule; it is an implementation of it.
 
@@ -982,7 +982,7 @@ def _build_created_entity_meta(
     correction whose ``field`` is an allowlisted name-bearing attribute
     overwrites it through the ordinary apply path, same as any other field.
 
-    Carries the handle key/value in the shape ``docs/source-handles.md``
+    Carries the handle key/value in the shape ``docs/extending/source-handles.md``
     §3 specifies — list-valued for a ``LIST_HANDLE_KEYS`` member, scalar
     otherwise — which is what lets a later submission resolve to this page
     instead of creating a second one (AC 3/AC 5). Provenance for the

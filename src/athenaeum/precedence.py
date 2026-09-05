@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Deterministic source-precedence ranker (issue athenaeum#797).
 
-Implements `docs/field-corrections.md` §6.1: the tier-0 field-correction
+Implements `docs/design/field-corrections.md` §6.1: the tier-0 field-correction
 applier cannot call an LLM, so the source-precedence taxonomy that until now
 existed only as prose inside `resolutions._RESOLVE_SYSTEM` (consulted by a
 live model at tier 3-4) needs a pure, in-process equivalent for tier 0.
@@ -16,7 +16,7 @@ seven ranks below its documented position. That is not hypothetical: the
 first draft of the design doc omitted `twitter:` exactly this way.
 
 DRIFT GUARD (site 4 of 4 — see `resolutions.py`'s drift-guard comment above
-`_RESOLVE_SYSTEM`, `docs/conflict-resolution.md` §11, and the `9-tier` count
+`_RESOLVE_SYSTEM`, `docs/design/conflict-resolution.md` §11, and the `9-tier` count
 in `resolutions.py`'s module docstring): the tier list here — its order AND
 each tier's membership — must agree with the `SOURCE-PRECEDENCE TAXONOMY`
 block of `resolutions._RESOLVE_SYSTEM`, the canonical prose list every other

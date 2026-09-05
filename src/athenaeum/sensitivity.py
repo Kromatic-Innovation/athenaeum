@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Sensitivity-class recogniser protocol + registry (athenaeum#910's design note).
 
-**Scope.** Implements both halves of ``docs/sensitivity-class-vocabulary.md``:
+**Scope.** Implements both halves of ``docs/design/sensitivity-class-vocabulary.md``:
 
 - **S1a (athenaeum#989, shipped first)** — the *recogniser* half:
   :class:`SensitivityMatch`, the :class:`SensitivityRecognizer` protocol,
@@ -466,7 +466,7 @@ class ReadPolicy:
     levels (``open`` / ``internal`` / ``confidential`` / ``personal``) — the
     SAME vocabulary athenaeum#312 already ships, not a new one (design note
     §4). ``audience`` is the same opaque role-list mechanism
-    ``docs/security-posture.md`` §2.1 already documents for
+    ``docs/design/security-posture.md`` §2.1 already documents for
     ``athenaeum serve --audience``; unlike ``access`` it is **not** validated
     against a known vocabulary — any role name an operator writes is
     accepted as-is, per design note §4.

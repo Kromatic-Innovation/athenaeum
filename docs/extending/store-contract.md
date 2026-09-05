@@ -10,7 +10,7 @@
 > docstring for the exact split.
 >
 > **Scope note.** This is the *physical* layer
-> [`docs/storage-adapter-contract.md`](storage-adapter-contract.md) has never
+> [`docs/extending/storage-adapter-contract.md`](storage-adapter-contract.md) has never
 > had: that contract resolves an entity class to a **surface** (a root plus a
 > corpus policy) and hands back a bare `pathlib.Path`; every caller then does
 > its own filesystem arithmetic against it. `Store` generalizes the physical
@@ -20,7 +20,7 @@
 > module, not a second front door. This contract **extends** the
 > storage-adapter seam; it does not replace it — see "Where this sits", below.
 
-Full design rationale: [`docs/whole-store-adapter-design.md`](whole-store-adapter-design.md)
+Full design rationale: [`docs/extending/whole-store-adapter-design.md`](whole-store-adapter-design.md)
 §6 (the draft this contract publishes) and §9.2 (the implementation slices
 S1–S8 that built and published it).
 
@@ -218,7 +218,7 @@ so surface → root resolution is supplied by the caller rather than looked up
 inside `athenaeum.store`.
 
 **Not to be confused with the storage-adapter layer.** `Store` is the
-physical read/write seam; [`docs/storage-adapter-contract.md`](storage-adapter-contract.md)
+physical read/write seam; [`docs/extending/storage-adapter-contract.md`](storage-adapter-contract.md)
 is the routing seam (entity class → surface + corpus policy) one level above
 it. They compose: `resolve_store_for_class` resolves BOTH — the surface an
 entity class maps to (storage-adapter layer) and the `Store` instance that
@@ -262,5 +262,5 @@ in the athenaeum repo is a complete worked example: a from-scratch, minimal
 dict-backed `Store` built using nothing but the public harness and protocol
 types, run through the same suite.
 
-The bundled [`adapter-authoring`](../skills/adapter-authoring/SKILL.md) skill
+The bundled [`adapter-authoring`](../../skills/adapter-authoring/SKILL.md) skill
 references this harness alongside its intake-adapter counterpart.

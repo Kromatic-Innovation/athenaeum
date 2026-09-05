@@ -10,7 +10,7 @@ ask the person-shaped question. These tests pin the caller-facing surfaces:
 - ``TestMcpReadEntityTool`` — the generic tool carries ALL of `uid`, the
   entity class, `include_excluded` AND `usage_classes` (dropping the last is
   not a smaller version of the same tool — it removes a filter
-  `docs/security-posture.md` §2.3 depends on), and its fail-closed audience
+  `docs/design/security-posture.md` §2.3 depends on), and its fail-closed audience
   check.
 - ``TestCliEntityCommand`` — the same for the shell: `athenaeum entity`
   prints the same JSON object shape.

@@ -138,7 +138,7 @@ purely semantic queries ("iterative feedback loops" → "Innovation
 Accounting") have no lexical overlap and need the vector side.
 
 Removing either backend collapses recall for its rescue class. See
-`docs/recall-architecture.md` for the full walkthrough and the four
+`docs/design/recall-architecture.md` for the full walkthrough and the four
 invariants a future "simplification" must not remove.
 
 ## 1Password bootstrap (optional)
@@ -176,7 +176,7 @@ Files in this directory supporting that integration:
 
 Full walkthrough — directory layout, citation policy, how the librarian
 ingests and consolidates, and an end-to-end quick start — lives in
-[`docs/integrations/claude-code.md`](../../docs/integrations/claude-code.md).
+[`docs/guides/claude-code.md`](../../docs/guides/claude-code.md).
 
 ## Pending-questions surface
 

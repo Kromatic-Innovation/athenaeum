@@ -1,7 +1,7 @@
 """Subpackage holding PACKAGED example shape rules (issue athenaeum#901).
 
 Contract: reference `*.yaml` shape-rule files a human is meant to read,
-adapt, and (per `docs/shape-rules.md` §5) deliberately graduate out of
+adapt, and (per `docs/design/shape-rules.md` §5) deliberately graduate out of
 `mode: observe`. `athenaeum.rules.load_rules` never reads this subpackage
 directly and `athenaeum` never activates a rule from here automatically —
 `athenaeum.init.copy_example_rules` (invoked by `athenaeum init

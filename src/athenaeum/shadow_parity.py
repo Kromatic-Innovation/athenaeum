@@ -112,7 +112,7 @@ if TYPE_CHECKING:
     from athenaeum.provider import LLMBackend
 
 #: Directory the dated report lands under by default (``measurements/`` at
-#: the repo root, mirroring the ``docs/memory-model-measurements.md``
+#: the repo root, mirroring the ``docs/measurements/memory-model-measurements.md``
 #: convention the other ``measure`` subcommands use, but as one dated file
 #: per run rather than an append-only shared doc — athenaeum#1258's live runs
 #: are each their own artifact, not a rolling snapshot).

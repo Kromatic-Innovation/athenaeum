@@ -8,9 +8,9 @@ because prose ("document new env vars") does not enforce itself. This check
 runs the diff in **both directions**:
 
 1. **src -> docs**: every ``ATHENAEUM_*`` name that appears in ``src/`` must be
-   documented in ``docs/configuration.md`` (the original athenaeum#688 gate).
+   documented in ``docs/reference/configuration.md`` (the original athenaeum#688 gate).
 2. **docs -> code**: every ``ATHENAEUM_*`` name documented in
-   ``docs/configuration.md`` must actually be read by something — ``src/``,
+   ``docs/reference/configuration.md`` must actually be read by something — ``src/``,
    the shipped hooks/scripts, or a known runtime-constructed family (athenaeum#1376).
    Direction 1 alone lets an operator set a documented variable that nothing
    reads and get no error and no effect.
@@ -73,7 +73,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src"
-CONFIG_DOC = REPO_ROOT / "docs" / "configuration.md"
+CONFIG_DOC = REPO_ROOT / "docs" / "reference" / "configuration.md"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 HOOKS_DIR = REPO_ROOT / "examples" / "claude-code"
 
@@ -91,7 +91,7 @@ _SELF = Path(__file__).resolve()
 _ENV_RE = re.compile(r"ATHENAEUM_[A-Z0-9_]+")
 
 #: Deliberately-internal / not-operator-facing vars that are intentionally NOT in
-#: docs/configuration.md. Each MUST carry a one-line reason — never a silent
+#: docs/reference/configuration.md. Each MUST carry a one-line reason — never a silent
 #: exclusion (issue athenaeum#688). Empty today: every ATHENAEUM_* read by src/ is
 #: operator-facing and documented.
 ALLOWLIST: dict[str, str] = {}
@@ -194,7 +194,7 @@ def undocumented(src_vars: set[str], doc_vars: set[str]) -> set[str]:
 
 
 def unread(doc_vars: set[str], read_vars: set[str]) -> set[str]:
-    """Names documented in docs/configuration.md that no scanned surface or
+    """Names documented in docs/reference/configuration.md that no scanned surface or
     family expansion reads, and that are not docs->code-allowlisted (issue
     athenaeum#1376). *read_vars* is the union of every surface this check
     treats as "read" — see :func:`main`.
@@ -278,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"env-docs: FAIL — {denom}", file=sys.stderr)
         print(
             "env-docs: the following ATHENAEUM_* vars are read by src/ but are NOT "
-            "documented in docs/configuration.md (add them there with a default and "
+            "documented in docs/reference/configuration.md (add them there with a default and "
             "what they control, or allowlist with a reason in check_env_docs.py):",
             file=sys.stderr,
         )
@@ -305,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
         if unread_names:
             print(
                 "env-docs: the following ATHENAEUM_* vars are documented in "
-                "docs/configuration.md but are read by no scanned surface (src/, "
+                "docs/reference/configuration.md but are read by no scanned surface (src/, "
                 "scripts/, examples/claude-code/) and covered by no known runtime "
                 "family (add a reader, remove the doc entry, or allowlist with a "
                 "reason in check_env_docs.py's DOCS_TO_CODE_ALLOWLIST):",

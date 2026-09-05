@@ -6,7 +6,7 @@ Issue athenaeum#1360. The package root used to eagerly import
 ``import athenaeum`` — and, because importing a submodule executes its package
 root first, every ``import athenaeum.search`` and ``import
 athenaeum.push_metrics`` — paid ~440 ms for an SDK the command might never
-speak to. `docs/retrieval-entry-point-measurements.md` (issue athenaeum#1357)
+speak to. `docs/measurements/retrieval-entry-point-measurements.md` (issue athenaeum#1357)
 measured it and showed the cost could not be dodged by importing the submodule
 directly, nor by ``importlib.util.spec_from_file_location``: the submodule's own
 absolute imports re-enter the root regardless.

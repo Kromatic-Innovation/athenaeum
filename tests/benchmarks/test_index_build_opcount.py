@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Op-count assertion for the S2 index-build scan (issue athenaeum#977).
 
-Design note (``docs/whole-store-adapter-design.md``) §3.5, constraint P5:
+Design note (``docs/extending/whole-store-adapter-design.md``) §3.5, constraint P5:
 
     "Op-count budgets are tested, wall-clock is not. Adapter-latency
     regressions are invisible to a wall-clock benchmark run on a local disk.

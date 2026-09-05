@@ -11,7 +11,7 @@ raw-intake files the librarian compiles into the wiki. This skill is
 self-contained — it does not depend on any private Kromatic repo or context.
 
 The authoritative contract this skill operationalises is
-[`docs/adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/adapter-contract.md).
+[`docs/extending/adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/extending/adapter-contract.md).
 The runnable reference is
 [`examples/adapters/minimal_adapter.py`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/examples/adapters/minimal_adapter.py).
 This skill file ships inside the published `athenaeum` package (under `skills/`);
@@ -20,29 +20,29 @@ the contract doc and example live in the repository and the source distribution
 
 **Not the same thing as a store adapter.** This skill is about a **source**
 adapter — turning external data into `raw/` intake files, per
-`docs/adapter-contract.md` above. If instead you are implementing a whole
+`docs/extending/adapter-contract.md` above. If instead you are implementing a whole
 **physical storage backend** (e.g. so athenaeum can persist its knowledge
 root somewhere other than a local filesystem — an object store, a database),
 that is the `Store` protocol, and it has its own contract and its own
 runnable conformance harness:
 
-- [`docs/store-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/store-contract.md)
+- [`docs/extending/store-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/extending/store-contract.md)
   — the published `Store` contract (issue athenaeum#983).
 - `athenaeum.store_conformance.StoreConformanceTests` — subclass it, override
   its `store` fixture with your own `Store` implementation, and run pytest;
-  see `docs/store-contract.md`'s "Running the conformance harness against
+  see `docs/extending/store-contract.md`'s "Running the conformance harness against
   your own implementation" section for the exact shape, and
   `tests/test_store_conformance_harness.py` in the athenaeum repo for a
   complete worked example.
 
-The two adapters never collide (same non-overlap `docs/storage-adapter-contract.md`
+The two adapters never collide (same non-overlap `docs/extending/storage-adapter-contract.md`
 draws between the storage-adapter layer and this skill's intake adapters): an
 intake adapter turns an external source into `raw/` files and stops at
 "how data *enters* the pipeline"; a `Store` implementation governs how the
 already-compiled wiki is physically read and written. If you're feeding a new
 external source in, keep reading this skill. If you want athenaeum's
 knowledge root to live on a different physical backend, go to
-`docs/store-contract.md` instead.
+`docs/extending/store-contract.md` instead.
 
 ## The one rule
 
@@ -58,7 +58,7 @@ comes from this structure, not from trusting the source.
   every external source. This skill walks Lane A.
 - **Lane B (auto-memory)** — `raw/auto-memory/<scope>/…`. Only for bridging an
   agent runtime's own memory folder. If that's your case, follow
-  [`docs/integrations/claude-code.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/integrations/claude-code.md)
+  [`docs/guides/claude-code.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/guides/claude-code.md)
   instead — it is a complete worked Lane-B adapter.
 
 ## Build it in six steps
@@ -82,7 +82,7 @@ comes from this structure, not from trusting the source.
    - the body: markdown; every claim in it should trace to `source`.
    The frontmatter schema is open — extra keys round-trip untouched, so you can
    carry adapter-specific metadata. See
-   [`docs/provenance-shape.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/provenance-shape.md) for the full
+   [`docs/design/provenance-shape.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/provenance-shape.md) for the full
    `source_type` vocabulary and per-field/per-value attribution.
 
 4. **Write it — pick a mechanism:**
@@ -130,8 +130,8 @@ comes from this structure, not from trusting the source.
 
 ## Reference
 
-- [`docs/adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/adapter-contract.md) — the full contract this skill operationalises.
+- [`docs/extending/adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/extending/adapter-contract.md) — the full contract this skill operationalises.
 - [`examples/adapters/minimal_adapter.py`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/examples/adapters/minimal_adapter.py) — synthetic, runnable Lane-A adapter.
-- [`docs/provenance-shape.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/provenance-shape.md) — provenance grammar and the MCP `remember` API.
-- [`docs/integrations/claude-code.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/integrations/claude-code.md) — a complete Lane-B (auto-memory) adapter.
-- [`docs/store-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/store-contract.md) — the sibling `Store` (physical storage backend) contract and its runnable third-party conformance harness, `athenaeum.store_conformance.StoreConformanceTests` — for writing a storage adapter instead of a source adapter.
+- [`docs/design/provenance-shape.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/provenance-shape.md) — provenance grammar and the MCP `remember` API.
+- [`docs/guides/claude-code.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/guides/claude-code.md) — a complete Lane-B (auto-memory) adapter.
+- [`docs/extending/store-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/extending/store-contract.md) — the sibling `Store` (physical storage backend) contract and its runnable third-party conformance harness, `athenaeum.store_conformance.StoreConformanceTests` — for writing a storage adapter instead of a source adapter.

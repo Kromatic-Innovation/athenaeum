@@ -65,7 +65,7 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
         help="Also copy bundled EXAMPLE shape rules (issue athenaeum#901) into "
         "<path>/rules/. Every example ships 'mode: observe' -- installing "
         "them changes nothing until you review wiki/_shape_rule_dispositions.jsonl "
-        "and edit a copy to 'mode: live'. See docs/shape-rules.md.",
+        "and edit a copy to 'mode: live'. See docs/design/shape-rules.md.",
     )
     init_parser.add_argument(
         "--rules-dest",

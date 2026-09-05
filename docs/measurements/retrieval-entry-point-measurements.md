@@ -377,6 +377,6 @@ to measure a different interpreter.
   its recorded fallback plan; it did not.
 - athenaeum#1360 — the eager-import defect. Finding 2 sharpens its second
   acceptance criterion into a confirmed live behaviour.
-- `docs/recall-architecture.md` — what the retrieval path is for.
+- `docs/design/recall-architecture.md` — what the retrieval path is for.
 - `examples/claude-code/user-prompt-recall.sh` — the shell sidecar whose
   justifying performance claim Finding 1 retires.

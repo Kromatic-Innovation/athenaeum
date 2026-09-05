@@ -206,7 +206,7 @@ def build_sweep_report(
     yet passed) is retained, exactly matching the fail-open athenaeum#308 posture
     ("absent valid_until => open upper bound => currently valid").
 
-    **Pack authority (issue athenaeum#1116 AC3, `docs/provenance-shape.md`
+    **Pack authority (issue athenaeum#1116 AC3, `docs/design/provenance-shape.md`
     §8.8).** When a page's frontmatter names BOTH ``memory_class`` and
     ``data_class`` (the latter is not written by any shipped write path as
     of this issue — this is the extension point for whenever one starts

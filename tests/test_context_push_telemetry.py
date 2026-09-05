@@ -116,7 +116,7 @@ def test_cli_end_to_end_writes_exactly_one_sidecar_row(tmp_path: Path) -> None:
     # AC4: memory_tier carried per item, from the index's own column.
     assert item["memory_tier"] == "hot"
     # Scope derived from the stored audience string (issue athenaeum#1362,
-    # docs/sidecar-adapter-contract.md §2.4's inverse-parsing helper).
+    # docs/extending/sidecar-adapter-contract.md §2.4's inverse-parsing helper).
     assert item["scope"] == "opsadmin"
     assert item["tier"] == "internal"
 

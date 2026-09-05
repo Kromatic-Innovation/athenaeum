@@ -190,7 +190,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   knob and the site already drops a non-string element; and `resolutions`
   (n=89) is deliberately **deferred** on an under-sampled denominator rather
   than decided, with its release bar stated in code and in
-  `docs/configuration.md`. Schema-shape only: no field became required or
+  `docs/reference/configuration.md`. Schema-shape only: no field became required or
   optional, no `athenaeum.yaml` key or env var is introduced, and no reported
   number or pipeline behavior changes — a tightened schema changes how a
   *future* mismatch is classified in the observation log, never whether
@@ -239,7 +239,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   the constructed output ever disagrees with the scan pass's positive-row
   count, and (on `--apply`) acquires the single-machine run lock (issue
   athenaeum#309) so it can never race the nightly's own concurrent appends to
-  this file. See `docs/configuration.md`'s shape-rules section.
+  this file. See `docs/reference/configuration.md`'s shape-rules section.
 
 - **The `split` and `log_demote` oversize-page dispositions are implemented
   (athenaeum#1248).** athenaeum#1182 shipped the page-size gate with only
@@ -273,7 +273,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   Run-summary counters `oversize_split`/`oversize_log_demoted` are new and
   disjoint from the existing `oversize_suppressed` (that one counts
   `review` only), so a run makes clear which disposition actually fired for
-  each oversize page. Documented in `docs/configuration.md` alongside the
+  each oversize page. Documented in `docs/reference/configuration.md` alongside the
   other `librarian.*` knobs. Unblocks athenaeum#1214 (the operator
   disposition sweep), whose per-page dispositions are only executable once
   all three actions exist.
@@ -388,7 +388,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
     — the shape every tier-3-created page actually uses.
   - **`librarian.name_collision_scan` (default `true`, the scan is free) and
     `librarian.name_collision_automerge` (default `false`) — new config
-    knobs, documented in `docs/configuration.md`.** Auto-merge ships OFF
+    knobs, documented in `docs/reference/configuration.md`.** Auto-merge ships OFF
     deliberately: athenaeum#1170 was split from a separate, one-time
     destructive repair sweep over collisions ALREADY PRESENT in the
     operator's live corpus — issue athenaeum#1246, `~operator`-gated and
@@ -417,7 +417,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   - `athenaeum.decay_sweep` now consults the active retention pack
     (`reconcile_bucket_daily_with_pack`) for a page's `(memory_class,
     data_class)` before falling back to its independent `bucket: daily` /
-    `valid_until` logic (`docs/provenance-shape.md` §8.8), gated on an
+    `valid_until` logic (`docs/design/provenance-shape.md` §8.8), gated on an
     explicit `data_class` frontmatter field — no shipped write path stamps
     one yet, so this is a no-op on any corpus produced by shipped code
     today.
@@ -644,7 +644,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   `budget_window` figure (today's spend against the configured per-day
   ceiling, alongside the existing `--since`-window totals) so the report
   agrees with what the ceiling would actually stop right now. Full
-  contract: [`docs/exit-codes.md`](docs/exit-codes.md).
+  contract: [`docs/reference/exit-codes.md`](docs/reference/exit-codes.md).
 
 - **Five-verdict comparator, phase 2 — verdict effects, supersession
   substrate, the two instruments, and the pending-queue re-run
@@ -703,7 +703,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
     hazards are additionally identified *before* any comparison runs and
     route to a human regardless of verdict.
 
-  New config knobs, all documented in `docs/configuration.md`:
+  New config knobs, all documented in `docs/reference/configuration.md`:
   `librarian.auto_supersession_enabled` (its own **off** switch inside the
   already-off comparator gate), `standing_state_claim_kinds`,
   `supersession_self_revision_window_days`, `supersession_claim_window_max`,
@@ -715,8 +715,8 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
 
   **The cut-over is still outstanding** — the old duplicate-detection and
   contradiction-detection paths still run, and athenaeum#715 requires they be
-  removed rather than left in parallel. `docs/contradiction-detection.md`
-  and `docs/conflict-resolution.md` now describe the unified operation and
+  removed rather than left in parallel. `docs/design/contradiction-detection.md`
+  and `docs/design/conflict-resolution.md` now describe the unified operation and
   say plainly that the rest of each document is still live behaviour.
 
 - **Five-verdict comparator, landed dark (athenaeum#715, child of the
@@ -767,7 +767,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   `athenaeum.yaml` keys (`athenaeum.config.resolve_retention_pack_selection`
   / `resolve_retention_pack_overrides`). Also documents (never implements)
   the last-resort in-git history-rewrite remediation path for misclassified
-  content, with its blast radius stated (`docs/security-posture.md` §2.4).
+  content, with its blast radius stated (`docs/design/security-posture.md` §2.4).
   No production caller is migrated onto this module in this slice — same
   posture `athenaeum.sensitivity` shipped under for its S1a/S1b — so the
   nightly librarian run and every existing write/read path are byte-for-byte
@@ -844,12 +844,12 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   on athenaeum#718 for the exact command and the follow-up verification
   issue. New `athenaeum.yaml` keys (`push_budget.tokens_per_turn`,
   `librarian.memory_tier_sweep_enabled`, `memory_tiers.demote_after_days`)
-  documented in `docs/configuration.md` with defaults.
+  documented in `docs/reference/configuration.md` with defaults.
 
 - **Off-corpus indexable storage: federated recall, single-store erasure
   delete, and an off-corpus ledger shard (athenaeum#984).** Split (b) of the
   athenaeum#718 re-scope under the whole-store adapter design lock
-  (athenaeum#911, `docs/whole-store-adapter-design.md` §8) — built on S1
+  (athenaeum#911, `docs/extending/whole-store-adapter-design.md` §8) — built on S1
   (athenaeum#976, the `Store` protocol + `FilesystemStore`) and S3
   (athenaeum#978, the `versioned` capability). New `src/athenaeum/off_corpus.py`:
   a physically separate, genuinely non-git-tracked `Store` instance (the
@@ -860,7 +860,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   one call; `record_pair_decision` (`src/athenaeum/verdicts.py`) now routes
   a verdict pair with an erasure-class side — including a cross-boundary
   pair — to the off-corpus ledger shard instead of refusing it. Off by
-  default (`off_corpus.enabled`, see `docs/configuration.md` "Off-corpus
+  default (`off_corpus.enabled`, see `docs/reference/configuration.md` "Off-corpus
   store"); the purgeable surface's `derived`/`operational` artifacts are
   declared in `athenaeum.store.ARTIFACT_REGISTRY`, the same R3 catalogue
   every other store artifact declares through.
@@ -890,7 +890,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
     with the existing `entity_runtime_share` (athenaeum#440) by taking whichever
     of the two implied entity deadlines is EARLIER. Wall-clock unit,
     deliberately mirroring `entity_runtime_share` rather than an LLM-call
-    count (see `docs/configuration.md` for the rationale). Defaults to
+    count (see `docs/reference/configuration.md` for the rationale). Defaults to
     disabled (`0.0`) — with the key unset, phase scheduling is byte-for-byte
     identical to pre-athenaeum#1102 behaviour (AC4). A non-positive or malformed
     value falls through to disabled, matching `resolve_max_merge_sources`'s
@@ -901,7 +901,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
     that review belongs with athenaeum#608.
 
 - **First live-store snapshots from the memory-model measurement pack, appended
-  to `docs/memory-model-measurements.md` (Refs athenaeum#713).** Ran all three
+  to `docs/measurements/memory-model-measurements.md` (Refs athenaeum#713).** Ran all three
   `athenaeum measure` commands (`shadow-linkage`, `backlog-price`,
   `ordinary-night`) against the operator's own `~/knowledge` store and
   committed the resulting snapshots: complete-linkage comparator pair count
@@ -930,12 +930,12 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   path reads (AC3(d) — no second price list), a test pinning that a
   generator's own `write_snapshot` replaces only its own section on a
   repeat run (AC6), a `## Reproducing the measurement pack` section in
-  `docs/memory-model-measurements.md` listing all three exact invocations
+  `docs/measurements/memory-model-measurements.md` listing all three exact invocations
   (AC7), and a test pinning those invocations against each module's own
   `REPRODUCE_COMMAND` constant.
 
 - **`street-address` sensitivity recogniser — fixture-bounded, bound to `pii`
-  by default (athenaeum#991, S2 of `docs/sensitivity-class-vocabulary.md` §9).**
+  by default (athenaeum#991, S2 of `docs/design/sensitivity-class-vocabulary.md` §9).**
   A third built-in `SensitivityRecognizer` (alongside `email`/`phone`,
   athenaeum#989), registered through the same public `register_recognizer()`
   call at `athenaeum.sensitivity` import time. Matches a US-style
@@ -959,8 +959,8 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   `bounce_contract.py` and `outbound_pii.py` onto `sensitivity.classify()`
   before this recogniser existed, so those three sweeps now additionally
   report street-address matches — routing/handling for every class is
-  otherwise unchanged. `docs/sensitivity-class-vocabulary.md` (§2.1, §5, §9)
-  and `docs/configuration.md`'s sensitivity-classes section are updated to
+  otherwise unchanged. `docs/design/sensitivity-class-vocabulary.md` (§2.1, §5, §9)
+  and `docs/reference/configuration.md`'s sensitivity-classes section are updated to
   match.
 
 - **Anchored PII-restore repair tooling: rename-following + retro-filename
@@ -1040,8 +1040,8 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   `StoreCapabilities`, `Lease`, `StoreKeyError`, `StoreConflictError`,
   `LeaseHeldError`, `UnknownSurfaceError`), and the shipped `FilesystemStore`
   adapter are now on the package root's stable `__all__` surface. The
-  contract's prose is published as `docs/store-contract.md`, alongside the
-  existing `docs/storage-adapter-contract.md`. The S1 conformance suite ships
+  contract's prose is published as `docs/extending/store-contract.md`, alongside the
+  existing `docs/extending/storage-adapter-contract.md`. The S1 conformance suite ships
   as a runnable, importable third-party harness —
   `athenaeum.store_conformance.StoreConformanceTests` — that an adapter
   author subclasses against their own `Store` implementation without editing
@@ -1070,7 +1070,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
     `recall.extra_intake_roots` entry) is excluded from this descent — it
     already has its own dedicated discovery path
     (`discover_auto_memory_files`).
-  See `docs/shape-rules.md` §3.2/§3.3.
+  See `docs/design/shape-rules.md` §3.2/§3.3.
 
 - **Memory model v6: usage sensor for tier movement, never-ingest class
   list, ingestion gate (athenaeum#968 — reshaped athenaeum#430, blocks athenaeum#718).**
@@ -1101,7 +1101,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
     ledgered ids-only (now including a `tier` field) to
     `_never_ingest_refusals.jsonl`, and never deleted from disk. Empty/absent
     manifest key is a complete no-op. See
-    `docs/authority-manifest.md#never-ingest-classes-athenaeum968`.
+    `docs/extending/authority-manifest.md#never-ingest-classes-athenaeum968`.
   - **Ingestion gate** — new `src/athenaeum/ingestion_gate.py` +
     `librarian.ingestion_gate_enabled` (default `false`): when enabled,
     skips the whole auto-memory compilation phase for a run if push-metrics
@@ -1151,7 +1151,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   `llm_schemas.STRICT_CONTRACTS` registry. The three C4-downstream contracts
   (`contradictions`, `claim_kind`, `resolutions`) are explicitly untouched and
   remain observe-only, decision deferred to athenaeum#608. See
-  `docs/configuration.md`'s "Per-contract strictness decision" section.
+  `docs/reference/configuration.md`'s "Per-contract strictness decision" section.
 
 - **`sensitivity.routing` config resolver (athenaeum#1022, slice 1/4 of
   athenaeum#949's design note).** New `resolve_sensitivity_routing` in
@@ -1162,7 +1162,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   `ATHENAEUM_SCREEN_MEDICAL` precedent). A malformed `enabled` value or an
   unknown per-class `action` raises the new `SensitivityRoutingConfigError`.
   A separate axis from athenaeum#910's own `sensitivity.classes.*` — see
-  `docs/configuration.md` → "Sensitivity routing". **Behaviour-free**:
+  `docs/reference/configuration.md` → "Sensitivity routing". **Behaviour-free**:
   nothing reads this resolver yet; the routing/redaction mechanism, the
   read path, and the librarian wiring are follow-on slices
   (athenaeum#1023-athenaeum#1025).
@@ -1192,7 +1192,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   this repo. Reading a routed value back
   (`resolve_sensitive_record`, athenaeum#1024) and wiring this into
   `librarian.process_one` (athenaeum#1025) are follow-on slices. See
-  `docs/configuration.md` → "Sensitivity routing/redaction mechanism" and
+  `docs/reference/configuration.md` → "Sensitivity routing/redaction mechanism" and
   the module's own docstring for the full disposition of every criterion.
 
 - **Sensitivity routing record-keyed read path (athenaeum#1024, slice 3/4 of
@@ -1252,8 +1252,8 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   Tier 2/3 path (asserting the raw value never appears in the mocked LLM
   call's own request payload, not merely the resulting wiki page), the
   fail-closed propagation path, the routing-disabled regression, and
-  re-sweep idempotency. See `docs/sensitivity-value-routing.md` for the
-  full design and `docs/configuration.md` → "Sensitivity routing" for the
+  re-sweep idempotency. See `docs/design/sensitivity-value-routing.md` for the
+  full design and `docs/reference/configuration.md` → "Sensitivity routing" for the
   config surface.
 
 - **Dimension registry + kernel dimensions (athenaeum#714).** Root of the
@@ -1290,9 +1290,9 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   comparison) — the five-verdict comparator that will consume the full
   algebra automatically is a separate, future child of epic athenaeum#709. Ships
   kernel-only by default (`engagement`/`repo`/`maturity`/... are
-  deployment-declared examples in `docs/configuration.md`, not shipped
+  deployment-declared examples in `docs/reference/configuration.md`, not shipped
   defaults); `memory-class` ships at `backfill` state (athenaeum#972 disposition).
-  See `docs/configuration.md`'s "Dimension registry" section.
+  See `docs/reference/configuration.md`'s "Dimension registry" section.
 
 - **Generalized ENUMERATION primitive: `enumerate_entities` (MCP) /
   `athenaeum enumerate` (CLI) (athenaeum#965).** Return every entity of a
@@ -1322,7 +1322,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   re-reads fresh frontmatter per candidate for predicates, sorting, output
   fields, and the same fail-closed audience scoping (athenaeum#538) every
   other read tool applies. Does NOT deprecate or change `athenaeum people`
-  (that is athenaeum#966); `docs/recall-architecture.md` documents a
+  (that is athenaeum#966); `docs/design/recall-architecture.md` documents a
   full capability-parity table against it. See
   `src/athenaeum/enumeration.py` for the full contract.
 
@@ -1333,7 +1333,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   as `_push_records.jsonl`: JSONL, `O_APPEND` + `fsync`, never inside the
   wiki corpus), written BEFORE the archival `git rm` so a ledger-write
   failure refuses the archival entirely rather than deleting without a
-  record. `docs/recall-architecture.md` and `docs/provenance-shape.md` §8.8
+  record. `docs/design/recall-architecture.md` and `docs/design/provenance-shape.md` §8.8
   now name the expired-`daily` carve-out as the sole exemption from the
   fail-closed expiry filter, state the swept-vs-cold distinction, and record
   the `bucket:` → policy-pack `delete-after` mapping commitment for the
@@ -1390,7 +1390,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   S1 of the whole-store adapter design lock, athenaeum#911).** New
   `athenaeum/store.py` (L0/L1) defines `StoreKey`, `ObjectMeta`,
   `StoreCapabilities`, and the `Store` protocol per
-  `docs/whole-store-adapter-design.md` §6.2, plus `FilesystemStore` — the
+  `docs/extending/whole-store-adapter-design.md` §6.2, plus `FilesystemStore` — the
   protocol implemented over `atomic_io` + `pathlib`. `resolve_store_for_class()`
   is now available alongside the existing `surface_root_for_class()` in
   `athenaeum.storage`, extending the seam rather than forking it (design note
@@ -1466,7 +1466,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   `athenaeum measure` subcommands the comparator slice (child of athenaeum#709)
   is gated on, all read-only against the live store (no wiki write, no
   `_pending_merges.md` mutation, no reindex) and all committing their dated
-  snapshot into `docs/memory-model-measurements.md`:
+  snapshot into `docs/measurements/memory-model-measurements.md`:
   - `athenaeum measure shadow-linkage` — runs the existing complete-linkage
     formation (`athenaeum.clusters`, athenaeum#681) over the live wiki-page
     population in shadow mode: embeddings only, zero LLM calls (asserted by
@@ -1530,7 +1530,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   merge approve/reject via `athenaeum ingest-answers` records a verdict for
   the decision the pipeline already made, and `athenaeum run`'s finalize
   phase materializes the ledger and advances the duty-cycle counters. See
-  `docs/configuration.md`'s "Verdict ledger" section. `run()`'s new `lock`
+  `docs/reference/configuration.md`'s "Verdict ledger" section. `run()`'s new `lock`
   parameter is covered end to end (not just at the finalize-phase boundary)
   by `tests/test_verdicts_run_wiring.py::TestRunEndToEndLockThreading`,
   which drives the real top-level `run(..., lock=lock)` against an
@@ -1557,7 +1557,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   only that provider's own token/knob/model attribution and correct
   `billing_mode`) via the new `spend.record_spend_per_knob_provider`,
   instead of one row assuming a single provider for the whole run. See
-  `docs/configuration.md`'s "Per-knob provider routing" section for the
+  `docs/reference/configuration.md`'s "Per-knob provider routing" section for the
   updated "what is actually wired" summary.
 
 - **`athenaeum surface-divergence --field <name>` — the bounce-divergence
@@ -1574,7 +1574,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   Exits non-zero (`3`) when a registered field diverges beyond its declared
   allowance — `bounced` tolerates a wiki-surface entry with no pii mark
   (the documented evidence-class asymmetry,
-  `docs/bounce-surface-convergence.md`) but not a pii mark with no wiki
+  `docs/design/bounce-surface-convergence.md`) but not a pii mark with no wiki
   entry; `do_not_email` tolerates neither direction. `2` on an unreadable
   surface, distinct from a genuine divergence. `--report-only` preserves
   the pre-athenaeum#963 exit-0-unless-unreadable contract for interactive
@@ -1584,7 +1584,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   builds a wheel and installs it fresh to prove it). Wired into `pytest`
   (and therefore `ci.yml`) against fixture stores; the two prior commands
   (`bounce-divergence`, `do-not-email-divergence`) are unchanged and still
-  shipped. See `docs/configuration.md` → "Surface-divergence guard
+  shipped. See `docs/reference/configuration.md` → "Surface-divergence guard
   (athenaeum#963)" for the operator-invocation contract this registers for
   an unattended nightly pass against the live store.
 
@@ -1609,7 +1609,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
 - **The Lane A intake cap and its drain budget are documented
   (athenaeum#1322).** `librarian.max_files` was documented as a knob but never
   as the thing a large prose submission has to be budgeted against.
-  `docs/configuration.md` gains "Intake window composition and the Lane A
+  `docs/reference/configuration.md` gains "Intake window composition and the Lane A
   drain budget" — how the cap counts FILES not records, is a scheduling cap
   not a rate limit, and fills round-robin across sources; a field-by-field
   table of the athenaeum#1322 window-composition instrumentation; the
@@ -1723,7 +1723,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   "the uid exists but the read/serialize path failed." Both constants are
   defined in `src/athenaeum/_cli_shared.py` next to the existing
   `EXIT_LOCK_HELD`; documented in `athenaeum entity --help` and
-  `docs/exit-codes.md`.
+  `docs/reference/exit-codes.md`.
 
 - **The unprompted-recall `UserPromptSubmit` hook now enforces the same
   `hot`-tier filter and `push_budget.tokens_per_turn` budget as the
@@ -1839,7 +1839,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   operator's own day without any config at all. An operator who already
   runs in UTC sees zero behavior change. A misspelled/unresolvable zone
   name WARNs and falls back to UTC rather than crashing a run. Full
-  rationale and config table: [`docs/configuration.md`](docs/configuration.md).
+  rationale and config table: [`docs/reference/configuration.md`](docs/reference/configuration.md).
   `athenaeum.spend._start_of_utc_day`
   is renamed `_start_of_accounting_day` (internal, not part of the public
   API) and `athenaeum.spend.spend_today` gained an optional `config=`
@@ -1939,7 +1939,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   declared `type`) and athenaeum#965 (enumerate by declared type + field
   predicates) have shipped, every question `people` answers is answerable
   through `athenaeum enumerate --type person --where ...` — see
-  `docs/recall-architecture.md`'s capability-parity table (landed with
+  `docs/design/recall-architecture.md`'s capability-parity table (landed with
   athenaeum#965) for the exact per-flag mapping, including the two rows
   generalization deliberately drops: `--top-touch`'s computed composite sort
   and `--format table|tsv` rendering, both presentation/scoring concerns
@@ -1992,7 +1992,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   operator ruling that the deprecation-window constraint did not apply
   (every caller is this workspace's own operator/agent sessions, and
   releases are cut on demand). `--top-touch N` and `--format table|tsv`
-  are dropped without replacement, per `docs/recall-architecture.md`'s
+  are dropped without replacement, per `docs/design/recall-architecture.md`'s
   capability-parity table — every other surface has a direct `enumerate`
   equivalent. The parser registration, `cmd_people`, and
   `PEOPLE_SURFACE_DEPRECATION` are removed from `src/athenaeum/_cmd_query.py`;
@@ -2235,7 +2235,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   (a prior scan's own JSON output, now itself sitting in `raw/`) looks like
   the same problem class one layer over; flagged for a follow-up issue,
   deliberately not fixed here since `raw/` was out of this issue's scope.
-  See `docs/configuration.md` → "PII scan exclusion — machine-generated audit
+  See `docs/reference/configuration.md` → "PII scan exclusion — machine-generated audit
   logs". Unblocks athenaeum#437's acceptance criterion, which was
   structurally unreachable while this file was in scope.
 
@@ -2433,7 +2433,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   `raw/` in the clear (append-only by contract) while only a pointer
   reaches `wiki/` — so a clean `lint-pii` would read as "no retained
   values anywhere" while every original sat unmeasured in `raw/`, the
-  exact blind spot `docs/sensitivity-value-routing.md` §5 names as a
+  exact blind spot `docs/design/sensitivity-value-routing.md` §5 names as a
   real, unresolved measurement gap. `lint-pii` now also scans `raw/`
   with the same email/phone detectors and reports its count as a
   DISTINCT surface — both in plain text (a second summary line) and in
@@ -2444,7 +2444,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   time-bounds it — athenaeum#437 owns existing residue, out of scope
   here), so gating on it would fail every corpus permanently and would
   make a clean wiki look dirty, destroying the wiki gate's existing
-  meaning. See `docs/sensitivity-value-routing.md` §5 for the updated
+  meaning. See `docs/design/sensitivity-value-routing.md` §5 for the updated
   disposition note.
 
 - **Narrowed the `do_not_email` surface-divergence predicate to the direction
@@ -2602,7 +2602,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
 
 ### Documentation
 
-- **`docs/merge-inflow-restoration.md` §5 and §9 annotated with outcomes
+- **`docs/design/merge-inflow-restoration.md` §5 and §9 annotated with outcomes
   (athenaeum#1093).** §5 records the ratification: `librarian.max_merge_sources`
   raised from 5 to 8 (operator decision, 2026-08-22), written to the operative
   `~/knowledge/athenaeum.yaml` and runtime-confirmed on 2026-08-23 (commit
@@ -2615,7 +2615,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   the 4,227-suppressions-over-~2.4-days figure is not reconciled against
   athenaeum#784's measured 127-132/night and must not be used for tuning until
   a distinct-cluster count exists. §9 is annotated as resolved, citing
-  athenaeum#1088, which fixed `docs/configuration.md`'s two stale
+  athenaeum#1088, which fixed `docs/reference/configuration.md`'s two stale
   `max_merge_sources` default references (25 → 5); the annotation drops the
   original line numbers (already stale at filing time) in favor of the table
   row and example-block key. Docs-only; no code changed, and the code default
@@ -2623,7 +2623,7 @@ exit code `1` now means only "uid not found" (athenaeum#1270).
   only in the operator's live store.
 
 - **Design note: standing sensitive-value filter at raw-sweep intake
-  (athenaeum#949).** New `docs/sensitivity-value-routing.md` answers the
+  (athenaeum#949).** New `docs/design/sensitivity-value-routing.md` answers the
   issue's AC1–AC13 — placement and pointer contract (AC1/AC2), the uid
   problem and the proposed record-keyed read-path disposition (AC3), the
   raw-tree observability gap stated as open rather than solved (AC4),
@@ -2708,7 +2708,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   logged `decision_type_unavailable` outcome and zero state mutation,
   referencing athenaeum#905 (open, blocked by athenaeum#901/athenaeum#903) rather than
   inventing that store here. See
-  [`docs/contradiction-detection.md`](docs/contradiction-detection.md#decision-answer-files-unified-decision-resolution-as-intake-athenaeum908)
+  [`docs/design/contradiction-detection.md`](docs/design/contradiction-detection.md#decision-answer-files-unified-decision-resolution-as-intake-athenaeum908)
   for the full format and dispatch table.
 
 - **The athenaeum#691 PII-restore script is now a tracked, tested repo script instead
@@ -2798,7 +2798,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   all-matches sibling of `resolve_contact_record`, and `uid_on_record`); the
   applier never constructs a contacts-surface path itself. **The librarian is
   not an exception to the one-way-out rule, it is an implementation of it** —
-  `docs/one-way-in-one-way-out.md` gains a section saying so, and another
+  `docs/design/one-way-in-one-way-out.md` gains a section saying so, and another
   recording the athenaeum#858 answer durably in the docs rather than only in an
   issue comment.
 
@@ -2852,7 +2852,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   case, with byte-identical stdout on the CLI side. The generic tool carries
   ALL of `uid`, the entity class, `include_excluded` **and** `usage_classes`:
   dropping the last would not have been a smaller version of the same tool, it
-  would have silently removed a filter `docs/security-posture.md` §2.3 depends
+  would have silently removed a filter `docs/design/security-posture.md` §2.3 depends
   on. `mcp_server.person_read`'s fail-closed audience check applies
   identically on the generic path — the same check, so a restricted caller
   cannot obtain via one tool what the other refuses.
@@ -2867,8 +2867,8 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   command's OWN layer-ordering tests, which athenaeum#885's do not cover.
   `athenaeum query people` (the separate multi-flag listing command) is
   deliberately untouched, and a test pins that it grew no excluded-field flag.
-  `docs/one-way-in-one-way-out.md` §5's integrator checklist now points at the
-  one read path in its two shapes; `docs/security-posture.md` §2, §2.1 and
+  `docs/design/one-way-in-one-way-out.md` §5's integrator checklist now points at the
+  one read path in its two shapes; `docs/design/security-posture.md` §2, §2.1 and
   §2.3 are updated so the audience-scoping AND usage-class descriptions still
   match the tool inventory.
 - **`recall(with_pii=True)` — resolve excluded fields for any entity class
@@ -2878,12 +2878,12 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   entity's excluded fields had to make a second, differently-shaped call — and
   only if the entity happened to be a person. That is the shape that makes
   callers reach past the seam:
-  `docs/one-way-in-one-way-out.md` §3 already recorded one agent session
+  `docs/design/one-way-in-one-way-out.md` §3 already recorded one agent session
   reading the excluded surface directly because nothing said otherwise and no
   alternative existed. `recall_search` / `_recall_via_backend` now take
   `with_pii` (default `False`) plus an optional `usage_classes` threaded to the
   join exactly as `read_entity` accepts it, so a caller that must not receive a
-  provider-sourced address (`docs/security-posture.md` §2.3) can filter here
+  provider-sourced address (`docs/design/security-posture.md` §2.3) can filter here
   too. **The default path is byte-identical and free** — with the flag unset,
   ZERO excluded-surface scans are performed. New config key
   `storage.excluded_read_mapping` maps a page `type:` onto the surface class
@@ -2895,8 +2895,8 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   nothing, never an error, and critically never scans the wiki root as if it
   were an excluded surface. One index per call, shared across all `top_k` hits;
   a hit with no `uid` performs no join and produces no marker.
-  `docs/one-way-in-one-way-out.md` §3 is rewritten as one path — table *and*
-  prose — and `docs/recall-architecture.md`'s load-bearing-invariants table
+  `docs/design/one-way-in-one-way-out.md` §3 is rewritten as one path — table *and*
+  prose — and `docs/design/recall-architecture.md`'s load-bearing-invariants table
   gains the layering statement.
 
   **How it layers with audience scoping (athenaeum#312/#538) — unchanged.**
@@ -3027,8 +3027,8 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   The `read_person` MCP tool logs a ONE-TIME notice per process, and
   `athenaeum query person` prints one to **stderr** — never to stdout, which
   is a JSON object a script parses and where a notice would be a breaking
-  output change dressed up as a deprecation. `docs/one-way-in-one-way-out.md`
-  §3/§5 and `docs/recall-architecture.md` now document them as deprecated
+  output change dressed up as a deprecation. `docs/design/one-way-in-one-way-out.md`
+  §3/§5 and `docs/design/recall-architecture.md` now document them as deprecated
   wrappers rather than the sanctioned entry point.
 
   **This changes zero behaviour** — both functions keep working identically,
@@ -3050,7 +3050,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   documented path, and apollo-enrich's weekly job calls `read_people` today);
   deleting a documented public function the same day its replacement lands is
   the identical mistake in reverse — a caller finds the path broken with no
-  warning, exactly the silent failure `docs/one-way-in-one-way-out.md` exists
+  warning, exactly the silent failure `docs/design/one-way-in-one-way-out.md` exists
   to prevent on the read side. Per the version-bump policy this issue is a
   **patch** (a warning, no behaviour change); the removal will be a breaking
   change and must bump **minor** at minimum, with a `### Removed` entry.
@@ -3087,7 +3087,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   (`_commit_partial_and_exit`), matching coreutils `timeout`(1) semantics —
   athenaeum's own checks never return it. Both constants live in
   `src/athenaeum/librarian.py`; the full contract is documented in the new
-  `docs/exit-codes.md`, linked from `docs/configuration.md` and the README
+  `docs/reference/exit-codes.md`, linked from `docs/reference/configuration.md` and the README
   docs index. **Two of the issue's acceptance criteria — the SessionEnd
   wrapper's own handling of the two codes and its `INGEST_DEGRADED` signal —
   live in `scripts/hooks/knowledge-rebuild-index.sh` in a different repo
@@ -3183,7 +3183,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   job) costs nothing rather than one full pass to read zero people; and the
   stream is lazy, so a 4,696-uid run never holds thousands of full page bodies
   in memory at once. The two-path invariant is untouched
-  (`docs/one-way-in-one-way-out.md` §3, updated): `read_people` resolves
+  (`docs/design/one-way-in-one-way-out.md` §3, updated): `read_people` resolves
   `contacts_surface_root` itself, so a caller still supplies only uids and
   flags and never constructs a surface path — keeping the batch shape *inside*
   the seam is precisely what stops a caller from routing around an interface
@@ -3251,8 +3251,8 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   being promoted to a hard bounce — even a wiki verdict that *would* match the
   detector is carried, never re-recognized, because convergence is a join on a
   shared key and not a re-recognition pass. No new state is recorded on either
-  surface; the join only reads. New `docs/bounce-surface-convergence.md`
-  (linked from `docs/deprecated-email-tracking.md`) states the surfaces, the
+  surface; the join only reads. New `docs/design/bounce-surface-convergence.md`
+  (linked from `docs/design/deprecated-email-tracking.md`) states the surfaces, the
   key, the asymmetry, the direction and the alternative that was rejected, and
   the re-report contract — including why last-writer-wins is intended for a
   re-bounce and what first-writer-wins would have cost.
@@ -3272,7 +3272,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   evidence found only 13 of 189 entries carrying a `5.x.x` code at all.) Until
   now the required shape was discoverable only by reading the gate and
   inferring it — which a producer in another repository cannot depend on. New
-  `docs/tier0-bounce-note-contract.md` documents the shape as an implementable
+  `docs/extending/tier0-bounce-note-contract.md` documents the shape as an implementable
   contract, and new `bounce_contract.check_tier0_bounce_conformance` answers
   "would Tier 0 recognize this?" for a candidate note **without writing
   anything** — no mark, no intake submission, no store mutation, no network,
@@ -3378,7 +3378,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   the mark onto that record through the same `mark_bounced` path a live bounce
   takes, and reports a count — deleting nothing (the slug-keyed record keeps
   its own mark and gains a `folded_into:` stamp) and idempotent on a re-run.
-  `docs/deprecated-email-tracking.md` gains the section a verifier actually
+  `docs/design/deprecated-email-tracking.md` gains the section a verifier actually
   needs: the mark is a valid-time close, **not** a `bounced:` field, so
   `grep '^bounced:'` over the contacts surface returns 0 even after a fully
   successful mark — and the mirror-image error, where the same grep over the
@@ -3404,7 +3404,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
 
 - **Qualify three bare issue references that failed `public-safe-lint`
   (athenaeum#768).** The reconciliation pass landed two references to
-  athenaeum#765 in `docs/deprecated-email-tracking.md` and one to
+  athenaeum#765 in `docs/design/deprecated-email-tracking.md` and one to
   athenaeum#712 in `CHANGELOG.md` without a repo prefix, tripping the
   `bare-issue-ref` rule on `develop`. All three now carry the `athenaeum`
   prefix the rest of the document already uses.
@@ -3415,18 +3415,18 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   `tests/data/resolve_system.txt` and `tests/test_resolve_system_snapshot.py`
   — but seven in-tree comments/docstrings still pointed at the deleted
   pair, including a DRIFT GUARD comment in `src/athenaeum/resolutions.py`
-  that a doc author transcribed faithfully into `docs/field-corrections.md`
+  that a doc author transcribed faithfully into `docs/design/field-corrections.md`
   §6.1 (athenaeum#796), shipping a normative guard citing two nonexistent
   files (caught and corrected in athenaeum#798). Corrected all seven sites
   — the module docstring and `_RESOLVE_SYSTEM` drift-guard comment in
-  `src/athenaeum/resolutions.py`, `docs/conflict-resolution.md`,
-  `docs/provenance-shape.md`, `tests/regression/test_live_prompt_regression.py`,
+  `src/athenaeum/resolutions.py`, `docs/design/conflict-resolution.md`,
+  `docs/design/provenance-shape.md`, `tests/regression/test_live_prompt_regression.py`,
   and two docstrings in `tests/test_parse_response_routing.py` — to point at
   the live pin, `tests/data/prompts/resolutions.resolve_system.txt`
   (`tests/test_prompt_goldens.py::test_prompt_matches_golden`). The
   `resolutions.py` drift-guard comment now also names which sites are
   INDEPENDENT (hand-edited, bound by a test) versus DERIVED (regenerated
-  and already pinned), matching the split `docs/field-corrections.md` §6.1
+  and already pinned), matching the split `docs/design/field-corrections.md` §6.1
   uses, so the golden is no longer described as something to hand-maintain.
   Left the intentional historical mentions alone (the `docs/field-
   corrections.md` §6.1 parenthetical that exists to warn readers off the
@@ -3438,7 +3438,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
 
 ### Documentation
 
-- **Correct `docs/deprecated-email-tracking.md` — Voltaire is the reporter,
+- **Correct `docs/design/deprecated-email-tracking.md` — Voltaire is the reporter,
   drop the bespoke schema, mark Q1/Q2 superseded (athenaeum#768).** Three
   corrections to the athenaeum#565 design doc, verified against the live code
   2026-08-05: (1) the doc's Q3 named maecenas as the bounce-fact reporter,
@@ -3518,7 +3518,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
 
 - **`athenaeum push-metrics baseline` no longer writes an unconditional
   snapshot, and refuses to write a placeholder against a dead instrument
-  (athenaeum#795).** The write to `docs/memory-model-measurements.md`
+  (athenaeum#795).** The write to `docs/measurements/memory-model-measurements.md`
   previously happened before the `--json`/text branch and regardless of
   whether the baseline had anything meaningful to say — `--json` only
   redirected stdout, so there was no read-only way to check whether a
@@ -3698,8 +3698,8 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   handoff file, never silently dropped. The attribute allowlist
   (`librarian.corrections.fields`) is **empty by default** — a fresh
   deployment writes nothing cheaply until an operator opts a specific
-  attribute in. See `docs/field-corrections.md` (design) and
-  `docs/configuration.md`'s new "Field corrections" section (every
+  attribute in. See `docs/design/field-corrections.md` (design) and
+  `docs/reference/configuration.md`'s new "Field corrections" section (every
   `librarian.corrections.*` key).
 
 - **`athenaeum spend --reprice` — recompute historical rows at current rates
@@ -3874,7 +3874,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   `prompt_registry._META_ROWS` (the single source of truth) via the new
   `prompt_registry.KNOBS` constant rather than duplicated, and every one is
   exercised by a real-call-site test in the new `tests/test_knob_attribution.py`,
-  with a drift-guard test pinning that set against `KNOBS`. `docs/configuration.md`'s
+  with a drift-guard test pinning that set against `KNOBS`. `docs/reference/configuration.md`'s
   reasoning-tier-auditing cost note (added by athenaeum#779, which explicitly
   said `--by-knob` "does not exist yet") now points at `--by-knob` instead of
   the `--by-model`-keyed-by-model-id workaround it previously documented.
@@ -3937,7 +3937,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   screen (`athenaeum.reasoning_tiers`) has had real production callers since
   athenaeum#518/#602, but was undocumented in the install/config docs, so an
   operator drowning in the human merge queue had no signal a built, tested
-  screening cascade already exists. New `docs/configuration.md` section
+  screening cascade already exists. New `docs/reference/configuration.md` section
   "Reasoning-tier screening (T1/T2) — off by default" covers what T1 (cheap
   model, bounded ~100-word excerpts, reject-or-pass-up only, no write
   authority) and T2 (expensive model, full bodies, T1 pass-ups only) do; the
@@ -3955,8 +3955,8 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   (`tier`/`decision`/`reason`/`reason_code`/`model`/`proposal_id` +
   timestamp). README gets a matching install-section pointer and a corrected
   "Note on reasoning tiers" (it previously said "exactly one production call
-  site," stale since athenaeum#602 added the T2 caller). `docs/configuration.md`'s
-  own reasoning-tier-model footnote and `docs/authority-manifest.md`'s
+  site," stale since athenaeum#602 added the T2 caller). `docs/reference/configuration.md`'s
+  own reasoning-tier-model footnote and `docs/extending/authority-manifest.md`'s
   "one gated production caller" note carried the same staleness and are
   corrected too — `reasoning_tiers.py`'s own docstring already warns against
   calling the tiers "unwired" or claiming "no production caller." The default
@@ -3996,7 +3996,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   them needs a re-record, which athenaeum#715 will do when it removes the
   resolver), now with a one-line comment pointing at athenaeum#760/athenaeum#715
   so the mark reads as tracked, not an untracked failure. Comment-only: no prompt,
-  registered golden, recorded fixture, or `docs/prompts.md` edit; no `--record`.
+  registered golden, recorded fixture, or `docs/design/prompts.md` edit; no `--record`.
 
 ### Fixed
 
@@ -4259,7 +4259,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   every `correct_*` verdict, permit or refuse. `forget_a`/`forget_b` (a
   transient-member cleanup with no human assertion behind it) and
   human-ratified pending-question answers are explicitly out of scope and
-  unaffected — see `docs/conflict-resolution.md` §14 for the full rule,
+  unaffected — see `docs/design/conflict-resolution.md` §14 for the full rule,
   scope boundaries, and known limits (substring match ≠ authorization;
   transcripts roll off; the transcript itself is not immutable).
 
@@ -4346,7 +4346,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
 - **`athenaeum spend --json` documented as a stable consumer contract; unknown
   is now distinct from zero (athenaeum#694).** `spend --json` is the surface
   `/good-morning` reads, but its shape lived only in code. It is now documented
-  in `docs/configuration.md` — every field's name, type, unit, and what it does
+  in `docs/reference/configuration.md` — every field's name, type, unit, and what it does
   and does not assert — as a stable contract (athenaeum emits facts; the caller
   computes ratios). The contract states explicitly that the `api` (dollars) and
   `subscription` (tokens) buckets are in **different units and must never be
@@ -4409,7 +4409,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   `precision = referenced / pushed`. New CLI `athenaeum push-metrics
   {baseline,coverage-audit}`: `baseline` computes precision + coverage over a
   stated window and idempotently writes a dated snapshot into a new committed
-  `docs/memory-model-measurements.md` (`docs/memory-model.md`, the design
+  `docs/measurements/memory-model-measurements.md` (`docs/memory-model.md`, the design
   lock, is never touched); `coverage-audit` samples N sessions into a
   worksheet **file** listing each session's pushed set plus candidate ids
   that were NOT pushed, for a human reviewer to mark relevant-but-missed —
@@ -4450,7 +4450,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   default so it sits below `models.resolve` but above the code default. Full
   precedence, highest first: `ATHENAEUM_RESOLVE_MODEL` env >
   `models.resolve` > `resolve.model` (legacy) > `DEFAULT_RESOLVE_MODEL`.
-  The config template and `docs/configuration.md` now advertise
+  The config template and `docs/reference/configuration.md` now advertise
   `models.resolve` as the preferred key and mark `resolve.model` legacy.
   Not to be confused with athenaeum#234 (multi-provider support) — all four knobs
   remain free-form model-id strings passed to the Anthropic SDK.
@@ -4612,7 +4612,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
     `drive_folder_ids`, `mural_board_ids`, `handles_verified` (plus the
     pre-existing `linkedin_url`). No schema-class change needed — `WikiBase`
     is already `extra="allow"`, so the keys round-trip byte-for-byte through
-    tier0 passthrough. Documented in `docs/source-handles.md`.
+    tier0 passthrough. Documented in `docs/extending/source-handles.md`.
   - New `src/athenaeum/registry.py` + `athenaeum registry` command: walks
     `wiki/*.md` and emits `registry.json`, recording only entities with at
     least one populated handle. Deterministic (uid-sorted, canonical key
@@ -4639,7 +4639,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
     for standing-state facts (true-when-observed vs. currently-true),
     distinct from `created`/`updated` and from `valid_from`/`valid_until`
     (athenaeum#308). Round-trips through parse/render.
-  - New [`docs/memory-taxonomy.md`](docs/memory-taxonomy.md): axis
+  - New [`docs/design/memory-taxonomy.md`](docs/design/memory-taxonomy.md): axis
     reconciliation, merge-vs-cite semantics (within-class merge,
     across-class cite-never-destroy — enforcement is athenaeum#433), and the
     inference-block grammar.
@@ -4722,13 +4722,13 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
     (`wiki_dedupe.discover_wiki_dedupe_candidates`) so a class routed to a
     non-merge-eligible surface is dropped even if it sits in `wiki/` —
     fail-closed defense-in-depth, byte-identical when unconfigured.
-  - New [`docs/storage-adapter-contract.md`](docs/storage-adapter-contract.md),
+  - New [`docs/extending/storage-adapter-contract.md`](docs/extending/storage-adapter-contract.md),
     explicitly disambiguated from the source → raw-intake adapter contract.
 - **Documented the source → raw-intake adapter contract + a bundled
   adapter-authoring skill (athenaeum#419).** The raw-intake write API is the seam any
   external source uses to feed data into the wiki, but it wasn't documented or
   packaged as a reusable "adapter" contract for OSS consumers.
-  - New [`docs/adapter-contract.md`](docs/adapter-contract.md) specifies the
+  - New [`docs/extending/adapter-contract.md`](docs/extending/adapter-contract.md) specifies the
     contract end to end: the two intake lanes, the `raw/<source>/<timestamp>-<uuid8>.md`
     location convention, the frontmatter/provenance shape, idempotency
     (write-once, append-only, atomic, compile-time dedupe), how compilation
@@ -5188,7 +5188,7 @@ index backstop (athenaeum#373). No public API change; opt-in config knobs only.
   (athenaeum#336).** The README environment-variable table now documents
   `ATHENAEUM_LLM_PROVIDER` (`api` | `claude-cli`, default `api`) plus
   `ATHENAEUM_CLAUDE_CLI_BIN` and `ATHENAEUM_CLAUDE_CLI_TIMEOUT`, pointing to
-  `docs/configuration.md` → "LLM provider selection" as the source of truth.
+  `docs/reference/configuration.md` → "LLM provider selection" as the source of truth.
   `SECURITY.md`'s scope section now names the `claude-cli` subprocess backend
   — argv-list construction (no shell interpolation), ambient Claude Code auth
   (no credential handling), and neutral-cwd invocation. Docs-only; no code or
@@ -5259,7 +5259,7 @@ index backstop (athenaeum#373). No public API change; opt-in config knobs only.
   `ATHENAEUM_BATCH_MODE` is a loud startup error (no silent fallback); and
   `claude-cli` token COUNTS are still recorded in `TokenUsage` while
   `estimated_cost_usd` reports **$0** (subscription-covered). See
-  `docs/configuration.md` → "LLM provider selection (athenaeum#330)".
+  `docs/reference/configuration.md` → "LLM provider selection (athenaeum#330)".
 
 ## [0.13.9] - 2026-07-06
 
@@ -5270,7 +5270,7 @@ index backstop (athenaeum#373). No public API change; opt-in config knobs only.
   *valid-then-replaced* history, not a wrong claim —
   `resolutions.enact_resolution` now stamps the loser's `valid_until` in
   ADDITION to the existing `superseded_by` mark (the close augments, never
-  replaces, the mark; §8.4 of `docs/provenance-shape.md`). Triggers:
+  replaces, the mark; §8.4 of `docs/design/provenance-shape.md`). Triggers:
   - `keep_a` / `keep_b` close the loser at the **winner's `valid_from`** when
     known, else the **resolution date** (`date.today()`).
   - Sequential-snapshot `not_a_conflict` closes the **older** member's interval
@@ -5348,7 +5348,7 @@ index backstop (athenaeum#373). No public API change; opt-in config knobs only.
 
 - **Surface `serve --audience` where operators wire up agents.** The
   audience-scoped read access added in 0.13.4 (athenaeum#312) was documented only in
-  `docs/configuration.md` / `docs/security-posture.md`. The README "MCP memory
+  `docs/reference/configuration.md` / `docs/design/security-posture.md`. The README "MCP memory
   server" section now shows `athenaeum serve --audience`, states the default is
   full-wiki-readable, and clarifies it is a single-owner read filter (not a
   multi-user ACL). `SECURITY.md` gains a matching Scope bullet so a vetting
@@ -5387,7 +5387,7 @@ index backstop (athenaeum#373). No public API change; opt-in config knobs only.
     parameter (default `date.today()`) so a later `--as-of DATE` view (slice 3)
     is plumbing, not a rewrite. Deferred: resolver auto-stamping `valid_until` on
     supersession (slice 2), the `--as-of` CLI (slice 3), per-claim validity
-    (slice 4). Documented in `docs/provenance-shape.md` §8.
+    (slice 4). Documented in `docs/design/provenance-shape.md` §8.
 
 ## [0.13.4] - 2026-07-05
 
@@ -5457,7 +5457,7 @@ index backstop (athenaeum#373). No public API change; opt-in config knobs only.
   proposing splits through `_pending_merges.md` is explicitly deferred
   (moscow:could) and NOT built here. Guidance on splitting long pages into
   linked sub-entities added to `docs/why-athenaeum.md`; knobs documented in
-  `docs/configuration.md`.
+  `docs/reference/configuration.md`.
 
 ## [0.13.2] - 2026-07-05
 
@@ -5573,7 +5573,7 @@ fence-parsing hardening that the wiki-dedup drafts depend on.
   where processed knowledge stayed local-only. Uses the ambient git
   credential helper — no tokens handled in-process. Failures are
   non-fatal and logged with a greppable `athenaeum-push-failed:` prefix.
-  See [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md).
+  See [`docs/reference/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/reference/configuration.md).
 
 ### Fixed
 
@@ -5618,7 +5618,7 @@ literals from the shipped package.
   drive it (config-resolved, no identity literals in `src/`):
   `ephemeral_scopes` (scope glob patterns, default-empty) and
   `operational_markers` (lower-cased content substrings, default-empty;
-  needs `>= 2` to fire). See [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md).
+  needs `>= 2` to fire). See [`docs/reference/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/reference/configuration.md).
 - **`athenaeum auto-memory prune` CLI for existing operational pages (athenaeum#280,
   part 2 of athenaeum#278).** New `auto_memory_prune` module builds a kill-list of
   operational `wiki/auto-*.md` pages using the same classifier (not loose
@@ -5873,7 +5873,7 @@ _Honest per-run LLM cost accounting, and an incremental contradiction pass that 
   cache reads) is logged per call. Shipped via PR athenaeum#237; the
   resolver-phase cache observability work above (athenaeum#239) builds on these
   counters.
-- **Canonical configuration reference at `docs/configuration.md` (athenaeum#233).**
+- **Canonical configuration reference at `docs/reference/configuration.md` (athenaeum#233).**
   One page listing every operator-tunable knob — librarian run budgets,
   model selection, contradiction/resolver tuning, recall/search, and the
   hook/sidecar environment — with env var, yaml key, CLI flag, code
@@ -5886,8 +5886,8 @@ _Honest per-run LLM cost accounting, and an incremental contradiction pass that 
   `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD`,
   `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP`, `ATHENAEUM_PQ_SNOOZE_HOURS`,
   `ATHENAEUM_PYTHON`) and links to the full reference; the duplicated
-  config tables in `docs/auto-resolve.md` and
-  `docs/contradiction-detection.md` are trimmed to link there instead.
+  config tables in `docs/design/auto-resolve.md` and
+  `docs/design/contradiction-detection.md` are trimmed to link there instead.
 - **`--max-files` gains env and yaml knobs (athenaeum#232).** The per-run intake batch
   size now resolves CLI `--max-files` > `ATHENAEUM_MAX_FILES` env >
   `librarian.max_files` yaml > default 50, mirroring the athenaeum#220
@@ -5930,7 +5930,7 @@ _Honest per-run LLM cost accounting, and an incremental contradiction pass that 
   stating plainly that the project has a single primary maintainer today,
   and what users can rely on if it goes quiet: Apache-2.0 fork rights, the
   repo and history staying public, and releases reproducible from source.
-- **docs/configuration.md records the env-0/CLI-0 asymmetry decision
+- **docs/reference/configuration.md records the env-0/CLI-0 asymmetry decision
   (athenaeum#235).** A design-decision note next to the budget table: CLI flags
   reject `0` (typo guard at the interactive surface) while env/yaml accept
   `0` as a deliberate defer-everything cap — intentional, decided
@@ -6321,7 +6321,7 @@ high-confidence resolutions and dedupe escalations by source pair.
   a high-confidence proposal for the same pair.
 - **Dedup escape hatch** (athenaeum#157) — `ATHENAEUM_TIER4_DEDUP=false` reverts
   to pre-athenaeum#157 always-append behavior. Default is ON.
-- **`docs/auto-resolve.md`** — explains the audit trail, how to disable
+- **`docs/design/auto-resolve.md`** — explains the audit trail, how to disable
   auto-apply (env or yaml), how to tune the threshold, and how to
   reverse an auto-resolution.
 - **`README.md` Configuration section** — documents the three precedence
@@ -6459,7 +6459,7 @@ BREAKING changes**; see Removed.
   with `rationale="llm-unavailable"`. Includes
   `scripts/measure_contradiction_baseline.py` for local corpus baselining.
 - **Claude Code auto-memory integration guide (athenaeum#200) [details]** — new
-  `docs/integrations/claude-code.md` documents the generic symlink-bridge
+  `docs/guides/claude-code.md` documents the generic symlink-bridge
   pattern from `~/.claude/projects/<scope>/memory/` into
   `raw/auto-memory/<scope>/`, a citation frontmatter policy, and an
   end-to-end quick start. Adds `examples/claude-code/setup-symlinks.sh`
@@ -6526,7 +6526,7 @@ BREAKING changes**; see Removed.
   that needs it. Completes athenaeum#97 acceptance criterion "Remove
   legacy regex branch + its tests" which was deferred from athenaeum#120 pending
   live-tree migration. The field-keyed `field_sources` legacy reader
-  (per `docs/provenance-shape.md` §2.3) is a different legacy form and
+  (per `docs/design/provenance-shape.md` §2.3) is a different legacy form and
   remains accepted on read.
 - **BREAKING: extracted `enrich` subcommand and `connectors/apollo` module**
   (athenaeum#112) — the Apollo people-match connector and the `athenaeum enrich
@@ -6534,7 +6534,7 @@ BREAKING changes**; see Removed.
   were Kromatic-specific (operator-curated wiki + Apollo API key) and now
   live in a separate private toolkit alongside the
   rest of the Apollo enrichment scripts. The conflict-resolution
-  lock document (`docs/conflict-resolution.md`) drops its former section 8
+  lock document (`docs/design/conflict-resolution.md`) drops its former section 8
   (`enrich_person` + CLI write path); the conflict-resolution audit suite
   drops `TestEnrichPersonResolution` and `TestCliEnrichWriteFieldSourcesMerge`.
   No other resolver or schema is affected.
@@ -6676,7 +6676,7 @@ item is hardening, doc clarity, or test-quality.
 - **Main README vector-search section expanded** with the concrete
   rescue-class evidence (proper-noun collision: `Return Path`; no-overlap
   semantic query: `iterative feedback loops` → Innovation Accounting) and
-  a pointer to `docs/recall-architecture.md`.
+  a pointer to `docs/design/recall-architecture.md`.
 - **`tests/test_roundtrip.py`** — end-to-end integration pinning
   init → remember → seed wiki → rebuild-index → recall with an explicit
   `--cache-dir` (regression guard for the class of bugs where a path
@@ -6740,12 +6740,12 @@ same sharp edges the review found.
 
 > **Adopter note.** The vector backend and the Claude Code hook flow ship
 > working — but the hook flow assumes you follow the hybrid-recall pattern
-> described in [`docs/recall-architecture.md`](docs/recall-architecture.md).
+> described in [`docs/design/recall-architecture.md`](docs/design/recall-architecture.md).
 > Four load-bearing invariants (`set -a` around config sourcing, hybrid
 > FTS5+vector merge, `hookSpecificOutput.hookEventName` wrapper, console
 > API key vs `CLAUDE_CODE_OAUTH_TOKEN`) each shipped CI-green the first
 > time they broke — every one of them is a silent failure mode. Read
-> `docs/recall-architecture.md` before simplifying any of them.
+> `docs/design/recall-architecture.md` before simplifying any of them.
 
 ### Added
 - **Vector search backend** with chromadb + `all-MiniLM-L6-v2` (athenaeum#31, athenaeum#32)
@@ -6756,7 +6756,7 @@ same sharp edges the review found.
 - `athenaeum.yaml` config with `auto_recall` toggle and `search_backend` selection (athenaeum#30)
 - Example Claude Code hooks — SessionStart builds the FTS5 index, UserPromptSubmit queries it per turn, PreCompact nudges save-before-compact
 - FTS5-based per-turn wiki recall hook
-- `docs/recall-architecture.md` describing the hybrid FTS5+vector pipeline, why each backend is load-bearing, and the four invariants a future "simplification" must not remove
+- `docs/design/recall-architecture.md` describing the hybrid FTS5+vector pipeline, why each backend is load-bearing, and the four invariants a future "simplification" must not remove
 - Example hooks (`user-prompt-recall.sh`, `session-start-recall.sh`) updated to match production hardening — `set -a`/`set +a` around config sourcing so child processes inherit `ANTHROPIC_API_KEY`; hybrid FTS5+vector merge; optional 1Password bootstrap of `ANTHROPIC_API_KEY` at SessionStart
 - README sections for the `[vector]` extra and the `athenaeum query-topics` subcommand
 - `SECURITY.md` with private disclosure process

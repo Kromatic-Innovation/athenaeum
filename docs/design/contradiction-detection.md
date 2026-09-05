@@ -11,10 +11,10 @@ costs, what knobs change behavior, and what the resulting block in
 For adjacent material:
 
 - Per-claim provenance and `field_sources` shape — see
-  [`docs/provenance-shape.md`](provenance-shape.md).
+  [`docs/design/provenance-shape.md`](provenance-shape.md).
 - The full audit-locked catalog of every place in the librarian where two
   values disagree (Tier 0 / Tier 3 / dedupe / merge frontmatter) — see
-  [`docs/conflict-resolution.md`](conflict-resolution.md). This document
+  [`docs/design/conflict-resolution.md`](conflict-resolution.md). This document
   covers ONLY the auto-memory cluster path; principled Tier 3 contradictions
   flow through `tier3_merge` and live in that adjacent doc.
 
@@ -66,7 +66,7 @@ partial-order authority treatment and rate limits, evidence-artifact fold
 proposals, the `compatible` TTL re-check, sibling-scope widening probes) are
 **built and tested, gated off by default** behind `librarian.comparator_enabled`
 (default `false`) — see
-[`docs/configuration.md`](configuration.md#five-verdict-comparator-athenaeum715--off-by-default).
+[`docs/reference/configuration.md`](../reference/configuration.md#five-verdict-comparator-athenaeum715--off-by-default).
 
 **The pipeline below (raw `auto-memory` intake → C1-C4 → this document's
 Haiku-detect/Opus-resolve split) is UNCHANGED and still describes live
@@ -367,7 +367,7 @@ env var, yaml key, and code default for this pipeline (`models.classify`,
 `similarity_threshold`, `resolve_max_per_run`,
 `resolved_similarity_threshold`, `ATHENAEUM_TIER4_DEDUP`,
 `ATHENAEUM_PQ_SNOOZE_HOURS`, and the auto-apply lane) — lives in
-[`docs/configuration.md`](configuration.md#contradiction-detection-and-resolver).
+[`docs/reference/configuration.md`](../reference/configuration.md#contradiction-detection-and-resolver).
 
 Notes:
 

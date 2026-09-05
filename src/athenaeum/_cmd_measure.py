@@ -14,7 +14,7 @@ artifact the v6 comparator slice (child of athenaeum#709) is gated on:
 
 All three of the above: read-only against the live store (no wiki write, no
 ``_pending_merges.md`` mutation, no reindex), write/append their dated
-snapshot into ``docs/memory-model-measurements.md`` unless ``--dry-run`` was
+snapshot into ``docs/measurements/memory-model-measurements.md`` unless ``--dry-run`` was
 passed, and print a machine-readable summary with ``--json``.
 
 The fourth is a DIFFERENT shape (issue athenaeum#1333, C4-retirement gate
@@ -56,9 +56,9 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--docs-path",
         type=Path,
-        default=Path("docs/memory-model-measurements.md"),
+        default=Path("docs/measurements/memory-model-measurements.md"),
         help="Where the snapshot section is written/appended "
-        "(default: docs/memory-model-measurements.md).",
+        "(default: docs/measurements/memory-model-measurements.md).",
     )
     parser.add_argument(
         "--dry-run",

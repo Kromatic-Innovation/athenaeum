@@ -165,7 +165,7 @@ built-in consumer (the PII-exclusion surface), not a general policy engine.
 > flag). Until an operator turns either setting on, production merge
 > behavior is unaffected. Full writeup, including when it's worth
 > turning on and what it costs:
-> [Reasoning-tier screening (T1/T2)](docs/configuration.md#reasoning-tier-screening-t1t2--off-by-default).
+> [Reasoning-tier screening (T1/T2)](docs/reference/configuration.md#reasoning-tier-screening-t1t2--off-by-default).
 
 ## The MCP surface
 
@@ -195,7 +195,7 @@ The three decision-queue mutators (`resolve_question`, `resolve_merge`,
 `review_audit_item`) plus every page-content-bearing read tool are subject to
 audience scoping: a restricted (`--audience`) server process fails those
 mutators closed entirely, since adjudicating the operator's decision queue is
-owner-only. See [`docs/security-posture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/security-posture.md).
+owner-only. See [`docs/design/security-posture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/security-posture.md).
 
 ```bash
 pip install 'athenaeum[mcp]'
@@ -241,8 +241,8 @@ the caller. Pages carry `access:` (`open`/`internal`/`confidential`/`personal`)
 and/or an `audience:` role list; untagged pages fail **closed** for a restricted
 audience (owner still sees them). This is a single-owner read filter, not a
 multi-user ACL. See
-[`docs/security-posture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/security-posture.md)
-and [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md)
+[`docs/design/security-posture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/security-posture.md)
+and [`docs/reference/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/reference/configuration.md)
 for the frontmatter model and the fail-closed enforcement.
 
 **Write-time PII screening (opt-in, off by default).** Complementing the
@@ -284,7 +284,7 @@ pip install athenaeum
 > pre-screen merge proposals before they reach your human review queue — off
 > by default, since the T2 tier can auto-apply a merge with no human review.
 > Worth turning on once your merge queue outgrows manual triage; see
-> [Reasoning-tier screening (T1/T2)](docs/configuration.md#reasoning-tier-screening-t1t2--off-by-default)
+> [Reasoning-tier screening (T1/T2)](docs/reference/configuration.md#reasoning-tier-screening-t1t2--off-by-default)
 > for when and how.
 
 ## Quick start
@@ -458,7 +458,7 @@ athenaeum decay-sweep --apply
 ```
 
 `decay-sweep` (issue athenaeum#904) archives EXPIRED `bucket: daily` wiki pages —
-see `docs/provenance-shape.md` §8.8 for the `bucket:` / `valid_until:`
+see `docs/design/provenance-shape.md` §8.8 for the `bucket:` / `valid_until:`
 frontmatter contract. `weekly` / `durable` / unbucketed pages are never
 candidates. Makes **zero LLM calls** — deterministic frontmatter/date
 comparison only. Dry-run is the default, same shape as `auto-memory prune`
@@ -625,14 +625,14 @@ feed Athenaeum by writing **raw-intake files** that the librarian compiles into
 the wiki. That seam is a small, stable contract: a source only _appends_ a raw
 file; the librarian is the only writer to the wiki.
 
-- **The contract** — [`docs/adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/adapter-contract.md): file location, frontmatter shape, provenance, idempotency, and how compilation reconciles duplicates/updates.
+- **The contract** — [`docs/extending/adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/extending/adapter-contract.md): file location, frontmatter shape, provenance, idempotency, and how compilation reconciles duplicates/updates.
 - **Guided walkthrough** — the bundled [`adapter-authoring`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/skills/adapter-authoring/SKILL.md) skill (ships in the package under `skills/`) teaches an agent or a human how to build a custom adapter step by step.
 - **Worked example** — [`examples/adapters/minimal_adapter.py`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/examples/adapters/minimal_adapter.py): a synthetic, runnable adapter you can copy as a starting point.
 
 ## Integrations
 
-- **Claude Code auto-memory** — bridge `~/.claude/projects/<scope>/memory/` into Athenaeum's `raw/` intake so the librarian can cluster, merge, and contradiction-check Claude Code's durable memory alongside other sources. A complete worked adapter for the auto-memory intake lane. See [`docs/integrations/claude-code.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/integrations/claude-code.md).
-- **Contradiction detection** — pipeline overview, cross-scope modes, source-precedence taxonomy, configuration reference, and cost model for the auto-memory contradiction path. See [`docs/contradiction-detection.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/contradiction-detection.md).
+- **Claude Code auto-memory** — bridge `~/.claude/projects/<scope>/memory/` into Athenaeum's `raw/` intake so the librarian can cluster, merge, and contradiction-check Claude Code's durable memory alongside other sources. A complete worked adapter for the auto-memory intake lane. See [`docs/guides/claude-code.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/guides/claude-code.md).
+- **Contradiction detection** — pipeline overview, cross-scope modes, source-precedence taxonomy, configuration reference, and cost model for the auto-memory contradiction path. See [`docs/design/contradiction-detection.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/contradiction-detection.md).
 
 ## Vector search (optional)
 
@@ -653,7 +653,7 @@ search_backend: vector
 ```
 
 Full walkthrough and the four invariants a future simplification must not
-remove: [`docs/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/recall-architecture.md).
+remove: [`docs/design/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/recall-architecture.md).
 
 ## Query-topic extraction (optional)
 
@@ -675,14 +675,14 @@ silently to the regex extractor if the API key or CLI is unavailable.
 
 The table below covers the common knobs. The exhaustive list — every env var,
 yaml key, and CLI flag with its code default and precedence chain — lives in
-[`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md).
+[`docs/reference/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/reference/configuration.md).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `ANTHROPIC_API_KEY` | Yes (unless `--dry-run`) | API key for Tier 2/3 LLM calls |
 | `ATHENAEUM_CLASSIFY_MODEL` | No | Override Tier 2 model. Precedence: env > `models.classify` in `athenaeum.yaml` > default `claude-haiku-4-5-20251001` |
 | `ATHENAEUM_WRITE_MODEL` | No | Override Tier 3 model. Precedence: env > `models.write` in `athenaeum.yaml` > default `claude-sonnet-4-6` |
-| `ATHENAEUM_LLM_PROVIDER` | No | LLM backend for the compile path: `api` (default, metered Anthropic API) or `claude-cli` (run the librarian on a Claude Code **subscription** via the `claude` binary, no API key). Precedence: env > `llm.provider` in `athenaeum.yaml` > `api`. Batch mode is API-only. See [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md) → "LLM provider selection" |
+| `ATHENAEUM_LLM_PROVIDER` | No | LLM backend for the compile path: `api` (default, metered Anthropic API) or `claude-cli` (run the librarian on a Claude Code **subscription** via the `claude` binary, no API key). Precedence: env > `llm.provider` in `athenaeum.yaml` > `api`. Batch mode is API-only. See [`docs/reference/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/reference/configuration.md) → "LLM provider selection" |
 | `ATHENAEUM_CLAUDE_CLI_BIN` | No | Path or name of the `claude` binary for the `claude-cli` provider (default: `claude`, resolved on `PATH`) |
 | `ATHENAEUM_CLAUDE_CLI_TIMEOUT` | No | Per-call timeout in seconds for the `claude-cli` subprocess (default: `300`) |
 | `ATHENAEUM_RESOLVE_MODEL` | No | Override the contradiction-resolver model (default: `claude-opus-4-7`) |
@@ -690,10 +690,10 @@ yaml key, and CLI flag with its code default and precedence chain — lives in
 | `ATHENAEUM_MAX_API_CALLS` | No | Run-level API call budget for `athenaeum run`. Precedence: `--max-api-calls` CLI flag > env > `librarian.max_api_calls` in `athenaeum.yaml` > default `800`. Env `0` is valid and defers the entire intake (writes `wiki/_deferred_work.md` and logs the DEGRADED summary); the CLI flag rejects `0` |
 | `ATHENAEUM_MAX_FILES` | No | Per-run intake batch size for `athenaeum run`. Precedence: `--max-files` CLI flag > env > `librarian.max_files` in `athenaeum.yaml` > default `50`. Env `0` is valid (defer-everything window); the CLI flag rejects `0` |
 | `ATHENAEUM_BATCH_MODE` | No | Opt-in [Batch API](https://platform.claude.com/docs/en/build-with-claude/batch-processing) mode for `athenaeum run` (athenaeum#236): tier-2/tier-3 calls are submitted as batches at a 50% token discount. Latency-tolerant — most batches finish within an hour, 24h worst case — intended for the nightly run. Precedence: `--batch-mode` / `--no-batch-mode` CLI flags > env > `librarian.batch_mode` in `athenaeum.yaml` > default off (`--no-batch-mode` forces the synchronous path even when env/yaml turn batch mode on) |
-| `ATHENAEUM_RESOLVE_AUTO_APPLY` | No | Auto-apply high-confidence resolutions (default: `true`). See [`docs/auto-resolve.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/auto-resolve.md) |
+| `ATHENAEUM_RESOLVE_AUTO_APPLY` | No | Auto-apply high-confidence resolutions (default: `true`). See [`docs/design/auto-resolve.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/auto-resolve.md) |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | No | Confidence floor for auto-apply, in `[0.0, 1.0]` (default: `0.90`) |
 | `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP` | No | Per-side body cap for the resolver's full-body context, ~4 chars/token (default: `1500`; must be positive) |
-| `ATHENAEUM_CROSS_SCOPE_MODE` | No | Cross-scope contradiction detection: `off` / `ancestor` / `similarity` / `both` (default: `ancestor`). See [`docs/contradiction-detection.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/contradiction-detection.md) |
+| `ATHENAEUM_CROSS_SCOPE_MODE` | No | Cross-scope contradiction detection: `off` / `ancestor` / `similarity` / `both` (default: `ancestor`). See [`docs/design/contradiction-detection.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/contradiction-detection.md) |
 | `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD` | No | Cosine threshold for matching new detections against the resolved-decision log (default: `0.83`) |
 | `ATHENAEUM_TIER4_DEDUP` | No | Dedupe pending-question escalations by source-memory pair (default: `true`; set `false`/`0`/`no`/`off` for legacy always-append) |
 | `ATHENAEUM_CACHE_DIR` | No | Cache root for the librarian's embedding/cluster pass (default: `~/.cache/athenaeum`) |
@@ -715,12 +715,12 @@ thing to check when the hook "ignores" a config change.
 scoped to its inference endpoint, and the Anthropic Messages API rejects it
 with `401 OAuth authentication is currently not supported`. The pipeline and
 example hooks need a separate console API key — see
-[`docs/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/recall-architecture.md#anthropic_api_key-bootstrap-sessionstart)
+[`docs/design/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/recall-architecture.md#anthropic_api_key-bootstrap-sessionstart)
 for the 1Password bootstrap pattern.
 
 ## Configuration
 
-Settings are resolved in the order **CLI flag > env var > `<knowledge_root>/athenaeum.yaml` > built-in default**, so a one-off shell export beats the yaml without requiring an edit. The canonical reference for every knob — librarian budgets, model selection, contradiction/resolver tuning, recall/search, and hook environment — is [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md). As one example, the resolver model lives under the top-level `models:` block, and the rest of the resolver's behavior knobs live under `resolve:`:
+Settings are resolved in the order **CLI flag > env var > `<knowledge_root>/athenaeum.yaml` > built-in default**, so a one-off shell export beats the yaml without requiring an edit. The canonical reference for every knob — librarian budgets, model selection, contradiction/resolver tuning, recall/search, and hook environment — is [`docs/reference/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/reference/configuration.md). As one example, the resolver model lives under the top-level `models:` block, and the rest of the resolver's behavior knobs live under `resolve:`:
 
 ```yaml
 models:
@@ -732,9 +732,9 @@ resolve:
   full_body_token_cap: 1500       # ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP, per-side body cap (~4 chars/token)
 ```
 
-When `auto_apply` is on and a proposal's confidence meets or exceeds `auto_apply_threshold`, the pending-question block is auto-flipped to answered with an `Auto-resolved: true` audit-trail tag. See [`docs/auto-resolve.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/auto-resolve.md) for the full lane, including how to disable, lower the threshold, or reverse an auto-resolution.
+When `auto_apply` is on and a proposal's confidence meets or exceeds `auto_apply_threshold`, the pending-question block is auto-flipped to answered with an `Auto-resolved: true` audit-trail tag. See [`docs/design/auto-resolve.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/auto-resolve.md) for the full lane, including how to disable, lower the threshold, or reverse an auto-resolution.
 
-**Alternative model gateways.** All model calls go through the Anthropic SDK, which honors `ANTHROPIC_BASE_URL` — so a LiteLLM proxy or any Anthropic-compatible gateway can serve alternative models with zero code change. Only Claude models are first-party tested; see [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md#alternative-model-gateways-anthropic_base_url) for the details and [#234](https://github.com/Kromatic-Innovation/athenaeum/issues/234) for multi-provider tracking.
+**Alternative model gateways.** All model calls go through the Anthropic SDK, which honors `ANTHROPIC_BASE_URL` — so a LiteLLM proxy or any Anthropic-compatible gateway can serve alternative models with zero code change. Only Claude models are first-party tested; see [`docs/reference/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/reference/configuration.md#alternative-model-gateways-anthropic_base_url) for the details and [#234](https://github.com/Kromatic-Innovation/athenaeum/issues/234) for multi-provider tracking.
 
 ## Data formats
 
@@ -943,17 +943,17 @@ This README covers the shape of the system and how to run it. For depth on a
 specific piece:
 
 - [`docs/why-athenaeum.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/why-athenaeum.md) — full design rationale, comparison with mem0/Letta/Zep/Cognee/RAG/Claude memory, and production lessons.
-- [`docs/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/recall-architecture.md) — the hybrid FTS5 + vector recall path and its invariants.
-- [`docs/sidecar-adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/sidecar-adapter-contract.md) — the `athenaeum context` sidecar core's envelope schema and the may/may-not rules for a host-specific adapter.
-- [`docs/contradiction-detection.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/contradiction-detection.md) — contradiction pipeline, cross-scope modes, cost model.
-- [`docs/conflict-resolution.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/conflict-resolution.md) and [`docs/auto-resolve.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/auto-resolve.md) — the resolver's action taxonomy and auto-apply lane.
-- [`docs/authority-manifest.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/authority-manifest.md) and [`docs/source-handles.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/source-handles.md) — source precedence and provenance handles.
-- [`docs/security-posture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/security-posture.md) — audience scoping, fail-closed enforcement, PII screening.
-- [`docs/storage-adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/storage-adapter-contract.md) — the storage extension point.
-- [`docs/whole-store-adapter-design.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/whole-store-adapter-design.md) — design lock for generalising that extension point to the whole store: the seam inventory, the index-build latency constraints, and how git-backed recoverability becomes an adapter capability.
-- [`docs/adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/adapter-contract.md) — writing a custom intake adapter.
-- [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md) — every env var, yaml key, and CLI flag, with defaults and precedence.
-- [`docs/exit-codes.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/exit-codes.md) — `athenaeum run`'s exit-code contract (`0` / `1` / `75` graceful-partial / `124` external-kill).
+- [`docs/design/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/recall-architecture.md) — the hybrid FTS5 + vector recall path and its invariants.
+- [`docs/extending/sidecar-adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/extending/sidecar-adapter-contract.md) — the `athenaeum context` sidecar core's envelope schema and the may/may-not rules for a host-specific adapter.
+- [`docs/design/contradiction-detection.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/contradiction-detection.md) — contradiction pipeline, cross-scope modes, cost model.
+- [`docs/design/conflict-resolution.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/conflict-resolution.md) and [`docs/design/auto-resolve.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/auto-resolve.md) — the resolver's action taxonomy and auto-apply lane.
+- [`docs/extending/authority-manifest.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/extending/authority-manifest.md) and [`docs/extending/source-handles.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/extending/source-handles.md) — source precedence and provenance handles.
+- [`docs/design/security-posture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/design/security-posture.md) — audience scoping, fail-closed enforcement, PII screening.
+- [`docs/extending/storage-adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/extending/storage-adapter-contract.md) — the storage extension point.
+- [`docs/extending/whole-store-adapter-design.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/extending/whole-store-adapter-design.md) — design lock for generalising that extension point to the whole store: the seam inventory, the index-build latency constraints, and how git-backed recoverability becomes an adapter capability.
+- [`docs/extending/adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/extending/adapter-contract.md) — writing a custom intake adapter.
+- [`docs/reference/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/reference/configuration.md) — every env var, yaml key, and CLI flag, with defaults and precedence.
+- [`docs/reference/exit-codes.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/reference/exit-codes.md) — `athenaeum run`'s exit-code contract (`0` / `1` / `75` graceful-partial / `124` external-kill).
 
 ## Getting help
 

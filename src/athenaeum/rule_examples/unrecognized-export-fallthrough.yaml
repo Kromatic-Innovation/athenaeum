@@ -10,7 +10,7 @@
 # auto-compiling it -- e.g. because the operator wants a human/LLM judgement
 # call on every record of this shape, at least for now. Nothing is written
 # by this rule; the record is left exactly as ordinary intake found it. See
-# docs/shape-rules.md for the full rule-schema reference.
+# docs/design/shape-rules.md for the full rule-schema reference.
 
 version: 1
 name: example-unrecognized-export-fallthrough

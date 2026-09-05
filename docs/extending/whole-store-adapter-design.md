@@ -13,7 +13,7 @@ off athenaeum#984 (off-corpus storage) and athenaeum#985 (erasure
 classification and taint).
 
 From the 2026-08-14 intake-architecture review (Vitruvius Specify), which
-ratified [`docs/north-star.md`](north-star.md) §2.11:
+ratified [`docs/north-star.md`](../north-star.md) §2.11:
 
 > **Storage is logically fixed, physically pluggable.** The logical model —
 > raw + wiki as source of truth, indexes derived — is a fixed boundary. The
@@ -21,11 +21,11 @@ ratified [`docs/north-star.md`](north-star.md) §2.11:
 > excluded surface with encrypted storage, a database, or a synced filesystem,
 > and no caller can tell, because callers only ever touch intake and recall.
 
-Companion to [`docs/storage-adapter-contract.md`](storage-adapter-contract.md)
+Companion to [`docs/extending/storage-adapter-contract.md`](storage-adapter-contract.md)
 (the seam as it exists today — entity class → surface + corpus policy),
-[`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md) (the two-path
+[`docs/design/one-way-in-one-way-out.md`](../design/one-way-in-one-way-out.md) (the two-path
 invariant this design is the physical half of), and
-[`docs/recall-architecture.md`](recall-architecture.md) (the read path whose
+[`docs/design/recall-architecture.md`](../design/recall-architecture.md) (the read path whose
 latency budget bounds everything here).
 
 ---
@@ -49,7 +49,7 @@ seam answers *where a class lives* and *what corpus it joins*; it does not
 mediate *how bytes are read and written*. `backing_store` is today a
 descriptive string — `"wiki-markdown"`, `"markdown"` — that no code dispatches
 on, and the documented `backing_store: "sqlite"` example
-(`docs/storage-adapter-contract.md:207`) changes no behaviour whatsoever.
+(`docs/extending/storage-adapter-contract.md:207`) changes no behaviour whatsoever.
 
 That is the whole gap. **The class → surface routing generalises already; the
 physical layer does not exist yet.** Reaching north-star §2.11 means
@@ -371,7 +371,7 @@ extrapolated, because no others were found in `docs/`, `CHANGELOG.md` or
 `tests/`:
 
 - **Full index build:** *"FTS5 rebuild is ~1s on a 3k-page wiki, cheap next to
-  vector's ~45s"* — `docs/recall-architecture.md:43`.
+  vector's ~45s"* — `docs/design/recall-architecture.md:43`.
 - **Query latency p95**, 200 synthetic pages, Apple Silicon:
   `keyword: 260.0` ms, `fts5: 1.2` ms —
   `tests/benchmarks/test_search_bench.py:39-46`. The keyword figure is high
@@ -379,12 +379,12 @@ extrapolated, because no others were found in `docs/`, `CHANGELOG.md` or
 - **O(corpus)-per-call, in production:** resolving one excluded record per
   `uid` cost *"~28s each against the live corpus, ~37 hours for the 4,696
   people the weekly enrichment job resolves"* —
-  `docs/one-way-in-one-way-out.md:118-121`. That number is why the batch
+  `docs/design/one-way-in-one-way-out.md:118-121`. That number is why the batch
   `read_entities` shape exists at all.
 
 The third is the cautionary one, and it did not need an adapter to happen. A
 seam that is far too slow for a real workload is one a caller eventually
-routes around (`docs/one-way-in-one-way-out.md:122-125`) — which is a
+routes around (`docs/design/one-way-in-one-way-out.md:122-125`) — which is a
 *correctness* failure of the two-path invariant, arriving dressed as a
 performance problem. Adapter latency makes that failure mode cheaper to reach,
 not new.
@@ -566,9 +566,9 @@ a directory whose name promises the opposite. §5.2 classifies it.
 The boundary north-star §2.11 fixes is **confirmed unchanged**, and it already
 holds physically as well as logically: every derived index lives under the
 cache root (`config.resolve_cache_dir`, `src/athenaeum/config.py:128`; default
-`~/.cache/athenaeum`, `docs/configuration.md:71`), outside `knowledge_root`
+`~/.cache/athenaeum`, `docs/reference/configuration.md:71`), outside `knowledge_root`
 entirely, and is explicitly framed as *"not recovery-critical (recovery is
-git-based)"* (`docs/configuration.md:56`). The FTS5 database, the chromadb
+git-based)"* (`docs/reference/configuration.md:56`). The FTS5 database, the chromadb
 collection, both manifests, and the vector `.generation` stamp
 (`search.py:990-1037`) are all reconstructible from raw + wiki by definition.
 
@@ -656,7 +656,7 @@ This is the extension point athenaeum#911 asks to have drafted. It is a
 **draft for publication**, not a published surface: like the rest of
 `athenaeum.storage` it stays off the stable `__all__` surface until §9's S8
 promotes it, backed by the conformance suite S1 ships (the same staging the
-existing seam used — `docs/storage-adapter-contract.md:247-249`).
+existing seam used — `docs/extending/storage-adapter-contract.md:247-249`).
 
 ### 6.1 Design decisions
 
@@ -676,7 +676,7 @@ existing seam used — `docs/storage-adapter-contract.md:247-249`).
 - **D5 — the existing seam is extended, never forked.** `resolve_adapter_for_class`
   keeps routing classes to surfaces; the store hangs off the resolved adapter.
   A parallel API alongside `surface_root_for_class` would be exactly the forked
-  seam `docs/one-way-in-one-way-out.md:56-60` rules out.
+  seam `docs/design/one-way-in-one-way-out.md:56-60` rules out.
 - **D6 — fail closed, loudly.** Inherited verbatim from the existing layer: an
   omitted capability defaults to absent, and a misconfiguration raises rather
   than falling back to the default surface (`storage.py:72-80`).
@@ -804,7 +804,7 @@ Putting `resolve_store_for_class` on the `storage.py` side of the edge keeps
 the dependency one-directional while still satisfying D5 ("the existing seam
 is extended, never forked" — it sits beside `surface_root_for_class` in the
 same module, doing the equivalent resolution for the store). See
-`docs/store-contract.md`'s "Where this sits" section for the full published
+`docs/extending/store-contract.md`'s "Where this sits" section for the full published
 account; issue athenaeum#1087 corrected this section to match it.
 
 `FilesystemStore` is implementable without weakening `atomic_io.py`'s L0 rule
@@ -825,7 +825,7 @@ is exactly the kind of module that attracts upward imports.
 R4 is not new policy — it is the existing layer's rule
 (`StorageConfigError`'s *"never silently falls back to the default surface"*,
 `storage.py:72-80`; the fail-closed `corpus_policy`,
-`docs/storage-adapter-contract.md:175-181`) applied to the physical layer.
+`docs/extending/storage-adapter-contract.md:175-181`) applied to the physical layer.
 Concretely:
 
 - A destructive path on a surface declaring neither `versioned` nor
@@ -954,7 +954,7 @@ closed independently of this design, as anticipated.
 | **S5 — artifact classification** | Every artifact in §5.2's tables declares one of the four R3 classes, and every `operational` one declares `store-durable` or `machine-local`. The 12 duplicated `O_APPEND` appenders collapse onto the contract's `append`; the cache-dir-resident artifacts are split by scope — durable ledgers move behind the seam, machine-local state stays out of it. The `config` class picks up `rules/`, `templates/`, the authority manifest and `athenaeum.yaml` (§2.3.1). Acceptance: a test enumerating every store artifact and asserting each declares exactly one class, and exactly one scope where the class is `operational`. | should | S1 |
 | **S6 — keyword backend declares its requirement** | `KeywordBackend` refuses on a surface without `cheap_local_scan`, naming FTS5 (P4, R4). Small. | should | S1 |
 | **S7 — one write-path caller, end to end** | Migrate a single self-contained write-heavy consumer fully onto the store — `quarantine.py` is the right candidate: ~13 sites, it exercises `append` (the ledger), `move` (both directions), and `put`, and it has no LLM in the path. **This is the slice that proves the write half.** Without it S1–S6 leave every one of the ~60 non-seam-consulting modules still writing through `Path`, and the "no caller can tell" goal is asserted rather than demonstrated. Acceptance: `quarantine.py` contains no `pathlib` or `shutil` call; its existing tests pass unchanged against `FilesystemStore`; and the same suite passes against the in-memory fake. | must | S1 |
-| **S8 — publish the contract** | Promote `athenaeum.store` onto the stable `__all__` surface; publish §6 as `docs/store-contract.md`; ship the S1 conformance suite as a runnable third-party adapter-authoring harness, alongside the existing `adapter-authoring` skill's intake-adapter counterpart. | could | S1–S7 |
+| **S8 — publish the contract** | Promote `athenaeum.store` onto the stable `__all__` surface; publish §6 as `docs/extending/store-contract.md`; ship the S1 conformance suite as a runnable third-party adapter-authoring harness, alongside the existing `adapter-authoring` skill's intake-adapter counterpart. | could | S1–S7 |
 
 **Coverage of the walks in §3.1:** S2 migrates W1 (the search index build);
 S6 gates W2 (keyword scan-on-query). **W3 through W8 are deliberately not in
@@ -976,7 +976,7 @@ converting all of them at once is the cutover §10 rejects.
   anything moves onto it.
 - **Add a parallel store API and leave `surface_root_for_class` in place
   permanently.** Two ways to reach the store is the forked seam
-  `docs/one-way-in-one-way-out.md:56-60` names as the failure mode, and the
+  `docs/design/one-way-in-one-way-out.md:56-60` names as the failure mode, and the
   fork would be invisible in tests because both paths work on a filesystem.
   D5's "extend, never fork" is the alternative, with `local_path_for` as a
   declared, nullable escape hatch rather than a second front door.

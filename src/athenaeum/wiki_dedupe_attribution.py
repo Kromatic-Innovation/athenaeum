@@ -45,7 +45,7 @@ for "this pair never became a proposal".
 scheduling be *checked* before deciding where the re-sited row lands. It was
 checked: as of this commit ``compact()`` has **no production call site
 anywhere in the repo** — the only callers are ``tests/test_verdicts.py`` and
-a prose mention in ``docs/configuration.md``. So ``wiki/_verdicts/`` is an
+a prose mention in ``docs/reference/configuration.md``. So ``wiki/_verdicts/`` is an
 unbounded-append artifact in production *today*, and re-siting a
 one-row-per-examined-pair record into it would add ~22,040 rows per nightly
 run to an artifact nothing prunes — precisely the athenaeum#1229 failure

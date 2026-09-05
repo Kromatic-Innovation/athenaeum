@@ -13,15 +13,15 @@ design locks are listed in §9 and are filed against this note by the
 orchestrator, not by this design itself.
 
 From the 2026-08-14 intake-architecture review (Vitruvius Specify) that also
-produced [`docs/whole-store-adapter-design.md`](whole-store-adapter-design.md)
+produced [`docs/extending/whole-store-adapter-design.md`](../extending/whole-store-adapter-design.md)
 (athenaeum#911) and the sensitivity-routing language in
-[`docs/field-corrections.md`](field-corrections.md) §7.1.
+[`docs/design/field-corrections.md`](field-corrections.md) §7.1.
 
-Companion to [`docs/storage-adapter-contract.md`](storage-adapter-contract.md)
+Companion to [`docs/extending/storage-adapter-contract.md`](../extending/storage-adapter-contract.md)
 (the `storage.mapping` seam this design routes through, unchanged),
-[`docs/field-corrections.md`](field-corrections.md) §7.1 (the sensitivity
+[`docs/design/field-corrections.md`](field-corrections.md) §7.1 (the sensitivity
 routing this design gives a vocabulary to), and
-[`docs/security-posture.md`](security-posture.md) §2.1/§2.3 (the `access:` /
+[`docs/design/security-posture.md`](security-posture.md) §2.1/§2.3 (the `access:` /
 `audience:` read-policy vocabulary this design reuses rather than invents).
 
 ---
@@ -58,7 +58,7 @@ This is filed design-first because three things this note specifies are a
    deployment's config.
 3. **The class-to-storage mapping** — already a live, external seam
    (`storage.mapping`, documented and consumed by five modules per
-   `docs/whole-store-adapter-design.md` §2.2). This design must extend it,
+   `docs/extending/whole-store-adapter-design.md` §2.2). This design must extend it,
    not fork it, or every existing `storage.mapping.pii: excluded` entry in a
    deployed `athenaeum.yaml` becomes ambiguous about which mechanism it means.
 
@@ -75,13 +75,13 @@ avoid paying twice.
 | Reference | Where | What it hardcodes |
 |---|---|---|
 | `PII_ENTITY_CLASS = "pii"` | `src/athenaeum/pii.py:164` | The one sensitivity class name every other constant and function in this module is built around. |
-| `DEFAULT_EXCLUDED_READ_MAPPING = {"person": PII_ENTITY_CLASS}` | `src/athenaeum/pii.py:201` | The one shipped page-class → surface-class non-identity entry (`docs/storage-adapter-contract.md`'s "Page class vs surface class" section). A second regulatory class needs a second entry, and today that means editing this module. |
+| `DEFAULT_EXCLUDED_READ_MAPPING = {"person": PII_ENTITY_CLASS}` | `src/athenaeum/pii.py:201` | The one shipped page-class → surface-class non-identity entry (`docs/extending/storage-adapter-contract.md`'s "Page class vs surface class" section). A second regulatory class needs a second entry, and today that means editing this module. |
 | `contacts_surface_root()` | `src/athenaeum/pii.py:234` | A convenience wrapper hardcoded to `PII_ENTITY_CLASS` — there is no equivalent for a second class without a second hand-written function. |
 | `is_pii_class_excluded()` | `src/athenaeum/pii.py:248` | Same shape: a boolean predicate name-bound to one class. |
 | `_EMAIL_RE`, `_PHONE_RE` | `src/athenaeum/pii.py:322`, `:329` | Compiled module-level regexes — the only two detection "recognisers" that exist today. As of athenaeum#989 (S1a) they are no longer solely three modules' private import: `src/athenaeum/sensitivity.py`'s built-in `email`/`phone` recognisers also iterate these two patterns directly (via `.finditer`, for offsets — see the corrected §3.2 below), alongside `src/athenaeum/outbound_pii.py`'s pre-existing direct import. They remain private module attributes; nothing about `pii.py`'s own behavior changed. |
 | `find_inline_emails()` / `find_inline_phones()` | `src/athenaeum/pii.py:602`, `:612` | The de facto detector functions. **As of athenaeum#992 (S3), no cross-module caller imports either by name.** Before that slice they were consumed directly (not through any lookup) by `src/athenaeum/storage_migrate.py:69-70` (the athenaeum#479/#502 migration sweep) and by `src/athenaeum/bounce_contract.py:62` (the athenaeum#854 Tier-0 bounce-note conformance check — **omitted from this row in the original version of this note**; a genuine direct importer). **`src/athenaeum/outbound_pii.py` never imported these two functions at all** (a claim this note originally got wrong): it always imported `athenaeum.pii`'s *private compiled patterns and helpers* — `_EMAIL_RE`, `_PHONE_RE`, `_has_enough_digits`, `_is_excluded_phone_shape` (`outbound_pii.py:60-64` pre-athenaeum#992) — never the `find_inline_*` functions themselves; the comment there justifying "one definition... rather than a second, driftable copy" (`outbound_pii.py:47-52` pre-athenaeum#992) was about those regex/helper primitives, not about `find_inline_emails`. athenaeum#992 migrated all three call sites (`storage_migrate`, `bounce_contract`, `outbound_pii`) onto `sensitivity.classify()` — see §9 S3. **Not** consumed by `sensitivity.py`'s built-in recognisers themselves — see §3.2's corrected span decision: these two functions return a deduped `list[str]` with no offsets, so a recogniser needing `SensitivityMatch.span` cannot wrap them and instead iterates the compiled patterns directly. Neither function, nor its own remaining callers inside `pii.py`, changed — this slice removed cross-module callers, not the functions. |
 | `CONTACT_IDENTIFIER_FIELDS = ("emails", "former_emails", "alt_emails")` | `src/athenaeum/pii.py:1693` | Hardcodes which frontmatter fields the `pii` class's contact recognisers look at. A `hipaa` class would need its own field allowlist with no shared mechanism to declare it. |
-| `USAGE_CLASSES` (`observed`/`provider`/`unclassified`) | `src/athenaeum/pii.py:1731` | **A different axis, not sensitivity class** — worth naming so this design does not conflate them. `usage_class` is a per-*value* permission (may this specific address be used for outreach), scoped entirely inside the `pii` class per `docs/security-posture.md` §2.3. Sensitivity class (this design) is which regulatory bucket a fact belongs to at all. A `hipaa` class gets its own read policy (§4); it does not need a `usage_class`-shaped table unless a follow-on slice decides that regime needs one too. |
+| `USAGE_CLASSES` (`observed`/`provider`/`unclassified`) | `src/athenaeum/pii.py:1731` | **A different axis, not sensitivity class** — worth naming so this design does not conflate them. `usage_class` is a per-*value* permission (may this specific address be used for outreach), scoped entirely inside the `pii` class per `docs/design/security-posture.md` §2.3. Sensitivity class (this design) is which regulatory bucket a fact belongs to at all. A `hipaa` class gets its own read policy (§4); it does not need a `usage_class`-shaped table unless a follow-on slice decides that regime needs one too. |
 | **A "street address" recogniser** | `src/athenaeum/sensitivity.py`'s `_StreetAddressRecognizer` (as of athenaeum#991, S2) | Athenaeum#910's own summary states "shipped recognisers cover email, phone and street address." At the time this note was filed that was **not yet true** — a repo-wide search (`rg -i 'street|postal|zip.code'` across `src/athenaeum/`) found no such detector, so this design corrected the premise to "two recognisers, not three." **Superseded by athenaeum#991 (S2, §9):** a third built-in, `street-address`, now ships — fixture-bounded keyword + regex, not general-purpose address detection (see the recogniser's own docstring and `tests/fixtures/street_address_fixtures.py`) — registered through the same S1 contract and bound to `pii` by default. `pii`'s resolved `recognizers:` is now `[email, phone, street-address]`, superseding this row's and §5's earlier "two-item list" statement. |
 
 ### 2.2 The `storage.mapping` seam `pii: excluded` already routes through
@@ -106,7 +106,7 @@ policy), never a hardcoded path.
   (`_BUILTIN_ADAPTERS`, `storage.py:150-153`) can never be shadowed
   (`storage.py:192-195`), a config-defined adapter of the same name always
   wins over a code-registered one (`storage.py:264-283`,
-  `docs/storage-adapter-contract.md` "Extending: add a surface with no core
+  `docs/extending/storage-adapter-contract.md` "Extending: add a surface with no core
   change").
 
 Today exactly one class name (`"pii"`) is ever passed to
@@ -124,7 +124,7 @@ this design is the third instance of the same principle, not a new one:
 
 - **Screening** (`src/athenaeum/screening.py`, issue athenaeum#320) classifies
   raw intake at write time and stamps a read-time `access:` label
-  (`docs/security-posture.md:49`). Its config resolver,
+  (`docs/design/security-posture.md:49`). Its config resolver,
   `resolve_screening()` (`src/athenaeum/config.py:1815-1868`), is the
   concrete pattern this design's own resolver copies (§3.1). Screening's
   detection is **keyword + regex, deliberately not ML/NER**
@@ -135,7 +135,7 @@ this design is the third instance of the same principle, not a new one:
   key/secret — is "deliberately NOT implemented here" (`screening.py:14-16`).
   Athenaeum#910 is, among other things, the generalization screening's own
   docstring already gestures at.
-- **`docs/field-corrections.md` §7.1** ("Sensitivity routing") already states
+- **`docs/design/field-corrections.md` §7.1** ("Sensitivity routing") already states
   the principle this design formalizes: *"The sensitivity classification is
   deployment configuration, not a constant in this repo"*
   (`field-corrections.md:577`). It also already establishes that a
@@ -151,7 +151,7 @@ this design is the third instance of the same principle, not a new one:
 
 `src/athenaeum/config.py`'s module docstring states the factoring rule this
 design is bound by: *"a new knob is not done until it is added here as a
-`resolve_*` function AND documented in `docs/configuration.md`"*
+`resolve_*` function AND documented in `docs/reference/configuration.md`"*
 (`config.py:14-18`), and the `_DEFAULTS` seeding rule at `config.py:165-172`:
 **seed a key in `_DEFAULTS` only when that dict is its single source of
 truth** — a resolver with its own module-level default (or one merged in
@@ -268,7 +268,7 @@ A new `sensitivity.py` module (L3 — see §3.2's layering note) owns:
   pure declared policy with nothing to register in code (§7 Decision D2).
   A config entry reusing a built-in class name **overrides** it (an operator
   may redefine `pii`'s read policy or recognisers), consistent with
-  `docs/storage-adapter-contract.md`'s "config wins" rule for adapters —
+  `docs/extending/storage-adapter-contract.md`'s "config wins" rule for adapters —
   the one difference from `storage.py` being that overriding a *class* name
   is permitted (there is no name-shadow protection here), because unlike a
   storage adapter's `backing_store`/`corpus_policy` a class carries no
@@ -374,7 +374,7 @@ exactly the call a deployment makes for its own `hipaa-identifier`
 recogniser — `register_recognizer(MyHipaaRecognizer())` — from wherever that
 deployment's own import happens (the same "adding a surface is config + a
 `register_adapter()` call, no core change" shape
-`docs/storage-adapter-contract.md`'s "Extending" section already documents
+`docs/extending/storage-adapter-contract.md`'s "Extending" section already documents
 for adapters, applied to recognisers). There is no `if built_in` branch
 anywhere in this contract; `_EmailRecognizer`/`_PhoneRecognizer` are
 ordinary `SensitivityRecognizer` implementations that happen to ship in this
@@ -406,7 +406,7 @@ answer downstream.
 
 **Empty `recognizers: []` is honoured literally** (mirroring
 `storage.excluded_fields`'s empty-list-is-a-statement rule,
-`docs/storage-adapter-contract.md:171-173`): a class with no recognisers is
+`docs/extending/storage-adapter-contract.md:171-173`): a class with no recognisers is
 never auto-detected, only reached by explicit operator/agent tagging (e.g. a
 correction's `usage_class`-style manual field, or a future `athenaeum tag`
 verb — out of scope here). `classified` in §3.1's example is exactly this
@@ -470,12 +470,12 @@ the class name it passes is no longer the literal `PII_ENTITY_CLASS`
 constant but whichever name `sensitivity.classes` iterates.
 
 `storage.excluded_read_mapping` (page `type:` → surface class,
-`docs/storage-adapter-contract.md`'s "Page class vs surface class") and
+`docs/extending/storage-adapter-contract.md`'s "Page class vs surface class") and
 `storage.excluded_fields` (which frontmatter fields on an excluded record are
 data) are likewise **reused unmodified** — a `hipaa` class that stores on
 its own page type declares its own `excluded_read_mapping`/`excluded_fields`
 entries the same way `person: pii` does today (`pii.py:201`,
-`docs/storage-adapter-contract.md:118-125`).
+`docs/extending/storage-adapter-contract.md:118-125`).
 
 ---
 
@@ -485,7 +485,7 @@ Every class's `read_policy` is `{access: <level>, audience: <roles>}` —
 **the same vocabulary athenaeum#312 already ships**, not a new one:
 `access` is one of the four `_ACCESS_RANK` levels (`open` / `internal` /
 `confidential` / `personal`, `screening.py:71-77`), and `audience` is the
-same opaque-role-list mechanism `docs/security-posture.md` §2.1 already
+same opaque-role-list mechanism `docs/design/security-posture.md` §2.1 already
 documents for `athenaeum serve --audience`. A sensitivity class's read
 policy is enforced at the exact points that vocabulary is already enforced
 today (recall render, MCP audience scoping) — this design adds no new
@@ -529,13 +529,13 @@ independent config surfaces that both key off the same class name
 (§3.3), and nothing ties them together structurally — a class's `read_policy`
 governs what `recall`/MCP audience-scoping does with a page once resolved;
 `storage.mapping` governs which surface the page physically lives on and
-whether it joins the corpus at all (`docs/storage-adapter-contract.md`'s
+whether it joins the corpus at all (`docs/extending/storage-adapter-contract.md`'s
 three orthogonal `corpus_policy` bits). A class that maps to a
 non-`recallable` surface is unreachable through recall regardless of its
 `read_policy.access`; `read_policy` only matters for a class whose surface
 is at least reachable through the read interface (`recall(with_pii=True)` /
 `read_entity`, the athenaeum#883/#885/#886 surfaces
-`docs/security-posture.md:29-33` names).
+`docs/design/security-posture.md:29-33` names).
 
 ---
 
@@ -589,7 +589,7 @@ general-purpose address detection; see the recogniser's own docstring in
 ## 6. Migration story — a corpus classified under an earlier vocabulary
 
 This design borrows its answer directly from an existing, already-settled
-precedent rather than inventing a new one: `docs/field-corrections.md` §13,
+precedent rather than inventing a new one: `docs/design/field-corrections.md` §13,
 **"Adoption is forward-only"** — *"A deployment adopting this contract is
 changing its write paths, not its existing content... there is no
 retroactive cleanup pass and none should be built."* The same posture
@@ -626,7 +626,7 @@ retroactively is a bulk edit, not a config change.
 3. **A genuine bulk reclassification — "move every page tagged `hipaa`
    under the old rules to `hipaa-v2`" — is not a mechanism this design
    ships.** It is exactly the shape of work Lane C's field corrections
-   already solve: a correction batch (`docs/field-corrections.md` §3-§4)
+   already solve: a correction batch (`docs/design/field-corrections.md` §3-§4)
    with `op: set`, `field: type` (or whatever field carries the class),
    applied deterministically at tier 0 through the existing conflict
    resolution and audit ledger. A deployment wanting a migration pass writes
@@ -658,7 +658,7 @@ retroactively is a bulk edit, not a config change.
 > behavior to implement — it is a name, a list of recogniser names, and a
 > read policy, all expressible as data — so a code path would buy nothing a
 > YAML block does not already give the operator. This matches
-> `docs/storage-adapter-contract.md`'s own precedent: the storage *adapter*
+> `docs/extending/storage-adapter-contract.md`'s own precedent: the storage *adapter*
 > is code because it does I/O; the *mapping* from class to adapter is pure
 > config because it does not.
 
@@ -667,7 +667,7 @@ retroactively is a bulk edit, not a config change.
 > `sensitivity.classes`.** Rejected: letting a class config name its adapter
 > directly (`sensitivity.classes.hipaa.storage_adapter: hipaa-vault`).
 > Rejected because it is exactly the forked seam
-> `docs/whole-store-adapter-design.md` §6.1 D5 already warns against for a
+> `docs/extending/whole-store-adapter-design.md` §6.1 D5 already warns against for a
 > different layer ("two ways to reach the store... invisible in tests
 > because both paths work") — here it would be two ways to answer "where
 > does this class live," one of which the issue itself explicitly says must
@@ -705,7 +705,7 @@ retroactively is a bulk edit, not a config change.
 > design; migration is forward-only (§6), reusing field-corrections.md's
 > correction batches as the bulk-edit mechanism for anyone who wants one.**
 > Rejected: a dedicated `athenaeum reclassify` bulk-rewrite command.
-> Rejected because it duplicates a mechanism `docs/field-corrections.md`
+> Rejected because it duplicates a mechanism `docs/design/field-corrections.md`
 > already ships end to end (conflict resolution, idempotency, audit ledger,
 > fallthrough) for exactly this shape of change — a field-level correction
 > applied at scale — and building a second one would be the "proliferating
@@ -746,7 +746,7 @@ retroactively is a bulk edit, not a config change.
   in the new vocabulary; its behavior — recognisers, routing, read posture —
   is byte-identical.
 - **The storage adapter's own generalization to a full `Store` protocol.**
-  Tracked separately in `docs/whole-store-adapter-design.md` (athenaeum#911);
+  Tracked separately in `docs/extending/whole-store-adapter-design.md` (athenaeum#911);
   this design's §3.3 depends only on the seam as it exists today
   (`surface_root_for_class` returning a `Path`), and nothing here is
   affected by whether that seam later grows a `Store` abstraction
@@ -759,7 +759,7 @@ retroactively is a bulk edit, not a config change.
   approach.
 - **Authorization — who may configure `sensitivity.classes` or read a given
   class's `audience:` role.** Same deferred question
-  `docs/security-posture.md` §2.3 already defers for `usage_class` (athenaeum#864).
+  `docs/design/security-posture.md` §2.3 already defers for `usage_class` (athenaeum#864).
 
 ---
 
@@ -831,7 +831,7 @@ retroactively is a bulk edit, not a config change.
   requirement end to end (a test-defined recogniser travels a migrated call
   site's sweep through the same code path as the shipped `email` recogniser)
   rather than by design-note assertion only.
-- **S4 — `docs/configuration.md` entry.** Per `config.py`'s own factoring
+- **S4 — `docs/reference/configuration.md` entry.** Per `config.py`'s own factoring
   rule (§2.4): "a key in code and not in that table is drift." Adds a
   `## Sensitivity classes (athenaeum#910)` section alongside the existing
   `## Intake screening (athenaeum#320)` one.
@@ -860,17 +860,17 @@ retroactively is a bulk edit, not a config change.
 
 ## See also
 
-- [`docs/storage-adapter-contract.md`](storage-adapter-contract.md) — the
+- [`docs/extending/storage-adapter-contract.md`](../extending/storage-adapter-contract.md) — the
   `storage.mapping` seam this design routes through unchanged (§3.3).
-- [`docs/field-corrections.md`](field-corrections.md) §7.1 (sensitivity
+- [`docs/design/field-corrections.md`](field-corrections.md) §7.1 (sensitivity
   routing as deployment config), §13 (adoption is forward-only, the
   precedent §6 borrows).
-- [`docs/security-posture.md`](security-posture.md) §2.1 (audience scoping),
+- [`docs/design/security-posture.md`](security-posture.md) §2.1 (audience scoping),
   §2.3 (contact-value usage classification — the adjacent, distinct axis
   named in §2.1).
-- [`docs/whole-store-adapter-design.md`](whole-store-adapter-design.md) —
+- [`docs/extending/whole-store-adapter-design.md`](../extending/whole-store-adapter-design.md) —
   the sibling design-first note from the same 2026-08-14 review; its §6.1
   D5 "extend, never fork" is the same principle Decision D3 applies here.
-- [`docs/configuration.md`](configuration.md) — `## Intake screening
+- [`docs/reference/configuration.md`](../reference/configuration.md) — `## Intake screening
   (athenaeum#320)` is the section this design's own config entry (§9, S4)
   will sit beside.
