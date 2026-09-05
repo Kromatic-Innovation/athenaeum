@@ -40,7 +40,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = [
-    "fastmcp>=2.0.0,<4.0",
+    "fastmcp>=2.0.0,<5.0",
 ]
 vector = [
     "chromadb>=0.5.0,<2.0",
@@ -53,7 +53,7 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "ruff==0.16.5",
-    "fastmcp>=2.0.0,<4.0",
+    "fastmcp>=2.0.0,<5.0",
     # athenaeum#1066: emits `::error file=...,line=...::` workflow commands for
     # each failing test under `GITHUB_ACTIONS=true`, which GitHub turns into
     # check-run annotations — readable via `gh api
