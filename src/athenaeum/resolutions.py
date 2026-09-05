@@ -414,15 +414,15 @@ class MergeProposal:
 # bind the two on order AND per-tier membership; (2) this block itself;
 # (3) the ``9-tier`` count in this module's docstring above, bound by
 # ``tests/test_precedence.py`` parsing ``resolutions.__doc__`` (issue
-# athenaeum#1375); (4) §11 of ``docs/conflict-resolution.md`` and §6.1 of
-# ``docs/field-corrections.md``, both also bound by
+# athenaeum#1375); (4) §11 of ``docs/design/conflict-resolution.md`` and §6.1 of
+# ``docs/design/field-corrections.md``, both also bound by
 # ``tests/test_precedence.py`` parsing the doc text directly (issue
 # athenaeum#1375).
 #
 # DERIVED — already guarded, no new work: the golden
 # ``tests/data/prompts/resolutions.resolve_system.txt``, pinned by
 # ``tests/test_prompt_goldens.py::test_prompt_matches_golden``; and
-# ``docs/prompts.md``, pinned byte-current by its own test.
+# ``docs/design/prompts.md``, pinned byte-current by its own test.
 
 
 _RESOLVE_SYSTEM = """You are a resolver for an AI agent's long-term memory system.

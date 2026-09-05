@@ -3,7 +3,7 @@
 An **adapter** turns an external source (an API, an export file, a message feed,
 a scraper) into raw-intake files that Athenaeum's librarian compiles into the
 wiki. The contract every adapter follows is documented in
-[`docs/adapter-contract.md`](../../docs/adapter-contract.md); the bundled
+[`docs/extending/adapter-contract.md`](../../docs/extending/adapter-contract.md); the bundled
 [`adapter-authoring`](../../skills/adapter-authoring/SKILL.md) skill is the
 guided walkthrough.
 
@@ -26,9 +26,9 @@ guided walkthrough.
 These examples are intentionally **synthetic and generic** — no PII, no
 credentials, no private integration details. Real production adapters live in
 their own host repositories by design; Athenaeum's OSS contract stops at the
-on-disk raw-intake shape (see [`docs/provenance-shape.md`](../../docs/provenance-shape.md) §6).
+on-disk raw-intake shape (see [`docs/design/provenance-shape.md`](../../docs/design/provenance-shape.md) §6).
 
 For an adapter that bridges an agent runtime's own memory folder (Lane B —
 `raw/auto-memory/<scope>/…`), see
-[`docs/integrations/claude-code.md`](../../docs/integrations/claude-code.md)
+[`docs/guides/claude-code.md`](../../docs/guides/claude-code.md)
 instead.

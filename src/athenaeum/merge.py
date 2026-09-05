@@ -1908,7 +1908,7 @@ def merge_clusters_to_wiki(
                 )
                 return
             # Issue athenaeum#433: type-compatibility precheck. A cluster spanning >1
-            # distinct memory_class values (docs/memory-taxonomy.md #3) may
+            # distinct memory_class values (docs/design/memory-taxonomy.md #3) may
             # not be mechanically merged — same-class only. Untyped members
             # (the overwhelming majority of raw auto-memory intake, which
             # carries no memory_class frontmatter) never trip this gate; it

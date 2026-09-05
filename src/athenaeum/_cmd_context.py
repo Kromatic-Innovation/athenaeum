@@ -19,7 +19,7 @@ build_context``), NOT through this CLI wrapper's ``build_parser()`` cost.
 Loading ``context.py`` by file path
 (``importlib.util.spec_from_file_location``) buys nothing over an ordinary
 import and should not be used here — this is measured, not assumed:
-``docs/retrieval-entry-point-measurements.md`` (athenaeum#1357's spike,
+``docs/measurements/retrieval-entry-point-measurements.md`` (athenaeum#1357's spike,
 "Finding 2") found the pre-convergence shell hook's identical bypass of
 ``search.py`` this way does not skip the package root either, because the
 loaded module's own ``from athenaeum.X import ...`` statements still import

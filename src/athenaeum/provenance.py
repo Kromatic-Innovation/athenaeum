@@ -273,7 +273,7 @@ def _reject_bad_remember_dict(keys: set[str]) -> None:
         '{"_field_sources": {<field>: <source>}} for per-field, or '
         "one of the channel-split extras "
         '(`_source_type`, `_source_ref`, `_model`, `_on_behalf_of`, `_asserter`). '
-        "See docs/provenance-shape.md §4 / §10. "
+        "See docs/design/provenance-shape.md §4 / §10. "
         f"Got keys: {sorted(keys)!r}"
     )
 
@@ -283,7 +283,7 @@ def resolve_remember_sources(
 ) -> tuple[Any, dict | None]:
     """Disambiguate the ``remember(sources=...)`` argument shape.
 
-    Settles design-lock §4 (``docs/provenance-shape.md``): the bare-dict
+    Settles design-lock §4 (``docs/design/provenance-shape.md``): the bare-dict
     heuristic that previously inspected ``{type, ref}`` keys to guess
     "structured single-source" vs "per-field map" is REMOVED. Callers
     must use explicit wrapper keys for structured input.
@@ -347,7 +347,7 @@ def resolve_remember_sources(
         f"`sources` must be str, dict, or None; got {type(sources).__name__}. "
         'Use {"_source": ...}, {"_field_sources": {...}}, or the channel-split '
         "extras (`_source_type`/`_source_ref`/`_model`/`_on_behalf_of`/`_asserter`) "
-        "for structured input. See docs/provenance-shape.md §4 / §10."
+        "for structured input. See docs/design/provenance-shape.md §4 / §10."
     )
 
 

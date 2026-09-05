@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CI gate: docs/configuration.md's Models table must match the code defaults
+"""CI gate: docs/reference/configuration.md's Models table must match the code defaults
 (issue athenaeum#1278).
 
 The table's intro claims the **knob set** cannot go stale because it is
@@ -20,7 +20,7 @@ from pathlib import Path
 from athenaeum import config as athenaeum_config
 from athenaeum import query_topics, reasoning_tiers, resolutions, rule_proposals, tiers
 
-_DOC = Path(__file__).resolve().parent.parent / "docs" / "configuration.md"
+_DOC = Path(__file__).resolve().parent.parent / "docs" / "reference" / "configuration.md"
 
 # One entry per row in the Models table's `models.<knob>` YAML key column,
 # mapped to the same code-level constant each knob's resolver
@@ -61,13 +61,15 @@ def test_models_table_found_and_nonempty() -> None:
     # enough that the regex stops matching, fail loudly instead of the
     # comparison test below silently passing on an empty dict.
     documented = _parse_models_table()
-    assert documented, "failed to parse any rows out of docs/configuration.md's Models table"
+    assert documented, (
+        "failed to parse any rows out of docs/reference/configuration.md's Models table"
+    )
 
 
 def test_models_table_covers_every_known_knob() -> None:
     documented = _parse_models_table()
     assert set(documented) == set(_CODE_DEFAULTS), (
-        "docs/configuration.md's Models table knob set does not match the "
+        "docs/reference/configuration.md's Models table knob set does not match the "
         f"knobs this test knows the code default for: doc={sorted(documented)} "
         f"code={sorted(_CODE_DEFAULTS)}"
     )
@@ -81,6 +83,6 @@ def test_models_table_defaults_match_code() -> None:
         if knob in _CODE_DEFAULTS and doc_default != _CODE_DEFAULTS[knob]
     }
     assert not mismatches, (
-        "docs/configuration.md's Models table Default column has drifted from "
+        "docs/reference/configuration.md's Models table Default column has drifted from "
         f"the resolver code defaults: {mismatches}"
     )

@@ -766,7 +766,7 @@ class TestHybridRescueClasses:
     still pass ``test_query_finds_match`` on the obvious lexical queries
     and quietly regress the non-obvious ones.
 
-    See ``docs/recall-architecture.md`` for the full walkthrough.
+    See ``docs/design/recall-architecture.md`` for the full walkthrough.
     """
 
     @pytest.fixture(autouse=True)

@@ -158,7 +158,7 @@ class TestWriteSnapshot:
             write_snapshot,
         )
 
-        docs_path = tmp_path / "docs" / "memory-model-measurements.md"
+        docs_path = tmp_path / "docs" / "measurements" / "memory-model-measurements.md"
         result = run_shadow_linkage(clique_wiki, embedding_provider=_fake_embed)
         write_snapshot(result, docs_path=docs_path)
         text = docs_path.read_text(encoding="utf-8")

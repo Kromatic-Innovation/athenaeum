@@ -2,7 +2,7 @@
 """Reusable in-memory :class:`~athenaeum.store.Store` fake (issue athenaeum#976).
 
 Deliberately not buried inside one test module: per
-``docs/whole-store-adapter-design.md`` §9.2, S2 (athenaeum#977) needs a
+``docs/extending/whole-store-adapter-design.md`` §9.2, S2 (athenaeum#977) needs a
 latency-injecting variant of this fake for its op-count benchmark (P5), and S7
 (athenaeum#982) runs ``quarantine.py``'s existing test suite against it
 alongside :class:`~athenaeum.store.FilesystemStore`. Import it as::

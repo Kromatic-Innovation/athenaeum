@@ -12,7 +12,7 @@ respecification, made concrete:
 
 - **AC1's "tier 2 or tier 3"** does not map onto athenaeum#975's ledger: that
   ledger's `tier` field is either `0` (the deterministic shape-rules pass,
-  tier 0 on the ladder in `docs/field-corrections.md` §2, actually disposed
+  tier 0 on the ladder in `docs/design/field-corrections.md` §2, actually disposed
   of the record) or `None` (it did not — no rule matched, a rule explicitly
   deferred, or a soft failure degraded to fallthrough). The shape-rules pass
   genuinely cannot know which reasoning tier (>=1) eventually handles a
@@ -24,7 +24,7 @@ respecification, made concrete:
   grouped by `(source, key_fingerprint)`; it never writes or reads a literal
   tier number 2 or 3 anywhere.
 - **"Reasoning-tier work"** — the issue's second ambiguity (which tier
-  ladder?) — is the **intake** ladder (`docs/field-corrections.md` §2:
+  ladder?) — is the **intake** ladder (`docs/design/field-corrections.md` §2:
   tier0 structured -> tier1 programmatic -> tier2 classify -> tier3 merge ->
   tier4 human), because that is the ladder athenaeum#975's ledger is built
   against; the *reasoning* ladder (`reasoning_tiers.py`'s T1/T2) is a
@@ -514,7 +514,7 @@ def build_rule_proposal_request_params(
     """Build the Messages API kwargs for one drafting call.
 
     Every exemplar record is untrusted raw intake (AC7,
-    `docs/field-corrections.md` §12a) and is fenced via
+    `docs/design/field-corrections.md` §12a) and is fenced via
     :func:`athenaeum.prompt_safety.fence_untrusted` before it reaches the
     prompt -- never interpolated raw.
     """
@@ -630,7 +630,7 @@ def _rule_file_header(*, source: str, key_fingerprint: str, note: str) -> str:
         f"# Librarian-proposed shape rule (issue athenaeum#905) -- "
         f"source={source!r} key_fingerprint={key_fingerprint!r}. {note}\n"
         "# Ships mode: observe. Promoting to live is a separate, explicit "
-        "operator action -- never automatic. See docs/shape-rules.md.\n"
+        "operator action -- never automatic. See docs/design/shape-rules.md.\n"
     )
 
 

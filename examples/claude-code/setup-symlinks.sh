@@ -4,7 +4,7 @@
 # ingest Claude Code's auto-memory files alongside other raw intake.
 #
 # Idempotent: re-running is a no-op for already-linked scopes.
-# See docs/integrations/claude-code.md for the full integration guide.
+# See docs/guides/claude-code.md for the full integration guide.
 set -euo pipefail
 
 KNOWLEDGE_ROOT="${KNOWLEDGE_ROOT:-$HOME/knowledge}"

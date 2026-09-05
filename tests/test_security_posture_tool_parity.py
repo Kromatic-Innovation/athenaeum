@@ -1,4 +1,4 @@
-"""Pin test: docs/security-posture.md section 2.1 lists every MCP tool
+"""Pin test: docs/design/security-posture.md section 2.1 lists every MCP tool
 ``create_server`` registers (issue athenaeum#1384).
 
 Two reusable pure functions do the derivation:
@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 SECURITY_POSTURE_PATH = (
-    Path(__file__).resolve().parents[1] / "docs" / "security-posture.md"
+    Path(__file__).resolve().parents[1] / "docs" / "design" / "security-posture.md"
 )
 
 _TOOL_NAME_RE = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)`")
@@ -123,7 +123,7 @@ class TestSecurityPostureToolParity:
         # test_synthetic_doc_missing_tool_is_reported_missing below).
         assert registered, "sanity: create_server registered zero tools"
         assert documented, (
-            "sanity: parsed zero tool names out of docs/security-posture.md "
+            "sanity: parsed zero tool names out of docs/design/security-posture.md "
             "section 2.1 -- table format may have changed"
         )
         assert registered == documented, (
@@ -147,7 +147,7 @@ class TestSecurityPostureToolParity:
         needle = f"`{omitted_tool}`"
         assert needle in real_text, (
             f"fixture precondition failed: {needle} not found verbatim in "
-            "docs/security-posture.md -- update this fixture if the doc's "
+            "docs/design/security-posture.md -- update this fixture if the doc's "
             "wording changed"
         )
         synthetic_text = real_text.replace(needle, "")

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the shape-rule engine (issue athenaeum#901,
-`docs/shape-rules.md` / `docs/field-corrections.md`).
+`docs/design/shape-rules.md` / `docs/design/field-corrections.md`).
 
 Organized to map onto the issue's 13 acceptance criteria — each test class
 below is annotated with the AC(s) it proves. Wiring-level phase-ordering
@@ -1292,7 +1292,7 @@ class TestPackagedExamples:
         assert errors == []
         assert len(rules) == len(_RULE_EXAMPLE_FILES)
         for rule in rules:
-            # Every packaged example ships in observe mode (docs/shape-rules.md §5/§7).
+            # Every packaged example ships in observe mode (docs/design/shape-rules.md §5/§7).
             assert rule.mode == "observe"
 
     def test_copying_examples_alone_activates_nothing(self, tmp_path: Path) -> None:

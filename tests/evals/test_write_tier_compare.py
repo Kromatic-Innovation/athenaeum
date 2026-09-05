@@ -14,7 +14,7 @@ Deliberately extends the existing ``tests/evals/`` harness rather than
 standing alone (issue athenaeum#1139's "Not verified" section left this decision to
 implementation): ``evals.yml`` already picks up every ``pytest.mark.eval``
 test under ``tests/evals/`` by marker (not an enumerated file list — see
-``docs/evals-inventory.md``'s closing paragraph), so this file needed ZERO
+``docs/measurements/evals-inventory.md``'s closing paragraph), so this file needed ZERO
 workflow changes to be wired in, and it inherits credential gating
 (:func:`tests.evals.harness.live_ready`), the record/replay contract, and
 the session-level token-budget guard for free. A standalone harness would

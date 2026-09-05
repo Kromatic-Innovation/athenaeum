@@ -271,7 +271,7 @@ class TestDiscoverRawFiles:
 
 
 class TestDiscoverRawFilesCorrections:
-    """Issue athenaeum#797, `docs/field-corrections.md` §3.1: a correction batch
+    """Issue athenaeum#797, `docs/design/field-corrections.md` §3.1: a correction batch
     lives in the ordinary `raw/<source>/` tree, recognized by shape (its
     first line is a valid batch envelope), not by a reserved subtree. The
     test that matters is that a MALFORMED `.jsonl` still reaches ordinary
@@ -672,7 +672,7 @@ class TestTier0Passthrough:
     def test_per_value_field_sources_round_trip(self, tmp_path: Path) -> None:
         """Per-value field_sources list shape (athenaeum#102) must round-trip
         byte-for-byte through tier0_passthrough — the shape contract in
-        docs/provenance-shape.md §3."""
+        docs/design/provenance-shape.md §3."""
         from athenaeum.librarian import tier0_passthrough
 
         wiki = self._make_wiki_root(tmp_path)
@@ -704,7 +704,7 @@ class TestTier0Passthrough:
         out_path = wiki / "9b8c7d61-per-value-pat.md"
         out = out_path.read_text(encoding="utf-8")
 
-        # Byte-for-byte contract from docs/provenance-shape.md §3:
+        # Byte-for-byte contract from docs/design/provenance-shape.md §3:
         # tier0 stamps ``created`` (when missing) + ``updated``, then
         # renders the meta verbatim. Reconstruct the expected bytes
         # rather than relying on substring checks.

@@ -26,7 +26,7 @@ rather than a slug-keyed sibling) is what makes this module possible at all.
 this module answers is "what does a consumer holding a wiki page know about
 deliverability" — and the pii mark reaches that answer by the chain above,
 **at read time**. This module deliberately does NOT write ``bounced:`` onto
-wiki pages; see ``docs/bounce-surface-convergence.md`` for why that direction
+wiki pages; see ``docs/design/bounce-surface-convergence.md`` for why that direction
 was chosen over propagating the mark into the corpus, and what the alternative
 would have cost.
 
@@ -71,7 +71,7 @@ log = logging.getLogger(__name__)
 
 #: The wiki frontmatter field consumers read at segment time. Historically
 #: written only by a producer OUTSIDE athenaeum (see
-#: ``docs/deprecated-email-tracking.md``'s Q3 and maecenas#42), with athenaeum
+#: ``docs/design/deprecated-email-tracking.md``'s Q3 and maecenas#42), with athenaeum
 #: reading it and never writing it (issue athenaeum#852). athenaeum#1341
 #: reverses that read-only stance for a narrow, bounded verdict vocabulary:
 #: :func:`athenaeum.librarian.tier0_bounce_verdict_mark` now writes

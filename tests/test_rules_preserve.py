@@ -317,7 +317,7 @@ class TestUnclaimedPreserve:
     def test_no_record_preserve_with_broken_field_correction_degrades_to_transform_error(
         self, tmp_path: Path
     ) -> None:
-        """`docs/shape-rules.md` §3.4: "a `preserve` rule may still carry a
+        """`docs/design/shape-rules.md` §3.4: "a `preserve` rule may still carry a
         `correction` referencing a `$field`, but resolving it against an
         empty record degrades safely to `transform-error`" -- an unclaimed
         candidate's record is always `{}` (no frontmatter, no first-line

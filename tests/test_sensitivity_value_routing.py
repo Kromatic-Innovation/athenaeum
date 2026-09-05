@@ -2,7 +2,7 @@
 """Tests for the routing/redaction mechanism (issues athenaeum#1023, athenaeum#1024).
 
 Slices 2/4 and 3/4 of athenaeum#949's design note
-(`docs/sensitivity-value-routing.md`):
+(`docs/design/sensitivity-value-routing.md`):
 :func:`athenaeum.sensitivity_routing.route_sensitive_values` (write path,
 athenaeum#1023) and :func:`athenaeum.sensitivity_routing.resolve_sensitive_record`
 (read path, athenaeum#1024) — kept in one file because the read tests share

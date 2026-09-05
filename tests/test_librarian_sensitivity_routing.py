@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for wiring sensitivity routing into the librarian raw sweep (athenaeum#1025).
 
-Slice 4/4 of athenaeum#949's design note (`docs/sensitivity-value-routing.md`)
+Slice 4/4 of athenaeum#949's design note (`docs/design/sensitivity-value-routing.md`)
 — the actual raw-sweep hook: :func:`athenaeum.sensitivity_routing.route_sensitive_values`
 (slices 2/3, athenaeum#1023/athenaeum#1024) called at the top of
 :func:`athenaeum.librarian.process_one`, before Tier 0's passthrough write

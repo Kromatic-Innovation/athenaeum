@@ -195,7 +195,7 @@ class TestAudienceHelpers:
     def test_parse_audience_index_string_is_the_inverse(self) -> None:
         """``parse_audience_index_string`` (issue athenaeum#1362) round-trips
         every shape ``audience_index_string`` can produce — the inverse-
-        parsing helper ``docs/sidecar-adapter-contract.md`` §2.4 calls out
+        parsing helper ``docs/extending/sidecar-adapter-contract.md`` §2.4 calls out
         as missing, for a caller (the sidecar push-telemetry path) that only
         has the stored delimited string, never the original frontmatter."""
         for meta in (

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """The public :class:`~athenaeum.store.Store` conformance harness (design note
-``docs/whole-store-adapter-design.md`` §6 preamble: "the same staging the
+``docs/extending/whole-store-adapter-design.md`` §6 preamble: "the same staging the
 existing seam used"; suite authored in issue athenaeum#976, S1; published here as a
 runnable third-party harness by issue athenaeum#983, S8).
 
@@ -24,7 +24,7 @@ own two shipped implementations (:class:`~athenaeum.store.FilesystemStore` and
 ``tests.store_fakes.InMemoryStore``, both S1) — see
 ``tests/test_store_conformance.py::TestStoreConformance``, which is itself now
 just a subclass of this class, parametrized over both. See
-``docs/store-contract.md`` for the prose contract this suite enforces, and
+``docs/extending/store-contract.md`` for the prose contract this suite enforces, and
 ``tests/test_store_conformance_harness.py`` for a worked, from-scratch,
 third-party-style example: a minimal dict-backed ``Store`` built using only
 this module and :mod:`athenaeum.store`'s public names, exercised the same way

@@ -902,7 +902,7 @@ class TestWriteSnapshot:
             cache_dir=tmp_path / "cache", repo_root=Path(".")
         )
         assert baseline.reference_record_count == 0
-        docs_path = tmp_path / "docs" / "memory-model-measurements.md"
+        docs_path = tmp_path / "docs" / "measurements" / "memory-model-measurements.md"
         with pytest.raises(ValueError, match="reference_records"):
             push_metrics.write_snapshot(baseline, docs_path=docs_path)
         assert not docs_path.exists()

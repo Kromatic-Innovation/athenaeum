@@ -6,7 +6,7 @@ A drift-guard comment's entire purpose is to tell a future editor which
 sites must change together. A guard naming a file that does not exist is
 worse than no guard at all: an editor either stalls looking for the missing
 file, or trusts the guard and believes a site is covered when nothing covers
-it. This happened for real — `docs/field-corrections.md` §6.1 (merged in
+it. This happened for real — `docs/design/field-corrections.md` §6.1 (merged in
 athenaeum#796) transcribed a stale pair of deleted files straight out of
 `resolutions.py`'s comment, and shipped a normative guard citing two
 nonexistent files (caught and corrected in athenaeum#798).
@@ -18,7 +18,7 @@ in-tree guards rather than transcribing an expected list, so a future guard
 that names a new (or renamed) test file is checked automatically, and it
 asserts its own denominator — a parser that silently matches nothing must
 fail loudly rather than passing vacuously forever (the same positive-control
-discipline `docs/field-corrections.md` §6.1 demands of the precedence
+discipline `docs/design/field-corrections.md` §6.1 demands of the precedence
 drift-guard test in `tests/test_precedence.py`).
 """
 
@@ -77,7 +77,7 @@ def test_drift_guard_test_paths_exist() -> None:
 
     # Positive control: fail loudly if the parser silently matched nothing
     # rather than passing vacuously forever — mirrors the denominator
-    # assertion `docs/field-corrections.md` §6.1 requires of the sibling
+    # assertion `docs/design/field-corrections.md` §6.1 requires of the sibling
     # precedence drift-guard test.
     assert paths, (
         "no tests/*.py paths were extracted from any DRIFT GUARD block under "

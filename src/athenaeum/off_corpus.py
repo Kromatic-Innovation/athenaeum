@@ -2,7 +2,7 @@
 """Off-corpus indexable storage — the purgeable surface (issue athenaeum#984).
 
 Split (b) of the athenaeum#718 three-way re-scope
-(``docs/whole-store-adapter-design.md`` §8), built on top of **S1**
+(``docs/extending/whole-store-adapter-design.md`` §8), built on top of **S1**
 (issue athenaeum#976 — the ``Store`` protocol + ``FilesystemStore``) and
 **S3** (issue athenaeum#978 — ``snapshot()``/the ``versioned`` capability).
 Both slices are closed; this module is the first real consumer of the
@@ -135,7 +135,7 @@ def off_corpus_adapter(config: dict[str, Any] | None) -> StorageAdapter | None:
             "off_corpus.enabled is true but off_corpus.adapter names no "
             "storage.adapters entry — set off_corpus.adapter to the name of "
             "the storage.adapters surface that backs the off-corpus store "
-            "(see docs/configuration.md 'Off-corpus store')"
+            "(see docs/reference/configuration.md 'Off-corpus store')"
         )
     adapters = available_adapters(config)
     adapter = adapters.get(name)
@@ -166,7 +166,7 @@ def off_corpus_root(config: dict[str, Any] | None, knowledge_root: Path) -> Path
             f"off_corpus adapter {adapter.name!r} surface_root {root} resolves "
             f"inside knowledge_root {resolved_knowledge_root} — an off-corpus "
             "surface must live OUTSIDE the git working tree for a delete to be "
-            "a true erasure (docs/whole-store-adapter-design.md §4.4/§8); set "
+            "a true erasure (docs/extending/whole-store-adapter-design.md §4.4/§8); set "
             "storage.adapters.<name>.surface_root to an absolute path outside "
             "the knowledge root"
         )
@@ -213,7 +213,7 @@ def build_off_corpus_index(
     :func:`athenaeum.librarian.reindex`) when off-corpus is disabled.
     ``config=None`` is passed to the underlying ``build_*_index`` calls
     deliberately: the off-corpus adapter's own ``corpus_policy.embedded`` is
-    ``False`` (by design — see docs/configuration.md — so the MAIN corpus
+    ``False`` (by design — see docs/reference/configuration.md — so the MAIN corpus
     build skips this content), and that SAME global per-class flag would
     also skip it here if a real ``config`` were threaded through, since
     ``is_embedded`` has no notion of "which index build is asking." Passing

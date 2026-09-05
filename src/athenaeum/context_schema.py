@@ -8,7 +8,7 @@ issue athenaeum#1358), so a schema change is a deliberate, visible act (bump
 :data:`SCHEMA_VERSION`, add a migration note below) rather than a silent
 drift between what the core emits and what an adapter was written against.
 
-See ``docs/sidecar-adapter-contract.md`` for the full contract this
+See ``docs/extending/sidecar-adapter-contract.md`` for the full contract this
 schema is one half of (the other half is the may/may-not rules for what
 an adapter may do with the envelope).
 

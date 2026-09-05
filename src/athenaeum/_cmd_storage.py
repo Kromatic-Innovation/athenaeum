@@ -29,10 +29,10 @@ Two sub-commands:
   non-gating surface: ``raw/`` is append-only and retains every original
   value by contract, so folding its count into the gate would make the
   command permanently fail with no fix in scope — see athenaeum#1049 and
-  ``docs/sensitivity-value-routing.md`` §5.
+  ``docs/design/sensitivity-value-routing.md`` §5.
 - ``lint-mapping`` — the ``storage.mapping`` completeness lint + the deferred
   `(read_policy, adapter)` pair check (issue athenaeum#993, S5 of
-  ``docs/sensitivity-class-vocabulary.md`` §9). A thin CLI wrapper over
+  ``docs/design/sensitivity-class-vocabulary.md`` §9). A thin CLI wrapper over
   :mod:`athenaeum.sensitivity_lint`, which holds all the check logic; exits
   non-zero only on a completeness finding (a D4 policy-mismatch finding is
   advisory and never fails the gate on its own).
@@ -947,7 +947,7 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
     not a regression this gate could ever clear. Folding it into the existing
     gate would make ``lint-pii`` fail permanently with no fix in scope, and
     would make a clean wiki look dirty, destroying the existing gate's
-    meaning (`docs/sensitivity-value-routing.md` §5). The raw count exists so
+    meaning (`docs/design/sensitivity-value-routing.md` §5). The raw count exists so
     an operator — and this epic's definition of done — can CITE raw
     retention instead of it going unmeasured; it is reporting, not mutation,
     and carries no allowlist/adjudication of its own.

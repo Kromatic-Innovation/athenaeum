@@ -21,10 +21,10 @@ part of the stable public surface; their signatures may change between minor
 releases.
 
 ``athenaeum.store`` (issue athenaeum#983, S8 of the whole-store adapter design
-lock, ``docs/whole-store-adapter-design.md`` §6/§9.2) is promoted here only
+lock, ``docs/extending/whole-store-adapter-design.md`` §6/§9.2) is promoted here only
 IN PART: the ``Store`` protocol's data/error types and the shipped
 :class:`~athenaeum.store.FilesystemStore` adapter are the published contract
-(see ``docs/store-contract.md``), so those names are below. The rest of
+(see ``docs/extending/store-contract.md``), so those names are below. The rest of
 ``athenaeum.store`` — the S4 lease-primitive internals
 (:func:`~athenaeum.store.lease_open_fd` and siblings, :class:`~athenaeum.store.FileLease`),
 the S5 artifact-registry catalogue (:data:`~athenaeum.store.ARTIFACT_REGISTRY`
@@ -48,7 +48,7 @@ their living under this package root (issue athenaeum#1360). Because a submodule
 import executes its package root first, that cost could not be escaped by
 importing the submodule directly, nor by loading it via
 ``importlib.util.spec_from_file_location`` — measured and recorded in
-``docs/retrieval-entry-point-measurements.md`` (issue athenaeum#1357).
+``docs/measurements/retrieval-entry-point-measurements.md`` (issue athenaeum#1357).
 
 The ``__all__`` contract is unchanged: every name in ``__all__`` still
 resolves on the package, and ``from athenaeum import ingest`` still works.

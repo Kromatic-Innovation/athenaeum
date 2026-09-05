@@ -296,7 +296,7 @@ def run_drain(
             # install_signal_handlers=False on every window, so neither
             # EXIT_GRACEFUL_PARTIAL nor EXIT_EXTERNAL_KILL (124) can actually
             # be returned here today — kept for defensive parity with
-            # `run()`'s general exit-code contract (docs/exit-codes.md) should
+            # `run()`'s general exit-code contract (docs/reference/exit-codes.md) should
             # a future caller thread those flags through.
             log.warning(
                 "athenaeum drain: window %d run exited %d but made progress "

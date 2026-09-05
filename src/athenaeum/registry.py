@@ -67,7 +67,7 @@ SCALAR_HANDLE_KEYS: tuple[str, ...] = (
 )
 
 #: All source-handle keys, in canonical (template) order. This is the
-#: contract documented in ``docs/source-handles.md``; keep the three in
+#: contract documented in ``docs/extending/source-handles.md``; keep the three in
 #: sync.
 SOURCE_HANDLE_KEYS: tuple[str, ...] = LIST_HANDLE_KEYS + SCALAR_HANDLE_KEYS
 

@@ -37,13 +37,13 @@ same code path. The body predicates are the production ones
 (:func:`athenaeum.sensitivity.classify`,
 :func:`athenaeum.pii.find_hard_bounce_code`,
 :func:`athenaeum.pii.detect_hard_bounce_fact`) called directly, never
-re-derived here. The prose contract in ``docs/tier0-bounce-note-contract.md``
+re-derived here. The prose contract in ``docs/extending/tier0-bounce-note-contract.md``
 is pinned to :data:`DECLINE_REASONS` by a test, so the documented reason list
 cannot silently fall behind this module either.
 
 **Migrated onto the sensitivity registry (issue athenaeum#992).** This module used
 to import :func:`athenaeum.pii.find_inline_emails` directly — the note at
-``docs/sensitivity-class-vocabulary.md`` §2.1/§9 originally omitted this
+``docs/design/sensitivity-class-vocabulary.md`` §2.1/§9 originally omitted this
 module from the S3 call-site inventory entirely. The email-identifier count
 this module needs (exactly one, for :data:`NO_EMAIL_IDENTIFIER` /
 :data:`SEVERAL_EMAIL_IDENTIFIERS`) is now obtained via

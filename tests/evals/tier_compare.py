@@ -200,7 +200,7 @@ def score_create(
     Checks (AC3): expected content present (a proxy, at the write stage, for
     "entities extracted vs expected" — the entity SET itself is CLASSIFY's
     job, already covered by ``test_classify_eval.py`` per
-    docs/evals-inventory.md; what WRITE owns is whether the page it produces
+    docs/measurements/evals-inventory.md; what WRITE owns is whether the page it produces
     is faithful to the entity/observations it was handed); frontmatter
     schema validity (mirrors the exact production write-gate in
     ``librarian.py``: render -> re-parse -> ``validate_wiki_meta``); no

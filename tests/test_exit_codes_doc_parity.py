@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Doc/code parity for `EXIT_LOCK_HELD` producers (issue athenaeum#1383).
 
-`docs/exit-codes.md` names, in prose, every `_cmd_*.py` module that can
+`docs/reference/exit-codes.md` names, in prose, every `_cmd_*.py` module that can
 return `EXIT_LOCK_HELD` (75) because it calls
 `athenaeum._cli_shared._acquire_or_exit`. That list is only trustworthy if a
 future `_cmd_*` module adding a call to `_acquire_or_exit` is caught here
@@ -12,7 +12,7 @@ doc, per athenaeum#1383's motivation.
 reusable functions (not tied to pytest) so both:
 
 - ``TestLiveTreeParity`` — the REAL `src/athenaeum` tree against the REAL
-  `docs/exit-codes.md`, and
+  `docs/reference/exit-codes.md`, and
 - ``TestSyntheticFixtureCatchesDrift`` — a synthetic temp-directory `_cmd_x.py`
   plus a doc text that omits it
 
@@ -29,7 +29,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src" / "athenaeum"
-EXIT_CODES_DOC = REPO_ROOT / "docs" / "exit-codes.md"
+EXIT_CODES_DOC = REPO_ROOT / "docs" / "reference" / "exit-codes.md"
 
 _CMD_MODULE_NAME_RE = re.compile(r"`(_cmd_[A-Za-z0-9_]+\.py)`")
 _CALL_RE = re.compile(r"\b_acquire_or_exit\s*\(")
@@ -87,7 +87,7 @@ class TestLiveTreeParity:
         derived_from_doc = _modules_named_in_doc(EXIT_CODES_DOC.read_text())
 
         assert derived_from_src == derived_from_doc, (
-            "docs/exit-codes.md's EXIT_LOCK_HELD producer list has drifted "
+            "docs/reference/exit-codes.md's EXIT_LOCK_HELD producer list has drifted "
             f"from src/athenaeum: modules calling _acquire_or_exit but not "
             f"named in the doc: {sorted(derived_from_src - derived_from_doc)}; "
             f"modules named in the doc but not actually calling it: "

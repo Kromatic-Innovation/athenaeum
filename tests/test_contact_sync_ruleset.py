@@ -46,7 +46,7 @@ def _copy_ruleset(knowledge_root: Path, *, live: bool = True) -> None:
     """Install the packaged contact-sync examples, optionally flipped live.
 
     Flipping to `mode: live` is what an operator does after reviewing the
-    ledger (docs/shape-rules.md §5); the packaged files themselves always
+    ledger (docs/design/shape-rules.md §5); the packaged files themselves always
     ship `observe`, which `TestPackagedRuleset` asserts separately.
     """
     rules_dir = knowledge_root / "rules"
@@ -303,7 +303,7 @@ class TestEmailRemovalCorrection:
     def test_routing_code_is_not_touched_by_this_ruleset(
         self, tmp_path: Path
     ) -> None:
-        # AC6: the correction NAMES alt_emails; docs/field-corrections.md §7
+        # AC6: the correction NAMES alt_emails; docs/design/field-corrections.md §7
         # makes target/field a proposal that the librarian's existing
         # sensitivity routing disposes. The rule carries no routing directive
         # of its own — there is no field by which it could.
