@@ -35,6 +35,19 @@ a human decision — still belongs *here* when what it produces is evidence abou
 the engine: a parity report, a benchmark, a comparison that informs the design.
 Label those `~operator` and leave them in place.
 
+**When those two pull in different directions, ask what closes the issue.**
+If closing it means writing a finding into the project's record — a number, a
+verdict, a recommendation that changes what the engine should do — it belongs
+here, however much deployment state it had to touch along the way. If closing
+it means leaving a deployment in a different state, it does not. An issue that
+would be closed by *both* is two issues: keep the finding here, and file the
+state change against the deployment.
+
+When work does move, **close the issue here with a reason, never with a link to
+where it went.** This repo is public and a deployment's tracker may not be — a
+reference no reader can resolve is worse than no reference at all. "Out of
+scope: operator corpus state, tracked privately" is the whole comment.
+
 ## Strategy tier
 
 **T1.** The relationship substrate the outreach machinery reads.
