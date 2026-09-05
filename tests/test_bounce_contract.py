@@ -49,7 +49,12 @@ from athenaeum.cli import main as cli_main
 from athenaeum.librarian import tier0_bounce_mark
 from athenaeum.models import RawFile
 
-CONTRACT_DOC = Path(__file__).resolve().parents[1] / "docs" / "extending" / "tier0-bounce-note-contract.md"
+CONTRACT_DOC = (
+    Path(__file__).resolve().parents[1]
+    / "docs"
+    / "extending"
+    / "tier0-bounce-note-contract.md"
+)
 
 CONFORMING = (
     "---\nobserved_at: 2026-08-05\nsource: script:bounce-relay\n---\n\n"

@@ -61,7 +61,9 @@ def test_models_table_found_and_nonempty() -> None:
     # enough that the regex stops matching, fail loudly instead of the
     # comparison test below silently passing on an empty dict.
     documented = _parse_models_table()
-    assert documented, "failed to parse any rows out of docs/reference/configuration.md's Models table"
+    assert documented, (
+        "failed to parse any rows out of docs/reference/configuration.md's Models table"
+    )
 
 
 def test_models_table_covers_every_known_knob() -> None:
