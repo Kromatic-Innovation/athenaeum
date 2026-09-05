@@ -175,8 +175,12 @@ DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION: dict[str, float] = {
     # auto-delete deserves a higher bar than a record-only edit, so these
     # four carry a 0.95 floor — only a very-high-confidence verdict
     # auto-deletes; anything in [0.90, 0.95) escalates to the human.
-    # Locked here so the gate in tiers.py treats them as auto-applicable
-    # (above threshold) rather than escalate-only.
+    # NOTE: for ``correct_a``/``correct_b`` these floors are no longer what
+    # decides auto-apply. ``tiers.py`` short-circuits ``_CORRECT_ACTIONS`` on a
+    # transcript-derived authorship check BEFORE consulting ``_threshold_for``
+    # (it logs "confidence threshold not consulted"), so the values below are
+    # inert on that path and are kept only for the other verdicts' symmetry.
+    # ``forget_a``/``forget_b`` still gate on the floor as described above.
     "correct_a": 0.95,
     "correct_b": 0.95,
     "forget_a": 0.95,

@@ -71,7 +71,7 @@ later, in which case supersession applies instead of precedence.
   comparison the resolver leaned on.
 - `wiki/_pending_merges.md` — one entry per proposed merge cluster.
 - An auto-applied proposal rewrites its own block in place: the checkbox flips to `[x]`, an
-  **Answer:** paragraph and `**Auto-resolved: true**` / `**Resolver model**` /
+  **Answer:** paragraph and ``**Auto-resolved**: true`` / `**Resolver model**` /
   `**Resolver confidence**` lines are appended. The original proposal block is left intact —
   the annotation is additive, never destructive.
 - `wiki/_reasoning_tier_decisions.jsonl` — one append-only, fsync'd record per T1/T2
@@ -82,8 +82,16 @@ later, in which case supersession applies instead of precedence.
 
 ## What it refuses
 
-- **`propose_merge` never auto-applies, at any confidence.** A resolver proposal to fold two
-  pages into one always lands in the human queue.
+- **`propose_merge` never auto-applies, at any confidence.** It is listed in
+  `_NEVER_AUTO_APPLY_ACTIONS`, so the threshold lookup returns nothing to compare against —
+  confidence is not a lever on this verdict. With the default configuration a resolver
+  proposal to fold two pages into one lands in the human queue.
+
+  **The exception is T2.** When `reasoning_tier_t2_auto_apply_enabled` is on (off by
+  default), a safe-class approve writes the pending-merge block and then immediately
+  resolves it `approve` with `auto_applied=True`. The block passes *through* the queue file
+  rather than waiting in it, and no human sees it. That is the escape hatch — it is why the
+  setting is opt-in and separate from T1's.
 - **Per-action confidence floors gate every other auto-apply verdict**, not one global
   threshold: `not_a_conflict` needs `>= 0.75`; `keep_a`/`keep_b`/`deprecate_both` need
   `>= 0.90`; `forget_a`/`forget_b` need `>= 0.95`. Below its floor, a verdict falls through
