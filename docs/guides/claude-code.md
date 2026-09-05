@@ -1,5 +1,7 @@
 # Claude Code auto-memory integration
 
+**Reference:** [MCP surface](../modules/mcp.md) · [Intake](../modules/intake.md) · [Recall](../modules/recall.md)
+
 Claude Code ships a first-party "auto-memory" feature: the agent can write
 durable notes to `~/.claude/projects/<scope>/memory/` and load them back on
 future sessions. This works well inside a single agent but has two gaps when
