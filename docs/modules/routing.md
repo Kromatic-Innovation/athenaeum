@@ -105,7 +105,7 @@ Entity routing refuses on a separate set of name-quality and collision gates:
 
 | Condition | Outcome |
 |---|---|
-| Name is bare issue-reference shaped (`#123`) | Rejected outright — logged, never escalated; unambiguous junk. |
+| Name is bare issue-reference shaped (`#NNN`, digits only) | Rejected outright — logged, never escalated; unambiguous junk. |
 | Name is a single, all-lowercase, whitespace-free token at or under `create_name_escalate_max_chars` (default 7) | Escalated to `_pending_questions.md` rather than minted or dropped silently. |
 | Name resolves to a page a prior log-demote retired (`_retired_names.yaml`) | Escalated — the page's content is preserved off-wiki, but nothing is re-minted under the retired name. |
 | Name collides with an existing indexed page (by name or alias) whose type is known | Disambiguated — the classification is rewritten to update the existing page instead of minting a duplicate. |
