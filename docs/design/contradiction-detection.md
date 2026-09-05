@@ -556,13 +556,13 @@ and immediately. athenaeum#908's scope named only the three MCP mutators; the CL
 path was left un-deferred on purpose. The end state is identical either
 way, just immediate rather than deferred.
 
-### Voltaire briefing surface (Tristan-specific)
+### Scheduled-briefing surface
 
-For users running a companion async agent, the companion side of the
-integration surfaces the same pending-questions stream into the morning briefing. The
-two surfaces are independent: the SessionStart hook fires when Claude Code
-starts a new session; the Voltaire briefing fires on the morning cron.
-Either one (or both) can be enabled.
+For example, a daily briefing routine — a companion agent running on a
+morning cron — can surface the same pending-questions stream into its
+briefing. The two surfaces are independent: the SessionStart hook fires when
+an agent session begins; a scheduled briefing fires on its own cron. Either
+one, or both, can be enabled.
 
 ---
 
