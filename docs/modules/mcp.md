@@ -62,8 +62,15 @@ KNOWLEDGE_WIKI_PATH=/data/knowledge/wiki \
 ## What it refuses
 
 - **A restricted audience fails closed on reads.** `athenaeum serve --audience ops` pins a
-  read scope for the life of the process. Every page-content-bearing tool — `recall` and
-  every list tool — applies the same predicate. Pages carry `access:`
+  read scope for the life of the process. `recall`, `read_entity`, `enumerate_entities` and
+  the three pending-decision list tools all apply the same predicate.
+
+  **Three read tools are not audience-scoped**: `list_axiom_audit`,
+  `scan_retraction_cascade` and `calibration_summary` take no audience and apply no filter.
+  They return slugs, paths and counts rather than page bodies, so a restricted caller learns
+  no page *content* through them — but it can learn that a page **exists**. If that
+  distinction matters to your deployment, do not expose those three to a restricted
+  audience. Pages carry `access:`
   (`open`/`internal`/`confidential`/`personal`) and/or an `audience:` role list; **untagged
   pages are invisible** to a restricted caller. The owner, with no audience pinned, sees
   everything.
