@@ -175,7 +175,7 @@ from this document rather than re-deriving them.
 
 `athenaeum surface-divergence --field bounced --path <store-root>` (issue
 athenaeum#963, see
-[configuration.md](configuration.md#surface-divergence-guard-athenaeum963))
+[configuration.md](../reference/configuration.md#surface-divergence-guard-athenaeum963))
 reports the difference between the two surfaces in both directions, over the
 `uid` join key defined above (athenaeum#853). It is read-only, takes the
 store root as a parameter, and its output is safe to paste into a public

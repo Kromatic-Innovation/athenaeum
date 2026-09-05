@@ -10,13 +10,13 @@ and is cited throughout as verification evidence for specific claims — it is
 evidence, not a decision, and none of its choices should be read as settled
 by virtue of having been built.
 
-Companion to [`docs/sensitivity-class-vocabulary.md`](sensitivity-class-vocabulary.md)
+Companion to [`docs/design/sensitivity-class-vocabulary.md`](sensitivity-class-vocabulary.md)
 (athenaeum#910 — the class vocabulary this design routes, unchanged),
-[`docs/field-corrections.md`](field-corrections.md) §7.1 (the sensitivity
+[`docs/design/field-corrections.md`](field-corrections.md) §7.1 (the sensitivity
 routing language this design must compose with),
-[`docs/storage-adapter-contract.md`](storage-adapter-contract.md) (the
+[`docs/extending/storage-adapter-contract.md`](../extending/storage-adapter-contract.md) (the
 `storage.mapping`/excluded-surface seam this design reuses), and
-[`docs/security-posture.md`](security-posture.md) (the `access:`/`audience:`
+[`docs/design/security-posture.md`](security-posture.md) (the `access:`/`audience:`
 read-policy vocabulary and the excluded-surface read path this design's
 pointer must eventually join).
 
@@ -99,7 +99,7 @@ can exist (be detectable, carry a read policy) without ever being routed,
 and — the common case immediately after this ships — routing is globally
 off by default regardless of which classes exist.
 
-**Composition with `docs/field-corrections.md` §7.1.** §7.1 settled
+**Composition with `docs/design/field-corrections.md` §7.1.** §7.1 settled
 (athenaeum#872) that CONTACT-value routing (an email/phone tied to an
 existing entity, corrected via the field-corrections mechanism) reads and
 writes through the shared contact-record path
@@ -605,7 +605,7 @@ gating these filings):
 - **athenaeum#1022 — Slice 1: `sensitivity.routing` config resolver.**
   `resolve_sensitivity_routing` in `config.py` (§8's YAML shape,
   `env > yaml > default`, a dedicated config-error type), plus the
-  `docs/configuration.md` entry. No behavior change on its own — nothing
+  `docs/reference/configuration.md` entry. No behavior change on its own — nothing
   reads this resolver yet.
 - **athenaeum#1023 — Slice 2: the routing/redaction mechanism, standalone.**
   Blocked by athenaeum#1022. A new module implementing:
@@ -636,13 +636,13 @@ gating these filings):
 
 ## See also
 
-- [`docs/sensitivity-class-vocabulary.md`](sensitivity-class-vocabulary.md)
+- [`docs/design/sensitivity-class-vocabulary.md`](sensitivity-class-vocabulary.md)
   — athenaeum#910, the class vocabulary this design consumes unchanged.
-- [`docs/field-corrections.md`](field-corrections.md) §7.1 — the
+- [`docs/design/field-corrections.md`](field-corrections.md) §7.1 — the
   sensitivity-routing language this design composes with (§1).
-- [`docs/storage-adapter-contract.md`](storage-adapter-contract.md) — the
+- [`docs/extending/storage-adapter-contract.md`](../extending/storage-adapter-contract.md) — the
   `storage.mapping`/excluded-surface seam this design reuses (§2, §6).
-- [`docs/security-posture.md`](security-posture.md) — the `access:`/
+- [`docs/design/security-posture.md`](security-posture.md) — the `access:`/
   `audience:` vocabulary this design's proposed read path reuses (§2).
 - Prototype branch `prototype/949-sensitivity-routing-spike` — the spike
   cited throughout as verification evidence, not a decision.

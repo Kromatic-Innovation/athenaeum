@@ -3,7 +3,7 @@
 
 Exercises ``examples/adapters/minimal_adapter.py`` against a scratch knowledge
 root and asserts it honours the Lane-A raw-intake contract documented in
-``docs/adapter-contract.md``: correct location, canonical filename, valid
+``docs/extending/adapter-contract.md``: correct location, canonical filename, valid
 frontmatter with declared provenance, path-safety, and discoverability by the
 librarian's ``discover_raw_files``.
 """

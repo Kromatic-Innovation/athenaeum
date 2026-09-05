@@ -27,7 +27,7 @@ serving them. Two backends ship:
     the call sites need no change.
 
 Known constraints (implemented here / at the call sites, documented in
-``docs/configuration.md``):
+``docs/reference/configuration.md``):
 
 * **Batch mode is API-only.** ``ATHENAEUM_BATCH_MODE`` + ``claude-cli`` is a
   loud startup error (see :func:`athenaeum.librarian.run_librarian`); the Batch
@@ -91,7 +91,7 @@ client, not one each. Wired at :mod:`athenaeum.query_topics` (``topic``), the
 ``resolve``, ``reasoning_t1``, ``reasoning_t2`` — see
 :func:`athenaeum.librarian._arm_run_deadline`) instead of one shared client
 for all five. **Known limitation, recorded not solved (see
-``docs/configuration.md``):** the ``classify`` knob is shared by
+``docs/reference/configuration.md``):** the ``classify`` knob is shared by
 ``tiers.classify``, ``contradictions.detect_system``, and ``claim_kind`` —
 routing those three to DIFFERENT providers is not reachable through
 ``llm.providers.classify`` alone; it needs the ``classify`` knob split into
@@ -192,7 +192,7 @@ def resolve_provider(
     (:func:`athenaeum.librarian.run`, all five of ``classify``/``write``/
     ``resolve``/``reasoning_t1``/``reasoning_t2`` — see
     :func:`athenaeum.librarian._arm_run_deadline`). **Remaining known
-    limitation (documented in ``docs/configuration.md``, unrelated to
+    limitation (documented in ``docs/reference/configuration.md``, unrelated to
     routing):** the ``classify`` knob is shared by three call sites
     (``tiers.classify``, ``contradictions.detect_system``, ``claim_kind``) —
     a ``llm.providers.classify`` override applies to all three alike;

@@ -10,7 +10,7 @@
 > how bytes are read and written — `surface_root_for_class` hands back a
 > `pathlib.Path` and callers do ordinary filesystem work against it.
 > Generalising the physical layer to the whole store is designed in
-> [`docs/whole-store-adapter-design.md`](whole-store-adapter-design.md)
+> [`docs/extending/whole-store-adapter-design.md`](whole-store-adapter-design.md)
 > (athenaeum#911), which extends this seam rather than replacing it.
 
 Athenaeum persists every compiled entity as a markdown page in a flat `wiki/`

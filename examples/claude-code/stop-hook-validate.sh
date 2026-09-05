@@ -5,7 +5,7 @@
 # Non-blocking by default; set VALIDATE_MODE=block to fail the hook and
 # signal Claude Code that the session closed with policy violations.
 #
-# See docs/integrations/claude-code.md §3 "Citation policy" and §4
+# See docs/guides/claude-code.md §3 "Citation policy" and §4
 # "Stop-hook validator" for the surrounding policy.
 set -euo pipefail
 

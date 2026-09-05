@@ -1303,7 +1303,7 @@ class TestAutoMemoryFileInactive:
 # Issue athenaeum#326 — channel split, model recording, IdP-compatible asserter identity
 # ---------------------------------------------------------------------------
 #
-# Locks `docs/provenance-shape.md` §10 — the two new source_type values and
+# Locks `docs/design/provenance-shape.md` §10 — the two new source_type values and
 # the new claim-level frontmatter fields (`model`, `on_behalf_of`,
 # `asserter`) round-trip through AutoMemoryFile / WikiEntity, and the
 # asserter identity key is derived from (iss, sub) — with the Microsoft

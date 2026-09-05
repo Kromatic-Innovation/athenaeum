@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Committed fixture corpus for the ``street-address`` sensitivity recogniser.
 
-Issue athenaeum#991 (S2 of ``docs/sensitivity-class-vocabulary.md`` §9). Every
+Issue athenaeum#991 (S2 of ``docs/design/sensitivity-class-vocabulary.md`` §9). Every
 value below is **synthetic** — invented for this fixture file, never copied
 from a live store or any real person/place. Any resemblance to a real street
 address is coincidental (generic names + fictional-magnitude house numbers).

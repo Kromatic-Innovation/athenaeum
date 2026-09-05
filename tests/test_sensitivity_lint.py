@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the ``storage.mapping`` completeness lint + the deferred
 ``(read_policy, adapter)`` pair check (issue athenaeum#993 — S5 of
-``docs/sensitivity-class-vocabulary.md`` §9).
+``docs/design/sensitivity-class-vocabulary.md`` §9).
 
 Mirrors ``tests/test_schemas.py``'s bundled-fixture convention
 (``FIXTURE_ROOT = Path(__file__).parent / "fixtures" / ...``) for the
@@ -239,7 +239,7 @@ class TestReadPolicyAdapterPairs:
         # storage.mapping.pii entry it resolves to the DEFAULT adapter,
         # which is embedded=True. This is a real, honest finding — an
         # unconfigured install has NOT actually excluded pii from the
-        # corpus (see docs/sensitivity-class-vocabulary.md §5: exclusion
+        # corpus (see docs/design/sensitivity-class-vocabulary.md §5: exclusion
         # requires the operator to set storage.mapping.pii: excluded) — not
         # a bug in the check. Asserted explicitly so a future change to
         # either default is caught rather than silently changing this

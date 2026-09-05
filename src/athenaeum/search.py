@@ -33,7 +33,7 @@ uses SQLite FTS5 with BM25 ranking and porter stemming; ``vector`` uses
 chromadb with ``all-MiniLM-L6-v2``; ``keyword`` is a zero-setup scan-on-query
 fallback. When the vector backend is configured, the example recall hook
 performs a hybrid FTS5+vector merge so that short proper-noun queries still
-resolve cleanly — see ``docs/recall-architecture.md`` for why each backend is
+resolve cleanly — see ``docs/design/recall-architecture.md`` for why each backend is
 load-bearing.
 
 **Invariant:** every query path enforces the SAME three exclusions before a

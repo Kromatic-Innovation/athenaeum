@@ -1,4 +1,4 @@
-# Maintenance-posture playbook (see docs/security-posture.md).
+# Maintenance-posture playbook (see docs/design/security-posture.md).
 # Patches and minors auto-merge via .github/workflows/dependabot-auto-merge.yml;
 # majors stay closed pending §3.2 review.
 #

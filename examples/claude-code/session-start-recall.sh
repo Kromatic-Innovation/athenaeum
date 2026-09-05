@@ -235,7 +235,7 @@ fi
 
 # ── Build search index ─────────────────────────────────────────────────────
 # Always build FTS5 — it's cheap (~1s for 3k pages) and rescues short-query
-# recall even when the vector backend is the primary. See docs/recall-architecture.md.
+# recall even when the vector backend is the primary. See docs/design/recall-architecture.md.
 "$PYTHON" -c "
 import sys, os, importlib.util
 src = os.environ.get('ATHENAEUM_SRC', '')

@@ -186,7 +186,7 @@ class TestIndexableModeAndFederatedRecall:
         assert counts["fts5"] == 1
 
         # FTS5Backend indexes name/tags/aliases/description/type, not body
-        # text (docs/recall-architecture.md) — the distinguishing token
+        # text (docs/design/recall-architecture.md) — the distinguishing token
         # lives in ``name:``, matching how every other FTS5-backed test in
         # this suite queries.
         result = recall_search(

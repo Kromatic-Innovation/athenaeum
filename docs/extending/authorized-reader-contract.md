@@ -7,17 +7,17 @@
 `do_not_email_state`, `IdentifierValidity` / `validity_for_value` /
 `assemble_excluded_validity`, `ExcludedSurfaceUnavailable`, `IdentifierFacts` /
 `read_identifier_facts`. It is a companion to
-[`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md), whose §3 is the
+[`docs/design/one-way-in-one-way-out.md`](../design/one-way-in-one-way-out.md), whose §3 is the
 canonical statement of the one-read-path invariant this document assumes
 rather than restates, and to
-[`docs/bounce-surface-convergence.md`](bounce-surface-convergence.md), which
+[`docs/design/bounce-surface-convergence.md`](../design/bounce-surface-convergence.md), which
 settles how a bounce mark relates to the wiki `bounced:` field — a question
 this document does not reopen.
 
 ## What the excluded read path is
 
 The excluded read path is the same one §3 of
-[`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md) already names,
+[`docs/design/one-way-in-one-way-out.md`](../design/one-way-in-one-way-out.md) already names,
 now carrying strictly more of what a suppression consumer needs: `recall`
 with its excluded-field flag set (`with_pii=True` on the MCP tool,
 `--with-pii` on the CLI) when the caller is searching; `read_entity` /
@@ -83,7 +83,7 @@ mistake this section exists to correct.
 
 The operator principle is that the restriction is on WRITING, not reading. An
 excluded surface is one more piece of the store, and the store has exactly one
-egress seam (`docs/one-way-in-one-way-out.md` §3): every read leaves through
+egress seam (`docs/design/one-way-in-one-way-out.md` §3): every read leaves through
 it, corpus or excluded, and a caller with a legitimate reason to read excluded
 facts is an AUTHORIZED reader, not an intruder. `maecenas#95`'s inert
 suppression gate, `maecenas#97`'s "never address a contact with no person
@@ -93,7 +93,7 @@ do-not-email state, and provenance for addresses they hold. Before athenaeum#851
 that need had no API to meet it — `DO_NOT_EMAIL_FIELD` existed on live records
 and was, per its own docstring, "absent from the API surface entirely," so an
 authorized reader's only path to it was reading the store's files directly.
-That is precisely the failure mode `docs/one-way-in-one-way-out.md` §3 calls a
+That is precisely the failure mode `docs/design/one-way-in-one-way-out.md` §3 calls a
 defect regardless of who is reading or how correct the answer is: a caller who
 globs the excluded surface because there is no other way in is not making an
 authorization error, athenaeum is making an API-completeness error. The right
@@ -103,7 +103,7 @@ route around it.
 That framing carries a second, deliberately future-facing justification:
 **assume athenaeum's data stores are encrypted, and you have to go through
 athenaeum.** They are not encrypted today — both the corpus and the excluded
-surfaces are plaintext on a single host (`docs/one-way-in-one-way-out.md` §4
+surfaces are plaintext on a single host (`docs/design/one-way-in-one-way-out.md` §4
 says so explicitly) — but the storage-adapter layer treats the physical
 backend as pluggable specifically so a deployment CAN back an excluded surface
 with encrypted storage, a database, or a synced filesystem with no caller
@@ -146,14 +146,14 @@ representation trap**" — and records that it has "already misled one
 verification lane, observed during maecenas#73's verification."
 
 **The canonical statement of this trap is
-[`docs/deprecated-email-tracking.md` § "How to verify a mark — and the two
-greps that lie"](deprecated-email-tracking.md#how-to-verify-a-mark--and-the-two-greps-that-lie-athenaeum850)**,
+[`docs/design/deprecated-email-tracking.md` § "How to verify a mark — and the two
+greps that lie"](../design/deprecated-email-tracking.md#how-to-verify-a-mark--and-the-two-greps-that-lie-athenaeum850)**,
 and a verifier should read it rather than this section. It is canonical
 because it covers BOTH failing greps, and the one above is only the first.
 The mirror-image error is more dangerous because it looks corroborating:
 grepping the **wiki** surface for `bounced:` is a different surface entirely
 (written by a producer outside athenaeum — see
-[`docs/bounce-surface-convergence.md`](bounce-surface-convergence.md)), where
+[`docs/design/bounce-surface-convergence.md`](../design/bounce-surface-convergence.md)), where
 the field genuinely exists and consumers genuinely read it. The maecenas#73
 lane reported that grep returning 0 and concluded there were no bounce marks
 in the corpus at all; re-run against the same store on the same day it
@@ -180,7 +180,7 @@ a shared pattern, each grow their own reading of them: `maecenas#95`'s inert
 suppression gate, `maecenas#97`'s "never address a contact with no person
 record," and `maecenas#43`'s "stop globbing the wiki." Three divergent
 readings of identical facts is exactly the kind of fork
-`docs/one-way-in-one-way-out.md` warns against for the read seam itself
+`docs/design/one-way-in-one-way-out.md` warns against for the read seam itself
 (athenaeum#888 is consolidating a different such fork) — so this section writes
 the composition pattern once, here, rather than let each consumer discover it
 independently.
@@ -316,7 +316,7 @@ Two concrete reasons this was rejected rather than merely deferred:
 2. **It would fork the read seam athenaeum#888 is consolidating.** Adding a
    second, verdict-shaped read entry point alongside the facts-shaped ones
    this document describes reopens the same "N callers, N paths" problem
-   `docs/one-way-in-one-way-out.md` §1 exists to rule out, at the exact moment
+   `docs/design/one-way-in-one-way-out.md` §1 exists to rule out, at the exact moment
    athenaeum#888 is working to remove an existing fork rather than add a new
    one.
 

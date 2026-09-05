@@ -23,7 +23,7 @@ a T1-only window (proposal-screening measurement) from a both-armed window
 split. Baseline 0 below predates the split and is retroactively `neither`
 (the single then-existing flag was unset for its entire window).
 
-See [`merge-inflow-restoration.md`](merge-inflow-restoration.md) (athenaeum#1030) for
+See [`merge-inflow-restoration.md`](../design/merge-inflow-restoration.md) (athenaeum#1030) for
 the follow-on analysis of the `max_merge_sources` suppression this doc
 measures below — what the recorded suppression counts do and do not support,
 and a proposed cap value for athenaeum#787's operator ratification.

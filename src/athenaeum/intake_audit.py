@@ -425,7 +425,7 @@ def _render_raise_text(
         "Alternatively (issue athenaeum#1133), an operator rule with "
         "`match: {unclaimed: true, ...}` can give this whole group a "
         "disposition (drop/retain/preserve) directly -- see "
-        "docs/shape-rules.md.\n\n"
+        "docs/design/shape-rules.md.\n\n"
         f"**Fingerprint**: {fingerprint}"
     )
     return question, context

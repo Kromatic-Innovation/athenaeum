@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """``storage.mapping`` completeness lint + the deferred `(read_policy, adapter)`
 pair check (issue athenaeum#993 — slice S5 of
-``docs/sensitivity-class-vocabulary.md`` §9).
+``docs/design/sensitivity-class-vocabulary.md`` §9).
 
 Implements the two checks that design note deliberately defers rather than
 enforcing inside the resolver itself:

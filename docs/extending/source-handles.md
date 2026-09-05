@@ -29,7 +29,7 @@ without any schema change — `WikiBase` is `extra="allow"` by design
 ## 2. Where this sits among the frontmatter axes
 
 This is **not** a new type axis. It layers on the existing entity schema
-(`docs/memory-taxonomy.md` §2): a person/company page keeps `type: person` /
+(`docs/design/memory-taxonomy.md` §2): a person/company page keeps `type: person` /
 `type: company` and simply gains the source-handle keys below. Nothing is
 retyped; the keys pass through validation via `extra="allow"`, exactly like
 `apollo_*` / `current_title` already do.

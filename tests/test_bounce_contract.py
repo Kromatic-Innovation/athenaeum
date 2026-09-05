@@ -12,7 +12,7 @@ the published contract, the check, and the shipped gate all say the same thing:
   matrix, asserted against the REAL gate run in ``dry_run`` (which writes
   nothing) rather than against a reimplementation of it. This is the seam that
   would catch someone re-inlining the eligibility logic into the gate.
-- ``TestContractDocumentAgreement`` — ``docs/tier0-bounce-note-contract.md``
+- ``TestContractDocumentAgreement`` — ``docs/extending/tier0-bounce-note-contract.md``
   documents exactly the decline reasons the code can emit, no more and no
   fewer, so the prose cannot fall behind.
 - ``TestCli`` — the ``athenaeum bounce-contract`` surface a producer in
@@ -49,7 +49,7 @@ from athenaeum.cli import main as cli_main
 from athenaeum.librarian import tier0_bounce_mark
 from athenaeum.models import RawFile
 
-CONTRACT_DOC = Path(__file__).resolve().parents[1] / "docs" / "tier0-bounce-note-contract.md"
+CONTRACT_DOC = Path(__file__).resolve().parents[1] / "docs" / "extending" / "tier0-bounce-note-contract.md"
 
 CONFORMING = (
     "---\nobserved_at: 2026-08-05\nsource: script:bounce-relay\n---\n\n"

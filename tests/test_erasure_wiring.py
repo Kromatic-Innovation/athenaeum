@@ -359,7 +359,7 @@ class TestAC3RetentionPackAuthority:
         (i.e. the old bucket:daily/valid_until logic alone would RETAIN it)
         is nonetheless routed off-corpus, because the active pack's
         unknown-jurisdiction default is ``store-off-corpus`` and placement,
-        not expiry, is what that action means (`docs/provenance-shape.md`
+        not expiry, is what that action means (`docs/design/provenance-shape.md`
         §8.8, "once a pack exists, it is authoritative")."""
         knowledge_root = tmp_path / "knowledge"
         wiki = knowledge_root / "wiki"

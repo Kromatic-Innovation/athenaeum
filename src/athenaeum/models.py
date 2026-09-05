@@ -301,7 +301,7 @@ def asserter_identity_key(asserter: dict[str, object] | None) -> tuple[str, ...]
     that keys memories by asserter should treat that as "no identity
     declared" and fall back to owner-only defaults.
 
-    Key rules (locked by ``docs/provenance-shape.md`` §10):
+    Key rules (locked by ``docs/design/provenance-shape.md`` §10):
 
     - Empty / non-dict asserter → ``()``.
     - Entra branch: ``iss`` set AND ``provider_ids`` carries a non-empty
@@ -655,13 +655,13 @@ def parse_deprecated(meta: Mapping[str, object] | None) -> bool:
 # what window valid*) — the bi-temporal split from Zep/Graphiti. Slice 1 makes
 # the READER honor a ``valid_until`` set by a human or the resolver; slice 2
 # (shipped) has the resolver auto-stamp the interval on a temporal supersession
-# (``resolutions.enact_resolution`` — see ``docs/provenance-shape.md`` §8.4).
+# (``resolutions.enact_resolution`` — see ``docs/design/provenance-shape.md`` §8.4).
 # Slice 3 (this change) threads the ``as_of`` parameter out to an operator-facing
 # ``--as-of DATE`` recall view (``search.build_index`` / ``query`` + the CLI
 # ``recall`` / ``rebuild-index`` commands) — a read-only historical rewind
 # through the upper bound + athenaeum#191 tombstones. The lower bound (``valid_from``)
 # stays ungated (it would collide with athenaeum#324's disjoint detector — see
-# :func:`is_inactive_memory`). See ``docs/provenance-shape.md`` §8.
+# :func:`is_inactive_memory`). See ``docs/design/provenance-shape.md`` §8.
 
 
 def _coerce_iso_date(value: object) -> date | None:
@@ -794,7 +794,7 @@ def parse_observed_at(meta: dict[str, object] | None) -> date | None:
 
     Intentional, retained helper (issue athenaeum#539 settling of §4.4). It has no
     in-repo caller today but is the documented parser for the ``observed_at``
-    staleness axis — see ``docs/memory-taxonomy.md`` §5, which names it — and
+    staleness axis — see ``docs/design/memory-taxonomy.md`` §5, which names it — and
     is the read-side companion to ``parse_valid_from`` / ``parse_valid_until``.
     Kept as an intentional internal helper (not on the stable ``__all__``
     surface); not dead.
@@ -1190,7 +1190,7 @@ def parse_audience_index_string(audience_str: str) -> tuple[list[str], bool]:
     push-telemetry path: ``athenaeum.context``'s FTS5 candidates carry this
     string, not the page's frontmatter). Named here, alongside the forward
     direction, rather than hand-rolled per caller — the sidecar-adapter
-    contract (``docs/sidecar-adapter-contract.md`` §2.4) calls out exactly
+    contract (``docs/extending/sidecar-adapter-contract.md`` §2.4) calls out exactly
     this gap: "No inverse-parsing helper for ``audience``'s delimited-string
     form exists... an adapter or downstream consumer that needs the parsed
     role list back out should add that inverse function to
@@ -1651,7 +1651,7 @@ class WikiEntity:
             "name": self.name,
         }
         # Issue athenaeum#996: emitted immediately after ``type`` — the two type
-        # axes read together (docs/memory-taxonomy.md §2). Absent when the
+        # axes read together (docs/design/memory-taxonomy.md §2). Absent when the
         # rule map does not decide, never defaulted to a class.
         if self.memory_class:
             meta["memory_class"] = self.memory_class

@@ -2,11 +2,11 @@
 
 Athenaeum routes every LLM-serving call through three independently
 configurable axes: **provider** (`llm.providers.<knob>` / [LLM provider
-selection](configuration.md#llm-provider-selection-athenaeum330)), **model**
-(`models.<knob>` / [Models](configuration.md#models)), and **batch mode**
-(`librarian.batch.<knob>` / [Backlog drain](configuration.md#backlog-drain-athenaeum-drain-athenaeum470)
+selection](../reference/configuration.md#llm-provider-selection-athenaeum330)), **model**
+(`models.<knob>` / [Models](../reference/configuration.md#models)), and **batch mode**
+(`librarian.batch.<knob>` / [Backlog drain](../reference/configuration.md#backlog-drain-athenaeum-drain-athenaeum470)
 and the librarian-run section). Each axis is documented in full on
-[configuration.md](configuration.md), under its own `yaml` parent. **This
+[configuration.md](../reference/configuration.md), under its own `yaml` parent. **This
 page answers the one question none of those sections answers alone: what
 provider, model, and batch mode does *this function* actually use** — and
 states the one precedence rule that is easy to get backwards.
@@ -46,7 +46,7 @@ has exactly two call sites (`BATCHABLE_KNOBS` in `librarian.py`). Setting
 to start with, not a silent no-op.
 
 For the env var / yaml key / default / CLI flag of each axis, see the
-tables already on [configuration.md](configuration.md) — this page does not
+tables already on [configuration.md](../reference/configuration.md) — this page does not
 duplicate them, to avoid a second copy drifting out of sync.
 
 ## The precedence rule: per-knob yaml beats global env
@@ -56,7 +56,7 @@ overridden by the corresponding GLOBAL environment variable
 (`ATHENAEUM_LLM_PROVIDER`).** This is the opposite of the usual "env beats
 yaml" convention most operators bring from elsewhere, and it is easy to
 misread the general precedence statement at the top of
-[configuration.md](configuration.md#precedence) ("env override always beats
+[configuration.md](../reference/configuration.md#precedence) ("env override always beats
 the yaml") as applying here — that statement is about a single knob's OWN
 env vs. its OWN yaml, not about a global env var vs. a *different* knob's
 yaml key.
@@ -112,7 +112,7 @@ llm:
 ```
 
 or `ATHENAEUM_LLM_PROVIDER=claude-cli` in the environment. See
-[claude-cli (subscription)](configuration.md#claude-cli-subscription) for
+[claude-cli (subscription)](../reference/configuration.md#claude-cli-subscription) for
 the backend's full constraints (no `cache_control`, `max_tokens` advisory,
 batch mode unavailable, etc.) — this section only adds the two holes below,
 which apply specifically to a **subscription-only** install and must not be

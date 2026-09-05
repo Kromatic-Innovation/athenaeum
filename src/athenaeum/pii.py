@@ -104,7 +104,7 @@ Five pieces, in the order the issue settles them:
    single sanctioned entry point for reading any entity's wiki page together
    with its excluded/contact data by uid. It is the concrete realization of
    the egress half of the two-path invariant
-   (``docs/one-way-in-one-way-out.md`` §3) for the excluded-data surface: it
+   (``docs/design/one-way-in-one-way-out.md`` §3) for the excluded-data surface: it
    resolves the surface root itself, so a caller supplies only a ``uid`` and a
    boolean, never a path. With inclusion off (the default), each withheld
    field is reported as a :class:`RedactionMarker` naming the field and that a
@@ -149,7 +149,7 @@ Five pieces, in the order the issue settles them:
    storage and forks the read seam athenaeum#888 is consolidating. The
    originally-filed ``suppression_state()`` was cancelled for exactly this
    reason; see athenaeum#851's decision comment and
-   ``docs/authorized-reader-contract.md``. (:func:`is_outreach_eligible` is
+   ``docs/extending/authorized-reader-contract.md``. (:func:`is_outreach_eligible` is
    NOT that predicate and is not a precedent for one: it reports a single
    value's usage class and deliberately does not consult bounce state — its
    own docstring says so.)
@@ -1704,7 +1704,7 @@ def resolve_identifier(
 # 5. Hard-bounce recognition + mark (issue athenaeum#765)
 # ---------------------------------------------------------------------------
 #
-# Voltaire's ``bounce.ts`` (see ``docs/deprecated-email-tracking.md``,
+# Voltaire's ``bounce.ts`` (see ``docs/design/deprecated-email-tracking.md``,
 # superseded by this issue) gates a HARD bounce on an RFC 3463 enhanced
 # delivery-status code of the PERMANENT-FAILURE class, ``5.x.x``; a ``4.x``
 # code is a transient give-up (voltaire#81's "potentially stale" case, e.g. a
@@ -2462,7 +2462,7 @@ def uid_on_record(record_path: Path) -> str | None:
 
     The `record -> uid` half of the ``identifier -> record -> uid -> wiki
     page`` chain, kept in this module because this module is the only one that
-    knows the surface layout (``docs/one-way-in-one-way-out.md`` §3) — a
+    knows the surface layout (``docs/design/one-way-in-one-way-out.md`` §3) — a
     caller doing its own ``read_bounce_record(...).get("uid")`` would be
     reaching past that seam for one field.
 
@@ -2910,13 +2910,13 @@ class IdentifierValidity:
     surface returns 0 even after a fully successful mark, which has already
     misled one verification lane (observed during maecenas#73's verification).
 
-    Before verifying a mark by hand, read ``docs/deprecated-email-tracking.md``
+    Before verifying a mark by hand, read ``docs/design/deprecated-email-tracking.md``
     § "How to verify a mark — and the two greps that lie" — the canonical
     account, covering BOTH failing greps. The one above is only the first; the
     mirror-image error is grepping the WIKI surface for ``bounced:``, where the
     field genuinely exists (a different surface, written outside athenaeum —
-    ``docs/bounce-surface-convergence.md``) and a ``0`` means the glob missed.
-    ``docs/authorized-reader-contract.md`` covers the caller-facing contract.
+    ``docs/design/bounce-surface-convergence.md``) and a ``0`` means the glob missed.
+    ``docs/extending/authorized-reader-contract.md`` covers the caller-facing contract.
 
     A consumer holding one of these never has to know that. It reads
     ``closed`` (is this value closed as of the date I asked about), ``valid_until``
@@ -3440,7 +3440,7 @@ def fold_orphaned_bounce_marks(
 # ---------------------------------------------------------------------------
 #
 # The egress-half realization of the two-path invariant
-# (``docs/one-way-in-one-way-out.md`` §3) for the excluded-data surface:
+# (``docs/design/one-way-in-one-way-out.md`` §3) for the excluded-data surface:
 # :func:`read_entity` is the ONE sanctioned way to read an entity's page
 # together with its excluded data. It resolves the surface root itself — a
 # caller supplies a ``uid`` and a boolean, never a path — and, with inclusion
@@ -4251,7 +4251,7 @@ def read_identifier_facts(
     Args:
         knowledge_root: Root of the knowledge base (parent of ``wiki/``). The
             caller supplies this and never constructs a surface path — the
-            two-path invariant (``docs/one-way-in-one-way-out.md`` §3), which
+            two-path invariant (``docs/design/one-way-in-one-way-out.md`` §3), which
             is why this is an entry point rather than an exported index.
         config: Resolved ``athenaeum.yaml``.
         identifiers: The addresses to look up. Consumed lazily.
@@ -4419,7 +4419,7 @@ def read_entities(
         input order (not a dict) so duplicate uids are neither collapsed nor
         reordered.
 
-    The two-path invariant is preserved (``docs/one-way-in-one-way-out.md``
+    The two-path invariant is preserved (``docs/design/one-way-in-one-way-out.md``
     §3): the caller supplies uids and flags, and THIS function resolves the
     surface root and the records within it. A caller still never constructs a
     surface path — which is what made a batch entry point the right fix rather

@@ -15,7 +15,7 @@ fail-loud exceptions is documented below.
 
 FACTORING RULE (durable — enforce on every new knob): **a new knob is not
 done until it is added here as a ``resolve_*`` function AND documented in
-``docs/configuration.md``.** This module is the only place precedence is
+``docs/reference/configuration.md``.** This module is the only place precedence is
 implemented; do not hand-roll env/yaml lookups in another module, and do
 not let a knob land without its docs entry — the resolver function and the
 docs page are two halves of one change.
@@ -1033,7 +1033,7 @@ def resolve_reasoning_tier_auditing_enabled(config: dict[str, Any] | None) -> bo
     authority a config didn't already have. To restore the exact
     pre-athenaeum#1200 combined behavior, add ONE line:
     ``librarian.reasoning_tier_t2_auto_apply_enabled: true``. See
-    ``docs/configuration.md``'s "Reasoning-tier screening" section for the
+    ``docs/reference/configuration.md``'s "Reasoning-tier screening" section for the
     full migration story.
 
     Env ``ATHENAEUM_REASONING_TIER_AUDITING_ENABLED`` (``1``/``true``/``yes``/``on``,
@@ -2804,7 +2804,7 @@ search_backend: fts5
 # dimensions (recorded-time, observed-time, valid-time, scope, subject,
 # memory-class) unconditionally — they need no config. `dimensions:` here
 # declares ADDITIONAL, deployment-specific axes on top; UNSET = kernel-only
-# (existing installs unchanged). See docs/configuration.md's "Dimension
+# (existing installs unchanged). See docs/reference/configuration.md's "Dimension
 # registry" section for the full field reference.
 # dimensions:
 #   - name: engagement          # kebab-case, unique; must not collide with a
@@ -3020,7 +3020,7 @@ search_backend: fts5
 #     cache_control is stripped; batch mode is NOT supported (loud error);
 #     token counts are recorded but estimated_cost_usd reports $0
 #     (subscription-covered). Precedence: env ATHENAEUM_LLM_PROVIDER > this
-#     key > api. See docs/configuration.md "LLM provider selection".
+#     key > api. See docs/reference/configuration.md "LLM provider selection".
 # llm:
 #   provider: api
 
@@ -3081,7 +3081,7 @@ search_backend: fts5
 #   resolved_similarity_threshold: 0.83  # cosine threshold, decision-log match (athenaeum#211)
 #   not_a_conflict_ttl_days: 0  # decay stale auto not_a_conflict (athenaeum#251); 0 = off
 
-# Contradiction resolver (issue athenaeum#126). See docs/auto-resolve.md for the
+# Contradiction resolver (issue athenaeum#126). See docs/design/auto-resolve.md for the
 # full knob set (auto_apply, auto_apply_threshold, full_body_token_cap).
 # model: LEGACY key for the model used to propose a winner once Haiku flags a
 #   contradiction. Prefer ``models.resolve`` above; this key is read only when
@@ -3099,7 +3099,7 @@ search_backend: fts5
 # `excluded` (a surface OUTSIDE wiki/, no embed/recall/merge — what athenaeum#427's PII
 # surface consumes). Adding a surface is config + a mapping, no core change.
 # NOTE: this is a STORAGE-surface adapter, NOT the source→raw-intake adapter of
-# docs/adapter-contract.md — different concept, opposite ends of the pipeline.
+# docs/extending/adapter-contract.md — different concept, opposite ends of the pipeline.
 #
 #   adapters:                      # custom adapters (built-ins are implicit)
 #     contacts-excluded:
@@ -3122,7 +3122,7 @@ search_backend: fts5
 # merely duplicates content a live source already owns can be detected and
 # converted to a one-line pointer stub instead of persisting a full copy.
 # Precedence: ATHENAEUM_AUTHORITY_MANIFEST env > this key > default
-# `<knowledge_root>/authority-manifest.yaml`. See docs/authority-manifest.md
+# `<knowledge_root>/authority-manifest.yaml`. See docs/extending/authority-manifest.md
 # and `athenaeum authority --help`.
 # librarian:
 #   authority_manifest_path: authority-manifest.yaml
@@ -3348,7 +3348,7 @@ def resolve_sensitivity_classes(config: dict[str, Any] | None) -> dict[str, dict
     :class:`~athenaeum.sensitivity.SensitivityClass` objects. Returns an EMPTY
     dict when unset — the shipped built-in ``pii`` class (defined in
     :data:`athenaeum.sensitivity._BUILTIN_CLASSES`, not here — this dict's
-    own source-of-truth rule, §2.4 of ``docs/sensitivity-class-vocabulary.md``)
+    own source-of-truth rule, §2.4 of ``docs/design/sensitivity-class-vocabulary.md``)
     is still resolved by ``available_classes`` regardless, so this resolver is
     NOT seeded in ``_DEFAULTS``: seeding it here would make the code default
     unreachable, the exact athenaeum#187 regression that rule exists to
@@ -3392,7 +3392,7 @@ class SensitivityRoutingConfigError(ValueError):
 def resolve_sensitivity_routing(config: dict[str, Any] | None) -> dict[str, Any]:
     """Resolve the ``sensitivity.routing`` config surface (athenaeum#949 design note §8).
 
-    Slice 1/4 of athenaeum#949's design note (`docs/sensitivity-value-routing.md`).
+    Slice 1/4 of athenaeum#949's design note (`docs/design/sensitivity-value-routing.md`).
 
     Returns ``{"enabled": bool, "classes": {<name>: {"action": "route"|"off"}}}``.
     A separate axis from :func:`resolve_sensitivity_classes` (athenaeum#910's
@@ -3589,7 +3589,7 @@ def resolve_excluded_fields_config(
 
 
 # ---------------------------------------------------------------------------
-# Field corrections (issue athenaeum#797, docs/field-corrections.md §10.3)
+# Field corrections (issue athenaeum#797, docs/design/field-corrections.md §10.3)
 # ---------------------------------------------------------------------------
 #
 # Every key lives under ``librarian.corrections``. The two structural
@@ -3604,7 +3604,7 @@ def resolve_excluded_fields_config(
 def resolve_corrections_fields(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     """Resolve ``librarian.corrections.fields`` — the attribute allowlist
     that bounds what a correction may write CHEAPLY at tier 0
-    (`docs/field-corrections.md` §6.3).
+    (`docs/design/field-corrections.md` §6.3).
 
     Maps an attribute name to ``{"shape": "scalar"|"list", "writers":
     [...], "monotone": bool}``. **Empty by default** (§10.3) — with no
@@ -3639,14 +3639,14 @@ def resolve_corrections_fields(config: dict[str, Any] | None) -> dict[str, dict[
 
 def resolve_corrections_sensitive_fields(config: dict[str, Any] | None) -> dict[str, str]:
     """Resolve ``librarian.corrections.sensitive_fields`` — the §7.1
-    sensitivity-routing table (`docs/field-corrections.md` §7.1).
+    sensitivity-routing table (`docs/design/field-corrections.md` §7.1).
 
     Maps an attribute name to a :mod:`athenaeum.storage` entity-CLASS name
     (resolved through the existing ``storage.mapping`` adapter layer, athenaeum#429
     — reused rather than reinvented) that a fact bearing on that attribute
     is routed to, REGARDLESS of the destination a correction named. Empty by
     default: **sensitivity classification is deployment configuration**,
-    never shipped in this repo (docs/field-corrections.md §7.1, issue athenaeum#797
+    never shipped in this repo (docs/design/field-corrections.md §7.1, issue athenaeum#797
     out-of-scope list).
     """
     if not isinstance(config, dict):
@@ -3672,7 +3672,7 @@ def resolve_corrections_sensitive_fields(config: dict[str, Any] | None) -> dict[
 
 def resolve_corrections_schema_slots(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     """Resolve ``librarian.corrections.schema_slots`` — the §7.2 schema-
-    evolution table (`docs/field-corrections.md` §7.2) for attributes that
+    evolution table (`docs/design/field-corrections.md` §7.2) for attributes that
     ARE on the :func:`resolve_corrections_fields` allowlist but that the
     deployment's schema has no dedicated slot for.
 
@@ -3834,11 +3834,11 @@ def resolve_corrections_runtime_share(config: dict[str, Any] | None) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Shape-rule engine (issue athenaeum#901, docs/field-corrections.md)
+# Shape-rule engine (issue athenaeum#901, docs/design/field-corrections.md)
 # ---------------------------------------------------------------------------
 #
 # The shape-rule engine compiles recognized foreign record shapes into
-# `docs/field-corrections.md`-conformant correction batches (`emit`) or
+# `docs/design/field-corrections.md`-conformant correction batches (`emit`) or
 # leaves them for the reasoning tiers (`fallthrough`). It runs in the same
 # deterministic phase slot as the field-correction fast path above, and its
 # per-run volume bound deliberately MIRRORS `librarian.corrections.
@@ -4338,7 +4338,7 @@ def resolve_retention_pack_overrides(config: dict[str, Any] | None) -> dict[str,
 # Five-verdict comparator, phase 2 (issue athenaeum#715) -- auto-supersession,
 # its rate limits, and the two instruments. Every knob here is inert unless
 # :func:`resolve_comparator_enabled` is on: the comparator subsystem is the
-# only caller, and it is itself gated. See ``docs/configuration.md``.
+# only caller, and it is itself gated. See ``docs/reference/configuration.md``.
 # ---------------------------------------------------------------------------
 
 
@@ -4555,7 +4555,7 @@ def resolve_sibling_widening_min_similarity(config: dict[str, Any] | None) -> fl
     merge candidates elsewhere -- and it never reaches a verdict, so this is
     a candidate-generation knob and NOT one of the confidence thresholds
     athenaeum#715 bans (those attach a scalar to a VERDICT; see
-    ``docs/configuration.md``).
+    ``docs/reference/configuration.md``).
 
     Env ``ATHENAEUM_SIBLING_WIDENING_MIN_SIMILARITY`` > yaml
     ``librarian.sibling_widening_min_similarity`` > ``0.85``. A parsed env

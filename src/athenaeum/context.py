@@ -608,7 +608,7 @@ def record_context_push(
 ) -> bool:
     """Route one rendered envelope's push into the durable push-metrics
     ledger, tagged ``"source": "sidecar"`` (issue athenaeum#1362,
-    ``docs/sidecar-adapter-contract.md`` §2.1's planned function, now
+    ``docs/extending/sidecar-adapter-contract.md`` §2.1's planned function, now
     landed).
 
     Re-homes the push-telemetry requirement issue athenaeum#1343 shipped as a
@@ -659,7 +659,7 @@ def record_context_push(
                     id=push_metrics.opaque_push_id_from_filename(filename),
                     # Always "internal": the FTS5 `wiki` table this module
                     # queries has no `access` column to read a real value
-                    # from (docs/configuration.md, "Known limitation" —
+                    # from (docs/reference/configuration.md, "Known limitation" —
                     # same default `build_push_record` assigns when
                     # frontmatter carries no `access`; see `memory_tier`
                     # below for the field that DOES carry real information
@@ -681,7 +681,7 @@ def record_context_push(
         # from recall rows written the same day. Same-package private
         # access, one call site, in preference to a duplicate. The
         # envelope's `query` field is the RAW prompt
-        # (`docs/sidecar-adapter-contract.md` §1.1) — only its hash is ever
+        # (`docs/extending/sidecar-adapter-contract.md` §1.1) — only its hash is ever
         # retained here, same as the MCP path.
         query_hash = push_metrics._query_hash(str(envelope.get("query", "")))
 

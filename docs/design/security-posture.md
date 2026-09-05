@@ -2,7 +2,7 @@
 
 Last reviewed: 2026-05-12. Next scheduled review: **2026-08-06**.
 
-This document records the threat model and dependency-upgrade policy for `athenaeum`. Patterned after the Kromatic games-and-tools workspace posture (origin: `plinkromatic/docs/security-posture.md`), adapted for this repo's published-library shape.
+This document records the threat model and dependency-upgrade policy for `athenaeum`. Patterned after the Kromatic games-and-tools workspace posture (origin: `plinkromatic/docs/design/security-posture.md`), adapted for this repo's published-library shape.
 
 ## 1. Shape of this repo (the load-bearing fact)
 
@@ -27,7 +27,7 @@ The threat model is "**library consumer drift**" — a dep that ships a subtle b
 > it.** The system-wide rule — *one path in, one path out*: every write enters as
 > raw intake compiled by a single writer, and every read leaves through the
 > recall/read interface, with no caller opening a store directly — is stated
-> canonically in [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md).
+> canonically in [`docs/design/one-way-in-one-way-out.md`](one-way-in-one-way-out.md).
 > This section (and §2.1) documents how far that egress half is currently
 > *enforced* over the MCP tool surface. Surfaces it does not cover are still
 > governed by the invariant even though nothing today refuses a caller that
@@ -53,7 +53,7 @@ The threat model is "**library consumer drift**" — a dep that ships a subtle b
 > Scope note: this section decides *who* may read what **across the 15 MCP
 > tools**. It does not, and is not meant to, establish that the MCP surface is
 > the only way to reach a store — that is the egress half of the invariant in
-> [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md), which this
+> [`docs/design/one-way-in-one-way-out.md`](one-way-in-one-way-out.md), which this
 > scoping enforces for one surface among several.
 
 `caller_audience` (§2, row "Read-scoping of recall") is pinned **once** by the
@@ -225,7 +225,7 @@ corpus in the first place. When they fail — a claim is misclassified and
 lands in git anyway — git's own durability, the exact property that makes
 ordinary content recoverable, is what makes an in-git "erasure" a lie: a
 `git rm` alone leaves the content in history on every clone until a rewrite
-is force-pushed everywhere (`docs/whole-store-adapter-design.md` §4.5).
+is force-pushed everywhere (`docs/extending/whole-store-adapter-design.md` §4.5).
 
 The named remediation, **last resort, not a routine tool**:
 
@@ -279,7 +279,7 @@ that issue's "Out of scope").
 wiki store is a git repository with history, clones, and remotes — a delete
 committed there survives in history on every clone until a rewrite is
 force-pushed everywhere, so it is not an erasure. `athenaeum.off_corpus`
-(split (b) of the athenaeum#718 re-scope, `docs/whole-store-adapter-design.md`
+(split (b) of the athenaeum#718 re-scope, `docs/extending/whole-store-adapter-design.md`
 §8) gives erasure-class content a genuinely separate, non-git-tracked store:
 a delete there (`athenaeum.off_corpus.erase_off_corpus_record`) is a real
 `os.unlink`-level removal, with no git history for it to survive in.
@@ -306,7 +306,7 @@ a delete there (`athenaeum.off_corpus.erase_off_corpus_record`) is a real
   serves it through `recall`.
 - **Federation does not widen the audience gate.** An off-corpus hit
   federated into `recall` (see
-  [`docs/recall-architecture.md`](recall-architecture.md#off-corpus-federation-athenaeum984))
+  [`docs/design/recall-architecture.md`](recall-architecture.md#off-corpus-federation-athenaeum984))
   passes through the SAME Layer C `is_page_authorized`/`recallable` checks
   every other hit does — no off-corpus-specific carve-out exists in that
   code path. An operator controls whether off-corpus content is recallable
@@ -320,7 +320,7 @@ a delete there (`athenaeum.off_corpus.erase_off_corpus_record`) is a real
   not this module's) to the off-corpus ledger shard instead of the in-git
   ledger, INCLUDING a cross-boundary pair where only one side is
   erasure-class — the whole pair routes off-git, never a partial write. See
-  [`docs/configuration.md`](configuration.md#off-corpus-store-athenaeum984--off-by-default).
+  [`docs/reference/configuration.md`](../reference/configuration.md#off-corpus-store-athenaeum984--off-by-default).
 - **Off by default.** With `off_corpus.enabled` unset, none of this code
   runs — no off-corpus index, no federation, and `record_pair_decision`
   keeps its pre-athenaeum#984 behavior of refusing (not writing anywhere) an
@@ -420,7 +420,7 @@ This posture assumes a **single maintainer** and an **automated overnight merge 
 
 ## 7. Pointers
 
-- Maintenance-posture origin: [plinkromatic#371](https://github.com/Kromatic-Innovation/plinkromatic/issues/371) and `plinkromatic/docs/security-posture.md`.
+- Maintenance-posture origin: [plinkromatic#371](https://github.com/Kromatic-Innovation/plinkromatic/issues/371) and `plinkromatic/docs/design/security-posture.md`.
 - Auto-merge workflow: `.github/workflows/dependabot-auto-merge.yml`.
 - Dependabot grouping config: `.github/dependabot.yml`.
 - Distribution: PyPI (`pyproject.toml` + `hatchling`).

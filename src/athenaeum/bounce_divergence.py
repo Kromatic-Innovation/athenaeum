@@ -4,7 +4,7 @@
 A count of one surface cannot tell a healthy system from a broken one here,
 and this feature has already been misread twice by exactly that shape of
 check — once in each direction (see
-``docs/deprecated-email-tracking.md``'s "How to verify a mark"). A metric that
+``docs/design/deprecated-email-tracking.md``'s "How to verify a mark"). A metric that
 reads only one surface inherits the same class of error. So this module
 reports the **difference between the two surfaces**, computed over the join
 key athenaeum#852 defines, rather than a count of either alone.
@@ -30,7 +30,7 @@ feature has actually had:
 Every number is re-derived at run time from the store passed in. Nothing from
 athenaeum#849 or athenaeum#853 is hard-coded as an expected value; the figures
 quoted in those issues are as-of-2026-08-12 observations of one private store
-(see ``docs/bounce-surface-convergence.md``), and this module neither asserts
+(see ``docs/design/bounce-surface-convergence.md``), and this module neither asserts
 nor reproduces them.
 
 **Read-only.** Nothing here writes to either surface.

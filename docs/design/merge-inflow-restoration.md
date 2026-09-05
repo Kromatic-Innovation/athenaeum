@@ -1,7 +1,7 @@
 # Merge-inflow restoration: a `max_merge_sources` proposal
 
 Analysis for athenaeum#1030 (blocks athenaeum#787), read against the athenaeum#784
-baseline in [`reasoning-tier-measurements.md`](reasoning-tier-measurements.md)
+baseline in [`reasoning-tier-measurements.md`](../measurements/reasoning-tier-measurements.md)
 and the suppression code path. **This document changes no default and flips no
 config.** The live-config flip belongs to athenaeum#787's arming step, after the
 value proposed here is ratified by the operator.
@@ -19,7 +19,7 @@ athenaeum#784 measured **0 merge proposals written on all 9 observed nights**
 (2026-08-05 through 2026-08-17), while the `wiki-dedupe` phase logged
 **127–132 `SUPPRESSED` events per night** — see
 [`reasoning-tier-measurements.md` §"merge proposals generated per
-night"](reasoning-tier-measurements.md#ac--merge-proposals-generated-per-night),
+night"](../measurements/reasoning-tier-measurements.md#ac--merge-proposals-generated-per-night),
 lines 74–92. The doc's own framing labels these as over-cluster suppressions
 against `max_merge_sources=5`.
 
@@ -44,7 +44,7 @@ short-circuiting order** (confirmed by `tests/test_merge_proposal_gates.py`'s
    hundreds/thousands of loosely-related pages into a giant component in the
    first place" (`wiki_dedupe.py:436-450`, comment on the athenaeum#478 call site).
 3. **Mean-similarity floor** — `mean_similarity < min_merge_mean_similarity`
-   (default **0.6**, active — `config.py`, docs/configuration.md line 66).
+   (default **0.6**, active — `config.py`, docs/reference/configuration.md line 66).
 4. **Confidence floor** — off by default (`min_merge_confidence=0.0`).
 
 Because the check short-circuits on the first gate that fires, **a cluster
@@ -308,9 +308,9 @@ runtime behavior and no config default; every figure above is either a code-
 verified guarantee (§4) or an explicitly-bounded, explicitly-labeled estimate
 (§3, §5) — never a fabricated distribution.
 
-## 9. `docs/configuration.md` default is stale (reported, not fixed here)
+## 9. `docs/reference/configuration.md` default is stale (reported, not fixed here)
 
-While tracing `resolve_max_merge_sources`, `docs/configuration.md` was found
+While tracing `resolve_max_merge_sources`, `docs/reference/configuration.md` was found
 to document the default as **25** in two places — the config-key table (line
 61) and the example `athenaeum.yaml` block (line 1899) — while the active
 code default is **5** (`config.py:678-720`, confirmed by
@@ -321,12 +321,12 @@ code default is **5** (`config.py:678-720`, confirmed by
 by the same commit that tightened the default. `git log -p -S"max_merge_sources:
 5" -- src/athenaeum/config.py` shows commit `f529efae` (athenaeum#421) changed the
 code default and `config.py`'s own inline example, but never touched
-`docs/configuration.md`'s two occurrences. This is a real, confirmed doc
+`docs/reference/configuration.md`'s two occurrences. This is a real, confirmed doc
 defect — left unfixed here per this issue's analysis-only scope; flagging for
 the orchestrator to decide whether it warrants its own follow-up.
 
 **Fixed (athenaeum#1088):** both occurrences now document the active default
-of `5`. The config-key table row (`docs/configuration.md`, "Merge-proposal
+of `5`. The config-key table row (`docs/reference/configuration.md`, "Merge-proposal
 source cap") reads "Default `5` (active) — tightened from `25`
 (athenaeum#421, settled design)"; the example `athenaeum.yaml` block's
 `max_merge_sources` line also reads `5`. The line numbers above (61, 1899)

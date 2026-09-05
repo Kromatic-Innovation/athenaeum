@@ -228,7 +228,7 @@ the rest. Five steps, all existing code:
    in `wiki/_pending_questions.md`. You resolve them by editing the file
    directly, or via the `resolve_question` MCP tool (which records the
    answer as a decision-answer file under `raw/answers/`, see
-   [`docs/contradiction-detection.md`](../contradiction-detection.md#decision-answer-files-unified-decision-resolution-as-intake-athenaeum908));
+   [`docs/design/contradiction-detection.md`](../design/contradiction-detection.md#decision-answer-files-unified-decision-resolution-as-intake-athenaeum908));
    `athenaeum ingest-answers` then applies it deterministically and folds
    the resolution back into the wiki.
 
@@ -268,5 +268,5 @@ already consolidated are skipped on re-runs.
 ## See also
 
 - [`examples/claude-code/README.md`](../../examples/claude-code/README.md) — per-turn recall hooks (complementary to this guide)
-- [`docs/recall-architecture.md`](../recall-architecture.md) — hybrid FTS5 + vector recall details
+- [`docs/design/recall-architecture.md`](../design/recall-architecture.md) — hybrid FTS5 + vector recall details
 - [`docs/why-athenaeum.md`](../why-athenaeum.md) — design rationale for the intake/compile split

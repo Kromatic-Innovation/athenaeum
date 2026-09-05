@@ -17,7 +17,7 @@ Two gaps this closes, without moving or changing any prompt text:
 2. **Discoverability.** Finding any prompt is one grep in this file; editing it
    is one hop to the named constant in its home module.
 
-``docs/prompts.md`` is generated from this registry and verified byte-current by
+``docs/design/prompts.md`` is generated from this registry and verified byte-current by
 the same test, so it cannot rot. Regenerate goldens + docs after any intentional
 prompt-text change::
 
@@ -25,7 +25,7 @@ prompt-text change::
 
 **Contract:** :data:`PROMPTS` maps a stable registry name to the LIVE prompt
 constant (re-imported from its home module, never copied) so a golden test
-can pin exact bytes and ``docs/prompts.md`` can render an always-current
+can pin exact bytes and ``docs/design/prompts.md`` can render an always-current
 inventory. This module never edits or generates prompt text.
 
 **Factoring rule:** this module owns the INDEX (name -> module/constant/
@@ -77,7 +77,7 @@ class PromptMeta:
 # Single source of truth: (registry name, home-module constant, model knob,
 # max_tokens). The module is derived from the name's first segment, so the name,
 # the constant, and the call-site knobs/budgets are recorded exactly once. Knob
-# and max_tokens were read from each prompt's live call site (see docs/prompts.md).
+# and max_tokens were read from each prompt's live call site (see docs/design/prompts.md).
 #
 # ``cacheable`` (issue athenaeum#927) is the LAST element: whether the call site marks
 # this prompt with a ``cache_control`` breakpoint. Exactly one prompt does today —
@@ -239,7 +239,7 @@ def _fence_for(text: str) -> str:
 
 
 def render_docs() -> str:
-    """Render the full contents of the generated ``docs/prompts.md``."""
+    """Render the full contents of the generated ``docs/design/prompts.md``."""
     manifest = prompt_manifest()
     lines: list[str] = [
         "<!-- GENERATED FILE — do not edit by hand.",
@@ -291,7 +291,7 @@ def _repo_root() -> Path:
 
 
 def write_goldens_and_docs(root: Path | None = None) -> None:
-    """Regenerate every golden under tests/data/prompts/ and docs/prompts.md."""
+    """Regenerate every golden under tests/data/prompts/ and docs/design/prompts.md."""
     root = root or _repo_root()
     golden_dir = root / "tests" / "data" / "prompts"
     golden_dir.mkdir(parents=True, exist_ok=True)
@@ -301,20 +301,20 @@ def write_goldens_and_docs(root: Path | None = None) -> None:
             existing.unlink()
     for name in PROMPTS:
         (golden_dir / f"{name}.txt").write_text(render_golden(name), encoding="utf-8")
-    (root / "docs" / "prompts.md").write_text(render_docs(), encoding="utf-8")
+    (root / "docs" / "design" / "prompts.md").write_text(render_docs(), encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Regenerate prompt goldens + docs/prompts.md, or print the manifest."
+        description="Regenerate prompt goldens + docs/design/prompts.md, or print the manifest."
     )
     parser.add_argument(
-        "--write", action="store_true", help="write goldens + docs/prompts.md to disk"
+        "--write", action="store_true", help="write goldens + docs/design/prompts.md to disk"
     )
     args = parser.parse_args(argv)
     if args.write:
         write_goldens_and_docs()
-        print(f"wrote {len(PROMPTS)} goldens + docs/prompts.md")
+        print(f"wrote {len(PROMPTS)} goldens + docs/design/prompts.md")
     else:
         for name, digest in prompt_manifest().items():
             print(f"{digest}  {name}")

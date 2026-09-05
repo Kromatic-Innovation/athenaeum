@@ -12,7 +12,7 @@ does its own filesystem arithmetic against it. This module generalizes the
 through the protocol, so a future non-filesystem adapter is a second
 implementation of this module, not a second front door.
 
-Full rationale: ``docs/whole-store-adapter-design.md`` §6 (the published draft
+Full rationale: ``docs/extending/whole-store-adapter-design.md`` §6 (the published draft
 contract this module implements verbatim from §6.2, plus the §6.1 design
 decisions D1-D6). **No existing caller is migrated onto this seam in this
 slice** — S2 (athenaeum#977), S3 (athenaeum#978), S4 (athenaeum#979) and S7
@@ -55,7 +55,7 @@ data/error types (:class:`StoreKey`, :class:`ObjectMeta`, :class:`Record`,
 :class:`StoreKeyError`, :class:`StoreConflictError`, :class:`LeaseHeldError`,
 :class:`UnknownSurfaceError`) and :class:`FilesystemStore` are now on the
 package root's stable ``__all__`` surface (see ``src/athenaeum/__init__.py``
-and ``docs/store-contract.md``, the published form of this docstring's §6).
+and ``docs/extending/store-contract.md``, the published form of this docstring's §6).
 The rest of this module stays internal, same as :mod:`athenaeum.storage` and
 :class:`athenaeum.search.SearchBackend`: the S4 lease-primitive internals
 (:func:`lease_open_fd` and siblings, :class:`FileLease`), the S5

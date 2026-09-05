@@ -178,7 +178,7 @@ class TestLintPiiCLI:
 #
 # `_cmd_storage_lint_pii` resolved its scan root as `knowledge_root / "wiki"`
 # only. `raw/` is a SIBLING of `wiki/`, not a descendant, and was never
-# scanned — `docs/sensitivity-value-routing.md` §5 confirms this premise
+# scanned — `docs/design/sensitivity-value-routing.md` §5 confirms this premise
 # directly against the code. Once athenaeum#1025's standing filter ships, an
 # original value stays in `raw/` in the clear (append-only by contract) while
 # only a pointer reaches `wiki/`, so a clean `lint-pii` would read as "no

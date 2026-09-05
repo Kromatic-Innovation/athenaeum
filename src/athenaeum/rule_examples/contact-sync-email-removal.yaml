@@ -9,10 +9,10 @@
 #
 # The removed address is the SET DIFFERENCE of the record's before and after
 # email lists -- computed by the closed-vocabulary `set_diff` function
-# (docs/shape-rules.md §4.1), never by a template or any evaluated
+# (docs/design/shape-rules.md §4.1), never by a template or any evaluated
 # expression. Expressed as a `remove` operation on `alt_emails`.
 #
-# ROUTING IS NOT THIS RULE'S DECISION. `docs/field-corrections.md` §7 is
+# ROUTING IS NOT THIS RULE'S DECISION. `docs/design/field-corrections.md` §7 is
 # explicit that a correction's target/field is a PROPOSAL: the librarian
 # resolves where the fact actually belongs, and §7.1's sensitivity routing
 # sends a fact bearing on a contact identifier to the PII/excluded-value
@@ -23,7 +23,7 @@
 # NOTE the deliberate absence: there is no create rule here. Contact-sync
 # records stay UPDATE-ONLY -- a sync record never auto-creates a person, on
 # the same volume argument as the email-handle create carve-out in
-# `docs/field-corrections.md` §8. A record whose person is unknown falls
+# `docs/design/field-corrections.md` §8. A record whose person is unknown falls
 # through to the reasoning tiers rather than manufacturing an entity.
 #
 # Ships in "observe" mode: review wiki/_shape_rules_applied.jsonl before

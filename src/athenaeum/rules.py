@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shape-rule engine (issue athenaeum#901): declarative YAML rules that
 recognise a foreign record shape and compile it into a
-`docs/field-corrections.md`-conformant correction batch.
+`docs/design/field-corrections.md`-conformant correction batch.
 
 Rules are DATA, not code. They live at `<knowledge-root>/rules/*.yaml`, are
 loaded and pydantic-schema-validated at run start (:func:`load_rules`), and
@@ -23,7 +23,7 @@ fixed, code-owned interpreter over already-`yaml.safe_load`'d data.
 **Dispositions** (`emit`/`fallthrough` are athenaeum#901; `drop`/`retain`/
 `rollup` athenaeum#903; `preserve` athenaeum#837):
 `emit` writes a correction batch in the ONE conformance format
-(`docs/field-corrections.md` §3.2), consumed by the existing correction
+(`docs/design/field-corrections.md` §3.2), consumed by the existing correction
 machinery (:mod:`athenaeum.corrections`) with NO CHANGES to it — the batch
 lands in the SAME ordinary `raw/<source>/` tree that machinery already
 scans. `fallthrough` explicitly leaves the record for the reasoning tiers
@@ -57,7 +57,7 @@ convention `corrections.py`'s module docstring uses):
   limitation, not a silent gap. Anything else (unparseable content, empty
   file, a non-object first line) yields an empty record `{}`: no field
   predicate or key-fingerprint can match it, so the file falls through to
-  the ordinary tiered ladder untouched — `docs/field-corrections.md` §1.1's
+  the ordinary tiered ladder untouched — `docs/design/field-corrections.md` §1.1's
   "conformance sets HOW DEEP, never WHETHER" rule, applied one layer up.
 - **Field interpolation is whole-value only.** `"$name"` substitutes
   `record["name"]` verbatim (any type). Embedding a field inside a larger
@@ -417,7 +417,7 @@ class ShapeRuleTransformError(Exception):
     against a matched record — a missing `$field`, wrong-shaped function
     args, an unparseable `date_of` input. The caller treats this as a
     per-record FALLTHROUGH, never a crash and never a silently-wrong write:
-    `docs/field-corrections.md` §1.1's "nothing is rejected, every failure
+    `docs/design/field-corrections.md` §1.1's "nothing is rejected, every failure
     to conform is a fallthrough" doctrine, applied to the compiler as well
     as the applier.
     """
@@ -530,7 +530,7 @@ def resolve_value_expr(expr: Any, record: dict[str, Any]) -> Any:
 
 class CorrectionSpec(BaseModel):
     """The `emit` disposition's correction-record template
-    (`docs/field-corrections.md` §3.2/§3.3). Every field except `op`/
+    (`docs/design/field-corrections.md` §3.2/§3.3). Every field except `op`/
     `field`/`source` may be a literal, a `$field` reference, or a closed-
     vocabulary function call — resolved per-record by
     :func:`resolve_value_expr` (see :func:`build_correction_record`).
@@ -600,7 +600,7 @@ class CorrectionSpec(BaseModel):
             raise ValueError(
                 f"correction.target keys {sorted(keys)} must be exactly one "
                 "of {uid}, {type,name}, {type,handle} "
-                "(docs/field-corrections.md §3.3)"
+                "(docs/design/field-corrections.md §3.3)"
             )
         _validate_no_unknown_fn(v, path="target")
         return v
@@ -644,7 +644,7 @@ class CorrectionSpec(BaseModel):
             raise ValueError(
                 f"correction.source {v!r} asserts precedence above machine "
                 f"tier -- only {sorted(MACHINE_TIER_SOURCE_TYPES)} source "
-                "types are permitted (docs/field-corrections.md §6.1)"
+                "types are permitted (docs/design/field-corrections.md §6.1)"
             )
         return v
 
@@ -676,7 +676,7 @@ TERMINAL_DISPOSITIONS: frozenset[str] = frozenset(
 class RollupSpec(BaseModel):
     """The `rollup` disposition's aggregation (issue athenaeum#903).
 
-    `docs/field-corrections.md` §12 is explicit about what may cross the
+    `docs/design/field-corrections.md` §12 is explicit about what may cross the
     boundary from an event stream into an entity record: *"a small rollup —
     last-event date, a windowed count"*, and nothing else. This spec is that
     sentence expressed as a closed vocabulary:
@@ -938,7 +938,7 @@ def _git(knowledge_root: Path, *args: str) -> "subprocess.CompletedProcess[bytes
 def write_correction_batch(
     *, raw_root: Path, source: str, submitter: str, records: list[dict[str, Any]]
 ) -> Path:
-    """Write ONE correction batch (`docs/field-corrections.md` §3.2) for the
+    """Write ONE correction batch (`docs/design/field-corrections.md` §3.2) for the
     given effective correction records into
     `raw/<source>/<timestamp>-<uuid8>.jsonl` — the SAME ordinary intake tree
     the existing correction machinery already scans
@@ -1471,7 +1471,7 @@ def append_shape_rule_disposition_row(wiki_root: Path, row: dict[str, Any]) -> N
 
 
 #: Dispositions the shape-rules pass -- the deterministic, no-LLM layer,
-#: tier 0 on the ladder in `docs/field-corrections.md` §2 -- actually
+#: tier 0 on the ladder in `docs/design/field-corrections.md` §2 -- actually
 #: resolved a record with. Everything else (no rule matched at all, a rule
 #: that explicitly deferred via `fallthrough`/`observed-fallthrough`, or a
 #: soft failure that degrades to fallthrough -- `transform-error`,
@@ -1778,7 +1778,7 @@ def prune_shape_rule_dispositions(
 # "preserve + observed-preserve" framing: `athenaeum.rule_proposals.
 # _grouped_deferred_rows` (the ledger's only consumer -- confirmed by a
 # call-site search of every reader of `default_shape_rule_dispositions_path`
-# in this package, not by inference; see `docs/configuration.md`'s
+# in this package, not by inference; see `docs/reference/configuration.md`'s
 # `log_no_match` entry) reads every `tier is None` row, not only `no-match`
 # ones. Dropping a `fallthrough`-shaped row this function has never observed
 # in the wild would still be an unreviewed, silent loss of data a live
@@ -1990,7 +1990,7 @@ def _compute_rollup_aggregate(
     spec: "RollupSpec", records: list[dict[str, Any]]
 ) -> Any:
     """Reduce a rollup group's records to the ONE value that crosses into the
-    entity record (`docs/field-corrections.md` §12).
+    entity record (`docs/design/field-corrections.md` §12).
 
     `count` -> the number of records in the group (a windowed count).
     `last`  -> the maximum resolved `of` across the group (a last-event date).

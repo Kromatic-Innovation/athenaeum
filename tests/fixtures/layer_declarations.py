@@ -20,7 +20,7 @@ in nearly every ``src/athenaeum/*.py`` module's OWN docstring — e.g.
 general L0-L5 scheme itself (L0 stdlib-only primitive/leaf, L1 data model,
 L2 primitive/utility, L3 service, L4 domain/pipeline, L5 presentation/CLI,
 plus package ``__init__`` sitting above L5) is spelled out authoritatively
-in ``docs/store-contract.md``'s "Layering" section and echoed consistently
+in ``docs/extending/store-contract.md``'s "Layering" section and echoed consistently
 by every module that documents its own layer.
 
 THIS FILE is that per-module scatter, collected into one place, so a test

@@ -336,7 +336,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   `claude:`, `script:`, `model-prior:`, `unsourced`).
 - **Change (athenaeum#326):** issue athenaeum#326 introduced a NEW tier `model-prior:<model-id>`
   ranked BELOW `script:<slug>`. Rationale is locked in
-  `docs/provenance-shape.md` §10.1 — a training prior is unverifiable and
+  `docs/design/provenance-shape.md` §10.1 — a training prior is unverifiable and
   silently stale past the model cutoff, while a pipeline slug at least names
   a repeatable in-tree process.
 - **Change (athenaeum#328):** issue athenaeum#328 inserts a NEW tier
@@ -357,7 +357,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   together.
 - **Cross-reference:** the channel-split source_type vocabulary (with
   the parallel `agent-observed` and `model-prior` claim-level values)
-  is locked in `docs/provenance-shape.md` §10; the two docs cross-link
+  is locked in `docs/design/provenance-shape.md` §10; the two docs cross-link
   so a future change to either the vocabulary OR the precedence rank
   updates both plus `tests/test_conflict_resolution.py` in the same
   change (Section 11 test class).
@@ -368,7 +368,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   point. `src/athenaeum/precedence.py`'s `SOURCE_PRECEDENCE_TIERS` /
   `source_rank()` is a deterministic, LLM-free MIRROR of this same 9-tier
   list, added for the tier-0 field-correction applier
-  (`docs/field-corrections.md` §6.1), which cannot call an LLM. It is a
+  (`docs/design/field-corrections.md` §6.1), which cannot call an LLM. It is a
   fourth site in the drift-guard set alongside `resolutions.py`'s docstring
   and `_RESOLVE_SYSTEM` comment and the golden-prompt snapshot — bound to
   THIS block by `tests/test_precedence.py`, which parses (not transcribes)
@@ -514,7 +514,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   `0.95`). Confidence is the wrong axis for an irreversible delete: models are
   poorly calibrated exactly at the top of their range. athenaeum#752 REPLACES the
   confidence gate for these two actions (it does not stack on top of it — see
-  `docs/configuration.md`) with a check against a record the model did not
+  `docs/reference/configuration.md`) with a check against a record the model did not
   author: **auto-apply fires only when the WINNING member's claim — the side
   named by the resolver's `recommended_winner`, i.e. the side asserting the
   correction — is classified `user-stated` by
@@ -670,7 +670,7 @@ partial-order authority treatment and rate limits, evidence-artifact fold
 proposals, the `compatible` TTL re-check, sibling-scope widening probes) are
 **built and tested, gated off by default** behind `librarian.comparator_enabled`
 (default `false`) — see
-[`docs/configuration.md`](configuration.md#five-verdict-comparator-athenaeum715--off-by-default).
+[`docs/reference/configuration.md`](../reference/configuration.md#five-verdict-comparator-athenaeum715--off-by-default).
 
 **Tier 3 / `tier3_merge` and this document's audit-locked frontmatter
 disagreement catalog are UNCHANGED and still describe live behaviour.**
@@ -681,7 +681,7 @@ algorithm is deleted outright and replaced by the comparator, gated on the
 SAME `librarian.comparator_enabled` knob. The C1-C4 auto-memory pipeline's
 own intra-cluster contradiction detector (`athenaeum.merge` /
 `athenaeum.contradictions`, see
-[`docs/contradiction-detection.md`](contradiction-detection.md) for the
+[`docs/design/contradiction-detection.md`](contradiction-detection.md) for the
 full pipeline) is **still the old path** — deeply interleaved with
 run-level deadline checkpointing, the detection-incomplete retry queue, and
 the shared API-call/spend budget, so retiring it safely is scoped as its

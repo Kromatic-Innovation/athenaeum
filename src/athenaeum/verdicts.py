@@ -985,7 +985,7 @@ def ensure_ledger_initialized(wiki_root: Path, *, lock: RunLock) -> Path:
     Idempotent — a second call on an already-initialized ledger touches
     nothing. This is the minimal, always-safe write a live ``athenaeum run``
     performs when the verdict ledger is enabled (see
-    ``docs/configuration.md``'s "Verdict ledger" section for the Wiring
+    ``docs/reference/configuration.md``'s "Verdict ledger" section for the Wiring
     decision this implements) so the store is genuinely live and queryable
     even before the comparator (a future, separate child of athenaeum#709)
     exists to populate it with real verdicts.
@@ -1129,7 +1129,7 @@ def record_pair_decision(
             if not write_off_corpus:
                 log.warning(
                     "verdicts: refusing pair write — erasure-class source(s): %s "
-                    "(off_corpus not configured; see docs/configuration.md "
+                    "(off_corpus not configured; see docs/reference/configuration.md "
                     "'Off-corpus store')",
                     erasure_class_sources,
                 )

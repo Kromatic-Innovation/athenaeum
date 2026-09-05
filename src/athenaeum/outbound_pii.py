@@ -36,7 +36,7 @@ place.
 to import :mod:`athenaeum.pii`'s private ``_EMAIL_RE`` / ``_PHONE_RE`` /
 ``_has_enough_digits`` / ``_is_excluded_phone_shape`` directly — never
 :func:`~athenaeum.pii.find_inline_emails`/:func:`~athenaeum.pii.find_inline_phones`
-(``docs/sensitivity-class-vocabulary.md`` §2.1/§9 previously claimed
+(``docs/design/sensitivity-class-vocabulary.md`` §2.1/§9 previously claimed
 otherwise; that claim is corrected in this PR). Migration was viable because
 :mod:`athenaeum.sensitivity`'s built-in recognisers populate
 ``SensitivityMatch.span`` (the design note's S1a span decision), which

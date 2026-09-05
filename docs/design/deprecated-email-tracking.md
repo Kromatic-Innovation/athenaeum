@@ -234,7 +234,7 @@ deprecation record). Preserve is the safe direction.
 
 ## Q3 — The raw-intake proposal contract
 
-> **Implementable version: [`tier0-bounce-note-contract.md`](tier0-bounce-note-contract.md)
+> **Implementable version: [`tier0-bounce-note-contract.md`](../extending/tier0-bounce-note-contract.md)
 > (athenaeum#854).** This section states the decision in prose. A producer in
 > another repository implementing against it should read that document
 > instead: it pins every field, where it must appear, what satisfies it, and

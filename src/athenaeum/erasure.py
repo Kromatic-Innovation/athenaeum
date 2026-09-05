@@ -2,7 +2,7 @@
 """Erasure classification and taint-propagation rules (athenaeum#985).
 
 Split (c) of athenaeum#718's three-way re-scope (athenaeum#911 design lock
-§8, `docs/whole-store-adapter-design.md`): the nine acceptance criteria that
+§8, `docs/extending/whole-store-adapter-design.md`): the nine acceptance criteria that
 are **classification and taint-propagation logic**, sitting *above* wherever
 the bytes land — decisions about *which* content is erasure-class and *what
 may be written about it*, answerable without knowing whether the bytes land
@@ -62,7 +62,7 @@ This module covers:
   the erasure cascade cannot reach), carried in every
   :class:`RedactionLedgerRecord`.
 - **AC7 — named remediation path.** Documented in
-  `docs/security-posture.md` ("Erasure remediation: misclassified in-git
+  `docs/design/security-posture.md` ("Erasure remediation: misclassified in-git
   content"); :func:`build_history_rewrite_remediation_record` builds (never
   executes) the ledger entry that protocol requires.
 - **AC8 — the redaction ledger.** :class:`RedactionLedgerRecord` records
@@ -77,7 +77,7 @@ This module covers:
   ``athenaeum.yaml`` (:func:`athenaeum.config.resolve_retention_pack_selection`
   / :func:`athenaeum.config.resolve_retention_pack_overrides`). Honors the
   ``bucket: daily`` -> ``delete-after`` mapping
-  `docs/provenance-shape.md` §8.8 commits to
+  `docs/design/provenance-shape.md` §8.8 commits to
   (:func:`reconcile_bucket_daily_with_pack`) as a **documented mapping**,
   not a rewrite of :mod:`athenaeum.decay_sweep`'s current (unchanged)
   behavior — see that function's docstring.
@@ -129,7 +129,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 #: Key filename under the cache dir (machine-local / ``operational``, R3 —
-#: `docs/whole-store-adapter-design.md` §5.2). Deliberately NOT under
+#: `docs/extending/whole-store-adapter-design.md` §5.2). Deliberately NOT under
 #: ``knowledge_root`` (wiki/raw): a key that ever entered git history would
 #: need the same history-rewrite remediation (AC7) this module exists to
 #: avoid for ordinary key rotation. Purging is then a plain file delete —
@@ -330,7 +330,7 @@ UNKNOWN_JURISDICTION_ACTION = "store-off-corpus"
 #: "misclassifying toward the strict side is recoverable" reads: content the
 #: system either refuses to keep in git-versioned form at all, or keeps only
 #: off-corpus where a true delete is possible — see
-#: `docs/whole-store-adapter-design.md` §4.5, "git is a capability... git's
+#: `docs/extending/whole-store-adapter-design.md` §4.5, "git is a capability... git's
 #: durability is precisely what makes erasure impossible").
 ERASURE_CLASS_ACTIONS: frozenset[str] = frozenset({"refuse-write", "store-off-corpus"})
 
@@ -559,7 +559,7 @@ def classify_retention(
 def reconcile_bucket_daily_with_pack(
     *, memory_class: str, data_class: str, pack: RetentionPack
 ) -> RetentionRule:
-    """What ``bucket: daily`` COMPILES TO under *pack*, per `docs/provenance-shape.md` §8.8.
+    """What ``bucket: daily`` COMPILES TO under *pack*, per `docs/design/provenance-shape.md` §8.8.
 
     That doc's §8.8 commits to a specific, already-published mapping:
     ``bucket: daily`` is v0 shorthand for a ``delete-after <period>`` rule
@@ -642,7 +642,7 @@ def classify_inference_taint(text: str, *, erasure_class_slugs: Collection[str])
 #: namespace (:mod:`athenaeum.provenance`'s ``_SCALAR_RE`` accepts any
 #: ``[a-z][a-z0-9_-]*`` type) rather than an addition to the CLOSED
 #: ``source_type`` channel vocabulary (``models.SOURCE_TYPES`` —
-#: `docs/provenance-shape.md` §10.1). That vocabulary carries an explicit
+#: `docs/design/provenance-shape.md` §10.1). That vocabulary carries an explicit
 #: cross-file lock discipline (resolver prompt + golden snapshot + the
 #: conflict-resolution doc all have to move together for any change to it),
 #: which this issue's taint rule has no need to touch — a source `type` is
@@ -689,11 +689,11 @@ def classify_by_provenance(source: str | SourceRef | None) -> bool:
 # AC6 — taint rule 3: push is egress (honest disclosure, carried in the ledger)
 # ---------------------------------------------------------------------------
 
-#: The honest guarantee this module (and `docs/security-posture.md`) states
+#: The honest guarantee this module (and `docs/design/security-posture.md`) states
 #: about erasure's actual reach. Embedded verbatim in every
 #: :class:`RedactionLedgerRecord`'s :meth:`~RedactionLedgerRecord.to_dict`
 #: output (AC6: "record that disclosure in the redaction ledger's output"),
-#: and in `docs/security-posture.md`'s "Erasure egress disclosure" section —
+#: and in `docs/design/security-posture.md`'s "Erasure egress disclosure" section —
 #: ONE string, not two independently-drifting copies (the doc section quotes
 #: this constant rather than restating it).
 EGRESS_DISCLOSURE = (
@@ -703,7 +703,7 @@ EGRESS_DISCLOSURE = (
     "downstream agent outputs. Recall into a session is an egress event; "
     "the erasure cascade cannot reach a session transcript or a cache built "
     "from one — that is a disclosed gap, not a silent one. See "
-    "docs/security-posture.md, 'Erasure egress disclosure'."
+    "docs/design/security-posture.md, 'Erasure egress disclosure'."
 )
 
 
@@ -713,7 +713,7 @@ EGRESS_DISCLOSURE = (
 # ---------------------------------------------------------------------------
 
 #: Reason code for a redaction-ledger entry recording that the last-resort
-#: in-git history-rewrite remediation (`docs/security-posture.md`, "Erasure
+#: in-git history-rewrite remediation (`docs/design/security-posture.md`, "Erasure
 #: remediation: misclassified in-git content") was invoked for one piece of
 #: misclassified content.
 HISTORY_REWRITE_REMEDIATION_REASON = "history-rewrite-remediation"
@@ -837,7 +837,7 @@ def build_history_rewrite_remediation_record(
 
     AC7: "Documented, not implemented — but documented precisely enough to
     execute." The protocol itself — forced re-clone of every machine, ledger
-    re-anchor — is documented in `docs/security-posture.md` ("Erasure
+    re-anchor — is documented in `docs/design/security-posture.md` ("Erasure
     remediation: misclassified in-git content"); this function builds the
     redaction-ledger entry that protocol requires, with ``action_taken``
     fixed to ``"refuse-write"`` — the remediation's outcome is that the
@@ -867,7 +867,7 @@ def append_redaction_ledger(
     """Append *records* to the durable redaction ledger, via
     :func:`athenaeum.store.append_line_durable` (``O_APPEND`` + ``fsync``,
     the same single shared primitive every other ledger in this codebase
-    uses — `docs/whole-store-adapter-design.md` §2.4/§6.2). Raises on
+    uses — `docs/extending/whole-store-adapter-design.md` §2.4/§6.2). Raises on
     failure, matching :func:`athenaeum.decay_sweep.write_sweep_ledger`'s
     posture rather than the best-effort ``record_merge_provenance``/
     ``record_push`` one: this ledger sits upstream of a redaction/erasure

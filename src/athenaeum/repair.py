@@ -234,7 +234,7 @@ def _quote_subst(m: re.Match) -> str:
 # 3. Legacy bare-slug ``source:`` migration  (issue athenaeum#97 / design-lock §5)
 
 # Fixed mapping from the live-tree inventory in
-# ``docs/provenance-shape.md`` §5.1. Both observed bare-slug values are
+# ``docs/design/provenance-shape.md`` §5.1. Both observed bare-slug values are
 # librarian scripts — ``script:<slug>`` is the typed form. Unknown slugs
 # ABORT the migration (design-lock §5.2 — no guess, no fallback).
 LEGACY_SLUG_MAP: dict[str, str] = {

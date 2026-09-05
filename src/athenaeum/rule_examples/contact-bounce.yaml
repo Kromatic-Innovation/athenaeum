@@ -5,10 +5,10 @@
 # `athenaeum init --with-rules` does that copy for you.
 #
 # Recognises a delivery-status monitor's bounce record --
-# docs/field-corrections.md §11.1's worked example -- and compiles it into a
+# docs/design/field-corrections.md §11.1's worked example -- and compiles it into a
 # conformant field correction. Ships in "observe" mode: review
 # wiki/_shape_rules_applied.jsonl after a few runs before flipping this
-# rule's own copy to `mode: live`. See docs/shape-rules.md for the full
+# rule's own copy to `mode: live`. See docs/design/shape-rules.md for the full
 # rule-schema reference.
 
 version: 1

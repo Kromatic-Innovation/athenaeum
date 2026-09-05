@@ -4,7 +4,7 @@ athenaeum#1376).
 
 `test_no_undocumented_env_vars` and `test_no_undocumented_by_code_env_vars` are
 the two enforcement gates — the first fails the suite if any `ATHENAEUM_*` name
-read by `src/` is missing from `docs/configuration.md` (src -> docs, athenaeum#688);
+read by `src/` is missing from `docs/reference/configuration.md` (src -> docs, athenaeum#688);
 the second fails it if any name documented there is read by nothing the checker
 can see (docs -> code, athenaeum#1376) — a documented-but-dead knob is silent
 operator-facing rot the first direction cannot catch. The rest prove the check
@@ -35,7 +35,7 @@ def test_no_undocumented_env_vars() -> None:
     missing = check_env_docs.undocumented(src_vars, doc_vars)
     assert not missing, (
         "undocumented ATHENAEUM_* vars read by src/ — document them in "
-        f"docs/configuration.md (or allowlist with a reason): {sorted(missing)}"
+        f"docs/reference/configuration.md (or allowlist with a reason): {sorted(missing)}"
     )
 
 
@@ -95,7 +95,7 @@ def test_allowlisted_var_is_not_flagged(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_no_undocumented_by_code_env_vars() -> None:
-    # The second CI gate: every ATHENAEUM_* documented in docs/configuration.md
+    # The second CI gate: every ATHENAEUM_* documented in docs/reference/configuration.md
     # must be read by src/, scripts/, examples/claude-code/, or a known
     # runtime-constructed family. A documented var nothing reads is an
     # operator-facing no-op with no error and no effect (issue athenaeum#1376).

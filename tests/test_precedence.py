@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for `athenaeum.precedence` (issue athenaeum#797, design doc
-`docs/field-corrections.md` §6.1).
+`docs/design/field-corrections.md` §6.1).
 
 The membership-drift test is the point of this file, not a footnote: a
 naive test that merely counts tiers passes forever while missing an omitted
@@ -205,7 +205,7 @@ def test_module_docstring_tier_count_positive_control() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Drift-guard site (4a): docs/conflict-resolution.md §11's inline list of
+# Drift-guard site (4a): docs/design/conflict-resolution.md §11's inline list of
 # the taxonomy's `<type>:` components (issue athenaeum#1375).
 #
 # The doc omitted `twitter:` — nine tokens instead of ten — while
@@ -259,7 +259,7 @@ def test_conflict_resolution_doc_type_components_match_taxonomy() -> None:
     """§11's inline type-component list must name every token in the
     canonical taxonomy — drift-guard site (4a), `resolutions.py:403-421`.
     """
-    doc_text = (_DOCS_DIR / "conflict-resolution.md").read_text(encoding="utf-8")
+    doc_text = (_DOCS_DIR / "design" / "conflict-resolution.md").read_text(encoding="utf-8")
     section = _extract_markdown_section(doc_text, 11)
     doc_tokens = _parse_doc_type_components(section)
     assert doc_tokens, (
@@ -268,7 +268,7 @@ def test_conflict_resolution_doc_type_components_match_taxonomy() -> None:
     )
     canonical_tokens = _canonical_token_set(_RESOLVE_SYSTEM)
     assert doc_tokens == canonical_tokens, (
-        f"docs/conflict-resolution.md §11's type-component list "
+        f"docs/design/conflict-resolution.md §11's type-component list "
         f"{sorted(doc_tokens)} does not match the canonical taxonomy's "
         f"token set {sorted(canonical_tokens)}"
     )
@@ -288,7 +288,7 @@ def test_conflict_resolution_doc_type_components_positive_control() -> None:
     mutated_tokens = _canonical_token_set(mutated)
     assert "twitter" not in mutated_tokens
 
-    doc_text = (_DOCS_DIR / "conflict-resolution.md").read_text(encoding="utf-8")
+    doc_text = (_DOCS_DIR / "design" / "conflict-resolution.md").read_text(encoding="utf-8")
     section = _extract_markdown_section(doc_text, 11)
     doc_tokens = _parse_doc_type_components(section)
     assert doc_tokens, "no type-component list parsed from §11 (see sibling test)"
@@ -300,7 +300,7 @@ def test_conflict_resolution_doc_type_components_positive_control() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Drift-guard site (4b): docs/field-corrections.md §6.1's stated tier and
+# Drift-guard site (4b): docs/design/field-corrections.md §6.1's stated tier and
 # minimum-token counts (issue athenaeum#1375).
 # ---------------------------------------------------------------------------
 
@@ -314,10 +314,10 @@ def test_field_corrections_doc_denominator_matches_taxonomy() -> None:
     ("it parsed 9 tiers and at least 10 tokens"); assert those numbers
     agree with the canonical taxonomy block — drift-guard site (4b).
     """
-    doc_text = (_DOCS_DIR / "field-corrections.md").read_text(encoding="utf-8")
+    doc_text = (_DOCS_DIR / "design" / "field-corrections.md").read_text(encoding="utf-8")
     match = _FIELD_CORRECTIONS_DENOMINATOR_RE.search(doc_text)
     assert match, (
-        "docs/field-corrections.md does not contain the 'parsed <N> tiers "
+        "docs/design/field-corrections.md does not contain the 'parsed <N> tiers "
         "and at least <M> tokens' sentence — parser regression"
     )
     stated_tiers = int(match.group(1))
@@ -347,7 +347,7 @@ def test_field_corrections_doc_denominator_positive_control() -> None:
     assert mutated != _RESOLVE_SYSTEM
     mutated_total_tokens = sum(len(tier) for tier in _parse_taxonomy(mutated))
 
-    doc_text = (_DOCS_DIR / "field-corrections.md").read_text(encoding="utf-8")
+    doc_text = (_DOCS_DIR / "design" / "field-corrections.md").read_text(encoding="utf-8")
     match = _FIELD_CORRECTIONS_DENOMINATOR_RE.search(doc_text)
     assert match, "no 'parsed <N> tiers and at least <M> tokens' sentence found"
     stated_min_tokens = int(match.group(2))

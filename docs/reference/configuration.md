@@ -1,8 +1,8 @@
 # Configuration Reference
 
 This is the canonical reference for every operator-tunable knob in Athenaeum.
-Other docs (README, [auto-resolve.md](auto-resolve.md),
-[contradiction-detection.md](contradiction-detection.md)) link here instead of
+Other docs (README, [auto-resolve.md](../design/auto-resolve.md),
+[contradiction-detection.md](../design/contradiction-detection.md)) link here instead of
 maintaining their own copies of the tables.
 
 ## Precedence
@@ -127,7 +127,7 @@ See [exit-codes.md](exit-codes.md) for the full `athenaeum run` exit-code table 
 | Quarantine threshold | — | `ATHENAEUM_QUARANTINE_THRESHOLD` | `librarian.quarantine_threshold` | `2` | Consecutive-run count after which a raw file that keeps exceeding ANY of the three bounds above is **quarantined** (athenaeum#898) — physically moved from `raw/<source>/` to `wiki/_quarantine/<source>/`, so it drops out of `discover_raw_files`'s discovery set, plus an audit-ledger record (`wiki/_quarantine.jsonl`) and a `type: "quarantine"` entry in `athenaeum decisions` / `list_pending_decisions`. Mirrors the stuck-file ledger's shape (`wiki/_quarantine_candidates.json`, keyed by ref + content hash, so editing the file resets its count) but is tracked as a SEPARATE ledger — a bound violation is a measured resource fact, not a processing exception, and its disposition (physical removal) is heavier than the stuck-file skip-in-place. Reversible only via an operator decision (`athenaeum.quarantine.release_quarantine`) — there is no automatic un-quarantine. Must be `>= 1`; non-numeric / non-positive / bool values fall back to the default. |
 | Zero-yield alert threshold | — | `ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD` | `librarian.zero_yield_alert_threshold` | `3` | Consecutive-zero-yield-run count (athenaeum#899's `zero_yield_state.json` `consecutive`) at which `athenaeum run` logs a dedicated `librarian-zero-yield-alert` ERROR-level line (athenaeum#1177) — distinct from the plain `librarian-zero-yield` WARNING that fires on every zero-yield run regardless of streak length. At the observed ~40 runs/day, the default of `3` alerts within roughly two hours, nowhere close to the four-day silent incident this issue exists to catch sooner. Must be `>= 1`; non-numeric / non-positive / bool values fall back to the default. |
 | Page-size threshold | — | — | `librarian.page_size_threshold_chars` | `10000` | Char threshold above which an existing wiki page is **too large to merge into** (athenaeum#1182). Enforced BEFORE a Tier-3 merge is dispatched — before the merge prompt is built or any model call is made — so an over-threshold page never pays for (or risks) a merge call at all; see `oversize_page_action` below for what happens instead. Picked from the corpus distribution (23,534 pages, non-`_`-prefixed `*.md`: median 1,544 bytes, p75 1,751, p90 2,061, p99 8,468), not the model's context window: well under the 20,000-char merge-input window and comfortably above p99, so it catches unbounded-accretion anomalies without false-positiving on the ordinary corpus. Must be `>= 1`; non-numeric / non-positive / bool values fall back to the default. |
-| Oversize-page action | — | — | `librarian.oversize_page_action` | `review` | What an over-`page_size_threshold_chars` page routes to instead of another merge (athenaeum#1182, dispositions implemented athenaeum#1248): one of `review`, `split`, `log_demote`. Any other value falls back to `review`. **Safety contract: `review` is the only route that is safe to leave enabled unattended, and it stays the shipped default** — `split`/`log_demote` restructure a durable operator page on disk and must be an explicit operator choice. `review` escalates the page (`_pending_questions.md`, carrying the observation that would have been merged) and leaves the page byte-for-byte unmodified. `split` decomposes the page into one atomic child page per top-level markdown heading/section, leaving the original in place as a **hub** — same `uid`/`name`/other frontmatter, so every existing index key and cross-reference into it still resolves — with a shrunk body that links to each child; content before the first heading has nowhere atomic to go, so it stays on the hub verbatim. A page with **no markdown heading at all** cannot be split (that cohort is athenaeum#1282's job) and falls back to `review`, page untouched. `log_demote` MOVES the page whole into the preserved-log area named by `librarian.preserved_log_dir` (see [shape-rules.md](shape-rules.md) — this reuses the SAME `preserve_raw_file` move the `preserve` shape-rule disposition already uses, not a second mechanism); with no `preserved_log_dir` configured it falls back to `review`, page untouched. **Atomicity, for both routes:** every write is either fully applied or the page is left byte-for-byte identical to before the call — `split` writes every child page first and the hub last, rolling back (deleting) any already-written child if a later write fails, so a mid-operation failure never leaves a partially-split page; `log_demote`'s move never removes the source until the destination write is confirmed. Either route degrading to `review` on failure is silent-but-logged, never a raised exception that could take a run down over one oversized page. Run-summary counters `oversize_split`/`oversize_log_demoted` (issue athenaeum#1248) are disjoint from `oversize_suppressed` (that one counts `review` only), so a run makes clear which disposition actually fired. |
+| Oversize-page action | — | — | `librarian.oversize_page_action` | `review` | What an over-`page_size_threshold_chars` page routes to instead of another merge (athenaeum#1182, dispositions implemented athenaeum#1248): one of `review`, `split`, `log_demote`. Any other value falls back to `review`. **Safety contract: `review` is the only route that is safe to leave enabled unattended, and it stays the shipped default** — `split`/`log_demote` restructure a durable operator page on disk and must be an explicit operator choice. `review` escalates the page (`_pending_questions.md`, carrying the observation that would have been merged) and leaves the page byte-for-byte unmodified. `split` decomposes the page into one atomic child page per top-level markdown heading/section, leaving the original in place as a **hub** — same `uid`/`name`/other frontmatter, so every existing index key and cross-reference into it still resolves — with a shrunk body that links to each child; content before the first heading has nowhere atomic to go, so it stays on the hub verbatim. A page with **no markdown heading at all** cannot be split (that cohort is athenaeum#1282's job) and falls back to `review`, page untouched. `log_demote` MOVES the page whole into the preserved-log area named by `librarian.preserved_log_dir` (see [shape-rules.md](../design/shape-rules.md) — this reuses the SAME `preserve_raw_file` move the `preserve` shape-rule disposition already uses, not a second mechanism); with no `preserved_log_dir` configured it falls back to `review`, page untouched. **Atomicity, for both routes:** every write is either fully applied or the page is left byte-for-byte identical to before the call — `split` writes every child page first and the hub last, rolling back (deleting) any already-written child if a later write fails, so a mid-operation failure never leaves a partially-split page; `log_demote`'s move never removes the source until the destination write is confirmed. Either route degrading to `review` on failure is silent-but-logged, never a raised exception that could take a run down over one oversized page. Run-summary counters `oversize_split`/`oversize_log_demoted` (issue athenaeum#1248) are disjoint from `oversize_suppressed` (that one counts `review` only), so a run makes clear which disposition actually fired. |
 | Merge-worthiness gate | — | `ATHENAEUM_MERGE_WORTHINESS_GATE_ENABLED` | `librarian.merge_worthiness_gate_enabled` | `false` (**off**) | Arms a deterministic, zero-LLM containment check (athenaeum#1172) that runs immediately before a Tier-3 merge is dispatched, right after the page-size gate above: every non-blank line of the raw file's observations must be an exact, normalized, contiguous substring of a SINGLE line of the target entity's existing page (checked against the SAME `_MAX_EXISTING_BODY_CHARS`-truncated window a merge would see — never the full body, and never the body flattened across line boundaries — an ordinary markdown paragraph is one line, so normal prose is unaffected) AND at least `_MERGE_WORTHINESS_MIN_UNIT_CHARS` (24) normalized chars long — a shorter line is treated as **not verifiable** and FAILS the check (dispatches the merge) rather than being excluded from it, since a short/generic unit (a bare date, a number, a one-word fragment) is cheap to satisfy by coincidence on any ordinary page. Only when every line clears both bars is the merge suppressed: no LLM call, no write, and no escalation (there is nothing to escalate — the content already exists). Normalization is casefold + whitespace-collapse only; no markdown-stripping, no fuzzy matching, no reordering, so a unit that fails only on formatting is dispatched, not suppressed. An empty observation (zero non-blank lines) is trivially "contained" and suppressed. Design intent is **zero false suppressions**: a false suppression permanently destroys a fact (raw files are unlinked after processing, with no re-derivation path), while a false pass costs only one ordinary merge call — so the gate ships off by default and only fires on overwhelming, line-exact, sufficiently-specific evidence. `1`/`true`/`yes`/`on` (case-insensitive) enable via env; a non-bool yaml value falls through to off. When the gate fires it logs one INFO line (`page=`, `source=`, `observation_chars=`, `existing_body_chars=`, `window=`) — the only durable trail a false suppression would leave. See [`resolve_merge_worthiness_gate_enabled`](../src/athenaeum/config.py) and [`check_merge_worthiness_gate`](../src/athenaeum/tiers.py). |
 | Junk-match stopwords | — | — | `librarian.junk_match_stopwords` | *(extends the built-in default)* | Extra entity names to treat as **junk** so a Tier-1 match on them never issues a Tier-3 merge LLM call (athenaeum#662). Tier-1 matches any indexed page name ≥ 3 chars, and the index accumulates junk pages (`here`, `get`, `main`, `reach`, `lane a`, …) — each became a ~16-23KB merge call, roughly **half** of the ~15-18 Tier-3 calls per file. A conservative built-in default (the measured junk plus common English function words) is always applied; entries here are **added** to it, case-insensitively on the whole name. Tune per corpus as the junk set changes. |
 | Junk-match allowlist | — | — | `librarian.junk_match_allowlist` | `[]` | Entity names that must **never** be treated as junk (athenaeum#662) — the escape hatch for a real entity whose name collides with a default/stopword junk word (e.g. a company literally named "Reach"). Wins over both the built-in default and `junk_match_stopwords`, case-insensitively. |
@@ -306,7 +306,7 @@ without this calculation being redone by hand.
 ### Field corrections (`librarian.corrections.*`, athenaeum#797)
 
 The deterministic, LLM-free field-correction fast path documented in
-[`field-corrections.md`](field-corrections.md). Runs as its own phase inside
+[`field-corrections.md`](../design/field-corrections.md). Runs as its own phase inside
 `athenaeum run`, before the entity tiers, and makes zero LLM calls.
 
 | Knob | Env var | YAML key | Default | What it does |
@@ -323,7 +323,7 @@ The deterministic, LLM-free field-correction fast path documented in
 ### Shape-rule engine (`librarian.shape_rules.*`, athenaeum#901)
 
 Declarative YAML rules (`<knowledge_root>/rules/*.yaml`, see
-[`shape-rules.md`](shape-rules.md)) that recognise a foreign record shape and
+[`shape-rules.md`](../design/shape-rules.md)) that recognise a foreign record shape and
 compile it into a field-correction batch — consumed unchanged by the field
 corrections machinery above. Runs as its own phase inside `athenaeum run`,
 immediately before the field-correction phase (so a compiled batch is visible
@@ -355,7 +355,7 @@ not wired into any automatic run.
 ### Raw intake retention limits (`librarian.raw_retention.*`, athenaeum#1269)
 
 Two independent, DEFAULT-NONE size ceilings on `raw/<source>/` — see
-[`shape-rules.md`](shape-rules.md#35-size-is-a-reported-condition-not-a-match-predicate-issue-athenaeum1269)
+[`shape-rules.md`](../design/shape-rules.md#35-size-is-a-reported-condition-not-a-match-predicate-issue-athenaeum1269)
 for the full rationale. Runs as its own deterministic, LLM-free,
 unbudgeted phase inside `athenaeum run`
 (`librarian._run_raw_retention_phase`), right after the unrecognised-raw-
@@ -377,7 +377,7 @@ pays no cost.
 ### Rule proposals (`librarian.rule_proposals.*`, athenaeum#905 / athenaeum#1063)
 
 The librarian's rule-proposal detector/drafter (`athenaeum.rule_proposals`,
-see [`shape-rules.md` §10](shape-rules.md)) — counts records the shape-rule
+see [`shape-rules.md` §10](../design/shape-rules.md)) — counts records the shape-rule
 engine above deferred to the reasoning tiers, drafts a candidate rule from
 exemplars once a shape crosses threshold, and puts it on the
 `list_pending_decisions` surface for a human to approve or reject. Wired
@@ -664,7 +664,7 @@ athenaeum surface-divergence --field do_not_email --path ~/knowledge
 
 | Field | Registered by | Tolerated residual |
 |---|---|---|
-| `bounced` | issue athenaeum#853 | Wiki-surface entries with no pii mark are TOLERATED — the documented evidence-class asymmetry, [bounce-surface-convergence.md](bounce-surface-convergence.md). Pii marks with no wiki entry are NOT tolerated (zero). |
+| `bounced` | issue athenaeum#853 | Wiki-surface entries with no pii mark are TOLERATED — the documented evidence-class asymmetry, [bounce-surface-convergence.md](../design/bounce-surface-convergence.md). Pii marks with no wiki entry are NOT tolerated (zero). |
 | `do_not_email` | issue athenaeum#960 | The excluded surface newly carrying the field (`marked_on_excluded_not_wiki`) is NOT tolerated (zero). The wiki carrying a mark the excluded surface does not (`marked_on_wiki_not_excluded`) is the design's only legal steady state and is TOLERATED — the wiki page is the sole authoring surface; athenaeum#960's design forbids backfilling marks onto the excluded surface (narrowed by athenaeum#1039, which had alerted on this legal state). |
 
 Exit codes: `0` clean (or `--report-only`, which reports and never fails on
@@ -708,7 +708,7 @@ default (`athenaeum#1278`), so a bumped model id cannot drift out of sync
 with this table either. They all live under the `models:` yaml block (athenaeum#232, athenaeum#513)
 and share one resolver helper (`config.resolve_model`). The resolver model
 additionally accepts the pre-athenaeum#232 `resolve.model` key for backward
-compatibility. See [routing.md](routing.md) for provider + model + batch
+compatibility. See [routing.md](../design/routing.md) for provider + model + batch
 mode assembled per function in one table, the per-knob-yaml-vs-global-env
 precedence rule, and the `athenaeum explain-routing` preview command
 (athenaeum#1176).
@@ -812,7 +812,7 @@ so an unset value degrades silently to the default rather than failing.
 | Reasoning tier 2 (escalation)² | `ATHENAEUM_REASONING_T2_MAX_TOKENS` (`4096`) | `ATHENAEUM_REASONING_T2_THINKING` (`adaptive`) |
 
 > `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED` (reasoning-tier decision auditing)
-> is documented in [`authority-manifest.md`](authority-manifest.md), where the
+> is documented in [`authority-manifest.md`](../extending/authority-manifest.md), where the
 > auditing behaviour it gates is described, rather than duplicated here.
 
 **A CI check keeps this section honest.** `scripts/check_env_docs.py` — gated in
@@ -923,7 +923,7 @@ against the catalog directly.
 
 > For provider + model + batch mode assembled **per function** in a single
 > table, plus the subscription-only (`claude-cli`) install recipe and its
-> preconditions, see [routing.md](routing.md) (athenaeum#1176).
+> preconditions, see [routing.md](../design/routing.md) (athenaeum#1176).
 
 Athenaeum's librarian pipeline talks to Claude through a single **provider
 seam** (`athenaeum.provider.build_llm_client`). Two backends ship:
@@ -1374,7 +1374,7 @@ index.
   session's pushed ids were actually referenced afterward in the session's
   own transcript. `precision = referenced / pushed`.
 - `athenaeum push-metrics baseline` computes precision over a window and
-  writes a dated snapshot into `docs/memory-model-measurements.md`.
+  writes a dated snapshot into `docs/measurements/memory-model-measurements.md`.
   `athenaeum push-metrics coverage-audit` samples sessions into a worksheet
   file — but, because push records retain only a query HASH and never the
   raw query text, that worksheet cannot support a per-candidate relevance
@@ -1411,7 +1411,7 @@ reimplementation of the record-building/append logic (pure bash/awk plus at
 most one `shasum`/`sha256sum` subprocess) living in
 `examples/claude-code/user-prompt-recall.sh`. That file never runs in
 production (the deployed cutover is a separate script — see
-`docs/sidecar-adapter-contract.md`), so the bash implementation shipped
+`docs/extending/sidecar-adapter-contract.md`), so the bash implementation shipped
 `"source": "sidecar"` support that had written exactly zero rows. athenaeum#1362
 re-homed the requirement into the converged core instead:
 `athenaeum.context.record_context_push()` (called from the `athenaeum
@@ -1721,8 +1721,8 @@ Detection knobs live under the `contradiction:` yaml block; resolver behavior
 knobs under `resolve:`. The resolver *model* lives under `models.resolve` with
 the other model knobs (`resolve.model` is the legacy fallback — see
 [Models](#models)). Pipeline walkthrough:
-[contradiction-detection.md](contradiction-detection.md); auto-apply lane:
-[auto-resolve.md](auto-resolve.md).
+[contradiction-detection.md](../design/contradiction-detection.md); auto-apply lane:
+[auto-resolve.md](../design/auto-resolve.md).
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
@@ -1775,7 +1775,7 @@ actions; it does not stack on top of it.** For `correct_a`/`correct_b`:
   or refuse — via the module logger, so a refusal is diagnosable without
   re-running the resolver.
 - This gate is not itself configurable (no yaml knob) — see
-  `docs/conflict-resolution.md` §14 for the full rule and its known limits.
+  `docs/design/conflict-resolution.md` §14 for the full rule and its known limits.
 
 Every OTHER action's threshold behavior is unchanged: `not_a_conflict`,
 `keep_a`/`keep_b`, `deprecate_both`, `scope_a`/`scope_b`, `attribute_both`,
@@ -1805,7 +1805,7 @@ scope:
 Nodes form a poset by path-prefix (`kromatic/platform ⊑ kromatic`;
 `en-US ⊑ en`). The three-way overlap verdict (DISJOINT / OVERRIDE / OVERLAP) and
 the `scope_a` / `scope_b` resolver actions are documented in
-`docs/conflict-resolution.md` §12 and `docs/provenance-shape.md` §9. The recall
+`docs/design/conflict-resolution.md` §12 and `docs/design/provenance-shape.md` §9. The recall
 `serve --scope` caller-context filter is deferred design (athenaeum#314).
 
 ## Intake screening (athenaeum#320)
@@ -1821,7 +1821,7 @@ intake per the configured action and access.
 ## Sensitivity classes (athenaeum#910)
 
 The open, deployment-configurable sensitivity-class vocabulary specified in
-[`docs/sensitivity-class-vocabulary.md`](sensitivity-class-vocabulary.md).
+[`docs/design/sensitivity-class-vocabulary.md`](../design/sensitivity-class-vocabulary.md).
 Athenaeum ships exactly one class today (`pii`); a deployment can define its
 own (`hipaa`, a `classified`/`secret`/`top-secret` gradation, …) without
 patching this repository. This section documents the **class-vocabulary**
@@ -1832,14 +1832,14 @@ point, not a YAML knob, and is documented in `sensitivity.py`'s module
 docstring rather than here; the class-to-storage-surface mapping is the
 **pre-existing, unchanged** `storage.mapping`/`storage.adapters` knobs
 documented elsewhere in this file (they are not repeated here — see
-`docs/storage-adapter-contract.md`).
+`docs/extending/storage-adapter-contract.md`).
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
 | Class definitions | — | `sensitivity.classes.<name>` | `{}` (operator entries) — the built-in `pii` class is always resolved regardless, see below | Defines a sensitivity class: `recognizers` (a list of recogniser names bound to it — code-registered, never config-defined) and `read_policy` (`access` + `audience`, below). No env override — a dict has no single scalar encoding (`resolve_storage_mapping`'s precedent). |
 | Bound recognisers | — | `sensitivity.classes.<name>.recognizers` | `[]` when omitted | The recogniser names (e.g. `email`, `phone`, `street-address`, or a deployment's own code-registered one) whose matches count toward this class. **Not inherited** — only `read_policy` inherits (see below). An empty list — explicit `[]` or the key simply omitted — is honoured literally: the class is never auto-detected, reachable only by explicit operator/agent tagging. Naming a recogniser `available_recognizers()` doesn't know about raises `SensitivityConfigError` at build time. |
 | Read policy | — | `sensitivity.classes.<name>.read_policy.access` | none (must resolve, directly or via `inherits`) | One of the four existing `access:` levels (`open` / `internal` / `confidential` / `personal` — the same vocabulary athenaeum#312 already ships, not a new one). An out-of-vocabulary value raises `SensitivityConfigError` rather than defaulting; so does a class whose `access` never resolves at all (no value set anywhere in its `inherits` chain). |
-| Read policy audience | — | `sensitivity.classes.<name>.read_policy.audience` | `[]` when omitted | The same opaque role-list mechanism `athenaeum serve --audience` already documents (`docs/security-posture.md` §2.1). **Unvalidated** — any role name is accepted; there is no known-role vocabulary to check against. |
+| Read policy audience | — | `sensitivity.classes.<name>.read_policy.audience` | `[]` when omitted | The same opaque role-list mechanism `athenaeum serve --audience` already documents (`docs/design/security-posture.md` §2.1). **Unvalidated** — any role name is accepted; there is no known-role vocabulary to check against. |
 | Inheritance | — | `sensitivity.classes.<name>.inherits` | unset (no parent) | Names another class in the resolved config (built-in or operator-defined) whose `read_policy` this class defaults from. See "Inheritance semantics" below. |
 
 **Built-in `pii` class, unless overridden.** With no `sensitivity:` config at
@@ -1879,7 +1879,7 @@ operator classes together) — including the built-in `pii` class's own
 `email`/`phone`. Binding the same recogniser name to two classes raises
 `SensitivityConfigError` naming both classes and the recogniser. This makes
 every detected match's destination class unambiguous by construction — see
-`docs/sensitivity-class-vocabulary.md` §7 Decision D6 for the deliberate
+`docs/design/sensitivity-class-vocabulary.md` §7 Decision D6 for the deliberate
 escape hatch (two *different* recogniser names wrapping the same detection
 function, each bound to a different class) and how `sensitivity.classify()`
 surfaces its consequence.
@@ -1931,13 +1931,13 @@ from the caller, defaulting to `--path`'s knowledge root) and never writes
 anything — both checks are read-only over config and the corpus tree.
 Committed synthetic fixtures under `tests/fixtures/sensitivity_mapping/`
 drive `tests/test_sensitivity_lint.py`. See
-[`docs/sensitivity-class-vocabulary.md`](sensitivity-class-vocabulary.md) §6
+[`docs/design/sensitivity-class-vocabulary.md`](../design/sensitivity-class-vocabulary.md) §6
 point 2 / §7 Decision D4 / §9 S5 for the full rationale.
 
 ## Sensitivity routing (athenaeum#949, slice 1/4 — config)
 
 The routing config surface specified in
-[`docs/sensitivity-value-routing.md`](sensitivity-value-routing.md) §8 — a
+[`docs/design/sensitivity-value-routing.md`](../design/sensitivity-value-routing.md) §8 — a
 deliberately separate axis from the "Sensitivity classes" section above.
 That section defines *which classes exist*; this one decides *whether a
 matched class gets intercepted at intake*, so a class can be defined without
@@ -2068,9 +2068,9 @@ it (§6/AC10).
 
 The classification and taint-propagation layer for erasure-class content
 (`athenaeum.erasure`, split (c) of athenaeum#718's re-scope — see
-`docs/whole-store-adapter-design.md` §8). **No production caller is
+`docs/extending/whole-store-adapter-design.md` §8). **No production caller is
 migrated onto this module in this slice** — it ships fully implemented and
-fully tested, mirroring the precedent `docs/configuration.md`'s own
+fully tested, mirroring the precedent `docs/reference/configuration.md`'s own
 "Sensitivity classes" section above documents for `athenaeum.sensitivity`'s
 S1a/S1b ("no caller was migrated... that was slice S3"). With every key
 below at its default, nothing in the librarian pipeline or `remember()`
@@ -2090,7 +2090,7 @@ athenaeum#985's own AC9 wording. A pack has a `default_action` (+ optional
 jurisdiction, action, period?}` entries. `action` is one of `refuse-write |
 store-off-corpus | demote-cold | delete-after | retain-until`; `period`
 (an opaque string, e.g. `"P7Y"`) is required for the last two, unused by
-the first three. `data_class` names a sensitivity class (`docs/sensitivity-class-vocabulary.md`
+the first three. `data_class` names a sensitivity class (`docs/design/sensitivity-class-vocabulary.md`
 — `pii` is the only one athenaeum ships); `memory_class` names an
 `athenaeum.memory_class.MEMORY_CLASSES` value.
 
@@ -2101,12 +2101,12 @@ BEFORE any pack lookup runs — a pack defining a `jurisdiction: unknown`
 row of its own is never reached for that case. Neither packaged pack
 defines one, for the same reason. Where the data subject's jurisdiction IS
 known, a pack keys on the **subject's** jurisdiction, not only the
-operator's deployment jurisdiction — `docs/configuration.md`'s two packaged
+operator's deployment jurisdiction — `docs/reference/configuration.md`'s two packaged
 examples both carry both a `jurisdiction: us` and a `jurisdiction: eu` row
 for exactly this reason.
 
 **Reconciling with the decay-bucket mapping (issue athenaeum#969,
-`docs/provenance-shape.md` §8.8).** That doc commits `bucket: daily` to
+`docs/design/provenance-shape.md` §8.8).** That doc commits `bucket: daily` to
 compile to a `delete-after <period>` rule keyed by `(memory_class,
 data_class)`, once a pack exists for that key. `athenaeum.erasure.reconcile_bucket_daily_with_pack`
 computes that mapping now that a pack exists, but — per that function's own
@@ -2123,7 +2123,7 @@ the end of this file is not amended for this section.
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
-| Authority manifest path | `ATHENAEUM_AUTHORITY_MANIFEST` | `librarian.authority_manifest_path` | `<knowledge_root>/authority-manifest.yaml` | Path to the authority manifest mapping authoritative LIVE sources. Relative yaml values resolve against the knowledge root; a missing file is treated as "no manifest configured". Full reference: [`docs/authority-manifest.md`](authority-manifest.md). |
+| Authority manifest path | `ATHENAEUM_AUTHORITY_MANIFEST` | `librarian.authority_manifest_path` | `<knowledge_root>/authority-manifest.yaml` | Path to the authority manifest mapping authoritative LIVE sources. Relative yaml values resolve against the knowledge root; a missing file is treated as "no manifest configured". Full reference: [`docs/extending/authority-manifest.md`](../extending/authority-manifest.md). |
 
 ### Never-ingest classes (athenaeum#968)
 
@@ -2155,7 +2155,7 @@ those numbers. A refused file (either tier) is excluded from that run's
 compilation and appended, ids-only, to
 `<cache_dir>/_never_ingest_refusals.jsonl` (never deleted from disk; it is
 re-evaluated on the next run). See `athenaeum.never_ingest` and
-[`docs/authority-manifest.md`](authority-manifest.md#never-ingest-classes-athenaeum968)
+[`docs/extending/authority-manifest.md`](../extending/authority-manifest.md#never-ingest-classes-athenaeum968)
 for the full mechanism.
 
 ## Usage report (athenaeum#968)
@@ -2199,7 +2199,7 @@ disk is touched, and the same raw intake is re-evaluated next run. See
 
 ```yaml
 librarian:
-  ingestion_gate_enabled: false   # off by default; see docs/configuration.md
+  ingestion_gate_enabled: false   # off by default; see docs/reference/configuration.md
 ```
 
 ## Reasoning-tier screening (T1/T2) — off by default
@@ -2242,7 +2242,7 @@ has grown beyond what you can triage by hand. The concrete signal to watch
 is `athenaeum merges count` (or `athenaeum decisions count` for the unified
 question+merge view) — both report the live depth of
 `wiki/_pending_merges.md`. (Don't hand-parse that file directly — see
-["Never hand-parse `wiki/_pending_merges.md`"](../README.md#one-unified-decisions-needed-list)
+["Never hand-parse `wiki/_pending_merges.md`"](../../README.md#one-unified-decisions-needed-list)
 in the README.) There is no built-in numeric threshold; "beyond what you can
 handle" is an operator judgment call, not a code-enforced ceiling.
 
@@ -2640,7 +2640,7 @@ print(resolve_cluster_threshold(Path.home() / 'knowledge'))
 
 or, for a full threshold-aware cluster snapshot in one step, use the
 shadow-mode measurement command (see "Reproducing the measurement pack" in
-`docs/memory-model-measurements.md`):
+`docs/measurements/memory-model-measurements.md`):
 
 ```console
 $ athenaeum measure shadow-linkage
@@ -2718,7 +2718,7 @@ plus a ledger shard for verdicts that touch off-corpus claims — never the
 in-git ledger the "Verdict ledger" section above documents. Ships in
 `src/athenaeum/off_corpus.py`, split (b) of the athenaeum#718 re-scope under
 the whole-store adapter design lock (athenaeum#911,
-[`docs/whole-store-adapter-design.md`](whole-store-adapter-design.md) §8).
+[`docs/extending/whole-store-adapter-design.md`](../extending/whole-store-adapter-design.md) §8).
 
 **Why a genuine erasure needs a store outside the git working tree.** The
 wiki store is a git repository with history, clones, and remotes — an in-git
@@ -2751,7 +2751,7 @@ With the flag on, three real integration points fire:
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
 | Off-corpus store | `ATHENAEUM_OFF_CORPUS_ENABLED` | `off_corpus.enabled` | `false` (**off**) | Gates the whole subsystem: the off-corpus index build, federated recall, and off-corpus ledger routing. See [`resolve_off_corpus_enabled`](../src/athenaeum/config.py). |
-| Off-corpus adapter | — (yaml-only) | `off_corpus.adapter` | `null` | Name of a `storage.adapters` entry (see [`docs/storage-adapter-contract.md`](storage-adapter-contract.md)) whose `surface_root` backs the off-corpus store. Required when `off_corpus.enabled` is true; `athenaeum` raises `OffCorpusConfigError` if unset, unknown, or resolves inside the knowledge root. See [`resolve_off_corpus_adapter_name`](../src/athenaeum/config.py). |
+| Off-corpus adapter | — (yaml-only) | `off_corpus.adapter` | `null` | Name of a `storage.adapters` entry (see [`docs/extending/storage-adapter-contract.md`](../extending/storage-adapter-contract.md)) whose `surface_root` backs the off-corpus store. Required when `off_corpus.enabled` is true; `athenaeum` raises `OffCorpusConfigError` if unset, unknown, or resolves inside the knowledge root. See [`resolve_off_corpus_adapter_name`](../src/athenaeum/config.py). |
 
 ```yaml
 off_corpus:
@@ -2790,7 +2790,7 @@ written anywhere).
 
 **Index shards**, under `<cache_dir>/off-corpus/` (never git-tracked, like
 every other derived index artifact — see "What the contract governs" in
-[`docs/store-contract.md`](store-contract.md)): `wiki-index.db` (FTS5) and
+[`docs/extending/store-contract.md`](../extending/store-contract.md)): `wiki-index.db` (FTS5) and
 `wiki-vectors/` (chromadb), rebuilt incrementally on the same cadence as the
 main corpus index.
 
@@ -3044,14 +3044,14 @@ server's own unprompted-recall path). The hook also gains a `memory_tier
 = 'hot'` predicate on its FTS5 query, reading the tier verdict
 `athenaeum.memory_tiers.resolve_tier` now stores at index-build time (FTS5
 schema version 4, see `athenaeum.search.FTS5Backend._SCHEMA_VERSION`) —
-see `docs/recall-architecture.md` for the full seam rationale and its
+see `docs/design/recall-architecture.md` for the full seam rationale and its
 duplication trade-off.
 
 ```yaml
 push_budget:
   tokens_per_turn: 1200   # the one push-budget dial (issue athenaeum#718)
 librarian:
-  memory_tier_sweep_enabled: false   # off by default; see docs/configuration.md
+  memory_tier_sweep_enabled: false   # off by default; see docs/reference/configuration.md
 memory_tiers:
   demote_after_days: 60
 ```
@@ -3149,7 +3149,7 @@ off.
 ## Hook / sidecar environment (examples/claude-code)
 
 These are read by the example shell hooks, not by the Python package. Setup
-guide: [`examples/claude-code/README.md`](../examples/claude-code/README.md).
+guide: [`examples/claude-code/README.md`](../../examples/claude-code/README.md).
 
 | Variable | Default | Purpose |
 |---|---|---|

@@ -2,7 +2,7 @@
 """Merge-engine type integration (issue athenaeum#433).
 
 The athenaeum#424 taxonomy (``memory_class:`` — see :mod:`athenaeum.schemas` and
-``docs/memory-taxonomy.md`` §3) defined merge-vs-cite semantics but shipped
+``docs/design/memory-taxonomy.md`` §3) defined merge-vs-cite semantics but shipped
 no enforcement. This module is that enforcement, consumed by the mechanical
 merge/proposal engine (:mod:`athenaeum.merge`, :mod:`athenaeum.wiki_dedupe`)
 alongside the athenaeum#421 guardrail chain (``_merge_proposal_suppression_reason``,
@@ -148,7 +148,7 @@ def cross_class_precheck(member_paths: Sequence[str | Path]) -> CrossClassReject
 
     Returns a :class:`CrossClassRejection` when 2+ DISTINCT non-empty
     ``memory_class`` values are present among the members — a cross-class
-    cluster, which must not be merged (see ``docs/memory-taxonomy.md`` §3).
+    cluster, which must not be merged (see ``docs/design/memory-taxonomy.md`` §3).
     """
     if len(member_paths) < 2:
         return None
@@ -168,7 +168,7 @@ def cross_class_precheck(member_paths: Sequence[str | Path]) -> CrossClassReject
     detail = (
         f"cluster spans {len(distinct)} distinct memory_class values "
         f"({', '.join(distinct)}); cross-class merges are not allowed "
-        "(same-class only — see docs/memory-taxonomy.md #3)"
+        "(same-class only — see docs/design/memory-taxonomy.md #3)"
     )
     log.info("merge_type_gate: REJECTED cross-class cluster (%s)", detail)
     return CrossClassRejection(
@@ -265,7 +265,7 @@ def build_cite_proposal(
     rationale = (
         f"cross-class cluster ({rejection.detail}); citing page(s) should "
         "reference the surviving fact/source page(s) rather than merge "
-        "with them (see docs/memory-taxonomy.md #3)"
+        "with them (see docs/design/memory-taxonomy.md #3)"
     )
     return CiteProposal(
         citing=citing,

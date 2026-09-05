@@ -8,7 +8,7 @@ a producer in another repository can implement against it instead of inferring
 it from the source. It describes what the shipped gate already does; it does
 not redesign it, and it changes no runtime behaviour on the intake path.
 
-`docs/deprecated-email-tracking.md` § Q3 describes this same path in prose, as
+`docs/design/deprecated-email-tracking.md` § Q3 describes this same path in prose, as
 a design decision. This is the implementable version of that prose: every
 field, where it must appear, what makes it satisfied, and what happens when it
 is not.
@@ -208,7 +208,7 @@ document, so agreement is enforced three ways rather than asserted:
 
 ## Related
 
-- `docs/deprecated-email-tracking.md` § Q3 — the design decision this contract
+- `docs/design/deprecated-email-tracking.md` § Q3 — the design decision this contract
   implements, in prose.
 - `src/athenaeum/bounce_contract.py` — the check.
 - `src/athenaeum/librarian.py` — `tier0_bounce_mark`, the gate.

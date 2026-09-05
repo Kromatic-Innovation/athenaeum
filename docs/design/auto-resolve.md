@@ -15,7 +15,7 @@ For each detected contradiction:
 1. The cheap detector flags a pair of snippets.
 2. The resolver (default `claude-opus-4-7`) proposes a winner, action,
    rationale, and confidence under the precedence taxonomy documented
-   in `docs/conflict-resolution.md`.
+   in `docs/design/conflict-resolution.md`.
 3. If auto-apply is enabled **and** the proposal's confidence is `>=` the
    configured threshold, the rendered pending-question block is rewritten:
 
@@ -43,7 +43,7 @@ The resolver knobs (`resolve.auto_apply`, `resolve.auto_apply_threshold`,
 `resolve.model`, `resolve.full_body_token_cap`, and their env vars) follow the
 standard **env > yaml > default** precedence. The canonical knob table with
 all defaults lives in
-[`docs/configuration.md`](configuration.md#contradiction-detection-and-resolver);
+[`docs/reference/configuration.md`](../reference/configuration.md#contradiction-detection-and-resolver);
 this document covers the behavior behind those knobs.
 
 Env-var boolean values accept `true`/`false`, `1`/`0`, `yes`/`no` (case-insensitive). An invalid env value falls through to the yaml/default layers — auto-apply is a behavior knob, not a hard validation surface.
@@ -263,9 +263,9 @@ grep -l "Auto-resolved" ~/knowledge/raw/answers/
 
 ## Related
 
-- [`docs/conflict-resolution.md`](conflict-resolution.md) — the source
+- [`docs/design/conflict-resolution.md`](conflict-resolution.md) — the source
   precedence taxonomy the resolver applies.
-- [`docs/contradiction-detection.md`](contradiction-detection.md) — the
+- [`docs/design/contradiction-detection.md`](contradiction-detection.md) — the
   cheap detector that gates whether the resolver runs at all.
-- [`docs/provenance-shape.md`](provenance-shape.md) — how `source:` and
+- [`docs/design/provenance-shape.md`](provenance-shape.md) — how `source:` and
   `field_sources:` feed the resolver's precedence comparison.

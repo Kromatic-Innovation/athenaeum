@@ -79,7 +79,7 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
             "post-compile phases, not just the per-file loop. Default: "
             "ATHENAEUM_MAX_RUNTIME env, then athenaeum.yaml librarian.max_runtime, "
             "then 3600. Pass 0 (or a negative value) to disable the deadline "
-            "(unbounded run). Full exit-code contract: docs/exit-codes.md."
+            "(unbounded run). Full exit-code contract: docs/reference/exit-codes.md."
         ),
     )
     run_parser.add_argument(
@@ -105,7 +105,7 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
         "exit code, not the log line. Opt-in escape hatch for a deliberate "
         "deterministic-phases-only / budget-starved run. --strict-budget "
         "takes precedence if both are set (see its help). Full exit-code "
-        "contract: docs/exit-codes.md.",
+        "contract: docs/reference/exit-codes.md.",
     )
     run_parser.add_argument(
         "--batch-mode",

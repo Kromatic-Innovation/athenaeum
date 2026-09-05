@@ -24,7 +24,7 @@
 > production merge behavior is unchanged until an operator sets
 > `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED` and/or
 > `ATHENAEUM_REASONING_TIER_T2_AUTO_APPLY_ENABLED`. Full operator-facing writeup:
-> [Reasoning-tier screening (T1/T2)](configuration.md#reasoning-tier-screening-t1t2--off-by-default).
+> [Reasoning-tier screening (T1/T2)](../reference/configuration.md#reasoning-tier-screening-t1t2--off-by-default).
 > Running the converter against the live corpus remains operator task athenaeum#437.
 > Neither is in scope here.
 
@@ -226,5 +226,5 @@ silently dropped.
 - Reasoning-tier consultation of the manifest (T1/T2, athenaeum#423/#432).
 - Running the detector/converter against the live `~/knowledge` corpus (athenaeum#437).
 - Syncing skill files across teammates via athenaeum (explicitly deferred;
-  see `docs/storage-adapter-contract.md`'s note on the deferred skill-file-sync
+  see `docs/extending/storage-adapter-contract.md`'s note on the deferred skill-file-sync
   surface).

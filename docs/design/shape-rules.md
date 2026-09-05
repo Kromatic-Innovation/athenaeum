@@ -242,7 +242,7 @@ or a raw source tree has grown can select a rule the way `source`,
 
 Instead, two independent, DEFAULT-NONE thresholds under
 `librarian.raw_retention` (see
-[`configuration.md`](configuration.md#raw-intake-retention-limits-librarianraw_retention-athenaeum1269)
+[`configuration.md`](../reference/configuration.md#raw-intake-retention-limits-librarianraw_retention-athenaeum1269)
 for the full env/yaml/default table) arm a detection sweep that runs as its
 own deterministic, LLM-free phase inside `athenaeum run`
 (`librarian._run_raw_retention_phase`, right after the unrecognised-raw-
@@ -336,7 +336,7 @@ A `correction:` block may additionally carry `bucket` (`daily` / `weekly` /
 correction's TARGET entity page regardless of what `field`/`value` the
 correction itself is proposing, rather than going through the
 `field`/value allowlist+precedence machinery. See
-`docs/provenance-shape.md` §8.8 for the full frontmatter contract these
+`docs/design/provenance-shape.md` §8.8 for the full frontmatter contract these
 feed.
 
 ```yaml
@@ -466,8 +466,8 @@ storage:
 knowledge root* — relative, versioned by the same git repo as everything
 else, and unchanged since athenaeum#837. `librarian.preserved_log_adapter` names a
 registered `storage.adapters.<name>` (the same seam
-[`storage-adapter-contract.md`](storage-adapter-contract.md) and
-[`whole-store-adapter-design.md`](whole-store-adapter-design.md) document) and
+[`storage-adapter-contract.md`](../extending/storage-adapter-contract.md) and
+[`whole-store-adapter-design.md`](../extending/whole-store-adapter-design.md) document) and
 routes through it instead — its `surface_root` may be absolute, so the
 artifact can live on a different filesystem or mount than the knowledge repo,
 which is what makes a large corpus (hundreds of megabytes of exported board
@@ -769,7 +769,7 @@ make zero LLM calls and run before the entity tiers.
 
 Per-run volume is bounded exactly like the field-correction phase, under its
 own `librarian.shape_rules.*` config namespace — see
-[`configuration.md`](configuration.md#shape-rule-engine-librarianshape_rules-athenaeum901)
+[`configuration.md`](../reference/configuration.md#shape-rule-engine-librarianshape_rules-athenaeum901)
 for the full knob table (`max_records_per_run`, `runtime_share`).
 
 ---
@@ -815,7 +815,7 @@ pass could not handle this" — is the faithful reading of the issue's own
 Motivation ("the reasoning tiers stop re-deriving the same conclusion for
 the fiftieth instance of a shape"); no code anywhere encodes a literal tier
 2 or 3. "The reasoning tiers" here means the **intake** ladder
-(`docs/field-corrections.md` §2: tier0 structured -> tier1 programmatic ->
+(`docs/design/field-corrections.md` §2: tier0 structured -> tier1 programmatic ->
 tier2 classify -> tier3 merge -> tier4 human) — the ladder §6.1's ledger is
 built against — not the unrelated T1/T2 numbering in `reasoning_tiers.py`.
 
@@ -847,7 +847,7 @@ re-validates via `ShapeRule.model_validate` before it is ever persisted. A
 draft that fails validation is skipped (logged), never stored. Every
 exemplar record embedded in the prompt is fenced via
 `athenaeum.prompt_safety.fence_untrusted` (AC7) — raw intake is untrusted
-input (`docs/field-corrections.md` §12a).
+input (`docs/design/field-corrections.md` §12a).
 
 **The proposal surfaces via `list_pending_decisions`** (AC4) as a
 `type: "proposed-rule"` item (`athenaeum.decisions.proposed_rule_to_decision`),

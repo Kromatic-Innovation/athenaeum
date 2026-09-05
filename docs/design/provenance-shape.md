@@ -5,7 +5,7 @@ on-disk shape. It settles the questions that athenaeum#102, athenaeum#97, and at
 implement against, so those three issues land against ONE decided shape
 and don't drift.
 
-Companion to `docs/conflict-resolution.md` — that doc locks how
+Companion to `docs/design/conflict-resolution.md` — that doc locks how
 disagreements are RESOLVED; this one locks how attribution is REPRESENTED
 on disk and at the MCP boundary.
 
@@ -35,7 +35,7 @@ together, not the doc as future-tense design ahead of the code.
   `_merge_field_sources` carries `field_sources` forward across a
   duplicate-pair merge. Canonical wins per key; absorbed-only keys are
   carried forward. Pruned when the underlying field is gone. Locked in
-  `docs/conflict-resolution.md` §7.
+  `docs/design/conflict-resolution.md` §7.
 
 ### Also already shipped (settled by this doc)
 
@@ -114,7 +114,7 @@ field_sources:
 
 Match key for "is this the same value": `repr(value)` of the dict, the
 same identity used by `dedupe._perform_merge`'s list-union (see
-`docs/conflict-resolution.md` §7 known-edge-cases). Two semantically-equal
+`docs/design/conflict-resolution.md` §7 known-edge-cases). Two semantically-equal
 dicts with different YAML key order would NOT match; this is a known
 limitation accepted at athenaeum#100 and out of scope here.
 
@@ -176,7 +176,7 @@ longer matches any list value is dropped at write time, mirroring the
 
 ## 3. tier0_passthrough byte-for-byte contract
 
-`tier0_passthrough` (see `docs/conflict-resolution.md` §1) renders raw
+`tier0_passthrough` (see `docs/design/conflict-resolution.md` §1) renders raw
 frontmatter verbatim. The per-value shape changes nothing about that
 contract — it strengthens it.
 
@@ -360,7 +360,7 @@ Out of scope, by design:
   Phase 0 (athenaeum#112). Future paid-API integrations live
   in their own host repositories.
   athenaeum's contract stops at the on-disk shape and the MCP API.
-- **Conflict resolution semantics.** `docs/conflict-resolution.md` is the
+- **Conflict resolution semantics.** `docs/design/conflict-resolution.md` is the
   lock for which-source-wins. This doc only specifies how attribution is
   represented; resolution rules already documented there extend
   unchanged to the per-value shape (dedupe's "canonical wins per key,
@@ -755,7 +755,7 @@ to "no bucket" rather than raising.
   `bucket` / `valid_until` keyword arguments, stamped into the raw intake
   file's frontmatter.
 - **A shape rule's `correction:` block** (issue athenaeum#901,
-  `docs/field-corrections.md`) — `bucket` / `valid_until` are OPTIONAL
+  `docs/design/field-corrections.md`) — `bucket` / `valid_until` are OPTIONAL
   sibling keys on the emitted correction record, the SAME shape as
   `usage_class` (§7.1): they ride alongside whatever `field`/`value` the
   correction is actually proposing and apply to the TARGET entity's page,
@@ -835,7 +835,7 @@ with the memory model; the pack itself is athenaeum#718 territory).**
 `bucket:` is deliberately the v0 SHORTHAND for a per-class `delete-after`
 retention rule, not a second retention vocabulary competing with the memory
 model's tiers and retention policy packs
-(`docs/whole-store-adapter-design.md` §8, "the retention-policy packs" —
+(`docs/extending/whole-store-adapter-design.md` §8, "the retention-policy packs" —
 one of the athenaeum#718 criteria that does not depend on the store
 generalisation and may land independently). Concretely, `bucket: daily`
 compiles to:
@@ -846,9 +846,9 @@ delete-after <period>   keyed by (memory_class, data_class)
 
 — `<period>` is the same window `bucket: daily`'s `valid_until` already
 encodes today (§8.1); packs do not introduce a second expiry clock. The key
-is the compiled page's `memory_class` (`docs/memory-taxonomy.md`) crossed
+is the compiled page's `memory_class` (`docs/design/memory-taxonomy.md`) crossed
 with its data/sensitivity classification
-(`docs/sensitivity-class-vocabulary.md`) — NOT the bucket label itself,
+(`docs/design/sensitivity-class-vocabulary.md`) — NOT the bucket label itself,
 which is why the pack, once it exists, is the authority and `bucket:`
 becomes sugar for it.
 
@@ -1006,8 +1006,8 @@ in a tool-result block; the scalar becomes
 when the transcript carries none).
 
 Lock discipline: any change to this taxonomy MUST update
-`docs/conflict-resolution.md` (which cross-links to this section),
-`docs/contradiction-detection.md` (which publishes its own copy of this
+`docs/design/conflict-resolution.md` (which cross-links to this section),
+`docs/design/contradiction-detection.md` (which publishes its own copy of this
 taxonomy in its §3), the `_RESOLVE_SYSTEM` prompt + its golden
 `tests/data/prompts/resolutions.resolve_system.txt` snapshot (regenerated
 via `python -m athenaeum.prompt_registry --write`, pinned by
@@ -1224,4 +1224,4 @@ For an evaluative pair (both `claim_kind: opinion`, or detector
 `asserter:` block). It is in `ENACTING_ACTIONS`, orientation-agnostic
 (`flip_action` → `None`), auto-apply threshold 0.90. `merge._emit_escalation`
 drops the pending-question escalation for `attribute_both`, so the pair never
-re-queues to the human. Full behavior lock: `docs/conflict-resolution.md` §13.
+re-queues to the human. Full behavior lock: `docs/design/conflict-resolution.md` §13.

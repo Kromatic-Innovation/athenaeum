@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for athenaeum.corrections (issue athenaeum#797, slices 1-4 of the
-field-correction fast path, docs/field-corrections.md).
+field-correction fast path, docs/design/field-corrections.md).
 """
 
 from __future__ import annotations

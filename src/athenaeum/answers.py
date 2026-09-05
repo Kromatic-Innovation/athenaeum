@@ -147,7 +147,7 @@ _RAISED_BY_AGENT = "agent"
 # tag distinguishes it from a plain agent-raised question in
 # ``athenaeum.decisions.question_to_decision``; the six structured fields
 # capture exactly what the pending-decisions consumer contract requires
-# (see ``docs/configuration.md``'s "confirmation-type consumer contract").
+# (see ``docs/reference/configuration.md``'s "confirmation-type consumer contract").
 _DECISION_KIND_PREFIX = "**Decision kind**:"
 _DECISION_KIND_CONFIRMATION = "confirmation"
 _RAISER_PREFIX = "**Raiser**:"
