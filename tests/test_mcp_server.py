@@ -1138,14 +1138,18 @@ class TestPendingQuestionMCPTools:
         )
         server = create_server(raw_root=raw, wiki_root=wiki)
 
-        async def _run() -> list[dict]:
+        async def _run() -> dict:
             tool = await server.get_tool("list_pending_decisions")
             return tool.fn()
 
         result = asyncio.run(_run())
-        types = [d["type"] for d in result]
+        # Issue athenaeum#1431: the tool now returns a bounded envelope, not a bare
+        # list — assert the paging fields alongside the existing item checks.
+        assert result["total"] == 2
+        assert result["next_offset"] is None
+        types = [d["type"] for d in result["items"]]
         assert types == ["merge", "question"]  # oldest (merge) first
-        merge = result[0]
+        merge = result["items"][0]
         assert merge["payload"]["sources"][0]["title"] == "Lean Startup"
         assert "Lean Startup" in merge["summary"]
 
@@ -1408,9 +1412,11 @@ class TestAllMcpToolWrappers:
     _EXPECTED_TYPE = {
         "recall": str,
         "remember": str,
-        "list_pending_questions": list,
+        # Issue athenaeum#1431: both now return a bounded {"items", "total",
+        # "offset", "limit", "next_offset"} envelope, not a bare list.
+        "list_pending_questions": dict,
         "list_pending_merges": list,
-        "list_pending_decisions": list,
+        "list_pending_decisions": dict,
         "list_axiom_audit": list,
         "resolve_question": dict,
         "raise_decision": dict,

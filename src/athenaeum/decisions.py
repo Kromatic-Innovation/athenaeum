@@ -66,6 +66,7 @@ from pathlib import Path
 from athenaeum.answers import PendingQuestion, parse_pending_questions
 from athenaeum.calibration import list_pending_audit
 from athenaeum.models import parse_frontmatter
+from athenaeum.pagination import paginate
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
 from athenaeum.quarantine import list_pending_quarantine
 from athenaeum.retraction_cascade import read_retraction_reviews
@@ -540,6 +541,8 @@ def list_pending_decisions(
     with_proposal: bool = False,
     max_sources_per_merge: int = _DECISIONS_MAX_SOURCES_DEFAULT,
     caller_audience: set[str] | None = None,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> list[dict]:
     """Unified list of pending questions + merges, oldest first.
 
@@ -567,6 +570,23 @@ def list_pending_decisions(
     owner-only, mirroring the write-side guard on ``review_audit_item``).
     Owner (``None``, the default) sees everything, preserving existing
     behavior.
+
+    Issue athenaeum#1431: ``offset``/``limit`` page over the FINAL, unified,
+    oldest-first list — the slice is applied AFTER the ``decisions.sort(...)``
+    call below, not threaded into any of the per-kind sub-lists (in
+    particular, this function's own internal question filtering above is
+    never limited). Paging any one sub-list independently would break the
+    queue-wide oldest-first ordering contract: questions, merges, retractions,
+    audits, quarantine items, and proposed rules would each restart their own
+    page boundary instead of interleaving by age. Because the slice happens
+    strictly after the sort, the oldest-first contract holds ACROSS pages —
+    page N's last item is always older than page N+1's first. ``offset``
+    defaults to ``0`` and is clamped to ``0`` if negative. ``limit`` defaults
+    to ``None`` (unbounded, preserving existing behavior for every direct
+    caller — notably the ``athenaeum decisions`` CLI); ``0`` or a negative
+    ``limit`` is likewise treated as unbounded rather than yielding an empty
+    page. For a bounded call that also reports a total count, next-offset,
+    and the effective limit, see :func:`list_pending_decisions_page`.
     """
     from athenaeum.models import all_sources_authorized, is_page_authorized_at
 
@@ -602,7 +622,52 @@ def list_pending_decisions(
             proposed_rule_to_decision(rec) for rec in list_pending_rule_proposals(wiki_root)
         ]
     decisions.sort(key=lambda d: d["created_at"] or "")
-    return decisions
+
+    return paginate(decisions, offset=offset, limit=limit)["items"]
+
+
+def list_pending_decisions_page(
+    wiki_root: Path,
+    *,
+    with_proposal: bool = False,
+    max_sources_per_merge: int = _DECISIONS_MAX_SOURCES_DEFAULT,
+    caller_audience: set[str] | None = None,
+    offset: int = 0,
+    limit: int | None = None,
+) -> dict:
+    """Bounded, self-describing page of :func:`list_pending_decisions`.
+
+    Issue athenaeum#1431: the MCP boundary needs enough information for a
+    caller to fetch the rest of an unbounded list without either transport
+    truncating it — a plain JSON array can't carry a total count or a
+    next-offset. This wraps :func:`list_pending_decisions` in an envelope::
+
+        {
+            "items": [...],       # this page's decisions, oldest first
+            "total": <int>,       # the FULL unpaginated count
+            "offset": <int>,      # the clamped offset actually applied
+            "limit": <int|None>,  # the effective limit actually applied
+            "next_offset": <int|None>,  # offset for the next page, or None
+        }
+
+    ``next_offset`` is ``offset + len(items)`` when more items remain past
+    this page, otherwise ``None`` (the caller has reached the end).
+
+    The full sorted list is built ONCE, with no limit, so ``total`` is exact
+    and the slice below is taken from it — there is no double-fetch or
+    separate counting pass. This is safe to do unconditionally: the issue's
+    own measurement found that BUILDING the unified list is fast (~0.2s
+    against the corpus that motivated this issue); the failure this issue
+    fixes is in SERIALIZING an unbounded list over the MCP stdio transport,
+    which is exactly what this envelope bounds.
+    """
+    all_decisions = list_pending_decisions(
+        wiki_root,
+        with_proposal=with_proposal,
+        max_sources_per_merge=max_sources_per_merge,
+        caller_audience=caller_audience,
+    )
+    return paginate(all_decisions, offset=offset, limit=limit)
 
 
 def age_days(created_at: str, *, today: date | None = None) -> int | None:
