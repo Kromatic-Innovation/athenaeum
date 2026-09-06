@@ -40,7 +40,34 @@ before: yanking them while 0.20.0 did not yet exist would have made
 `pip install athenaeum` resolve *backwards* to 0.15.0, which carries the same
 data. (0.17.1 was already yanked, for an unrelated reason.)
 
-Don't take that on trust — check it:
+**Nor should you take the removal on trust** — though be clear about what can
+and cannot be checked. Every address in the current tree can be listed:
+
+```bash
+git ls-files -z \
+  | xargs -0 grep -IhoE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' \
+  | sort -u
+```
+
+That returns roughly 170 addresses. Nearly all are test fixtures at RFC 2606
+reserved names (`example.com`, `.example`, `.invalid`); the rest are service
+identifiers (`git@github.com`, a `…iam.gserviceaccount.com`, a
+`…group.calendar.google.com`). The check you are performing is *does any of
+these look like a real person's mailbox* — it is short enough to read.
+
+**The honest limit:** that verifies nothing real remains. It cannot prove a
+specific string was removed from history, because doing so would require
+publishing the values — which is what this whole change exists to undo. Running
+the same scan over `git log --all -p` is possible but returns ~190 results
+laced with decorator syntax (`@pytest.fixture`) and is not a check anyone can
+usefully eyeball; do not mistake it for one.
+
+**A caveat neither check surfaces:** pre-rewrite commits remain reachable
+through GitHub's pull-request refs (`refs/pull/*`), which a repository owner
+cannot delete and which a `--mirror` clone still fetches. Their removal is with
+GitHub Support.
+
+And for the yank status — check that too:
 
 ```bash
 pip index versions athenaeum

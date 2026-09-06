@@ -37,10 +37,16 @@ memory tool, RAG, and the existing agent-memory libraries, is in
 
 ## Quick start
 
-Requires Python 3.13+.
+**Requires Python 3.13+ — and check what you actually got.** `pip` will not fail
+on an older interpreter. Because releases before 0.17.1 declared `>=3.11`, pip
+silently resolves *backwards* past a dozen releases and installs a year-old
+version instead of erroring. Nothing in the output tells you this happened, and
+the CLI will appear to work.
 
 ```bash
+python3.13 -m venv .venv && source .venv/bin/activate  # 3.13+, explicitly
 pip install 'athenaeum[mcp]'
+athenaeum --version                                    # confirm 0.20.0 or newer
 
 # Create a knowledge directory (default: ~/knowledge)
 athenaeum init
@@ -48,6 +54,10 @@ athenaeum init
 # Wire it into Claude Code — it auto-starts with every session
 claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
 ```
+
+Older releases are **not** yanked (see the CHANGELOG for why), so they stay
+installable. If `--version` reports below 0.20.0, you are on the wrong
+interpreter — not a broken install.
 
 Want to confirm it works before wiring anything up or spending API budget?
 
