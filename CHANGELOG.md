@@ -52,8 +52,15 @@ Earlier releases (0.4.0 through 0.15.0) still carry the data in their sdists and
 remain published rather than yanked — yanking the entire history would leave the
 project with no installable version while removing nothing, since a yank
 de-lists a version but never deletes the files. Upgrade rather than pinning
-backwards. A **GitHub Security Advisory** on this repository carries the same
-information in a form `pip-audit` and Dependabot can see.
+backwards. The GitHub Release for v0.20.0 carries the same disclosure, dated and
+linked from the tag.
+
+No advisory was filed, deliberately. An advisory answers *"does this dependency
+endanger my system?"* — and here it does not: nothing is exploitable, no
+consumer's own data was exposed, and there is no escalation path. The harm is to
+the people whose data was published. Routing that through a vulnerability
+database would flag the package as a risk to every consumer pinning an old
+version, for something that does not put them at risk.
 
 If you maintain a fork or a vendored copy, please delete any cached artifacts
 from the affected releases.
