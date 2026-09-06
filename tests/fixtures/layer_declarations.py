@@ -63,6 +63,7 @@ MODULE_LAYER: dict[str, int] = {
     "logconf": 0,
     "memory_class": 0,
     "owner": 0,
+    "pagination": 0,
     "progress": 0,
     "vecmath": 0,
     # L1 -- data model.

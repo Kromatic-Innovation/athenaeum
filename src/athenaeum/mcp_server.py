@@ -1996,8 +1996,8 @@ def create_server(
         )
 
     @mcp.tool()
-    def list_pending_questions() -> list[dict]:
-        """List unanswered pending questions.
+    def list_pending_questions(offset: int = 0, limit: int | None = None) -> dict:
+        """List unanswered pending questions, bounded and paginated (issue athenaeum#1431).
 
         Returns the unanswered blocks from ``wiki/_pending_questions.md`` in
         a shape any agent can render — including containerized agents that
@@ -2009,15 +2009,53 @@ def create_server(
         question text are unchanged, so an agent can call this tool,
         present the list, and then call ``resolve_question`` with the id
         of the chosen item.
+
+        Read-path bound (issue athenaeum#1431): an unbounded array here broke the MCP
+        stdio transport against the live corpus (11,355,998 bytes / 8,632
+        items — ``Connection closed``). This tool now returns a bounded
+        envelope::
+
+            {
+                "items": [...],       # this page, oldest first
+                "total": <int>,       # the FULL unpaginated count
+                "offset": <int>,      # the clamped offset actually applied
+                "limit": <int>,       # the effective limit actually applied
+                "next_offset": <int|None>,  # offset for the next page, or None
+            }
+
+        An unparameterized call returns only the FIRST page, oldest first —
+        NOT everything. ``limit`` defaults to
+        :func:`athenaeum.config.resolve_decisions_page_limit`'s resolved
+        value (env ``ATHENAEUM_DECISIONS_PAGE_LIMIT`` > yaml
+        ``librarian.decisions_page_limit`` > ``50``). To fetch the rest, call
+        again with ``offset=<the previous response's next_offset>``,
+        repeating until ``next_offset`` is ``null``. This bounds the number
+        of top-level items returned, complementing the athenaeum#431 cap that bounds
+        the number of sources rendered WITHIN one merge item in
+        ``list_pending_decisions``.
+
+        This tool is the transport-safety boundary, so a non-positive
+        ``limit`` (``0`` or negative — the value a client is likely to send
+        meaning "no limit") is NOT treated as unbounded here, unlike the
+        underlying library functions: it resolves to the same page-limit
+        default as an omitted ``limit``. A caller can never get the
+        unbounded 11MB response back through this tool.
         """
         from athenaeum.answers import list_unanswered
+        from athenaeum.config import load_config, resolve_decisions_page_limit
+        from athenaeum.pagination import paginate
+
+        if limit is None or limit <= 0:
+            config = load_config(wiki_root.parent)
+            limit = resolve_decisions_page_limit(config)
 
         pending_path = wiki_root / "_pending_questions.md"
-        return list_unanswered(
+        all_items = list_unanswered(
             pending_path,
             caller_audience=caller_audience,
             knowledge_root=wiki_root.parent,
         )
+        return paginate(all_items, offset=offset, limit=limit)
 
     @mcp.tool()
     def resolve_question(id: str, answer: str) -> dict:
@@ -2302,8 +2340,8 @@ def create_server(
         )
 
     @mcp.tool()
-    def list_pending_decisions() -> list[dict]:
-        """List ALL pending human decisions — questions AND merges (issue athenaeum#401).
+    def list_pending_decisions(offset: int = 0, limit: int | None = None) -> dict:
+        """List pending human decisions — questions AND merges (issue athenaeum#401).
 
         The unified queue behind ``athenaeum decisions list``. Combines the
         unanswered blocks of ``wiki/_pending_questions.md`` with the
@@ -2333,16 +2371,55 @@ def create_server(
         accurate remainder count in ``payload["sources_omitted"]`` — so a
         merge proposal with a very large source list can't blow out this
         tool's payload either.
+
+        Read-path bound on the ITEM COUNT (issue athenaeum#1431): an unbounded top-level
+        array here broke the MCP stdio transport against the live corpus
+        (11,355,998 bytes / 8,632 items — ``Connection closed``). This tool
+        now returns a bounded envelope, complementing the athenaeum#431 per-merge
+        source cap above::
+
+            {
+                "items": [...],       # this page, oldest first
+                "total": <int>,       # the FULL unpaginated count
+                "offset": <int>,      # the clamped offset actually applied
+                "limit": <int>,       # the effective limit actually applied
+                "next_offset": <int|None>,  # offset for the next page, or None
+            }
+
+        An unparameterized call returns only the FIRST page, oldest first —
+        NOT the whole backlog. ``limit`` defaults to
+        :func:`athenaeum.config.resolve_decisions_page_limit`'s resolved
+        value (env ``ATHENAEUM_DECISIONS_PAGE_LIMIT`` > yaml
+        ``librarian.decisions_page_limit`` > ``50``). To fetch the rest, call
+        again with ``offset=<the previous response's next_offset>``,
+        repeating until ``next_offset`` is ``null``. The oldest-first
+        ordering contract holds ACROSS pages — see
+        :func:`athenaeum.decisions.list_pending_decisions_page`.
+
+        This tool is the transport-safety boundary, so a non-positive
+        ``limit`` (``0`` or negative — the value a client is likely to send
+        meaning "no limit") is NOT treated as unbounded here, unlike the
+        underlying library functions: it resolves to the same page-limit
+        default as an omitted ``limit``. A caller can never get the
+        unbounded 11MB response back through this tool.
         """
-        from athenaeum.config import load_config, resolve_decisions_max_sources_per_merge
-        from athenaeum.decisions import list_pending_decisions as _list_decisions
+        from athenaeum.config import (
+            load_config,
+            resolve_decisions_max_sources_per_merge,
+            resolve_decisions_page_limit,
+        )
+        from athenaeum.decisions import list_pending_decisions_page
 
         config = load_config(wiki_root.parent)
         max_sources_per_merge = resolve_decisions_max_sources_per_merge(config)
-        return _list_decisions(
+        if limit is None or limit <= 0:
+            limit = resolve_decisions_page_limit(config)
+        return list_pending_decisions_page(
             wiki_root,
             max_sources_per_merge=max_sources_per_merge,
             caller_audience=caller_audience,
+            offset=offset,
+            limit=limit,
         )
 
     @mcp.tool()

@@ -1985,6 +1985,29 @@ def resolve_decisions_max_sources_per_merge(config: dict[str, Any] | None) -> in
     )
 
 
+def resolve_decisions_page_limit(config: dict[str, Any] | None) -> int:
+    """Resolve the decisions-view MCP read-path page size (issue athenaeum#1431).
+
+    The ``list_pending_decisions`` and ``list_pending_questions`` MCP tools
+    returned every pending item in one unbounded JSON array — against the
+    live corpus that was 11,355,998 bytes across 8,632 items, which breaks
+    the MCP stdio transport (``Connection closed``). This bounds the number
+    of top-level items those tools return per call, with the remainder
+    reachable via ``offset``/``limit`` paging. It is the sibling cap to
+    :func:`resolve_decisions_max_sources_per_merge` (athenaeum#431), which
+    bounds the number of sources rendered WITHIN a single merge item; this
+    one bounds the number of items in the top-level list.
+
+    Precedence: ``ATHENAEUM_DECISIONS_PAGE_LIMIT`` env > yaml
+    ``librarian.decisions_page_limit`` > ``50``. See
+    :func:`_resolve_positive_int_knob` for the coercion contract (``bool`` /
+    non-int / ``<= 0`` values fall through to the default).
+    """
+    return _resolve_positive_int_knob(
+        config, "decisions_page_limit", "ATHENAEUM_DECISIONS_PAGE_LIMIT", 50
+    )
+
+
 def _resolve_optional_positive_number(
     config: dict[str, Any] | None,
     block: str,
