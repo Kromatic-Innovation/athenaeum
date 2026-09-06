@@ -69,6 +69,7 @@ from athenaeum.fingerprint import (
     normalize_side,
     record_resolution,
 )
+from athenaeum.pagination import paginate
 from athenaeum.sidecar_blocks import GENERIC_FENCE_OPEN_RE, split_blocks
 from athenaeum.store import now_iso
 
@@ -1317,6 +1318,8 @@ def list_unanswered(
     *,
     caller_audience: set[str] | None = None,
     knowledge_root: Path | None = None,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> list[dict]:
     """Return unanswered pending questions as dicts suitable for MCP output.
 
@@ -1328,10 +1331,24 @@ def list_unanswered(
     fail-closed predicate ``recall`` applies. Owner (``None``, the default)
     sees everything, preserving existing behavior. ``knowledge_root`` is the
     base a relative source path is resolved against.
+
+    Issue athenaeum#1431: ``offset``/``limit`` page over the result. The
+    slice is applied AFTER the ``answered``/authorization filtering above, so
+    a page contains exactly the items a given caller is entitled to see —
+    never a raw slice of the unfiltered file that then gets filtered down to
+    fewer items than the caller asked for. ``offset`` defaults to ``0`` and
+    is clamped to ``0`` if negative. ``limit`` defaults to ``None``, which
+    means UNBOUNDED — this is deliberate and load-bearing: it preserves the
+    existing behavior byte-for-byte for every direct caller (notably the
+    ``athenaeum decisions`` CLI, whose ``_counts()`` helper must see every
+    item — see ``src/athenaeum/_cmd_decisions.py``). A ``limit`` of ``0`` or
+    a negative number is likewise treated as unbounded rather than yielding
+    an empty page. Ordering is the file's block order, which is stable for a
+    static backing file — consecutive pages neither duplicate nor skip items.
     """
     from athenaeum.models import is_page_authorized_at
 
-    return [
+    items = [
         {
             "id": pq.id,
             "entity": pq.entity,
@@ -1350,6 +1367,8 @@ def list_unanswered(
         if not pq.answered
         and is_page_authorized_at(pq.source, caller_audience, base=knowledge_root)
     ]
+
+    return paginate(items, offset=offset, limit=limit)["items"]
 
 
 # ---------------------------------------------------------------------------

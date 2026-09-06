@@ -205,7 +205,10 @@ class TestCrossSessionSurfacing:
         # server_a.
         server_b = _server(tmp_path)
         assert server_b is not server_a
-        decisions = _call(server_b, "list_pending_decisions", lambda fn: fn())
+        # Issue athenaeum#1431: `list_pending_decisions` now returns a bounded
+        # envelope (`{"items", "total", "offset", "limit", "next_offset"}`)
+        # rather than a bare list.
+        decisions = _call(server_b, "list_pending_decisions", lambda fn: fn())["items"]
         ids = [d["id"] for d in decisions]
         assert decision_id in ids
 
@@ -214,9 +217,10 @@ class TestCrossSessionSurfacing:
         assert item["payload"]["raised_by"] == "agent"
 
         # list_pending_questions (the narrower tool) surfaces it too, from
-        # yet another fresh instance.
+        # yet another fresh instance. Issue athenaeum#1431: also a bounded
+        # envelope now, not a bare list.
         server_c = _server(tmp_path)
-        questions = _call(server_c, "list_pending_questions", lambda fn: fn())
+        questions = _call(server_c, "list_pending_questions", lambda fn: fn())["items"]
         assert any(q["id"] == decision_id for q in questions)
 
 
@@ -484,7 +488,9 @@ class TestConfirmationResolvesThroughExistingPath:
         assert raised["ok"] is True
         decision_id = raised["decision_id"]
 
-        decisions = _call(server, "list_pending_decisions", lambda fn: fn())
+        # Issue athenaeum#1431: bounded envelope, not a bare list — see the
+        # comment in TestCrossSessionSurfacing above.
+        decisions = _call(server, "list_pending_decisions", lambda fn: fn())["items"]
         item = next(d for d in decisions if d["id"] == decision_id)
         assert item["type"] == "confirmation"
 
@@ -509,6 +515,7 @@ class TestConfirmationResolvesThroughExistingPath:
         assert resolved.decision_kind == "confirmation"
         assert resolved.raiser == _CONFIRMATION_KWARGS["raiser"]
 
-        # And it's gone from the unified pending-decisions view.
-        decisions_after = _call(server, "list_pending_decisions", lambda fn: fn())
+        # And it's gone from the unified pending-decisions view. Issue
+        # athenaeum#1431: bounded envelope, not a bare list.
+        decisions_after = _call(server, "list_pending_decisions", lambda fn: fn())["items"]
         assert all(d["id"] != decision_id for d in decisions_after)

@@ -156,6 +156,7 @@ See [exit-codes.md](exit-codes.md) for the full `athenaeum run` exit-code table 
 | Backlog-drain warn threshold (days) | — | — | `librarian.drain_warn_days` | `3` | Backlog-drain ETA threshold in **days** (athenaeum#470). At the end of any run that leaves raw intake undrained (and in `athenaeum status`), the advisor projects time-to-drain from **observed** throughput (the athenaeum#378 spend ledger; falls back to this run's own rate) and emits a machine-greppable `backlog-drain-advisor:` `WARNING` — naming the copy-pastable `athenaeum drain` remedy — only when the projection **exceeds** this many days; below it the run stays silent. `bool` / non-int / `<= 0` values fall through to the default. |
 | Merge-read preview length | — | `ATHENAEUM_MERGE_BODY_PREVIEW_CHARS` | `librarian.merge_body_preview_chars` | `2000` | Read-path bound (athenaeum#431) on the `list_pending_merges` MCP tool: `draft_merged_body` is truncated to this many characters by default (a single oversized pending merge — the withdrawn runaway that prompted this issue had a ~878 KB draft body — otherwise blows out the payload on every call). Each item also carries `draft_merged_body_truncated` and `draft_merged_body_full_length`; pass `full_body=True` to the tool to get the untruncated body on demand. Complements the write-path `max_merge_sources` cap above (athenaeum#400), which suppresses the proposal entirely rather than bounding its rendering. `bool` / non-int / `<= 0` values fall through to the default. |
 | Decisions-view source cap | — | `ATHENAEUM_DECISIONS_MAX_SOURCES_PER_MERGE` | `librarian.decisions_max_sources_per_merge` | `20` | Read-path bound (athenaeum#431) on the `decisions` view / `list_pending_decisions` MCP tool: a merge item renders at most this many sources, with the exact remainder in `payload["sources_omitted"]` (and an "… and N more" line in the plain-text CLI rendering). `bool` / non-int / `<= 0` values fall through to the default. |
+| Decisions-view page limit | — | `ATHENAEUM_DECISIONS_PAGE_LIMIT` | `librarian.decisions_page_limit` | `50` | Read-path bound (athenaeum#1431) on the **number of top-level items** the `list_pending_decisions` / `list_pending_questions` MCP tools return per call — complements the per-merge source cap above, which bounds sources WITHIN one merge item rather than the number of items in the list. An unbounded top-level array broke the MCP stdio transport against the live corpus (11,355,998 bytes / 8,632 items, `Connection closed`); both tools now return a bounded `{"items", "total", "offset", "limit", "next_offset"}` envelope and page via `offset`/`limit`. `bool` / non-int / `<= 0` values fall through to the default. |
 | T2-approval audit rate | — | `ATHENAEUM_AUDIT_SAMPLE_RATE_T2_APPROVALS` | `librarian.audit_sample_rate_t2_approvals` | `0.075` | Share of T2 (opus) approvals randomly sampled into the human decisions queue as `type: "audit"` calibration items (athenaeum#438) — the false-approve half of the tier calibration loop. Deterministic per `(tier, proposal)`. Clamped to `[0.0, 1.0]` (`0.0` = OFF, `1.0` = audit everything); default `0.075` is the midpoint of the settled 5-10% band. `bool` / non-numeric values fall through to the default. |
 | T1-reject audit rate | — | `ATHENAEUM_AUDIT_SAMPLE_RATE_T1_REJECTS` | `librarian.audit_sample_rate_t1_rejects` | `0.075` | Share of T1 (haiku/sonnet) rejects randomly sampled into the human decisions queue as `type: "audit"` calibration items (athenaeum#438) — the false-reject half of the tier calibration loop. Deterministic per `(tier, proposal)`. Clamped to `[0.0, 1.0]` (`0.0` = OFF, `1.0` = audit everything); default `0.075` is the midpoint of the settled 5-10% band. `bool` / non-numeric values fall through to the default. |
 | Embedding cache root | — | `ATHENAEUM_CACHE_DIR` | — | `~/.cache/athenaeum` | Cache root used by the librarian's cluster pass (chromadb lives at `<dir>/wiki-vectors/`). The `recall` / `rebuild-index` commands do **not** read this var — they take `--cache-dir` (same default). |
@@ -1643,6 +1644,59 @@ tagged `type`, oldest-first: `question` (contradiction-detector escalations
 and plain agent-raised flags), `merge` (resolver merge proposals),
 `retraction`, `audit`, `quarantine`, `proposed-rule`, and — as of issue
 athenaeum#1290 — `confirmation`.
+
+### Pagination — consumer contract (athenaeum#1431)
+
+Against the live corpus, the unified queue reached 8,632 items / 11,355,998
+bytes as one unbounded JSON array — large enough to break the MCP stdio
+transport (`Connection closed`). The `list_pending_decisions` and
+`list_pending_questions` MCP tools now return a bounded, self-describing
+envelope instead of a bare array:
+
+| Field | Type | What it carries |
+|---|---|---|
+| `items` | array | This page's decisions/questions, oldest `created_at` first. |
+| `total` | int | The FULL unpaginated count — how many items exist across every page. |
+| `offset` | int | The offset actually applied (clamped to `>= 0`). |
+| `limit` | int | The limit actually applied this call. |
+| `next_offset` | int or `null` | Pass this as `offset` to fetch the next page; `null` means this was the last page. |
+
+**Default limit.** An unparameterized call (`list_pending_decisions()` /
+`list_pending_questions()`) returns only the FIRST page, oldest-first — NOT
+the whole backlog. The default page size comes from
+`resolve_decisions_page_limit`: env `ATHENAEUM_DECISIONS_PAGE_LIMIT` > yaml
+`librarian.decisions_page_limit` > `50` (see the config table above).
+
+**Paging loop.** Call with `offset=0` (or omit it), then repeat with
+`offset=<the previous response's next_offset>` until `next_offset` comes
+back `null`:
+
+```python
+offset = 0
+while True:
+    page = list_pending_decisions(offset=offset, limit=50)
+    handle(page["items"])
+    if page["next_offset"] is None:
+        break
+    offset = page["next_offset"]
+```
+
+**Ordering holds across pages.** The queue-wide oldest-first sort happens
+ONCE, over the full unified list, before the page slice is taken — never
+per-page or per-item-type — so page N's last item is always older than page
+N+1's first, and paging never duplicates or skips an item as long as the
+underlying files don't change mid-page. This bounds the number of
+**top-level items** returned, complementing the pre-existing athenaeum#431 cap
+(`decisions_max_sources_per_merge`), which bounds the number of sources
+rendered WITHIN a single merge item.
+
+**The CLI is intentionally unpaginated.** `athenaeum decisions
+{list,next,count}` renders locally to a terminal — there is no stdio
+transport size limit to protect it from, and `count`'s breakdown must be
+computed over every pending item, not just one page. It calls the same
+library functions (`athenaeum.decisions.list_pending_decisions`,
+`athenaeum.answers.list_unanswered`) with `limit` left at its default of
+`None` (unbounded), so it is unaffected by this change and needs no update.
 
 ### The `confirmation` decision type — consumer contract (athenaeum#1290)
 
@@ -3271,6 +3325,7 @@ librarian:
   drain_warn_days: 3            # backlog-drain ETA WARNING threshold in days (athenaeum#470)
   merge_body_preview_chars: 2000            # list_pending_merges draft_merged_body preview cap (athenaeum#431)
   decisions_max_sources_per_merge: 20       # decisions-view per-merge source fan-out cap (athenaeum#431)
+  decisions_page_limit: 50                  # list_pending_decisions/list_pending_questions top-level item page size (athenaeum#1431)
   audit_sample_rate_t2_approvals: 0.075     # share of T2 approvals sampled for human audit (athenaeum#438)
   audit_sample_rate_t1_rejects: 0.075       # share of T1 rejects sampled for human audit (athenaeum#438)
   verdict_ledger_enabled: false              # off by default; verdict ledger + basis (athenaeum#712)
