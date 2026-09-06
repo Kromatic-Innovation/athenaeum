@@ -311,7 +311,7 @@ def _migrate_str_value(
         token is preserved on the excluded record).
       - PII embedded in surrounding text (a ``source:`` provenance string like
         ``"imported from foo@bar.com via Streak"``, or a ``sources[].claim``
-        like ``"Reached Emily at emily@novo.co"``) → the token redacted
+        like ``"Reached Priya at priya@example.com"``) → the token redacted
         in place with :data:`INLINE_REDACTION_MARKER`, keeping the non-PII
         context so the field stays meaningful.
     """

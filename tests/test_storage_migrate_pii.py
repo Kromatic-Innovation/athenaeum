@@ -958,14 +958,14 @@ class TestNestedFrontmatterCoverage:
         root = tmp_path / "knowledge"
         page = _write_page(
             root / "wiki",
-            "auto-calendar-emily.md",
+            "auto-calendar-priya.md",
             "uid: n1\n"
             "name: Auto Calendar\n"
             "type: memory\n"
             "sources:\n"
             "  - session: sess-2026-07-01\n"
             "    scope: work\n"
-            "    claim: Reached Emily at emily@novo.co and emilycc@gmail.com\n",
+            "    claim: Reached Priya at priya@example.com and p.raman@example.org\n",
             "Auto-memory page.",
         )
 
@@ -973,19 +973,19 @@ class TestNestedFrontmatterCoverage:
         meta, _body = parse_frontmatter(plan.rewritten_page_text or "")
 
         assert plan.changed is True
-        assert plan.emails == ["emily@novo.co", "emilycc@gmail.com"]
+        assert plan.emails == ["priya@example.com", "p.raman@example.org"]
         block = meta["sources"][0]
         # Surrounding provenance fields survive untouched...
         assert block["session"] == "sess-2026-07-01"
         assert block["scope"] == "work"
         # ...only the address in `claim` is replaced (redacted in place).
-        assert "emily@novo.co" not in block["claim"]
-        assert "emilycc@gmail.com" not in block["claim"]
+        assert "priya@example.com" not in block["claim"]
+        assert "p.raman@example.org" not in block["claim"]
         assert INLINE_REDACTION_MARKER in block["claim"]
-        assert "Reached Emily at" in block["claim"]
+        assert "Reached Priya at" in block["claim"]
         # ...and both addresses are archived on the excluded record.
-        assert "emily@novo.co" in (plan.excluded_page_text or "")
-        assert "emilycc@gmail.com" in (plan.excluded_page_text or "")
+        assert "priya@example.com" in (plan.excluded_page_text or "")
+        assert "p.raman@example.org" in (plan.excluded_page_text or "")
 
     def test_migrates_email_in_apollo_employment_history_title(
         self, tmp_path: Path
@@ -995,13 +995,13 @@ class TestNestedFrontmatterCoverage:
         root = tmp_path / "knowledge"
         page = _write_page(
             root / "wiki",
-            "ad1b80ad-phil-haake.md",
+            "ad1b80ad-jordan-reyes.md",
             "uid: n2\n"
-            "name: Phil Haake\n"
+            "name: Jordan Reyes\n"
             "type: person\n"
             "apollo_employment_history:\n"
-            "  - organization: First50\n"
-            "    title: Phil@first50.com\n"
+            "  - organization: Acme Corp\n"
+            "    title: Jordan@example.com\n"
             "    start_date: 2015\n",
             "Enriched via Apollo.",
         )
@@ -1010,15 +1010,15 @@ class TestNestedFrontmatterCoverage:
         meta, _body = parse_frontmatter(plan.rewritten_page_text or "")
 
         assert plan.changed is True
-        assert plan.emails == ["Phil@first50.com"]
+        assert plan.emails == ["Jordan@example.com"]
         entry = meta["apollo_employment_history"][0]
         # The rest of the employment entry is byte-identical...
-        assert entry["organization"] == "First50"
+        assert entry["organization"] == "Acme Corp"
         assert entry["start_date"] == 2015
         # ...and the address no longer appears anywhere on the origin page.
-        assert "Phil@first50.com" not in (plan.rewritten_page_text or "")
+        assert "Jordan@example.com" not in (plan.rewritten_page_text or "")
         # ...but is archived on the excluded record.
-        assert "Phil@first50.com" in (plan.excluded_page_text or "")
+        assert "Jordan@example.com" in (plan.excluded_page_text or "")
 
     def test_service_address_is_not_migrated(self, tmp_path: Path) -> None:
         # AC: a service identifier (git@github.com) is email-shaped but NOT
