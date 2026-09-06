@@ -49,6 +49,12 @@ athenaeum init
 claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
 ```
 
+Want to confirm it works before wiring anything up or spending API budget?
+
+```bash
+athenaeum test-mcp    # smoke-tests remember/recall against a scratch dir — no API key needed
+```
+
 That gives your agent two tools: `remember` to write an observation, `recall` to search
 the compiled wiki. A round-trip looks like this:
 

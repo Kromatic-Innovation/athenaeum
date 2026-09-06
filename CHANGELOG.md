@@ -34,9 +34,33 @@ to remove the values from prior commits; commit SHAs before this release have
 therefore changed. No code behaviour changed — the rewritten tip is
 byte-identical to what it replaced.
 
-Releases **0.17.1, 0.18.0, 0.18.1 and 0.19.0 are yanked on PyPI.** Earlier
-releases still carry the data in their sdists and are left published; upgrade
-rather than pinning to them.
+**0.18.0, 0.18.1 and 0.19.0 are yanked on PyPI as part of this release.** The
+yank is performed immediately after 0.20.0 is published, and deliberately not
+before: yanking them while 0.20.0 did not yet exist would have made
+`pip install athenaeum` resolve *backwards* to 0.15.0, which carries the same
+data. (0.17.1 was already yanked, for an unrelated reason.)
+
+Don't take that on trust — check it:
+
+```bash
+pip index versions athenaeum
+curl -s https://pypi.org/pypi/athenaeum/json | \
+  python3 -c "import json,sys; d=json.load(sys.stdin); print({v: any(f['yanked'] for f in fs) for v,fs in d['releases'].items() if fs})"
+```
+
+Earlier releases (0.4.0 through 0.15.0) still carry the data in their sdists and
+remain published rather than yanked — yanking the entire history would leave the
+project with no installable version while removing nothing, since a yank
+de-lists a version but never deletes the files. Upgrade rather than pinning
+backwards. The GitHub Release for v0.20.0 carries the same disclosure, dated and
+linked from the tag.
+
+No advisory was filed, deliberately. An advisory answers *"does this dependency
+endanger my system?"* — and here it does not: nothing is exploitable, no
+consumer's own data was exposed, and there is no escalation path. The harm is to
+the people whose data was published. Routing that through a vulnerability
+database would flag the package as a risk to every consumer pinning an old
+version, for something that does not put them at risk.
 
 If you maintain a fork or a vendored copy, please delete any cached artifacts
 from the affected releases.
@@ -44,6 +68,30 @@ from the affected releases.
 _Supersedes 45 untagged, unpublished patch bumps (0.19.1–0.19.45) that never shipped to PyPI; the last published release was v0.19.0. Section closed at commit `bbe8637` on 2026-09-03 and folded in the 91 commits that landed on `develop`/`main` afterward (through `0798b6d`, 2026-09-04) per athenaeum#1400 — including the `dir(athenaeum)` attribute-access removal from athenaeum#1373, documented under Removed below._
 
 _Numbered `0.20.0` rather than `0.19.45` (athenaeum#1335): this release **removes** public entry points — the `athenaeum people`, `athenaeum person` and `athenaeum bounce-divergence` subcommands and the `read_person` MCP tool — and a patch digit tells a dependency resolver the opposite. The removals were always documented under **Removed** below; only the version number disagreed._
+
+### Why this is one release and not seven
+
+This release bundles seven independently-shippable themes. That is not the
+normal shape of a good release, and the reason is worth recording for whoever
+bisects a regression out of it later.
+
+The substrate work below landed continuously on `develop` across roughly three
+months, versioned as 45 patch bumps (0.19.1–0.19.45) that were **never published
+to PyPI**. By the time that was noticed, the unpublished delta was already a
+year's worth of substrate: the memory model, the storage seam, the sensitivity
+path and the spend accounting had co-evolved and had cross-dependencies that
+make a retroactive split dishonest rather than merely tedious — the intermediate
+states were never green as public releases, so publishing them now would
+fabricate a history that did not happen.
+
+So this is one bump, and the cost is stated rather than hidden: **`git bisect`
+across 0.19.0..0.20.0 spans seven unrelated theses.** If you are chasing a
+regression, start from the theme sections below rather than the commit range —
+each names its landing issues, and the issue is a far better bisect boundary
+than the tag.
+
+The release train restarts here. Subsequent releases return to one thesis per
+bump.
 
 ### Release summary
 
