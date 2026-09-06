@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.20.0] - 2026-09-04
 
+### ⚠️ Repository history was rewritten before this release — re-clone required
+
+**If you have a local clone or a fork of this repository, it is now
+incompatible with the remote.** Re-clone, or reset each branch:
+
+```
+git fetch --all
+git reset --hard origin/<branch>
+```
+
+Do **not** `git pull` — it will try to merge two unrelated histories. Forks are
+detached and must be re-forked.
+
+**Why:** an audit found that real third-party personal data had been committed
+into test fixtures — three live email addresses, and one individual's contact
+record including their name, employer, job title, professional-profile URL and a
+contact-service identifier. It was published in the sdist of releases from
+0.4.0 onward, and one address reached the wheel through a module docstring.
+
+The fixtures now use RFC 2606 reserved domains (`example.com`, `example.org`)
+and invented people. History was rewritten across all branches and all 32 tags
+to remove the values from prior commits; commit SHAs before this release have
+therefore changed. No code behaviour changed — the rewritten tip is
+byte-identical to what it replaced.
+
+Releases **0.17.1, 0.18.0, 0.18.1 and 0.19.0 are yanked on PyPI.** Earlier
+releases still carry the data in their sdists and are left published; upgrade
+rather than pinning to them.
+
+If you maintain a fork or a vendored copy, please delete any cached artifacts
+from the affected releases.
+
 _Supersedes 45 untagged, unpublished patch bumps (0.19.1–0.19.45) that never shipped to PyPI; the last published release was v0.19.0. Section closed at commit `bbe8637` on 2026-09-03 and folded in the 91 commits that landed on `develop`/`main` afterward (through `0798b6d`, 2026-09-04) per athenaeum#1400 — including the `dir(athenaeum)` attribute-access removal from athenaeum#1373, documented under Removed below._
 
 _Numbered `0.20.0` rather than `0.19.45` (athenaeum#1335): this release **removes** public entry points — the `athenaeum people`, `athenaeum person` and `athenaeum bounce-divergence` subcommands and the `read_person` MCP tool — and a patch digit tells a dependency resolver the opposite. The removals were always documented under **Removed** below; only the version number disagreed._
