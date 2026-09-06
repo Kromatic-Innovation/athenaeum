@@ -1,43 +1,70 @@
 name: Promote Main
 
-# STANDALONE PROMOTION WORKFLOW — athenaeum-specific deviation from the
-# fleet-wide consumer stub (docs/project-registry.yaml driftGuard.
-# templateDeviations, cwc#2756-public-repo-gap issue).
+# ⚠️  CANONICAL STANDALONE TEMPLATE (openSource arm) — cwc#3071. DO NOT
+# HAND-EDIT PER REPO.
 #
-# WHY THIS FILE IS NOT THE THREE-LINE STUB: every other `family: platform` +
-# `promotionModel: develop-main` repo commits a short stub that `uses:`
-# code-workspace-config's own `.github/workflows/promote-main.yml` as a
-# `workflow_call` reusable workflow (cwc#2756). That call structurally
-# CANNOT work here: athenaeum is a PUBLIC repository and cwc is PRIVATE, and
-# GitHub Actions refuses a public repo's workflow_call into a private repo's
-# reusable workflow outright — no `Settings > Actions > Access` grant can
-# unblock it; `access_level: organization` only governs private-to-private/
-# internal sharing within the org. Dispatching the stub 422s with "failed to
-# parse workflow: error parsing called workflow "" -> "...@main": workflow
-# was not found." cwc's own sync_promote_workflows.py already documents the
-# identical failure for the release-npm reusable workflow (npm-oidc-
-# publish.yml, tickle-stick#111) — the promote-main cutover (cwc#2756)
-# reintroduced the same anti-pattern for the develop-main promotion gate
-# without excluding public consumers.
+# This is the source of truth for `promote-main.yml` in every `family:
+# platform` + `promotionModel: develop-main` repo the registry ALSO marks
+# `openSource: true` (currently: athenaeum, zenodotus, tickle-stick, panelist,
+# ideate-core — `docs/project-registry.yaml`). It is synced by
+# `scripts/sync_promote_workflows.py` via `PROMOTE_MAIN_STANDALONE_SPEC`
+# (`select_promote_main_standalone_consumers`), the sibling of the ordinary
+# `templates/promote-main.yml` stub spec (`select_promote_main_consumers`).
 #
-# So this file carries the FULL job body directly (workflow_dispatch only,
-# no workflow_call trigger — athenaeum has nothing to serve as a reusable
-# workflow), kept byte-for-byte identical in substance to cwc's canonical
-# `jobs:` block. It is EXEMPT from `scripts/sync_promote_workflows.py`'s
-# stub sync via a `driftGuard.templateDeviations` waiver on
-# (Kromatic-Innovation/athenaeum, promote-main) in cwc's
-# docs/project-registry.yaml, so `--apply` will never clobber it back to the
-# broken stub.
+# WHY A SEPARATE SHAPE EXISTS. Every OTHER platform/develop-main repo commits
+# the three-line `templates/promote-main.yml` stub, which `uses:` cwc's own
+# `.github/workflows/promote-main.yml` as a `workflow_call` reusable workflow
+# (cwc#2756). That call structurally CANNOT work for a repo the registry
+# marks `openSource: true`: cwc is `visibility: private`, and GitHub Actions
+# refuses a PUBLIC repository's workflow from calling a PRIVATE repository's
+# reusable workflow outright — no `Settings > Actions > Access` grant unblocks
+# it (`access_level: organization` only governs private-to-private/internal
+# sharing within the org). Dispatching the stub against a public consumer
+# 422s: "failed to parse workflow: error parsing called workflow \"\" ->
+# \"...@main\": workflow was not found." (reproduced live against athenaeum,
+# cwc#3071.) `select_promote_main_consumers` therefore excludes every
+# `openSource: true` project from the stub's recipient set, and
+# `select_promote_main_standalone_consumers` (this file's selector) picks
+# them up instead.
 #
-# MAINTENANCE: when cwc's canonical `.github/workflows/promote-main.yml`
-# `jobs:` block changes, hand-port the same change here (this is the
-# structural cost of the exemption — the fleet exposure this issue tracks
-# affects every OTHER `openSource: true` platform repo not yet converted to
-# the stub too: zenodotus, tickle-stick, panelist, ideate-core). A systemic
-# fix (an openSource-aware selector in sync_promote_workflows.py that syncs
-# THIS shape to every public platform repo instead of a one-off per-repo
-# waiver) is out of scope for this urgent fix and is tracked on the filed
-# issue.
+# So THIS file carries the promotion job's FULL body directly —
+# `workflow_dispatch` only, no `workflow_call` trigger, since an
+# `openSource: true` repo has nothing private of cwc's to expose as a
+# reusable workflow and nothing to gain from declaring one. Its `jobs:` block
+# is kept BYTE-IDENTICAL to cwc's own canonical
+# `.github/workflows/promote-main.yml` — same gate logic, same CI-evidence
+# resolution ladder, same `sha`-pin handling — the only structural difference
+# from that file is the absence of the `workflow_call:` trigger block under
+# `on:`.
+#
+# MAINTENANCE COST OF THE SPLIT: when cwc's canonical
+# `.github/workflows/promote-main.yml` `jobs:` block changes, hand-port the
+# same change here in the same PR — `scripts/check_fleet_drift.py` property 4
+# will otherwise report every openSource consumer as drifted against this
+# file, not against the edited canonical. This mirrors the existing
+# stub/canonical wiring cost (`check_stub_contract`), just for the standalone
+# arm instead of the reusable-workflow arm.
+#
+# HISTORY: athenaeum was fixed first, urgently, as a one-off per-repo
+# `driftGuard.templateDeviations` waiver on (athenaeum, promote-main) in
+# `docs/project-registry.yaml` (cwc#3071's "Fix applied"). This file is the
+# systemic follow-up that waiver's own tracking issue called for: with
+# `select_promote_main_consumers` now openSource-aware and this template
+# recognized by property 4 as its own conformant shape, athenaeum needs no
+# per-repo waiver to read as conformant — the waiver was REMOVED in the same
+# change that added this file (see `docs/project-registry.yaml`'s
+# `driftGuard` comment on athenaeum's entry for the removal note). Converting
+# zenodotus / tickle-stick / panelist / ideate-core to this shape is
+# deliberately OUT OF SCOPE here (cwc#3071's "Out of scope") — landing this
+# selector is what makes that conversion safe; performing it is separate
+# work.
+#
+# RE-SYNC PATH — same as the stub arm, scoped to this spec:
+#
+#     python3 scripts/sync_promote_workflows.py --workflow promote-main-standalone --check
+#     python3 scripts/sync_promote_workflows.py --workflow promote-main-standalone --apply
+#
+# Never hand-edit a consumer's committed copy — the next sync overwrites it.
 
 on:
   workflow_dispatch:
