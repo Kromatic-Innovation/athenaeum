@@ -143,7 +143,7 @@ class TestValidateSourceValue:
 
 class TestValidateFieldSources:
     def test_dict_of_scalars(self) -> None:
-        v = {"emails": "api:apollo", "current_title": "linkedin:nicole"}
+        v = {"emails": "api:apollo", "current_title": "linkedin:nadia"}
         assert validate_field_sources(v) is v
 
     def test_dict_of_mixed(self) -> None:

@@ -17,7 +17,7 @@ Format contract (issue athenaeum#90):
 - Scalar: ``"<type>:<ref>"``. ``type`` is ``[a-z][a-z0-9_-]*``, ``ref`` is
   any non-empty string with no embedded newlines. Examples:
   ``"api:apollo:2026-05-07"``, ``"claude:session-2026-05-08"``,
-  ``"linkedin:nicole-segerer-5209921b"``.
+  ``"linkedin:nadia-sorensen-0a1b2c3d"``.
 - Structured: a dict with required ``type`` + ``ref`` and optional ``ts``
   (ISO-8601 string), ``confidence`` (float in [0, 1]), ``notes`` (free
   text). Extra keys are rejected so we don't silently absorb typos.

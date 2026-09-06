@@ -471,27 +471,27 @@ class TestRawFileContent:
 PASSTHROUGH_RAW = """---
 uid: 35297ed5
 type: person
-name: Nicole Segerer
+name: Nadia Sorensen
 access: personal
 tags:
   - relationship:dormant
   - tier:warm-b
   - account:kromatic
   - apollo:enriched
-google_contact: people/c971065947330806669
+google_contact: people/c100000000000000001
 emails:
-  - nsegerer@revenera.com
+  - nsorensen@example.com
 warm_score: 10.8
 current_title: SVP and General Manager
-current_company: Revenera
-linkedin_url: "http://www.linkedin.com/in/nicole-segerer-5209921b"
+current_company: Vantage Systems
+linkedin_url: "http://www.linkedin.com/in/nadia-sorensen-0a1b2c3d"
 apollo_employment_history:
   - title: SVP and General Manager
-    organization_name: Revenera
+    organization_name: Vantage Systems
     current: true
 ---
 
-# Nicole Segerer
+# Nadia Sorensen
 
 ## Role / Background
 
@@ -516,7 +516,7 @@ class TestTier0Passthrough:
     def _make_raw(self, tmp_path: Path, content: str) -> RawFile:
         raw_dir = tmp_path / "raw" / "contact-wiki"
         raw_dir.mkdir(parents=True)
-        path = raw_dir / "35297ed5-nicole.md"
+        path = raw_dir / "35297ed5-nadia.md"
         path.write_text(content, encoding="utf-8")
         return RawFile(
             path=path,
@@ -536,8 +536,8 @@ class TestTier0Passthrough:
 
         assert entity is not None
         assert entity.uid == "35297ed5"
-        assert entity.name == "Nicole Segerer"
-        out_path = wiki / "35297ed5-nicole-segerer.md"
+        assert entity.name == "Nadia Sorensen"
+        out_path = wiki / "35297ed5-nadia-sorensen.md"
         assert out_path.exists()
         written = out_path.read_text(encoding="utf-8")
         # Custom frontmatter namespaces must survive
@@ -545,14 +545,14 @@ class TestTier0Passthrough:
             "relationship:dormant",
             "apollo:enriched",
             "current_title: SVP and General Manager",
-            "current_company: Revenera",
-            "linkedin_url: http://www.linkedin.com/in/nicole-segerer-5209921b",
+            "current_company: Vantage Systems",
+            "linkedin_url: http://www.linkedin.com/in/nadia-sorensen-0a1b2c3d",
             "apollo_employment_history:",
-            "organization_name: Revenera",
+            "organization_name: Vantage Systems",
         ):
             assert needle in written, f"missing custom field: {needle}"
         # Body preserved
-        assert "# Nicole Segerer" in written
+        assert "# Nadia Sorensen" in written
 
     def test_registers_in_index(self, tmp_path: Path) -> None:
         from athenaeum.librarian import tier0_passthrough
@@ -564,7 +564,7 @@ class TestTier0Passthrough:
         tier0_passthrough(raw, index, wiki, ["person"])
 
         # Subsequent lookups should find the new entity
-        hit = index.lookup("Nicole Segerer")
+        hit = index.lookup("Nadia Sorensen")
         assert hit is not None
         assert hit[0] == "35297ed5"
 
@@ -573,9 +573,9 @@ class TestTier0Passthrough:
 
         wiki = self._make_wiki_root(tmp_path)
         # Pre-seed wiki with the same uid
-        existing = wiki / "35297ed5-nicole-segerer.md"
+        existing = wiki / "35297ed5-nadia-sorensen.md"
         existing.write_text(
-            "---\nuid: 35297ed5\ntype: person\nname: Nicole Segerer\n"
+            "---\nuid: 35297ed5\ntype: person\nname: Nadia Sorensen\n"
             "access: personal\ntags: [active]\n---\n\n# Nicole\n",
             encoding="utf-8",
         )

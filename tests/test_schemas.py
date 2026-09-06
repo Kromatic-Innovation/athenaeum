@@ -284,7 +284,7 @@ class TestProvenanceFields:
     def test_field_sources_map_accepted(self) -> None:
         fs = {
             "emails": "api:apollo:2026-05-07",
-            "current_title": "linkedin:nicole-segerer",
+            "current_title": "linkedin:nadia-sorensen",
         }
         m = PersonWiki(uid="abc12345", type="person", name="X", field_sources=fs)
         assert m.field_sources == fs
