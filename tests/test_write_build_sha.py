@@ -319,6 +319,31 @@ def test_deploy_sync_check_reports_drift_then_in_sync(git_checkout: Path, tmp_pa
     assert "stamp=current" in ok.stdout
 
 
+def test_deploy_sync_check_no_fetch_without_cached_ref_reports_no_fetch_unknown(
+    git_checkout: Path,
+) -> None:
+    """``--no-fetch`` with no local ``origin/<ref>`` ever fetched has nothing
+    to compare HEAD against. Every other ``--no-fetch`` sync reading is
+    prefixed ``no-fetch:`` (asserted via the ``sync=in-sync`` round-trip
+    above, run without ``--no-fetch``) so a live comparison is never confused
+    with a cached one; this state is reachable ONLY under ``--no-fetch`` (a
+    fetch failure without it exits 30 before this branch, and a successful
+    fetch always leaves ``origin/<ref>`` resolvable), so it must carry that
+    same prefix rather than rendering a bare ``unknown`` that looks like a
+    third, unprefixed category.
+    """
+    _require_bash()
+    proc = subprocess.run(
+        ["bash", str(DEPLOY_SYNC), "--check", "--no-fetch"],
+        env=_sync_env(git_checkout),  # no origin remote configured at all
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 14, proc.stdout + proc.stderr
+    assert "sync=no-fetch:unknown" in proc.stdout
+    assert "sync=unknown" not in proc.stdout  # the bare, unprefixed form must never appear
+
+
 def test_deploy_sync_check_frozen_deployment_reports_behind_not_in_sync(
     git_checkout: Path, tmp_path: Path
 ) -> None:

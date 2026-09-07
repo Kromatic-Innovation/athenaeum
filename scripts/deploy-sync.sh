@@ -65,7 +65,7 @@
 # alone without saying so — a `no-fetch:in-sync` is a "was in sync as of the
 # last fetch", not a live confirmation, and no consumer should treat the two
 # as equivalent. When no local `origin/<ref>` exists at all (never fetched),
-# `sync=unknown` is reported instead — never a green word.
+# `sync=no-fetch:unknown` is reported instead — never a green word.
 #
 # Exit-code contract for `--check` (distinguished in the exit code, not only
 # the text, so an automated caller can branch without parsing stdout):
@@ -74,7 +74,7 @@
 #   11  sync=behind <N>                     (checkout is behind the deploy ref)
 #   12  sync=diverged                       (no common ancestor — needs reset/re-clone)
 #   13  sync=ahead <N>                      (checkout has local commits the ref lacks)
-#   14  sync=unknown (--no-fetch, no local origin/<ref> to compare against)
+#   14  sync=no-fetch:unknown (--no-fetch, no local origin/<ref> to compare against)
 #   20  $dir is not a git checkout
 #   30  could not fetch origin/<ref> (remote unreachable) — never emits a green
 #       word; only reachable when `--no-fetch` was NOT given
@@ -153,8 +153,12 @@ if [ "${1:-}" = "--check" ]; then
 
   if [ -z "$remote" ]; then
     # --no-fetch and origin/<ref> has never been fetched locally: there is
-    # nothing to compare against yet. Never a green word for this case.
-    sync_state="unknown"
+    # nothing to compare against yet. Never a green word for this case. Only
+    # reachable when no_fetch=1 (without --no-fetch, a fetch failure already
+    # exited 30 above, and a successful fetch of $ref always leaves
+    # origin/$ref resolvable) — so this is always rendered "no-fetch:unknown",
+    # same as every other branch here composes "${prefix}...".
+    sync_state="${prefix}unknown"
     exit_code=14
   elif [ "$head" = "$remote" ]; then
     sync_state="${prefix}in-sync"

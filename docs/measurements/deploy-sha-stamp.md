@@ -86,7 +86,8 @@ checkout:
   - `sync=` — is the **checkout** current with `origin/<ref>`? One of
     `in-sync` / `behind <N>` / `ahead <N>` / `diverged` (no common ancestor —
     what a history rewrite produces) / `unknown` (no local `origin/<ref>` to
-    compare against, only reachable with `--no-fetch`).
+    compare against — only reachable with `--no-fetch`, so it always renders
+    `no-fetch:unknown`, per the prefix rule below).
   - `stamp=` — is the **install** current with the checkout? One of
     `current` / `stale` / `missing`. This is the original, pre-athenaeum#1445
     comparison, retained unchanged as a second condition rather than the only
