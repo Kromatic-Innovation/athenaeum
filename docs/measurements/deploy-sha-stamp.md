@@ -77,18 +77,51 @@ checkout:
   Root override for tests: `ATHENAEUM_BUILD_SHA_ROOT`.
 - `scripts/deploy-sync.sh` — fast-forwards a checkout to its deploy ref
   (`ATHENAEUM_DEPLOY_REF`, default `main`) and then runs the stamp writer.
-  `scripts/deploy-sync.sh --check` reports `in-sync` / `drift` without
-  mutating anything (exit `0` / `10`).
+
+  `scripts/deploy-sync.sh --check` fetches `origin/<ref>` and reports two
+  orthogonal axes on one line, never collapsed into a single word (athenaeum#1445 —
+  before this, `--check` only ever compared HEAD to the *stamp*, so a deploy
+  frozen at any commit reported `in-sync` indefinitely, no matter how far
+  behind it fell):
+  - `sync=` — is the **checkout** current with `origin/<ref>`? One of
+    `in-sync` / `behind <N>` / `ahead <N>` / `diverged` (no common ancestor —
+    what a history rewrite produces) / `unknown` (no local `origin/<ref>` to
+    compare against, only reachable with `--no-fetch`).
+  - `stamp=` — is the **install** current with the checkout? One of
+    `current` / `stale` / `missing`. This is the original, pre-athenaeum#1445
+    comparison, retained unchanged as a second condition rather than the only
+    one.
+
+  `--no-fetch` skips the network fetch (the offline mode this script's own
+  tests use) and compares against whatever `origin/<ref>` remote-tracking ref
+  already exists locally, which may be stale. Every `--no-fetch` sync reading
+  is prefixed `no-fetch:` (e.g. `no-fetch:in-sync`) so it can never be mistaken
+  for a live confirmation.
+
+  Exit code distinguishes fetch failure from each drift state, not only the
+  text: `0` in-sync + stamp current (fully healthy) · `10` in-sync but stamp
+  stale/missing · `11` behind · `12` diverged · `13` ahead · `14` unknown
+  (`--no-fetch`, nothing cached) · `20` not a git checkout · `30` could not
+  fetch `origin/<ref>` (remote unreachable — never a green word).
+
+  On the mutating path, a diverged deploy ref (no common ancestor — the same
+  history-rewrite case) is detected with `git merge-base --is-ancestor` before
+  the fast-forward is attempted, and refused with the reset/re-clone remedy
+  named explicitly, instead of surfacing git's own "refusing to merge
+  unrelated histories".
 
   ```bash
-  scripts/deploy-sync.sh          # sync to the deploy ref, rewrite the stamp
-  scripts/deploy-sync.sh --check  # report drift only, mutate nothing
+  scripts/deploy-sync.sh                      # sync to the deploy ref, rewrite the stamp
+  scripts/deploy-sync.sh --check              # report sync + stamp state, mutate nothing
+  scripts/deploy-sync.sh --check --no-fetch   # same, without the network fetch (tests only)
   ```
 
 Both share the same `write_build_sha.py` stamp writer and produce the same
-stamped, reinstalled checkout; they differ only in how they move the worktree —
+stamped, reinstalled checkout; they differ in how they move the worktree —
 `deploy-guard.sh` reconciles to the deploy ref with `git reset --hard` (so a
-rewind is applied, athenaeum#614), while `deploy-sync.sh` fast-forwards. `deploy-guard.sh` is what the automated `hestia redeploy`
+rewind is applied, athenaeum#614), while `deploy-sync.sh` fast-forwards, refusing
+(with a named remedy) rather than reconciling when history has diverged
+(athenaeum#1445). `deploy-guard.sh` is what the automated `hestia redeploy`
 cadence runs against the worktree above, `deploy-sync.sh` is the manual
 single-checkout path.
 
