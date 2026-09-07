@@ -363,13 +363,23 @@ def test_local_deploy_dir_contract(tmp_path: Path) -> None:
     assert str(root / "athenaeum") in r.stdout
 
 
+
+# Resolved once, up front, against the TEST HOST's real PATH -- not looked up
+# again inside a test's deliberately-restricted env. subprocess.run() searches
+# for argv[0] using the PATH of the *env it is given* (verified: passing a
+# restricted env without this resolved raises FileNotFoundError: 'bash'), so a
+# hermetic PATH fixture that owns PATH exactly (athenaeum#1441) would otherwise
+# make bash itself unfindable before the guard script ever runs.
+_BASH = shutil.which("bash") or "/bin/bash"
+
+
 def _source_and_eval(func_call: str, env_extra: dict[str, str]) -> str:
     """Source the guard (entrypoint is source-guarded) and echo one helper's output."""
     env = dict(os.environ)
     env.pop("ATHENAEUM_DEPLOY_EXTRAS", None)
     env.update(env_extra)
     r = subprocess.run(
-        ["bash", "-c", f'. "{GUARD}"; {func_call}'],
+        [_BASH, "-c", f'. "{GUARD}"; {func_call}'],
         capture_output=True,
         text=True,
         env=env,
@@ -385,7 +395,7 @@ def _source_and_eval_rc(func_call: str, env_extra: dict[str, str]) -> tuple[int,
     env.pop("ATHENAEUM_GUARD_PYTHON", None)
     env.update(env_extra)
     r = subprocess.run(
-        ["bash", "-c", f'. "{GUARD}"; {func_call}'],
+        [_BASH, "-c", f'. "{GUARD}"; {func_call}'],
         capture_output=True,
         text=True,
         env=env,
@@ -420,8 +430,71 @@ def _tree_with_floor(tmp_path: Path, spec: str) -> Path:
     return tree
 
 
+# The external (non-bash-builtin) commands deploy-guard.sh actually invokes
+# by bare name on the path a resolver test walks: `dirname` to source
+# lib/local-deploys.sh (unconditional at source time, scripts/deploy-guard.sh
+# line ~116), and `sed`/`tr`/`head` inside _dg_requires_python. Verified
+# empirically (athenaeum#1441): with PATH restricted to a shim dir alone,
+# sourcing prints "dirname: command not found" and _dg_requires_python's
+# floor parse silently fails, which routes _dg_resolve_python into its
+# no-declared-floor fallback -- the WRONG branch for a resolver test, and one
+# that happens to still return a plausible-looking path, so it doesn't fail
+# loudly. Nothing else in the resolver's call graph shells out: `command -v`,
+# `printf`, `[`, arithmetic, and `read` are all bash builtins.
+_HERMETIC_BINS = ("dirname", "sed", "tr", "head")
+
+
+def _hermetic_bin_dir(tmp_path: Path) -> Path:
+    """A fixture-owned dir of symlinks to just the coreutils the guard needs.
+
+    Built once per test's tmp_path and cached there. These binaries carry no
+    interpreter of their own, so admitting them to PATH cannot let a host
+    python outrank the shim -- unlike admitting a whole system directory
+    (e.g. /usr/bin) wholesale, which would re-admit a real python3.
+    """
+    bindir = tmp_path / "bin"
+    if bindir.exists():
+        return bindir
+    bindir.mkdir(exist_ok=True)
+    for name in _HERMETIC_BINS:
+        real = shutil.which(name)
+        assert real, f"test host is missing {name!r}, needed to build a hermetic PATH"
+        (bindir / name).symlink_to(real)
+    return bindir
+
+
 def _shimmed_path(shims: Path) -> str:
-    return f"{shims}:{os.environ.get('PATH', '')}"
+    """PATH that is EXACTLY the shim dir plus the coreutils the guard needs --
+    never the inherited host PATH (athenaeum#1441). Prepending the shim dir to
+    the inherited PATH left a real host interpreter (e.g. Homebrew's
+    /opt/homebrew/opt/python@3.13/bin/python3.13) reachable and able to
+    outrank the shim on a developer machine, even though CI's clean container
+    never has a competing interpreter to expose it. Owning PATH like this is
+    what makes the resolver hermetic BY CONSTRUCTION regardless of what else
+    is installed on the host running the suite.
+    """
+    bindir = _hermetic_bin_dir(shims.parent)
+    return f"{shims}:{bindir}"
+
+
+def _assert_resolved_under_tmp(path_str: str, tmp_path: Path) -> None:
+    """AC4 (athenaeum#1441): the resolver must never hand back a host
+    interpreter. Assert the returned path is under THIS test's own tmp_path so
+    a future PATH leak fails as an explicit wrong-prefix error instead of an
+    opaque string-equality mismatch.
+    """
+    resolved = Path(path_str).resolve()
+    root = tmp_path.resolve()
+    assert resolved.is_relative_to(root), (
+        f"resolved interpreter {path_str!r} is not under this test's own tmp "
+        f"dir {tmp_path} -- PATH leaked a host interpreter"
+    )
+
+
+def _cmd_interpreter(cmd: str) -> str:
+    """Pull the interpreter path out of a `"<path>" -m venv ...` install cmd."""
+    assert cmd.startswith('"'), cmd
+    return cmd[1 : cmd.index('"', 1)]
 
 
 def test_default_install_cmd_uses_athenaeum_extras(tmp_path: Path) -> None:
@@ -436,6 +509,7 @@ def test_default_install_cmd_uses_athenaeum_extras(tmp_path: Path) -> None:
         f'"{shims}/python3" -m venv .venv && '
         '.venv/bin/python -m pip install -q -e ".[mcp,vector]"'
     )
+    _assert_resolved_under_tmp(_cmd_interpreter(out), tmp_path)
 
 
 def test_deploy_extras_override_flows_into_install(tmp_path: Path) -> None:
@@ -449,6 +523,7 @@ def test_deploy_extras_override_flows_into_install(tmp_path: Path) -> None:
         f'"{shims}/python3" -m venv .venv && '
         '.venv/bin/python -m pip install -q -e ".[mcp]"'
     )
+    _assert_resolved_under_tmp(_cmd_interpreter(out), tmp_path)
 
 
 def test_default_reconcile_cmd_is_hard_reset_to_origin_ref() -> None:
@@ -739,9 +814,11 @@ def test_resolver_rejects_too_old_bare_python3(tmp_path: Path) -> None:
     shims = _shim_dir(tmp_path, {"python3": "3.11", "python3.13": "3.13"})
     out = _source_and_eval(f"_dg_resolve_python {tree}", {"PATH": _shimmed_path(shims)})
     assert out == f"{shims}/python3.13"
+    _assert_resolved_under_tmp(out, tmp_path)
 
     cmd = _source_and_eval(f"_dg_default_install_cmd {tree}", {"PATH": _shimmed_path(shims)})
     assert cmd.startswith(f'"{shims}/python3.13" -m venv')
+    _assert_resolved_under_tmp(_cmd_interpreter(cmd), tmp_path)
 
 
 def test_resolver_prefers_bare_python3_when_it_already_satisfies(tmp_path: Path) -> None:
@@ -751,6 +828,7 @@ def test_resolver_prefers_bare_python3_when_it_already_satisfies(tmp_path: Path)
     shims = _shim_dir(tmp_path, {"python3": "3.13", "python3.14": "3.14"})
     out = _source_and_eval(f"_dg_resolve_python {tree}", {"PATH": _shimmed_path(shims)})
     assert out == f"{shims}/python3"
+    _assert_resolved_under_tmp(out, tmp_path)
 
 
 def test_resolver_accepts_a_newer_minor_than_the_floor(tmp_path: Path) -> None:
@@ -762,6 +840,7 @@ def test_resolver_accepts_a_newer_minor_than_the_floor(tmp_path: Path) -> None:
     shims = _shim_dir(tmp_path, {"python3": "3.11", "python3.95": "3.95"})
     out = _source_and_eval(f"_dg_resolve_python {tree}", {"PATH": _shimmed_path(shims)})
     assert out == f"{shims}/python3.95"
+    _assert_resolved_under_tmp(out, tmp_path)
 
 
 def test_resolver_fails_when_nothing_satisfies(tmp_path: Path) -> None:
@@ -782,6 +861,7 @@ def test_guard_python_override_is_used_when_it_satisfies(tmp_path: Path) -> None
         {"PATH": _shimmed_path(shims), "ATHENAEUM_GUARD_PYTHON": "python3.13"},
     )
     assert out == f"{shims}/python3.13"
+    _assert_resolved_under_tmp(out, tmp_path)
 
 
 def test_guard_python_override_that_does_not_satisfy_is_refused(tmp_path: Path) -> None:
