@@ -71,6 +71,36 @@ _SECTION_MARKER_PREFIX = "## ["
 _SLUG_STRIP_RE = re.compile(r"[^\w\- ]", re.UNICODE)
 
 
+class ReleaseNotesTooSmallError(ValueError):
+    """``max_chars`` cannot even hold a link-bearing message without cutting
+    the URL inside it mid-string.
+
+    This can happen on two paths: the no-section fallback ("See
+    CHANGELOG.md for details."), and the over-cap truncation notice. Both
+    carry a link that is the whole point of the message -- a link cut short
+    is not a degraded-but-useful release note, it is a broken one. Rather
+    than silently slicing either string to fit (which is exactly how a
+    truncated/malformed URL would reach a real release), this is raised
+    instead, naming the minimum ``max_chars`` that would have worked. A hard
+    error naming the fix is more honest than a release body with a dead
+    link (issue athenaeum#1442, Seer review finding 2).
+    """
+
+
+def _truncation_notice(*, original_len: int, max_chars: int, full_link: str) -> str:
+    """The visible truncation marker + full-section link.
+
+    Self-contained (no leading blank line baked in) so it can be measured
+    and emitted on its own when there is no room left for any body at all;
+    callers that keep part of the body prepend their own separator.
+    """
+    return (
+        f"… truncated ({original_len:,} characters exceeds this "
+        f"release's {max_chars:,}-character notes limit) — "
+        f"full notes: {full_link}\n"
+    )
+
+
 def github_anchor(header_line: str) -> str:
     """Approximate a GitHub Flavored Markdown heading anchor slug.
 
@@ -151,18 +181,30 @@ def build_release_notes(
       (a tag ref, so it keeps resolving even after CHANGELOG.md changes on
       the default branch).
 
-    The return value is always at most ``max_chars`` characters.
+    The return value is always at most ``max_chars`` characters, on every
+    return path -- including the no-section fallback. Raises
+    :class:`ReleaseNotesTooSmallError` instead of returning anything at all
+    when ``max_chars`` is too small to hold a link-bearing message without
+    cutting its URL mid-string; see that class's docstring for why.
     """
     changelog_link = f"https://github.com/{repo}/blob/{tag}/CHANGELOG.md"
     section = extract_section(changelog_text, version)
 
     if section is None:
+        fallback = f"See [CHANGELOG.md]({changelog_link}) for details.\n"
+        if len(fallback) > max_chars:
+            raise ReleaseNotesTooSmallError(
+                f"--max-chars={max_chars} is too small to hold the no-section "
+                f"fallback link ({len(fallback)} characters) without cutting "
+                f"off its CHANGELOG link mid-URL. Raise --max-chars to at "
+                f"least {len(fallback)}."
+            )
         print(
             f"::warning::No CHANGELOG.md section found for [{version}]; "
             "falling back to a CHANGELOG link",
             file=sys.stderr,
         )
-        return f"See [CHANGELOG.md]({changelog_link}) for details.\n"
+        return fallback
 
     header, body = section
     full = (f"{header}\n{body}" if body else header).strip("\n") + "\n"
@@ -172,26 +214,33 @@ def build_release_notes(
 
     anchor = github_anchor(header)
     full_link = f"{changelog_link}#{anchor}"
-    notice = (
-        f"\n\n… truncated ({len(full):,} characters exceeds this "
-        f"release's {max_chars:,}-character notes limit) — "
-        f"full notes: {full_link}\n"
-    )
+    notice = _truncation_notice(original_len=len(full), max_chars=max_chars, full_link=full_link)
+    separator = "\n\n"
+    if len(notice) > max_chars:
+        # max_chars can't even hold the notice alone -- there is no
+        # partial-notice output that doesn't mean a cut-off link. Raising
+        # here is the whole point of finding 2: a hard error naming the
+        # minimum viable --max-chars beats a release body with a broken
+        # CHANGELOG link that nobody would notice until a human clicked it.
+        raise ReleaseNotesTooSmallError(
+            f"--max-chars={max_chars} is too small to hold the truncation "
+            f"notice alone ({len(notice)} characters) without cutting off "
+            f"its CHANGELOG link mid-URL. Raise --max-chars to at least "
+            f"{len(notice)}."
+        )
     print(
         f"::warning::Release notes for {tag} truncated: {len(full):,} chars "
         f"exceeds the {max_chars:,}-char limit; full notes linked at {full_link}",
         file=sys.stderr,
     )
-    budget = max_chars - len(notice)
+    budget = max_chars - len(notice) - len(separator)
     if budget <= 0:
-        # Pathological: max_chars smaller than the notice itself. Emit only
-        # the notice (it still carries a working link) rather than raising.
-        return notice.lstrip("\n")[:max_chars]
+        # Not enough room for the separator plus any body, but the notice
+        # alone fits -- emit just the notice. No leading blank lines are
+        # needed because there is no body text above it in this case.
+        return notice
     truncated_body = _truncate_on_boundary(full, budget)
-    result = truncated_body.rstrip("\n") + notice
-    # Belt-and-suspenders: never return more than max_chars, even if the
-    # boundary search above landed unexpectedly.
-    return result[:max_chars]
+    return truncated_body.rstrip("\n") + separator + notice
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -214,13 +263,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     changelog_text = args.changelog.read_text(encoding="utf-8")
-    notes = build_release_notes(
-        changelog_text=changelog_text,
-        version=args.version,
-        repo=args.repo,
-        tag=args.tag,
-        max_chars=args.max_chars,
-    )
+    try:
+        notes = build_release_notes(
+            changelog_text=changelog_text,
+            version=args.version,
+            repo=args.repo,
+            tag=args.tag,
+            max_chars=args.max_chars,
+        )
+    except ReleaseNotesTooSmallError as exc:
+        print(f"::error::{exc}", file=sys.stderr)
+        return 2
     args.output.write_text(notes, encoding="utf-8")
     print(f"extract_release_notes: wrote {len(notes)} chars to {args.output}")
     return 0

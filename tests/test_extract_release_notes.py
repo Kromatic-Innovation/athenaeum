@@ -134,7 +134,11 @@ def test_over_cap_is_truncated_with_link() -> None:
 def test_truncated_output_never_exceeds_max_chars() -> None:
     mod = _load_module()
     changelog = _changelog(300_000)
-    for max_chars in (1000, 5000, 60_000, 100):
+    # All of these are comfortably large enough to hold the truncation
+    # notice itself -- the too-small-to-hold-the-notice case is its own
+    # dedicated test below (test_max_chars_smaller_than_notice_raises),
+    # since that path now raises rather than returning a string at all.
+    for max_chars in (1000, 5000, 60_000):
         notes = mod.build_release_notes(
             changelog_text=changelog, version="0.20.0", repo=REPO, tag=TAG, max_chars=max_chars
         )
@@ -199,6 +203,113 @@ def test_missing_section_falls_back_to_link() -> None:
     )
     expected_link = f"https://github.com/{REPO}/blob/v9.9.9/CHANGELOG.md"
     assert notes == f"See [CHANGELOG.md]({expected_link}) for details.\n"
+
+
+# --------------------------------------------------------------------------- #
+# Seer review findings on this PR:
+#   1. the no-section fallback bypassed the length check
+#   2. a max_chars smaller than the truncation notice truncated the notice
+#      itself -- a broken URL in a real release body
+# --------------------------------------------------------------------------- #
+
+
+def test_missing_section_fallback_raises_when_max_chars_too_small() -> None:
+    """Finding 1: every return path must honour max_chars, not just most of
+    them. The no-section fallback is normally short (well under any sane
+    cap) but was returned unchecked -- this pins that a pathologically
+    small max_chars now raises instead of silently exceeding its own
+    documented contract.
+    """
+    mod = _load_module()
+    changelog = _changelog(20)
+    expected_link = f"https://github.com/{REPO}/blob/v9.9.9/CHANGELOG.md"
+    fallback = f"See [CHANGELOG.md]({expected_link}) for details.\n"
+
+    # One char too few to hold the fallback -- must raise, not truncate.
+    with pytest.raises(mod.ReleaseNotesTooSmallError):
+        mod.build_release_notes(
+            changelog_text=changelog,
+            version="9.9.9",
+            repo=REPO,
+            tag="v9.9.9",
+            max_chars=len(fallback) - 1,
+        )
+
+    # Exactly enough room: still succeeds and returns the fallback intact.
+    notes = mod.build_release_notes(
+        changelog_text=changelog,
+        version="9.9.9",
+        repo=REPO,
+        tag="v9.9.9",
+        max_chars=len(fallback),
+    )
+    assert notes == fallback
+
+
+def test_max_chars_smaller_than_notice_raises_not_truncates() -> None:
+    """Finding 2: max_chars smaller than the truncation notice must raise a
+    clear error naming the minimum viable --max-chars, not emit a
+    cut-off notice with a broken URL. This asserts the chosen behaviour
+    (hard error), not merely that the call doesn't crash some other way --
+    and it asserts the link is never fragmented, which is the actual
+    defect Seer flagged.
+    """
+    mod = _load_module()
+    changelog = _changelog(5000)
+
+    with pytest.raises(mod.ReleaseNotesTooSmallError) as exc_info:
+        mod.build_release_notes(
+            changelog_text=changelog, version="0.20.0", repo=REPO, tag=TAG, max_chars=50
+        )
+    # The error names the minimum --max-chars that would work, so an
+    # operator (or release.yml) can act on it instead of guessing.
+    assert "--max-chars" in str(exc_info.value)
+    assert "50" in str(exc_info.value)
+
+
+def test_max_chars_exactly_notice_length_returns_notice_link_intact() -> None:
+    """The boundary right at the too-small cutoff: max_chars exactly equal
+    to the notice's own length must succeed and return the notice
+    untouched (full working link), never a partial one.
+    """
+    mod = _load_module()
+    changelog = _changelog(5000)
+    # Rather than hand-recompute the exact notice-length f-string (brittle:
+    # it embeds len(full) and max_chars themselves, which shift the string's
+    # own length as max_chars changes), probe the exact boundary directly by
+    # calling the real function at increasing max_chars until it stops
+    # raising.
+    minimum: int | None = None
+    for candidate in range(1, 400):
+        try:
+            mod.build_release_notes(
+                changelog_text=changelog, version="0.20.0", repo=REPO, tag=TAG, max_chars=candidate
+            )
+        except mod.ReleaseNotesTooSmallError:
+            continue
+        minimum = candidate
+        break
+    assert minimum is not None, "expected some max_chars in range to succeed"
+
+    # One below the boundary: raises.
+    with pytest.raises(mod.ReleaseNotesTooSmallError):
+        mod.build_release_notes(
+            changelog_text=changelog,
+            version="0.20.0",
+            repo=REPO,
+            tag=TAG,
+            max_chars=minimum - 1,
+        )
+
+    # At the boundary: succeeds, returns exactly the notice, and the link
+    # inside it is complete (not cut off anywhere, including at the very
+    # end of the string).
+    notes = mod.build_release_notes(
+        changelog_text=changelog, version="0.20.0", repo=REPO, tag=TAG, max_chars=minimum
+    )
+    assert len(notes) == minimum
+    assert notes.rstrip("\n").endswith("CHANGELOG.md#0200---2026-01-01")
+    assert "truncated" in notes
 
 
 # --------------------------------------------------------------------------- #
