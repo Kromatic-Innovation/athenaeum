@@ -55,6 +55,44 @@ jobs:
           name: dist
           path: dist/
 
+      # athenaeum#1442: this used to be an inline `awk` heredoc in the
+      # `github-release` job below, which runs AFTER `publish` -- so an
+      # oversized body (v0.20.0's CHANGELOG section: 183,969 characters as
+      # measured by this script's own `len()` -- the same string's raw
+      # UTF-8 byte count is slightly higher, ~184.7k, because the prose
+      # has multi-byte characters like em dashes and curly quotes -- both
+      # readings are well over GitHub's 125,000-character release-body cap)
+      # surfaced as a `gh release create` HTTP 422 only after the PyPI
+      # upload had already happened, irreversibly. Doing the extraction +
+      # size guard here, in `build`, means the body is fully decided --
+      # truncated-with-link if it's too big, verbatim otherwise -- before
+      # `publish` ever runs.
+      # Nothing downstream can hit an oversized body, because nothing
+      # oversized is ever produced past this step: `publish` and
+      # `github-release` just carry the already-safe result forward. The
+      # 60,000-character threshold (well under GitHub's 125,000 hard cap)
+      # is chosen and justified in scripts/extract_release_notes.py's
+      # DEFAULT_MAX_CHARS comment; the degrade path (truncate on a line
+      # boundary, append a notice + a link to the full section at this tag)
+      # is exercised by tests/test_extract_release_notes.py, not assumed.
+      - name: Extract + size-guard release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python scripts/extract_release_notes.py \
+            --changelog CHANGELOG.md \
+            --version "$version" \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$GITHUB_REF_NAME" \
+            --output release-notes.md \
+            --max-chars 60000
+          wc -c release-notes.md
+
+      - name: Upload release notes artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: release-notes
+          path: release-notes.md
+
   publish:
     name: Publish to PyPI
     needs: build
@@ -97,20 +135,15 @@ jobs:
     permissions:
       contents: write          # create the release for the pushed tag
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      - name: Extract CHANGELOG section for this tag
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          awk -v ver="$version" '
-            index($0, "## [" ver "]") == 1 { found = 1; next }
-            found && index($0, "## [") == 1 { exit }
-            found { print }
-          ' CHANGELOG.md > release-notes.md
-          if [ ! -s release-notes.md ]; then
-            echo "::warning::No CHANGELOG.md section found for [$version]; falling back to a CHANGELOG link"
-            echo "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md) for details." > release-notes.md
-          fi
+      # athenaeum#1442: release-notes.md is now produced (and size-guarded)
+      # by the `build` job's "Extract + size-guard release notes" step,
+      # before `publish` ran -- this job only downloads the already-safe
+      # result. No checkout needed here: this job doesn't touch CHANGELOG.md
+      # or any other repo file directly anymore.
+      - name: Download release notes artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: release-notes
 
       # Idempotent: the next release may be cut manually with
       # `gh release create` before this job runs — if a release already
