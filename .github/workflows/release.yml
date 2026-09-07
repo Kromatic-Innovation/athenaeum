@@ -57,12 +57,16 @@ jobs:
 
       # athenaeum#1442: this used to be an inline `awk` heredoc in the
       # `github-release` job below, which runs AFTER `publish` -- so an
-      # oversized body (v0.20.0's CHANGELOG section: 184,739 characters
-      # against GitHub's 125,000-character release-body cap) surfaced as a
-      # `gh release create` HTTP 422 only after the PyPI upload had already
-      # happened, irreversibly. Doing the extraction + size guard here, in
-      # `build`, means the body is fully decided -- truncated-with-link if
-      # it's too big, verbatim otherwise -- before `publish` ever runs.
+      # oversized body (v0.20.0's CHANGELOG section: 183,969 characters as
+      # measured by this script's own `len()` -- the same string's raw
+      # UTF-8 byte count is slightly higher, ~184.7k, because the prose
+      # has multi-byte characters like em dashes and curly quotes -- both
+      # readings are well over GitHub's 125,000-character release-body cap)
+      # surfaced as a `gh release create` HTTP 422 only after the PyPI
+      # upload had already happened, irreversibly. Doing the extraction +
+      # size guard here, in `build`, means the body is fully decided --
+      # truncated-with-link if it's too big, verbatim otherwise -- before
+      # `publish` ever runs.
       # Nothing downstream can hit an oversized body, because nothing
       # oversized is ever produced past this step: `publish` and
       # `github-release` just carry the already-safe result forward. The
