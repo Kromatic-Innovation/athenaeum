@@ -232,6 +232,19 @@ _dg_python_candidates() {
 # Echo an absolute path to an interpreter satisfying <dir>'s requires-python.
 # Non-zero (and silent) when none is available, so the caller can abort LOUDLY
 # with a recovery hint instead of handing pip an interpreter it will reject.
+#
+# $PATH is the ONLY external input this resolver (and _dg_requires_python's
+# floor parse) consults -- everything routes through `command -v` (a bash
+# builtin, itself PATH-only) or an interpreter path already in hand. There is
+# no hardcoded Homebrew/pyenv/`/usr/local` prefix to special-case. That makes
+# a test fixture's job exactly this: own $PATH completely (not prepend a shim
+# dir to the inherited one) and it fully controls what this function can see,
+# on any host. A hermetic test PATH does still need `dirname` (sourcing this
+# file pulls in lib/local-deploys.sh unconditionally) and `sed`/`tr`/`head`
+# (used inside _dg_requires_python) alongside the shim dir -- none of those
+# are bash builtins, and none of them carry an interpreter of their own that
+# could compete with the shim (verified in tests/test_deploy_guard.py,
+# athenaeum#1441).
 _dg_resolve_python() {
   local dir="${1:-.}" floor cand path
   floor="$(_dg_requires_python "$dir")" || floor=""
