@@ -70,6 +70,52 @@ turn), see [Passive recall via hooks](sidecar.md); for bridging Claude
 Code's own auto-memory files into Athenaeum's intake, see
 [Claude Code auto-memory integration](claude-code.md).
 
+## I want my agent's memories to carry provenance and skip a classifier call
+
+Claude Code's native memory writer emits four frontmatter keys by default
+(`name`, `description`, `metadata.type`, `modified`), none of which carries
+provenance. Those four are a **prompt convention, not an enforced schema** —
+memory files are authored with the ordinary `Write` tool, so a `CLAUDE.md`
+can instruct the writer to stamp more, and the extra keys reach intake
+verbatim.
+
+Add this to your user-level `~/.claude/CLAUDE.md` (loaded every session, so
+it covers every project at once):
+
+```markdown
+When writing an auto-memory file, include these keys in the frontmatter:
+
+  originSessionId: <the session UUID — basename of the current
+                    ~/.claude/projects/<scope>/*.jsonl transcript>
+  claim_kind: fact | observation | opinion | decision | policy | definition
+
+Do not hand-author `sources[]` — Athenaeum resolves provenance itself.
+Do not stamp `access`, `tags` or `observed_at` — the auto-memory path does
+not read them.
+```
+
+What it buys:
+
+- **`claim_kind` saves one LLM call per new memory.** The nightly run
+  otherwise classifies each unclassified file in a cheap Haiku call; a valid
+  author-supplied value is never overwritten and skips the call entirely.
+- **`originSessionId` beats origin-session recovery.** Intake gates recovery
+  on `origin_session_id is None and not sources`, so a declared session wins
+  — and unlike recovery it never depends on file mtimes surviving your sync
+  method. Saves I/O, not tokens.
+Keep the convention to keys this path actually reads. `observed_at`, `access`,
+`tags` and `aliases` belong to Athenaeum's *entity* intake path, not this one —
+stamping them on a memory is a no-op the compile discards.
+
+This is an **optimization over** origin-session recovery, never a replacement:
+compliance is best-effort per session, and whether the extra keys survive a
+Claude Code rewrite is unestablished. Recovery stays the backstop for every
+file the convention missed.
+
+Full field reference — every key intake reads, with vocabularies, defaults,
+and which ones your deployment defines rather than core code — is in
+[Claude Code auto-memory integration](claude-code.md) §3.
+
 ## I want a secondary agent that can't reach my private pages
 
 Pin a restricted audience at serve time — the caller can never widen it:

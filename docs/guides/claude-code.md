@@ -125,14 +125,36 @@ produced each fact, add YAML frontmatter with `sources[]` entries to your
 auto-memory files. The librarian's merge pass propagates these citations
 verbatim into the consolidated wiki entry.
 
-> **This frontmatter path applies to adapter-written and hand-written intake
-> only.** Claude Code's **native** auto-memory writer emits a fixed schema —
-> `name`, `description`, `metadata.type`, and (2.1.214+) `modified`. It has no
-> `sources` field, no `originSessionId`, and no extension point for either, so
-> a natively-written memory *cannot* opt into the table below however the
-> policy is configured. The stop-hook validator in Section 4 will warn on
-> every such file forever; nudging cannot fill a field the writer's schema
-> does not have.
+> **Claude Code's native writer emits four keys by default** — `name`,
+> `description`, `metadata.type`, and (2.1.214+) `modified` — and nothing in
+> that set carries provenance. Left alone, a natively-written memory therefore
+> reaches the librarian with neither `sources[]` nor `originSessionId`, which
+> is the gap origin-session recovery exists to close.
+>
+> **Those four keys are a prompt convention, not a writer-enforced schema.**
+> Memory files are authored with the ordinary `Write` tool rather than
+> serialized through a fixed struct, so additional frontmatter keys can be
+> written and they persist verbatim into `raw/auto-memory/`. A project or user
+> `CLAUDE.md` can therefore instruct the writer to stamp `originSessionId`
+> (and the other fields in the table below), and a natively-written memory
+> *can* opt into this path. Verified end-to-end: a memory written with
+> `originSessionId`, `claim_kind` and `sources[]` was claimed by discovery,
+> compiled, and retired into a wiki entry carrying a populated `sources[]`
+> where the native default would have left it empty.
+>
+> Prefer this to recovery where you can get it — `intake` gates recovery on
+> `origin_session_id is None and not sources`, so a declared session id wins,
+> and unlike recovery it never depends on file mtimes surviving the operator's
+> sync method. But treat it as an *optimization over* recovery, never a
+> replacement: compliance is best-effort per session, and whether the extra
+> keys survive a Claude Code rewrite is not established — it stamps a
+> `modified` timestamp (2.1.214+), which implies it does touch frontmatter on
+> files that have it. Recovery remains the backstop for every file the
+> convention missed.
+>
+> Stamp only keys this path actually reads (see the field reference below).
+> Extra keys are harmless but inert — they persist in `raw/` and are discarded
+> at compile.
 >
 > Provenance for natively-written memories comes from **origin-session
 > recovery at intake** instead, which needs nothing from the memory file. Athenaeum resolves the session that wrote it from the
@@ -157,6 +179,74 @@ Required/recommended fields:
 | `originSessionId` | yes (strict) | Claude Code session UUID that produced this memory                      |
 | `originTurn`      | yes (strict) | Turn index within that session                                          |
 | `sources[]`       | append-only | List of source maps with `session`, `turn`, optional `excerpt`          |
+
+### Full field reference
+
+Every frontmatter key read off an auto-memory file by
+`intake.discover_auto_memory_files` — the keys that reach an `AutoMemoryFile`
+and act somewhere in the compile, whether during clustering, merge, resolution,
+or on the rendered page. (Most do their work upstream and never appear in the
+compiled entry's own frontmatter.) All are optional unless the table above
+marks them required, and **all fail open**: an unrecognized value is logged at
+debug and discarded, the compile continues, so a guessed value is worse than an
+omitted key.
+
+> **This is the auto-memory path only.** Athenaeum has a second, separate
+> intake path for entity-schema pages (`tier0_handle_upsert` → `WikiEntity`),
+> which reads a different key set with different defaults — including `access`,
+> `tags` and `aliases`, whose vocabularies each operator defines in their own
+> `wiki/_schema/`. **None of those three is read off an auto-memory file**, so
+> stamping them on a memory does nothing. Don't carry a key across from one
+> table to the other, and read your own store's vocabularies via the
+> `entity_schema` MCP tool rather than copying another deployment's.
+
+The vocabularies below are core-code constants, identical in every deployment.
+
+| Field | Vocabulary / shape | Absent or invalid |
+|---|---|---|
+| `metadata.type` | `feedback` \| `project` \| `reference` \| `user` \| `recall`. **Only a fallback**: the primary claim path is the filename (`<type>_<slug>.md`, `AUTO_MEMORY_FILE_RE`), and frontmatter is consulted only when the filename misses — which is the normal case for Claude Code, whose writer names files `<kebab-slug>.md`. A top-level `memory_type` is read as a further fallback, and a scalar `metadata: feedback` is tolerated. | With neither a conforming filename nor a recognized declared type, the file is **silently skipped** — not routed anywhere else. It becomes invisible to every discovery path. This is the one field whose absence loses the memory outright. |
+| `originSessionId` | Claude Code session UUID — the basename of the scope's `~/.claude/projects/<scope>/<uuid>.jsonl` transcript. | Origin-session recovery runs instead, resolving from the scope's transcripts and the file's mtime. |
+| `originTurn` | Integer turn index within that session. | Omitted from the synthesized source ref; the session alone still resolves. |
+| `sources[]` | List of maps: `session`, optional `turn`, optional `excerpt`, plus `source_type` / `source_ref`. Deduped on `(session, turn)`. | Falls back to a synthetic source built from `originSessionId`, then to recovery. Empty at every stage ⇒ `sources: []` on the compiled page. |
+| `source_type` | `user-stated` \| `agent-observed` \| `external` \| `document` \| `inferred` \| `model-prior`. `agent-observed`, `inferred` and `model-prior` are the AI-attributed channels and should carry `model:`. | Defaults to `inferred` — the honest fallback for an origin that cannot be established. Never silently promoted to `user-stated`. |
+| `source_ref` | Free-form ref: a URL, an issue ref, or a `<session>#turn<N>`. Never the raw `auto-memory/...` filename — that shape is rejected. | Back-filled from session + turn. |
+| `claim_kind` | `fact` \| `observation` \| `opinion` \| `decision` \| `policy` \| `definition`. Drives the resolver's stance short-circuit; `opinion` routes a conflicting pair to `attribute_both` rather than picking a winner. **An author-supplied value is never overwritten and skips the classifier's LLM call entirely** (`librarian._stamp_unclassified_claim_kinds`). | The nightly run classifies it in one cheap LLM call and stamps it once. On failure, `""` (unclassified) — the resolver's LLM path decides as before. An out-of-vocabulary value logs a debug breadcrumb and is discarded. |
+| `valid_from` / `valid_until` | ISO dates bounding the claim's validity. Travel with the claim into each compiled source record, so validity is per-claim rather than per-page. | Unbounded. |
+| `model` | The model that produced the claim. Expected on the AI-attributed `source_type` channels; validation is fail-open, so it is not enforced. | `""`. |
+| `on_behalf_of` | Who the claim was made for. | `""`. |
+| `asserter` | Structured asserter annotation. | `{}`. |
+| `bucket` | `daily` \| `weekly` \| `durable` — the decay bucket, set at intake and carried onto the compiled page (first non-empty active member wins). | `""`, discarded fail-open like the rest. (An invalid bucket *is* rejected outright — but only on the `remember()` MCP write and correction records, which is a different path from the memory files this section is about.) |
+| `supersedes` / `superseded_by` / `refines` | Ref to another memory or entity. | Unset; no supersession edge is drawn. |
+| `deprecated` | Truthy marker. | Not deprecated. |
+| `ephemeral` | `true` \| `1` \| `yes` \| `on`. **Drops the file from intake entirely**, before clustering — the documented way to write a memory you do not want ingested. | Not ephemeral. Note the file can still be dropped without this flag: two or more configured operational markers co-occurring in `name`/`description`/body classify it as ephemeral too (that path is deployment-configured). |
+| `modified` | ISO timestamp. Claude Code's native writer stamps it automatically (2.1.214+); read as the write-time signal feeding origin-session recovery. | Recovery falls back to the file's mtime. |
+
+**Read on the entity path only, *not* here:** `observed_at`, `access`, `tags`,
+`aliases`, `created`, `updated`. Stamping any of them on an auto-memory file is
+a no-op the compile discards.
+
+A `CLAUDE.md` convention that stamps `originSessionId` and `claim_kind`
+captures most of the available value in two lines. What each one buys:
+
+- `claim_kind` — **saves one LLM call per memory, once ever.** The nightly run
+  otherwise classifies each unclassified file in a cheap Haiku call and stamps
+  the result back into the file; a valid author-supplied value is skipped
+  outright, and the run-loop wrapper short-circuits before even re-reading the
+  frontmatter.
+- `originSessionId` — saves transcript-scanning I/O, not tokens
+  (`session_recovery` makes no LLM call), and beats recovery on accuracy
+  wherever mtimes stop reflecting write time.
+
+Add `originTurn` too if the writer can determine it reliably — the Section 4
+validator checks for it alongside `originSessionId`, and it sharpens the
+synthesized `<session>#turn<N>` ref. A *wrong* turn index is worse than an
+absent one, though, so omit it rather than guess (and trim the template's check
+if your writer cannot supply it).
+
+Hand-authoring `sources[]` is **not** recommended: choosing `source_type`
+correctly means checking the claim against the transcript, which is
+`transcript_verify.verify_user_stated`'s job, and a confidently-wrong
+`external` is worse than a recovered `inferred`.
 
 Example file (see also
 [`examples/claude-code/auto-memory-frontmatter.example.md`](../../examples/claude-code/auto-memory-frontmatter.example.md)):

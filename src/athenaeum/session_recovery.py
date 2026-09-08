@@ -1,12 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """Recover the originating session of a natively-written memory (issue athenaeum#1452).
 
-Claude Code's *native* auto-memory writer emits a fixed frontmatter schema
-(``name`` / ``description`` / ``metadata.type``). It carries no ``sources[]``
-and no ``originSessionId``, so BOTH provenance paths into the librarian are
-dead by construction for the memories it writes: ``merge._am_as_implicit_source``
-returns ``None`` the moment ``origin_session_id`` is absent, and the compiled
-wiki page lands with ``sources: []``.
+Claude Code's *native* auto-memory writer emits four frontmatter keys by
+default (``name`` / ``description`` / ``metadata.type`` / ``modified``). None
+of them carries provenance, so a memory left at that default reaches the
+librarian with no ``sources[]`` and no ``originSessionId``, and BOTH provenance
+paths are dead for it: ``merge._am_as_implicit_source`` returns ``None`` the
+moment ``origin_session_id`` is absent, and the compiled wiki page lands with
+``sources: []``.
+
+That default is a prompt convention, not an enforced schema — a ``CLAUDE.md``
+can instruct the writer to stamp ``originSessionId`` directly, and
+:func:`~athenaeum.intake.discover_auto_memory_files` honors a declared session
+verbatim (recovery is gated on ``origin_session_id is None and not sources``).
+Recovery is the backstop for every file that convention did not reach, which
+is most of them: compliance is best-effort per session. See
+``docs/guides/claude-code.md`` §3.
 
 This module closes that gap at INTAKE, not by scraping the memory body. It
 recovers the session id the writer never wrote, from the two structural facts
