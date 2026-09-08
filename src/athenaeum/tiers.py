@@ -1772,22 +1772,40 @@ def gate_create_name_classifications(
 #: corpus-affecting regression, not a conservative choice.
 TEMPLATE_BOARD_GATE_SOURCE = "mural-board-summary"
 
-# Default template-token pattern (issue athenaeum#1464). Measured over the
-# 2,244 `mural-board-summary` source boards in the corpus index: ~150-159
-# titles (roughly 7%) carry one of these tokens, and in every confirmed case
-# it appears as a LEADING token -- "TEMPLATE - Retro Exercise", "Copy of
-# Sprint Planning" -- never mid-title. Anchored at the start of the string
-# (`^`) rather than an unanchored substring search: a legitimate board whose
-# title merely CONTAINS one of these words away from the front (e.g. a real
-# exercise titled "Postmortem Template Feedback Round") must not
-# false-positive, and a substring search would catch it. Case is matched as
-# authored -- `TEMPLATE` and `Template` are both listed explicitly (both
-# casings are independently attested in the corpus) rather than compiling
-# with `re.IGNORECASE`, so this stays a match on the specific tokens the
-# issue measured rather than a blanket case-fold that could also catch an
-# ordinary title that happens to start with the common word "template" as
-# its own subject.
-DEFAULT_TEMPLATE_BOARD_TITLE_PATTERN = r"^(TEMPLATE|Template|EXAMPLE|Copy of)\b"
+# Default template-token pattern (issue athenaeum#1464).
+#
+# **Measured twice, and the second measurement overrode the first.** An
+# earlier draft of this default anchored the token to the START of the
+# title (`^(TEMPLATE|Template|EXAMPLE|Copy of)\b`), reasoning that the
+# issue's own examples were all leading tokens ("TEMPLATE - Retro
+# Exercise"). Measured directly against the 2,244 titled boards in the live
+# `/knowledge/raw/mural/*.json` archive (2026-09-08): the anchored form
+# matches only 94 of them -- 63% of the issue's own stated ~150-159 cohort.
+# The other 56 carry the same token in a NON-leading position and are
+# unambiguously the same target cohort, not noise: `Coaching - TEMPLATE`,
+# `Get to Know Your Customers TEMPLATE`, `Hilti - Coaching Template`,
+# `2021-07 Team Coaching Template`, `CBUSA COACHING SESSION TEMPLATE - Q3
+# 2020`, `(draft) TEMPLATE - Innovation Culture and Group Behavior`. 94 +
+# 56 = 150, exactly the issue's measured denominator -- the issue's own
+# scope table was measured unanchored, and the anchored default was
+# quietly delivering less coverage than the issue documented.
+#
+# Widened to an unanchored, case-insensitive token match. This is a
+# DELIBERATE coverage-over-precision trade-off, not an oversight of the
+# false-positive risk anchoring was protecting against: the corpus contains
+# real per-person filled-in copies shaped like `<person> - Storyboarding
+# Template` (e.g. `Krsto A - Storyboarding Template`, `Namrata M -
+# Storyboarding Template`) whose board genuinely carries that person's own
+# work, not template instructions, and this pattern DOES match them. That
+# is an acceptable cost specifically because this gate ESCALATES rather
+# than discards (AC1): a false positive here costs one human triage item in
+# `_pending_questions.md` with the record's content attached (recoverable),
+# while a false negative silently mints exactly the near-duplicate junk
+# page this issue exists to prevent (the harder-to-detect failure). A human
+# who disagrees with this trade-off for their own corpus can retune
+# `librarian.template_board_title_pattern` (see the resolver below) without
+# a code change.
+DEFAULT_TEMPLATE_BOARD_TITLE_PATTERN = r"(?i)\b(?:template|example)\b|\bcopy of\b"
 
 
 def resolve_template_board_title_pattern(config: dict[str, Any] | None = None) -> re.Pattern[str]:
@@ -1923,7 +1941,17 @@ def gate_template_board_classifications(
         return TemplateBoardGateOutcome(kept=list(classified), escalations=())
 
     pattern = resolve_template_board_title_pattern(config)
-    if not pattern.match(title):
+    # Deliberately `.search()`, not `.match()` (issue athenaeum#1464 follow-up,
+    # 2026-09-08): the documented default is unanchored -- see
+    # DEFAULT_TEMPLATE_BOARD_TITLE_PATTERN's comment for the coverage
+    # measurement that forced this. `.match()` implicitly anchors at
+    # position 0, which would silently re-impose the leading-token-only
+    # behavior this change removed, even though the pattern text itself no
+    # longer starts with `^`. A configured override is honored exactly as
+    # written either way: `.search()` finds a `^`-anchored override at the
+    # start same as `.match()` would, so this switch costs a config author
+    # nothing.
+    if not pattern.search(title):
         return TemplateBoardGateOutcome(kept=list(classified), escalations=())
 
     kept: list[ClassifiedEntity] = []

@@ -39,6 +39,7 @@ own organization):
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -160,27 +161,73 @@ class TestResolveTemplateBoardTitlePattern:
         pattern = resolve_template_board_title_pattern(None)
         assert pattern.pattern == DEFAULT_TEMPLATE_BOARD_TITLE_PATTERN
 
-    def test_default_pattern_matches_all_four_documented_tokens(self) -> None:
+    def test_default_pattern_matches_leading_tokens_case_insensitively(self) -> None:
         pattern = resolve_template_board_title_pattern(None)
         for title in (
             "TEMPLATE - Retro Exercise",
             "Template - Retro Exercise",
+            "template - retro exercise",
             "EXAMPLE - Retro Exercise",
             "Copy of Retro Exercise",
+            "copy of retro exercise",
         ):
-            assert pattern.match(title), title
+            assert pattern.search(title), title
 
-    def test_default_pattern_is_anchored_not_a_substring_search(self) -> None:
+    def test_default_pattern_is_unanchored_and_catches_suffix_tokens(self) -> None:
+        """Coverage-widening regression lock (issue athenaeum#1464 follow-up,
+        2026-09-08): measured directly against the live 2,244-title board
+        archive, the earlier `^`-anchored default caught only 94 of the
+        issue's own measured ~150-159 template-token cohort -- the other 56
+        carry the token in a NON-leading position. This asserts the
+        unanchored default catches that suffix/mid-title shape, so
+        coverage cannot silently regress back to prefix-only."""
         pattern = resolve_template_board_title_pattern(None)
-        # The token appears, but not as a LEADING token -- must not match.
-        assert not pattern.match("Postmortem Template Feedback Round")
-        assert not pattern.match("Q3 Planning - Acme Team")
+        for title in (
+            "Coaching - TEMPLATE",
+            "Get to Know Your Customers TEMPLATE",
+            "Hilti - Coaching Template",
+            "2021-07 Team Coaching Template",
+            "CBUSA COACHING SESSION TEMPLATE - Q3 2020",
+            "Postmortem Template Feedback Round",
+        ):
+            assert pattern.search(title), title
+
+    def test_default_pattern_still_requires_no_token_at_all(self) -> None:
+        """A title carrying none of the tokens, in any position, must not
+        match -- the widening is unanchored, not unconditional."""
+        pattern = resolve_template_board_title_pattern(None)
+        assert not pattern.search("Q3 Planning - Acme Team")
+
+    def test_new_default_is_a_strict_superset_of_the_old_anchored_pattern(self) -> None:
+        """Reproduces the 2026-09-08 corpus measurement's superset claim
+        without requiring the live corpus mount: every title the OLD,
+        prefix-only default (`^(TEMPLATE|Template|EXAMPLE|Copy of)\\b`)
+        matched must still match the new, widened default -- the coverage
+        change only ADDS matches, it never removes one."""
+        old_anchored = re.compile(r"^(TEMPLATE|Template|EXAMPLE|Copy of)\b")
+        new_default = resolve_template_board_title_pattern(None)
+        leading_token_titles = [
+            "TEMPLATE - Retro Exercise",
+            "Template - Retro Exercise",
+            "EXAMPLE - Retro Exercise",
+            "Copy of Retro Exercise",
+            "TEMPLATE Sprint Planning Board",
+            "Template: Onboarding Checklist",
+        ]
+        # Sanity: these titles are actually exercising the OLD pattern's
+        # match branch, not vacuously true because none of them matched.
+        assert all(old_anchored.match(t) for t in leading_token_titles)
+        for title in leading_token_titles:
+            assert new_default.search(title), (
+                f"regression: {title!r} matched the old anchored default "
+                "but not the new widened one"
+            )
 
     def test_configured_override_is_honored(self) -> None:
         config = {"librarian": {"template_board_title_pattern": r"^ARCHIVE:"}}
         pattern = resolve_template_board_title_pattern(config)
-        assert pattern.match("ARCHIVE: old board")
-        assert not pattern.match("TEMPLATE - Retro Exercise")
+        assert pattern.search("ARCHIVE: old board")
+        assert not pattern.search("TEMPLATE - Retro Exercise")
 
     def test_wrong_type_falls_back_to_default(self) -> None:
         config = {"librarian": {"template_board_title_pattern": 123}}
