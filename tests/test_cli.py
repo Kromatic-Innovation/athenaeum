@@ -733,6 +733,121 @@ class TestIngestAnswers:
         assert list((raw / "answers").glob("*.md"))
         assert (wiki / "_pending_questions_archive.md").exists()
 
+    @staticmethod
+    def _write_mixed_corpus(tmp_path: Path) -> tuple[Path, Path]:
+        # Issue athenaeum#1446 fixture: one malformed block (bad header, so it
+        # trips both `_parse_block`'s "malformed header" noise and
+        # `ingest_answers`'s rewrite-pass "Preserving malformed" noise) plus
+        # one well-formed answered block, so a run produces both noise AND a
+        # real summary line to check for. Built in `tmp_path` — never the
+        # live corpus.
+        wiki = tmp_path / "wiki"
+        raw = tmp_path / "raw"
+        wiki.mkdir()
+        raw.mkdir()
+        answered = (
+            '## [2026-04-20] Entity: "Acme Corp" (from sessions/test.md)\n'
+            "- [x] Question about Acme?\n"
+            "**Conflict type**: principled\n"
+            "**Description**: Conflicting Series info.\n"
+            "\n"
+            "Series B, closed March 2026.\n"
+        )
+        malformed = "## Not a real header\n" "- [x] garbled\n" "**Conflict type**: ???\n"
+        (wiki / "_pending_questions.md").write_text(
+            "# Pending Questions\n\n" + answered + "\n---\n\n" + malformed
+        )
+        return wiki, raw
+
+    def test_quiet_flag_suppresses_malformed_noise(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # AC2 counter-example: `--quiet` against a fixture with a malformed
+        # block and a valid answered block still prints the summary line but
+        # neither of the per-block noise strings.
+        #
+        # Two distinct emitters carry the noise: `_parse_block`'s bare
+        # `print(..., file=sys.stderr)` (checked via `capsys`, which captures
+        # real stream writes) and the `log.warning` calls (checked via
+        # `caplog`, since pytest installs its own log-capture handler that
+        # pre-empts `logging.lastResort` — the handler real terminal usage
+        # relies on to print an unconfigured logger's WARNING+ records to
+        # stderr; `cmd_ingest_answers` never calls `configure_logging`).
+        # Confirmed against the real `athenaeum` console script in a
+        # subprocess: both noise lines appear on stderr unflagged and both
+        # disappear under `--quiet`.
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="athenaeum.answers")
+        self._write_mixed_corpus(tmp_path)
+        rc = main(["ingest-answers", "--path", str(tmp_path), "--quiet"])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "Ingested 1 answered question(s)." in captured.out
+        assert "malformed header" not in captured.out
+        assert "malformed header" not in captured.err
+        assert "Preserving malformed" not in captured.out
+        assert "Preserving malformed" not in captured.err
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("malformed header" in m for m in messages)
+        assert not any("Preserving malformed" in m for m in messages)
+
+    def test_quiet_short_flag_also_suppresses_noise(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="athenaeum.answers")
+        self._write_mixed_corpus(tmp_path)
+        rc = main(["ingest-answers", "--path", str(tmp_path), "-q"])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "Ingested 1 answered question(s)." in captured.out
+        assert "malformed header" not in captured.err
+        assert "Preserving malformed" not in captured.err
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("Preserving malformed" in m for m in messages)
+
+    def test_without_quiet_flag_output_is_unchanged(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # AC3 positive control: the SAME fixture without `--quiet` still
+        # emits both noise strings — proving the flag is additive, not a
+        # default-behavior change. See the sibling quiet test's docstring
+        # for why "Preserving malformed" (log-only, no paired print) is
+        # asserted via `caplog` rather than `capsys`.
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="athenaeum.answers")
+        self._write_mixed_corpus(tmp_path)
+        rc = main(["ingest-answers", "--path", str(tmp_path)])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "Ingested 1 answered question(s)." in captured.out
+        assert "malformed header" in captured.err
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("Preserving malformed" in m for m in messages)
+
+    def test_help_documents_quiet_flag(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # AC4: `ingest-answers --help` documents the new flag.
+        with pytest.raises(SystemExit) as excinfo:
+            main(["ingest-answers", "--help"])
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        assert "--quiet" in out
+        assert "-q" in out
+
 
 class TestIngestMerges:
     """`athenaeum ingest-merges` subcommand (issue athenaeum#299).

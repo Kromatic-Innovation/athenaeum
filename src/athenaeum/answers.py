@@ -328,8 +328,21 @@ def _synthesize_checkbox_block(lines: list[str]) -> list[str] | None:
     return [lines[0], f"- [ ] {question}", *lines[1:]]
 
 
-def _parse_block(block_text: str) -> PendingQuestion | None:
-    """Parse one block. Returns ``None`` on malformed input."""
+def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | None:
+    """Parse one block. Returns ``None`` on malformed input.
+
+    Args:
+        block_text: The raw block text to parse.
+        quiet: Issue athenaeum#1446 — when true, suppress the per-block
+            ``[warn] skipping ... malformed header`` line printed to stderr.
+            The paired ``log.warning`` call is left unconditional here; the
+            caller (``ingest_answers``, via ``athenaeum ingest-answers
+            --quiet``) suppresses it by raising the ``athenaeum.answers``
+            logger's level instead, so the warning stays visible to
+            ``caplog``-style capture even under ``--quiet``. Keyword-only;
+            defaults to ``False`` so every existing caller (including
+            ``resolve_by_id`` and ``parse_pending_questions``) is unaffected.
+    """
     lines = block_text.splitlines()
     if not lines:
         return None
@@ -337,11 +350,12 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
     header_match = _HEADER_RE.match(lines[0])
     if not header_match:
         log.warning("Skipping block with malformed header: %r", lines[0][:80])
-        print(
-            f"[warn] skipping pending-question block with malformed header: "
-            f"{lines[0][:80]!r}",
-            file=sys.stderr,
-        )
+        if not quiet:
+            print(
+                f"[warn] skipping pending-question block with malformed header: "
+                f"{lines[0][:80]!r}",
+                file=sys.stderr,
+            )
         return None
 
     # Find the checkbox line — first non-blank line after the header.
@@ -940,6 +954,7 @@ def ingest_answers(
     *,
     client: "LLMBackend | None" = None,
     config: "dict | None" = None,
+    quiet: bool = False,
 ) -> int:
     """Parse resolved items from ``pending_path``, write raw intake, archive.
 
@@ -960,6 +975,16 @@ def ingest_answers(
             defaults to ``None`` so every existing caller is unaffected.
         config: Optional athenaeum config dict. Forwarded to the resolver
             for model selection. Keyword-only; defaults to ``None``.
+        quiet: Issue athenaeum#1446 — when true, suppress the per-block
+            ``[warn] skipping ... malformed header`` print (forwarded to
+            :func:`_parse_block`) and, in combination with the caller
+            raising the ``athenaeum.answers`` logger's level, the per-block
+            ``log.warning`` noise this function and ``_parse_block`` both
+            emit. This function does not itself touch logger levels — see
+            ``athenaeum._cmd_pending.cmd_ingest_answers`` for that half.
+            Keyword-only; defaults to ``False`` so every existing caller is
+            unaffected and the unflagged CLI path is byte-for-byte
+            unchanged.
 
     Returns:
         Count of answers ingested on this run.
@@ -1019,10 +1044,14 @@ def ingest_answers(
     filename_ts = now.strftime("%Y%m%dT%H%M%SZ")
 
     for block_text in blocks:
-        pq = _parse_block(block_text)
+        pq = _parse_block(block_text, quiet=quiet)
         if pq is None:
             # Malformed — preserve as-is in the primary file so the human
-            # can see + fix it. Do not archive.
+            # can see + fix it. Do not archive. Left as an unconditional
+            # log.warning (issue athenaeum#1446): under `quiet`, the CLI
+            # caller raises the `athenaeum.answers` logger's level rather
+            # than this function structurally deleting the call, so the
+            # record stays visible to caplog-style capture.
             log.warning("Preserving malformed block verbatim in primary file.")
             unanswered.append(
                 PendingQuestion(
