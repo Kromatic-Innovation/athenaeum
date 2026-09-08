@@ -696,6 +696,59 @@ class TestReindexGateOnStaleness:
         )
         assert third.reindex_would_change == 0 and third.reindexed is False
 
+    def test_deleted_vector_collection_under_an_intact_manifest_is_rebuilt(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """Row 1 on the PRODUCTION backend: the fts5 twin above covers the
+        ``wiki-index.db`` stat; this covers the vector backend's ``is_dir``
+        on the collection dir.
+
+        Worth its own test because it is the only vector blocker that is a
+        filesystem check — the model and schema rows are both manifest-field
+        comparisons, so neither would catch a missing ``stat``.
+        """
+        pytest.importorskip("chromadb")
+        import shutil
+
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert first.reindexed is True and first.backend == "vector"
+
+        vector_dir = cache / "wiki-vectors"
+        assert vector_dir.is_dir() and (cache / "vector-manifest.json").is_file()
+        shutil.rmtree(vector_dir)  # the manifest stays.
+
+        second = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert second.ingest.noop is True
+        assert second.reindexed is True
+        assert vector_dir.is_dir()
+
+        third = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert third.reindex_would_change == 0 and third.reindexed is False
+
     def test_embedding_model_swap_forces_a_reindex(
         self, tmp_path: Path, mock_anthropic: MagicMock
     ) -> None:
