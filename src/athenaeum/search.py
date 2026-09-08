@@ -937,6 +937,53 @@ def _manifest_last_full_rehash(manifest: dict[str, Any] | None) -> float | None:
     return float(raw)
 
 
+def _full_rehash_due(
+    manifest: dict[str, Any] | None,
+    full_rehash_max_age_days: float,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Is the issue athenaeum#373 periodic full re-hash due for ``manifest``?
+
+    The ONE implementation of the backstop condition, so the three places that
+    ask it cannot drift apart (issue athenaeum#1472):
+
+    * :meth:`FTS5Backend.build_index` and :meth:`VectorBackend.build_index`,
+      which turn it into ``prior=None`` for one build — every file re-read and
+      re-hashed, the change delta still applied incrementally;
+    * ``librarian._reindex_would_change``, the issue athenaeum#1456 SessionEnd
+      staleness gate, which turns it into "reindex" so an otherwise-idle tick
+      actually gives the build that chance. Before athenaeum#1472 the preview
+      inherited athenaeum#370's stat pre-filter without this correction, so a
+      content edit that preserved BOTH ``mtime`` and ``size`` was never
+      detected on the idle path at all — permanently, not merely until the
+      next tick.
+
+    Deliberately NOT a ``_incremental_reuse_blocker`` reason: a backstop-due
+    index IS reusable as-is, and folding the condition in there would make both
+    builds take the ``not do_incremental`` branch — an FTS5 table wipe and, on
+    the vector backend, an ``rmtree`` plus a full re-embed of the corpus every
+    ``full_rehash_max_age_days``. athenaeum#373's whole design point is that the
+    re-hash is full while the delta stays incremental, and this preserves it.
+
+    True when the manifest has never recorded a full re-hash (a pre-athenaeum#373
+    manifest, or a malformed value), when it predates the opaque-token stats
+    schema (issue athenaeum#977 — the forced re-hash also re-stamps the version
+    rather than silently preserving a timestamp from before the schema
+    changed), or when more than ``full_rehash_max_age_days`` have elapsed since
+    the last one. ``now`` defaults to :func:`_now`; callers that already read
+    the clock pass their own so one build reasons about a single instant.
+    """
+    last_rehash = _manifest_last_full_rehash(manifest)
+    if last_rehash is None:
+        return True
+    if manifest is not None and manifest.get("version") != _STORE_STATS_SCHEMA_VERSION:
+        return True
+    if now is None:
+        now = _now()
+    return (now - last_rehash) > (full_rehash_max_age_days * 86400.0)
+
+
 def _scan_prior(
     manifest: dict[str, Any] | None,
 ) -> dict[str, tuple[str, str, str]]:
@@ -1238,14 +1285,7 @@ class FTS5Backend:
         # timestamp from before the schema changed.
         now = _now()
         last_rehash = _manifest_last_full_rehash(stored)
-        schema_mismatch = (
-            stored is not None and stored.get("version") != _STORE_STATS_SCHEMA_VERSION
-        )
-        stale = (
-            last_rehash is None
-            or schema_mismatch
-            or (now - last_rehash) > (full_rehash_max_age_days * 86400.0)
-        )
+        stale = _full_rehash_due(stored, full_rehash_max_age_days, now=now)
         rehash_at = now if (not do_incremental or stale) else last_rehash
 
         # Issue athenaeum#370: feed the prior manifest's stats into the scan so unchanged
@@ -1823,14 +1863,7 @@ class VectorBackend:
         # schema — see the identical comment in ``FTS5Backend.build_index``.
         now = _now()
         last_rehash = _manifest_last_full_rehash(stored)
-        schema_mismatch = (
-            stored is not None and stored.get("version") != _STORE_STATS_SCHEMA_VERSION
-        )
-        stale = (
-            last_rehash is None
-            or schema_mismatch
-            or (now - last_rehash) > (full_rehash_max_age_days * 86400.0)
-        )
+        stale = _full_rehash_due(stored, full_rehash_max_age_days, now=now)
 
         # Issue athenaeum#370: stat pre-filter the scan on the incremental path only —
         # a full (re)build embeds every scanned record and cannot use the
