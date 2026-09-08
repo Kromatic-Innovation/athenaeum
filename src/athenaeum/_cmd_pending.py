@@ -21,6 +21,7 @@ cost down.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -43,6 +44,20 @@ def add_pending_subparsers(subparsers: argparse._SubParsersAction) -> None:
         type=Path,
         default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge)",
+    )
+    # Issue athenaeum#1446: suppress per-malformed-block noise (both the
+    # `[warn] ... malformed header` print and the paired `log.warning`
+    # calls, plus the rewrite pass's "Preserving malformed block verbatim"
+    # line) so a corpus with thousands of malformed blocks doesn't bury the
+    # final summary line. Additive only — without the flag, output is
+    # byte-for-byte unchanged (see `cmd_ingest_answers`).
+    ingest_answers_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        default=False,
+        help="Suppress per-block malformed-block warnings; print only the "
+        "final summary line(s) (issue athenaeum#1446).",
     )
     _add_lock_args(ingest_answers_parser)
     ingest_answers_parser.set_defaults(func=cmd_ingest_answers)
@@ -104,6 +119,20 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
     an Anthropic SDK client when ``provider: api`` and ``ANTHROPIC_API_KEY`` is
     set. When the key is absent (api backend) or construction fails, the
     annotation fallback is used instead.
+
+    Issue athenaeum#1446: ``--quiet``/``-q`` suppresses the per-malformed-block
+    noise (``_parse_block``'s ``[warn] ... malformed header`` print, plus the
+    ``log.warning`` calls in ``_parse_block`` and in ``ingest_answers``'s
+    rewrite pass) so a corpus with thousands of malformed blocks doesn't bury
+    the summary line. Deliberately NOT routed through ``configure_logging`` —
+    that helper only distinguishes INFO/DEBUG (``verbose``), has no quiet
+    level, and calling it here would also change the unflagged path's output
+    format. Instead: the bare ``print`` calls are gated at the call site
+    (threaded through as ``quiet=quiet``), and the ``log.warning`` records are
+    suppressed by temporarily raising the ``athenaeum.answers`` logger to
+    ``ERROR`` for the duration of the ``ingest_answers`` call, restored in a
+    ``finally`` so this process-level side effect never leaks past this
+    function.
     """
     from athenaeum.answers import ingest_answers
     from athenaeum.config import load_config
@@ -121,6 +150,8 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
 
     pending_path = target / "wiki" / "_pending_questions.md"
     raw_root = target / "raw"
+
+    quiet = getattr(args, "quiet", False)  # issue athenaeum#1446
 
     cfg = load_config(target)
 
@@ -168,9 +199,25 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
         decision_report = apply_decision_answers(
             wiki_root, raw_root, config=cfg, lock=lock
         )
-        count = ingest_answers(
-            pending_path, raw_root, client=anthropic_client, config=cfg
-        )
+        # Issue athenaeum#1446: `--quiet` suppresses the per-block
+        # `log.warning` noise `_parse_block`/`ingest_answers` emit by
+        # level, not by structurally deleting the calls — restored in
+        # `finally` so the mutation never leaks past this one call.
+        answers_logger = logging.getLogger("athenaeum.answers")
+        prior_level = answers_logger.level
+        if quiet:
+            answers_logger.setLevel(logging.ERROR)
+        try:
+            count = ingest_answers(
+                pending_path,
+                raw_root,
+                client=anthropic_client,
+                config=cfg,
+                quiet=quiet,
+            )
+        finally:
+            if quiet:
+                answers_logger.setLevel(prior_level)
     except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
         print(
             f"Fatal error ingesting answers ({type(exc).__name__}): {exc}",
