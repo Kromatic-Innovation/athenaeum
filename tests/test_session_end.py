@@ -25,7 +25,9 @@ client's `messages.create` is asserted never-called.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -914,6 +916,272 @@ class TestReindexGateOnStaleness:
             backend="vector",
         )
         assert third.reindex_would_change == 0 and third.reindexed is False
+
+    # -- athenaeum#1472: the athenaeum#373 full-re-hash backstop on the idle path --
+    #
+    # The preview inherited athenaeum#370's stat pre-filter without athenaeum#373's
+    # correction for it, so a content edit that preserved BOTH ``mtime`` and
+    # ``size`` was never detected on the idle path — permanently, since nothing
+    # else opens the gate for it. These pin the fix AND its self-limiting
+    # property, which is what separates it from the naive ``prior=None``
+    # override that would re-hash the whole corpus on every tick forever.
+
+    @staticmethod
+    def _age_full_rehash_stamp(manifest_path: Path, days: float) -> None:
+        """Backdate the manifest's athenaeum#373 stamp by ``days``."""
+        payload = json.loads(manifest_path.read_text())
+        assert "last_full_rehash_at" in payload, (
+            "the build must stamp last_full_rehash_at, or the backstop can "
+            "never be cleared by the rebuild it triggers"
+        )
+        payload["last_full_rehash_at"] = time.time() - days * 86400.0
+        manifest_path.write_text(json.dumps(payload))
+
+    def test_elapsed_full_rehash_backstop_reindexes_then_settles(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """An elapsed backstop opens the gate for ONE tick, then closes it.
+
+        Three consecutive ticks, asserted as reindex -> no-reindex -> no-reindex.
+        The second and third are the point: the naive fix (having the preview
+        pass ``prior=None`` when the manifest looks stale) would show
+        reindex -> reindex -> reindex forever, because this function performs no
+        writes and so can never clear its own trigger. Only the real build
+        stamps ``last_full_rehash_at``, so routing the condition through the
+        rebuild is what makes it self-limiting.
+        """
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert first.reindexed is True
+
+        settled = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert settled.reindex_would_change == 0 and settled.reindexed is False
+
+        manifest = cache / "fts5-manifest.json"
+        self._age_full_rehash_stamp(manifest, days=8.0)  # default max age is 7
+
+        ticks = []
+        for _ in range(3):
+            ticks.append(
+                session_end(
+                    raw_root=root / "raw",
+                    wiki_root=root / "wiki",
+                    knowledge_root=root,
+                    cache_dir=cache,
+                    backend="fts5",
+                )
+            )
+
+        assert all(t.ingest.noop is True for t in ticks)
+        assert ticks[0].reindexed is True, (
+            "an elapsed full-re-hash backstop must open the otherwise-idle gate"
+        )
+        assert ticks[0].reindex_would_change > 0
+        assert [t.reindexed for t in ticks] == [True, False, False], (
+            "the backstop is not self-limiting — the rebuild it triggered did "
+            "not clear its own trigger, so every later tick reindexes too"
+        )
+        assert [t.reindex_would_change for t in ticks[1:]] == [0, 0]
+
+    def test_stat_preserving_edit_is_caught_only_once_the_backstop_elapses(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """The failure the backstop exists for, plus its counter-example.
+
+        A content edit with an identical ``size`` and a restored ``mtime`` is
+        invisible to the athenaeum#370 stat pre-filter. WITHIN the interval that
+        is correct and must stay so (otherwise the test would pass for any
+        edit, proving nothing about the backstop); once the interval has
+        elapsed it must be caught, and the stored hash must actually change.
+        """
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+        manifest = cache / "fts5-manifest.json"
+
+        session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        page = root / "wiki" / "stat-trap.md"
+        page.write_text("---\nname: Stat Trap\n---\n\nalpha body\n")
+        session_end(  # picks the new page up the ordinary way
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        settled = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert settled.reindex_would_change == 0 and settled.reindexed is False
+
+        before = json.loads(manifest.read_text())["hashes"]
+        key = next(k for k in before if "stat-trap" in k)
+
+        # The edit the stat pre-filter cannot see: same byte length, mtime and
+        # atime restored to what they were.
+        st = page.stat()
+        edited = "---\nname: Stat Trap\n---\n\nbravo body\n"
+        assert len(edited) == len(page.read_text())
+        page.write_text(edited)
+        os.utime(page, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+        # Counter-example: within the interval the build would not catch it
+        # either, so the preview must not claim it would.
+        within = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert within.reindex_would_change == 0 and within.reindexed is False
+        assert json.loads(manifest.read_text())["hashes"][key] == before[key]
+
+        self._age_full_rehash_stamp(manifest, days=8.0)
+
+        caught = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert caught.ingest.noop is True
+        assert caught.reindexed is True
+        assert json.loads(manifest.read_text())["hashes"][key] != before[key], (
+            "the backstop fired but the file was not actually re-hashed"
+        )
+
+        after = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert after.reindex_would_change == 0 and after.reindexed is False
+
+    def test_full_rehash_backstop_applies_to_the_vector_manifest_too(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """The production backend reads a DIFFERENT manifest on a different
+        path, and carries the identical athenaeum#373 backstop in its own
+        ``build_index``. Both halves asserted here, not just fts5's."""
+        pytest.importorskip("chromadb")
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert first.reindexed is True and first.backend == "vector"
+
+        settled = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert settled.reindex_would_change == 0 and settled.reindexed is False
+
+        self._age_full_rehash_stamp(cache / "vector-manifest.json", days=8.0)
+
+        due = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert due.ingest.noop is True and due.reindexed is True
+
+        after = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert after.reindex_would_change == 0 and after.reindexed is False
+
+    def test_always_rehash_setting_does_not_wedge_the_idle_gate_open(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """``full_rehash_max_age_days: 0`` means "re-hash on every build I run".
+
+        It must NOT mean "run a build on every idle tick". No rebuild can clear
+        a condition that is true again the instant after it is stamped, so
+        honouring a non-positive interval in the preview would reintroduce the
+        athenaeum#1458 every-tick rebuild — which is why the preview treats the
+        backstop as a trigger only for a positive interval. The build still
+        re-hashes everything on every build it actually performs.
+        """
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        (root / "athenaeum.yaml").write_text(
+            "librarian:\n  reindex:\n    full_rehash_max_age_days: 0\n"
+        )
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert first.reindexed is True
+
+        for _ in range(2):
+            idle = session_end(
+                raw_root=root / "raw",
+                wiki_root=root / "wiki",
+                knowledge_root=root,
+                cache_dir=cache,
+                backend="fts5",
+            )
+            assert idle.ingest.noop is True
+            assert idle.reindex_would_change == 0
+            assert idle.reindexed is False
 
 
 # ---------------------------------------------------------------------------

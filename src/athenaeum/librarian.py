@@ -9899,17 +9899,31 @@ def _reindex_would_change(
     ``__init__`` opens a client or loads a model, and the blockers are a
     ``stat`` plus, on fts5, one ``PRAGMA user_version`` read.
 
+    Issue athenaeum#1472: the stat pre-filter above is not a sound change
+    oracle — an edit that preserves BOTH ``mtime`` and ``size`` leaves the
+    stored hash in place. Both builds correct for that with athenaeum#373's
+    periodic full re-hash; this preview honours the SAME interval (one shared
+    :func:`~athenaeum.search._full_rehash_due`, so they cannot drift) by
+    previewing a due re-hash as a full rebuild. The reindex that follows does
+    the re-hash and stamps ``last_full_rehash_at``, which is what clears the
+    condition and keeps the gate from wedging open.
+
     Degenerate case, accepted rather than engineered around: an unusable index
     over an EMPTY corpus reports 0, and the athenaeum#1456 gate
     (``bool(count)``) therefore skips the rebuild. There is nothing to index,
     so the only loss is that the empty index file is recreated one tick later
     than it could have been.
     """
-    from athenaeum.config import resolve_embedding_model, resolve_index_globs
+    from athenaeum.config import (
+        resolve_embedding_model,
+        resolve_index_globs,
+        resolve_reindex_full_rehash_max_age_days,
+    )
     from athenaeum.search import (
         _FTS5_MANIFEST,
         _VECTOR_MANIFEST,
         _compute_delta,
+        _full_rehash_due,
         _load_manifest,
         _manifest_hashes,
         _scan_indexed_records,
@@ -9955,6 +9969,43 @@ def _reindex_would_change(
             "rebuild (issue athenaeum#1459)",
             resolved_cache,
             blocker,
+        )
+        stored = None
+    # Issue athenaeum#1472: the athenaeum#373 full-re-hash backstop. The scan
+    # below reuses the athenaeum#370 stat pre-filter, so a content edit that
+    # preserved BOTH ``mtime`` and ``size`` is neither re-read nor re-hashed
+    # and reads as "nothing to do". Both builds correct for that periodically
+    # by re-hashing every file once the backstop interval has elapsed; the
+    # preview inherited the pre-filter without the correction, so on the idle
+    # path such an edit was never detected at all — permanently, because
+    # nothing else opens the gate for it.
+    #
+    # Previewing it the ``athenaeum#1459`` way (discard the manifest, so every
+    # current page reads as pending) is what makes this SELF-LIMITING: the
+    # reindex it triggers performs the full re-hash AND stamps a fresh
+    # ``last_full_rehash_at``, which clears the condition for the next tick.
+    # Re-hashing here instead (``prior=None`` with the manifest kept) would
+    # not: this function performs no writes, so a zero delta would leave the
+    # stamp untouched and every later tick would re-hash the whole corpus
+    # forever — the athenaeum#1458 every-tick shape.
+    #
+    # ``<= 0`` ("always re-hash") is deliberately NOT a preview trigger, for
+    # exactly that invariant: no rebuild can ever clear a condition that is
+    # true the instant after it is stamped, so honouring it here would wedge
+    # the gate open on every tick. The build still honours it on every build
+    # it actually runs, which is what the setting asks for.
+    max_age_days = resolve_reindex_full_rehash_max_age_days(knowledge_root, config)
+    if (
+        stored is not None
+        and max_age_days > 0
+        and _full_rehash_due(stored, max_age_days)
+    ):
+        log.info(
+            "session-end: index at %s has not had a full re-hash in %s days — "
+            "previewing a re-hash of the whole corpus so a stat-preserving "
+            "edit is finally caught (issue athenaeum#1472)",
+            resolved_cache,
+            max_age_days,
         )
         stored = None
     prior = _scan_prior(stored) if stored is not None else None
