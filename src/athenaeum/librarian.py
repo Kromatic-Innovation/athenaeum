@@ -246,6 +246,7 @@ from athenaeum.tiers import (
     TIER2_ADDRESS_UNRESOLVED_MARKER,
     Tier2ParseStats,
     gate_create_name_classifications,
+    gate_template_board_classifications,
     partition_code_artifact_classifications,
     resolve_address_named_classifications,
     schema_fragment_state,
@@ -2130,6 +2131,17 @@ def process_one(
     )
     classified = name_gate_outcome.kept
     address_escalations.extend(name_gate_outcome.escalations)
+
+    # Issue athenaeum#1464: template-board create gate. Sibling to the
+    # athenaeum#1173 name gate immediately above (same "kept" chaining,
+    # same seam, BEFORE actions are built) — see
+    # gate_template_board_classifications' docstring for why this is a
+    # separate gate rather than folded into the one above.
+    template_board_outcome = gate_template_board_classifications(
+        classified, raw.ref, raw.content, config
+    )
+    classified = template_board_outcome.kept
+    address_escalations.extend(template_board_outcome.escalations)
 
     # Build actions
     actions: list[EntityAction] = []
