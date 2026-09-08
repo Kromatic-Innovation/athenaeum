@@ -4229,15 +4229,26 @@ def _merge_full_response_is_plausible_echo(existing_body: str, response_text: st
 
     - If *existing_body* has a leading H1 (the normal case — every page
       :func:`tier3_create` writes starts with one): find *response_text*'s
-      OWN first H1. Anything before it is the "leading content" the AC
-      talks about. If that leading content is empty, the response starts
-      directly with page structure — a plausible echo. If it is non-empty,
-      it is only a plausible echo when that exact text already appears
-      somewhere in *existing_body* (i.e. it is preserved content, not new
-      prose the model added ahead of the page); a rationale sentence never
-      appears verbatim in the existing page, so this correctly refuses it.
-      A response with NO H1 at all (a pure refusal, no echo) is treated as
-      entirely "leading content" and refused the same way.
+      OWN first H1 via ``search()`` — deliberately NOT ``match()``, since
+      the whole point is to locate the first H1 wherever it sits and treat
+      everything before it as "leading content"; anchoring to position 0
+      would make ``resp_h1`` ``None`` for almost every legitimate response
+      and refuse nearly all of them (Seer review, athenaeum#1467). Anything
+      before that first H1 is the "leading content" the AC talks about. If
+      it is empty, the response starts directly with page structure — a
+      plausible echo. If it is non-empty, it is only a plausible echo when
+      that exact text already appears in *existing_body*'s OWN region
+      before *existing_body*'s first H1 — not merely somewhere in the page
+      (tightened per the same review: a substring check against the whole
+      body let a short, generic meta-prefix that happens to recur later in
+      the page — "Note:", a common word — slip through, which is a narrow
+      instance of exactly the leakage class this issue exists to stop).
+      When *existing_body*'s own pre-H1 region is empty (the common case —
+      its H1 is the very first thing in the body), any non-empty leading
+      content in the response is explicitly refused: there is no preserved
+      pre-heading content it could be. A response with NO H1 at all (a
+      pure refusal, no echo) is treated as entirely "leading content" and
+      refused the same way.
 
     - If *existing_body* has NO leading H1 (rare — CREATE_SYSTEM instructs
       every new page to start with one, so an existing page without one is
@@ -4259,7 +4270,18 @@ def _merge_full_response_is_plausible_echo(existing_body: str, response_text: st
         leading = leading.strip()
         if not leading:
             return True
-        return leading in existing_body
+        # Tightened per Seer review (athenaeum#1467): the leading content must be
+        # genuinely PRESERVED pre-heading content from the existing page —
+        # restrict the containment check to existing_body's OWN region
+        # before ITS first H1, not the whole body.
+        existing_pre_h1 = existing_body[: h1_match.start()]
+        if not existing_pre_h1.strip():
+            # No pre-H1 region to preserve content from at all — any
+            # non-empty leading content in the response cannot be
+            # preserved content, so refuse explicitly rather than let this
+            # fall out of the substring check incidentally.
+            return False
+        return leading in existing_pre_h1
 
     if not existing_stripped:
         return False

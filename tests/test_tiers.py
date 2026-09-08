@@ -1609,6 +1609,23 @@ class TestTier3MergeFullEchoNoOp:
 
         assert _merge_full_response_is_plausible_echo(existing_body, response)
 
+    def test_leading_prefix_present_elsewhere_but_not_in_pre_h1_region_is_refused(
+        self,
+    ) -> None:
+        """Tightened per Seer review (athenaeum#1467): a short, generic meta-prefix
+        that happens to recur SOMEWHERE in the existing page (e.g. inside a
+        later section) must not be accepted just because it is present in
+        the body text overall — the old ``leading in existing_body`` check
+        would wrongly pass this. The existing page's H1 sits at position 0
+        (no pre-H1 region at all), so any non-empty leading content in the
+        response can never be preserved pre-heading content and must be
+        refused, even though "Note:" itself does appear later in the page.
+        """
+        existing_body = "# Acme Corp\n\nNote: see footnotes.\n\nFintech startup, Series B."
+        response = "Note:\n\n# Acme Corp\n\nFintech startup, Series B, Series C."
+
+        assert not _merge_full_response_is_plausible_echo(existing_body, response)
+
     def test_no_leading_h1_in_existing_body_requires_response_to_start_with_it(
         self,
     ) -> None:
