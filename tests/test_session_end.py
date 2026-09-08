@@ -395,6 +395,169 @@ class TestSessionEndComposition:
 
 
 # ---------------------------------------------------------------------------
+# reindex gate keyed on index staleness, not compile activity (athenaeum#1456)
+# ---------------------------------------------------------------------------
+
+
+class TestReindexGateOnStaleness:
+    """The reindex gate must consult the INDEX, not the ingest stamp (athenaeum#1456).
+
+    Ingest and the index keep separate manifests. A raw file ingest has already
+    recorded is ``new_or_changed: 0`` forever after, so gating the reindex on
+    compile activity alone meant a page that missed its indexing window was
+    never reconsidered — every later tick was also ``noop`` and also skipped,
+    and the index drifted below the corpus and stayed there silently.
+
+    Both halves matter. The positive case is the bug; the negative case is the
+    guard against the overcorrection that turns every tick into a rebuild.
+    """
+
+    def test_noop_ingest_with_stale_index_still_reindexes(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """A page in the corpus that never reached the index IS picked up by a
+        later tick, even though ingest reports ``noop``."""
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert first.reindexed is True
+
+        # A wiki page that the index has never seen, with NO new raw behind it —
+        # the production shape of a page that missed its indexing window.
+        (root / "wiki" / "lean.md").write_text("---\nname: Lean\n---\n\nbody\n")
+
+        second = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert second.exit_code == 0
+        assert second.ingest.noop is True  # nothing new to compile...
+        assert second.reindexed is True  # ...but the index was behind.
+        assert second.reindex_pages >= 1
+        # The staleness count is surfaced in the JSON summary so rebuild.log
+        # shows WHY an otherwise-idle tick reindexed.
+        assert second.reindex_would_change == 1
+        assert second.summary()["reindex_would_change"] == 1
+
+        # And the page is now actually retrievable — a third tick is idle again.
+        third = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert third.ingest.noop is True and third.reindexed is False
+
+    def test_noop_ingest_with_current_index_does_not_reindex(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The guard against the overcorrection: a current index must NOT be
+        rebuilt on every tick just because the gate now checks staleness."""
+        import athenaeum.librarian as lib
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert first.reindexed is True
+
+        # Spy AFTER the legitimate first reindex: the second tick must not call it.
+        reindex_calls: list[bool] = []
+        real_reindex = lib.reindex
+        monkeypatch.setattr(
+            lib,
+            "reindex",
+            lambda *a, **k: (reindex_calls.append(True), real_reindex(*a, **k))[1],
+        )
+
+        second = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert second.ingest.noop is True
+        assert reindex_calls == []  # asserted directly, not inferred.
+        assert second.reindexed is False
+        assert second.reindex_pages == 0
+        assert second.reindex_would_change == 0
+
+    def test_vector_backend_idle_tick_stays_cheap(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The PRODUCTION backend: the staleness check reads the vector manifest
+        (a different path from fts5's) and must agree with what ``reindex``
+        wrote — otherwise every tick rebuilds. Pinned by forbidding chromadb and
+        the embedding model on the idle tick, which is also the athenaeum#370
+        cheapness claim carried onto the non-dry-run path.
+        """
+        pytest.importorskip("chromadb")
+        import chromadb
+
+        import athenaeum.librarian as lib
+        from athenaeum.search import VectorBackend
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert first.reindexed is True and first.backend == "vector"
+
+        def _boom(*_a: object, **_k: object) -> object:
+            raise AssertionError("idle tick must not open chromadb / build a model")
+
+        monkeypatch.setattr(chromadb, "PersistentClient", _boom)
+        monkeypatch.setattr(VectorBackend, "_embedding_function", _boom)
+
+        second = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        # Nothing stale → no reindex, and the guards above never fired.
+        assert second.ingest.noop is True
+        assert second.reindexed is False
+        assert second.reindex_would_change == 0
+
+
+# ---------------------------------------------------------------------------
 # session-end CLI wrapper
 # ---------------------------------------------------------------------------
 

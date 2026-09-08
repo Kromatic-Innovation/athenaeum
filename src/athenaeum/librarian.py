@@ -9884,9 +9884,13 @@ class SessionEndResult:
     """Summary of a :func:`session_end` invocation (issue athenaeum#350).
 
     Wraps the underlying :class:`IngestResult` and records whether the reindex
-    step ran (it is change-gated on the compile actually having run) and how
-    many pages it touched. ``exit_code`` propagates the ingest compile's status
-    — the SessionEnd path never indexes a half-compiled wiki.
+    step ran and how many pages it touched. ``exit_code`` propagates the ingest
+    compile's status — the SessionEnd path never indexes a half-compiled wiki.
+
+    Issue athenaeum#1456: the reindex is gated on *index staleness*, not on
+    compile activity alone. A compile that ran always reindexes; a no-op
+    compile reindexes when — and only when — the index manifest disagrees with
+    the corpus scan.
     """
 
     ingest: IngestResult
@@ -9897,7 +9901,12 @@ class SessionEndResult:
     session: str | None = None
     # Issue athenaeum#370: on a dry-run, a cheap manifest hash-diff of how many pages a
     # real reindex WOULD touch — computed WITHOUT opening chromadb or loading a
-    # model. ``None`` on a non-dry-run, or when it could not be computed cheaply.
+    # model. ``None`` when it could not be computed cheaply (no wiki dir).
+    #
+    # Issue athenaeum#1456: also populated on a NON-dry-run whose ingest was a
+    # no-op, where the same diff is what decides whether to reindex at all. It
+    # stays ``None`` on the compile-ran path, which reindexes unconditionally
+    # and never pays for the diff.
     dry_run: bool = False
     reindex_would_change: int | None = None
 
@@ -9917,7 +9926,7 @@ class SessionEndResult:
             "duration_ms": self.duration_ms,
             "exit_code": self.exit_code,
         }
-        if self.dry_run:
+        if self.dry_run or self.reindex_would_change is not None:
             # Cheap preview: how many pages a reindex would touch. ``null`` here
             # means it could not be computed without chromadb (never loaded one).
             data["reindex_would_change"] = self.reindex_would_change
@@ -9955,10 +9964,20 @@ def session_end(
     1. **Incremental** :func:`ingest` of this session's new/changed raw intake.
        Internally a fast no-op (zero LLM) when nothing is new; ``tier0``
        structured entries compile with no model cost.
-    2. **Then** :func:`reindex` — but *only when the compile actually ran*
-       (``ingest`` was not a no-op) and succeeded. An idle SessionEnd (no new
-       raw), a failed compile, or a ``dry_run`` never touches the index, per
-       the issue's per-session cost bound.
+    2. **Then** :func:`reindex` — when the compile actually ran (``ingest`` was
+       not a no-op), or when the index is *stale* against the corpus even
+       though nothing new was compiled (issue athenaeum#1456). A failed
+       compile or a ``dry_run`` never touches the index.
+
+    The staleness arm exists because ingest and the index keep **separate**
+    manifests. A raw file ingest has already recorded is ``new_or_changed: 0``
+    forever after, so gating the reindex on compile activity alone meant a page
+    that missed its indexing window was never reconsidered by any later tick —
+    the index drifted below the corpus and stayed there, silently
+    (athenaeum#1456). The staleness check is :func:`_reindex_would_change`, one
+    stat-prefiltered corpus walk against the index manifest: no embedding model
+    is loaded and chromadb is never opened, so an already-current index stays
+    cheap and idle SessionEnds still do not reindex.
 
     ``session`` scopes the new/changed detection to one ``originSessionId``
     (the SessionEnd use-case). ``incremental=False`` forces a full recompile +
@@ -9988,22 +10007,52 @@ def session_end(
     reindex_pages = 0
     reindex_would_change: int | None = None
 
-    # Change-gate the index step: reindex only when the compile actually ran
-    # (wiki may have changed) AND succeeded, and never on a dry-run. An idle
-    # no-op ingest short-circuits here → no reindex, per the acceptance bound.
-    should_reindex = (
-        not ingest_result.noop and ingest_result.exit_code == 0 and not dry_run
-    )
+    # Change-gate the index step. Never on a dry-run, never on a failed compile
+    # (no indexing a half-compiled wiki). Otherwise two arms:
+    #
+    #   compile ran   → reindex unconditionally (the wiki just changed); no diff
+    #                   is computed, so this path costs exactly what it did.
+    #   compile no-op → issue athenaeum#1456: consult the INDEX, not the ingest
+    #                   stamp. `_reindex_would_change` is a stat-prefiltered
+    #                   manifest hash-diff — no chromadb, no embedding model —
+    #                   and we reindex only if it reports pending work. A
+    #                   genuinely current index still short-circuits to no
+    #                   reindex, so idle ticks stay cheap.
+    compile_ran = not ingest_result.noop
+    gate_open = ingest_result.exit_code == 0 and not dry_run
+    should_reindex = gate_open and compile_ran
+    if gate_open and not compile_ran:
+        reindex_would_change = _reindex_would_change(
+            knowledge_root,
+            wiki_root,
+            cache_dir=cache_dir,
+            config=config,
+            backend=backend,
+        )
+        # ``None`` means the diff could not be computed cheaply (no wiki dir) —
+        # treat that as "nothing known to be stale" rather than reindexing blind.
+        should_reindex = bool(reindex_would_change)
+
     if should_reindex:
         # Issue athenaeum#370: announce the planned work BEFORE the (potentially minutes-
-        # long) reindex so the run does not look like a silent hang.
-        log.info(
-            "session-end: %d new/changed raw (compiled %d); reindexing wiki "
-            "(%s backend)…",
-            ingest_result.new_or_changed,
-            ingest_result.compiled,
-            backend_name,
-        )
+        # long) reindex so the run does not look like a silent hang. Issue
+        # athenaeum#1456: say WHICH arm opened the gate, so rebuild.log makes
+        # the reason for a reindex legible (compile-driven vs. staleness-driven).
+        if compile_ran:
+            log.info(
+                "session-end: %d new/changed raw (compiled %d); reindexing wiki "
+                "(%s backend)…",
+                ingest_result.new_or_changed,
+                ingest_result.compiled,
+                backend_name,
+            )
+        else:
+            log.info(
+                "session-end: ingest no-op but index is stale — %d page(s) "
+                "pending; reindexing wiki (%s backend)…",
+                reindex_would_change,
+                backend_name,
+            )
         sys.stdout.flush()
         sys.stderr.flush()
         backend_name, reindex_pages = reindex(
