@@ -456,6 +456,63 @@ class TestIngestAnswers:
         primary_text = pending_path.read_text()
         assert "Not a real header" in primary_text
 
+    def test_quiet_suppresses_print_but_not_log_warning(
+        self,
+        pending_path: Path,
+        raw_root: Path,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Issue athenaeum#1446: `ingest_answers(..., quiet=True)` threads
+        # `quiet` down to `_parse_block`, which gates only the bare
+        # `print(..., file=sys.stderr)` call. The `log.warning` records stay
+        # unconditional at this layer — suppressing THEM by level is the
+        # CLI's job (`cmd_ingest_answers`), not this function's, so that a
+        # direct caller (or a `caplog`-based test like this one) still sees
+        # them.
+        import logging
+
+        answered = _block(checkbox="[x]", answer="ok")
+        malformed = (
+            "## Not a real header\n" "- [x] garbled\n" "**Conflict type**: ???\n"
+        )
+        pending_path.write_text(
+            "# Pending Questions\n\n" + answered + "\n---\n\n" + malformed
+        )
+        caplog.set_level(logging.WARNING, logger="athenaeum.answers")
+
+        count = ingest_answers(pending_path, raw_root, quiet=True)
+        assert count == 1
+
+        err = capsys.readouterr().err
+        assert "malformed header" not in err
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("malformed header" in m for m in messages)
+        assert any("Preserving malformed" in m for m in messages)
+
+    def test_default_quiet_false_preserves_full_output(
+        self,
+        pending_path: Path,
+        raw_root: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # AC3 positive control at the library layer: the default (no
+        # `quiet` argument) is unchanged — the print still fires.
+        answered = _block(checkbox="[x]", answer="ok")
+        malformed = (
+            "## Not a real header\n" "- [x] garbled\n" "**Conflict type**: ???\n"
+        )
+        pending_path.write_text(
+            "# Pending Questions\n\n" + answered + "\n---\n\n" + malformed
+        )
+
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 1
+
+        err = capsys.readouterr().err
+        assert "malformed header" in err
+
     def test_collision_safe_filenames(self, pending_path: Path, raw_root: Path) -> None:
         # Two answered blocks for the same entity resolved in one run should
         # not clobber each other's raw files.
