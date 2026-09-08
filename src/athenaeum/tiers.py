@@ -1734,6 +1734,230 @@ def gate_create_name_classifications(
 
 
 # ---------------------------------------------------------------------------
+# Issue athenaeum#1464: template-board create suppression
+# ---------------------------------------------------------------------------
+#
+# `mural-board-summary` records for reusable exercise-template boards (the
+# same worksheet copied across many engagements, titled e.g. "TEMPLATE -
+# Retro Exercise") were minting a standalone `type: concept` page per board.
+# A template board carries no fact about any specific entity, so this is
+# near-duplicate fragmentation with zero informational content -- 531 of
+# 1,774 compiled pages citing this source are `type: concept`, and roughly
+# 150-159 of the 2,244 source boards in the corpus index carry a template
+# token in their TITLE.
+#
+# The adapter's own `template_only` flag (`fragment_count <= 3`) is not
+# usable here -- it assumes a template board is sparse, but a template is
+# dense with *instruction* text (three confirmed template boards carry 113,
+# 307, and 38 fragments; the flag reads `false` for all three). The only
+# deterministic, no-model-call signal is the board's own title, which is
+# reachable verbatim in the raw record's YAML frontmatter (`RawFile.content`
+# is a plain `read_text()` of the whole file, frontmatter included). By the
+# time tier-2 classification produces a `ClassifiedEntity`, the "TEMPLATE - "
+# prefix has already been stripped from the minted name -- so this check
+# must run against the RAW frontmatter title, before that stripping happens,
+# as a SIBLING to `gate_create_name_classifications` rather than an
+# extension of it or of `validate_create_name` (which only ever sees the
+# post-strip name and would find nothing to gate on).
+
+#: The raw-record source ("submitter") this gate is scoped to. `raw_ref` is
+#: built as ``f"{source}/{filename}"`` (`RawFile.ref`,
+#: `athenaeum/models.py`) -- the same shape `athenaeum.batch`'s raw-file
+#: reconstruction already splits on to recover `source` from a bare ref
+#: string. Scoping to this one submitter is deliberate: a template-token
+#: title match is only a meaningful signal for board-shaped content: gating
+#: every submitter's create-bound classifications on the same regex would
+#: risk suppressing an unrelated source's legitimate create (e.g. a person
+#: or company page whose name happens to start with "Copy of") -- a
+#: corpus-affecting regression, not a conservative choice.
+TEMPLATE_BOARD_GATE_SOURCE = "mural-board-summary"
+
+# Default template-token pattern (issue athenaeum#1464). Measured over the
+# 2,244 `mural-board-summary` source boards in the corpus index: ~150-159
+# titles (roughly 7%) carry one of these tokens, and in every confirmed case
+# it appears as a LEADING token -- "TEMPLATE - Retro Exercise", "Copy of
+# Sprint Planning" -- never mid-title. Anchored at the start of the string
+# (`^`) rather than an unanchored substring search: a legitimate board whose
+# title merely CONTAINS one of these words away from the front (e.g. a real
+# exercise titled "Postmortem Template Feedback Round") must not
+# false-positive, and a substring search would catch it. Case is matched as
+# authored -- `TEMPLATE` and `Template` are both listed explicitly (both
+# casings are independently attested in the corpus) rather than compiling
+# with `re.IGNORECASE`, so this stays a match on the specific tokens the
+# issue measured rather than a blanket case-fold that could also catch an
+# ordinary title that happens to start with the common word "template" as
+# its own subject.
+DEFAULT_TEMPLATE_BOARD_TITLE_PATTERN = r"^(TEMPLATE|Template|EXAMPLE|Copy of)\b"
+
+
+def resolve_template_board_title_pattern(config: dict[str, Any] | None = None) -> re.Pattern[str]:
+    """Resolve ``librarian.template_board_title_pattern`` (issue athenaeum#1464).
+
+    Mirrors :func:`resolve_page_size_threshold_chars`'s validation contract:
+    the configured value must be a non-empty string that also compiles as a
+    valid regex, or this resolver falls back to
+    :data:`DEFAULT_TEMPLATE_BOARD_TITLE_PATTERN`. A YAML scalar of the wrong
+    type, an empty string, or a string with invalid regex syntax never
+    raises out of this resolver -- each degrades silently to the documented
+    default, the same fail-open contract
+    :func:`gate_template_board_classifications` holds end to end.
+    """
+    pattern_str: str = DEFAULT_TEMPLATE_BOARD_TITLE_PATTERN
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            raw = librarian_cfg.get("template_board_title_pattern")
+            if isinstance(raw, str) and raw:
+                pattern_str = raw
+    try:
+        return re.compile(pattern_str)
+    except re.error:
+        log.warning(
+            "template-board-gate: configured librarian.template_board_title_pattern "
+            "%r failed to compile as a regex; falling back to the documented default",
+            pattern_str,
+        )
+        return re.compile(DEFAULT_TEMPLATE_BOARD_TITLE_PATTERN)
+
+
+def _template_board_title(raw_content: str) -> str | None:
+    """Extract a raw record's board title from its YAML frontmatter (issue athenaeum#1464).
+
+    The board title is the record's own frontmatter ``name`` field -- the
+    only documented title-bearing key for a Lane-A raw-intake record
+    (``docs/extending/adapter-contract.md`` §2: "Short slug for the
+    entity/topic; helps the compiler place and title the entry"). This is
+    the verbatim board-title text as the adapter wrote it (e.g. ``"TEMPLATE
+    - Retro Exercise"``), which is NOT the same string as the name tier-2
+    classification later mints for a create -- see the module-level note
+    above for why that distinction is exactly what forces this gate to read
+    raw frontmatter instead of a classified name.
+
+    Fails open: ``raw_content`` is arbitrary file text, so no frontmatter
+    block, malformed YAML, or a missing/non-string ``name`` field all
+    return ``None`` rather than raising.
+    :func:`athenaeum.models.parse_frontmatter` already swallows
+    ``yaml.YAMLError`` and a missing ``---`` block internally and returns
+    ``({}, text)``; this wrapper only has to additionally guard the case
+    where the parsed frontmatter is not a ``dict`` at all (a YAML document
+    whose top level is a list or scalar) and the case where ``name`` is
+    present but not a string.
+    """
+    meta, _ = parse_frontmatter(raw_content)
+    if not isinstance(meta, dict):
+        return None
+    name = meta.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+@dataclass(frozen=True)
+class TemplateBoardGateOutcome:
+    """Result of :func:`gate_template_board_classifications` (issue athenaeum#1464)."""
+
+    kept: list[ClassifiedEntity]
+    escalations: tuple[EscalationItem, ...]
+
+
+def gate_template_board_classifications(
+    classified: list[ClassifiedEntity],
+    raw_ref: str,
+    raw_content: str = "",
+    config: dict[str, Any] | None = None,
+) -> TemplateBoardGateOutcome:
+    """Stop tier-2 from minting a `type: concept` page per reusable
+    exercise-TEMPLATE board (issue athenaeum#1464).
+
+    Sibling to :func:`gate_create_name_classifications` -- call it
+    immediately alongside that gate, at the same seam, in both transports.
+    See the module-level comment above this function for why this cannot be
+    folded into that gate or into :func:`validate_create_name`.
+
+    **Scope.** Returns every input classification in ``kept``, unchanged,
+    with ``escalations=()``, whenever any of the following hold (in this
+    order, cheapest check first):
+
+    - ``raw_ref``'s source segment (``raw_ref.split("/", 1)[0]``) is not
+      :data:`TEMPLATE_BOARD_GATE_SOURCE` -- this is not a
+      ``mural-board-summary`` record at all.
+    - ``raw_content`` carries no usable board title (see
+      :func:`_template_board_title`'s fail-open contract).
+    - The title does not match :func:`resolve_template_board_title_pattern`.
+
+    Each of these is a fail-open, byte-identical-to-before path -- a
+    record this gate cannot confidently classify as a template board is
+    left completely alone.
+
+    **Create-bound only** (mirrors :func:`gate_create_name_classifications`
+    exactly): ``if not c.is_new: kept.append(c); continue``. A
+    classification with ``is_new=False`` names an EXISTING page this raw
+    file is about to update/merge into; that page already exists, so
+    suppressing it here would be suppressing MATCHING, not creation, which
+    is out of scope exactly as it is for the sibling gate.
+
+    **On a title-token match**, every remaining create-bound classification
+    is dropped from ``kept`` and an
+    :class:`~athenaeum.models.EscalationItem` (``conflict_type=
+    "template_board"``) is appended to ``escalations``, carrying
+    ``raw_content[:2000]`` so the observation survives raw-file unlinking --
+    the same "a decline alone would destroy the fact" contract
+    :func:`gate_create_name_classifications` documents. **The caller MUST
+    flush ``escalations`` through :func:`tier4_escalate` /
+    ``_pending_questions.md``**, exactly as that sibling gate requires, or
+    the fact is lost when the raw file is unlinked after this run
+    regardless of outcome.
+
+    **No corpus mutation of any kind.** This function only reclassifies
+    in-memory :class:`ClassifiedEntity` objects before any
+    :class:`EntityAction` is built. No existing page is read, modified,
+    moved, or deleted -- unlike :func:`check_page_size_gate`'s configurable
+    ``split``/``log_demote`` actions, this gate has no action knob at all:
+    it is hardcoded escalate-only, by design (issue athenaeum#1464 is
+    explicit that it must not inherit that configurability).
+    """
+    source = raw_ref.split("/", 1)[0] if "/" in raw_ref else raw_ref
+    if source != TEMPLATE_BOARD_GATE_SOURCE:
+        return TemplateBoardGateOutcome(kept=list(classified), escalations=())
+
+    title = _template_board_title(raw_content)
+    if title is None:
+        return TemplateBoardGateOutcome(kept=list(classified), escalations=())
+
+    pattern = resolve_template_board_title_pattern(config)
+    if not pattern.match(title):
+        return TemplateBoardGateOutcome(kept=list(classified), escalations=())
+
+    kept: list[ClassifiedEntity] = []
+    escalations: list[EscalationItem] = []
+    for c in classified:
+        if not c.is_new:
+            kept.append(c)
+            continue
+        log.warning(
+            "tier3-create-template-board-suppressed ref=%s name=%r title=%r",
+            raw_ref,
+            c.name,
+            title,
+        )
+        escalations.append(
+            EscalationItem(
+                raw_ref=raw_ref,
+                entity_name=c.name,
+                conflict_type="template_board",
+                description=(
+                    f"Tier-3 create for {c.name!r} was suppressed (issue "
+                    f"athenaeum#1464): the source board's title ({title!r}) "
+                    "matches the configured reusable-template token "
+                    "pattern, so this board is a reusable exercise "
+                    "template, not a record about a specific entity. No "
+                    "page was created; the observation follows so the "
+                    f"fact is not lost:\n\n{raw_content[:2000]}"
+                ),
+            )
+        )
+    return TemplateBoardGateOutcome(kept=kept, escalations=tuple(escalations))
+
+
+# ---------------------------------------------------------------------------
 # Tier 2 — Classification (fast LLM)
 # ---------------------------------------------------------------------------
 

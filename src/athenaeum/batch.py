@@ -104,6 +104,7 @@ from athenaeum.tiers import (
     check_page_size_gate,
     existing_body_needs_full_echo,
     gate_create_name_classifications,
+    gate_template_board_classifications,
     parse_merge_ops_response,
     parse_tier2_entities,
     partition_code_artifact_classifications,
@@ -1464,6 +1465,15 @@ def process_batch_run(
         )
         classified = name_gate_outcome.kept
         st.address_escalations.extend(name_gate_outcome.escalations)
+        # Issue athenaeum#1464: template-board create gate, same call as the
+        # sync transport (librarian.process_one) — sibling to the
+        # athenaeum#1173 name gate immediately above, same seam, BEFORE
+        # actions are built, symmetric with the sync transport above.
+        template_board_outcome = gate_template_board_classifications(
+            classified, st.raw.ref, st.raw.content, config
+        )
+        classified = template_board_outcome.kept
+        st.address_escalations.extend(template_board_outcome.escalations)
         for c in classified:
             st.actions.append(
                 EntityAction(
