@@ -52,10 +52,14 @@ Both steps are change-gated so an idle SessionEnd is cheap:
 1. **Incremental `ingest`** of the session's new/changed raw intake — a
    fast no-op (zero LLM) when nothing is new; structured entries compile
    with no model cost.
-2. **Then `reindex`, but only when the compile actually ran and
-   succeeded.** An idle SessionEnd does no LLM work and no reindex; a
-   failed compile never indexes a half-built wiki; `--dry-run` touches
-   nothing.
+2. **Then `reindex`, when the compile ran — or when the index is stale.**
+   A compile that ran always reindexes. A no-op compile consults the index
+   manifest (a stat-prefiltered corpus walk; no chromadb, no embedding
+   model) and reindexes only if pages are actually pending, so a page that
+   missed its indexing window is picked up by a later tick instead of
+   drifting out of the index forever. An idle SessionEnd against an
+   already-current index does no LLM work and no reindex; a failed compile
+   never indexes a half-built wiki; `--dry-run` touches nothing.
 
 The result: a memory `remember`ed in one session becomes recallable as a
 fully-resolved wiki entry the moment that session ends, with no waiting on

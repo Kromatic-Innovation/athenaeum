@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `session-end` reindexed only when the *compile* found new raw, not when the
+  *index* was behind the corpus. Ingest and the index keep separate manifests,
+  so a page that missed its indexing window was `new_or_changed: 0` forever
+  after and no later tick ever reconsidered it — the index silently drifted
+  below the corpus and stayed there. A no-op compile now consults the index
+  manifest (a stat-prefiltered corpus walk; no chromadb opened, no embedding
+  model loaded) and reindexes when pages are genuinely pending. An idle tick
+  against an already-current index still does no reindex.
+  ([#1456](https://github.com/Kromatic-Innovation/athenaeum/issues/1456))
+
 ## [0.20.0] - 2026-09-04
 
 ### ⚠️ Repository history was rewritten before this release — re-clone required
