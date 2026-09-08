@@ -99,6 +99,7 @@ MODULE_LAYER: dict[str, int] = {
     "wiki_write_guard": 2,
     "zero_yield": 2,
     # L3 -- services.
+    "adapter_provenance": 3,
     "batch_state": 3,
     "calibration": 3,
     "clusters": 3,

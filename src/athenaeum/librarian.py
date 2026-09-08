@@ -92,6 +92,7 @@ from typing import Any, Callable
 
 from athenaeum import batch_state, detection_state, push_state, spend, zero_yield
 from athenaeum._retry import TransientAPIError
+from athenaeum.adapter_provenance import record_adapter_provenance_for_pages
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.authority import AuthorityManifest, load_authority_manifest
 from athenaeum.bounce_contract import (
@@ -1575,6 +1576,7 @@ def _apply_tier3_results(
     index: EntityIndex,
     config: dict[str, object] | None,
     incoming_handles: dict[str, object] | None = None,
+    raw: RawFile | None = None,
 ) -> None:
     """Write a Tier-3 result set to disk and fold it into *result* in place.
 
@@ -1603,6 +1605,15 @@ def _apply_tier3_results(
     partial-progress call site deliberately passes ``None`` here — see its
     call site's comment — to preserve issue athenaeum#994's guarantee that
     already-computed partial progress always lands durably.
+
+    ``raw`` (issue athenaeum#1462, keyword-only, ``None`` default) is the raw
+    file this whole result set was derived from. When supplied, this is the
+    one place in the pipeline where a raw record's frontmatter and the
+    uid(s) it just landed on are both known at once — see
+    :mod:`athenaeum.adapter_provenance`'s module docstring for why that
+    makes this the compile-time join point the ledger is written from.
+    ``None`` (every pre-athenaeum#1462 caller, and any caller with no raw
+    file to attribute to) skips the ledger write entirely.
     """
     if incoming_handles:
         _written_metas: list[dict[str, object]] = []
@@ -1618,6 +1629,11 @@ def _apply_tier3_results(
 
     for _update_path, _update_content in pending_updates:
         atomic_write_text(_update_path, _update_content)
+
+    # Issue athenaeum#1462: uids this call actually WROTE (never a
+    # type-rejected create — see the ``continue`` below), for the
+    # adapter-provenance ledger call at the end of this function.
+    _written_uids: list[str] = list(updated_uids)
 
     for entity in new_entities:
         page_path = wiki_root / entity.filename
@@ -1646,7 +1662,20 @@ def _apply_tier3_results(
         atomic_write_text(page_path, rendered)
         index.register(entity)
         result.created.append(entity)
+        _written_uids.append(entity.uid)
         log.info("  Created: %s → %s", entity.name, entity.filename)
+
+    # Issue athenaeum#1462: ledger the source-object <-> page join for every
+    # uid this call just wrote, from the raw record's own frontmatter. A
+    # no-op when `raw` is absent (see this function's docstring) or the raw
+    # file's source has no declared id-key convention
+    # (`adapter_provenance.SOURCE_OBJECT_ID_KEYS`) — see that module for the
+    # full mechanism this closes over :func:`athenaeum.tiers.tier3_create`'s
+    # fixed-field write path.
+    if raw is not None and _written_uids:
+        record_adapter_provenance_for_pages(
+            raw.source, raw.ref, raw.content, _written_uids
+        )
 
     result.updated.extend(updated_uids)
     result.escalated.extend(escalations)
@@ -2198,6 +2227,7 @@ def process_one(
                 index=index,
                 config=config,
                 incoming_handles=incoming_handles,
+                raw=raw,
             )
         return result
 
@@ -2249,6 +2279,7 @@ def process_one(
             wiki_root=wiki_root,
             index=index,
             config=config,
+            raw=raw,
         )
         raise
 
@@ -2263,6 +2294,7 @@ def process_one(
         index=index,
         config=config,
         incoming_handles=incoming_handles,
+        raw=raw,
     )
     return result
 
