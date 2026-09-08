@@ -636,6 +636,285 @@ class TestReindexGateOnStaleness:
         )
         assert third.reindexed is False
 
+    # -- athenaeum#1459: the preview must apply the BUILD's invalidation checks --
+    #
+    # A manifest hash-diff is a strict SUBSET of what ``build_index`` treats as
+    # invalidating. Each test below breaks the index in a way the corpus scan
+    # cannot see — the manifest still matches the wiki byte for byte — and
+    # asserts the next idle tick rebuilds anyway. Each then asserts a THIRD
+    # tick is idle again: a blocker that never clears would be an infinite
+    # rebuild loop, which is the athenaeum#1458 failure in the opposite
+    # direction.
+
+    def test_deleted_index_under_an_intact_manifest_is_rebuilt(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """Row 1, probe-confirmed on athenaeum#1458: delete the index file and
+        leave the manifest, and the hash-diff reports 0 forever — so nothing
+        ever rebuilt the index that recall was querying.
+
+        The build has always refused to reuse an index whose DB is gone; only
+        the preview did not know that.
+        """
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert first.reindexed is True
+
+        db = cache / "wiki-index.db"
+        manifest = cache / "fts5-manifest.json"
+        assert db.is_file() and manifest.is_file()
+        db.unlink()  # the manifest stays: the corpus scan still matches it.
+
+        second = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert second.ingest.noop is True  # nothing new to compile...
+        assert second.reindexed is True  # ...but the index was gone.
+        assert db.is_file()
+
+        third = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert third.reindex_would_change == 0 and third.reindexed is False
+
+    def test_non_vector_backend_name_previews_the_index_reindex_builds(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """``backend="keyword"`` must consult the FTS5 blocker, because that is
+        what :func:`reindex` actually builds under any non-``vector`` name.
+
+        ``reindex`` is ``if backend_name == "vector": build_vector_index(...)
+        else: build_fts5_index(...)`` — a two-way split, not a three-way one.
+        Resolving the preview's backend with ``get_backend(backend_name)``
+        instead of the ``"fts5"`` literal hands back ``KeywordBackend``, whose
+        blocker is unconditionally ``None`` because that class persists
+        nothing. The gate then never fires and athenaeum#1459 survives verbatim
+        under this config, while the fts5 twin above still passes — which is
+        exactly why that test cannot stand in for this one.
+        """
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="keyword",
+        )
+        assert first.reindexed is True
+        # Proof of the premise: a NON-vector name built an FTS5 index on disk.
+        db = cache / "wiki-index.db"
+        assert db.is_file(), "reindex maps every non-vector name to fts5"
+
+        db.unlink()  # manifest stays, so the hash-diff alone still reports 0.
+
+        second = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="keyword",
+        )
+        assert second.ingest.noop is True
+        assert second.reindexed is True
+        assert db.is_file()
+
+        third = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="keyword",
+        )
+        assert third.reindex_would_change == 0 and third.reindexed is False
+
+    def test_deleted_vector_collection_under_an_intact_manifest_is_rebuilt(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """Row 1 on the PRODUCTION backend: the fts5 twin above covers the
+        ``wiki-index.db`` stat; this covers the vector backend's ``is_dir``
+        on the collection dir.
+
+        Worth its own test because it is the only vector blocker that is a
+        filesystem check — the model and schema rows are both manifest-field
+        comparisons, so neither would catch a missing ``stat``.
+        """
+        pytest.importorskip("chromadb")
+        import shutil
+
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert first.reindexed is True and first.backend == "vector"
+
+        vector_dir = cache / "wiki-vectors"
+        assert vector_dir.is_dir() and (cache / "vector-manifest.json").is_file()
+        shutil.rmtree(vector_dir)  # the manifest stays.
+
+        second = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert second.ingest.noop is True
+        assert second.reindexed is True
+        assert vector_dir.is_dir()
+
+        third = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert third.reindex_would_change == 0 and third.reindexed is False
+
+    def test_embedding_model_swap_forces_a_reindex(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """Row 2, the most damaging in practice: the corpus stays embedded under
+        the old model while queries embed under the new one. No error, no log
+        line — just silently degraded retrieval, because every hash still
+        matches.
+
+        The manifest is edited directly rather than pointing the config at a
+        real second model: the blocker compares recorded-vs-configured names,
+        and this way no second sentence-transformer is ever downloaded.
+        """
+        pytest.importorskip("chromadb")
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert first.reindexed is True and first.backend == "vector"
+
+        manifest = cache / "vector-manifest.json"
+        payload = json.loads(manifest.read_text())
+        real_model = payload["embedding_model"]
+        payload["embedding_model"] = "superseded-model-v0"
+        manifest.write_text(json.dumps(payload))
+
+        second = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert second.ingest.noop is True
+        assert second.reindexed is True
+        # The rebuild re-embedded under the configured model and re-stamped it.
+        assert json.loads(manifest.read_text())["embedding_model"] == real_model
+
+        third = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert third.reindex_would_change == 0 and third.reindexed is False
+
+    def test_metadata_schema_roll_forces_a_reindex(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """Row 3: a metadata-schema roll (athenaeum#964) must re-embed every page,
+        because a stat-matched incremental build never re-reads an unchanged
+        page's frontmatter and would leave it on the old metadata shape.
+
+        Same blind spot as the model swap — the contract changed, the bytes
+        did not, so a hash-diff sees nothing to do.
+        """
+        pytest.importorskip("chromadb")
+        from athenaeum.librarian import session_end
+        from athenaeum.search import VectorBackend
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert first.reindexed is True
+
+        manifest = cache / "vector-manifest.json"
+        payload = json.loads(manifest.read_text())
+        assert payload["metadata_schema_version"] == VectorBackend._METADATA_SCHEMA_VERSION
+        payload["metadata_schema_version"] = 1  # a manifest from the old contract
+        manifest.write_text(json.dumps(payload))
+
+        second = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert second.ingest.noop is True
+        assert second.reindexed is True
+        assert (
+            json.loads(manifest.read_text())["metadata_schema_version"]
+            == VectorBackend._METADATA_SCHEMA_VERSION
+        )
+
+        third = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert third.reindex_would_change == 0 and third.reindexed is False
+
 
 # ---------------------------------------------------------------------------
 # session-end CLI wrapper
