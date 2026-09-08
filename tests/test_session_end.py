@@ -556,6 +556,86 @@ class TestReindexGateOnStaleness:
         assert second.reindexed is False
         assert second.reindex_would_change == 0
 
+    def test_unembedded_class_does_not_wedge_the_gate_open(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """Scan parity: the staleness preview must apply the SAME filters as the
+        build, or the gate never closes.
+
+        ``config`` gates the athenaeum#532 ``is_embedded`` filter inside
+        ``_scan_indexed_records``. The build threads it and therefore writes a
+        manifest WITHOUT pages whose class routes to an ``embedded: false``
+        surface. If the preview omits it, those pages are counted as ``added``
+        against a manifest that will never contain them — a delta that cannot
+        converge, so every idle tick reindexes forever. On the vector backend
+        that is a chromadb open plus an embedding-model load per tick.
+
+        The other two negative tests run against a corpus with zero filtered
+        pages, so they pin the gate arithmetic but cannot catch parity drift.
+        This one can: it asserts the count CONVERGES across consecutive idle
+        ticks, not merely that it is zero once.
+        """
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        # A surface INSIDE wiki/ (so both scans still walk the page) that is
+        # nonetheless not embedded — the shape that makes the two scans differ.
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n"
+            "  adapters:\n"
+            "    notes-unembedded:\n"
+            "      backing_store: markdown\n"
+            "      surface_root: wiki\n"
+            "      corpus_policy:\n"
+            "        embedded: false\n"
+            "        recallable: false\n"
+            "        merge_eligible: false\n"
+            "  mapping:\n"
+            "    note: notes-unembedded\n"
+        )
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        assert first.reindexed is True
+
+        # A page the BUILD will refuse to index (unembedded class) but which
+        # sits in the scanned tree all the same.
+        (root / "wiki" / "scratch-note.md").write_text(
+            "---\nname: Scratch\ntype: note\n---\n\nbody\n"
+        )
+
+        # Two consecutive idle ticks. The first may legitimately reindex (the
+        # page is new to the scan); the second must NOT — by then the build has
+        # had its chance and the delta has to have converged to zero.
+        session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+        third = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+
+        assert third.ingest.noop is True
+        assert third.reindex_would_change == 0, (
+            "staleness preview disagrees with the build about which pages count "
+            "— the gate is wedged open and every idle tick will reindex"
+        )
+        assert third.reindexed is False
+
 
 # ---------------------------------------------------------------------------
 # session-end CLI wrapper

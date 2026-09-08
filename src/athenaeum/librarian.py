@@ -9872,6 +9872,17 @@ def _reindex_would_change(
             include_globs=include_globs,
             exclude_globs=exclude_globs,
             prior=prior,
+            # MUST match what ``reindex`` -> ``build_*_index`` passes, or the
+            # preview and the build disagree about which pages count. ``config``
+            # gates the athenaeum#532 ``is_embedded`` filter inside
+            # ``_scan_indexed_records``: without it the build drops pages whose
+            # entity class routes to an ``embedded: false`` surface and writes a
+            # manifest without them, while this scan counts them — so they read
+            # as ``added`` in every diff, forever. Harmless while this was a
+            # dry-run-only preview (a cosmetic count); load-bearing since
+            # athenaeum#1456 made the diff GATE the reindex, where a permanent
+            # non-zero delta means every idle tick rebuilds the whole index.
+            config=config,
         )
     }
     stored_hashes = _manifest_hashes(stored)
@@ -9965,9 +9976,16 @@ def session_end(
        Internally a fast no-op (zero LLM) when nothing is new; ``tier0``
        structured entries compile with no model cost.
     2. **Then** :func:`reindex` — when the compile actually ran (``ingest`` was
-       not a no-op), or when the index is *stale* against the corpus even
-       though nothing new was compiled (issue athenaeum#1456). A failed
+       not a no-op), or when the index MANIFEST disagrees with the corpus scan
+       even though nothing new was compiled (issue athenaeum#1456). A failed
        compile or a ``dry_run`` never touches the index.
+
+    Note the precision: the staleness arm compares *manifest hashes*, which is
+    narrower than "the index is stale". It does NOT notice a deleted index file
+    whose manifest survived, a changed ``embedding_model``, or a rolled
+    metadata-schema version — all of which :func:`reindex` itself treats as
+    invalidating. Those remain under-reindex gaps (not regressions: before
+    athenaeum#1456 an idle tick reindexed *never*), tracked separately.
 
     The staleness arm exists because ingest and the index keep **separate**
     manifests. A raw file ingest has already recorded is ``new_or_changed: 0``
