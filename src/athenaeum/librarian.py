@@ -9891,7 +9891,7 @@ def _reindex_would_change(
     outright, embedded under a superseded model, carrying a rolled metadata
     schema — while the manifest still matched the corpus and this returned 0
     forever. The build's own answer to "is this index usable as-is?" is now
-    consulted first (``_incremental_reuse_blocker``, shared with
+    consulted first (``incremental_reuse_blocker``, shared with
     :meth:`~athenaeum.search.FTS5Backend.build_index` so the two cannot drift
     apart again); a blocker discards the manifest for the diff, which reports
     the whole corpus as pending — exactly what the full rebuild that follows
@@ -9959,7 +9959,7 @@ def _reindex_would_change(
         if backend_name == "vector"
         else get_backend("fts5")
     )
-    blocker = backend_obj._incremental_reuse_blocker(resolved_cache, stored)
+    blocker = backend_obj.incremental_reuse_blocker(resolved_cache, stored)
     if blocker is not None and stored is not None:
         # The build will refuse to reuse this index (athenaeum#1459) and rebuild it
         # from scratch, so preview it the way the build will see it: with no

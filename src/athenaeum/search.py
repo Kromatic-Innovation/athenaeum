@@ -179,7 +179,7 @@ class SearchBackend(Protocol):
         """
         ...
 
-    def _incremental_reuse_blocker(
+    def incremental_reuse_blocker(
         self, cache_dir: Path, stored: dict[str, Any] | None
     ) -> str | None:
         """Say why the on-disk index cannot be reused as-is (issue athenaeum#1459).
@@ -204,6 +204,13 @@ class SearchBackend(Protocol):
         constant-cost header read. Never open a collection, load an embedding
         model, or walk the corpus. Caller policy (``incremental``, ``as_of``)
         is NOT considered here — only the state of what is on disk.
+
+        Public by name as well as by contract (issue athenaeum#1474). It was
+        introduced underscore-prefixed, which is the convention for
+        module-private and is the opposite of what this member is for: it is a
+        cross-module contract, deliberately called from ``athenaeum.librarian``
+        into ``athenaeum.search``, and a reader who trusts the underscore would
+        reasonably tidy that call away as a layering violation.
         """
         ...
 
@@ -959,7 +966,7 @@ def _full_rehash_due(
       detected on the idle path at all — permanently, not merely until the
       next tick.
 
-    Deliberately NOT a ``_incremental_reuse_blocker`` reason: a backstop-due
+    Deliberately NOT an ``incremental_reuse_blocker`` reason: a backstop-due
     index IS reusable as-is, and folding the condition in there would make both
     builds take the ``not do_incremental`` branch — an FTS5 table wipe and, on
     the vector backend, an ``rmtree`` plus a full re-embed of the corpus every
@@ -1079,7 +1086,7 @@ class FTS5Backend:
     )
     _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?,?,?)"
 
-    def _incremental_reuse_blocker(
+    def incremental_reuse_blocker(
         self, cache_dir: Path, stored: dict[str, Any] | None
     ) -> str | None:
         """Why this on-disk index cannot be reused as-is, or ``None`` (athenaeum#1459).
@@ -1259,7 +1266,7 @@ class FTS5Backend:
                 self._SCHEMA_VERSION,
             )
         # Issue athenaeum#1459: the invalidation checks themselves live in
-        # ``_incremental_reuse_blocker`` so the staleness preview
+        # ``incremental_reuse_blocker`` so the staleness preview
         # (``librarian._reindex_would_change``) applies the SAME ones. Only the
         # caller policy (``incremental``, ``as_of``) is decided here. The athenaeum#530
         # warning above stays where it is — it is build-path diagnostics, not
@@ -1267,7 +1274,7 @@ class FTS5Backend:
         do_incremental = (
             incremental
             and as_of is None
-            and self._incremental_reuse_blocker(cache_dir, stored) is None
+            and self.incremental_reuse_blocker(cache_dir, stored) is None
         )
 
         # Issue athenaeum#373: self-healing full-re-hash backstop. On the incremental
@@ -1651,13 +1658,13 @@ class VectorBackend:
         # started before an out-of-process reindex never serves stale results.
         self._seen_generation: str | None = None
 
-    def _incremental_reuse_blocker(
+    def incremental_reuse_blocker(
         self, cache_dir: Path, stored: dict[str, Any] | None
     ) -> str | None:
         """Why this on-disk index cannot be reused as-is, or ``None`` (athenaeum#1459).
 
         The vector half of the shared "is this index usable as-is?" answer —
-        see :meth:`FTS5Backend._incremental_reuse_blocker` for why both the
+        see :meth:`FTS5Backend.incremental_reuse_blocker` for why both the
         build and the staleness preview consult one implementation.
 
         The three blockers are the ones :meth:`build_index` has always applied:
@@ -1844,14 +1851,14 @@ class VectorBackend:
         # Incremental only when we have a prior manifest, a live collection
         # dir, the SAME embedding model (a model swap must re-embed all), AND
         # the SAME metadata schema version — all of which
-        # ``_incremental_reuse_blocker`` answers, so the athenaeum#1456 staleness
+        # ``incremental_reuse_blocker`` answers, so the athenaeum#1456 staleness
         # preview can apply the identical checks instead of its own copy
         # (issue athenaeum#1459). Only the caller policy (``incremental``,
         # ``as_of``) is decided here.
         do_incremental = (
             incremental
             and as_of is None
-            and self._incremental_reuse_blocker(cache_dir, stored) is None
+            and self.incremental_reuse_blocker(cache_dir, stored) is None
         )
 
         # Issue athenaeum#373: self-healing full-re-hash backstop (identical to FTS5).
@@ -2334,7 +2341,7 @@ class KeywordBackend:
     small wikis or tests — FTS5 is the recommended default for real use.
     """
 
-    def _incremental_reuse_blocker(
+    def incremental_reuse_blocker(
         self, cache_dir: Path, stored: dict[str, Any] | None
     ) -> str | None:
         """Always ``None``: there is no persisted index to invalidate (athenaeum#1459).
