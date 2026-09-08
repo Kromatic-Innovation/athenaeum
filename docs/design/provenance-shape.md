@@ -1176,6 +1176,7 @@ the read-side parsers (`models.parse_asserter`,
 | §9 multi-dimensional scoped claims | athenaeum#329 | Buildable subset: `scope: {org, locale}` poset (trees) + time, versioned tree config (`scope.org`/`scope.locale`), three-way `scope_comparison` verdict (DISJOINT / OVERRIDE / OVERLAP) wired into `resolutions._scope_verdict_proposal`, and `scope_a`/`scope_b` resolver actions (time-dimension narrowing enactment). **Deferred (ADR):** time-nesting OVERRIDE, org/locale coordinate pinning enactment, recall `serve --scope` filter, team/multi-tenant scope-identity (athenaeum#314). |
 | §10 channel split + model + asserter | athenaeum#326 | Extend `SOURCE_TYPES` with `agent-observed` and `model-prior`; add `model:` / `on_behalf_of:` / `asserter:` claim-level frontmatter fields; extend `remember(sources=...)` with `_source_type` / `_source_ref` / `_model` / `_on_behalf_of` / `_asserter` wrapper keys; drop `model-prior:<model-id>` into the resolver's precedence taxonomy below `script:`. |
 | §12 claim kind + opinion attribution | athenaeum#327 | Add `claim_kind:` (`fact`/`observation`/`opinion`/`decision`/`policy`/`definition`) classified once at intake (`claim_kind.classify_claim_kind`, tier2-style), round-tripped by tier0; add `compare_asserters` (`same`/`different`/`unknown`) over the §10.3 identity key; add the `attribute_both` resolver action + `_stance_attribution_verdict` short-circuit + detector `stance` conflict type. An opinion is NEVER resolved by precedence; unknown asserter → keep-both fallback. |
+| §13 adapter frontmatter provenance ledger | athenaeum#1462 | New `src/athenaeum/adapter_provenance.py`: bounded `SOURCE_OBJECT_ID_KEYS`/`ADAPTER_PROVENANCE_VALUE_KEYS`, `record_adapter_provenance_for_pages` wired into `librarian._apply_tier3_results`, `resolve_source_for_page` for the raw-file-independent join. Mechanism (b) chosen over (a); rejected-alternative reasoning in the module docstring. |
 
 ## 12. Claim kind + opinion attribution (`claim_kind:`, `attribute_both`)
 
@@ -1225,3 +1226,58 @@ For an evaluative pair (both `claim_kind: opinion`, or detector
 (`flip_action` → `None`), auto-apply threshold 0.90. `merge._emit_escalation`
 drops the pending-question escalation for `attribute_both`, so the pair never
 re-queues to the human. Full behavior lock: `docs/design/conflict-resolution.md` §13.
+
+## 13. Adapter frontmatter provenance ledger (issue athenaeum#1462)
+
+**Status: locked, implemented.** A Lane A adapter's own frontmatter (e.g.
+`mural-board-summary`'s `mural_board_id` / `room` / `workspace` /
+`created_on` / `updated_on` / `text_fragment_count` / `archive_path` /
+`template_only`) does not survive Tier 2/3 compile onto the applied page —
+`ClassifiedEntity` / `EntityAction` / `WikiEntity` all carry a fixed field
+set with no general-purpose extra-frontmatter escape hatch, and Tier 3's
+create/merge prompts never receive those keys at all. Once the raw record
+is unlinked post-compile, the join from a compiled page back to its source
+object is gone.
+
+**Decision: mechanism (b) — a source-object ↔ page provenance ledger,
+written at Tier-3-apply time, outside the wiki corpus.** NOT (a) (preserving
+selected keys onto the compiled page itself). Full rationale, the bounded
+key set, and the schema live in `src/athenaeum/adapter_provenance.py`'s
+module docstring — this section is the pointer this doc's own convention
+(§1's "resolved by ONE decided shape") requires, not a duplicate of it.
+Summary of the two reasons (a) was rejected:
+
+1. **Structural.** Landing an adapter key on the page would require new
+   `WikiEntity` dataclass fields, a new `render()` branch, and new plumbing
+   through `ClassifiedEntity`/`EntityAction`/both `tier3_derive_actions`
+   branches (create AND merge) — materially larger than this module.
+2. **Leakage.** `archive_path` is an operator-machine absolute filesystem
+   path; `room`/`workspace` are a third-party tool's internal taxonomy —
+   neither is a fact about the entity a compiled, recall-visible page
+   describes. A ledger a caller must deliberately query is the
+   corpus-hygiene-safe home for both.
+
+**Mechanism.** `adapter_provenance.SOURCE_OBJECT_ID_KEYS` (closed map:
+Lane A `source` → its own object-id frontmatter key) and
+`adapter_provenance.ADAPTER_PROVENANCE_VALUE_KEYS` (closed set of
+descriptive keys captured alongside the id) are the two bounded
+collections — AC2's "a named key list, not whatever the adapter sent."
+Widening either is an in-repo code change; an adapter cannot opt itself in,
+or widen its own captured set, by emitting a new frontmatter key.
+`athenaeum.librarian._apply_tier3_results` is the wiring point: it is the
+one place in the compile pipeline where a raw record's frontmatter and the
+uid(s) it just produced are both known at once, so it calls
+`adapter_provenance.record_adapter_provenance_for_pages(raw.source,
+raw.ref, raw.content, <uids just written>)` right after every create/update
+write lands. The ledger itself is a JSONL file under the resolved cache
+dir (`_adapter_provenance_records.jsonl`, mirrors
+`decay_sweep.SWEEP_LEDGER_FILENAME`'s "outside the wiki/raw corpus"
+convention) — never git-tracked, never rendered into a recall hit.
+`adapter_provenance.resolve_source_for_page(page_uid)` is the read side:
+it reads ONLY the ledger, never `raw/`, so it still answers correctly after
+the raw record backing a page has been unlinked.
+
+Pinned by `tests/test_adapter_provenance_1462.py`, including an end-to-end
+test that compiles a fixture record through `athenaeum.librarian.process_one`,
+deletes the raw file, and resolves page → source object from the ledger
+alone.
