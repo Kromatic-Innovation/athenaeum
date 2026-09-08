@@ -36,6 +36,12 @@ Two sub-commands:
   :mod:`athenaeum.sensitivity_lint`, which holds all the check logic; exits
   non-zero only on a completeness finding (a D4 policy-mismatch finding is
   advisory and never fails the gate on its own).
+- ``audit-h1-redaction`` — read-only audit (issue athenaeum#1461) for pages whose
+  H1 heading line carries :data:`~athenaeum.storage_migrate.INLINE_REDACTION_MARKER`,
+  classified via :mod:`athenaeum.pii_h1_audit` into a defect population
+  (marker consumed the whole heading subject) and a non-defect population
+  (marker replaced one inline token inside an otherwise-intact title). Never
+  writes; see that module's docstring for the classification rule.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` — this
@@ -69,6 +75,8 @@ from athenaeum.pii import (
     scan_corpus_pii,
     scan_excluded_by_name,
 )
+from athenaeum.pii_h1_audit import MARKER_LEADING, find_h1_marker_pages
+from athenaeum.pii_h1_audit import render_report as render_h1_audit_report
 from athenaeum.rules import (
     DispositionPruneMismatchError,
     default_shape_rule_dispositions_path,
@@ -313,6 +321,29 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Emit machine-readable JSON findings instead of plain text.",
     )
 
+    audit_h1_p = s_sub.add_parser(
+        "audit-h1-redaction",
+        help=(
+            "Read-only audit (issue athenaeum#1461): report pages whose H1 heading "
+            "line carries the inline-redaction marker, classified into a "
+            "defect population (marker consumed the whole heading subject) "
+            "and a non-defect population (marker replaced one inline token "
+            "inside an otherwise-intact title). Never writes."
+        ),
+    )
+    audit_h1_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge root (default: ~/knowledge).",
+    )
+    audit_h1_p.add_argument(
+        "--wiki-root",
+        type=Path,
+        default=None,
+        help="Wiki directory to scan (default: <knowledge-root>/wiki).",
+    )
+
     prune_p = s_sub.add_parser(
         "prune-dispositions",
         help=(
@@ -350,14 +381,42 @@ def cmd_storage(args: argparse.Namespace) -> int:
         return _cmd_storage_lint_pii(args)
     if sub == "lint-mapping":
         return _cmd_storage_lint_mapping(args)
+    if sub == "audit-h1-redaction":
+        return _cmd_storage_audit_h1_redaction(args)
     if sub == "prune-dispositions":
         return _cmd_storage_prune_dispositions(args)
     print(
         "usage: athenaeum storage {migrate-pii,lint-pii,lint-mapping,"
-        "prune-dispositions} [...]",
+        "audit-h1-redaction,prune-dispositions} [...]",
         file=sys.stderr,
     )
     return 2
+
+
+def _cmd_storage_audit_h1_redaction(args: argparse.Namespace) -> int:
+    """``athenaeum storage audit-h1-redaction`` — read-only, never writes.
+
+    Exit codes mirror :data:`EXIT_PII_FOUND`'s convention: 0 on a clean scan
+    (no H1 heading carries the marker), :data:`EXIT_PII_FOUND` when the
+    DEFECT population (:data:`~athenaeum.pii_h1_audit.MARKER_LEADING`) is
+    non-empty. A non-defect (marker-mid-heading) finding alone does not
+    trigger the non-zero exit — it is reported, not gated on, since it is
+    documented, intended behaviour (issue athenaeum#1461).
+    """
+    knowledge_root = _resolve_knowledge_root(args)
+    wiki_root = (
+        args.wiki_root.expanduser().resolve()
+        if args.wiki_root
+        else knowledge_root / "wiki"
+    )
+    if not wiki_root.is_dir():
+        print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
+        return 1
+    findings = find_h1_marker_pages(wiki_root)
+    print(render_h1_audit_report(findings))
+    if any(f.classification == MARKER_LEADING for f in findings):
+        return EXIT_PII_FOUND
+    return 0
 
 
 def _apply_plan(plan: PiiMigrationPlan) -> None:

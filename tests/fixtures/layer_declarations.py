@@ -154,6 +154,7 @@ MODULE_LAYER: dict[str, int] = {
     "merge": 4,
     "ordinary_night_table": 4,
     "pending_merges": 4,
+    "pii_h1_audit": 4,
     "pii_restore": 4,
     "quarantine": 4,
     "recompare": 4,
