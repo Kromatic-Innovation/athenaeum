@@ -25,6 +25,7 @@ client's `messages.create` is asserted never-called.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import time
@@ -1182,6 +1183,104 @@ class TestReindexGateOnStaleness:
             assert idle.ingest.noop is True
             assert idle.reindex_would_change == 0
             assert idle.reindexed is False
+
+    # -- athenaeum#1473: pin the embedding-model argument the preview passes --
+
+    def test_configured_embedding_model_reaches_the_preview_backend(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """``_reindex_would_change`` must construct its backend with the
+        CONFIGURED embedding model, not the default.
+
+        The construction at that call site carries an in-code comment that it
+        MUST mirror what ``reindex`` builds, and it is load-bearing in both
+        directions: build under a configured model and preview under the
+        default, and every idle tick sees a phantom model swap and rebuilds the
+        whole index; build under the default and preview under a configured
+        model, and a real swap is invisible. Until now no test used a
+        non-default model at all — ``test_embedding_model_swap_forces_a_reindex``
+        edits the stored manifest instead — so the ``embedding_model=`` keyword
+        could be deleted outright and the whole suite would still pass.
+
+        No second model is ever downloaded: the index is built under the
+        default, only the CONFIG names the other one, and the preview is
+        asserted to construct neither an embedding function nor a chromadb
+        client while it runs.
+        """
+        pytest.importorskip("chromadb")
+        import athenaeum.librarian as lib
+        from athenaeum.config import load_config
+        from athenaeum.search import VectorBackend
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+        )
+        assert first.reindexed is True and first.backend == "vector"
+        default_model = json.loads(
+            (cache / "vector-manifest.json").read_text()
+        )["embedding_model"]
+
+        # Control: nothing is stale, so the settled preview reports zero. Any
+        # non-zero below is therefore attributable to the model, not to drift.
+        assert (
+            lib._reindex_would_change(
+                root,
+                root / "wiki",
+                cache_dir=cache,
+                config=load_config(root),
+                backend="vector",
+            )
+            == 0
+        )
+
+        configured = "sentence-transformers/all-mpnet-base-v2"
+        assert configured != default_model
+        (root / "athenaeum.yaml").write_text(
+            f"vector:\n  embedding_model: {configured}\n"
+        )
+
+        def _boom(*_a: object, **_k: object) -> object:
+            raise AssertionError(
+                "the staleness preview must answer from the manifest alone — "
+                "no embedding model, no chromadb client"
+            )
+
+        monkeypatch.setattr(VectorBackend, "_embedding_function", _boom)
+        monkeypatch.setattr(VectorBackend, "_get_chromadb", _boom)
+
+        with caplog.at_level(logging.INFO, logger="athenaeum.librarian"):
+            delta = lib._reindex_would_change(
+                root,
+                root / "wiki",
+                cache_dir=cache,
+                config=load_config(root),
+                backend="vector",
+            )
+
+        assert delta > 0, (
+            "the corpus is embedded under a model the config no longer names, "
+            "so the preview must report a reindex"
+        )
+        blocker_logs = "\n".join(
+            r.getMessage() for r in caplog.records if "not reusable" in r.getMessage()
+        )
+        assert configured in blocker_logs, (
+            "the preview resolved its backend without the configured embedding "
+            f"model — blocker said: {blocker_logs!r}"
+        )
+        assert f"expected {default_model!r}" not in blocker_logs
 
 
 # ---------------------------------------------------------------------------
