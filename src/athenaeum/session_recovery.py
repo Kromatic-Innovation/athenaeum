@@ -16,9 +16,18 @@ Claude Code's own on-disk layout gives us:
    (``<projects_root>/<scope>/*.jsonl``) and that project's native memory
    files (``<projects_root>/<scope>/memory/*.md``). The scope name is the
    join key — no mapping table, no inference.
-2. The raw intake copy under ``raw/auto-memory/<scope>/`` keeps the memory
-   file's NAME, and (because intake hardlinks rather than copies — see
-   :mod:`athenaeum.retire`) its MTIME is the real write time.
+2. ``raw/auto-memory/<scope>/`` keeps the memory file's NAME, and — on the
+   blessed setup, where each scope is bridged by a SYMLINK to the live memory
+   directory (``examples/claude-code/setup-symlinks.sh``, ``docs/guides/
+   claude-code.md`` §2) — it IS that directory, so ``stat`` follows through
+   and its MTIME is the real write time.
+
+   Athenaeum does not create that bridge and cannot verify it: an operator who
+   syncs with a COPY-based tool instead gets mtimes stamped at sync time. That
+   degrades recovery to *unresolved*, never to *wrong* — a sync-time mtime
+   matches no session window, and :data:`MAX_CITATION_LAG` rejects a citation
+   it no longer explains. Losing a recovery is today's behavior; a wrong one
+   would not be.
 
 Recovery ladder — most direct first, first hit wins, never a guess:
 
@@ -66,8 +75,9 @@ import logging
 import os
 import re
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -97,9 +107,33 @@ _MEMORY_HINT = "/memory/"
 
 _TIMESTAMP_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
 
-#: How many trailing lines to keep so the window's upper bound survives a
-#: malformed or timestamp-less final line.
-_TAIL_LINES = 8
+#: Sentinel for "this write was recorded, but its timestamp was unreadable."
+#: Distinct from "no write recorded" (absent key) so a citation we cannot date
+#: is not mistaken for one dated at the dawn of time.
+_UNKNOWN_WRITE_TIME = datetime.min.replace(tzinfo=timezone.utc)
+
+#: How far a cited write may predate the memory's own write time and still be
+#: taken as explaining its CURRENT content.
+#:
+#: Without this bound the ``write-cited`` rung fabricates. Consider a memory
+#: written by session A (whose transcript survives) and genuinely REWRITTEN
+#: months later by session B (whose transcript has since rolled off). The only
+#: surviving citation is A's, and attributing the current content to A is a
+#: confident WRONG answer — worse than the ``None`` the ``time-window`` rung
+#: would honestly return, and a breach of this module's own "never worse than
+#: not trying" contract.
+#:
+#: A day is deliberately generous: it absorbs clock skew and a write whose
+#: mtime settles slightly after the transcript record, while still rejecting
+#: the stale-citation case, which is separated by weeks or months. Erring
+#: strict is correct here — a rejected citation falls through to the window
+#: rung and, failing that, to ``None``, which is merely today's behavior,
+#: whereas a wrong attribution is unrecoverable and invisible.
+MAX_CITATION_LAG = timedelta(days=1)
+
+#: How many leading/trailing lines to retain when resolving the window's
+#: bounds, so a malformed or timestamp-less edge line does not lose them.
+_EDGE_LINES = 8
 
 
 @dataclass(frozen=True)
@@ -166,7 +200,7 @@ def written_at_from_frontmatter(meta: dict[str, object] | None) -> datetime | No
     every file in the corpus that motivated issue athenaeum#1452 (measured
     2026-09-08: 0 of 42 raw auto-memory files carry it), so this is the
     forward-looking signal, not the load-bearing one — callers fall back to
-    the file's mtime, which the hardlinked intake copy preserves. Returns
+    the file's mtime, which the symlink-bridged intake tree preserves. Returns
     ``None`` when the key is absent or unparseable.
     """
     if not meta:
@@ -210,6 +244,43 @@ def _tool_use_paths(record: object) -> list[str]:
     return paths
 
 
+def _edge_timestamp(lines: Iterable[str]) -> datetime | None:
+    """First readable record timestamp among ``lines``, preferring parsed JSON.
+
+    The bound MUST come from a record's own top-level ``timestamp``, not from
+    the first ``"timestamp": "…"`` the regex finds in the raw line: a ``Write``
+    whose CONTENT embeds that key — entirely plausible for JSON, YAML, or log
+    text — would otherwise contribute a timestamp from the payload rather than
+    from the record. The window feeds the ``time-window`` rung, so a polluted
+    bound is a fabrication risk, not a cosmetic one.
+
+    The regex survives only as a fallback for a line JSON cannot parse (a
+    truncated final line in a transcript still being appended to, which is the
+    normal state of a live session's log).
+    """
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            record = None
+        if isinstance(record, dict):
+            raw = record.get("timestamp")
+            if isinstance(raw, str):
+                parsed = _parse_timestamp(raw)
+                if parsed is not None:
+                    return parsed
+            # A well-formed record with no usable timestamp: keep looking
+            # rather than falling back to a regex over the same line, whose
+            # only possible hit would be a nested one.
+            continue
+        match = _TIMESTAMP_RE.search(line)
+        if match:
+            parsed = _parse_timestamp(match.group(1))
+            if parsed is not None:
+                return parsed
+    return None
+
+
 @dataclass(frozen=True)
 class _ScopeIndex:
     """One scope's transcripts, reduced to the two facts recovery needs.
@@ -247,9 +318,8 @@ def _scan_transcript(
     """
     needle = f"/{scope}/memory/" if scope else _MEMORY_HINT
     writes: dict[str, datetime] = {}
-    first: datetime | None = None
-    last: datetime | None = None
-    tail: deque[str] = deque(maxlen=_TAIL_LINES)
+    head: list[str] = []
+    tail: deque[str] = deque(maxlen=_EDGE_LINES)
     try:
         with jsonl.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -257,10 +327,8 @@ def _scan_transcript(
                 if not line:
                     continue
                 tail.append(line)
-                if first is None:
-                    match = _TIMESTAMP_RE.search(line)
-                    if match:
-                        first = _parse_timestamp(match.group(1))
+                if len(head) < _EDGE_LINES:
+                    head.append(line)
                 if _MEMORY_HINT not in line:
                     continue
                 try:
@@ -285,19 +353,38 @@ def _scan_transcript(
                     # A later write supersedes an earlier one; a write with no
                     # readable timestamp only fills an otherwise-empty slot.
                     if prior is None:
-                        writes[name] = stamp or datetime.min.replace(tzinfo=timezone.utc)
+                        writes[name] = stamp or _UNKNOWN_WRITE_TIME
                     elif stamp is not None and stamp >= prior:
                         writes[name] = stamp
     except OSError:
         return {}, None, None
-    # The window's upper bound: the newest timestamp among the trailing lines.
-    for line in reversed(tail):
-        match = _TIMESTAMP_RE.search(line)
-        if match:
-            last = _parse_timestamp(match.group(1))
-            if last is not None:
-                break
+    first = _edge_timestamp(head)
+    last = _edge_timestamp(reversed(tail))
     return writes, first, last
+
+
+def _citation_explains(cited_at: datetime, written_at: datetime | None) -> bool:
+    """Can a write cited at ``cited_at`` account for the file's current content?
+
+    A citation only attributes the content the file HOLDS NOW. One that
+    predates the file's own write time by more than :data:`MAX_CITATION_LAG`
+    demonstrably does not: something wrote the file afterwards, and if that
+    later session's transcript has rolled off the surviving citation is the
+    WRONG one. Rejecting it drops through to the window rung (and then to
+    ``None``), which is merely today's behavior — the safe direction.
+
+    Two cases cannot be judged and are accepted rather than discarded, since
+    in both the citation is the only evidence there is: an undatable write
+    (:data:`_UNKNOWN_WRITE_TIME`), and a memory whose own write time is
+    unknown (``written_at is None`` — no ``modified`` and an unreadable
+    mtime, which in practice means intake could not stat the file either).
+    """
+    if written_at is None or cited_at == _UNKNOWN_WRITE_TIME:
+        return True
+    # A citation NEWER than the recorded write time is fine: mtime can settle
+    # marginally before the transcript record, and clocks drift. Only a
+    # citation implausibly OLDER than the content is disqualifying.
+    return written_at - cited_at <= MAX_CITATION_LAG
 
 
 class SessionRecoverer:
@@ -341,6 +428,18 @@ class SessionRecoverer:
         self._cache[scope] = index
         return index
 
+    @staticmethod
+    def _write_time(memory_path: Path, written_at: datetime | None) -> datetime | None:
+        """The memory's write time as an aware UTC datetime, or ``None``."""
+        if written_at is None:
+            try:
+                return datetime.fromtimestamp(memory_path.stat().st_mtime, tz=timezone.utc)
+            except OSError:
+                return None
+        if written_at.tzinfo is None:
+            return written_at.replace(tzinfo=timezone.utc)
+        return written_at.astimezone(timezone.utc)
+
     def recover(
         self,
         memory_path: Path,
@@ -358,7 +457,7 @@ class SessionRecoverer:
             written_at: The memory's write time, when the caller already
                 parsed it from frontmatter (see
                 :func:`written_at_from_frontmatter`). Falls back to the file's
-                mtime, which the hardlinked intake copy preserves.
+                mtime, which the linked intake tree preserves.
 
         Returns:
             A :class:`RecoveredOrigin`, or ``None`` when nothing resolves it
@@ -367,22 +466,14 @@ class SessionRecoverer:
         if not scope:
             return None
         index = self._index_for(scope)
+        stamp = self._write_time(memory_path, written_at)
 
         cited = index.writes.get(memory_path.name)
-        if cited is not None:
+        if cited is not None and _citation_explains(cited[1], stamp):
             return RecoveredOrigin(session_id=cited[0], basis=BASIS_WRITE_CITED)
 
-        stamp = written_at
         if stamp is None:
-            try:
-                stamp = datetime.fromtimestamp(memory_path.stat().st_mtime, tz=timezone.utc)
-            except OSError:
-                return None
-        elif stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=timezone.utc)
-        else:
-            stamp = stamp.astimezone(timezone.utc)
-
+            return None
         matches = [sid for first, last, sid in index.windows if first <= stamp <= last]
         if len(matches) != 1:
             # Zero candidates (transcript rolled off) and several overlapping

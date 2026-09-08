@@ -153,9 +153,9 @@ def _write_native_memory(
         encoding="utf-8",
     )
     if mtime_offset_minutes is not None:
-        # In production the raw intake copy is HARDLINKED to the live
-        # ``~/.claude/projects/<scope>/memory/`` file, so its mtime is the real
-        # write time. Emulate that here.
+        # In production each scope in the raw intake tree is a SYMLINK to the
+        # live ``~/.claude/projects/<scope>/memory/`` directory, so ``stat``
+        # follows through and the mtime is the real write time. Emulate that.
         stamp = (T0 + timedelta(minutes=mtime_offset_minutes)).timestamp()
         os.utime(path, (stamp, stamp))
     return path
@@ -425,11 +425,13 @@ class TestWriteCitedRung:
                 _tool_use_record("Write", _native_path(projects_root, "own-memory.md", SCOPE), 6),
             ],
         )
-        # Both memories sit far outside the transcript's window, so a citation
-        # match is the ONLY thing that could resolve either one.
+        # Both memories sit outside the transcript's window (so a citation is
+        # the ONLY thing that could resolve either) but well inside
+        # MAX_CITATION_LAG of the cited writes, so the staleness bound is not
+        # what is doing the work in this test.
         knowledge_root = tmp_path / "knowledge"
-        foreign = _write_native_memory(knowledge_root, mtime_offset_minutes=5000)
-        own = _write_native_memory(knowledge_root, "own-memory.md", mtime_offset_minutes=5000)
+        foreign = _write_native_memory(knowledge_root, mtime_offset_minutes=600)
+        own = _write_native_memory(knowledge_root, "own-memory.md", mtime_offset_minutes=600)
         recoverer = SessionRecoverer(projects_root)
         # The cross-project write must NOT be claimed by this scope...
         assert recoverer.recover(foreign, SCOPE) is None
@@ -454,6 +456,157 @@ class TestWriteCitedRung:
         )
         recovered = SessionRecoverer(projects_root).recover(Path(MEMORY_NAME), SCOPE)
         assert recovered is not None and recovered.session_id == WRITER_SESSION
+
+
+class TestStaleCitationBound:
+    """A citation only attributes the content the file HOLDS NOW."""
+
+    def test_stale_citation_does_not_attribute_a_later_rewrite(self, tmp_path: Path) -> None:
+        """The regression this bound exists for.
+
+        Session A wrote the memory and its transcript SURVIVES. Session B
+        genuinely rewrote it much later and its transcript has ROLLED OFF. The
+        only surviving citation is A's — and attributing B's content to A is a
+        confident wrong answer, strictly worse than the honest ``None`` the
+        window rung would return.
+        """
+        projects_root = tmp_path / "projects"
+        _write_transcript(
+            projects_root,
+            OTHER_SESSION,
+            [_tool_use_record("Write", _native_path(projects_root), 0, session_id=OTHER_SESSION)],
+        )
+        # Rewritten 30 days after the surviving citation.
+        memory = _write_native_memory(tmp_path / "knowledge", mtime_offset_minutes=60 * 24 * 30)
+        assert SessionRecoverer(projects_root).recover(memory, SCOPE) is None
+
+    def test_a_citation_within_the_lag_still_attributes(self, tmp_path: Path) -> None:
+        """The bound must not disable the rung it guards."""
+        projects_root = tmp_path / "projects"
+        _write_transcript(
+            projects_root,
+            WRITER_SESSION,
+            [_tool_use_record("Write", _native_path(projects_root), 0)],
+        )
+        memory = _write_native_memory(tmp_path / "knowledge", mtime_offset_minutes=60)
+        recovered = SessionRecoverer(projects_root).recover(memory, SCOPE)
+        assert recovered is not None and recovered.basis == BASIS_WRITE_CITED
+
+    def test_citation_newer_than_the_mtime_is_accepted(self, tmp_path: Path) -> None:
+        """Only an implausibly OLD citation is disqualifying.
+
+        An mtime settling marginally before the transcript record (or plain
+        clock drift) must not throw away a good attribution.
+        """
+        projects_root = tmp_path / "projects"
+        _write_transcript(
+            projects_root,
+            WRITER_SESSION,
+            [_tool_use_record("Write", _native_path(projects_root), 90)],
+        )
+        memory = _write_native_memory(tmp_path / "knowledge", mtime_offset_minutes=0)
+        recovered = SessionRecoverer(projects_root).recover(memory, SCOPE)
+        assert recovered is not None and recovered.basis == BASIS_WRITE_CITED
+
+    def test_undatable_write_time_still_attributes(self, tmp_path: Path) -> None:
+        """With no write time knowable, the citation is the only evidence there is."""
+        projects_root = tmp_path / "projects"
+        _write_transcript(
+            projects_root,
+            WRITER_SESSION,
+            [_tool_use_record("Write", _native_path(projects_root), 0)],
+        )
+        # A path that does not exist: no frontmatter, no stat-able mtime.
+        recovered = SessionRecoverer(projects_root).recover(
+            tmp_path / "absent" / MEMORY_NAME, SCOPE
+        )
+        assert recovered is not None and recovered.basis == BASIS_WRITE_CITED
+
+
+class TestWindowBoundsComeFromRecords:
+    def test_a_timestamp_inside_written_content_does_not_move_the_window(
+        self, tmp_path: Path
+    ) -> None:
+        """The window must be read from the RECORD, not from the raw line text.
+
+        A ``Write`` whose CONTENT embeds a literal ``"timestamp"`` key — normal
+        for JSON, YAML or log text — would pollute a regex-derived bound. The
+        window feeds the ``time-window`` rung, so a polluted bound is a
+        fabrication risk, not a cosmetic one.
+        """
+        projects_root = tmp_path / "projects"
+        poisoned = _stamp(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Write",
+                            "input": {
+                                "file_path": str(tmp_path / "notes.md"),
+                                "content": '{"timestamp": "2001-01-01T00:00:00Z"}',
+                            },
+                        }
+                    ],
+                },
+            },
+            0,
+        )
+        _write_transcript(projects_root, WRITER_SESSION, [poisoned, _text_record("end", 9)])
+        from athenaeum.session_recovery import _scan_transcript
+
+        _writes, first, last = _scan_transcript(
+            projects_root / SCOPE / f"{WRITER_SESSION}.jsonl", SCOPE
+        )
+        assert first == T0
+        assert last == T0 + timedelta(minutes=9)
+
+    def test_a_truncated_final_line_falls_back_to_the_regex(self, tmp_path: Path) -> None:
+        """A live transcript's last line is often mid-append."""
+        from athenaeum.session_recovery import _scan_transcript
+
+        projects_root = tmp_path / "projects"
+        scope_dir = projects_root / SCOPE
+        scope_dir.mkdir(parents=True)
+        # Cut the closing brace only: JSON can no longer parse it, but the
+        # record's own timestamp is intact for the regex fallback to find.
+        truncated = json.dumps(_text_record("end", 9))[:-1]
+        (scope_dir / f"{WRITER_SESSION}.jsonl").write_text(
+            json.dumps(_text_record("start", 0)) + "\n" + truncated + "\n",
+            encoding="utf-8",
+        )
+        _writes, first, last = _scan_transcript(scope_dir / f"{WRITER_SESSION}.jsonl", SCOPE)
+        assert first == T0
+        assert last == T0 + timedelta(minutes=9)
+
+
+class TestMergeIgnoresProjectsRootWhenMembersSupplied:
+    def test_supplied_members_win_and_projects_root_is_inert(
+        self, native_corpus: tuple[Path, Path]
+    ) -> None:
+        """Pins the documented contract, so a future caller cannot regress it.
+
+        ``merge_clusters_to_wiki`` documents that ``projects_root`` is ignored
+        when ``auto_memory_files`` is supplied — that list was already
+        discovered, recovery and all. Passing members discovered WITHOUT a
+        transcript root must therefore still compile to ``sources: []`` even
+        though a perfectly good ``projects_root`` is also passed.
+        """
+        knowledge_root, projects_root = native_corpus
+        no_transcripts = knowledge_root / "no-transcripts"
+        no_transcripts.mkdir(exist_ok=True)
+        unrecovered = discover_auto_memory_files(knowledge_root, projects_root=no_transcripts)
+        (entry,) = merge_clusters_to_wiki(
+            knowledge_root,
+            auto_memory_files=unrecovered,
+            projects_root=projects_root,
+        )
+        assert entry.sources == []
+        # ...and the same corpus DOES recover when merge does its own discovery.
+        (recovered_entry,) = merge_clusters_to_wiki(knowledge_root, projects_root=projects_root)
+        assert recovered_entry.sources
 
 
 class TestTimeWindowRung:

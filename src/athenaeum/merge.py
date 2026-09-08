@@ -1693,6 +1693,18 @@ def merge_clusters_to_wiki(
 
     extra_roots = resolve_extra_intake_roots(knowledge_root, config=resolved_config)
 
+    if auto_memory_files is not None and projects_root is not None:
+        # Issue athenaeum#1452: the caller supplied BOTH a pre-discovered member
+        # list and a transcript root. The list was already discovered — with
+        # whatever recovery its own discovery call did or did not do — so this
+        # ``projects_root`` reaches nothing. Say so: a silent no-op here is
+        # indistinguishable from "recovery ran and resolved nothing", which is
+        # exactly the confusion that would hide a mis-wired caller.
+        log.debug(
+            "merge pass: projects_root ignored — auto_memory_files was supplied, "
+            "so origin-session recovery belongs to that discovery call"
+        )
+
     if auto_memory_files is None:
         auto_memory_files = discover_auto_memory_files(
             knowledge_root,
