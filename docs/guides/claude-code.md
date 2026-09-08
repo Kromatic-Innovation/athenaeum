@@ -138,9 +138,9 @@ verbatim into the consolidated wiki entry.
 > `CLAUDE.md` can therefore instruct the writer to stamp `originSessionId`
 > (and the other fields in the table below), and a natively-written memory
 > *can* opt into this path. Verified end-to-end: a memory written with
-> `originSessionId` / `claim_kind` / `observed_at` / `sources[]` was claimed by
-> `auto_memory_type_from_frontmatter`, compiled, and retired into a wiki entry
-> carrying a populated `sources[]`.
+> `originSessionId`, `claim_kind` and `sources[]` was claimed by discovery,
+> compiled, and retired into a wiki entry carrying a populated `sources[]`
+> where the native default would have left it empty.
 >
 > Prefer this to recovery where you can get it — `intake` gates recovery on
 > `origin_session_id is None and not sources`, so a declared session id wins,
@@ -151,6 +151,10 @@ verbatim into the consolidated wiki entry.
 > `modified` timestamp (2.1.214+), which implies it does touch frontmatter on
 > files that have it. Recovery remains the backstop for every file the
 > convention missed.
+>
+> Stamp only keys this path actually reads (see the field reference below).
+> Extra keys are harmless but inert — they persist in `raw/` and are discarded
+> at compile.
 >
 > Provenance for natively-written memories comes from **origin-session
 > recovery at intake** instead, which needs nothing from the memory file. Athenaeum resolves the session that wrote it from the
@@ -178,47 +182,62 @@ Required/recommended fields:
 
 ### Full field reference
 
-Every frontmatter key `intake` and `models` read off an auto-memory file, with
-its vocabulary and its behavior when absent or invalid. All are optional unless
-the table above marks them required; **all fail open** — an unrecognized value
-is dropped and the compile continues, so a guessed value is worse than an
-omitted key.
+Every frontmatter key read off an auto-memory file by
+`intake.discover_auto_memory_files` — i.e. the keys that reach an
+`AutoMemoryFile` and survive into `merge.render_merged_entry`. All are optional
+unless the table above marks them required, and (except `bucket`, noted below)
+**all fail open**: an unrecognized value is dropped and the compile continues,
+so a guessed value is worse than an omitted key.
 
-> **Which vocabularies are fixed, and which are yours.** The values listed
-> below come from constants in core code and are the same in every deployment
-> — *except* the rows that point at `wiki/_schema/`, which each operator
-> defines for their own store. Don't treat another deployment's `access`
-> levels or tag set as canonical, and don't hard-code them into a `CLAUDE.md`
-> convention; read your own via the `entity_schema` MCP tool.
+> **This is the auto-memory path only.** Athenaeum has a second, separate
+> intake path for entity-schema pages (`tier0_handle_upsert` → `WikiEntity`),
+> which reads a different key set with different defaults — including `access`,
+> `tags` and `aliases`, whose vocabularies each operator defines in their own
+> `wiki/_schema/`. **None of those three is read off an auto-memory file**, so
+> stamping them on a memory does nothing. Don't carry a key across from one
+> table to the other, and read your own store's vocabularies via the
+> `entity_schema` MCP tool rather than copying another deployment's.
+
+The vocabularies below are core-code constants, identical in every deployment.
 
 | Field | Vocabulary / shape | Absent or invalid |
 |---|---|---|
-| `metadata.type` | `feedback` \| `project` \| `reference` \| `user` \| `recall` — the native writer emits the first four; `recall` is Athenaeum-internal. A top-level `memory_type` is read as a fallback, and a scalar `metadata: feedback` is tolerated. | The file is **not claimed as auto-memory intake** and falls through to the entity-schema path. This is the one field whose absence changes routing. |
+| `metadata.type` | `feedback` \| `project` \| `reference` \| `user` \| `recall`. **Only a fallback**: the primary claim path is the filename (`<type>_<slug>.md`, `AUTO_MEMORY_FILE_RE`), and frontmatter is consulted only when the filename misses — which is the normal case for Claude Code, whose writer names files `<kebab-slug>.md`. A top-level `memory_type` is read as a further fallback, and a scalar `metadata: feedback` is tolerated. | With neither a conforming filename nor a recognized declared type, the file is **silently skipped** — not routed anywhere else. It becomes invisible to every discovery path. This is the one field whose absence loses the memory outright. |
 | `originSessionId` | Claude Code session UUID — the basename of the scope's `~/.claude/projects/<scope>/<uuid>.jsonl` transcript. | Origin-session recovery runs instead, resolving from the scope's transcripts and the file's mtime. |
 | `originTurn` | Integer turn index within that session. | Omitted from the synthesized source ref; the session alone still resolves. |
 | `sources[]` | List of maps: `session`, optional `turn`, optional `excerpt`, plus `source_type` / `source_ref`. Deduped on `(session, turn)`. | Falls back to a synthetic source built from `originSessionId`, then to recovery. Empty at every stage ⇒ `sources: []` on the compiled page. |
 | `source_type` | `user-stated` \| `agent-observed` \| `external` \| `document` \| `inferred` \| `model-prior`. `agent-observed`, `inferred` and `model-prior` are the AI-attributed channels and should carry `model:`. | Defaults to `inferred` — the honest fallback for an origin that cannot be established. Never silently promoted to `user-stated`. |
 | `source_ref` | Free-form ref: a URL, an issue ref, or a `<session>#turn<N>`. Never the raw `auto-memory/...` filename — that shape is rejected. | Back-filled from session + turn. |
 | `claim_kind` | `fact` \| `observation` \| `opinion` \| `decision` \| `policy` \| `definition`. Drives the resolver's stance short-circuit; `opinion` routes a conflicting pair to `attribute_both` rather than picking a winner. **An author-supplied value is never overwritten and skips the classifier's LLM call entirely** (`librarian._stamp_unclassified_claim_kinds`). | The nightly run classifies it in one cheap LLM call and stamps it once. On failure, `""` (unclassified) — the resolver's LLM path decides as before. An out-of-vocabulary value logs a debug breadcrumb and is discarded. |
-| `observed_at` | ISO date — when the fact was *established*, not when the file was written. | Unset; temporal reasoning falls back to `created` / `updated`. |
 | `valid_from` / `valid_until` | ISO dates bounding the claim's validity. Travel with the claim into each compiled source record, so validity is per-claim rather than per-page. | Unbounded. |
-| `tags` / `aliases` | Lists of strings. The tag vocabulary is **deployment-defined** — see your store's `wiki/_schema/tags.md`. | Empty. |
+| `model` | The model that produced the claim. Expected on the AI-attributed `source_type` channels; validation is fail-open, so it is not enforced. | `""`. |
+| `on_behalf_of` | Who the claim was made for. | `""`. |
+| `asserter` | Structured asserter annotation. | `{}`. |
+| `bucket` | `daily` \| `weekly` \| `durable` — the decay bucket, set at intake and carried onto the compiled page. | `""` at read time, but note this is the **one key that does not fail open on write**: an invalid value raises rather than being discarded. Omit it unless you mean it. |
 | `supersedes` / `superseded_by` / `refines` | Ref to another memory or entity. | Unset; no supersession edge is drawn. |
-| `access` | Access class. The vocabulary is **deployment-defined**, loaded from your store's `wiki/_schema/access-levels.md` (`librarian.py`, `load_schema_list(...) or FALLBACK_ACCESS`) — not a fixed set. | `internal`, the parse-time default in core code. |
 | `deprecated` | Truthy marker. | Not deprecated. |
 
-A `CLAUDE.md` convention that stamps `originSessionId`, `claim_kind` and
-`observed_at` captures most of the value for three lines. What each one buys:
+**Read on the entity path only, *not* here:** `observed_at`, `access`, `tags`,
+`aliases`, `created`, `updated`. Stamping any of them on an auto-memory file is
+a no-op the compile discards.
 
-- `claim_kind` — **saves one LLM call per new memory.** The nightly run
-  otherwise classifies every unclassified file in a cheap Haiku call; a valid
-  author-supplied value is skipped outright, and the run-loop wrapper
-  short-circuits before even re-reading the frontmatter.
+A `CLAUDE.md` convention that stamps `originSessionId` and `claim_kind`
+captures most of the available value in two lines. What each one buys:
+
+- `claim_kind` — **saves one LLM call per memory, once ever.** The nightly run
+  otherwise classifies each unclassified file in a cheap Haiku call and stamps
+  the result back into the file; a valid author-supplied value is skipped
+  outright, and the run-loop wrapper short-circuits before even re-reading the
+  frontmatter.
 - `originSessionId` — saves transcript-scanning I/O, not tokens
   (`session_recovery` makes no LLM call), and beats recovery on accuracy
   wherever mtimes stop reflecting write time.
-- `observed_at` — no cost saving; it is there because a fact's establishment
-  date is not its file's write date, and only the author knows the difference.
+
+Add `originTurn` too if the writer can determine it reliably — the Section 4
+validator checks for it alongside `originSessionId`, and it sharpens the
+synthesized `<session>#turn<N>` ref. A *wrong* turn index is worse than an
+absent one, though, so omit it rather than guess (and trim the template's check
+if your writer cannot supply it).
 
 Hand-authoring `sources[]` is **not** recommended: choosing `source_type`
 correctly means checking the claim against the transcript, which is

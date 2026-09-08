@@ -88,9 +88,10 @@ When writing an auto-memory file, include these keys in the frontmatter:
   originSessionId: <the session UUID — basename of the current
                     ~/.claude/projects/<scope>/*.jsonl transcript>
   claim_kind: fact | observation | opinion | decision | policy | definition
-  observed_at: YYYY-MM-DD   # when the fact was established, not written
 
 Do not hand-author `sources[]` — Athenaeum resolves provenance itself.
+Do not stamp `access`, `tags` or `observed_at` — the auto-memory path does
+not read them.
 ```
 
 What it buys:
@@ -102,8 +103,9 @@ What it buys:
   on `origin_session_id is None and not sources`, so a declared session wins
   — and unlike recovery it never depends on file mtimes surviving your sync
   method. Saves I/O, not tokens.
-- **`observed_at`** costs nothing and saves nothing; only the author knows
-  that a fact's establishment date differs from its file's write date.
+Keep the convention to keys this path actually reads. `observed_at`, `access`,
+`tags` and `aliases` belong to Athenaeum's *entity* intake path, not this one —
+stamping them on a memory is a no-op the compile discards.
 
 This is an **optimization over** origin-session recovery, never a replacement:
 compliance is best-effort per session, and whether the extra keys survive a
