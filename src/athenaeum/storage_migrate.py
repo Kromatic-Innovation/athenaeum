@@ -84,7 +84,7 @@ from athenaeum.pii import (
     PiiAllowlistEntry,
     is_pii_class_excluded,
     is_service_address,
-    name_field_holds_pii,
+    name_field_pii_values,
 )
 from athenaeum.sensitivity import classify
 from athenaeum.storage import surface_root_for_class
@@ -595,7 +595,11 @@ def plan_pii_migration(
     skipped_allowlisted = _dedupe_allowlist_entries(
         fm_skipped + inline_skipped_emails + inline_skipped_phones
     )
-    name_field_pii = name_field_holds_pii(meta)
+    # athenaeum#1461: the actual contact datum(s), not just the bool — needed below to
+    # exclude precisely this value from the body rewrite, not to skip the rewrite
+    # wholesale.
+    name_pii_values = name_field_pii_values(meta)
+    name_field_pii = bool(name_pii_values)
 
     excluded_root = surface_root_for_class(PII_ENTITY_CLASS, config, knowledge_root)
     excluded_page_path = excluded_root / page_path.name
@@ -617,8 +621,15 @@ def plan_pii_migration(
 
     # Rewrite origin: frontmatter with contact data stripped/redacted (durable
     # identifiers untouched, real aliases preserved), then the body inline
-    # tokens redacted.
-    new_body = _redact_inline_tokens(body, inline_emails + inline_phones)
+    # tokens redacted. athenaeum#1461: a token that IS the name-field contact datum
+    # is excluded here — it is a deliberately preserved durable identifier
+    # (athenaeum#502), most visibly quoted back in an H1 heading, and blind-replacing
+    # it there previously slipped through whenever the page also carried an
+    # unrelated inline token (the no-inline-PII early return above only fires
+    # when `emails`/`phones` are BOTH empty, which is not the case here). Any
+    # OTHER inline token is still redacted normally.
+    body_redact_tokens = [t for t in inline_emails + inline_phones if t not in name_pii_values]
+    new_body = _redact_inline_tokens(body, body_redact_tokens)
     rewritten_page_text = render_frontmatter(new_meta) + "\n" + new_body
 
     # athenaeum#1108: when this page was migrated before, a record already sits at

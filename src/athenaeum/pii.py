@@ -734,6 +734,33 @@ def is_service_address(token: str) -> bool:
     return domain in SERVICE_ADDRESS_DOMAINS
 
 
+def name_field_pii_values(meta: dict[str, Any]) -> list[str]:
+    """Email/phone-shaped tokens found in a ``name:`` / ``preferred_name:`` value.
+
+    The athenaeum#502 name-is-an-email population: ~80 live pages whose NAME is a raw
+    contact address (Streak email-only import). This returns the actual
+    contact datum(s) so a caller can distinguish "this specific token is the
+    preserved name-field identifier" from any other inline token on the page
+    (issue athenaeum#1461) — :func:`name_field_holds_pii` only reports whether such
+    a token exists, which is enough to COUNT the population but not enough to
+    exclude just that value from an unrelated rewrite. Order-preserving,
+    deduped, mirroring :func:`find_inline_emails`/:func:`find_inline_phones`.
+    """
+    if not meta:
+        return []
+    seen: list[str] = []
+    for field in NAME_FIELDS:
+        raw = meta.get(field)
+        if raw is None:
+            continue
+        for value in raw if isinstance(raw, list) else [raw]:
+            s = str(value)
+            for token in find_inline_emails(s) + find_inline_phones(s):
+                if token not in seen:
+                    seen.append(token)
+    return seen
+
+
 def name_field_holds_pii(meta: dict[str, Any]) -> bool:
     """True when a ``name:`` / ``preferred_name:`` value is email/phone-shaped.
 
@@ -745,17 +772,7 @@ def name_field_holds_pii(meta: dict[str, Any]) -> bool:
     excluded population so the operator sees exactly how many pages the
     follow-up slice must cover, rather than the class silently vanishing.
     """
-    if not meta:
-        return False
-    for field in NAME_FIELDS:
-        raw = meta.get(field)
-        if raw is None:
-            continue
-        for value in raw if isinstance(raw, list) else [raw]:
-            s = str(value)
-            if find_inline_emails(s) or find_inline_phones(s):
-                return True
-    return False
+    return bool(name_field_pii_values(meta))
 
 
 # ---------------------------------------------------------------------------
@@ -4459,6 +4476,7 @@ __all__ = [
     "DURABLE_IDENTIFIER_FIELDS",
     "NAME_FIELDS",
     "name_field_holds_pii",
+    "name_field_pii_values",
     "ROLE_LOCALPARTS",
     "derive_display_name_from_email",
     "OBSERVATION_LOG_VERSION",

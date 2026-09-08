@@ -921,6 +921,37 @@ class TestDetectorDrivenKeyCoverage:
         assert meta["name"] == "ivy@streak.example"
         assert "aliases" not in meta
 
+    def test_name_is_email_inline_in_h1_is_not_blind_redacted(self, tmp_path: Path) -> None:
+        # athenaeum#1461 AC4: a page that is BOTH name-field-PII AND carries an
+        # inline token elsewhere skips the no-inline-PII early return (both
+        # `emails`/`phones` end up non-empty) and reaches the body rewrite —
+        # exactly the combination that previously fell through. The rewrite
+        # used to blind-replace EVERY detected inline token, including the
+        # name-field datum quoted back in the H1 heading, announcing a
+        # redaction while the rest of the page stayed unredacted. The
+        # name-field datum must be excluded from the body rewrite; a
+        # genuinely different inline token elsewhere must still be redacted
+        # normally (this must not regress into skipping the rewrite wholesale).
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "kim.md",
+            "uid: k1\nname: kim@streak.example\ntype: person\n",
+            "# kim@streak.example\n\n"
+            "Reach Kim's colleague at other.contact@corp.example for intros.",
+        )
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+
+        assert plan.name_field_pii is True
+        assert plan.changed is True
+        rewritten = plan.rewritten_page_text or ""
+        # The H1 heading quoting the name-field email is left intact.
+        assert "# kim@streak.example" in rewritten
+        # The unrelated inline token is still redacted normally.
+        assert "other.contact@corp.example" not in rewritten
+        assert INLINE_REDACTION_MARKER in rewritten
+
     def test_body_prose_email_on_entity_page_is_redacted(self, tmp_path: Path) -> None:
         # AC: body-text redaction covers entity pages. ~113/300 sampled pages
         # carry the address in prose only.
