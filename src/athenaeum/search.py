@@ -1181,10 +1181,18 @@ class FTS5Backend:
         # raises ``OperationalError``, and is silently turned into empty recall.
         # A schema mismatch forces a full rebuild (the DB is unlinked and
         # recreated below), which self-heals a legacy index on the next build.
-        db_schema_ok = (
-            db_path.is_file()
-            and self._db_schema_version(db_path) == self._SCHEMA_VERSION
+        #
+        # Read the stamp ONCE into a local and reuse it for both the reuse test
+        # and the warning's message below. Not a performance measure — a
+        # ``PRAGMA user_version`` read costs ~91µs against a 10MB index, which
+        # is nothing beside a build — but recomputing a value the same function
+        # already holds is how the two-places-disagree bugs in athenaeum#1458
+        # and athenaeum#1459 started, and this one is read twice in a block
+        # that reasons about it.
+        db_found_version = (
+            self._db_schema_version(db_path) if db_path.is_file() else None
         )
+        db_schema_ok = db_found_version == self._SCHEMA_VERSION
         if (
             incremental
             and as_of is None
@@ -1200,7 +1208,7 @@ class FTS5Backend:
                 "stale-shaped table cannot silently break audience-filtered "
                 "recall (issue athenaeum#530)",
                 db_path,
-                self._db_schema_version(db_path),
+                db_found_version,
                 self._SCHEMA_VERSION,
             )
         # Issue athenaeum#1459: the invalidation checks themselves live in
