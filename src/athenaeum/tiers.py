@@ -2587,6 +2587,18 @@ Contradictions and escalation:
 
 # The pre-athenaeum#469 full-echo contract, retained as the deterministic fallback
 # (:func:`tier3_merge_full`). Quality can never be worse than this baseline.
+#
+# Issue athenaeum#1460: unlike MERGE_SYSTEM (patch mode), this contract used to have
+# NO way for the model to report "this observation adds nothing" — its only
+# non-body response shape was ESCALATE:, reserved for principled-tension
+# conflicts. A model with nothing to merge would then write its refusal
+# rationale as prose, and that prose became the ENTIRE new page body (the
+# defect this issue fixes). The NO_MERGE: line below mirrors MERGE_SYSTEM's
+# `{"ops": []}` affordance; :func:`parse_tier3_merge` recognizes it and
+# leaves the page unchanged instead of writing a body. This is a sanctioned
+# channel the model is expected to use — it is NOT the only defense: the
+# independent, deterministic guard in :func:`parse_tier3_merge` refuses a
+# non-compliant response too (issue athenaeum#1460 AC2).
 MERGE_SYSTEM_FULL = (
     """You are a knowledge librarian. You merge new observations into
 existing entity wiki pages.
@@ -2602,6 +2614,10 @@ Rules:
   "confirmed once more") — always add the new source as an additional
   footnote citation on the EXISTING bullet instead, so the re-confirming
   source is never lost even when no new bullet is warranted.
+- If the observation adds nothing at all — it is a pure re-confirmation with
+  no new information, or it is not about this entity — do NOT rewrite or
+  echo the page. Return a plain-text response starting with exactly
+  `NO_MERGE:` followed by a brief reason, and nothing else.
 - If the new observation contradicts existing content:
   - Factual contradiction (verifiable fact): keep the more reliable source, note the discrepancy
   - Contextual difference (opinions, preferences): capture both with context
@@ -4155,6 +4171,7 @@ def tier3_merge_full(
         response_text(response),
         action,
         source_ref,
+        existing_body,
         # athenaeum#574: None on a backend that cannot report stop_reason (claude-cli),
         # so the truncation-refusal escalation does not fire on a spurious
         # value; a genuinely short body still degrades through the normal path.
@@ -4162,10 +4179,98 @@ def tier3_merge_full(
     )
 
 
+#: Stable, greppable log prefix for the sanctioned full-echo no-op channel
+#: (issue athenaeum#1460 AC1 / AC5): the model reported "nothing to merge" via the
+#: ``NO_MERGE:`` prompt affordance and the page was correctly left unchanged.
+#: Distinct from :data:`MERGE_FULL_GUARD_REFUSED_LOG_PREFIX` — a model that
+#: complies with the affordance vs. one whose response was rejected by the
+#: independent guard are different facts a nightly log needs to tell apart
+#: (one is the happy path; the other means the guard is doing real work, or
+#: the prompt affordance is being ignored).
+MERGE_FULL_NOOP_LOG_PREFIX = "tier3-merge-full-noop"
+
+#: Stable, greppable log prefix for the independent, deterministic AC2 guard
+#: (issue athenaeum#1460): fires when a full-echo response's leading content — the
+#: text before its first H1 heading — is not a plausible echo of the
+#: existing page (i.e. it looks like meta-prose about the merge decision,
+#: not page content). This guard does not depend on the model using the
+#: ``NO_MERGE:`` / ``ESCALATE:`` prompt affordances at all — see
+#: :func:`_merge_full_response_is_plausible_echo`.
+MERGE_FULL_GUARD_REFUSED_LOG_PREFIX = "tier3-merge-full-guard-refused"
+
+#: How many leading chars of a rejected/refused full-echo response to log so
+#: a nightly can eyeball what the model actually said, mirroring
+#: :data:`MERGE_RESP_PREFIX_CHARS`.
+MERGE_FULL_RESP_PREFIX_CHARS = 200
+
+# First-H1 detector (issue athenaeum#1460 AC2): a line starting with a single "#"
+# followed by whitespace, NOT a deeper heading ("##", "###", ...) — the
+# negative lookahead `(?!#)` is what excludes those. CREATE_SYSTEM instructs
+# every new page to "Start with `# Entity Name`", so this is the same
+# structural marker a legitimate full-echo response is expected to lead
+# with.
+_MERGE_FULL_LEADING_H1_RE = re.compile(r"(?m)^#(?!#)[ \t]")
+
+
+def _merge_full_response_is_plausible_echo(existing_body: str, response_text: str) -> bool:
+    """Deterministic AC2 guard (issue athenaeum#1460): is *response_text* a plausible
+    full-echo of *existing_body*, or does it look like meta-prose about the
+    merge decision (a refusal rationale, an explanation, ...) rather than
+    page content?
+
+    This is intentionally independent of the ``NO_MERGE:`` / ``ESCALATE:``
+    prompt affordances — it must catch a non-compliant response even when
+    the model ignores those entirely, which is exactly the shape observed
+    on the corpus (a refusal sentence, sometimes followed by a full echo of
+    the untouched page).
+
+    Method (the issue's own corpus scan is the template — it found the
+    affected pages by looking for prose appearing before the first H1):
+
+    - If *existing_body* has a leading H1 (the normal case — every page
+      :func:`tier3_create` writes starts with one): find *response_text*'s
+      OWN first H1. Anything before it is the "leading content" the AC
+      talks about. If that leading content is empty, the response starts
+      directly with page structure — a plausible echo. If it is non-empty,
+      it is only a plausible echo when that exact text already appears
+      somewhere in *existing_body* (i.e. it is preserved content, not new
+      prose the model added ahead of the page); a rationale sentence never
+      appears verbatim in the existing page, so this correctly refuses it.
+      A response with NO H1 at all (a pure refusal, no echo) is treated as
+      entirely "leading content" and refused the same way.
+
+    - If *existing_body* has NO leading H1 (rare — CREATE_SYSTEM instructs
+      every new page to start with one, so an existing page without one is
+      itself unusual), there is no heading to anchor the "content before
+      the heading" check on. Per the issue's bias-toward-refusing
+      instruction, the conservative generalization is to require the
+      response to literally start with the existing body's own content
+      (after stripping) — nothing may precede real page content, headed or
+      not. An empty existing body always refuses here: there is no content
+      to check a prefix against, so a guard built to protect content by
+      comparison has nothing to compare against and must not guess.
+    """
+    existing_stripped = existing_body.strip()
+    h1_match = _MERGE_FULL_LEADING_H1_RE.search(existing_body)
+
+    if h1_match is not None:
+        resp_h1 = _MERGE_FULL_LEADING_H1_RE.search(response_text)
+        leading = response_text[: resp_h1.start()] if resp_h1 else response_text
+        leading = leading.strip()
+        if not leading:
+            return True
+        return leading in existing_body
+
+    if not existing_stripped:
+        return False
+    return response_text.strip().startswith(existing_stripped)
+
+
 def parse_tier3_merge(
     text: str,
     action: EntityAction,
     source_ref: str,
+    existing_body: str,
     *,
     stop_reason: str | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
@@ -4182,6 +4287,27 @@ def parse_tier3_merge(
     is a truncated body, not a complete one — writing it back would
     silently discard the tail of the page. Refuse to overwrite and
     escalate for human review instead of returning the truncated text.
+
+    Issue athenaeum#1460: full-echo mode used to have no sanctioned way for the
+    model to report "nothing to merge" — its refusal rationale would become
+    the entire new page body. Two independent defenses now apply, in order:
+
+    1. The ``NO_MERGE:`` sentinel (:data:`MERGE_SYSTEM_FULL`'s AC1
+       affordance) — when the model complies, this is recognized here and
+       the page is left unchanged (``(None, None)``), logged under
+       :data:`MERGE_FULL_NOOP_LOG_PREFIX` so a repeatedly-declining model is
+       visible rather than looking like a clean pass (AC5).
+    2. :func:`_merge_full_response_is_plausible_echo` (AC2) — a
+       deterministic, prompt-independent guard that refuses to write a body
+       whose leading content is not a plausible echo of the existing page,
+       so a response that ignores the ``NO_MERGE:`` affordance entirely
+       (the exact shape observed on the corpus) still cannot reach the
+       page. Logged under :data:`MERGE_FULL_GUARD_REFUSED_LOG_PREFIX`.
+
+    Both return ``(None, None)`` (or an escalation, for the ``ESCALATE:``
+    protocol below) — never a body — so both callers (:mod:`athenaeum.batch`
+    and this module's own ``tier3_merge`` fallback) treat the page as
+    unchanged: each only writes when the returned body is truthy.
     """
     text = text.strip()
     escalation = None
@@ -4199,6 +4325,19 @@ def parse_tier3_merge(
             ),
         )
 
+    if text.startswith("NO_MERGE:"):
+        reason = text[len("NO_MERGE:"):].strip()
+        log.info(
+            "%s page=%s source=%s reason=%r — model reported no merge-worthy "
+            "content via the sanctioned no-op channel; existing page left "
+            "unchanged",
+            MERGE_FULL_NOOP_LOG_PREFIX,
+            action.name,
+            source_ref,
+            reason[:MERGE_FULL_RESP_PREFIX_CHARS],
+        )
+        return None, None
+
     if text.startswith("ESCALATE:"):
         parts = text.split("---", 1)
         esc_desc = parts[0].replace("ESCALATE:", "").strip()
@@ -4212,6 +4351,28 @@ def parse_tier3_merge(
             text = parts[1].strip()
         else:
             return None, escalation
+
+    # AC2: independent of whether the model used either sentinel above —
+    # catches a response that ignores both and just writes prose (the exact
+    # shape observed on the corpus: a refusal rationale, sometimes followed
+    # by a full echo of the untouched page).
+    if not _merge_full_response_is_plausible_echo(existing_body, text):
+        redacted_prefix, _findings = redact_outbound_text(
+            text[:MERGE_FULL_RESP_PREFIX_CHARS]
+        )
+        log.warning(
+            "%s page=%s source=%s — full-echo response's leading content is "
+            "not a plausible echo of the existing page (looks like "
+            "meta-prose about the merge decision, not page content); "
+            "refusing the whole write, existing page left unchanged "
+            "| resp[:%d]=%r",
+            MERGE_FULL_GUARD_REFUSED_LOG_PREFIX,
+            action.name,
+            source_ref,
+            MERGE_FULL_RESP_PREFIX_CHARS,
+            redacted_prefix,
+        )
+        return None, escalation
 
     return text, escalation
 
