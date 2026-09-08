@@ -125,6 +125,28 @@ produced each fact, add YAML frontmatter with `sources[]` entries to your
 auto-memory files. The librarian's merge pass propagates these citations
 verbatim into the consolidated wiki entry.
 
+> **This frontmatter path applies to adapter-written and hand-written intake
+> only.** Claude Code's **native** auto-memory writer emits a fixed schema —
+> `name`, `description`, `metadata.type`, and (2.1.214+) `modified`. It has no
+> `sources` field, no `originSessionId`, and no extension point for either, so
+> a natively-written memory *cannot* opt into the table below however the
+> policy is configured. The stop-hook validator in Section 4 will warn on
+> every such file forever; nudging cannot fill a field the writer's schema
+> does not have.
+>
+> Provenance for natively-written memories comes from **origin-session
+> recovery at intake** instead, which needs nothing from the memory file. Athenaeum resolves the session that wrote it from the
+> scope's own transcripts — exactly, when a transcript shows a writing
+> tool-use naming the file; otherwise from a unique write-time window — and
+> feeds the recovered session into the same `_am_as_implicit_source` fallback
+> the `sources[]` path falls back to. When neither resolves unambiguously
+> (transcript rolled off, or two concurrent sessions in one project) the
+> memory keeps `sources: []` rather than being attributed to a guess.
+>
+> Recovery supplies an **origin, not a verdict**: the claim keeps the honest
+> `inferred` `source_type` until `transcript_verify.verify_user_stated`
+> confirms it against the transcript itself.
+
 Required/recommended fields:
 
 | Field             | Required | Description                                                                 |
@@ -157,11 +179,14 @@ she confirmed the Series B close date in session turn 12.
 ```
 
 **Citation-strict vs. permissive.** Athenaeum ingests uncited files fine —
-they just land in the consolidated wiki without provenance. If you want to
-enforce "every fact carries a source", run the stop-hook validator (Section
-4) to warn when auto-memory files lack `originSessionId`/`originTurn`. The
+they just land in the consolidated wiki, relying on origin-session recovery
+(above) for provenance. If you want to enforce "every fact carries a source"
+for the intake you *do* control, run the stop-hook validator (Section 4) to
+warn when auto-memory files lack `originSessionId`/`originTurn`. The
 validator can be made blocking or non-blocking; start non-blocking while you
-bootstrap the habit.
+bootstrap the habit. Point it at your adapter's or your own output —
+running it blocking over `*/memory/*.md` fails on every natively-written
+file by construction, for a field that writer cannot emit.
 
 **Append-only `sources[]`.** When Claude Code later adds a corroborating
 turn to an existing memory, append a new entry to `sources[]` rather than

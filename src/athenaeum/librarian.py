@@ -6122,6 +6122,7 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
             deadline=ctx.run_deadline,  # issue athenaeum#396
             max_api_calls=ctx.max_api_calls,  # issue athenaeum#461
             out_stats=_merge_only_stats,  # issue athenaeum#464
+            projects_root=ctx.projects_root,  # issue athenaeum#1452
         )
     except RunDeadlineExceeded as exc:
         return ctx.stop_on_deadline(exc.phase)
@@ -7822,7 +7823,9 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     # on each record so the tier pipeline and the cluster pass both see
     # the same routing key.
     auto_memory_files = discover_auto_memory_files(
-        ctx.knowledge_root, config=ctx.config
+        ctx.knowledge_root,
+        config=ctx.config,
+        projects_root=ctx.projects_root,  # issue athenaeum#1452
     )
     if not auto_memory_files:
         return None
