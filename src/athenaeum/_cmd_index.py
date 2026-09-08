@@ -273,9 +273,13 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
     # session-end command (issue athenaeum#350) — the change-gated compile-then-index
     # composition the cwc SessionEnd hook and the nightly-after-librarian path
     # invoke as ONE command: incremental `ingest` of this session's new raw,
-    # then (only when the compile actually ran) an incremental `reindex` so the
-    # freshly-compiled wiki pages become recallable. An idle SessionEnd is a
-    # fast no-op with zero LLM cost and no reindex.
+    # then an incremental `reindex` so the freshly-compiled wiki pages become
+    # recallable. Since athenaeum#1456 the reindex runs when the compile ran OR
+    # when the index MANIFEST disagrees with the corpus scan — a page that
+    # missed its indexing window is otherwise never reconsidered, because
+    # ingest keeps its own separate manifest and reports it as not-new forever.
+    # An idle SessionEnd whose index is already current is still a fast no-op
+    # with zero LLM cost and no reindex.
     session_end_parser = subparsers.add_parser(
         "session-end",
         help="Change-gated ingest + reindex for SessionEnd (issue athenaeum#350): "
