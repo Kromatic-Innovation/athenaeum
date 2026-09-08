@@ -147,9 +147,9 @@ verbatim into the consolidated wiki entry.
 > and unlike recovery it never depends on file mtimes surviving the operator's
 > sync method. But treat it as an *optimization over* recovery, never a
 > replacement: compliance is best-effort per session, and whether the extra
-> keys survive a Claude Code rewrite is not established (no file in the
-> reference store carries a `modified` stamp yet, so there is no observed
-> instance either way). Recovery remains the backstop for every file the
+> keys survive a Claude Code rewrite is not established — it stamps a
+> `modified` timestamp (2.1.214+), which implies it does touch frontmatter on
+> files that have it. Recovery remains the backstop for every file the
 > convention missed.
 >
 > Provenance for natively-written memories comes from **origin-session
@@ -184,26 +184,44 @@ the table above marks them required; **all fail open** — an unrecognized value
 is dropped and the compile continues, so a guessed value is worse than an
 omitted key.
 
+> **Which vocabularies are fixed, and which are yours.** The values listed
+> below come from constants in core code and are the same in every deployment
+> — *except* the rows that point at `wiki/_schema/`, which each operator
+> defines for their own store. Don't treat another deployment's `access`
+> levels or tag set as canonical, and don't hard-code them into a `CLAUDE.md`
+> convention; read your own via the `entity_schema` MCP tool.
+
 | Field | Vocabulary / shape | Absent or invalid |
 |---|---|---|
 | `metadata.type` | `feedback` \| `project` \| `reference` \| `user` \| `recall` — the native writer emits the first four; `recall` is Athenaeum-internal. A top-level `memory_type` is read as a fallback, and a scalar `metadata: feedback` is tolerated. | The file is **not claimed as auto-memory intake** and falls through to the entity-schema path. This is the one field whose absence changes routing. |
-| `originSessionId` | Claude Code session UUID — the basename of the scope's `~/.claude/projects/<scope>/<uuid>.jsonl` transcript. | Origin-session recovery runs instead (athenaeum#1452), resolving from the scope's transcripts and the file's mtime. |
+| `originSessionId` | Claude Code session UUID — the basename of the scope's `~/.claude/projects/<scope>/<uuid>.jsonl` transcript. | Origin-session recovery runs instead, resolving from the scope's transcripts and the file's mtime. |
 | `originTurn` | Integer turn index within that session. | Omitted from the synthesized source ref; the session alone still resolves. |
 | `sources[]` | List of maps: `session`, optional `turn`, optional `excerpt`, plus `source_type` / `source_ref`. Deduped on `(session, turn)`. | Falls back to a synthetic source built from `originSessionId`, then to recovery. Empty at every stage ⇒ `sources: []` on the compiled page. |
 | `source_type` | `user-stated` \| `agent-observed` \| `external` \| `document` \| `inferred` \| `model-prior`. `agent-observed`, `inferred` and `model-prior` are the AI-attributed channels and should carry `model:`. | Defaults to `inferred` — the honest fallback for an origin that cannot be established. Never silently promoted to `user-stated`. |
 | `source_ref` | Free-form ref: a URL, an issue ref, or a `<session>#turn<N>`. Never the raw `auto-memory/...` filename — that shape is rejected. | Back-filled from session + turn. |
-| `claim_kind` | `fact` \| `observation` \| `opinion` \| `decision` \| `policy` \| `definition`. Drives the resolver's stance short-circuit; `opinion` routes a conflicting pair to `attribute_both` rather than picking a winner. | `""` (unclassified) — the resolver's LLM path decides as before. An out-of-vocabulary value logs a debug breadcrumb and is discarded. |
+| `claim_kind` | `fact` \| `observation` \| `opinion` \| `decision` \| `policy` \| `definition`. Drives the resolver's stance short-circuit; `opinion` routes a conflicting pair to `attribute_both` rather than picking a winner. **An author-supplied value is never overwritten and skips the classifier's LLM call entirely** (`librarian._stamp_unclassified_claim_kinds`). | The nightly run classifies it in one cheap LLM call and stamps it once. On failure, `""` (unclassified) — the resolver's LLM path decides as before. An out-of-vocabulary value logs a debug breadcrumb and is discarded. |
 | `observed_at` | ISO date — when the fact was *established*, not when the file was written. | Unset; temporal reasoning falls back to `created` / `updated`. |
 | `valid_from` / `valid_until` | ISO dates bounding the claim's validity. Travel with the claim into each compiled source record, so validity is per-claim rather than per-page. | Unbounded. |
-| `tags` / `aliases` | Lists of strings. | Empty. |
+| `tags` / `aliases` | Lists of strings. The tag vocabulary is **deployment-defined** — see your store's `wiki/_schema/tags.md`. | Empty. |
 | `supersedes` / `superseded_by` / `refines` | Ref to another memory or entity. | Unset; no supersession edge is drawn. |
-| `access` | Access class, e.g. `internal`. | `internal`. |
+| `access` | Access class. The vocabulary is **deployment-defined**, loaded from your store's `wiki/_schema/access-levels.md` (`librarian.py`, `load_schema_list(...) or FALLBACK_ACCESS`) — not a fixed set. | `internal`, the parse-time default in core code. |
 | `deprecated` | Truthy marker. | Not deprecated. |
 
 A `CLAUDE.md` convention that stamps `originSessionId`, `claim_kind` and
-`observed_at` captures most of the value for three lines. Hand-authoring
-`sources[]` is **not** recommended: choosing `source_type` correctly means
-checking the claim against the transcript, which is
+`observed_at` captures most of the value for three lines. What each one buys:
+
+- `claim_kind` — **saves one LLM call per new memory.** The nightly run
+  otherwise classifies every unclassified file in a cheap Haiku call; a valid
+  author-supplied value is skipped outright, and the run-loop wrapper
+  short-circuits before even re-reading the frontmatter.
+- `originSessionId` — saves transcript-scanning I/O, not tokens
+  (`session_recovery` makes no LLM call), and beats recovery on accuracy
+  wherever mtimes stop reflecting write time.
+- `observed_at` — no cost saving; it is there because a fact's establishment
+  date is not its file's write date, and only the author knows the difference.
+
+Hand-authoring `sources[]` is **not** recommended: choosing `source_type`
+correctly means checking the claim against the transcript, which is
 `transcript_verify.verify_user_stated`'s job, and a confidently-wrong
 `external` is worse than a recovered `inferred`.
 
