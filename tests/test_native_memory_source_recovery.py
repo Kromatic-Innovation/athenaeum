@@ -38,6 +38,7 @@ from athenaeum.intake import discover_auto_memory_files
 from athenaeum.merge import AUTO_WIKI_PREFIX, merge_clusters_to_wiki
 from athenaeum.models import DEFAULT_SOURCE_TYPE
 from athenaeum.recovery_yield import load_state as load_recovery_yield_state
+from athenaeum.recovery_yield import write_state as write_recovery_yield_state
 from athenaeum.session_recovery import (
     BASIS_TIME_WINDOW,
     BASIS_WRITE_CITED,
@@ -929,9 +930,7 @@ class TestRecoveryYieldSignalFromIntake:
 
         warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert any("recovery yield" in msg and "0.6" in msg for msg in warnings), warnings
-        assert any("write-cited=1" in msg and "time-window=0" in msg for msg in warnings), (
-            warnings
-        )
+        assert any("write-cited=1" in msg and "time-window=0" in msg for msg in warnings), warnings
 
     def test_fail_open_on_unwritable_cache_dir(
         self,
@@ -955,3 +954,68 @@ class TestRecoveryYieldSignalFromIntake:
         files = discover_auto_memory_files(knowledge_root, projects_root=projects_root)
         assert len(files) == 1
         assert files[0].origin_session_id == WRITER_SESSION
+
+
+class TestRecoveryYieldSignalCoversEveryExit:
+    """Issue athenaeum#1453 review follow-up: the record must survive BOTH exits.
+
+    ``recovery_yield``'s contract is that the record is written unconditionally,
+    so a reader is never looking at a stale prior pass. ``discover_auto_memory_files``
+    has two exits, though: the ordinary pass end, and an early ``return []``
+    taken when no intake root is configured. An early return that skipped the
+    write would leave a previous pass's BREACH standing for as long as the
+    roots stayed unconfigured — with only the ``updated`` stamp to disclose
+    it, which nothing reading ``within_threshold`` would notice.
+    """
+
+    def test_no_intake_roots_still_records_a_truthful_zeroed_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+
+        # Seed a prior pass that BREACHED, so a skipped write is detectable as
+        # a stale breach rather than merely as an absent file.
+        write_recovery_yield_state(cache_dir, uncited=10, recovered=1, write_cited=1, time_window=0)
+
+        # A knowledge root whose config declares no extra intake roots at all.
+        knowledge_root = tmp_path / "knowledge"
+        (knowledge_root / "wiki").mkdir(parents=True)
+        (knowledge_root / "athenaeum.yaml").write_text(
+            "recall:\n  extra_intake_roots: []\n", encoding="utf-8"
+        )
+
+        assert discover_auto_memory_files(knowledge_root, projects_root=tmp_path) == []
+
+        state = load_recovery_yield_state(cache_dir.resolve())
+        assert state == {
+            "uncited": 0,
+            "recovered": 0,
+            "write_cited": 0,
+            "time_window": 0,
+        }, "the no-intake-roots early return left the previous pass's record standing"
+
+    def test_no_intake_roots_pass_is_no_data_not_a_breach(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Recording an empty pass must not itself fire the alarm.
+
+        ``uncited == 0`` is "nothing needed recovery", which evaluates to
+        ``no-data`` — a third state, distinct from a zero rate. If it read as
+        ``0.0`` instead, every pass with no configured roots would alarm.
+        """
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.setenv("ATHENAEUM_RECOVERY_YIELD_THRESHOLD", "0.9")
+
+        knowledge_root = tmp_path / "knowledge"
+        (knowledge_root / "wiki").mkdir(parents=True)
+        (knowledge_root / "athenaeum.yaml").write_text(
+            "recall:\n  extra_intake_roots: []\n", encoding="utf-8"
+        )
+
+        with caplog.at_level(logging.WARNING, logger="athenaeum.intake"):
+            assert discover_auto_memory_files(knowledge_root, projects_root=tmp_path) == []
+
+        assert "below threshold" not in caplog.text

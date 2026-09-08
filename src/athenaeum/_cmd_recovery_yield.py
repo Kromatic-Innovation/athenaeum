@@ -108,7 +108,14 @@ def _scan_corpus(knowledge_root: Path) -> dict[str, object]:
             continue
         total += 1
         sources = meta.get("sources")
-        if not sources:
+        # A page counts toward the empty-sources cohort when it carries no
+        # USABLE provenance list: absent, `[]`, or any non-list value. The
+        # `isinstance` half matters -- frontmatter is an open schema, so a
+        # hand-edited `sources: 0` / `sources: false` / `sources: "abc"` is
+        # possible, and a bare falsy test would silently disagree with itself
+        # across those (counting `0` as empty but a non-empty string as
+        # provenance). Neither is a provenance list, so both are empty here.
+        if not isinstance(sources, list) or not sources:
             empty_sources += 1
     share = (empty_sources / total) if total else None
     return {

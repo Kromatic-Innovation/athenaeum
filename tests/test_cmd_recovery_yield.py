@@ -175,3 +175,43 @@ class TestHelp:
         with pytest.raises(SystemExit) as excinfo:
             main(["recovery-yield", "--help"])
         assert excinfo.value.code == 0
+
+
+class TestCorpusScanRejectsNonListSources:
+    """Issue athenaeum#1453 review follow-up: a falsy test alone is not enough.
+
+    Frontmatter is an OPEN schema (``models.parse_frontmatter`` deliberately
+    round-trips non-core keys), so a hand-edited page can carry ``sources`` as
+    a scalar. A bare ``if not sources:`` disagrees with itself across those —
+    it counts ``0``/``false`` as empty but a non-empty string as provenance —
+    even though none of them is a provenance LIST. All three belong in the
+    empty-sources cohort, which is what makes the reported share a truthful
+    answer to athenaeum#1452's AC2.
+    """
+
+    def _write_raw_page(self, wiki_root: Path, name: str, sources_line: str) -> None:
+        (wiki_root / name).write_text(
+            f"---\ntype: auto-memory\n{sources_line}\n---\nBody.\n", encoding="utf-8"
+        )
+
+    def test_scalar_sources_values_all_count_as_empty(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        # Three non-list scalars: a falsy int, a falsy bool, and a TRUTHY
+        # string. The string is the discriminating case — a bare falsy test
+        # would call it provenance.
+        self._write_raw_page(wiki_root, "auto-scalar-zero.md", "sources: 0")
+        self._write_raw_page(wiki_root, "auto-scalar-false.md", "sources: false")
+        self._write_raw_page(wiki_root, "auto-scalar-string.md", "sources: abc")
+        # One genuinely cited page, as a positive control.
+        self._write_raw_page(wiki_root, "auto-really-cited.md", "sources:\n  - session: abc")
+
+        cache = tmp_path / "cache"
+        rc, payload = _run("--cache-dir", str(cache), "--path", str(knowledge_root), capsys=capsys)
+        assert rc == 0
+        assert payload["auto_memory_pages"] == 4
+        assert payload["auto_memory_pages_empty_sources"] == 3
+        assert payload["auto_memory_empty_sources_share"] == pytest.approx(3 / 4)
