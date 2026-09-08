@@ -87,9 +87,12 @@ _WRITING_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 #: Keys a tool-use ``input`` may use for its target path.
 _PATH_KEYS = ("file_path", "notebook_path", "path")
 
-#: Cheap per-line prefilter. Only lines that could possibly mention a memory
-#: file get JSON-parsed, which keeps the scan linear in bytes rather than in
-#: records for the overwhelming majority of transcript lines.
+#: Cheap per-line prefilter, and the fallback needle when no scope is known.
+#: Only lines that could possibly mention a memory file get JSON-parsed, which
+#: keeps the scan linear in bytes rather than in records for the overwhelming
+#: majority of transcript lines. It must stay a SUPERSET of the anchored
+#: ``/<scope>/memory/`` needle, or the prefilter would drop lines the match
+#: would have accepted.
 _MEMORY_HINT = "/memory/"
 
 _TIMESTAMP_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
@@ -223,14 +226,26 @@ class _ScopeIndex:
     windows: list[tuple[datetime, datetime, str]]
 
 
-def _scan_transcript(jsonl: Path) -> tuple[dict[str, datetime], datetime | None, datetime | None]:
+def _scan_transcript(
+    jsonl: Path, scope: str = ""
+) -> tuple[dict[str, datetime], datetime | None, datetime | None]:
     """One linear pass over a transcript: memory writes + its time window.
 
     Returns ``({memory filename: latest write time}, first, last)``. An
     unreadable file yields empty results rather than raising — a transcript
     that rolled off mid-scan must degrade to "cannot recover", not to a
     crashed intake.
+
+    ``scope`` narrows the accepted write targets to ``<scope>/memory/…`` —
+    THIS scope's own memory directory. Without it, a session that edited some
+    OTHER project's memory file (agents do reach across projects) would index
+    that basename here, and a same-named memory in this scope would then be
+    attributed to a session that never wrote it. Fabricated provenance is the
+    worst failure this module can have, so the match is anchored rather than
+    merely ``"/memory/" in target``. An empty ``scope`` keeps the loose match
+    (used only where no scope is known).
     """
+    needle = f"/{scope}/memory/" if scope else _MEMORY_HINT
     writes: dict[str, datetime] = {}
     first: datetime | None = None
     last: datetime | None = None
@@ -261,7 +276,7 @@ def _scan_transcript(jsonl: Path) -> tuple[dict[str, datetime], datetime | None,
                     if isinstance(raw_ts, str):
                         stamp = _parse_timestamp(raw_ts)
                 for target in paths:
-                    if _MEMORY_HINT not in target:
+                    if needle not in target:
                         continue
                     name = target.rsplit("/", 1)[-1]
                     if not name:
@@ -315,7 +330,7 @@ class SessionRecoverer:
                 session_id = jsonl.stem
                 if not session_id:
                     continue
-                found, first, last = _scan_transcript(jsonl)
+                found, first, last = _scan_transcript(jsonl, scope)
                 for name, stamp in found.items():
                     prior = writes.get(name)
                     if prior is None or stamp >= prior[1]:

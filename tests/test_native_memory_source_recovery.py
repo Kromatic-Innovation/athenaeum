@@ -400,6 +400,44 @@ class TestWriteCitedRung:
         assert recovered is not None
         assert recovered.basis == BASIS_TIME_WINDOW
 
+    def test_another_projects_memory_write_does_not_attribute(self, tmp_path: Path) -> None:
+        """A same-named memory in a DIFFERENT project must not be claimed here.
+
+        Agents do reach across projects, so a session whose transcript lives in
+        this scope can legitimately write another scope's memory file. Matching
+        on a bare ``/memory/`` substring would index that basename here and
+        attribute this scope's same-named memory to a session that never wrote
+        it — fabricated provenance, the worst outcome this module can produce.
+        """
+        projects_root = tmp_path / "projects"
+        other_scope = "-Users-alice-Code-otherproject"
+        # ONE transcript, living in THIS scope, writing two memory files: one
+        # belonging to another project, one belonging to this one.
+        _write_transcript(
+            projects_root,
+            WRITER_SESSION,
+            [
+                _tool_use_record(
+                    "Write",
+                    _native_path(projects_root, MEMORY_NAME, other_scope),
+                    5,
+                ),
+                _tool_use_record("Write", _native_path(projects_root, "own-memory.md", SCOPE), 6),
+            ],
+        )
+        # Both memories sit far outside the transcript's window, so a citation
+        # match is the ONLY thing that could resolve either one.
+        knowledge_root = tmp_path / "knowledge"
+        foreign = _write_native_memory(knowledge_root, mtime_offset_minutes=5000)
+        own = _write_native_memory(knowledge_root, "own-memory.md", mtime_offset_minutes=5000)
+        recoverer = SessionRecoverer(projects_root)
+        # The cross-project write must NOT be claimed by this scope...
+        assert recoverer.recover(foreign, SCOPE) is None
+        # ...while the same transcript's write into THIS scope still resolves,
+        # so the anchoring narrowed the match rather than disabling it.
+        recovered = recoverer.recover(own, SCOPE)
+        assert recovered is not None and recovered.basis == BASIS_WRITE_CITED
+
     def test_latest_writer_wins(self, tmp_path: Path) -> None:
         """The file's CURRENT content is what the last write left behind."""
         projects_root = tmp_path / "projects"
@@ -541,7 +579,11 @@ class TestScanResilience:
         )
         calls: list[Path] = []
         real = sr._scan_transcript
-        monkeypatch.setattr(sr, "_scan_transcript", lambda p: (calls.append(p), real(p))[1])
+        monkeypatch.setattr(
+            sr,
+            "_scan_transcript",
+            lambda path, scope="": (calls.append(path), real(path, scope))[1],
+        )
         recoverer = sr.SessionRecoverer(projects_root)
         for index in range(5):
             recoverer.recover(Path(f"memory-{index}.md"), SCOPE)
