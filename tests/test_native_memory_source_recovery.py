@@ -27,6 +27,7 @@ Every test injects a synthetic ``projects_root`` and knowledge tree under
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,6 +37,8 @@ import pytest
 from athenaeum.intake import discover_auto_memory_files
 from athenaeum.merge import AUTO_WIKI_PREFIX, merge_clusters_to_wiki
 from athenaeum.models import DEFAULT_SOURCE_TYPE
+from athenaeum.recovery_yield import load_state as load_recovery_yield_state
+from athenaeum.recovery_yield import write_state as write_recovery_yield_state
 from athenaeum.session_recovery import (
     BASIS_TIME_WINDOW,
     BASIS_WRITE_CITED,
@@ -823,3 +826,196 @@ class TestDeclaredProvenanceIsUntouched:
         assert am.origin_session_id is None
         (entry,) = merge_clusters_to_wiki(knowledge_root, projects_root=projects_root)
         assert [s["session"] for s in entry.sources] == ["cited-sess"]
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1453: the recovery-yield signal intake writes at pass end.
+#
+# These tests exercise `discover_auto_memory_files` end to end (real fixture
+# trees, no mocking of the recoverer) so the persisted counters are proven
+# against actual write-cited AND time-window recoveries, not just against the
+# `evaluate`/`load_state`/`write_state` primitives already covered in
+# `test_recovery_yield.py`.
+
+
+class TestRecoveryYieldSignalFromIntake:
+    def test_basis_split_is_persisted_with_one_write_cited_and_one_time_window(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One file resolves via each rung; the persisted split must tell them apart.
+
+        The second memory's mtime is placed just past WRITER_SESSION's last
+        record (8 min) but still inside OTHER_SESSION's window (0-9 min) --
+        so only the time-window rung (against OTHER_SESSION, which never
+        cites any file) can resolve it, while the first memory is cited
+        directly by a `Write` tool-use and resolves via write-cited.
+        """
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+
+        knowledge_root = tmp_path / "knowledge"
+        projects_root = tmp_path / "projects"
+        _write_native_memory(knowledge_root, mtime_offset_minutes=5)  # MEMORY_NAME
+        window_only_name = "time-window-memory.md"
+        _write_native_memory(knowledge_root, window_only_name, mtime_offset_minutes=8.5)
+        _write_config(knowledge_root)
+        _write_transcript(
+            projects_root,
+            WRITER_SESSION,
+            [
+                _text_record("remember the egress finding", 0),
+                _tool_use_record("Write", _native_path(projects_root), 5),
+                _text_record("thanks", 8),
+            ],
+        )
+        _write_transcript(
+            projects_root,
+            OTHER_SESSION,
+            [
+                _text_record("unrelated work in the same project", 0),
+                _text_record("still unrelated", 9),
+            ],
+        )
+
+        files = discover_auto_memory_files(knowledge_root, projects_root=projects_root)
+        by_name = {f.path.name: f.origin_session_id for f in files}
+        assert by_name[MEMORY_NAME] == WRITER_SESSION
+        assert by_name[window_only_name] == OTHER_SESSION
+
+        state = load_recovery_yield_state(cache_dir.resolve())
+        assert state == {"uncited": 2, "recovered": 2, "write_cited": 1, "time_window": 1}
+
+    def test_below_threshold_logs_a_warning_naming_rate_threshold_and_basis(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A rate below the resolved threshold must fire a WARNING, on its own.
+
+        One file resolves (write-cited); a second is genuinely ambiguous (two
+        overlapping session windows, cited by neither) so recovery declines
+        it -- 1 of 2 recovered, rate 0.5, which the env-set 0.6 threshold
+        rejects.
+        """
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.setenv("ATHENAEUM_RECOVERY_YIELD_THRESHOLD", "0.6")
+        caplog.set_level(logging.WARNING, logger="athenaeum.intake")
+
+        knowledge_root = tmp_path / "knowledge"
+        projects_root = tmp_path / "projects"
+        _write_native_memory(knowledge_root, mtime_offset_minutes=5)  # MEMORY_NAME
+        unresolved_name = "unresolved-memory.md"
+        _write_native_memory(knowledge_root, unresolved_name, mtime_offset_minutes=5)
+        _write_config(knowledge_root)
+        _write_transcript(
+            projects_root,
+            WRITER_SESSION,
+            [_tool_use_record("Write", _native_path(projects_root), 5)],
+        )
+        _write_transcript(
+            projects_root,
+            OTHER_SESSION,
+            [_text_record("start", 3), _text_record("end", 7)],
+        )
+
+        files = discover_auto_memory_files(knowledge_root, projects_root=projects_root)
+        by_name = {f.path.name: f.origin_session_id for f in files}
+        assert by_name[MEMORY_NAME] == WRITER_SESSION
+        assert by_name[unresolved_name] is None  # ambiguous window, correctly declined
+
+        state = load_recovery_yield_state(cache_dir.resolve())
+        assert state == {"uncited": 2, "recovered": 1, "write_cited": 1, "time_window": 0}
+
+        warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("recovery yield" in msg and "0.6" in msg for msg in warnings), warnings
+        assert any("write-cited=1" in msg and "time-window=0" in msg for msg in warnings), warnings
+
+    def test_fail_open_on_unwritable_cache_dir(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        native_corpus: tuple[Path, Path],
+    ) -> None:
+        """An unwritable cache dir must not raise or change discovery's return.
+
+        A plain FILE occupying the configured cache-dir path makes
+        `atomic_write_text`'s own `parent.mkdir(parents=True, exist_ok=True)`
+        raise `FileExistsError` -- exactly the class of failure the
+        try/except around the recovery-yield write+evaluate step in
+        `discover_auto_memory_files` exists to swallow.
+        """
+        knowledge_root, projects_root = native_corpus
+        bogus_cache = tmp_path / "cache-is-actually-a-file"
+        bogus_cache.write_text("occupied", encoding="utf-8")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(bogus_cache))
+
+        files = discover_auto_memory_files(knowledge_root, projects_root=projects_root)
+        assert len(files) == 1
+        assert files[0].origin_session_id == WRITER_SESSION
+
+
+class TestRecoveryYieldSignalCoversEveryExit:
+    """Issue athenaeum#1453 review follow-up: the record must survive BOTH exits.
+
+    ``recovery_yield``'s contract is that the record is written unconditionally,
+    so a reader is never looking at a stale prior pass. ``discover_auto_memory_files``
+    has two exits, though: the ordinary pass end, and an early ``return []``
+    taken when no intake root is configured. An early return that skipped the
+    write would leave a previous pass's BREACH standing for as long as the
+    roots stayed unconfigured — with only the ``updated`` stamp to disclose
+    it, which nothing reading ``within_threshold`` would notice.
+    """
+
+    def test_no_intake_roots_still_records_a_truthful_zeroed_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+
+        # Seed a prior pass that BREACHED, so a skipped write is detectable as
+        # a stale breach rather than merely as an absent file.
+        write_recovery_yield_state(cache_dir, uncited=10, recovered=1, write_cited=1, time_window=0)
+
+        # A knowledge root whose config declares no extra intake roots at all.
+        knowledge_root = tmp_path / "knowledge"
+        (knowledge_root / "wiki").mkdir(parents=True)
+        (knowledge_root / "athenaeum.yaml").write_text(
+            "recall:\n  extra_intake_roots: []\n", encoding="utf-8"
+        )
+
+        assert discover_auto_memory_files(knowledge_root, projects_root=tmp_path) == []
+
+        state = load_recovery_yield_state(cache_dir.resolve())
+        assert state == {
+            "uncited": 0,
+            "recovered": 0,
+            "write_cited": 0,
+            "time_window": 0,
+        }, "the no-intake-roots early return left the previous pass's record standing"
+
+    def test_no_intake_roots_pass_is_no_data_not_a_breach(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Recording an empty pass must not itself fire the alarm.
+
+        ``uncited == 0`` is "nothing needed recovery", which evaluates to
+        ``no-data`` — a third state, distinct from a zero rate. If it read as
+        ``0.0`` instead, every pass with no configured roots would alarm.
+        """
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.setenv("ATHENAEUM_RECOVERY_YIELD_THRESHOLD", "0.9")
+
+        knowledge_root = tmp_path / "knowledge"
+        (knowledge_root / "wiki").mkdir(parents=True)
+        (knowledge_root / "athenaeum.yaml").write_text(
+            "recall:\n  extra_intake_roots: []\n", encoding="utf-8"
+        )
+
+        with caplog.at_level(logging.WARNING, logger="athenaeum.intake"):
+            assert discover_auto_memory_files(knowledge_root, projects_root=tmp_path) == []
+
+        assert "below threshold" not in caplog.text
