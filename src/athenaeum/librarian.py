@@ -9929,17 +9929,28 @@ def _reindex_would_change(
     stored = _load_manifest(manifest_path)
     # MUST mirror what ``reindex`` -> ``build_*_index`` constructs, or the
     # embedding-model blocker compares against the wrong model.
+    #
+    # Note the ``"fts5"`` literal in the else branch — NOT ``backend_name``.
+    # ``reindex`` is ``if backend_name == "vector": build_vector_index(...)
+    # else: build_fts5_index(...)``, so EVERY non-``vector`` name (including
+    # ``keyword``, and any typo) builds an FTS5 index. Asking
+    # ``get_backend(backend_name)`` here would hand back ``KeywordBackend``
+    # under ``search_backend: keyword``, whose blocker is unconditionally
+    # ``None`` because *it* persists nothing — true of that class, false of
+    # what ``reindex`` actually built. athenaeum#1459 would then survive
+    # verbatim under that config. This mirrors ``manifest_name`` above, which
+    # already resolves the same two-way split correctly.
     backend_obj = (
         get_backend("vector", embedding_model=resolve_embedding_model(config))
         if backend_name == "vector"
-        else get_backend(backend_name)
+        else get_backend("fts5")
     )
     blocker = backend_obj._incremental_reuse_blocker(resolved_cache, stored)
     if blocker is not None and stored is not None:
         # The build will refuse to reuse this index (athenaeum#1459) and rebuild it
         # from scratch, so preview it the way the build will see it: with no
         # usable manifest, which counts every current page as pending.
-        logging.getLogger(__name__).info(
+        log.info(
             "session-end: index at %s is not reusable (%s) — previewing a full "
             "rebuild (issue athenaeum#1459)",
             resolved_cache,

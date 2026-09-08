@@ -696,6 +696,61 @@ class TestReindexGateOnStaleness:
         )
         assert third.reindex_would_change == 0 and third.reindexed is False
 
+    def test_non_vector_backend_name_previews_the_index_reindex_builds(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """``backend="keyword"`` must consult the FTS5 blocker, because that is
+        what :func:`reindex` actually builds under any non-``vector`` name.
+
+        ``reindex`` is ``if backend_name == "vector": build_vector_index(...)
+        else: build_fts5_index(...)`` — a two-way split, not a three-way one.
+        Resolving the preview's backend with ``get_backend(backend_name)``
+        instead of the ``"fts5"`` literal hands back ``KeywordBackend``, whose
+        blocker is unconditionally ``None`` because that class persists
+        nothing. The gate then never fires and athenaeum#1459 survives verbatim
+        under this config, while the fts5 twin above still passes — which is
+        exactly why that test cannot stand in for this one.
+        """
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        first = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="keyword",
+        )
+        assert first.reindexed is True
+        # Proof of the premise: a NON-vector name built an FTS5 index on disk.
+        db = cache / "wiki-index.db"
+        assert db.is_file(), "reindex maps every non-vector name to fts5"
+
+        db.unlink()  # manifest stays, so the hash-diff alone still reports 0.
+
+        second = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="keyword",
+        )
+        assert second.ingest.noop is True
+        assert second.reindexed is True
+        assert db.is_file()
+
+        third = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="keyword",
+        )
+        assert third.reindex_would_change == 0 and third.reindexed is False
+
     def test_deleted_vector_collection_under_an_intact_manifest_is_rebuilt(
         self, tmp_path: Path, mock_anthropic: MagicMock
     ) -> None:
