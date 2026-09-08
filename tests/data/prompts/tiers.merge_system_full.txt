@@ -16,6 +16,10 @@ Rules:
   "confirmed once more") — always add the new source as an additional
   footnote citation on the EXISTING bullet instead, so the re-confirming
   source is never lost even when no new bullet is warranted.
+- If the observation adds nothing at all — it is a pure re-confirmation with
+  no new information, or it is not about this entity — do NOT rewrite or
+  echo the page. Return a plain-text response starting with exactly
+  `NO_MERGE:` followed by a brief reason, and nothing else.
 - If the new observation contradicts existing content:
   - Factual contradiction (verifiable fact): keep the more reliable source, note the discrepancy
   - Contextual difference (opinions, preferences): capture both with context

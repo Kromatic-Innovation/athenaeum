@@ -27,18 +27,23 @@ from athenaeum.tiers import (
     _TIER3_CREATE_MAX_TOKENS,
     ENTITY_LLM_CALL_MARKER,
     MERGE_FALLBACK_LOG_PREFIX,
+    MERGE_FULL_GUARD_REFUSED_LOG_PREFIX,
+    MERGE_FULL_NOOP_LOG_PREFIX,
     MERGE_PARSE_FAIL_AMBIGUOUS,
     MERGE_PARSE_FAIL_NO_JSON,
     MERGE_PARSE_FAIL_SHAPE,
+    MERGE_SYSTEM_FULL,
     TIER2_DEGRADED_MARKER,
     TIER2_TRUNCATED_MARKER,
     MergeOpsError,
     PreambleOnlyResponseError,
     Tier2ParseStats,
+    _merge_full_response_is_plausible_echo,
     _timed_llm_call,
     apply_merge_ops,
     parse_merge_ops_response,
     parse_tier2_entities,
+    parse_tier3_merge,
     resolve_type_gate_allowed_types,
     resolve_type_gate_excluded_keys,
     strip_planning_preamble,
@@ -49,6 +54,7 @@ from athenaeum.tiers import (
     tier3_create,
     tier3_derive_actions,
     tier3_merge,
+    tier3_merge_full,
     tier3_write,
     tier4_escalate,
 )
@@ -1411,6 +1417,247 @@ class TestTier3Merge:
         )
         assert body is not None
         assert esc is None
+
+
+class TestTier3MergeFullEchoNoOp:
+    """Issue athenaeum#1460: full-echo merge had no sanctioned way for the model
+    to report "nothing to merge" — its refusal rationale became the ENTIRE
+    new page body. Two independent defenses now apply:
+
+    - AC1: the ``NO_MERGE:`` prompt affordance in ``MERGE_SYSTEM_FULL``,
+      recognized by ``parse_tier3_merge``.
+    - AC2: a deterministic, prompt-independent guard
+      (``_merge_full_response_is_plausible_echo``) that refuses to write a
+      body whose leading content is not a plausible echo of the existing
+      page — this must fire even when the model ignores AC1 entirely.
+
+    Every action below uses ``entity_type="company"`` (never ``person``) so
+    these tests cannot be mistaken for coverage already provided by the
+    unrelated ``_refuse_person_rewrite`` guard (issue athenaeum#1183) —
+    per the issue, 6 of the 10 affected corpus pages were company/concept/
+    tool, not person.
+    """
+
+    def _company_action(self, observations: str = "Irrelevant observation.") -> EntityAction:
+        return EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations=observations,
+        )
+
+    # -- AC1: the sanctioned no-op channel -----------------------------------
+
+    def test_merge_system_full_states_the_no_op_affordance(self) -> None:
+        assert "NO_MERGE:" in MERGE_SYSTEM_FULL
+
+    def test_no_merge_sentinel_leaves_page_unchanged(self) -> None:
+        """A model that complies with the ``NO_MERGE:`` affordance gets a
+        clean (None, None) — no body, no escalation — and the existing
+        caller contract (``if updated_body:``) leaves the page untouched.
+        """
+        existing_body = "# Acme Corp\n\nFintech startup, Series B."
+        response = "NO_MERGE: the new observation is not about this entity."
+
+        body, esc = parse_tier3_merge(
+            response, self._company_action(), "sessions/raw.md", existing_body
+        )
+
+        assert body is None
+        assert esc is None
+
+    def test_no_merge_sentinel_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        existing_body = "# Acme Corp\n\nFintech startup, Series B."
+        response = "NO_MERGE: pure re-confirmation, nothing new."
+
+        with caplog.at_level("INFO"):
+            parse_tier3_merge(
+                response, self._company_action(), "sessions/raw.md", existing_body
+            )
+
+        assert any(
+            MERGE_FULL_NOOP_LOG_PREFIX in rec.message for rec in caplog.records
+        )
+        # The guard-refusal prefix must NOT also fire on the happy path —
+        # the two facts are meant to be greppable separately.
+        assert not any(
+            MERGE_FULL_GUARD_REFUSED_LOG_PREFIX in rec.message
+            for rec in caplog.records
+        )
+
+    def test_tier3_merge_full_end_to_end_no_merge_sentinel(self) -> None:
+        """End-to-end through tier3_merge_full (not just the parser) — the
+        mocked model complies with the NO_MERGE: affordance.
+        """
+        existing_body = "# Acme Corp\n\nFintech startup, Series B."
+        client = _mock_client(
+            "NO_MERGE: this observation is about an unrelated company."
+        )
+        client.messages.create.return_value.stop_reason = "end_turn"
+
+        body, esc = tier3_merge_full(
+            self._company_action(), existing_body, "sessions/raw.md", client
+        )
+
+        assert body is None
+        assert esc is None
+
+    # -- AC2: the independent, deterministic guard ---------------------------
+
+    def test_pure_refusal_is_refused_byte_identical(self) -> None:
+        """Counter-example (AC3): a pure refusal/rationale response, with NO
+        page content and NOT using the NO_MERGE: sentinel at all, must not
+        reach the page. Proves AC2 fires independently of AC1 compliance.
+        """
+        existing_body = "# Acme Corp\n\nFintech startup, Series B."
+        response = (
+            "The new observation contains no information relevant to Acme "
+            "Corp. It appears to be a security questionnaire fact-check "
+            "document relating to a different individual's travel history "
+            "and client records. There is nothing to merge."
+        )
+
+        body, esc = parse_tier3_merge(
+            response, self._company_action(), "sessions/raw.md", existing_body
+        )
+
+        assert body is None
+        # No rationale text reaches the return value at all — the caller
+        # contract (``if updated_body:``) then leaves the page byte-identical
+        # to *existing_body*, since nothing is written when body is falsy.
+
+    def test_refusal_followed_by_full_echo_is_refused_whole(self) -> None:
+        """Counter-example (AC4): the exact observed shape — a refusal
+        rationale FOLLOWED BY a full echo of the untouched existing body.
+        The rationale must not merely be stripped from a body that is
+        otherwise rewritten: the WHOLE write is refused, so the page stays
+        byte-identical to *existing_body*, not a re-serialized copy of it.
+        """
+        existing_body = "# Acme Corp\n\nFintech startup, Series B."
+        response = (
+            "The new observation contains no information relevant to Acme "
+            "Corp. There is nothing to merge.\n\n"
+            + existing_body
+        )
+
+        body, esc = parse_tier3_merge(
+            response, self._company_action(), "sessions/raw.md", existing_body
+        )
+
+        assert body is None
+
+    def test_guard_fires_without_any_sentinel_proving_ac1_ac2_independence(
+        self,
+    ) -> None:
+        """Issue athenaeum#1460 design constraint: AC1 and AC2 must be
+        independent by construction — this response uses NEITHER
+        ``NO_MERGE:`` NOR ``ESCALATE:``, just raw meta-prose, and must still
+        be refused by the deterministic AC2 guard alone.
+        """
+        existing_body = "# Acme Corp\n\nFintech startup, Series B."
+        response = "I don't see anything worth merging here, so I'll leave it as is."
+
+        body, esc = parse_tier3_merge(
+            response, self._company_action(), "sessions/raw.md", existing_body
+        )
+
+        assert body is None
+
+    def test_guard_refusal_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        existing_body = "# Acme Corp\n\nFintech startup, Series B."
+        response = "There is nothing here worth merging into this page."
+
+        with caplog.at_level("WARNING"):
+            parse_tier3_merge(
+                response, self._company_action(), "sessions/raw.md", existing_body
+            )
+
+        assert any(
+            MERGE_FULL_GUARD_REFUSED_LOG_PREFIX in rec.message
+            for rec in caplog.records
+        )
+
+    def test_guard_does_not_false_positive_on_legitimate_full_echo(self) -> None:
+        """Sanity check: an ordinary, compliant full-echo merge — response
+        starts directly with the page's own leading H1, new content added
+        in a section — must NOT be refused.
+        """
+        existing_body = "# Acme Corp\n\nFintech startup, Series B."
+        response = (
+            "# Acme Corp\n\nFintech startup, Series B.\n\n"
+            "Raised Series C in Q1 2024.[^2]"
+        )
+
+        body, esc = parse_tier3_merge(
+            response, self._company_action(), "sessions/raw.md", existing_body
+        )
+
+        assert body == response
+        assert esc is None
+
+    def test_guard_allows_response_whose_leading_text_is_preserved_content(
+        self,
+    ) -> None:
+        """A response is a plausible echo even with content before its first
+        H1, as long as that leading content already exists verbatim in the
+        page (i.e. it is preserved, not newly-added meta-prose)."""
+        existing_body = "Some preamble note.\n\n# Acme Corp\n\nFintech startup."
+        response = "Some preamble note.\n\n# Acme Corp\n\nFintech startup, now bigger."
+
+        assert _merge_full_response_is_plausible_echo(existing_body, response)
+
+    def test_leading_prefix_present_elsewhere_but_not_in_pre_h1_region_is_refused(
+        self,
+    ) -> None:
+        """Tightened per Seer review (athenaeum#1467): a short, generic meta-prefix
+        that happens to recur SOMEWHERE in the existing page (e.g. inside a
+        later section) must not be accepted just because it is present in
+        the body text overall — the old ``leading in existing_body`` check
+        would wrongly pass this. The existing page's H1 sits at position 0
+        (no pre-H1 region at all), so any non-empty leading content in the
+        response can never be preserved pre-heading content and must be
+        refused, even though "Note:" itself does appear later in the page.
+        """
+        existing_body = "# Acme Corp\n\nNote: see footnotes.\n\nFintech startup, Series B."
+        response = "Note:\n\n# Acme Corp\n\nFintech startup, Series B, Series C."
+
+        assert not _merge_full_response_is_plausible_echo(existing_body, response)
+
+    def test_no_leading_h1_in_existing_body_requires_response_to_start_with_it(
+        self,
+    ) -> None:
+        """Conservative no-leading-H1 handling: without a heading to anchor
+        on, a plausible echo must literally START WITH the existing body —
+        this both accepts a legitimate append-only echo and rejects any
+        prefix ahead of it (refusal prose included)."""
+        existing_body = "Fintech startup, Series B (no heading on this page)."
+
+        legit_response = existing_body + "\n\nRaised Series C in Q1 2024.[^2]"
+        assert _merge_full_response_is_plausible_echo(existing_body, legit_response)
+
+        refusal_response = "Nothing to merge here.\n\n" + existing_body
+        assert not _merge_full_response_is_plausible_echo(
+            existing_body, refusal_response
+        )
+
+    def test_no_leading_h1_and_empty_existing_body_always_refuses(self) -> None:
+        """An empty existing body gives the guard nothing to compare a
+        prefix against — bias-toward-refusing means this must refuse
+        rather than guess, per the issue's design constraint."""
+        assert not _merge_full_response_is_plausible_echo("", "anything at all")
+        assert not _merge_full_response_is_plausible_echo("   ", "# Title\n\nBody")
+
+    def test_response_with_no_h1_at_all_is_treated_as_entirely_leading(self) -> None:
+        """A response that never produces an H1 at all — a pure prose
+        refusal with no structure whatsoever — has no boundary to exempt
+        any of it, so the whole thing is "leading content" and refused."""
+        existing_body = "# Acme Corp\n\nFintech startup, Series B."
+        response = "Nothing new here, leaving the page as-is."
+
+        assert not _merge_full_response_is_plausible_echo(existing_body, response)
 
 
 class TestTier3MergeTruncationGuard:

@@ -215,7 +215,7 @@ Contradictions and escalation:
 - **Constant:** `athenaeum.tiers.MERGE_SYSTEM_FULL`
 - **Source:** `src/athenaeum/tiers.py`
 - **Model knob:** `write` &middot; **max_tokens:** `12288`
-- **sha256:** `1ade1f7dd8a254564e6bad3bf3f28930f6e1632f014df645f998b36de7e3c4a6`
+- **sha256:** `4859236351d76682d3c64e1ce9ce7310707ad9d4c020ec325a0d423154b1deda`
 
 ```text
 You are a knowledge librarian. You merge new observations into
@@ -232,6 +232,10 @@ Rules:
   "confirmed once more") — always add the new source as an additional
   footnote citation on the EXISTING bullet instead, so the re-confirming
   source is never lost even when no new bullet is warranted.
+- If the observation adds nothing at all — it is a pure re-confirmation with
+  no new information, or it is not about this entity — do NOT rewrite or
+  echo the page. Return a plain-text response starting with exactly
+  `NO_MERGE:` followed by a brief reason, and nothing else.
 - If the new observation contradicts existing content:
   - Factual contradiction (verifiable fact): keep the more reliable source, note the discrepancy
   - Contextual difference (opinions, preferences): capture both with context
