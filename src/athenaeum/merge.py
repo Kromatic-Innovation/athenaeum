@@ -1479,6 +1479,7 @@ def merge_clusters_to_wiki(
     heartbeat: Callable[[], None] | None = None,
     c4_since: datetime | None = None,
     c4_full_sweep: bool = False,
+    projects_root: Path | None = None,
 ) -> list[MergedWikiEntry]:
     """Read the canonical cluster JSONL and emit one wiki entry per cluster.
 
@@ -1598,6 +1599,16 @@ def merge_clusters_to_wiki(
             contradiction-sweep stamp (via ``out_stats["c4_swept_full"]``
             above); this flag alone has no stamp side effect. Default
             ``False``.
+        projects_root: Issue athenaeum#1452. Claude Code transcript/memory home,
+            forwarded to :func:`~athenaeum.intake.discover_auto_memory_files`
+            so a member written by Claude Code's NATIVE memory writer — which
+            emits neither ``sources[]`` nor ``originSessionId`` — can have its
+            originating session recovered from the scope's own transcripts.
+            Without it :func:`_am_as_implicit_source` returns ``None`` for
+            every such member and the page compiles with ``sources: []``.
+            Ignored when ``auto_memory_files`` is supplied (that list was
+            already discovered, recovery and all). Defaults to
+            ``~/.claude/projects``; inject a temp dir in tests.
 
     Returns:
         The list of :class:`MergedWikiEntry` records in cluster-file order.
@@ -1682,10 +1693,27 @@ def merge_clusters_to_wiki(
 
     extra_roots = resolve_extra_intake_roots(knowledge_root, config=resolved_config)
 
+    if auto_memory_files is not None and projects_root is not None:
+        # Issue athenaeum#1452: the caller supplied BOTH a pre-discovered member
+        # list and a transcript root. The list was already discovered — with
+        # whatever recovery its own discovery call did or did not do — so this
+        # ``projects_root`` reaches nothing. Say so: a silent no-op here is
+        # indistinguishable from "recovery ran and resolved nothing", which is
+        # exactly the confusion that would hide a mis-wired caller.
+        log.debug(
+            "merge pass: projects_root ignored — auto_memory_files was supplied, "
+            "so origin-session recovery belongs to that discovery call"
+        )
+
     if auto_memory_files is None:
         auto_memory_files = discover_auto_memory_files(
             knowledge_root,
             config=resolved_config,
+            # Issue athenaeum#1452: this is the discovery whose records feed
+            # ``_am_as_implicit_source`` below, so the origin-session recovery
+            # has to reach THIS call — a memory whose session is recovered only
+            # in C1's discovery would still compile with ``sources: []`` here.
+            projects_root=projects_root,
         )
 
     am_by_path = _collect_am_by_path(auto_memory_files)

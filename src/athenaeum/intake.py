@@ -18,8 +18,9 @@ cycle" move.
 Layering: L2 primitive. Imports only leaf/service modules that do NOT import
 any SCC member back — :mod:`athenaeum.models`, :mod:`athenaeum.config`,
 :mod:`athenaeum.ephemeral`, :mod:`athenaeum._lint`, :mod:`athenaeum.schemas`,
-:mod:`athenaeum.atomic_io`, and (issue athenaeum#797) :mod:`athenaeum.corrections`, a
-peer L2 primitive. It must NEVER import ``librarian``, ``merge``,
+:mod:`athenaeum.atomic_io`, (issue athenaeum#797) :mod:`athenaeum.corrections`, a
+peer L2 primitive, and (issue athenaeum#1452) :mod:`athenaeum.session_recovery`,
+a stdlib-only L0/L1 primitive. It must NEVER import ``librarian``, ``merge``,
 ``tiers``, ``pending_merges``, ``batch``, ``status``, ``retire``, or
 ``wiki_dedupe`` (that would re-introduce the cycle this module exists to
 break). ``librarian`` re-exports these three names for backward compatibility,
@@ -88,6 +89,7 @@ from athenaeum.models import (
 )
 from athenaeum.person_registry import PERSON_TYPE, PersonRegistry, PersonRegistryEntry
 from athenaeum.schemas import validate_wiki_meta
+from athenaeum.session_recovery import SessionRecoverer, written_at_from_frontmatter
 
 log = logging.getLogger(__name__)
 
@@ -254,6 +256,7 @@ def _raise_if_raw_root_is_actually_knowledge_root(
 def discover_auto_memory_files(
     knowledge_root: Path | None = None,
     config: dict[str, object] | None = None,
+    projects_root: Path | None = None,
 ) -> list[AutoMemoryFile]:
     """Find all auto-memory intake files under ``raw/auto-memory/<scope>/``.
 
@@ -297,6 +300,23 @@ def discover_auto_memory_files(
       ``config=None``, not a bug -- see
       ``TestConfigNoneVersusEmptyDict`` in
       ``tests/test_intake_root_guard.py`` for both directions pinned.
+
+    ``projects_root`` is the Claude Code transcript/memory home used to
+    RECOVER an ``originSessionId`` the native memory writer never wrote
+    (issue athenaeum#1452). Claude Code's native writer emits no
+    ``originSessionId`` and no ``sources[]``, which left ``merge``'s
+    ``_am_as_implicit_source`` fallback dead on arrival and compiled those
+    memories into wiki pages carrying ``sources: []``. When a file's
+    frontmatter declares no session, :class:`~athenaeum.session_recovery.SessionRecoverer`
+    resolves one from the scope's own transcripts — exactly, when a transcript
+    shows a writing tool-use naming the file; otherwise from a unique
+    write-time window; and ``None`` when neither is unambiguous, which is
+    simply today's behavior. Recovery NEVER touches ``source_type``: a
+    recovered session is an origin, not a verification, so the claim keeps its
+    honest ``inferred`` default until
+    :func:`athenaeum.transcript_verify.verify_user_stated` confirms it against
+    the transcript. Defaults to ``~/.claude/projects`` (honoring
+    ``CLAUDE_CONFIG_DIR``); inject a temp dir in tests.
     """
     if knowledge_root is None:
         knowledge_root = Path.home() / "knowledge"
@@ -320,6 +340,12 @@ def discover_auto_memory_files(
     ephemeral_scopes = resolve_ephemeral_scopes(resolved_config)
     operational_markers = resolve_operational_markers(resolved_config)
     dropped_ephemeral = 0
+
+    # Issue athenaeum#1452: one recoverer per pass, so a scope's transcripts are
+    # scanned once no matter how many of its memories need a session.
+    recoverer = SessionRecoverer(projects_root)
+    recovered_origins = 0
+    uncited = 0
 
     files: list[AutoMemoryFile] = []
     for root in roots:
@@ -399,6 +425,40 @@ def discover_auto_memory_files(
                     sources = [str(s) for s in sources_raw]
                 else:
                     sources = []
+                # Issue athenaeum#1452: Claude Code's NATIVE memory writer emits
+                # neither ``sources[]`` nor ``originSessionId``, so both of the
+                # librarian's provenance paths were dead for the memories it
+                # writes -- ``merge._am_as_implicit_source`` bails on a missing
+                # session id, and the page compiles with ``sources: []``.
+                # Recover the session here, from the scope's own transcripts,
+                # for exactly the files that declare no provenance at all: a
+                # file WITH ``sources[]`` already cites its origin (that list is
+                # merge's source of truth, and overriding an unrelated absent
+                # session id could only add noise), and a file that already
+                # declares ``originSessionId`` is left verbatim -- the file's
+                # own claim always outranks an inferred one. Failure is
+                # unremarkable: ``None`` leaves the record exactly as it was
+                # before this existed.
+                if origin_session_id is None and not sources:
+                    uncited += 1
+                    recovered = recoverer.recover(
+                        fpath,
+                        scope,
+                        written_at=written_at_from_frontmatter(meta),
+                    )
+                    if recovered is not None:
+                        origin_session_id = recovered.session_id
+                        # ``origin_turn`` stays None on purpose: the native
+                        # writer stamps no turn and inventing an index would
+                        # emit a WRONG ``#turnN`` ref. A bare session ref is
+                        # the honest citation (transcript_verify._best_effort_ref).
+                        recovered_origins += 1
+                        log.debug(
+                            "auto-memory: recovered origin session %s for %s (%s)",
+                            recovered.session_id,
+                            fpath,
+                            recovered.basis,
+                        )
                 # Issue athenaeum#260 (slice A of athenaeum#259): origin-traced provenance.
                 # Missing source_type defaults to ``inferred``; source_ref is
                 # the ultimate reference and is never this file's own name.
@@ -465,6 +525,13 @@ def discover_auto_memory_files(
                         bucket=parse_bucket(meta_for_markers),
                     )
                 )
+    if uncited:
+        log.info(
+            "auto-memory: recovered an origin session for %d of %d file(s) that "
+            "declared no provenance (issue athenaeum#1452)",
+            recovered_origins,
+            uncited,
+        )
     if dropped_ephemeral:
         log.info(
             "auto-memory: dropped %d ephemeral/operational intake file(s) "

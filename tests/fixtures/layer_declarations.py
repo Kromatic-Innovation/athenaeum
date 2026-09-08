@@ -78,6 +78,7 @@ MODULE_LAYER: dict[str, int] = {
     "scoped_claims": 1,    # "L0/L1-boundary primitive" -> upper bound
     "storage": 1,
     "store": 1,            # "L0/L1 (design note Sec6.4)" -> upper bound
+    "session_recovery": 1,  # "L0/L1-boundary primitive" -> upper bound
     "transcript_verify": 1,  # "L0/L1-boundary primitive" -> upper bound
     # L2 -- primitives/utilities/services one tier up.
     "bounce_contract": 2,  # "L2-ish" -> upper (non-boundary) bound stated
