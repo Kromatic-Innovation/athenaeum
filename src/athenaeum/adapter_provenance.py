@@ -67,7 +67,7 @@ workspace: Kromatic
 created_on: '1730753845696'
 updated_on: '1732116400407'
 text_fragment_count: 137
-archive_path: /Users/tristankromer/knowledge/raw/mural/kromatic5164....json
+archive_path: <operator-home>/knowledge/raw/mural/kromatic5164....json
 template_only: false
 participants:                                 # NOT captured -- not in the allowlist
 - Nebiyou

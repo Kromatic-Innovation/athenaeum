@@ -43,9 +43,12 @@ from athenaeum.models import ClassifiedEntity, EntityIndex, RawFile, TokenUsage
 VALID_TYPES = ["person", "company", "concept", "reference"]
 VALID_ACCESS = ["open", "internal", "confidential", "personal"]
 
-# Verbatim shape measured against a live mural-board-summary record
+# Shape measured against a live mural-board-summary record
 # (/knowledge/raw/mural-board-summary/, 2026-09-08) -- see the module
-# docstring's decision note. `participants` is deliberately present and
+# docstring's decision note. The `archive_path` value is a sanitized stand-in
+# for the operator-machine path the adapter really emits; only its shape
+# matters here, and a real one would trip public-safe-lint.
+# `participants` is deliberately present and
 # deliberately NOT in ADAPTER_PROVENANCE_VALUE_KEYS: it is this fixture's
 # "unlisted key" for the AC3 counter-example.
 _MURAL_BOARD_ID = "kromatic5164.1730753845696"
@@ -60,7 +63,7 @@ _MURAL_FIXTURE_CONTENT = (
     "created_on: '1730753845696'\n"
     "updated_on: '1732116400407'\n"
     "text_fragment_count: 137\n"
-    "archive_path: /Users/tristankromer/knowledge/raw/mural/kromatic5164.json\n"
+    "archive_path: /opt/example-knowledge/raw/mural/kromatic5164.json\n"
     "template_only: false\n"
     "participants:\n"
     "- Nebiyou\n"
