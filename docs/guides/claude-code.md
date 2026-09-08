@@ -183,11 +183,13 @@ Required/recommended fields:
 ### Full field reference
 
 Every frontmatter key read off an auto-memory file by
-`intake.discover_auto_memory_files` — i.e. the keys that reach an
-`AutoMemoryFile` and survive into `merge.render_merged_entry`. All are optional
-unless the table above marks them required, and (except `bucket`, noted below)
-**all fail open**: an unrecognized value is dropped and the compile continues,
-so a guessed value is worse than an omitted key.
+`intake.discover_auto_memory_files` — the keys that reach an `AutoMemoryFile`
+and act somewhere in the compile, whether during clustering, merge, resolution,
+or on the rendered page. (Most do their work upstream and never appear in the
+compiled entry's own frontmatter.) All are optional unless the table above
+marks them required, and **all fail open**: an unrecognized value is logged at
+debug and discarded, the compile continues, so a guessed value is worse than an
+omitted key.
 
 > **This is the auto-memory path only.** Athenaeum has a second, separate
 > intake path for entity-schema pages (`tier0_handle_upsert` → `WikiEntity`),
@@ -213,9 +215,11 @@ The vocabularies below are core-code constants, identical in every deployment.
 | `model` | The model that produced the claim. Expected on the AI-attributed `source_type` channels; validation is fail-open, so it is not enforced. | `""`. |
 | `on_behalf_of` | Who the claim was made for. | `""`. |
 | `asserter` | Structured asserter annotation. | `{}`. |
-| `bucket` | `daily` \| `weekly` \| `durable` — the decay bucket, set at intake and carried onto the compiled page. | `""` at read time, but note this is the **one key that does not fail open on write**: an invalid value raises rather than being discarded. Omit it unless you mean it. |
+| `bucket` | `daily` \| `weekly` \| `durable` — the decay bucket, set at intake and carried onto the compiled page (first non-empty active member wins). | `""`, discarded fail-open like the rest. (An invalid bucket *is* rejected outright — but only on the `remember()` MCP write and correction records, which is a different path from the memory files this section is about.) |
 | `supersedes` / `superseded_by` / `refines` | Ref to another memory or entity. | Unset; no supersession edge is drawn. |
 | `deprecated` | Truthy marker. | Not deprecated. |
+| `ephemeral` | `true` \| `1` \| `yes` \| `on`. **Drops the file from intake entirely**, before clustering — the documented way to write a memory you do not want ingested. | Not ephemeral. Note the file can still be dropped without this flag: two or more configured operational markers co-occurring in `name`/`description`/body classify it as ephemeral too (that path is deployment-configured). |
+| `modified` | ISO timestamp. Claude Code's native writer stamps it automatically (2.1.214+); read as the write-time signal feeding origin-session recovery. | Recovery falls back to the file's mtime. |
 
 **Read on the entity path only, *not* here:** `observed_at`, `access`, `tags`,
 `aliases`, `created`, `updated`. Stamping any of them on an auto-memory file is
