@@ -27,7 +27,8 @@ reresolve-questions), ``_cmd_curate`` (dedupe/claims/auto-memory),
 (push-metrics baseline/coverage-audit, issue athenaeum#711),
 ``_cmd_memory_class`` (memory-class backfill, issue athenaeum#996),
 ``_cmd_verdicts`` (verdict ledger inspection, issue athenaeum#712),
-``_cmd_explain_routing`` (explain-routing, issue athenaeum#1176).
+``_cmd_explain_routing`` (explain-routing, issue athenaeum#1176),
+``_cmd_recovery_yield`` (recovery-yield, issue athenaeum#1453).
 
 FACTORING RULE: **every subcommand lives in its own ``_cmd_<name>.py`` module
 (or a small same-domain group module) with an ``add_<name>_subparser(subparsers)``
@@ -119,6 +120,10 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "decay-sweep": ("athenaeum._cmd_decay", "add_decay_subparser"),
     "reconcile": ("athenaeum._cmd_reconcile", "add_reconcile_subparser"),
     "repair": ("athenaeum._cmd_repair", "add_repair_subparser"),
+    "recovery-yield": (
+        "athenaeum._cmd_recovery_yield",
+        "add_recovery_yield_subparser",
+    ),
     "pii-restore": ("athenaeum._cmd_pii_restore", "add_pii_restore_subparser"),
     "questions": ("athenaeum._cmd_questions", "add_questions_subparser"),
     "merges": ("athenaeum._cmd_merges", "add_merges_subparser"),
@@ -188,6 +193,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_query import add_query_subparsers
     from athenaeum._cmd_questions import add_questions_subparser
     from athenaeum._cmd_reconcile import add_reconcile_subparser
+    from athenaeum._cmd_recovery_yield import add_recovery_yield_subparser
     from athenaeum._cmd_repair import add_repair_subparser
     from athenaeum._cmd_run import add_run_subparser
     from athenaeum._cmd_serve import add_serve_subparser
@@ -216,6 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_curate_subparsers(subparsers)  # dedupe, claims, auto-memory
     add_decay_subparser(subparsers)  # decay-sweep
     add_reconcile_subparser(subparsers)  # reconcile (issue athenaeum#1143)
+    add_recovery_yield_subparser(subparsers)  # recovery-yield (issue athenaeum#1453)
     add_repair_subparser(subparsers)  # repair
     add_pii_restore_subparser(subparsers)  # pii-restore (issue athenaeum#1037)
     add_questions_subparser(subparsers)  # questions

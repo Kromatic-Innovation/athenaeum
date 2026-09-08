@@ -55,6 +55,7 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.compiled_exempt import load_exempt
 from athenaeum.config import (
     load_config,
+    resolve_cache_dir,
     resolve_ephemeral_scopes,
     resolve_extra_intake_roots,
     resolve_non_intake_sources,
@@ -88,8 +89,16 @@ from athenaeum.models import (
     validity_bound_str,
 )
 from athenaeum.person_registry import PERSON_TYPE, PersonRegistry, PersonRegistryEntry
+from athenaeum.recovery_yield import evaluate as evaluate_recovery_yield
+from athenaeum.recovery_yield import resolve_threshold as resolve_recovery_yield_threshold
+from athenaeum.recovery_yield import write_state as write_recovery_yield_state
 from athenaeum.schemas import validate_wiki_meta
-from athenaeum.session_recovery import SessionRecoverer, written_at_from_frontmatter
+from athenaeum.session_recovery import (
+    BASIS_TIME_WINDOW,
+    BASIS_WRITE_CITED,
+    SessionRecoverer,
+    written_at_from_frontmatter,
+)
 
 log = logging.getLogger(__name__)
 
@@ -346,6 +355,12 @@ def discover_auto_memory_files(
     recoverer = SessionRecoverer(projects_root)
     recovered_origins = 0
     uncited = 0
+    # Issue athenaeum#1453: basis split of `recovered_origins` — which rung
+    # (`session_recovery.BASIS_WRITE_CITED` vs `BASIS_TIME_WINDOW`) resolved
+    # each recovery, retained (not just logged) so `recovery_yield.write_state`
+    # can persist a signal an operator/probe can read across runs.
+    recovered_write_cited = 0
+    recovered_time_window = 0
 
     files: list[AutoMemoryFile] = []
     for root in roots:
@@ -453,6 +468,12 @@ def discover_auto_memory_files(
                         # emit a WRONG ``#turnN`` ref. A bare session ref is
                         # the honest citation (transcript_verify._best_effort_ref).
                         recovered_origins += 1
+                        # Issue athenaeum#1453: retain which rung resolved this
+                        # one, for the recovery-yield basis split.
+                        if recovered.basis == BASIS_WRITE_CITED:
+                            recovered_write_cited += 1
+                        elif recovered.basis == BASIS_TIME_WINDOW:
+                            recovered_time_window += 1
                         log.debug(
                             "auto-memory: recovered origin session %s for %s (%s)",
                             recovered.session_id,
@@ -531,6 +552,50 @@ def discover_auto_memory_files(
             "declared no provenance (issue athenaeum#1452)",
             recovered_origins,
             uncited,
+        )
+    # Issue athenaeum#1453: persist the recovery-yield signal and evaluate it
+    # against its threshold. Written UNCONDITIONALLY (even uncited=0) so the
+    # next reader is never looking at a stale prior pass. This must never be
+    # able to fail (or change) discovery itself — an unwritable cache dir (or
+    # any other error resolving/writing/evaluating the signal) is swallowed
+    # and logged at debug, exactly like the ephemeral-drop and recovery paths
+    # above tolerate their own failure modes without aborting the pass.
+    try:
+        cache_dir = resolve_cache_dir().resolve()
+        write_recovery_yield_state(
+            cache_dir,
+            uncited=uncited,
+            recovered=recovered_origins,
+            write_cited=recovered_write_cited,
+            time_window=recovered_time_window,
+        )
+        threshold = resolve_recovery_yield_threshold(resolved_config)
+        evaluation = evaluate_recovery_yield(
+            {
+                "uncited": uncited,
+                "recovered": recovered_origins,
+                "write_cited": recovered_write_cited,
+                "time_window": recovered_time_window,
+            },
+            threshold,
+        )
+        if evaluation.verdict == "breach":
+            log.warning(
+                "auto-memory: recovery yield %.3f is below threshold %.3f "
+                "(recovered %d of %d; write-cited=%d, time-window=%d) "
+                "(issue athenaeum#1453)",
+                evaluation.rate,
+                threshold,
+                recovered_origins,
+                uncited,
+                recovered_write_cited,
+                recovered_time_window,
+            )
+    except Exception:  # observability must never break discovery
+        log.debug(
+            "auto-memory: failed to persist/evaluate the recovery-yield signal "
+            "(issue athenaeum#1453)",
+            exc_info=True,
         )
     if dropped_ephemeral:
         log.info(
