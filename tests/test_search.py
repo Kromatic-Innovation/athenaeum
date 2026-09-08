@@ -690,6 +690,22 @@ class TestGetBackend:
             get_backend("unknown")
 
 
+class TestKeywordBackend:
+    def test_satisfies_protocol(self) -> None:
+        """The third implementer, asserted alongside the other two
+        (issue athenaeum#1473).
+
+        Ordinarily redundant with mypy, which covers conformance through the
+        ``_BACKENDS: dict[str, type[SearchBackend]]`` annotation. Worth a
+        runtime assertion here specifically because the athenaeum#1471 parity
+        defect was KeywordBackend-shaped: ``reindex`` maps every non-``vector``
+        backend name to fts5, so ``search_backend: keyword`` is the one config
+        under which the preview and the build resolve different classes, and
+        this is the one implementer that had no runtime check behind it.
+        """
+        assert isinstance(KeywordBackend(), SearchBackend)
+
+
 class TestKeywordCheapLocalScan:
     """Issue athenaeum#981 (S6): ``KeywordBackend`` gates its scan-on-query walk
     on the ``cheap_local_scan`` capability (design note §7 honest-refusal
