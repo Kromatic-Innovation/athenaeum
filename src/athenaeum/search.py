@@ -179,6 +179,34 @@ class SearchBackend(Protocol):
         """
         ...
 
+    def _incremental_reuse_blocker(
+        self, cache_dir: Path, stored: dict[str, Any] | None
+    ) -> str | None:
+        """Say why the on-disk index cannot be reused as-is (issue athenaeum#1459).
+
+        Returns a short human-readable reason, or ``None`` when the index at
+        ``cache_dir`` may be updated incrementally against the loaded manifest
+        ``stored`` (``None`` = no manifest, itself a blocker).
+
+        This is the ONE answer to "is this index usable as-is?". Two callers
+        depend on it and MUST NOT reimplement it:
+
+        * :meth:`build_index`, which turns a blocker into a full rebuild;
+        * ``librarian._reindex_would_change``, the athenaeum#1456 SessionEnd
+          staleness gate, which turns a blocker into "reindex".
+
+        Those two were written separately until athenaeum#1459 and drifted twice
+        in opposite directions (athenaeum#1458 over-reindexed; a deleted index
+        under an intact manifest was never rebuilt at all).
+
+        Implementations MUST stay cheap enough to run on every idle SessionEnd:
+        manifest fields, ``stat``-class filesystem checks, and at most a
+        constant-cost header read. Never open a collection, load an embedding
+        model, or walk the corpus. Caller policy (``incremental``, ``as_of``)
+        is NOT considered here — only the state of what is on disk.
+        """
+        ...
+
     def query(
         self,
         query: str,
@@ -1004,6 +1032,36 @@ class FTS5Backend:
     )
     _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?,?,?)"
 
+    def _incremental_reuse_blocker(
+        self, cache_dir: Path, stored: dict[str, Any] | None
+    ) -> str | None:
+        """Why this on-disk index cannot be reused as-is, or ``None`` (athenaeum#1459).
+
+        The single answer to "is this index usable as-is?", shared by
+        :meth:`build_index` (which turns a blocker into a full rebuild) and by
+        ``librarian._reindex_would_change`` (which turns a blocker into "the
+        index is stale, reindex"). Before athenaeum#1459 the two were written
+        separately and had already drifted twice in opposite directions —
+        athenaeum#1458 was the over-reindex half, this is the under-reindex
+        half — so they share one implementation now rather than two lists of
+        checks that must be kept in sync by hand.
+
+        Deliberately CHEAP: a ``stat`` and one ``PRAGMA user_version`` read.
+        The preview calls this on every idle SessionEnd, so it must never open
+        a collection or load an embedding model. ``incremental`` and ``as_of``
+        are NOT considered here — they are caller policy, not index state, and
+        the preview has neither.
+        """
+        if stored is None:
+            return "no manifest"
+        db_path = cache_dir / _DB_NAME
+        if not db_path.is_file():
+            return f"index db missing at {db_path}"
+        found = self._db_schema_version(db_path)
+        if found != self._SCHEMA_VERSION:
+            return f"db schema version {found}, expected {self._SCHEMA_VERSION}"
+        return None
+
     @staticmethod
     def _db_schema_version(db_path: Path) -> int:
         """Read the DB's ``PRAGMA user_version`` (issue athenaeum#530 M7).
@@ -1145,8 +1203,16 @@ class FTS5Backend:
                 self._db_schema_version(db_path),
                 self._SCHEMA_VERSION,
             )
+        # Issue athenaeum#1459: the invalidation checks themselves live in
+        # ``_incremental_reuse_blocker`` so the staleness preview
+        # (``librarian._reindex_would_change``) applies the SAME ones. Only the
+        # caller policy (``incremental``, ``as_of``) is decided here. The athenaeum#530
+        # warning above stays where it is — it is build-path diagnostics, not
+        # invalidation logic.
         do_incremental = (
-            incremental and as_of is None and stored is not None and db_schema_ok
+            incremental
+            and as_of is None
+            and self._incremental_reuse_blocker(cache_dir, stored) is None
         )
 
         # Issue athenaeum#373: self-healing full-re-hash backstop. On the incremental
@@ -1537,6 +1603,45 @@ class VectorBackend:
         # started before an out-of-process reindex never serves stale results.
         self._seen_generation: str | None = None
 
+    def _incremental_reuse_blocker(
+        self, cache_dir: Path, stored: dict[str, Any] | None
+    ) -> str | None:
+        """Why this on-disk index cannot be reused as-is, or ``None`` (athenaeum#1459).
+
+        The vector half of the shared "is this index usable as-is?" answer —
+        see :meth:`FTS5Backend._incremental_reuse_blocker` for why both the
+        build and the staleness preview consult one implementation.
+
+        The three blockers are the ones :meth:`build_index` has always applied:
+        a missing collection dir (a ``stat``), an embedding-model swap (which
+        must re-embed everything, or the corpus stays embedded under a model
+        the queries no longer use), and a metadata-schema roll (athenaeum#964).
+        All three are answered from the manifest dict and one ``is_dir`` —
+        chromadb is never opened and no model is ever loaded, which is what
+        keeps the athenaeum#1456 idle-tick gate cheap.
+        """
+        if stored is None:
+            return "no manifest"
+        vector_dir = cache_dir / _VECTOR_DIR
+        if not vector_dir.is_dir():
+            return f"collection dir missing at {vector_dir}"
+        stored_model = stored.get("embedding_model")
+        if stored_model != self.embedding_model:
+            return (
+                f"embedding model {stored_model!r}, expected {self.embedding_model!r}"
+            )
+        # Issue athenaeum#964 (AC amendment 1): a manifest predating the metadata
+        # schema stamp (``None``) or stamped with an older contract version
+        # must NOT be reused incrementally — same rule the model swap above
+        # already applies.
+        stored_metadata_schema = stored.get("metadata_schema_version")
+        if stored_metadata_schema != self._METADATA_SCHEMA_VERSION:
+            return (
+                f"metadata schema version {stored_metadata_schema!r}, expected "
+                f"{self._METADATA_SCHEMA_VERSION!r}"
+            )
+        return None
+
     def _refresh_on_reindex(self, vector_dir: Path) -> None:
         """Clear chromadb's process-global cache if the index was rebuilt (athenaeum#489).
 
@@ -1688,22 +1793,17 @@ class VectorBackend:
         stored = (
             _load_manifest(manifest_path) if incremental and as_of is None else None
         )
-        stored_model = stored.get("embedding_model") if stored else None
-        # Issue athenaeum#964 (AC amendment 1): a manifest predating the metadata
-        # schema stamp (``None``) or stamped with an older contract version
-        # must NOT be reused incrementally — same rule ``stored_model`` above
-        # already applies for an embedding-model swap.
-        stored_metadata_schema = stored.get("metadata_schema_version") if stored else None
         # Incremental only when we have a prior manifest, a live collection
         # dir, the SAME embedding model (a model swap must re-embed all), AND
-        # the SAME metadata schema version.
+        # the SAME metadata schema version — all of which
+        # ``_incremental_reuse_blocker`` answers, so the athenaeum#1456 staleness
+        # preview can apply the identical checks instead of its own copy
+        # (issue athenaeum#1459). Only the caller policy (``incremental``,
+        # ``as_of``) is decided here.
         do_incremental = (
             incremental
             and as_of is None
-            and stored is not None
-            and vector_dir.is_dir()
-            and stored_model == self.embedding_model
-            and stored_metadata_schema == self._METADATA_SCHEMA_VERSION
+            and self._incremental_reuse_blocker(cache_dir, stored) is None
         )
 
         # Issue athenaeum#373: self-healing full-re-hash backstop (identical to FTS5).
@@ -2192,6 +2292,18 @@ class KeywordBackend:
     are weighted 3x body hits. Intended as a zero-setup fallback for
     small wikis or tests — FTS5 is the recommended default for real use.
     """
+
+    def _incremental_reuse_blocker(
+        self, cache_dir: Path, stored: dict[str, Any] | None
+    ) -> str | None:
+        """Always ``None``: there is no persisted index to invalidate (athenaeum#1459).
+
+        Protocol parity with the two indexed backends. This backend rescans on
+        every query, so no on-disk artifact can go stale and nothing here can
+        force a rebuild — the same reason :meth:`build_index` is a no-op.
+        """
+        del cache_dir, stored
+        return None
 
     def build_index(
         self,

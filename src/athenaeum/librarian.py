@@ -9885,8 +9885,27 @@ def _reindex_would_change(
     opening chromadb or loading any embedding model. The scan reuses the athenaeum#370
     stat pre-filter, so it re-hashes only changed files. Returns the delta count,
     or ``None`` when it cannot be computed cheaply (no wiki dir).
+
+    Issue athenaeum#1459: a hash diff alone is a strict SUBSET of what the build
+    treats as invalidating, so an index could be genuinely unusable — deleted
+    outright, embedded under a superseded model, carrying a rolled metadata
+    schema — while the manifest still matched the corpus and this returned 0
+    forever. The build's own answer to "is this index usable as-is?" is now
+    consulted first (``_incremental_reuse_blocker``, shared with
+    :meth:`~athenaeum.search.FTS5Backend.build_index` so the two cannot drift
+    apart again); a blocker discards the manifest for the diff, which reports
+    the whole corpus as pending — exactly what the full rebuild that follows
+    will touch. Constructing the backend costs nothing: neither
+    ``__init__`` opens a client or loads a model, and the blockers are a
+    ``stat`` plus, on fts5, one ``PRAGMA user_version`` read.
+
+    Degenerate case, accepted rather than engineered around: an unusable index
+    over an EMPTY corpus reports 0, and the athenaeum#1456 gate
+    (``bool(count)``) therefore skips the rebuild. There is nothing to index,
+    so the only loss is that the empty index file is recreated one tick later
+    than it could have been.
     """
-    from athenaeum.config import resolve_index_globs
+    from athenaeum.config import resolve_embedding_model, resolve_index_globs
     from athenaeum.search import (
         _FTS5_MANIFEST,
         _VECTOR_MANIFEST,
@@ -9895,6 +9914,7 @@ def _reindex_would_change(
         _manifest_hashes,
         _scan_indexed_records,
         _scan_prior,
+        get_backend,
     )
 
     if not wiki_root.is_dir():
@@ -9907,6 +9927,25 @@ def _reindex_would_change(
     include_globs, exclude_globs = resolve_index_globs(config)
 
     stored = _load_manifest(manifest_path)
+    # MUST mirror what ``reindex`` -> ``build_*_index`` constructs, or the
+    # embedding-model blocker compares against the wrong model.
+    backend_obj = (
+        get_backend("vector", embedding_model=resolve_embedding_model(config))
+        if backend_name == "vector"
+        else get_backend(backend_name)
+    )
+    blocker = backend_obj._incremental_reuse_blocker(resolved_cache, stored)
+    if blocker is not None and stored is not None:
+        # The build will refuse to reuse this index (athenaeum#1459) and rebuild it
+        # from scratch, so preview it the way the build will see it: with no
+        # usable manifest, which counts every current page as pending.
+        logging.getLogger(__name__).info(
+            "session-end: index at %s is not reusable (%s) — previewing a full "
+            "rebuild (issue athenaeum#1459)",
+            resolved_cache,
+            blocker,
+        )
+        stored = None
     prior = _scan_prior(stored) if stored is not None else None
     current_hashes = {
         name: h
