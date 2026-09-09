@@ -49,6 +49,7 @@ permanent :attr:`MISS` for behaving correctly.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
@@ -208,6 +209,25 @@ def mrr(ranked: Sequence[str], expected: Iterable[str]) -> float:
         if uid in expected_set:
             return 1.0 / index
     return 0.0
+
+
+_UID_LINE = re.compile(r"^\*\*Uid:\*\*\s*(\S+)\s*$", re.MULTILINE)
+
+
+def uids_from_recall_output(output: str) -> list[str]:
+    """Extract ranked page uids from ``recall_search`` rendered output.
+
+    Parses the explicit ``**Uid:**`` field rather than pattern-matching page
+    filenames. An earlier version of this suite scraped ``([a-z0-9-]+)\\.md``
+    and silently dropped every uid containing an underscore -- which happened
+    to be the entire generated distractor tier. It reported "0/95 distractor
+    slots" while distractors were in fact taking every top-5 slot, and nothing
+    failed: a broken extractor returns a plausible number, not an error.
+
+    Scoring code is the one place a bug is indistinguishable from a finding,
+    so read the field the renderer actually emits.
+    """
+    return _UID_LINE.findall(output)
 
 
 def outcome_histogram(outcomes: Iterable[PushOutcome]) -> dict[str, int]:

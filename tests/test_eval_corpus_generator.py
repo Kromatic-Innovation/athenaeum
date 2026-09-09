@@ -9,6 +9,9 @@ rank is not a weaker result, it is a meaningless one.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,16 +36,39 @@ def test_core_corpus_is_internally_consistent() -> None:
     assert not problems, "corpus inconsistencies:\n  " + "\n  ".join(problems)
 
 
-def test_generation_is_deterministic() -> None:
-    """Same seed and scale must yield a byte-identical tree.
-
-    This is what lets large corpora be regenerated on demand instead of
-    committed, and what makes ``(version, seed, scale)`` a sufficient citation
-    for a stored measurement.
-    """
+def test_generation_is_deterministic_within_a_process() -> None:
     first = build_corpus(scale="small", seed=4242)
     second = build_corpus(scale="small", seed=4242)
     assert first.fingerprint() == second.fingerprint()
+
+
+def test_generation_is_deterministic_ACROSS_processes() -> None:
+    """The contract that actually matters, and the one a same-process test
+    cannot see.
+
+    Python salts string hashing per process, so any generation input derived
+    from builtin ``hash()`` differs between runs while an in-process test
+    passes -- which is precisely how this shipped broken once. A corpus that
+    is not reproducible across processes makes every stored fingerprint name
+    a corpus nobody can rebuild, so this must run in a SUBPROCESS.
+    """
+    script = (
+        "from tests.evals.corpus import build_corpus; "
+        "print(build_corpus(scale='small', seed=4242).fingerprint())"
+    )
+    env = {**os.environ, "PYTHONPATH": "src"}
+    seen = {
+        subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=Path(__file__).resolve().parent.parent,
+            env=env,
+        ).stdout.strip()
+        for _ in range(3)
+    }
+    assert len(seen) == 1, f"fingerprint varies across processes: {seen}"
 
 
 def test_different_seeds_yield_different_corpora() -> None:
@@ -102,13 +128,49 @@ def test_size_and_confusability_are_independent_axes() -> None:
     )
 
 
-def test_distractors_share_probe_vocabulary() -> None:
-    """Distractors must actually compete for rank.
+def test_distractors_actually_reach_the_top_k() -> None:
+    """The confusability axis must move something. This is the load-bearing one.
 
-    Generic filler would never be surfaced by BM25 for a probe query, so a
-    corpus padded with it could reach any size with recall untouched -- and
-    would license the false conclusion that scale is harmless. Every probe
-    therefore needs near-misses carrying its own vocabulary.
+    Vocabulary overlap is NOT the property that matters -- the first version of
+    this suite asserted only that some distractor contained some probe term,
+    which passed while distractors occupied 0 of 95 top-5 slots. The axis was
+    inert and the test could not see it.
+
+    What matters is rank competition: if near-misses never surface, raising
+    their density changes nothing, and Workstream G's scale-dependence result
+    -- read directly off this axis -- would be a measurement of noise.
+    """
+    import tempfile
+
+    from athenaeum.mcp_server import recall_search
+    from tests.evals.metrics import uids_from_recall_output
+
+    corpus = build_corpus(scale="medium_verydense")
+    root = Path(tempfile.mkdtemp())
+    corpus.materialize(root)
+    tier_of = {page.uid: page.tier for page in corpus.pages}
+
+    slots = distractor_slots = 0
+    for probe in corpus.probes:
+        output = recall_search(root / "wiki", probe.query, top_k=5)
+        hits = uids_from_recall_output(output)[:5]
+        slots += len(hits)
+        distractor_slots += sum(1 for uid in hits if tier_of.get(uid) == "distractor")
+
+    assert slots, "no results at all -- the probe harness is broken, not the corpus"
+    share = distractor_slots / slots
+    assert share >= 0.10, (
+        f"distractors took {distractor_slots}/{slots} top-5 slots "
+        f"({share:.0%}); below ~10% the confusability axis cannot move a "
+        "result and density is a knob attached to nothing"
+    )
+
+
+def test_distractors_share_probe_vocabulary() -> None:
+    """Necessary-but-insufficient companion to the rank test above.
+
+    Kept because it localizes a failure: if rank competition disappears, this
+    says whether the cause was vocabulary (a template regression) or ranking.
     """
     corpus = build_corpus(scale="small")
     by_probe: dict[str, list[str]] = {}

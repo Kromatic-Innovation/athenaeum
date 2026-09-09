@@ -18,6 +18,7 @@ from tests.evals.metrics import (
     outcome_histogram,
     precision_at_k,
     recall_at_k,
+    uids_from_recall_output,
 )
 
 
@@ -113,6 +114,40 @@ class TestRankedMeasures:
         assert precision_at_k([], ["a"], k=5) == 0.0
         assert recall_at_k([], ["a"], k=5) == 0.0
         assert mrr([], ["a"]) == 0.0
+
+
+class TestUidExtraction:
+    """Regression cover for a bug that produced a plausible wrong number.
+
+    A filename-scraping extractor dropped every uid containing an underscore
+    and reported a confident 0%. Nothing failed, because a broken extractor
+    returns data rather than an error -- which is why the scoring path needs
+    its own tests at least as much as the system under test does.
+    """
+
+    SAMPLE = (
+        "Found 2 matching pages:\n\n"
+        "### 1. PTO notes (score: 28.0)\n"
+        "**Path:** wiki/dis-pto_allowance-020.md\n"
+        "**Uid:** dis-pto_allowance-020\n"
+        "**Type:** note\n\n"
+        "### 2. PTO policy (score: 14.0)\n"
+        "**Path:** wiki/policy-pto.md\n"
+        "**Uid:** policy-pto\n"
+    )
+
+    def test_extracts_uids_in_rank_order(self) -> None:
+        assert uids_from_recall_output(self.SAMPLE) == [
+            "dis-pto_allowance-020",
+            "policy-pto",
+        ]
+
+    def test_underscored_uids_survive(self) -> None:
+        """The exact class the old extractor dropped silently."""
+        assert "dis-pto_allowance-020" in uids_from_recall_output(self.SAMPLE)
+
+    def test_no_results_yields_empty(self) -> None:
+        assert uids_from_recall_output("No matching pages found.") == []
 
 
 def test_histogram_reports_every_rung_including_empty_ones() -> None:

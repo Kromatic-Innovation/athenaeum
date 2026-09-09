@@ -310,6 +310,16 @@ SCALES: dict[str, Scale] = {
 }
 
 
+def _stable_hash(value: str) -> int:
+    """Process-stable integer digest of *value*.
+
+    Builtin ``hash()`` is salted per process, so anything derived from it
+    varies between runs. Every generation input must be reproducible or the
+    corpus fingerprint stops identifying a corpus.
+    """
+    return int.from_bytes(hashlib.sha256(value.encode()).digest()[:8], "big")
+
+
 def _render(template: str, slots: dict[str, str]) -> str:
     out = template
     for key, value in slots.items():
@@ -348,7 +358,12 @@ def _generate_distractors(
     for probe in probes:
         terms = list(probe.distractor_terms) or list(probe.query.split())
         for i in range(per_probe):
-            form = forms[(hash(probe.id) + i) % len(forms)]
+            # NOT builtin hash(): Python randomizes string hashing per
+            # process unless PYTHONHASHSEED is pinned, which would make the
+            # emitted tree differ between runs and silently falsify the
+            # (GENERATOR_VERSION, seed, scale) reproducibility contract that
+            # every stored measurement cites.
+            form = forms[(_stable_hash(probe.id) + i) % len(forms)]
             term = terms[i % len(terms)]
             slots = {
                 "term": term,
@@ -365,7 +380,15 @@ def _generate_distractors(
                     name=_render(form["name"], slots),
                     body=_render(form["body"], slots),
                     tier="distractor",
-                    tags=tuple(form.get("tags", ())),
+                    # Aliases and tags are rendered with the probe's own terms
+                    # rather than left static. The keyword scorer weights
+                    # frontmatter (name/aliases/tags) at 3x body text, so a
+                    # near-miss carrying the term only in its title cannot
+                    # compete with an answer page carrying it in all four --
+                    # and a distractor tier that never reaches the top-k
+                    # measures nothing, which is how this shipped inert once.
+                    aliases=tuple(_render(a, slots) for a in form.get("aliases", ())),
+                    tags=tuple(_render(t, slots) for t in form.get("tags", ())),
                     source_ref=f"session-2026-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d}",
                 )
             )
