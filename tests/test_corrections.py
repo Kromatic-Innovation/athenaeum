@@ -2226,7 +2226,9 @@ class TestFallthroughHandoff:
         )
         raised = [r for r in outcome.results if r.disposition == "raised-tier"]
         assert len(raised) == 2
-        handoff_path = write_correction_handoff(outcome, raised, raw_root=tmp_path / "raw")
+        handoff_path = write_correction_handoff(
+            outcome, raised, raw_root=tmp_path / "raw", knowledge_root=tmp_path
+        )
         assert handoff_path.exists()
         text = handoff_path.read_text()
         assert env["batch_id"] in text

@@ -2155,6 +2155,98 @@ def resolve_push_token_budget(config: dict[str, Any] | None) -> int:
     return 1200
 
 
+# Issue athenaeum#1492 -- kept as a tight, self-contained block (this dispatch's
+# other lane, athenaeum#1418, is the primary editor of the rest of this module):
+# the relevance-floor MECHANISM only. Selecting a production threshold is
+# explicitly out of scope for athenaeum#1492 ("ships INACTIVE" is the acceptance
+# criterion) and is deferred to a follow-up.
+_RECALL_FLOOR_ENV: dict[tuple[str, bool], str] = {
+    ("fts5", False): "ATHENAEUM_RECALL_MIN_SCORE_FTS5",
+    ("keyword", False): "ATHENAEUM_RECALL_MIN_SCORE_KEYWORD",
+    ("fts5", True): "ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5",
+    ("keyword", True): "ATHENAEUM_RECALL_PUSH_MIN_SCORE_KEYWORD",
+}
+
+
+def resolve_recall_relevance_floor(
+    config: dict[str, Any] | None,
+    backend_name: str,
+    *,
+    unprompted: bool = False,
+) -> float | None:
+    """Resolve the recall relevance floor for one (backend, call path) (athenaeum#1492).
+
+    ``None`` — the value at every precedence level, for every backend and
+    both call paths, until an operator opts in — means NO FLOOR: today's
+    behavior, unchanged. That is the acceptance criterion this function
+    exists to satisfy: merging it changes no existing recall output.
+
+    This is the MECHANISM, not the tuning. Two of the issue's four open
+    design questions are settled here at the mechanism-SHAPE level (not the
+    value level), and recorded rather than left ambiguous:
+
+    * absolute vs. relative-to-the-result-set threshold -> ABSOLUTE. Each
+      hit's own score is compared against a fixed configured number.
+    * per-backend vs. one normalized cross-backend confidence -> PER-BACKEND.
+      FTS5's ``rank`` and the keyword scorer's additive score are different
+      scales with different "better" directions (see
+      :func:`athenaeum.search.meets_relevance_floor`), so this resolves and
+      compares in each backend's own units rather than inventing a
+      normalization this issue does not scope. A normalized layer could
+      still be built on top later without reshaping this resolver.
+
+    The other two open questions are genuinely NOT decided here: whether the
+    push path should in practice be set stricter than explicit recall (this
+    function only makes that independently *settable* via ``unprompted``,
+    AC3 — it expresses no opinion on which, if either, should be stricter),
+    and whether a below-floor hit should be suppressed or surfaced as
+    low-confidence (:func:`athenaeum.search.meets_relevance_floor` only
+    supports suppression — marking is a rendering decision for the
+    follow-up).
+
+    Precedence per (backend, path): env var > ``recall.relevance_floor``
+    yaml > ``None``. Vars: ``ATHENAEUM_RECALL_MIN_SCORE_FTS5`` /
+    ``ATHENAEUM_RECALL_MIN_SCORE_KEYWORD`` for an explicit ``recall_search``
+    call; ``ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5`` /
+    ``ATHENAEUM_RECALL_PUSH_MIN_SCORE_KEYWORD`` for the ``unprompted=True``
+    push path. YAML shape::
+
+        recall:
+          relevance_floor:
+            fts5: -6.0
+            keyword: 12.0
+            push:
+              fts5: -3.0
+              keyword: 20.0
+
+    An unrecognized ``backend_name`` (e.g. ``"vector"``, not named in
+    athenaeum#1492's acceptance criteria) always resolves to ``None``: no
+    floor is applied regardless of config. A malformed env value WARNs and
+    falls through to yaml/default (see :func:`_env_number`); a non-numeric
+    yaml value is ignored the same way.
+    """
+    if backend_name not in ("fts5", "keyword"):
+        return None
+    env_name = _RECALL_FLOOR_ENV.get((backend_name, unprompted))
+    if env_name is not None:
+        env_value = _env_number(env_name, float)
+        if env_value is not None:
+            return env_value
+    if isinstance(config, dict):
+        recall_cfg = config.get("recall")
+        if isinstance(recall_cfg, dict):
+            floor_cfg = recall_cfg.get("relevance_floor")
+            if isinstance(floor_cfg, dict):
+                scope_cfg: object = floor_cfg
+                if unprompted:
+                    scope_cfg = floor_cfg.get("push")
+                if isinstance(scope_cfg, dict):
+                    raw = scope_cfg.get(backend_name)
+                    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                        return float(raw)
+    return None
+
+
 def resolve_memory_tier_sweep_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve whether the automatic memory-tier sweep runs (issue athenaeum#718).
 

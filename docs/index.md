@@ -111,6 +111,7 @@ Evidence, kept out of the reading path.
 - [Memory-model measurements](measurements/memory-model-measurements.md)
 - [Reasoning-tier measurements](measurements/reasoning-tier-measurements.md)
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)
+- [Recall relevance floor sweep](measurements/recall-relevance-floor-sweep.md)
 - [Deploy SHA stamp](measurements/deploy-sha-stamp.md)
 - [LLM provider cost audit](measurements/audits/2026-08-06-llm-provider-cost-audit.md)
 
