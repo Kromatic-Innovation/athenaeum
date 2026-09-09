@@ -156,7 +156,7 @@
       - "Thornhollow's office is at 14 Kingsway, Kingsway Works floor 3."
       - "Thornhollow's office is at 220 Regent Street, suite 5B."
   members:
-    - filename: reference_office_kingsway_works.md
+    - filename: reference_office_kingsway-works.md
       body: "Thornhollow's office is at 14 Kingsway, Kingsway Works floor 3."
       frontmatter:
         name: office-address-kingsway-works
