@@ -86,6 +86,15 @@ class Page:
     created: str = "2026-01-01"
     updated: str = "2026-01-01"
     links: tuple[str, ...] = ()
+    # Issue athenaeum#1493: the DECLARED supersession pointer (a page ``name:``
+    # value, matching the real ``resolutions.py`` enactment convention — see
+    # ``athenaeum.models.parse_superseded_by``'s docstring). "" (default)
+    # emits no frontmatter key at all, so a page with no supersession story
+    # renders byte-identical to before this field existed. This replaces the
+    # corpus's prior body-text ``SUPERSEDED:`` convention (issue athenaeum#1493's
+    # own finding: that convention was never a contract retrieval could
+    # consult — see ``core/05-temporal.yaml``).
+    superseded_by: str = ""
 
     def to_markdown(self) -> str:
         """Render frontmatter + body, matching the existing fixture shape.
@@ -114,6 +123,8 @@ class Page:
         fm.append(f"source_ref: {q(self.source_ref)}")
         fm.append(f"created: {self.created}")
         fm.append(f"updated: {self.updated}")
+        if self.superseded_by:
+            fm.append(f"superseded_by: {q(self.superseded_by)}")
         fm.append("---")
         return "\n".join(fm) + "\n\n" + self.body.rstrip() + "\n"
 
@@ -225,6 +236,7 @@ def load_core_pages() -> list[Page]:
                     created=raw.get("created", "2026-01-01"),
                     updated=raw.get("updated", raw.get("created", "2026-01-01")),
                     links=tuple(raw.get("links", ())),
+                    superseded_by=raw.get("superseded_by", ""),
                 )
             )
     return pages

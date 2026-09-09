@@ -5,6 +5,15 @@
 # one -- a memory system that returns the superseded answer confidently is
 # worse than one that returns nothing, which is why these are their own probe
 # class rather than ordinary single-hop cases.
+#
+# Issue athenaeum#1493: supersession is marked with the DECLARED ``superseded_by:``
+# frontmatter field (pointing at the replacement's ``name:``), not a body-text
+# convention. An earlier version of this fixture used a body-text
+# ``SUPERSEDED:`` line, which nothing in retrieval ever read -- these pages
+# demonstrated only that ranking ignores a body-text convention that was never
+# a contract, not that ranking ignores the declared field. The body prose
+# below is retained for human readability only; it carries no retrieval
+# meaning.
 
 - uid: office-address-current
   type: note
@@ -33,13 +42,14 @@
   created: 2026-01-10
   updated: 2026-05-02
   links: [office-address-current]
+  superseded_by: "Office address (current)"
   body: |
     # Office address (former, Thornlea Wharf)
 
     The firm's office was at 14 Thornlea Wharf, Deskhaus floor 3, until April 2026.
 
-    SUPERSEDED: the firm moved to 220 Alderway Row on 1 May 2026. Retained for
-    historical reference only; do not cite as the current address.
+    Historical note: the firm moved to 220 Alderway Row on 1 May 2026. Retained
+    for historical reference only; do not cite as the current address.
 
 - uid: standup-time-current
   type: note
@@ -64,12 +74,13 @@
   created: 2026-01-20
   updated: 2026-04-06
   links: [standup-time-current]
+  superseded_by: "Standup time (current)"
   body: |
     # Standup time (former, 9:00)
 
     The delivery standup was at 9:00 AM through Q1 2026.
 
-    SUPERSEDED: moved to 9:30 AM in April 2026.
+    Historical note: moved to 9:30 AM in April 2026.
 
 - uid: pto-allowance-current
   type: note
@@ -93,12 +104,13 @@
   created: 2025-06-01
   updated: 2026-05-14
   links: [pto-allowance-current]
+  superseded_by: "PTO allowance (current)"
   body: |
     # PTO allowance (former, 22 days)
 
     The allowance was 22 days per year through FY2025.
 
-    SUPERSEDED: raised to 25 days for FY2026.
+    Historical note: raised to 25 days for FY2026.
 
 - uid: budget-threshold-current
   type: note
@@ -122,9 +134,10 @@
   created: 2025-09-15
   updated: 2026-01-08
   links: [budget-threshold-current]
+  superseded_by: "Budget approval threshold (current)"
   body: |
     # Budget approval threshold (former, 250 GBP)
 
     The ceiling was 250 GBP through 2025.
 
-    SUPERSEDED: raised to 500 GBP in January 2026.
+    Historical note: raised to 500 GBP in January 2026.

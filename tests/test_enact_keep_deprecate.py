@@ -313,25 +313,43 @@ def _recall_wiki(tmp_path: Path) -> Path:
 
 
 class TestRecallHonorsMarkers:
-    def test_fts5_excludes_inactive(self, tmp_path: Path) -> None:
+    """Issue athenaeum#1493: ``superseded_by`` and ``deprecated`` DIVERGED here.
+
+    Before athenaeum#1493, ``_is_recall_inactive`` treated a declared
+    ``superseded_by`` exactly like ``deprecated`` — a hard exclusion from
+    both the FTS5/vector index and the keyword scan, so a superseded page
+    could never even be a candidate for these two backends' raw ``query()``.
+    athenaeum#1493 keeps ``deprecated`` excluded here (unchanged) but stops
+    treating ``superseded_by`` as an exclusion reason at THIS layer — a
+    superseded page now stays indexed/scanned so it can be reachable via
+    explicit recall. Demotion below its replacement, and the rendered
+    "superseded" marker, both happen one layer up, at render time
+    (``athenaeum.mcp_server._reorder_hits_by_supersession`` /
+    ``_recall_metadata_lines``) — see ``tests/test_supersession_recall.py``
+    for coverage of that layer. These two tests now assert the SPLIT: a
+    deprecated page is excluded here exactly as before; a superseded page is
+    NOT.
+    """
+
+    def test_fts5_excludes_deprecated_but_not_superseded(self, tmp_path: Path) -> None:
         wiki = _recall_wiki(tmp_path)
         cache = tmp_path / "cache"
         backend = FTS5Backend()
         count = backend.build_index(wiki, cache)
-        # Only the active page is indexed.
-        assert count == 1
+        # The active AND the superseded page are indexed; only deprecated is not.
+        assert count == 2
         results = backend.query("widgets rule", cache, n=10)
         filenames = [r[0] for r in results]
         assert "active-topic.md" in filenames
-        assert "superseded-topic.md" not in filenames
+        assert "superseded-topic.md" in filenames
         assert "deprecated-topic.md" not in filenames
 
-    def test_keyword_excludes_inactive(self, tmp_path: Path) -> None:
+    def test_keyword_excludes_deprecated_but_not_superseded(self, tmp_path: Path) -> None:
         wiki = _recall_wiki(tmp_path)
         cache = tmp_path / "cache"
         backend = KeywordBackend()
         results = backend.query("widgets rule", cache, n=10, wiki_root=wiki)
         filenames = [r[0] for r in results]
         assert any(f.endswith("active-topic.md") for f in filenames)
-        assert not any(f.endswith("superseded-topic.md") for f in filenames)
+        assert any(f.endswith("superseded-topic.md") for f in filenames)
         assert not any(f.endswith("deprecated-topic.md") for f in filenames)

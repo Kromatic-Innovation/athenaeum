@@ -619,8 +619,18 @@ def parse_superseded_by(meta: Mapping[str, object] | None) -> str:
 
     Set by the resolver's keep_a/keep_b enactment on the LOSING member to
     mark it as valid-then-replaced history. Non-empty => the member is
-    inactive (excluded from recall + C3 compile) but preserved on disk.
-    Tolerant: a non-string value coerces to its str form; missing => "".
+    inactive for C3 merge-compile purposes (:meth:`AutoMemoryFile.is_inactive`
+    / :func:`is_inactive_memory`) but preserved on disk.
+
+    As of issue athenaeum#1493, recall does NOT treat non-empty as an exclusion
+    reason — that was the pre-athenaeum#1493 behavior this docstring used to
+    describe. Recall visibility uses its own local predicate
+    (:func:`athenaeum.search._is_recall_inactive`), which deliberately keeps a
+    superseded page indexed/scanned; :mod:`athenaeum.mcp_server` demotes it
+    below its replacement and marks it in the rendered hit instead of
+    excluding it, so the two "inactive" concepts (compile vs. recall) are no
+    longer in lockstep for this one field. Tolerant: a non-string value
+    coerces to its str form; missing => "".
     """
     if not meta:
         return ""

@@ -77,7 +77,6 @@ from athenaeum.models import (
     is_page_authorized,
     parse_deprecated,
     parse_frontmatter,
-    parse_superseded_by,
     resolve_page_type,
     valid_until_expired,
     validity_bound_str,
@@ -589,10 +588,24 @@ def _is_recall_inactive(meta: dict[str, Any] | None, as_of: date | None = None) 
     (:mod:`athenaeum.decay_sweep`) is what eventually removes it from the
     live tree, on the operator's own cadence, never recall itself.
 
+    Issue athenaeum#1493: a declared ``superseded_by`` pointer is, likewise, NOT a
+    recall-inactive reason here even though :func:`~athenaeum.models.is_inactive_memory`
+    treats it as one for C3 compile purposes (those two predicates diverging is
+    exactly why this is a separate local predicate — see above). A superseded
+    page stays indexed/scanned so it remains reachable via explicit recall;
+    :func:`athenaeum.mcp_server._reorder_hits_by_supersession` demotes it below
+    its replacement and the per-hit render marks it, the same demote-don't-
+    filter shape ``bucket: daily`` currency already uses one paragraph up. This
+    is a genuine behavior change from the pre-athenaeum#1493 shape (which DID hard-
+    exclude a ``superseded_by`` page from recall, matching
+    :func:`~athenaeum.models.parse_superseded_by`'s docstring at the time) —
+    see that function's updated docstring for the C3-only half of the split.
+
     ``weekly``/``durable``/unbucketed pages are BYTE-IDENTICAL to
-    ``is_inactive_memory`` here — the divergence fires ONLY for
-    ``bucket: daily``, which is what keeps "a corpus with no buckets
-    anywhere is completely unaffected" true for this function too.
+    ``is_inactive_memory`` here — the divergence fires for ``bucket: daily``
+    AND for a declared ``superseded_by``, which is what keeps "a corpus with
+    no buckets and no supersession anywhere is completely unaffected" true
+    for this function too.
 
     Known limitation (documented, not silently accepted): the FTS5/vector
     incremental-rebuild stat fast-path (:func:`_scan_indexed_records`)
@@ -608,8 +621,6 @@ def _is_recall_inactive(meta: dict[str, Any] | None, as_of: date | None = None) 
     """
     if not meta:
         return False
-    if parse_superseded_by(meta):
-        return True
     if parse_deprecated(meta):
         return True
     if meta.get("bucket") == "daily":
@@ -2482,7 +2493,10 @@ class KeywordBackend:
                 continue
 
             fm, body = parse_frontmatter(text)
-            # Issue athenaeum#191: skip inactive members (superseded_by / deprecated).
+            # Issue athenaeum#191: skip inactive members (deprecated). Issue athenaeum#1493:
+            # a declared ``superseded_by`` no longer skips here — it stays a
+            # candidate and is demoted + marked at render (see
+            # ``_is_recall_inactive``'s updated docstring).
             # Issue athenaeum#308 slice 3: also skip pages outside their validity window
             # relative to ``as_of`` (default today) — the query-time as-of view.
             # Issue athenaeum#904: ``_is_recall_inactive`` lets an expired
