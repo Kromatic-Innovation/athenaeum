@@ -35,10 +35,27 @@ grows unnoticed cannot balloon cost silently.
 
 ### Content policy
 
-All golden-set inputs are **synthetic small-org scenarios** (the invented
-consultancy "Thornhollow Advisory"). Nothing here originates from a live
-knowledge tree. Adding a case that quotes real client / colleague content
-is a review-blocker.
+All golden-set inputs (`tests/evals/data/{classify,detector,merge,recall,
+resolver,write_tier_compare}/`) are **synthetic small-org scenarios** (the
+invented consultancy "Thornhollow Advisory" and its invented tools/vendors —
+e.g. Pagemoor, Hostmoor, Tallyfold). Nothing here originates from a live
+knowledge tree, and every invented name is checked absent from BOTH the
+local knowledge tree and the public web before it is adopted (issue
+athenaeum#1496 — a prior invented name, "Meridian Advisory", turned out to
+collide with a real firm because only the former was checked; several
+vendor mentions also turned out to name real products). `tests/
+test_eval_corpus_leakage.py` enforces the mechanical half of this on every
+PR — see that module's docstring for exactly what it can and cannot catch.
+Adding a case that quotes real client / colleague content is a
+review-blocker.
+
+This is a DIFFERENT set from `tests/evals/data/corpus/`, the procedurally
+generated synthetic knowledge corpus used by the retrieval/shadow-parity
+tests (`tests/test_eval_recall_floor.py`, `tests/test_supersession_recall.py`,
+and friends) — same "every entity is invented" policy, but generated from
+syllable pools rather than hand-authored, and documented separately in
+`tests/evals/data/corpus/README.md`. Both are in scope for the leakage
+guard above; neither originates from the other.
 
 Every golden set must contain at least one **pass**, one **contradict**,
 and one **escalate** case (per acceptance criteria).
