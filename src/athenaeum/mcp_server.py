@@ -1168,7 +1168,23 @@ def _recall_via_backend(
             )
 
         if isinstance(tags, list):
-            tags = ", ".join(tags)
+            # Issue athenaeum#1491: YAML 1.1 parses unquoted ambiguous scalars
+            # (times like `9:00` -> sexagesimal int 540, `true`/`no` -> bool,
+            # `1.5` -> float, `2026-01-01` -> date) as non-str list elements,
+            # so the container-only `isinstance(tags, list)` check above does
+            # not guarantee every ELEMENT is a str -- ", ".join(tags) then
+            # raises TypeError on the first non-str item. Coerce per element.
+            #
+            # This renders `str(t)` verbatim (e.g. "540", not "9:00").
+            # Recovering the originally-authored text is deliberately NOT
+            # attempted: YAML's sexagesimal grammar is lossy in the reverse
+            # direction -- `9:00`, `09:00`, and `0:09:00` all fold to
+            # different ints, but a single int cannot be mapped back to one
+            # unique original spelling (e.g. 90 has no principled way to
+            # choose between "1:30" and other readings). A "reconstruct the
+            # text" heuristic would produce a plausible-looking guess with no
+            # fidelity guarantee, which is worse than an honest str(int).
+            tags = ", ".join(str(t) for t in tags)
         snip = _snippet(body, tokens) if body else ""
         # Issue athenaeum#325: compact provenance/context header from the FRESH
         # on-disk frontmatter (same ``fm`` the Layer-C re-read populated).
