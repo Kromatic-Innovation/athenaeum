@@ -101,8 +101,12 @@ def render(stats: dict[str, object], wiki: Path) -> str:
         "because a frequency table over a personal corpus is not reliably",
         "content-free.",
         "",
-        f"Source tree: `{wiki}` (path shown for your reference; do not copy it",
-        "into any committed artifact).",
+        # Deliberately NOT the absolute path. The default --out lands inside
+        # tests/evals/data/corpus/, which the eval-corpus path lint scans, and
+        # writing a home directory into a file in that directory would put the
+        # exact string the lint exists to catch inside the tree it guards.
+        f"Source tree: {len(list(wiki.rglob('*.md')))} pages (path omitted by",
+        "design -- see the note in this script).",
         "",
         "| metric | value |",
         "|---|---|",

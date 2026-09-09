@@ -33,7 +33,7 @@
   tags: [operations, delivery]
   source_ref: "session-2026-02-05"
   created: 2026-02-05
-  links: [tool-gsheets]
+  links: [tool-gridbook]
   body: |
     # Resourcing model
 
@@ -46,7 +46,7 @@
   tags: [operations, finance]
   source_ref: "session-2026-02-05"
   created: 2026-02-05
-  links: [tool-gsheets]
+  links: [tool-gridbook]
   body: |
     # Revenue forecast model
 
@@ -246,7 +246,7 @@
   tags: [operations, knowledge]
   source_ref: "session-2026-01-12"
   created: 2026-01-12
-  links: [tool-notion, project-knowledge-base]
+  links: [tool-pagevault, project-knowledge-base]
   body: |
     # Meeting notes practice
 

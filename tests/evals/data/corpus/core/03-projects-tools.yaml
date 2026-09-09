@@ -7,11 +7,11 @@
   tags: [project, delivery]
   source_ref: "session-2026-01-20"
   created: 2026-01-20
-  links: [person-lena-varga, person-hana-lindqvist, client-meridian]
+  links: [person-lena-varga, person-hana-lindqvist, client-alderway]
   body: |
     # Client portal refresh
 
-    A rebuild of the client-facing portal, sponsored by Meridian. Delivery lead
+    A rebuild of the client-facing portal, sponsored by Alderway. Delivery lead
     Lena Varga; design lead Hana Lindqvist. Running since January 2026.
 
 - uid: project-portal-hosting
@@ -69,31 +69,31 @@
     The firm's internal build and release pipeline. Maintained by Tomas Briell.
     All internal repositories build through it, including the rate-card tooling.
 
-- uid: tool-notion
+- uid: tool-pagevault
   type: project
-  name: Notion
+  name: Pagevault
   aliases: [the wiki]
   tags: [tooling, saas]
   source_ref: "session-2026-01-12"
   created: 2026-01-12
   body: |
-    # Notion
+    # Pagevault
 
     Used for meeting notes and project pages. Not used for anything containing
     client-identifying data, per the tooling procurement policy.
 
-- uid: tool-gsheets
+- uid: tool-gridbook
   type: project
-  name: Google Sheets
+  name: Gridbook
   aliases: [spreadsheets]
   tags: [tooling, saas]
   source_ref: "session-2026-01-12"
   created: 2026-01-12
   body: |
-    # Google Sheets
+    # Gridbook
 
     Used for the rate card, resourcing, and forecast models. The rate-card
-    sheet is generated from the rowanhale tooling rather than edited by hand.
+    sheet is generated from the rowanwrenfield tooling rather than edited by hand.
 
 - uid: meeting-standup
   type: meeting
@@ -116,7 +116,7 @@
   tags: [meeting, governance]
   source_ref: "session-2026-01-15"
   created: 2026-01-15
-  links: [person-rowan-hale, person-amir-osei]
+  links: [person-rowan-wrenfield, person-amir-osei]
   body: |
     # Partners meeting
 

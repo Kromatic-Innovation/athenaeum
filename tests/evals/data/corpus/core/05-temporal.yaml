@@ -18,27 +18,27 @@
   body: |
     # Office address (current)
 
-    The firm's office is at 220 Regent Street, suite 5B. The move completed on
+    The firm's office is at 41 Alderway Row, suite 5B. The move completed on
     1 May 2026. Confirmed by Oscar Delaney, office manager, who is the
     authoritative source for this.
 
-    This supersedes the Kingsway address.
+    This supersedes the Thornlea Wharf address.
 
 - uid: office-address-superseded
   type: note
-  name: Office address (former, Kingsway)
-  aliases: [Kingsway office]
+  name: Office address (former, Thornlea Wharf)
+  aliases: [Thornlea Wharf office]
   tags: [facilities, superseded]
   source_ref: "session-2026-01-10"
   created: 2026-01-10
   updated: 2026-05-02
   links: [office-address-current]
   body: |
-    # Office address (former, Kingsway)
+    # Office address (former, Thornlea Wharf)
 
-    The firm's office was at 14 Kingsway, WeWork floor 3, until April 2026.
+    The firm's office was at 14 Thornlea Wharf, Deskhaus floor 3, until April 2026.
 
-    SUPERSEDED: the firm moved to 220 Regent Street on 1 May 2026. Retained for
+    SUPERSEDED: the firm moved to 220 Alderway Row on 1 May 2026. Retained for
     historical reference only; do not cite as the current address.
 
 - uid: standup-time-current

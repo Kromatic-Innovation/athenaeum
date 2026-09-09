@@ -64,7 +64,7 @@
 - id: ratecard_tooling_owner
   probe_class: multi_hop
   query: "which repository generates the rate card, and who maintains its build?"
-  expected_uids: [repo-rowanhale, tool-buildpipe]
+  expected_uids: [repo-rowanwrenfield, tool-buildpipe]
   distractor_terms: ["rate card", "build pipeline"]
 
 # --- temporal / knowledge update --------------------------------------------
@@ -74,7 +74,7 @@
   query: "where is our office?"
   expected_uids: [office-address-current]
   must_not_rank: [office-address-superseded]
-  distractor_terms: ["office address", "Kingsway", "Regent Street"]
+  distractor_terms: ["office address", "Thornlea Wharf", "Alderway Row"]
 
 - id: standup_time_current
   probe_class: temporal
@@ -96,36 +96,36 @@
 
 - id: person_not_repo
   probe_class: disambiguation
-  query: "what did Rowan Hale decide about pricing?"
-  expected_uids: [person-rowan-hale, project-pricing-review]
-  must_not_rank: [repo-rowanhale]
-  distractor_terms: ["Rowan Hale", "rowanhale", "pricing"]
+  query: "what did Rowan Wrenfield decide about pricing?"
+  expected_uids: [person-rowan-wrenfield, project-pricing-review]
+  must_not_rank: [repo-rowanwrenfield]
+  distractor_terms: ["Rowan Wrenfield", "rowanwrenfield", "pricing"]
   note: >-
     A decision is made by a PERSON. The eponymous repository shares almost all
     of the query's vocabulary and must not outrank the person page.
 
 - id: repo_not_person
   probe_class: disambiguation
-  query: "how many maintainers does the rowanhale repository have?"
-  expected_uids: [repo-rowanhale]
-  must_not_rank: [person-rowan-hale]
-  distractor_terms: ["rowanhale", "maintainers", "repository"]
+  query: "how many maintainers does the rowanwrenfield repository have?"
+  expected_uids: [repo-rowanwrenfield]
+  must_not_rank: [person-rowan-wrenfield]
+  distractor_terms: ["rowanwrenfield", "maintainers", "repository"]
   note: The inverse direction -- the guard must not simply always prefer people.
 
 - id: surname_is_ambiguous
   probe_class: disambiguation
-  query: "tell me about Hale"
-  expected_uids: [person-rowan-hale, person-devi-hale, person-marcus-hale]
-  distractor_terms: ["Hale", "Hale Associates"]
+  query: "tell me about Wrenfield"
+  expected_uids: [person-rowan-wrenfield, person-ilva-wrenfield, person-tovah-wrenfield]
+  distractor_terms: ["Wrenfield", "Wrenfield Associates"]
   note: >-
     A bare surname is genuinely ambiguous across several people plus an org.
     The correct behaviour is to surface the ambiguity, not to answer
-    confidently about one Hale. Scored on distinct-page count, not a single hit.
+    confidently about one Wrenfield. Scored on distinct-page count, not a single hit.
 
 - id: given_name_is_ambiguous
   probe_class: disambiguation
   query: "who is Rowan?"
-  expected_uids: [person-rowan-hale, person-rowan-castell]
+  expected_uids: [person-rowan-wrenfield, person-rowan-deverell]
   distractor_terms: ["Rowan"]
 
 # --- abstention -------------------------------------------------------------
@@ -167,7 +167,7 @@
 - id: former_client_not_current
   probe_class: distractor_robustness
   query: "which clients are currently on retainer?"
-  expected_uids: [client-meridian, client-bluewater, client-atlas]
+  expected_uids: [client-alderway, client-bluewater, client-atlas]
   must_not_rank: [client-verity, client-solent]
   distractor_terms: ["retainer", "client"]
   note: Verity is a former client and Solent only a prospect.

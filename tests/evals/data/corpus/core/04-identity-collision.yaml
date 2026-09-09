@@ -7,118 +7,118 @@
 # repo; see ../README.md.
 #
 # The failure being guarded against: a query about the PERSON returns the
-# REPOSITORY, or a surname-only query returns one confident wrong Hale
+# REPOSITORY, or a surname-only query returns one confident wrong Wrenfield
 # instead of surfacing that several exist.
 
-- uid: person-rowan-hale
+- uid: person-rowan-wrenfield
   type: person
-  name: Rowan Hale
-  aliases: [Rowan, R. Hale]
-  tags: [person, partner, meridian]
+  name: Rowan Wrenfield
+  aliases: [Rowan, R. Wrenfield]
+  tags: [person, partner, alderway]
   source_ref: "session-2026-02-03"
   created: 2026-02-03
   updated: 2026-05-20
-  links: [org-hale-associates, project-pricing-review, person-devi-hale]
+  links: [org-wrenfield-associates, project-pricing-review, person-ilva-wrenfield]
   body: |
-    # Rowan Hale
+    # Rowan Wrenfield
 
-    Rowan Hale is a founding partner at Hale Associates and sits on the
-    pricing committee. Rowan owns the firm's relationship with the Meridian
+    Rowan Wrenfield is a founding partner at Wrenfield Associates and sits on the
+    pricing committee. Rowan owns the firm's relationship with the Alderway
     account and chaired the 2026 pricing review.
 
     Rowan's decision on pricing, recorded in the pricing review, was to hold
     the day rate flat through the 2026 financial year and absorb the increase
     in indirect costs rather than pass it to retainer clients.
 
-    Not to be confused with the rowanhale code repository, which is named
+    Not to be confused with the rowanwrenfield code repository, which is named
     after Rowan but is a software project, not a person.
 
-- uid: repo-rowanhale
+- uid: repo-rowanwrenfield
   type: project
-  name: rowanhale
-  aliases: [rowanhale repo, the rowanhale repository]
+  name: rowanwrenfield
+  aliases: [rowanwrenfield repo, the rowanwrenfield repository]
   tags: [repository, software, tooling]
   source_ref: "session-2026-03-11"
   created: 2026-03-11
   updated: 2026-06-02
-  links: [person-rowan-hale, tool-buildpipe]
+  links: [person-rowan-wrenfield, tool-buildpipe]
   body: |
-    # rowanhale
+    # rowanwrenfield
 
-    rowanhale is an internal code repository holding the firm's rate-card
-    calculation tooling. It is named after Rowan Hale, who wrote the first
+    rowanwrenfield is an internal code repository holding the firm's rate-card
+    calculation tooling. It is named after Rowan Wrenfield, who wrote the first
     version, but the repository is a software project and has no opinions,
     decisions, or pricing authority of its own.
 
     The repository has 4 maintainers and builds through the buildpipe
     pipeline. Its open issues concern test coverage and a dependency bump.
 
-    A question about what Rowan Hale decided is a question about the PERSON,
+    A question about what Rowan Wrenfield decided is a question about the PERSON,
     not about this repository.
 
-- uid: person-devi-hale
+- uid: person-ilva-wrenfield
   type: person
-  name: Devi Hale
-  aliases: [Devi]
+  name: Ilva Wrenfield
+  aliases: [Ilva]
   tags: [person, family, external]
   source_ref: "session-2026-02-03"
   created: 2026-02-03
-  links: [person-rowan-hale]
+  links: [person-rowan-wrenfield]
   body: |
-    # Devi Hale
+    # Ilva Wrenfield
 
-    Devi Hale is Rowan Hale's sister and is not employed by the firm. Devi is
+    Ilva Wrenfield is Rowan Wrenfield's sister and is not employed by the firm. Ilva is
     an architect and appears in the record only because she attended the firm's
     2026 anniversary dinner as a guest.
 
-    Devi holds no role, makes no decisions, and owns no accounts here.
+    Ilva holds no role, makes no decisions, and owns no accounts here.
 
-- uid: person-marcus-hale
+- uid: person-tovah-wrenfield
   type: person
-  name: Marcus Hale
-  aliases: [Marcus]
+  name: Tovah Wrenfield
+  aliases: [Tovah]
   tags: [person, family, external]
   source_ref: "session-2026-04-18"
   created: 2026-04-18
-  links: [person-rowan-hale]
+  links: [person-rowan-wrenfield]
   body: |
-    # Marcus Hale
+    # Tovah Wrenfield
 
-    Marcus Hale is Rowan Hale's cousin. He runs an unrelated logistics business
+    Tovah Wrenfield is Rowan Wrenfield's cousin. He runs an unrelated logistics business
     and has never been a client, supplier, or employee of the firm.
 
     He is recorded here solely because he was mistakenly added to a client
     mailing list in April 2026 and had to be removed.
 
-- uid: org-hale-associates
+- uid: org-wrenfield-associates
   type: company
-  name: Hale Associates
-  aliases: [Hale Assoc, HA]
+  name: Wrenfield Associates
+  aliases: [Wrenfield Assoc, HA]
   tags: [company, partnership]
   source_ref: "session-2026-01-15"
   created: 2026-01-15
-  links: [person-rowan-hale]
+  links: [person-rowan-wrenfield]
   body: |
-    # Hale Associates
+    # Wrenfield Associates
 
-    Hale Associates is the partnership through which Rowan Hale holds their
+    Wrenfield Associates is the partnership through which Rowan Wrenfield holds their
     equity. It is a legal entity, not a person, and not the code repository of
     a similar name.
 
     It has two partners and files accounts annually.
 
-- uid: person-rowan-castell
+- uid: person-rowan-deverell
   type: person
-  name: Rowan Castell
+  name: Rowan Deverell
   aliases: [Rowan C.]
   tags: [person, contractor]
   source_ref: "session-2026-05-09"
   created: 2026-05-09
   body: |
-    # Rowan Castell
+    # Rowan Deverell
 
-    Rowan Castell is a contract designer engaged for the portal refresh. Shares
-    a given name with Rowan Hale and nothing else -- different person,
+    Rowan Deverell is a contract designer engaged for the portal refresh. Shares
+    a given name with Rowan Wrenfield and nothing else -- different person,
     different surname, no pricing role.
 
     A near-miss that a given-name-only query should not confidently resolve to.
@@ -130,15 +130,15 @@
   tags: [project, pricing, decision]
   source_ref: "session-2026-05-20"
   created: 2026-05-20
-  links: [person-rowan-hale, policy-rate-card]
+  links: [person-rowan-wrenfield, policy-rate-card]
   body: |
     # 2026 pricing review
 
-    The annual review of the firm's rate card, chaired by Rowan Hale.
+    The annual review of the firm's rate card, chaired by Rowan Wrenfield.
 
     Outcome: hold the day rate flat through FY2026. Indirect cost increases
     are absorbed rather than passed through to retainer clients. Reviewed
     again at the FY2027 planning session.
 
     The rate-card calculation tooling used during the review lives in the
-    rowanhale repository.
+    rowanwrenfield repository.

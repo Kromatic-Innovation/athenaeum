@@ -1,18 +1,18 @@
 # Clients and engagements.
 
-- uid: client-meridian
+- uid: client-alderway
   type: company
-  name: Meridian Advisory
-  aliases: [Meridian]
+  name: Alderway Advisory
+  aliases: [Alderway]
   tags: [client, retainer]
   source_ref: "session-2026-01-08"
   created: 2026-01-08
   links: [person-priya-shah, project-portal-refresh]
   body: |
-    # Meridian Advisory
+    # Alderway Advisory
 
-    Meridian Advisory is a 12-person strategy consultancy on a monthly
-    retainer. Client lead: Priya Shah. Meridian is the firm's largest retainer
+    Alderway Advisory is a 12-person strategy consultancy on a monthly
+    retainer. Client lead: Priya Shah. Alderway is the firm's largest retainer
     client by revenue and the sponsor of the client portal refresh.
 
 - uid: client-bluewater

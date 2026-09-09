@@ -45,7 +45,7 @@ Content policy (see ``data/corpus/README.md``): every name here is invented.
 Nothing is copied, paraphrased, or sampled from a live knowledge tree; only
 DISTRIBUTION PARAMETERS are taken from one, via
 ``scripts/measure_corpus_shape.py``, whose output is gitignored.
-``tests/test_corpus_pii_lint.py`` enforces this on every PR.
+``tests/test_eval_corpus_leakage.py`` enforces this on every PR.
 """
 
 from __future__ import annotations

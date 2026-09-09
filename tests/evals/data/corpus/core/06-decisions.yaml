@@ -30,17 +30,17 @@
     harder to explain and invited line-by-line negotiation. A single blended
     day rate stays.
 
-- uid: decision-no-client-data-in-notion
+- uid: decision-no-client-data-in-pagevault
   type: note
-  name: Decision - no client data in Notion
+  name: Decision - no client data in Pagevault
   tags: [decision, tooling, confidentiality]
   source_ref: "session-2026-01-12"
   created: 2026-01-12
-  links: [tool-notion, policy-confidentiality]
+  links: [tool-pagevault, policy-confidentiality]
   body: |
-    # Decision - no client data in Notion
+    # Decision - no client data in Pagevault
 
-    Notion holds meeting notes and project pages only. Anything
+    Pagevault holds meeting notes and project pages only. Anything
     client-identifying stays out, because the workspace is broadly readable
     internally and confidentiality is a firm value rather than a control.
 
@@ -115,12 +115,12 @@
   tags: [meeting, social]
   source_ref: "session-2026-02-03"
   created: 2026-02-03
-  links: [person-devi-hale]
+  links: [person-ilva-wrenfield]
   body: |
     # 2026 anniversary dinner
 
-    The firm's anniversary dinner. Partners, staff and guests attended. Devi
-    Hale attended as Rowan Hale's guest.
+    The firm's anniversary dinner. Partners, staff and guests attended. Ilva
+    Wrenfield attended as Rowan Wrenfield's guest.
 
 - uid: note-mailing-list-correction
   type: note
@@ -128,11 +128,11 @@
   tags: [note, operations]
   source_ref: "session-2026-04-18"
   created: 2026-04-18
-  links: [person-marcus-hale]
+  links: [person-tovah-wrenfield]
   body: |
     # Client mailing list correction
 
-    Marcus Hale was added to the client mailing list in error in April 2026
+    Tovah Wrenfield was added to the client mailing list in error in April 2026
     and removed the same week. He has never been a client.
 
 - uid: note-fy2027-planning

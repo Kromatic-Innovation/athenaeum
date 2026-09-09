@@ -264,7 +264,7 @@ def test_materialize_writes_a_readable_wiki_tree(tmp_path: Path) -> None:
     written = list(wiki.glob("*.md"))
     assert len(written) == len(corpus.pages)
 
-    sample = (wiki / "person-rowan-hale.md").read_text(encoding="utf-8")
+    sample = (wiki / "person-rowan-wrenfield.md").read_text(encoding="utf-8")
     assert sample.startswith("---\n")
-    assert "uid: person-rowan-hale" in sample
+    assert "uid: person-rowan-wrenfield" in sample
     assert "type: person" in sample

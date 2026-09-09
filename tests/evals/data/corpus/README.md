@@ -14,12 +14,45 @@ committed**. A frequency table over a personal corpus is not reliably
 content-free, and committing it would place the derived artifact in the very
 directory the PII lint scans.
 
-`tests/test_corpus_pii_lint.py` enforces this on every PR. It runs offline and
+`tests/test_eval_corpus_leakage.py` enforces this on every PR. (Not
+`tests/test_corpus_pii_lint.py` -- that one gates the *live* knowledge corpus
+for inline contact data, athenaeum#495. Same word, two corpora.) It runs offline and
 checks generated and hand-authored pages alike against a denylist **read from
 the local knowledge tree at lint time and never written to disk** -- a
 committed denylist of real proper nouns would itself be the leak it exists to
 prevent. With no local tree present the check skips loudly rather than
 passing silently, so an outside contributor's suite still runs.
+
+### What the guards catch, and what they cannot
+
+Five checks run offline on every PR (`tests/test_eval_corpus_leakage.py`), and
+each has a negative control proving it fails on the leak it claims to catch:
+
+| check | catches |
+|---|---|
+| multi-word name denylist | a real person or org name, read from the whole tree |
+| structural-name check | any token the corpus *leans on* (>=3 pages) matching a real entity name |
+| exhaustive name-space check | every one of the ~13,500 composable generated names |
+| brand list | well-known real commercial products |
+| path + contact scans | local paths, emails, phone-shaped tokens |
+
+**Known limitation, stated rather than papered over:** a single-use,
+single-token real brand *not on the curated list* cannot be caught
+mechanically. The structural check needs three uses, and matching every real
+company name is unusable -- the tree holds 2,666 company-name tokens including
+`about`, `access`, `data` and `first`, which produced 170 hits that were almost
+entirely ordinary English. That residue is a review responsibility, not an
+automated guarantee.
+
+Two historical failures are worth knowing, because both passed every check
+green at the time:
+
+1. The denylist scanned `sorted(...)[:4000]` of 25,487 files. Pages are named
+   by hex uid, so that was not a sample but "uids beginning 0, 1 or 2" -- the
+   same 16% every run. Removing the limit cost 0.9s.
+2. Matching was whole-phrase, so a real `Landon Hale` could never collide with
+   a fixture `Rowan Hale`. The corpus had built its entire cast on a real
+   person's surname.
 
 ### The identity-collision cast
 

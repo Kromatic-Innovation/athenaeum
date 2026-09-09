@@ -1,5 +1,5 @@
-# Meridian Advisory's people. Invented; see ../README.md for the content
-# policy. Surnames here deliberately avoid "Hale" so the identity-collision
+# Alderway Advisory's people. Invented; see ../README.md for the content
+# policy. Surnames here deliberately avoid "Wrenfield" so the identity-collision
 # cast in 04- stays the only source of surname competition.
 
 - uid: person-priya-shah
@@ -9,11 +9,11 @@
   tags: [person, client-lead]
   source_ref: "session-2026-01-08"
   created: 2026-01-08
-  links: [client-meridian, policy-expense]
+  links: [client-alderway, policy-expense]
   body: |
     # Priya Shah
 
-    Priya Shah is the client lead for the Meridian account and sits on the
+    Priya Shah is the client lead for the Alderway account and sits on the
     budget committee. She approves discretionary spend up to 500 GBP; anything
     above that goes to the finance partner.
 
