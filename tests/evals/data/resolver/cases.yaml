@@ -3,7 +3,7 @@
 # Same synthetic Thornhollow Advisory scenario as the detector set — invented
 # consultancy, no live-knowledge content.
 #
-# Cases feed a hand-authored ContradictionResult (as if the Haiku detector
+# Cases feed a hand-authored ContradictionResult (as if the tier-1 detector
 # had already flagged the pair) into propose_resolution() with a real Opus
 # call. We assert on ACTION CLASS, NOT rationale text.
 #
@@ -193,7 +193,7 @@
         type: reference
         source_type: inferred
 
-# --- Cases added in issue athenaeum#345 (WS3) to give the floor >= 2-case slack ---
+# --- Cases added in issue athenaeum#345 (WS3) to give the floor >= 2-case headroom ---
 # Enlarges the set from 5 -> 8 so no single hard case sinks the whole layer.
 # Two cases per action class (not_a_conflict, keep_pick_winner,
 # disambiguation, propose_merge). Still 100% synthetic Thornhollow Advisory.

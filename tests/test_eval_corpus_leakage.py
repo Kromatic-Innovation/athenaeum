@@ -1,15 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Leakage guard for the SYNTHETIC EVAL CORPUS (``tests/evals/data/corpus``).
+"""Leakage guard for the eval fixture data under ``tests/evals/data/``.
 
 Distinct from ``test_corpus_pii_lint.py``, which gates the *live* knowledge
 corpus for inline contact data (athenaeum#495). This module gates the
-hand-authored and generated eval fixtures for content borrowed from a real
-knowledge tree. Same word, two corpora -- see ``tests/evals/data/corpus/README.md``.
+hand-authored and generated eval fixtures for content borrowed from -- or
+colliding with -- a real knowledge tree. Same word, two corpora -- see
+``tests/evals/data/corpus/README.md``.
 
 Runs in the DEFAULT suite -- offline, no network, no API key -- so a fixture
 that quotes real content fails an ordinary PR rather than waiting for a
 metered eval run. athenaeum is a public repository; every fixture here is
 public or public-bound.
+
+**Scope (issue athenaeum#1496).** Originally this module scanned only the
+synthetic generated corpus under ``tests/evals/data/corpus/``. That left
+every OTHER fixture directory (``classify/``, ``detector/``, ``merge/``,
+``recall/`` + its ``wiki/`` pages, ``resolver/``, ``write_tier_compare/`` --
+all hand-authored, not generated) unguarded, which is exactly how the
+"Meridian Advisory" fictional consultancy and several real SaaS vendor names
+(Notion, Heroku, WeWork, Airtable, Zendesk, Google Sheets/Docs) sat committed
+and unchecked despite this module's own existence: a guard that only
+inspects the directory built to satisfy it is not a guard over the
+fixtures. ``_corpus_blobs()`` below now walks the whole eval data root
+(``tests/evals/harness.EVAL_DATA_ROOT``, which contains ``corpus/`` as one
+subdirectory among several), so every committed fixture directory is in
+scope, not only the synthetic corpus.
 
 The denylist of real proper nouns is read from the local knowledge tree AT
 LINT TIME and never written to disk. A committed denylist of real names would
@@ -35,6 +50,7 @@ import yaml
 
 from athenaeum.pii import scan_corpus_pii
 from tests.evals.corpus import CORPUS_ROOT, build_corpus
+from tests.evals.harness import EVAL_DATA_ROOT
 
 # What counts as an identity worth guarding.
 #
@@ -218,10 +234,16 @@ def _real_proper_nouns(wiki: Path) -> set[str]:
 
 
 def _corpus_blobs() -> dict[str, str]:
-    """Hand-authored sources plus a generated sample, keyed by label.
+    """Every committed eval fixture, plus a generated sample, keyed by label.
 
-    Generated tiers are checked too: composed names can collide with a real
-    name by chance, which is exactly why composition alone is not trusted.
+    Walks ``EVAL_DATA_ROOT`` (``tests/evals/data/``) -- NOT just
+    ``CORPUS_ROOT`` (``tests/evals/data/corpus/``, one subdirectory of it) --
+    so the hand-authored fixture sets (``classify/``, ``detector/``,
+    ``merge/``, ``recall/`` + its ``wiki/`` pages, ``resolver/``,
+    ``write_tier_compare/``) are in scope alongside the synthetic generated
+    corpus (issue athenaeum#1496; see module docstring). Generated tiers are
+    checked too: composed names can collide with a real name by chance,
+    which is exactly why composition alone is not trusted.
     """
     # Every text file, not just *.yaml. The earlier glob missed README.md and
     # -- more to the point -- any `corpus-shape*.md` report, which is written
@@ -230,15 +252,54 @@ def _corpus_blobs() -> dict[str, str]:
     # catch exactly it, and a lint that cannot see the likeliest offender is
     # not covering the case it claims to.
     blobs = {
-        str(path.relative_to(CORPUS_ROOT)): path.read_text(encoding="utf-8")
-        for path in sorted(CORPUS_ROOT.rglob("*"))
+        str(path.relative_to(EVAL_DATA_ROOT)): path.read_text(encoding="utf-8")
+        for path in sorted(EVAL_DATA_ROOT.rglob("*"))
         if path.is_file() and path.suffix in {".yaml", ".yml", ".md", ".txt"}
     }
     generated = build_corpus(scale="small")
     blobs["<generated:small>"] = "\n".join(
         page.to_markdown() for page in generated.pages if page.tier != "core"
     )
+    # Deliberately NOT extended to tests/fixtures/recorded/**/*.json (issue
+    # athenaeum#1496 measured this): those JSON fixtures mirror the case text
+    # above and their FUNCTIONAL content (case_id/response_text/content_blocks)
+    # is clean after the rename -- but scripts/rederive_recorded_fixture.py
+    # stamps an honest `rederived.rename` provenance block on each one that
+    # was mechanically re-derived, recording the OLD name as documentation of
+    # what changed (e.g. "Heroku=Hostmoor"). Scanning that directory would
+    # make this guard fail on its own audit trail. Excluding the directory
+    # entirely is simpler and more honest than teaching this scan to parse
+    # JSON and skip one specific key.
     return blobs
+
+
+def _scan_blobs_for_leaks(
+    blobs: dict[str, str],
+    *,
+    denylist: "frozenset[str] | set[str]" = frozenset(),
+    brands: "frozenset[str] | set[str]" = frozenset(),
+) -> list[str]:
+    """Pure scan over an arbitrary ``{label: blob}`` mapping -- no filesystem
+    or knowledge-tree access of its own.
+
+    Shared by :func:`test_eval_corpus_contains_no_real_proper_nouns` (knowledge-
+    tree ``denylist``), :func:`test_eval_corpus_names_no_real_commercial_brands`
+    (curated ``brands``), and the negative control
+    :func:`test_negative_control_catches_the_pre_fix_fixture_content` below --
+    so the control exercises the SAME matching logic the real guard runs,
+    rather than a parallel reimplementation that could drift from it.
+    """
+    hits: list[str] = []
+    for label, blob in blobs.items():
+        lowered = blob.lower()
+        for name in denylist:
+            if re.search(rf"\b{re.escape(name)}\b", lowered):
+                hits.append(f"{label}: {name!r}")
+        if brands:
+            tokens = {w.lower() for w in re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", blob)}
+            for brand in sorted(tokens & brands):
+                hits.append(f"{label}: {brand!r}")
+    return hits
 
 
 def test_eval_corpus_contains_no_real_proper_nouns() -> None:
@@ -252,12 +313,7 @@ def test_eval_corpus_contains_no_real_proper_nouns() -> None:
     if not denylist:
         pytest.skip("local knowledge tree yielded no frontmatter names to check")
 
-    hits: list[str] = []
-    for label, blob in _corpus_blobs().items():
-        lowered = blob.lower()
-        for name in denylist:
-            if re.search(rf"\b{re.escape(name)}\b", lowered):
-                hits.append(f"{label}: {name!r}")
+    hits = _scan_blobs_for_leaks(_corpus_blobs(), denylist=denylist)
     assert not hits, (
         "eval corpus contains proper nouns that also appear in the local "
         "knowledge tree -- rewrite them as invented names (this corpus is "
@@ -360,13 +416,23 @@ def test_structurally_central_corpus_names_are_absent_from_the_real_tree() -> No
 #: The structural check needs three uses; matching every company name is
 #: unusable noise. This list closes the realistic cases; the residue is a
 #: review responsibility, not an automated guarantee.
+#:
+#: ``meridian`` (issue athenaeum#1496): the fixtures' own fictional consultancy
+#: used to be named "Meridian Advisory", which collided with a real firm.
+#: It has been renamed everywhere under ``tests/evals/data/`` to
+#: "Thornhollow Advisory" -- adding the OLD name here is safe (it cannot
+#: self-match the current fixtures) and turns this into a standing regression
+#: guard: if "Meridian" is ever reintroduced, this test catches it the same
+#: way it would catch any other real brand. This is the general rule for
+#: adding a name here after a rename fixes a leak, not special-cased to this
+#: one word.
 _REAL_BRANDS = frozenset(
     """
     wework regus notion slack salesforce hubspot zoom dropbox asana trello jira
     confluence airtable figma miro stripe xero quickbooks netsuite workday
     greenhouse lever gusto zendesk intercom mailchimp shopify squarespace
     wordpress github gitlab bitbucket linkedin facebook twitter instagram
-    aws azure heroku datadog snowflake databricks tableau
+    aws azure heroku datadog snowflake databricks tableau meridian
     """.split()
 )
 
@@ -420,11 +486,7 @@ def test_eval_corpus_names_no_real_commercial_brands() -> None:
     Runs unconditionally -- no local knowledge tree needed -- so it protects
     outside contributors' PRs too.
     """
-    hits: list[str] = []
-    for label, blob in _corpus_blobs().items():
-        tokens = {w.lower() for w in re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", blob)}
-        for brand in sorted(tokens & _REAL_BRANDS):
-            hits.append(f"{label}: {brand!r}")
+    hits = _scan_blobs_for_leaks(_corpus_blobs(), brands=_REAL_BRANDS)
     assert not hits, (
         "eval corpus names real commercial brands; replace them with invented "
         "equivalents:\n  " + "\n  ".join(hits)
@@ -440,6 +502,79 @@ def test_eval_corpus_has_no_local_paths() -> None:
     pattern = re.compile(r"(/Users/|/home/|~/[A-Za-z])")
     hits = [label for label, blob in _corpus_blobs().items() if pattern.search(blob)]
     assert not hits, f"absolute or home-relative local paths in eval corpus: {hits}"
+
+
+class TestNegativeControlWidenedGuardActuallyFires:
+    """Proves the widened guard (issue athenaeum#1496) is not a guard that only
+    inspects the directory built to satisfy it.
+
+    Feeds :func:`_scan_blobs_for_leaks` -- the SAME pure scan the two real
+    tests above call, not a reimplementation -- verbatim excerpts of what
+    ``tests/evals/data/detector/cases.yaml`` and
+    ``tests/evals/data/resolver/cases.yaml`` actually contained before this
+    issue's rename: the real "Meridian" firm name and the real "Heroku"
+    brand name, both outside ``tests/evals/data/corpus/`` (the only
+    directory the guard covered before this issue). Before the widening --
+    when ``_corpus_blobs()`` walked only ``CORPUS_ROOT`` -- this exact
+    content sat committed in the repo and passed every existing test, because
+    nothing scanned that directory. That is the defect this issue fixes, and
+    this test is what proves the fix: it fails on the pre-fix text and passes
+    on the post-fix text, using the real (post-rename) ``_REAL_BRANDS`` set.
+    """
+
+    #: Verbatim excerpts, pre-athenaeum#1496 (i.e. as the fixtures actually read
+    #: before this issue's rename commits -- git blob 5b10946^). Bare
+    #: "Meridian" (not the possessive "Meridian's") deliberately: the
+    #: brand-token regex (``[A-Za-z'-]{2,}``, shared with the real check)
+    #: treats an apostrophe as part of the token, so "Meridian's" tokenizes
+    #: as one glued token that will never equal the bare "meridian" entry in
+    #: ``_REAL_BRANDS`` -- a real, pre-existing limitation of that regex, not
+    #: something this issue introduces. Using the possessive form here would
+    #: make the control quietly test nothing.
+    _PRE_FIX_DETECTOR_EXCERPT = (
+        '      body: "Client invoices at Meridian go out on the 1st of every month."'
+    )
+    _PRE_FIX_RESOLVER_EXCERPT = '      - "Meridian\'s client portal runs on Heroku."'
+
+    #: The same two passages after this issue's rename (verbatim from the
+    #: current committed fixtures).
+    _POST_FIX_DETECTOR_EXCERPT = (
+        '      body: "Client invoices at Thornhollow go out on the 1st of every month."'
+    )
+    _POST_FIX_RESOLVER_EXCERPT = '      - "Thornhollow\'s client portal runs on Hostmoor."'
+
+    def test_pre_fix_content_is_caught(self) -> None:
+        blobs = {
+            "detector/cases.yaml": self._PRE_FIX_DETECTOR_EXCERPT,
+            "resolver/cases.yaml": self._PRE_FIX_RESOLVER_EXCERPT,
+        }
+        hits = _scan_blobs_for_leaks(blobs, brands=_REAL_BRANDS)
+        assert hits, (
+            "negative control did not fire on pre-fix content containing "
+            "'Meridian' and 'Heroku' -- the widened guard would have let "
+            "this exact content merge"
+        )
+        joined = " ".join(hits)
+        assert "meridian" in joined, hits
+        assert "heroku" in joined, hits
+
+    def test_post_fix_content_is_clean(self) -> None:
+        blobs = {
+            "detector/cases.yaml": self._POST_FIX_DETECTOR_EXCERPT,
+            "resolver/cases.yaml": self._POST_FIX_RESOLVER_EXCERPT,
+        }
+        hits = _scan_blobs_for_leaks(blobs, brands=_REAL_BRANDS)
+        assert not hits, f"renamed fixture text still trips the brand guard: {hits}"
+
+    def test_real_committed_fixtures_no_longer_contain_the_pre_fix_excerpts(self) -> None:
+        """Ties the excerpts above to reality: if a future edit reintroduces
+        the pre-fix wording verbatim, this fails alongside the guard itself."""
+        detector_text = (EVAL_DATA_ROOT / "detector" / "cases.yaml").read_text(encoding="utf-8")
+        resolver_text = (EVAL_DATA_ROOT / "resolver" / "cases.yaml").read_text(encoding="utf-8")
+        assert self._PRE_FIX_DETECTOR_EXCERPT not in detector_text
+        assert self._PRE_FIX_RESOLVER_EXCERPT not in resolver_text
+        assert self._POST_FIX_DETECTOR_EXCERPT in detector_text
+        assert self._POST_FIX_RESOLVER_EXCERPT in resolver_text
 
 
 def test_materialized_eval_corpus_carries_no_contact_data(tmp_path: Path) -> None:
