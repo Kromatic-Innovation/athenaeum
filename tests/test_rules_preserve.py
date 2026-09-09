@@ -549,7 +549,7 @@ class TestFactCarriesSourcePointer:
             "hestia-lanes",
             "20260815T000000Z-aa.jsonl",
             {
-                "email": "jon@smith.com",
+                "email": "jon@example.com",
                 "status": "bounced",
                 "status_date": "2026-08-15",
                 "observed_at": "2026-08-15T00:00:00Z",
@@ -568,7 +568,7 @@ class TestFactCarriesSourcePointer:
         ]
         record = next(r for r in lines if r.get("record") == "correction")
 
-        assert record["target"] == {"type": "person", "handle": {"email": "jon@smith.com"}}
+        assert record["target"] == {"type": "person", "handle": {"email": "jon@example.com"}}
         assert record["field"] == "bounced"
         assert record["value"] == "2026-08-15"
 
@@ -600,7 +600,7 @@ class TestFactCarriesSourcePointer:
             "hestia-lanes",
             "20260815T000000Z-aa.jsonl",
             {
-                "email": "jon@smith.com",
+                "email": "jon@example.com",
                 "status": "bounced",
                 "status_date": "2026-08-15",
                 "observed_at": "2026-08-15T00:00:00Z",
@@ -642,7 +642,7 @@ class TestFactCarriesSourcePointer:
                     "entities": {
                         "person-alex": {
                             "type": "person",
-                            "handles": {"alt_emails": ["jon@smith.com"]},
+                            "handles": {"alt_emails": ["jon@example.com"]},
                         }
                     }
                 }
@@ -663,7 +663,7 @@ class TestFactCarriesSourcePointer:
             "hestia-lanes",
             "20260815T000000Z-aa.jsonl",
             {
-                "email": "jon@smith.com",
+                "email": "jon@example.com",
                 "status": "bounced",
                 "status_date": "2026-08-15",
                 "observed_at": "2026-08-15T00:00:00Z",
@@ -910,7 +910,7 @@ class TestPreservedLogAdapterRouting:
             "hestia-lanes",
             "20260815T000000Z-aa.jsonl",
             {
-                "email": "jon@smith.com",
+                "email": "jon@example.com",
                 "status": "bounced",
                 "status_date": "2026-08-15",
                 "observed_at": "2026-08-15T00:00:00Z",
@@ -1036,7 +1036,7 @@ class TestPreservedLogAdapterRouting:
             "hestia-lanes",
             "20260815T000000Z-aa.jsonl",
             {
-                "email": "jon@smith.com",
+                "email": "jon@example.com",
                 "status": "bounced",
                 "status_date": "2026-08-15",
                 "observed_at": "2026-08-15T00:00:00Z",

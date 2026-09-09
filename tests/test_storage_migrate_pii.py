@@ -1153,7 +1153,7 @@ class TestServiceAddressPredicate:
 
     def test_a_real_contact_address_is_not_a_service_address(self) -> None:
         assert is_service_address("founder@acme.example") is False
-        assert is_service_address("realbook@kromatic.com") is False
+        assert is_service_address("realbook@example.com") is False
 
 
 class TestBulkSurfacesNameIsEmailPopulation:
@@ -1910,7 +1910,7 @@ class TestNoDirectPiiDetectorImport:
 
         assert not hasattr(sm, "find_inline_emails")
         assert not hasattr(sm, "find_inline_phones")
-        assert find_inline_emails("reach a@b.com") == ["a@b.com"]
+        assert find_inline_emails("reach a@example.com") == ["a@example.com"]
         assert find_inline_phones("call 555-010-0100") == ["555-010-0100"]
 
 

@@ -784,7 +784,7 @@ def name_field_holds_pii(meta: dict[str, Any]) -> bool:
 # renaming a page changes its slug and breaks inbound ``related:``/alias
 # edges, so it needed its own slice (this one). The operator's decision
 # (athenaeum#505, APPROACH 1): derive a human-readable display name from the
-# local-part when possible (e.g. ``jane.doe@acme.com`` -> ``Jane Doe``), move
+# local-part when possible (e.g. ``jane.doe@example.com`` -> ``Jane Doe``), move
 # the address to the excluded contact record, and rewrite inbound edges — the
 # page stays in the corpus under a human-readable name. When a confident name
 # cannot be derived, LEAVE the page for manual naming (never guess).
@@ -792,7 +792,7 @@ def name_field_holds_pii(meta: dict[str, Any]) -> bool:
 #: Local-parts that are ALWAYS role/service addresses, never a person's name —
 #: matched case-insensitively against the WHOLE local-part (not a substring
 #: check, so ``information@`` is not mistaken for ``info@``). Deliberately a
-#: closed, auditable list rather than a heuristic: renaming ``sales@acme.com``
+#: closed, auditable list rather than a heuristic: renaming ``sales@example.com``
 #: to "Sales" would invent a fictitious person.
 ROLE_LOCALPARTS: frozenset[str] = frozenset(
     {
