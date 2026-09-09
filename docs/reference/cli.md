@@ -35,6 +35,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum decisions next`](#athenaeum-decisions-next) (command) — Show the oldest pending decision (single block).
 - [`athenaeum decisions raise-confirmation`](#athenaeum-decisions-raise-confirmation) (command) — File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
 - [`athenaeum decisions scan-retractions`](#athenaeum-decisions-scan-retractions) (command) — Flag any completed merge that relied on a now-retracted source for human review. Idempotent; never unmerges.
+- [`athenaeum dedup-oversize-escalations`](#athenaeum-dedup-oversize-escalations) (command) — Collapse duplicate oversize-page-family escalations in _pending_questions.md to one unanswered block per entity
 - [`athenaeum dedupe`](#athenaeum-dedupe) (group) — Find or merge duplicate wiki entries.
 - [`athenaeum dedupe persons`](#athenaeum-dedupe-persons) (command) — Person-wiki dedupe (HIGH-confidence apollo_id / linkedin / exact-name match). Default --find prints a YAML report; --apply consumes the report and merges.
 - [`athenaeum dedupe wiki-pages`](#athenaeum-dedupe-wiki-pages) (command) — Cluster concept/reference/principle wiki pages and propose merges for near-duplicate topics. Writes idempotent proposals to wiki/_pending_merges.md; --dry-run previews without writing.
@@ -394,6 +395,16 @@ Flag any completed merge that relied on a now-retracted source for human review.
 |---|---|---|---|
 | `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum dedup-oversize-escalations`
+
+Collapse duplicate oversize-page-family escalations in _pending_questions.md to one unanswered block per entity
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum dedupe`
 
@@ -1239,7 +1250,7 @@ Move archival contact data (emails/phones) off entity pages to the excluded surf
 | `--page` | — | — | Path to a single live entity wiki page to migrate. |
 | `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
 | `--reindex` | `False` | — | After a successful --apply, rebuild the search index so the migrated contact data is no longer recallable. Rewriting a page changes its content hash, so an incremental reindex evicts the stale index entry and re-embeds the scrubbed text — WITHOUT this, --apply leaves the pre-migration text live in the index and every migrated address stays reachable via recall. Ignored on a dry-run (nothing changed to reindex). |
-| `--rename-name-email` | `False` | — | Also migrate the name-is-an-email population: a page whose name:/preferred_name: IS an email address (the carve-out) is renamed to a display name derived from the local-part (e.g. jane.doe@acme.com -> 'Jane Doe'), the address is moved to the excluded contact record, and inbound [[wikilink]]s are rewritten to the new slug. An ambiguous local-part (role address, +tag, initial-blob, numeric/opaque) is left unrenamed and counted as a residual rather than guessed at. Scoped by whichever target selector is in use (--page / --all / --glob); combines with the ordinary contact-data migration in the same run unless --rename-only is given. |
+| `--rename-name-email` | `False` | — | Also migrate the name-is-an-email population: a page whose name:/preferred_name: IS an email address (the carve-out) is renamed to a display name derived from the local-part (e.g. jane.doe@example.com -> 'Jane Doe'), the address is moved to the excluded contact record, and inbound [[wikilink]]s are rewritten to the new slug. An ambiguous local-part (role address, +tag, initial-blob, numeric/opaque) is left unrenamed and counted as a residual rather than guessed at. Scoped by whichever target selector is in use (--page / --all / --glob); combines with the ordinary contact-data migration in the same run unless --rename-only is given. |
 | `--rename-only` | `False` | — | Run ONLY the name-is-an-email rename slice; skip the body-text contact-data migration entirely. Implies --rename-name-email. Use this when the body-migration pass would act on findings you do not want migrated — e.g. while the phone axis still carries detector false positives, where a full --all --apply would redact real prose (; the failure mode spent two restore passes repairing). |
 | `--rename-to` | — | — | Operator-supplied display name for a --page rename. refuses to GUESS a name from an ambiguous local-part, but offered no way to supply one — so the deferred population had no route through the tool and could only be hand-edited, which skips the excluded record, the slug rename and the inbound-link rewrite. This is a human asserting the name, so it bypasses the confidence gate by design. Requires --page and --rename-name-email (or --rename-only). |
 
