@@ -210,7 +210,7 @@ def scan_outbound_text(text: str, *, allowlist: Allowlist | object = None) -> li
     """Scan *text* for PII, returning findings in document order.
 
     Detects emails first, then phone numbers that do NOT overlap an email match
-    (so ``5551234567`` inside ``jo.5551234567@x.com`` is reported once, as the
+    (so ``5551234567`` inside ``jo.5551234567@example.com`` is reported once, as the
     email, not twice). Detection is obtained through
     :func:`athenaeum.sensitivity.classify` (issue athenaeum#992) — the shipped
     ``email``/``phone`` recognisers, which already apply the digit-count floor

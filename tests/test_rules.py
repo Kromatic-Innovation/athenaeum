@@ -235,7 +235,7 @@ class TestFieldPredicate:
     def test_glob(self) -> None:
         p = FieldPredicate.model_validate({"glob": "*@example.org"})
         assert p.matches("alex@example.org")
-        assert not p.matches("alex@other.org")
+        assert not p.matches("alex@example.net")
         assert not p.matches(123)  # non-string never glob-matches
 
     def test_in_membership(self) -> None:
@@ -281,7 +281,7 @@ class TestMatchSpec:
         assert not spec.matches(raw=other, record={}, fmt="md")
 
     def test_key_fingerprint_match(self, tmp_path: Path) -> None:
-        record = {"status": "bounced", "email": "a@b.com"}
+        record = {"status": "bounced", "email": "a@example.com"}
         fp = record_key_fingerprint(record)
         spec = MatchSpec.model_validate({"key_fingerprint": fp})
         raw = self._raw(tmp_path, "s", "a.jsonl")
@@ -629,7 +629,7 @@ class TestIntendedHestiaLanesRuleExpressible:
 
 class TestTransformInterpolation:
     def test_field_reference_substitutes_whole_value(self) -> None:
-        assert resolve_value_expr("$email", {"email": "a@b.com"}) == "a@b.com"
+        assert resolve_value_expr("$email", {"email": "a@example.com"}) == "a@example.com"
 
     def test_field_reference_preserves_type(self) -> None:
         assert resolve_value_expr("$count", {"count": [1, 2, 3]}) == [1, 2, 3]
@@ -654,9 +654,9 @@ class TestTransformInterpolation:
 
     def test_nested_dict_and_list_resolved_recursively(self) -> None:
         expr = {"type": "person", "handle": {"email": "$email"}}
-        assert resolve_value_expr(expr, {"email": "a@b.com"}) == {
+        assert resolve_value_expr(expr, {"email": "a@example.com"}) == {
             "type": "person",
-            "handle": {"email": "a@b.com"},
+            "handle": {"email": "a@example.com"},
         }
 
     def test_no_eval_no_template_language(self) -> None:
@@ -766,7 +766,7 @@ class TestCorrectionSpecSchema:
         [
             {"uid": "person-alex-a1b2c3d4"},
             {"type": "person", "name": "Alex Doe"},
-            {"type": "person", "handle": {"email": "a@b.com"}},
+            {"type": "person", "handle": {"email": "a@example.com"}},
         ],
     )
     def test_good_target_shapes_accepted(self, target: dict) -> None:
@@ -898,12 +898,12 @@ class TestRecordExtraction:
         d = tmp_path / "s"
         d.mkdir()
         p = d / "a.md"
-        p.write_text("---\nstatus: bounced\nemail: a@b.com\n---\nBody.\n", encoding="utf-8")
+        p.write_text("---\nstatus: bounced\nemail: a@example.com\n---\nBody.\n", encoding="utf-8")
         rf = RawFile(path=p, source="s", timestamp="", uuid8="")
         record, fmt = _record_and_format(rf)
         assert fmt == "md"
         assert record["status"] == "bounced"
-        assert record["email"] == "a@b.com"
+        assert record["email"] == "a@example.com"
 
     def test_md_without_frontmatter_is_empty_record(self, tmp_path: Path) -> None:
         d = tmp_path / "s"

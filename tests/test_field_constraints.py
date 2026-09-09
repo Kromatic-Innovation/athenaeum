@@ -162,14 +162,14 @@ class TestCheckEntityFieldsEmptySchema:
         """AC2 counter-example that must fail: a fresh install (no
         declared constraints at all) must warn/filter/refuse NOTHING —
         not even for the company/email worked example's exact shape."""
-        meta = {"uid": "u1", "type": "company", "name": "Acme", "emails": ["bob@acme.com"]}
+        meta = {"uid": "u1", "type": "company", "name": "Acme", "emails": ["bob@example.com"]}
         assert check_entity_fields(meta, ()) == []
 
     def test_type_with_no_declared_row_is_untouched(self) -> None:
         constraints = (
             FieldConstraint(entity_type="company", field="emails", rule="forbidden"),
         )
-        meta = {"uid": "u1", "type": "person", "name": "Alice", "emails": ["a@x.com"]}
+        meta = {"uid": "u1", "type": "person", "name": "Alice", "emails": ["a@example.net"]}
         assert check_entity_fields(meta, constraints) == []
 
 
@@ -185,12 +185,12 @@ class TestCheckEntityFieldsPopulatedSchema:
             "uid": "u1",
             "type": "company",
             "name": "Acme",
-            "emails": ["bob@acme.com"],
+            "emails": ["bob@example.com"],
         }
         violations = check_entity_fields(meta, constraints)
         assert len(violations) == 1
         assert violations[0].field == "emails"
-        assert violations[0].value == "bob@acme.com"
+        assert violations[0].value == "bob@example.com"
         assert violations[0].entity_type == "company"
 
     def test_forbidden_field_absent_is_clean(self) -> None:
@@ -216,18 +216,18 @@ class TestCheckEntityFieldsPopulatedSchema:
             "uid": "u1",
             "type": "company",
             "name": "Acme",
-            "emails": ["info@acme.com"],
+            "emails": ["info@example.com"],
         }
         personal_meta = {
             "uid": "u2",
             "type": "company",
             "name": "Acme",
-            "emails": ["bob.smith@acme.com"],
+            "emails": ["bob.smith@example.com"],
         }
         assert check_entity_fields(role_meta, constraints) == []
         violations = check_entity_fields(personal_meta, constraints)
         assert len(violations) == 1
-        assert violations[0].value == "bob.smith@acme.com"
+        assert violations[0].value == "bob.smith@example.com"
 
     def test_deny_pattern_flags_matching_value(self) -> None:
         constraints = (
@@ -250,7 +250,7 @@ class TestCheckEntityFieldsPopulatedSchema:
             "uid": "u1",
             "type": "company",
             "name": "Acme",
-            "emails": ["bob@acme.com"],
+            "emails": ["bob@example.com"],
         }
         before = dict(meta)
         check_entity_fields(meta, constraints)
@@ -262,7 +262,7 @@ class TestCheckEntityFieldsPopulatedSchema:
         address. This mechanism does not pretend otherwise — it applies
         whatever regex the operator supplies, literally, with no semantic
         owner-detection. Demonstrate the documented limit directly: a
-        pattern permissive enough to admit `jd@acme.com` (initials) also
+        pattern permissive enough to admit `jd@example.com` (initials) also
         admits a same-shaped role-looking string with no way to tell them
         apart from the string alone."""
         constraints = (
@@ -270,7 +270,7 @@ class TestCheckEntityFieldsPopulatedSchema:
                 entity_type="company",
                 field="emails",
                 rule="allow-pattern",
-                pattern=r"^[a-z]{2,4}@acme\.com$",
+                pattern=r"^[a-z]{2,4}@example\.com$",
             ),
         )
         # A real personal address (initials) and a role address are
@@ -280,13 +280,13 @@ class TestCheckEntityFieldsPopulatedSchema:
             "uid": "u1",
             "type": "company",
             "name": "Acme",
-            "emails": ["jd@acme.com"],
+            "emails": ["jd@example.com"],
         }
         role_meta = {
             "uid": "u2",
             "type": "company",
             "name": "Acme",
-            "emails": ["it@acme.com"],
+            "emails": ["it@example.com"],
         }
         assert check_entity_fields(initials_meta, constraints) == []
         assert check_entity_fields(role_meta, constraints) == []
@@ -308,11 +308,11 @@ class TestCheckEntityFieldsPopulatedSchema:
         clean_violations = check_entity_fields(meta, constraints, body="No contact info here.")
         assert clean_violations == []
         dirty_violations = check_entity_fields(
-            meta, constraints, body="Contact Bob at bob@acme.com for details."
+            meta, constraints, body="Contact Bob at bob@example.com for details."
         )
         assert len(dirty_violations) == 1
         assert dirty_violations[0].field == BODY_PSEUDO_FIELD
-        assert "bob@acme.com" in (dirty_violations[0].value or "")
+        assert "bob@example.com" in (dirty_violations[0].value or "")
 
 
 # ---------------------------------------------------------------------------
@@ -342,21 +342,21 @@ class TestScanFieldConstraintViolationsPopulatedSchema:
         )
         dirty = wiki_root / "dirty.md"
         dirty.write_text(
-            "---\nuid: u2\ntype: company\nname: Acme\nemails: [bob@acme.com]\n---\n\nBody.\n",
+            "---\nuid: u2\ntype: company\nname: Acme\nemails: [bob@example.com]\n---\n\nBody.\n",
             encoding="utf-8",
         )
         violations = scan_field_constraint_violations(wiki_root)
         assert len(violations) == 1
         assert violations[0].path == "dirty.md"
         assert violations[0].uid == "u2"
-        assert violations[0].value == "bob@acme.com"
+        assert violations[0].value == "bob@example.com"
 
     def test_underscore_prefixed_pages_excluded_from_scan(self, tmp_path: Path) -> None:
         wiki_root = _wiki_root(tmp_path)
         _write_field_constraints(wiki_root, "| company | emails | forbidden | |\n")
         hidden = wiki_root / "_type_rejected.md"
         hidden.write_text(
-            "---\nuid: u9\ntype: company\nname: Hidden\nemails: [x@x.com]\n---\n\nBody.\n",
+            "---\nuid: u9\ntype: company\nname: Hidden\nemails: [x@example.net]\n---\n\nBody.\n",
             encoding="utf-8",
         )
         assert scan_field_constraint_violations(wiki_root) == []
@@ -370,8 +370,10 @@ class TestScanFieldConstraintViolationsPopulatedSchema:
 class TestGuardEntityFieldConstraintsEmptySchema:
     def test_every_write_admitted_with_no_declared_constraints(self, tmp_path: Path) -> None:
         wiki_root = _wiki_root(tmp_path)
-        meta = {"uid": "u1", "type": "company", "name": "Acme", "emails": ["bob@acme.com"]}
-        rendered = "---\nuid: u1\ntype: company\nname: Acme\nemails: [bob@acme.com]\n---\n\nBody.\n"
+        meta = {"uid": "u1", "type": "company", "name": "Acme", "emails": ["bob@example.com"]}
+        rendered = (
+            "---\nuid: u1\ntype: company\nname: Acme\nemails: [bob@example.com]\n---\n\nBody.\n"
+        )
         admitted, violations = guard_entity_field_constraints(
             wiki_root, "acme.md", rendered, meta
         )
@@ -386,9 +388,9 @@ class TestGuardEntityFieldConstraintsPopulatedSchema:
     def test_violating_write_refused_parked_and_ledgered(self, tmp_path: Path) -> None:
         wiki_root = _wiki_root(tmp_path)
         _write_field_constraints(wiki_root, "| company | emails | forbidden | |\n")
-        meta = {"uid": "u1", "type": "company", "name": "Acme", "emails": ["bob@acme.com"]}
+        meta = {"uid": "u1", "type": "company", "name": "Acme", "emails": ["bob@example.com"]}
         rendered = (
-            "---\nuid: u1\ntype: company\nname: Acme\nemails: [bob@acme.com]\n---\n\nBody.\n"
+            "---\nuid: u1\ntype: company\nname: Acme\nemails: [bob@example.com]\n---\n\nBody.\n"
         )
         admitted, violations = guard_entity_field_constraints(
             wiki_root, "acme.md", rendered, meta, source="test"
@@ -404,7 +406,7 @@ class TestGuardEntityFieldConstraintsPopulatedSchema:
         records = list_field_constraint_violations(wiki_root)
         assert len(records) == 1
         assert records[0]["field"] == "emails"
-        assert records[0]["value"] == "bob@acme.com"
+        assert records[0]["value"] == "bob@example.com"
         assert records[0]["source"] == "test"
 
     def test_clean_write_admitted(self, tmp_path: Path) -> None:
@@ -429,7 +431,7 @@ class TestGuardEntityFieldConstraintsPopulatedSchema:
         meta = {"uid": "u1", "type": "company", "name": "Acme"}
         rendered = (
             "---\nuid: u1\ntype: company\nname: Acme\n---\n\n"
-            "Contact Bob at bob@acme.com for details.\n"
+            "Contact Bob at bob@example.com for details.\n"
         )
         admitted, violations = guard_entity_field_constraints(
             wiki_root, "acme.md", rendered, meta, source="tier3-create"
@@ -460,7 +462,7 @@ class TestWritePathIntegrationEmptySchema:
             uid="abc12345",
             type="company",
             name="Acme Corp",
-            body="Contact Bob at bob@acme.com for details.",
+            body="Contact Bob at bob@example.com for details.",
         )
 
         _apply_tier3_results(
@@ -493,7 +495,7 @@ class TestWritePathIntegrationEmptySchema:
         result = ProcessingResult(raw_file=_raw())
         new_content = (
             "---\nuid: abc12345\ntype: company\nname: Acme Corp\n---\n\n"
-            "Contact Bob at bob@acme.com for details.\n"
+            "Contact Bob at bob@example.com for details.\n"
         )
 
         _apply_tier3_results(
@@ -532,7 +534,7 @@ class TestWritePathIntegrationPopulatedSchema:
             uid="abc12345",
             type="company",
             name="Acme Corp",
-            body="Contact Bob at bob@acme.com for details.",
+            body="Contact Bob at bob@example.com for details.",
         )
 
         _apply_tier3_results(
@@ -550,7 +552,7 @@ class TestWritePathIntegrationPopulatedSchema:
         assert result.created == []
         assert not (wiki_root / entity.filename).exists()
         parked = wiki_root / FIELD_CONSTRAINT_REJECTED_DIR_NAME / entity.filename
-        assert "bob@acme.com" in parked.read_text(encoding="utf-8")
+        assert "bob@example.com" in parked.read_text(encoding="utf-8")
         records = list_field_constraint_violations(wiki_root)
         assert len(records) == 1
         assert records[0]["source"] == "tier3-create"
@@ -575,7 +577,7 @@ class TestWritePathIntegrationPopulatedSchema:
         result = ProcessingResult(raw_file=_raw())
         new_content = (
             "---\nuid: abc12345\ntype: company\nname: Acme Corp\n---\n\n"
-            "Contact Bob at bob@acme.com for details.\n"
+            "Contact Bob at bob@example.com for details.\n"
         )
 
         _apply_tier3_results(
