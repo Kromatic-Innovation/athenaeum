@@ -147,8 +147,9 @@ _SPACE_BEFORE_PUNCT_RE = re.compile(r"[ \t]+([.,;:)])")
 # A placeholder knowledge_root used only to invoke a `(knowledge_root, config)`
 # resolver deterministically. Never expanded/resolved, never written anywhere
 # in generated output (those resolvers are curated below, precisely because
-# their return value embeds this path). Deliberately NOT a real absolute path
-# like `/home/x/knowledge` so this script cannot leak a host-specific value.
+# their return value embeds this path). Deliberately NOT a real absolute
+# filesystem path under an operator's home directory, so this script cannot
+# leak a host-specific value.
 _PLACEHOLDER_KNOWLEDGE_ROOT = Path("<knowledge_root>")
 
 
