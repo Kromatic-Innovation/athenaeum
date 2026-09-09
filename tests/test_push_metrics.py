@@ -493,6 +493,170 @@ class TestRecordPush:
         assert len(rows) == 1
 
 
+class TestRecordHookPush:
+    """Tests for issue athenaeum#1478 — the hook-path push-recording entry
+    point. Each acceptance criterion gets its own test, with the
+    counter-example the issue names as a comment on the test it defeats.
+
+    AC: "A recording entry point exists that an external caller can invoke
+    with a session id and a list of injected ids, writing a push record
+    indistinguishable in shape from one `record_push` writes today."
+    """
+
+    def test_writes_a_push_record(self, tmp_path: Path) -> None:
+        """Counter-example that must fail: a silent no-op — precisely what
+        athenaeum#734 caught once when `CLAUDE_SESSION_ID` was read but
+        never set, and zero push records were ever written."""
+        wrote = push_metrics.record_hook_push(
+            "sess-1", ["abc12345", "def67890"], backend="fts5", cache_dir=tmp_path
+        )
+        assert wrote is True
+        rows = push_metrics.read_push_records(cache_dir=tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["session_id"] == "sess-1"
+        assert rows[0]["pushed_count"] == 2
+        assert [it["id"] for it in rows[0]["items"]] == ["abc12345", "def67890"]
+
+    def test_record_shape_matches_an_ordinary_recall_row(self, tmp_path: Path) -> None:
+        """Counter-example that must fail: two independent serializers
+        drifting apart (the same hazard `test_sidecar_and_mcp_records_share_key_structure`
+        in `tests/test_context_push_telemetry.py` guards for the sidecar
+        path). Compares the hook-path row's key set — top level and per
+        item — against an ordinary MCP `recall` row's."""
+        push_metrics.record_hook_push("sess-1", ["abc12345"], cache_dir=tmp_path)
+        hook_row = push_metrics.read_push_records(cache_dir=tmp_path)[0]
+
+        recall_record = push_metrics.build_push_record(
+            session_id="sess-1",
+            query="q",
+            backend="fts5",
+            hits=[("abc12345-page.md", {"uid": "abc12345"}, "body")],
+        )
+        recall_dict = recall_record.to_dict()
+
+        # The ONE intentional discriminator: a hook-path row carries
+        # `source`, an ordinary recall row omits it entirely.
+        assert hook_row.keys() - recall_dict.keys() == {"source"}
+        assert recall_dict.keys() - hook_row.keys() == set()
+        assert hook_row["items"][0].keys() == recall_dict["items"][0].keys()
+
+    def test_opaque_push_id_from_filename_applied_to_each_id(self, tmp_path: Path) -> None:
+        """A caller handing through a raw compiled-entity filename (rather
+        than an already-opaque id) must never leak its name-derived slug."""
+        push_metrics.record_hook_push(
+            "sess-1", ["abc12345-jane-doe.md", "20260802T023311Z-3f0ea402.md"], cache_dir=tmp_path
+        )
+        row = push_metrics.read_push_records(cache_dir=tmp_path)[0]
+        ids = [it["id"] for it in row["items"]]
+        assert ids == ["abc12345", "20260802T023311Z-3f0ea402.md"]
+        assert "jane-doe" not in json.dumps(row)
+
+    def test_blank_ids_are_dropped(self, tmp_path: Path) -> None:
+        push_metrics.record_hook_push("sess-1", ["abc12345", "  ", ""], cache_dir=tmp_path)
+        row = push_metrics.read_push_records(cache_dir=tmp_path)[0]
+        assert [it["id"] for it in row["items"]] == ["abc12345"]
+
+    def test_only_query_hash_retained_never_raw_query(self, tmp_path: Path) -> None:
+        push_metrics.record_hook_push(
+            "sess-1", ["abc12345"], query="jane doe's personal cell number", cache_dir=tmp_path
+        )
+        raw_text = push_metrics.push_records_path(tmp_path).read_text(encoding="utf-8")
+        assert "jane" not in raw_text.lower()
+        assert "cell number" not in raw_text.lower()
+
+    # -------------------------------------------------------------------
+    # AC: "Records carry which path produced them, so hook-path and
+    # explicit-`recall` pushes can be told apart in `usage-report` and in
+    # athenaeum#1479's tail."
+    # -------------------------------------------------------------------
+
+    def test_source_is_the_named_hook_constant(self, tmp_path: Path) -> None:
+        push_metrics.record_hook_push("sess-1", ["abc12345"], cache_dir=tmp_path)
+        row = push_metrics.read_push_records(cache_dir=tmp_path)[0]
+        assert row["source"] == push_metrics.SOURCE_HOOK
+        assert push_metrics.SOURCE_HOOK == "hook"
+        # Distinct from the sidecar's own source tag and from an ordinary
+        # recall row's omitted key (see the reader-rule tests below).
+        assert push_metrics.SOURCE_HOOK != "sidecar"
+
+    def test_source_hook_is_distinguishable_from_sidecar_and_recall(self, tmp_path: Path) -> None:
+        """Counter-example that must fail: a reader treating 'anything but
+        sidecar' as an explicit recall push — a hook-path row is a THIRD
+        case, not `recall` by elimination."""
+        push_metrics.record_hook_push("hook-sess", ["a"], cache_dir=tmp_path)
+        recall_record = push_metrics.build_push_record(
+            session_id="recall-sess", query="q", backend="fts5", hits=[("b.md", {"uid": "b"}, "x")]
+        )
+        push_metrics.record_push(recall_record, cache_dir=tmp_path)
+        sidecar_record = push_metrics.PushRecord(
+            session_id="sidecar-sess",
+            ts="2026-01-01T00:00:00Z",
+            query_hash="deadbeef00000000",
+            backend="fts5",
+            items=[push_metrics.PushedItem(id="c", tier="internal", scope="owner", token_cost=1)],
+            source="sidecar",
+        )
+        push_metrics.record_push(sidecar_record, cache_dir=tmp_path)
+
+        rows = push_metrics.read_push_records(cache_dir=tmp_path)
+        by_session = {r["session_id"]: r.get("source") for r in rows}
+        assert by_session == {"hook-sess": "hook", "recall-sess": None, "sidecar-sess": "sidecar"}
+
+    # -------------------------------------------------------------------
+    # AC: "Invoking it is safe when the ledger is unwritable: it fails
+    # quietly and never raises into the caller."
+    # -------------------------------------------------------------------
+
+    def test_survives_an_unwritable_ledger_path(self, tmp_path: Path) -> None:
+        """Counter-example that must fail: an unwritable ledger path taking
+        down the caller. The ledger path is replaced with a DIRECTORY
+        (deterministic across users/containers) so the append write raises
+        `IsADirectoryError` — this must still return `False`, never raise."""
+        push_metrics.push_records_path(tmp_path).mkdir(parents=True)
+        result = push_metrics.record_hook_push("sess-1", ["abc12345"], cache_dir=tmp_path)
+        assert result is False
+        assert push_metrics.push_records_path(tmp_path).is_dir()
+
+    def test_survives_a_malformed_ids_argument(self, tmp_path: Path) -> None:
+        """A caller passing something not actually iterable-of-strings must
+        not raise into the hook it instruments — it degrades to a no-op."""
+        result = push_metrics.record_hook_push("sess-1", None, cache_dir=tmp_path)  # type: ignore[arg-type]
+        assert result is False
+        assert push_metrics.read_push_records(cache_dir=tmp_path) == []
+
+    # -------------------------------------------------------------------
+    # No-op cases: never a masked failure, never a fabricated row.
+    # -------------------------------------------------------------------
+
+    def test_noop_when_no_session_id(self, tmp_path: Path) -> None:
+        assert push_metrics.record_hook_push("", ["abc12345"], cache_dir=tmp_path) is False
+        assert push_metrics.read_push_records(cache_dir=tmp_path) == []
+
+    def test_noop_when_no_ids(self, tmp_path: Path) -> None:
+        assert push_metrics.record_hook_push("sess-1", [], cache_dir=tmp_path) is False
+        assert push_metrics.read_push_records(cache_dir=tmp_path) == []
+
+    def test_noop_when_disabled(self, tmp_path: Path) -> None:
+        result = push_metrics.record_hook_push(
+            "sess-1", ["abc12345"], cache_dir=tmp_path, config={"push_metrics": {"enabled": False}}
+        )
+        assert result is False
+        assert push_metrics.read_push_records(cache_dir=tmp_path) == []
+
+    # -------------------------------------------------------------------
+    # Known limitation: ids only, so tier/scope/token_cost are safe
+    # defaults, never a fabricated real value.
+    # -------------------------------------------------------------------
+
+    def test_known_limitation_defaults_are_safe_not_fabricated(self, tmp_path: Path) -> None:
+        push_metrics.record_hook_push("sess-1", ["abc12345"], cache_dir=tmp_path)
+        item = push_metrics.read_push_records(cache_dir=tmp_path)[0]["items"][0]
+        assert item["tier"] == "internal"
+        assert item["scope"] == "owner"
+        assert item["token_cost"] == 0
+        assert item["memory_tier"] == ""
+
+
 # ---------------------------------------------------------------------------
 # Precision computation
 # ---------------------------------------------------------------------------

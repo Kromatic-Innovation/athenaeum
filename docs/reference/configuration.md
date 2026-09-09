@@ -1428,9 +1428,13 @@ remain on disk as a reference for the wire shape only — do not call them.
 Two things distinguish a sidecar row from an MCP `recall` row:
 
 - **`"source": "sidecar"`** on every `record_context_push`-written record.
-  The MCP path is unchanged and omits the key entirely. Reader rule:
-  `rec.get("source") == "sidecar"` → sidecar push; anything else (key
-  absent, or any other value) → explicit `recall` push.
+  The MCP path is unchanged and omits the key entirely. **Reader rule
+  (updated by athenaeum#1478 — see "The hook path is a third writer" below):
+  check for the specific value you care about; never treat "anything but
+  `sidecar`" as `recall` by elimination** — a hook-path row (`source:
+  "hook"`) is a third case, distinct from both. `rec.get("source") ==
+  "sidecar"` → sidecar push; `rec.get("source") == "hook"` → hook-path push;
+  key absent → explicit `recall` push.
 - **`items[].memory_tier`** — a field the MCP path does not write. It carries
   the FTS5 index's `memory_tier` column value for that page (the envelope's
   `candidates[].memory_tier`), added specifically so a downstream reader can
@@ -1460,6 +1464,65 @@ prefix (never the name-derived slug); anything else (a raw-intake filename,
 never name-derived) is recorded whole. Both exist because
 `athenaeum.context`'s FTS5 candidates carry no frontmatter — only the
 index's own stored columns.
+
+### The hook path is a third writer (issue athenaeum#1478)
+
+Before this issue, the per-turn `UserPromptSubmit` recall hook — which
+injects wiki content into **every** Claude Code turn, unprompted, and is the
+highest-frequency recall moment in the system — wrote nothing to the push
+ledger at all. `athenaeum.query_topics` (the LLM-based topic extractor
+behind that hook) recorded spend on every call but never a push, so the push
+side was missing its highest-volume contributor entirely: measured on the
+operator's host, 5657 spend rows against 200 push rows on the same day.
+
+The hook lives in `code-workspace-config` (`code-workspace-config#3227`,
+tracked separately, out of this repo's scope), not in athenaeum, and it
+builds its own ranked query against the FTS5 index rather than reusing
+`query_topics`'s output directly — so athenaeum does not know, from inside
+`query_topics`, what was actually injected into the turn. Two designs were
+considered: instrumenting inside `query_topics` and recording a superset of
+what it returned (rejected — a knowingly-approximate precision figure is
+worse than an absent one), versus giving the hook a reporting path it calls
+with the ids it actually injected (**decided**). `push_metrics.record_hook_push`
+and its CLI wrapper, `athenaeum push-metrics record`, are that reporting
+path — routed through the SAME `push_metrics.record_push` /
+`PushRecord` / `PushedItem` the MCP `recall` and sidecar paths already write
+through, so a hook-path row can never drift onto an independently-shaped
+ledger row.
+
+**`"source": "hook"`** on every `record_hook_push`-written record (the
+`push_metrics.SOURCE_HOOK` named constant — never a bare string literal at
+any call site). Distinct from both the sidecar's `"sidecar"` tag and the MCP
+`recall` path's omitted key; see the updated reader rule above.
+
+**CLI shape** (`athenaeum push-metrics record`, thin argv/stdin wrapper over
+`record_hook_push`):
+
+- `--session-id ID` / `--id PUSHED_ID` (repeatable) — the argv form.
+- `--stdin-json` — reads `{"session_id": ..., "ids": [...], "query": ...,
+  "backend": ...}` from stdin (the same hook-input convention `athenaeum
+  context --stdin-json` already established). A stdin `ids` array REPLACES
+  any `--id` flags rather than merging with them.
+- `--session-id` omitted and no stdin `session_id` → falls back to
+  `push_metrics.resolve_session_id()` (the single sanctioned session-id
+  resolver, issue athenaeum#734), reading `CLAUDE_CODE_SESSION_ID` /
+  `CLAUDE_SESSION_ID` from the environment.
+- `--cache-dir` / `--path` — same flags and same behind-the-seam ledger
+  resolution (`push_metrics.durable_push_records_path`) `baseline` /
+  `coverage-audit` already use.
+- **Always exits `0`.** This subcommand is specified fire-and-forget: the
+  hook calling it is expected to background the call and never check its
+  output, so a ledger failure is never surfaced as a nonzero exit — it is
+  logged at `debug` instead (issue athenaeum#540 L19: swallowed, never fully
+  silent) and is otherwise invisible to the caller, by design.
+
+**Known limitation — `items[].tier`, `items[].scope`, and `items[].token_cost`
+are always `"internal"`, `"owner"`, and `0` on a hook-path row.** The hook
+hands over ids only — no frontmatter, no rendered text, no audience string —
+so none of these can be read from the caller. Same discipline as the
+sidecar's own `items[].tier` limitation above: a safe, documented default,
+never a fabricated real value. `items[].id` is derived the same way as the
+sidecar path's, via `push_metrics.opaque_push_id_from_filename`.
 
 ## LLM schema-observation ledger (athenaeum#570 / athenaeum#724)
 
