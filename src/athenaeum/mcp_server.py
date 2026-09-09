@@ -64,6 +64,7 @@ from athenaeum.config import (
     resolve_cache_dir,
     resolve_person_registry_root,
     resolve_push_token_budget,
+    resolve_recall_relevance_floor,
 )
 from athenaeum.entity_schema import (
     QUERYABLE_FIELDS,
@@ -950,7 +951,12 @@ def _recall_via_backend(
     """
     from athenaeum import memory_tiers
     from athenaeum.push_metrics import estimate_tokens
-    from athenaeum.search import DegradedIndexError, get_backend, normalize_type_filter
+    from athenaeum.search import (
+        DegradedIndexError,
+        get_backend,
+        meets_relevance_floor,
+        normalize_type_filter,
+    )
 
     try:
         backend = get_backend(backend_name)
@@ -1043,6 +1049,24 @@ def _recall_via_backend(
                 f"a recognized entity class on this deployment. Known classes: "
                 f"{classes_str}."
             )
+
+    # Issue athenaeum#1492: relevance floor, resolved per (backend, call path) so
+    # the unprompted push path can be tuned independently of an explicit
+    # recall_search call (AC3). ``relevance_floor`` is ``None`` at every
+    # precedence level by default (AC1) -- this whole block is then a no-op
+    # and ``hits`` is unchanged, byte-identical to this issue not existing.
+    # See ``resolve_recall_relevance_floor`` / ``meets_relevance_floor`` for
+    # what this mechanism does and does not decide; picking a production
+    # threshold is explicitly out of scope here.
+    relevance_floor = resolve_recall_relevance_floor(
+        config, backend_name, unprompted=unprompted
+    )
+    if relevance_floor is not None:
+        hits = [
+            hit
+            for hit in hits
+            if meets_relevance_floor(backend_name, hit[2], relevance_floor)
+        ]
 
     if not hits:
         return f"No wiki pages matched query: {query!r}{unrecognized_note}"

@@ -3350,6 +3350,22 @@ agent sees why a hit was pushed/shown.
 | Read-scope audience (athenaeum#312) | `--audience` (`serve` / `recall`) | `ATHENAEUM_AUDIENCE` | `serve.audience` | _(unset = owner, full access)_ | Pins the `serve`/`recall` process to a RESTRICTED read scope: comma-separated (or yaml-list) opaque role/group ids the operator maps onto an external RBAC (AD group, app role, routine name). A restricted caller receives a page only when it is `access: open` OR its `audience:` list grants one of these roles; untagged / `confidential` / `personal` pages are withheld (fail-closed). The audience is pinned by the operator here — it is NOT a `recall()` tool argument, so a restricted agent can't widen its own scope. Empty/unset = owner = every page. |
 | Topic-extraction timeout | `--timeout` (`query-topics`) | — | — | `3.0` | Seconds before `query-topics` gives up and the hook falls back to the regex extractor. |
 | Topic-extraction config root | `--knowledge-root` / `--path` (`query-topics`) | — | — | `~/knowledge` | Knowledge root whose `athenaeum.yaml` supplies `models.topic` (athenaeum#232). |
+| Relevance floor (FTS5, explicit call) | — | `ATHENAEUM_RECALL_MIN_SCORE_FTS5` | `recall.relevance_floor.fts5` | _(unset = no floor)_ | Minimum FTS5 `rank` a hit must clear to survive an ordinary (`unprompted=False`) `recall_search` call. FTS5's `rank` follows the bm25 convention where a MORE NEGATIVE value is a BETTER match, so a hit clears the floor when its score is at or below it. Unset by default at every level — the floor mechanism ships INACTIVE, so this changes no existing recall output until an operator opts in. |
+| Relevance floor (keyword, explicit call) | — | `ATHENAEUM_RECALL_MIN_SCORE_KEYWORD` | `recall.relevance_floor.keyword` | _(unset = no floor)_ | Same floor for the keyword backend, whose score is higher-is-better: a hit clears the floor when its score is at or above it. |
+| Relevance floor (FTS5, unprompted push) | — | `ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5` | `recall.relevance_floor.push.fts5` | _(unset = no floor)_ | Same as the FTS5 floor above, but resolved and applied independently for the `unprompted=True` push path — a push sidecar can be given a stricter (or looser) floor than an explicit `recall_search` call without the two sharing a value. |
+| Relevance floor (keyword, unprompted push) | — | `ATHENAEUM_RECALL_PUSH_MIN_SCORE_KEYWORD` | `recall.relevance_floor.push.keyword` | _(unset = no floor)_ | Same, for the keyword backend's push path. |
+
+**Relevance floor is a mechanism, not a tuned default (issue athenaeum#1492).**
+The four knobs above let `recall_search` return an explicitly empty result
+(`"No wiki pages matched query: ..."`) instead of a best-of-a-bad-set ranking
+for a query the corpus cannot answer — but every one of them is unset by
+default, on every backend and both call paths, so merging this mechanism
+changes no existing behavior. Picking what value production should actually
+run is a deliberate product judgment left to a follow-up, not decided here.
+See `athenaeum.config.resolve_recall_relevance_floor` and
+`athenaeum.search.meets_relevance_floor` for the full precedence rule and the
+per-backend comparison direction. The vector backend is not covered by
+either knob — it is not named in athenaeum#1492's acceptance criteria.
 
 **Reserved keys (not yet read by code).** `vector.provider` (default
 `chromadb`) and `vector.collection` (default `wiki`) appear in the loader's
