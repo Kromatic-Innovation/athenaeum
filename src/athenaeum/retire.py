@@ -284,6 +284,9 @@ _VERDICT_RATIONALES: dict[str, str] = {
     "not_a_conflict": "not_a_conflict",
     "declared-supersession": "declared-supersession",
     "declared-refinement": "declared-refinement",
+    # Issue athenaeum#715: the honest, non-directional counterpart to
+    # declared-refinement — a human rejected a merge proposal for this pair.
+    "declared-merge-rejection": "declared-merge-rejection",
     # merge.py prunes a chunk to <2 members when every undeclared pair has been
     # removed (a declared refines/supersedes resolution lived in the text). The
     # surviving entry is move-eligible and genuinely settled, so its declared

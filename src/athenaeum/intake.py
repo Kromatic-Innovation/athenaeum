@@ -50,7 +50,10 @@ from datetime import date
 from pathlib import Path
 from typing import Any, cast
 
-from athenaeum._lint import _strip_self_reference
+from athenaeum._lint import (
+    _strip_self_reference,
+    _strip_self_reference_merge_rejected_with,
+)
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.compiled_exempt import load_exempt
 from athenaeum.config import (
@@ -78,6 +81,7 @@ from athenaeum.models import (
     parse_claim_kind,
     parse_deprecated,
     parse_frontmatter,
+    parse_merge_rejected_with,
     parse_model,
     parse_on_behalf_of,
     parse_refines,
@@ -571,18 +575,26 @@ def discover_auto_memory_files(
                 try:
                     refines = parse_refines(meta if meta else None)
                     supersedes = parse_supersedes(meta if meta else None)
+                    merge_rejected_with = parse_merge_rejected_with(
+                        meta if meta else None
+                    )
                 except ValueError as exc:
                     log.warning(
-                        "auto-memory %s: invalid refines/supersedes (%s); "
-                        "treating as empty",
+                        "auto-memory %s: invalid refines/supersedes/"
+                        "merge_rejected_with (%s); treating as empty",
                         fpath,
                         exc,
                     )
                     refines = []
                     supersedes = []
+                    merge_rejected_with = []
                 # Issue athenaeum#173 / athenaeum#181: drop refines/supersedes self-references.
                 refines, supersedes = _strip_self_reference(
                     name, refines, supersedes, fpath
+                )
+                # Issue athenaeum#715: same self-reference lint for merge_rejected_with.
+                merge_rejected_with = _strip_self_reference_merge_rejected_with(
+                    name, merge_rejected_with, fpath
                 )
                 # Issue athenaeum#191: non-destructive inactive markers.
                 meta_for_markers = meta if meta else None
@@ -598,6 +610,7 @@ def discover_auto_memory_files(
                         sources=sources,
                         refines=refines,
                         supersedes=supersedes,
+                        merge_rejected_with=merge_rejected_with,
                         superseded_by=parse_superseded_by(meta_for_markers),
                         deprecated=parse_deprecated(meta_for_markers),
                         source_type=source_type,

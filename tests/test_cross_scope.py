@@ -984,3 +984,37 @@ class TestCandidateSelfReferenceLint:
             and str(a) in r.getMessage()
             for r in caplog.records
         )
+
+    def test_merge_rejected_with_self_dropped(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Issue athenaeum#715: a page must never record a rejection against itself."""
+        from athenaeum.cross_scope import (
+            SimilarityCandidate,
+            candidate_to_auto_memory_files,
+        )
+
+        a = tmp_path / "a.md"
+        b = tmp_path / "b.md"
+        a.write_text(
+            "---\nname: A Mem\ntype: feedback\n"
+            "merge_rejected_with:\n  - A Mem\n  - Other\n---\nbody\n",
+            encoding="utf-8",
+        )
+        b.write_text(
+            "---\nname: B Mem\ntype: feedback\n---\nbody\n",
+            encoding="utf-8",
+        )
+        cand = SimilarityCandidate(
+            a_path=a, b_path=b, similarity=0.9, a_scope="-X", b_scope="-Y"
+        )
+        with caplog.at_level("WARNING"):
+            ams = candidate_to_auto_memory_files(cand)
+        am_a = next(am for am in ams if am.path == a)
+        assert am_a.merge_rejected_with == ["Other"]
+        assert any(
+            "merge_rejected_with self" in r.getMessage()
+            and "A Mem" in r.getMessage()
+            and str(a) in r.getMessage()
+            for r in caplog.records
+        )

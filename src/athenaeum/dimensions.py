@@ -575,6 +575,18 @@ def compare_interval(
     return Relation.OVERLAPS
 
 
+def _hierarchy_normalize(value: str, separator: str) -> list[str]:
+    """Shared prefix-tree normalization: strip, lowercase, split on *separator*.
+
+    Factored out of :func:`compare_hierarchy` (issue athenaeum#715 read-side) so
+    it and the directional :func:`hierarchy_contains` can never silently
+    diverge on what counts as an ancestor prefix. Case-folded,
+    whitespace-trimmed, matching
+    :class:`athenaeum.scoped_claims.TreeDimension.normalize`'s convention.
+    """
+    return value.strip().lower().split(separator)
+
+
 def compare_hierarchy(
     a: str | None,
     b: str | None,
@@ -597,16 +609,47 @@ def compare_hierarchy(
     if uni_rel is not None:
         return uni_rel
 
-    a_n, b_n = a.strip().lower(), b.strip().lower()
-    if a_n == b_n:
+    a_parts = _hierarchy_normalize(a, separator)
+    b_parts = _hierarchy_normalize(b, separator)
+    if a_parts == b_parts:
         return Relation.EQUAL
-    a_parts = a_n.split(separator)
-    b_parts = b_n.split(separator)
     a_ancestor_of_b = b_parts[: len(a_parts)] == a_parts
     b_ancestor_of_a = a_parts[: len(b_parts)] == b_parts
     if a_ancestor_of_b or b_ancestor_of_a:
         return Relation.CONTAINS
     return Relation.DISJOINT
+
+
+def hierarchy_contains(outer: str | None, inner: str | None, *, separator: str = "/") -> bool:
+    """True when *outer*'s prefix-tree region contains *inner*'s (ancestor-or-equal).
+
+    :func:`compare_hierarchy` deliberately does not expose direction (its own
+    docstring: the five-value relation vocabulary has no "contained-by"
+    counterpart) — this is the directional counterpart that issue
+    athenaeum#715's read side (:mod:`athenaeum.scope_resolution`'s in-scope
+    filter: "claim C applies to query Q iff C's scope contains Q's scope")
+    needs and :func:`compare_hierarchy` cannot answer alone. It reuses
+    :func:`_hierarchy_normalize`, the SAME normalization :func:`compare_hierarchy`
+    uses, so the two can never disagree about what counts as an ancestor
+    prefix.
+
+    ``None`` is UNIVERSAL for the ``scope`` dimension (:data:`SCOPE`'s
+    ``null_means=universal``): an absent coordinate's region is the whole
+    dimension, so ``hierarchy_contains(None, anything)`` is ``True`` —
+    including when *inner* is also ``None`` — and ``hierarchy_contains(x,
+    None)`` is ``False`` for any non-``None`` ``x``. The explicit
+    :data:`UNIVERSAL_MARKER` (``"*"``) is honoured the same way, consistent
+    with :func:`_universal_marker_relation`'s undirected handling: both
+    spellings of "applies everywhere" behave identically on the containing
+    side.
+    """
+    if outer is None or outer == UNIVERSAL_MARKER:
+        return True
+    if inner is None or inner == UNIVERSAL_MARKER:
+        return False
+    outer_parts = _hierarchy_normalize(outer, separator)
+    inner_parts = _hierarchy_normalize(inner, separator)
+    return inner_parts[: len(outer_parts)] == outer_parts
 
 
 def compare_enum(
@@ -1066,6 +1109,7 @@ __all__ = [
     "coverage_ratio",
     "cross_corpus_compare",
     "dimension_applies",
+    "hierarchy_contains",
     "maybe_flip_to_enforced",
     "parse_dimension_entry",
     "parsed_coordinate",

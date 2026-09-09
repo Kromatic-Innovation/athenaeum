@@ -127,6 +127,7 @@ MODULE_LAYER: dict[str, int] = {
     "query_topics": 3,
     "rules": 3,
     "screening": 3,
+    "scope_resolution": 3,
     "search": 3,
     "self_resolving": 3,
     "sensitivity": 3,

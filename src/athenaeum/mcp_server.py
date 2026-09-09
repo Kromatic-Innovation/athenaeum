@@ -65,6 +65,7 @@ from athenaeum.config import (
     resolve_person_registry_root,
     resolve_push_token_budget,
     resolve_recall_relevance_floor,
+    resolve_scope_aware_recall_enabled,
 )
 from athenaeum.entity_schema import (
     QUERYABLE_FIELDS,
@@ -86,6 +87,7 @@ from athenaeum.models import (
     parse_superseded_by,
     render_frontmatter,
     resolve_page_type,
+    slugify,
     valid_until_expired,
     validity_bound_str,
 )
@@ -219,6 +221,7 @@ def recall_search(
     type_filter: str | Sequence[str] | None = None,
     unprompted: bool = False,
     session_scope: str | None = None,
+    claimed_scope: str | None = None,
 ) -> str:
     """Search the knowledge wiki for pages relevant to *query*.
 
@@ -322,6 +325,20 @@ def recall_search(
             with ``unprompted=True`` it also weights push selection. ``None``
             (default) skips coordinate-fit weighting entirely (neutral
             weight) and the header shows tier only.
+        claimed_scope: Issue athenaeum#715 (read side) — the caller's query scope,
+            the same coordinate shape as *session_scope* and a page's
+            ``claimed_scope`` frontmatter value. Unlike *session_scope* (which
+            only annotates/weights), this can DROP hits: when
+            :func:`athenaeum.config.resolve_scope_aware_recall_enabled` is on
+            AND this is supplied (non-``None``), hits are narrowed via
+            :func:`athenaeum.scope_resolution.resolve_most_specific` — a claim
+            whose ``claimed_scope`` does not contain this query scope is
+            dropped, and among the claims that remain, a more general claim
+            is dropped in favor of an in-scope more-specific one (including
+            via any ``refines:`` edge the ``specialization`` verdict already
+            wrote). Default ``None``, and with the config key off or this
+            left ``None``, behavior is byte-identical to before this
+            parameter existed — no filtering, no ranking change.
 
     Returns a formatted string of matching wiki pages with relevance scores
     and content snippets.
@@ -377,6 +394,7 @@ def recall_search(
         type_filter=type_filter,
         unprompted=unprompted,
         session_scope=session_scope,
+        claimed_scope=claimed_scope,
     )
 
 
@@ -1016,6 +1034,7 @@ def _recall_via_backend(
     type_filter: str | Sequence[str] | None = None,
     unprompted: bool = False,
     session_scope: str | None = None,
+    claimed_scope: str | None = None,
 ) -> str:
     """Delegate recall to a registered search backend, then format results.
 
@@ -1054,6 +1073,15 @@ def _recall_via_backend(
     ``unprompted=True``. The recall hit header's tier + matched-scope
     segment (:func:`athenaeum.memory_tiers.tier_scope_header_line`) is
     computed unconditionally, on every call, regardless of ``unprompted``.
+
+    ``claimed_scope`` (issue athenaeum#715, read side): applied AFTER every row is
+    built (so it sees each hit's fresh on-disk ``claimed_scope``/``refines:``
+    frontmatter, the same ``fm`` the Layer-C re-read populated) and BEFORE the
+    ``unprompted`` re-rank/budget selection, so an unprompted push never sees
+    a claim scope-resolution would have dropped. Gated on
+    :func:`athenaeum.config.resolve_scope_aware_recall_enabled` being on AND
+    *claimed_scope* being non-``None`` — either condition false and this is a
+    complete no-op, byte-identical to before this parameter existed.
     """
     from athenaeum import memory_tiers
     from athenaeum.push_metrics import estimate_tokens
@@ -1362,6 +1390,92 @@ def _recall_via_backend(
                 tokens=estimate_tokens(block),
             )
         )
+
+    # Issue athenaeum#715 (read side): scope-aware narrowing, dark by default.
+    # A no-op unless BOTH the config key is on and the caller supplied a
+    # query scope -- either condition false leaves `_rows` untouched, so the
+    # default path (and every existing caller that never passes
+    # `claimed_scope`) stays byte-identical to before this existed.
+    if claimed_scope is not None and _rows and resolve_scope_aware_recall_enabled(config):
+        from athenaeum.scope_resolution import ScopedClaim, resolve_most_specific
+
+        def _raw_refines_entries(fm: dict[str, object]) -> tuple[str, ...]:
+            raw = fm.get("refines")
+            if isinstance(raw, list):
+                return tuple(str(r) for r in raw)
+            if isinstance(raw, str) and raw.strip():
+                return (raw.strip(),)
+            return ()
+
+        def _claimed_scope_of(fm: dict[str, object]) -> str | None:
+            raw = fm.get("claimed_scope")
+            return raw if isinstance(raw, str) else None
+
+        # `scope_resolution.resolve_most_specific` is id-space agnostic -- it
+        # never inspects an id, only compares them for equality. The
+        # translation between the two id spaces in play here is this
+        # caller's job, not that module's:
+        #
+        # - `ScopedClaim.id` here is the row's `filename` (the search
+        #   backend's hit key, e.g. `my-page.md` or `<root>/<relpath>`) --
+        #   REQUIRED to stay `filename`, never a slug, because it is what
+        #   `_kept_ids` filters `_rows` back down by below, and two hits
+        #   with the same basename stem in different roots/extra-roots must
+        #   never collide into one kept/dropped decision.
+        # - A `refines:` frontmatter entry, by contrast, is written by
+        #   `verdict_effects.write_refines_declaration` as a bare SLUG
+        #   (`verdicts.page_id_for_path` = `slugify(Path(path).stem)`), not
+        #   a filename. Comparing a slug directly against a filename id (the
+        #   bug this block used to have) can never match, silently making
+        #   every real `refines:` edge look like it names an absent claim.
+        #
+        # Mirror `page_id_for_path` exactly (same `slugify` from
+        # `athenaeum.models`, the same function `verdicts.py` imports it
+        # from) so this side computes IDENTICAL slugs to the write side,
+        # then resolve each row's raw `refines:` entries through a
+        # slug -> filename map built from THIS result set and hand the
+        # resolved (filename-keyed, filename-valued) edges to
+        # `resolve_most_specific` via its `refines=` override -- the
+        # translation happens once, at this boundary, and `scope_resolution`
+        # itself never has to know slugs exist.
+        _slug_to_filename: dict[str, str] = {}
+        for row in _rows:
+            filename = row.pushed_hit[0]
+            slug = slugify(Path(filename).stem)
+            if slug in _slug_to_filename:
+                log.debug(
+                    "recall scope resolution: hit slug %r already resolved to "
+                    "%r; %r is unreachable as a refines: target this call "
+                    "(duplicate stem across hits)",
+                    slug,
+                    _slug_to_filename[slug],
+                    filename,
+                )
+                continue
+            _slug_to_filename[slug] = filename
+
+        _refines_by_filename: dict[str, tuple[str, ...]] = {}
+        for row in _rows:
+            filename = row.pushed_hit[0]
+            resolved = tuple(
+                _slug_to_filename[slugify(entry)]
+                for entry in _raw_refines_entries(row.pushed_hit[1])
+                if slugify(entry) in _slug_to_filename
+            )
+            if resolved:
+                _refines_by_filename[filename] = resolved
+
+        _scoped_claims = [
+            ScopedClaim(id=row.pushed_hit[0], claimed_scope=_claimed_scope_of(row.pushed_hit[1]))
+            for row in _rows
+        ]
+        _kept_ids = {
+            c.id
+            for c in resolve_most_specific(
+                _scoped_claims, claimed_scope, refines=_refines_by_filename
+            )
+        }
+        _rows = [row for row in _rows if row.pushed_hit[0] in _kept_ids]
 
     # Issue athenaeum#718: the unprompted push path — restrict to the `hot`
     # tier, re-rank by relevance x tier x coordinate-fit, and greedily
@@ -2866,9 +2980,11 @@ def create_server(
                 purges their vectors from the search index (when a vector
                 backend is configured). Either way, flips the checkbox and
                 records a provenance entry naming the sources folded/merged
-                in. ``"reject"`` flips the checkbox and writes a
-                ``refines:`` declaration into the first source memory so
-                the detector's declared-refinement short-circuit
+                in. ``"reject"`` flips the checkbox and writes an honest,
+                non-directional ``merge_rejected_with:`` declaration
+                (issue athenaeum#715 — never ``refines:``, which is reserved for
+                a genuine specialization verdict) into the first source
+                memory so the detector's declared-pair short-circuit
                 suppresses the pair on future runs.
             note: Optional human note attached to the decision block.
 

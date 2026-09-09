@@ -1996,6 +1996,32 @@ not rows.
 ``_shape_rule_dispositions.jsonl`` rows whose ``at`` timestamp falls
 within this many days of "now".
 
+### `resolve_scope_aware_recall_enabled`
+
+- **YAML path:** `librarian.scope_aware_recall_enabled`
+- **Environment variable:** `ATHENAEUM_SCOPE_AWARE_RECALL_ENABLED`
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the scope-aware recall opt-in. DEFAULT OFF.
+
+Gates the READ side of the ``scope`` dimension in ``recall``
+(`athenaeum.mcp_server.recall_search`): with this off, a caller-supplied
+query scope is accepted but never changes which hits are returned —
+byte-identical to today. With this on AND a query scope supplied, hits are
+narrowed via `athenaeum.scope_resolution.resolve_most_specific` so a
+general claim is dropped in favor of an in-scope more-specific one (or
+dropped entirely when its ``claimed_scope`` does not contain the query
+scope at all). This is the read-side counterpart to
+`athenaeum.verdict_effects.write_refines_declaration`, which already
+writes the ``refines:`` edges this reads.
+
+Mirrors `resolve_auto_supersession_enabled`'s shape exactly: env
+``ATHENAEUM_SCOPE_AWARE_RECALL_ENABLED`` (``1``/``true``/``yes``/``on``,
+case-insensitive) > yaml ``librarian.scope_aware_recall_enabled`` >
+default ``False``. No seed in ``_DEFAULTS``.
+
 ### `resolve_shape_rules_dispositions_retention_days`
 
 - **YAML path:** `librarian.shape_rules.dispositions_retention_days`

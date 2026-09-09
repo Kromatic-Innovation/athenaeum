@@ -67,6 +67,31 @@ def _strip_self_reference(
     return refines, supersedes
 
 
+def _strip_self_reference_merge_rejected_with(
+    name: str,
+    merge_rejected_with: list[str],
+    fpath: Path | None = None,
+) -> list[str]:
+    """Drop self-references from ``merge_rejected_with`` with a WARN.
+
+    Issue athenaeum#715: mirrors :func:`_strip_self_reference`'s ``refines``
+    handling — a page must never record a merge rejection against itself.
+    Kept as a separate small helper (rather than widening
+    :func:`_strip_self_reference`'s return shape) since only three call
+    sites need it and each already calls both helpers independently.
+    """
+    if not name:
+        return merge_rejected_with
+    if any(r == name for r in merge_rejected_with):
+        log.warning(
+            "auto-memory %s: merge_rejected_with self (%r); dropping self-reference",
+            fpath,
+            name,
+        )
+        merge_rejected_with = [r for r in merge_rejected_with if r != name]
+    return merge_rejected_with
+
+
 # --- Memory-taxonomy lint (issue athenaeum#424) ---
 #
 # ``memory_class:`` validity (unknown non-empty value -> flagged) is

@@ -4677,6 +4677,37 @@ def resolve_auto_supersession_enabled(config: dict[str, Any] | None) -> bool:
     return False
 
 
+def resolve_scope_aware_recall_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the scope-aware recall opt-in (issue athenaeum#715). DEFAULT OFF.
+
+    Gates the READ side of the ``scope`` dimension in ``recall``
+    (:func:`athenaeum.mcp_server.recall_search`): with this off, a caller-supplied
+    query scope is accepted but never changes which hits are returned —
+    byte-identical to today. With this on AND a query scope supplied, hits are
+    narrowed via :func:`athenaeum.scope_resolution.resolve_most_specific` so a
+    general claim is dropped in favor of an in-scope more-specific one (or
+    dropped entirely when its ``claimed_scope`` does not contain the query
+    scope at all). This is the read-side counterpart to
+    :func:`athenaeum.verdict_effects.write_refines_declaration`, which already
+    writes the ``refines:`` edges this reads.
+
+    Mirrors :func:`resolve_auto_supersession_enabled`'s shape exactly: env
+    ``ATHENAEUM_SCOPE_AWARE_RECALL_ENABLED`` (``1``/``true``/``yes``/``on``,
+    case-insensitive) > yaml ``librarian.scope_aware_recall_enabled`` >
+    default ``False``. No seed in ``_DEFAULTS`` (issue athenaeum#231).
+    """
+    env = os.environ.get("ATHENAEUM_SCOPE_AWARE_RECALL_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("scope_aware_recall_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
 def resolve_standing_state_claim_kinds(config: dict[str, Any] | None) -> frozenset[str]:
     """Resolve which :data:`athenaeum.models.CLAIM_KINDS` count as STANDING STATE.
 

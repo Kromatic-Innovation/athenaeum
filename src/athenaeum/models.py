@@ -570,6 +570,47 @@ def parse_refines(meta: dict[str, object] | None) -> list[str]:
     return out
 
 
+def parse_merge_rejected_with(meta: dict[str, object] | None) -> list[str]:
+    """Coerce a frontmatter ``merge_rejected_with:`` value into a clean list of slugs.
+
+    Issue athenaeum#715: the HONEST, non-directional counterpart to
+    ``refines:``. Written by :func:`athenaeum.pending_merges.resolve_merge`
+    when a human REJECTS a merge proposal — recording "these two are NOT
+    the same claim" without fabricating a directional relationship
+    (``refines:`` is reserved for a genuine specialization verdict and
+    must never be written to record a rejection). Follows
+    :func:`parse_refines`'s exact conventions.
+
+    Accepts:
+    - ``None`` / missing key → ``[]``.
+    - ``list[str]`` of memory ``name:`` slugs (the documented shape).
+
+    Raises:
+        ValueError: when ``merge_rejected_with`` is present but not a
+            list, or any entry is not a non-empty string. The frontmatter
+            is a durable contract — a typo rendered as a scalar should be
+            loud, not silent.
+    """
+    if not meta:
+        return []
+    raw = meta.get("merge_rejected_with")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(
+            "merge_rejected_with must be a list of memory name slugs, got "
+            f"{type(raw).__name__}"
+        )
+    out: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(
+                f"merge_rejected_with entries must be non-empty strings, got {entry!r}"
+            )
+        out.append(entry.strip())
+    return out
+
+
 def parse_supersedes(meta: dict[str, object] | None) -> list[dict[str, str]]:
     """Coerce a frontmatter ``supersedes:`` value into a list of records.
 
@@ -1422,6 +1463,13 @@ class AutoMemoryFile:
     # by ``name:`` slug, not path.
     refines: list[str] = field(default_factory=list)
     supersedes: list[dict[str, str]] = field(default_factory=list)
+    # Issue athenaeum#715: honest, non-directional counterpart to ``refines``.
+    # Lists ``name:`` slugs of memories a human REJECTED a merge proposal
+    # against (this memory is NOT the same claim as those). Written by
+    # ``pending_merges.resolve_merge`` on a ``reject`` decision instead of
+    # fabricating a ``refines:`` declaration. Matching is by ``name:`` slug,
+    # same as ``refines``/``supersedes``.
+    merge_rejected_with: list[str] = field(default_factory=list)
     # Issue athenaeum#191: non-destructive inactive markers written by the resolver's
     # keep_a/keep_b (superseded_by = winner name) and deprecate_both
     # (deprecated = True) enactment. An inactive member is preserved on disk
