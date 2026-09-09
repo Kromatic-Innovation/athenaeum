@@ -16,6 +16,14 @@ The budget guard runs at session teardown: if the run's cumulative
 input+output tokens exceed :data:`EVAL_TOKEN_CEILING`, the session fails
 loudly rather than silently burning through spend on a golden set that
 has grown unnoticed.
+
+Also adds a SEPARATE ``rollout_session`` fixture (issue athenaeum#1521) for
+agent-rollout token usage, which must never accumulate into the
+``eval_session``/``EVAL_TOKEN_CEILING`` guard above — see
+``tests/evals/rollout_session.py`` for why. It is its own
+:class:`EvalSession` instance, guarded at teardown by its own
+``ROLLOUT_TOKEN_CEILING``, and is the fixture a future ``pytest.mark.rollout``
+eval would depend on instead of ``eval_session``.
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ from tests.evals.harness import (
     REPO_ROOT,
     EvalSession,
 )
+from tests.evals.rollout_session import assert_rollout_ceiling
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -89,3 +98,19 @@ def eval_session(request: pytest.FixtureRequest) -> Any:
         f"({total_tokens} > {EVAL_TOKEN_CEILING}) — "
         "shrink the golden set or raise EVAL_TOKEN_CEILING deliberately"
     )
+
+
+@pytest.fixture(scope="session")
+def rollout_session(request: pytest.FixtureRequest) -> Any:
+    """Session-scoped accumulator for agent-rollout token usage (athenaeum#1521).
+
+    A SEPARATE :class:`EvalSession` instance from ``eval_session`` above —
+    never shares state with it — so rollout usage cannot accumulate into
+    ``EVAL_TOKEN_CEILING``'s teardown assert. Emits its own summary artifact
+    (``rollout-summary.json``) and is guarded by its own
+    ``ROLLOUT_TOKEN_CEILING`` via :func:`tests.evals.rollout_session.assert_rollout_ceiling`.
+    """
+    session = EvalSession()
+    yield session
+    session.emit_summary(REPO_ROOT / "rollout-summary.json")
+    assert_rollout_ceiling(session)
