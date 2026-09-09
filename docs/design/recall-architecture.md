@@ -20,7 +20,7 @@ How the UserPromptSubmit hook surfaces wiki context — the hybrid FTS5 + vector
 2. **Query-topic extraction (optional, LLM).** `athenaeum query-topics "$PROMPT" --timeout 3` calls a cheap Haiku classifier that returns a JSON array of substantive topics, ignoring meta-instructions like "quote verbatim" or "don't call tools". On any failure (missing CLI, missing API key, timeout, bad JSON), the hook falls back silently to a regex + stopword extractor.
 
 3. **Hybrid search.**
-   - **FTS5** (`wiki-index.db`) — lowercased-and-phrase-quoted OR query, top 3 by BM25 rank, excluding session-seen filenames, `AND memory_tier = 'hot'` (issue athenaeum#1120 — see "Hot-tier filter + push-token budget" below).
+   - **FTS5** (`wiki-index.db`) — lowercased-and-phrase-quoted OR query, top 3 by BM25 rank, excluding session-seen filenames. **No tier predicate** (issue athenaeum#1345 / athenaeum#1513 — see "Push-token budget, and the tier gate that was removed" below).
    - **Vector** (`wiki-vectors/`, runs when `SEARCH_BACKEND=vector`) — embeds the *concatenated topics* (not the raw prompt; meta-instructions drift the embedding), queries chromadb, returns top 3.
    - **Merge** — FTS5 first, then vector, dedupe by filename, cap at 3.
 
@@ -28,14 +28,42 @@ How the UserPromptSubmit hook surfaces wiki context — the hybrid FTS5 + vector
    over the merged, deduped, rank-ordered candidates greedily packs them
    into `PUSH_TOKEN_BUDGET` tokens (same `1200` default and env-over-yaml
    precedence as `athenaeum.config.resolve_push_token_budget`), skipping —
-   never truncating — a candidate that would exceed it. See "Hot-tier
-   filter + push-token budget" below for the full seam.
+   never truncating — a candidate that would exceed it. See "Push-token
+   budget, and the tier gate that was removed" below for the full seam.
 
 5. **Session dedup.** `/tmp/knowledge-seen-${SESSION_ID}` accumulates already-surfaced filenames across turns.
 
 6. **Emit.** `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"..."}}`. A flat `{"additionalContext":...}` payload is silently ignored by Claude Code.
 
-## Hot-tier filter + push-token budget (issue athenaeum#1120)
+## Push-token budget, and the tier gate that was removed (issues athenaeum#1120 → athenaeum#1345 → athenaeum#1513)
+
+> **Read this first.** The hot-tier FILTER described below is **gone**.
+> Issue athenaeum#1345 decided it out ("the push path ranks on relevance
+> alone — no tier-based inclusion, no tier-based exclusion, no tier term
+> in ranking, not as a filter, a weight, a multiplier, or an additive
+> nudge"); athenaeum#1513 removed it from this hook after cwc#3229
+> de-vendored the recall hook and the gate reached production.
+>
+> It excluded 96.5% of the real corpus — 892 hot of 25,505 pages, with
+> `principle`/`preference`/`auto-memory` the entire hot pool and **zero**
+> of 17,265 `person` pages reachable. Its failure mode was silent
+> SUBSTITUTION, not silence: in 10 of 12 sampled queries it still
+> returned three hits, just materially worse ones.
+>
+> `memory_tier` is unchanged in every other respect — still resolved at
+> index-build time, still stored in the index, still in frontmatter, and
+> still recorded per pushed item in the sidecar telemetry ledger, which
+> is what makes the mix shifting off 3.5% hot observable. It is recorded,
+> never enforced. The invariant is pinned by
+> `tests/test_shell_hooks.py` (`test_gate_removal_returns_the_true_bm25_top3`,
+> `test_swapping_two_pages_memory_tier_does_not_change_the_push`,
+> `test_no_tier_predicate_survives_on_either_surface`) and, on the
+> converged core, by `tests/test_context_core.py`.
+>
+> **The push-token budget in this section is unaffected and still
+> current.** The rest of the section is retained as the design record for
+> how the tier verdict came to be index-carried — that mechanism still
+> serves the render and the telemetry — with the filter itself struck.
 
 Before this issue, `user-prompt-recall.sh` queried FTS5 directly and never
 called `recall_search` — so unprompted recall never saw the `hot`-tier
@@ -58,10 +86,13 @@ hidden:**
 - The tier model is NOT reimplemented in shell. `athenaeum.memory_tiers.resolve_tier`
   runs once, at index-build time (`athenaeum.search.FTS5Backend._row_for`),
   and its verdict is stored in the FTS5 index (`memory_tier UNINDEXED`
-  column, schema version bumped 3 -> 4); the hook just reads that column
-  with `WHERE memory_tier = 'hot'`. This is the SAME established pattern
-  `audience` (athenaeum#312, schema v2) and `type` (athenaeum#964, schema v3)
-  already use so shell/SQL can filter without Python.
+  column, schema version bumped 3 -> 4); the hook just reads that column.
+  This is the SAME established pattern `audience` (athenaeum#312, schema
+  v2) and `type` (athenaeum#964, schema v3) already use so shell/SQL can
+  read a Python-resolved verdict without starting Python. **The hook read
+  that column with `WHERE memory_tier = 'hot'` until athenaeum#1513; it
+  now reads it into the SELECT list only, for the render and the
+  telemetry row.**
 - The ONLY duplicated surface is (a) the greedy budget-accumulation loop
   and (b) the token estimator, `athenaeum.push_metrics.estimate_tokens` =
   `max(0, len(text) // 4)` — a single arithmetic expression, expressed in
@@ -79,9 +110,12 @@ hidden:**
 `memory_tier` column; selecting it would raise `sqlite3.OperationalError`,
 which the hook's own `2>/dev/null || echo ""` would otherwise swallow into
 a silent zero-recall until the index happens to be rebuilt. The hook
-probes `PRAGMA table_info(wiki)` for the column first and falls back to
-the pre-athenaeum#1120 unfiltered query when it's absent, so an un-rebuilt index
-degrades to pre-athenaeum#1120 behavior instead of to nothing.
+probes `PRAGMA table_info(wiki)` for the column first and falls back to a
+query naming a literal `''` in its place when it's absent, so an
+un-rebuilt index degrades to a name-only telemetry tier instead of to
+nothing. Since athenaeum#1513 this probe no longer selects between a
+gated and an ungated query — neither branch filters — only between one
+that can name the column and one that cannot.
 
 **`session-start-recall.sh` was also checked for this gap and is
 unaffected (AC2).** It writes stderr diagnostics only and emits no

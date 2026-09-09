@@ -44,7 +44,8 @@
 #
 # Push telemetry (issue athenaeum#1343). This hook used to record NOTHING
 # about what it pushed — the exact reason issue athenaeum#1120's
-# `AND memory_tier = 'hot'` gate (below) was able to silently over-exclude
+# `AND memory_tier = 'hot'` gate (since removed — athenaeum#1345,
+# athenaeum#1513) was able to silently over-exclude
 # 96.56% of the corpus for weeks with nothing watching. Every turn that
 # renders at least one candidate now appends one JSONL row to the SAME
 # durable ledger `athenaeum.push_metrics.record_push` writes for the
@@ -162,8 +163,10 @@ esac
 # the SAME durable ledger `athenaeum.push_metrics.record_push` writes for
 # the explicit `recall` MCP path — previously this hook wrote nothing at
 # all (see the issue's motivation: the `AND memory_tier = 'hot'` gate
-# above shipped with no telemetry, so its 96.56% over-exclusion on the
-# real corpus went undetected for weeks). Setup only; the actual append
+# shipped with no telemetry, so its 96.56% over-exclusion on the real
+# corpus went undetected for weeks; the gate itself was removed by
+# athenaeum#1345 / athenaeum#1513, this telemetry is what makes the mix
+# shifting off it observable). Setup only; the actual append
 # happens after the budget pass below, which is the only place that
 # knows the *rendered* set.
 
@@ -629,19 +632,23 @@ fi
 
 # ── Query backends ──────────────────────────────────────────────────────
 # Issue athenaeum#1120 — legacy-DB safety, probed ONCE and shared by BOTH
-# the FTS5 query below and the vector-hit tier post-filter further down
-# (a warm/cold page reached via the vector backend must be held to the
-# SAME hot-tier bar as an FTS5 hit — see that section for why). A DB
-# built by an older athenaeum predates the `memory_tier` column (schema
+# the FTS5 query below and the vector-hit metadata lookup further down. A
+# DB built by an older athenaeum predates the `memory_tier` column (schema
 # v4, see athenaeum.search.FTS5Backend._SCHEMA_VERSION's comment).
 # Selecting a column that doesn't exist raises `sqlite3.OperationalError`,
 # which this hook's own `2>/dev/null || echo ""` swallow would otherwise
 # turn into a ZERO recall for every turn until the index happens to be
 # rebuilt — exactly the failure class that _SCHEMA_VERSION comment warns
-# about. Probe for the column first and fall back to the
-# pre-athenaeum#1120 unfiltered query when it's absent, so an un-rebuilt
-# index degrades BOTH branches consistently to today's (unfiltered)
-# behaviour instead of one branch filtering and the other not.
+# about. Probe for the column first and fall back to a query that names a
+# literal `''` instead when it's absent, so an un-rebuilt index degrades
+# BOTH branches consistently together.
+#
+# Issues athenaeum#1345 / athenaeum#1513 — this probe no longer guards a
+# FILTER. It once selected between a gated (`AND memory_tier = 'hot'`)
+# and an ungated query; the gate is gone from both the lexical and the
+# vector surface (see each site below), so the ONLY difference between
+# the two branches is now whether the SELECT list can name the
+# `memory_tier` column for telemetry. Tier is recorded, never enforced.
 HAS_TIER_COLUMN=false
 if [ -f "$DB_FILE" ] && sqlite3 "$DB_FILE" "PRAGMA table_info(wiki);" 2>/dev/null | grep -q '|memory_tier|'; then
   HAS_TIER_COLUMN=true
@@ -716,11 +723,24 @@ if [ -f "$DB_FILE" ]; then
     # query, no second lookup, no new process. Ordering stays `ORDER BY
     # rank` alone: no tier or description term participates in selection
     # or ordering (AC "ordering and selection are by relevance alone").
+    #
+    # ENFORCEMENT SURFACE 1 of 2 (issues athenaeum#1345, athenaeum#1513).
+    # This WHERE clause used to carry `AND memory_tier = 'hot'`. It is
+    # gone. `memory_tier` stays in the SELECT list — it is recorded in
+    # the telemetry row below and rendered nowhere else — but it no
+    # longer participates in selection, ordering, or exclusion, "not as
+    # a filter, a weight, a multiplier, or an additive nudge"
+    # (athenaeum#1345's invariant). The gate excluded 96.5% of the real
+    # corpus (892 hot of 25,505) including every one of 17,265 `person`
+    # pages, and its failure mode was silent substitution rather than
+    # silence: in 10 of 12 sampled queries it still returned three hits,
+    # just materially worse ones. Surface 2 is the vector post-filter
+    # further down; both come out together, because removing only one
+    # reintroduces branch divergence with the sign flipped.
     FTS_RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
       SELECT filename, name, rank, audience, memory_tier, 'fts5', ${DESC_COL}
       FROM wiki
       WHERE wiki MATCH '${FTS_QUERY}'
-      AND memory_tier = 'hot'
       ${EXCLUDE}
       ORDER BY rank
       LIMIT 3;
@@ -775,23 +795,26 @@ for fname, name, score in query_vector_index(sys.argv[1], os.path.expanduser('~/
   fi
 fi
 
-# ── Post-filter vector hits to the SAME hot-tier verdict (issue athenaeum#1120) ──
-# The FTS5 branch above enforces `memory_tier = 'hot'` INSIDE its own SQL
-# WHERE clause; without an equivalent check here, a warm/cold page
-# surfaced by the vector backend would bypass the filter entirely under
-# `SEARCH_BACKEND=vector` — a dial that looks enforced but silently isn't
-# on that deployed path. No second tier model is introduced: this is a
-# second, bounded lookup into the SAME index-carried verdict the FTS5
-# query already reads, restricted to the (at most 3) filenames the vector
-# backend actually returned — never an unbounded `WHERE memory_tier =
-# 'hot'` scan, which against the real ~23k-page corpus would pull the
-# whole hot set on every turn for no reason. Skipped when the DB predates
-# the `memory_tier` column (`HAS_TIER_COLUMN=false`, legacy-DB safety
-# above), so both branches degrade to the SAME pre-athenaeum#1120
-# unfiltered behaviour together rather than one filtering and the other
-# not. Cost: the vector branch already pays a Python interpreter start
-# (~400ms, see the header latency note); one more bounded (<=3-row)
-# sqlite3 lookup (~1-3ms) does not touch that contract.
+# ── Metadata lookup for vector hits (issues athenaeum#1120 → athenaeum#1513) ──
+# HISTORY, because this block's shape only makes sense with it: issue
+# athenaeum#1120 introduced this lookup as a hot-tier POST-FILTER, so the
+# vector backend would be held to the same `memory_tier = 'hot'` bar the
+# FTS5 `WHERE` clause enforced. Issue athenaeum#1345 decided the gate
+# comes out entirely (relevance alone decides the push); issue
+# athenaeum#1513 is the regression that it had, in the interim, reached
+# production on this file. The filtering is gone from BOTH surfaces.
+#
+# What the block does NOW is purely a metadata join: one bounded lookup
+# into the SAME index rows the FTS5 query reads, restricted to the (at
+# most 3) filenames the vector backend actually returned — never an
+# unbounded scan — carrying `audience`, `memory_tier` and `description`
+# through so a vector-sourced item renders and reports EXACTLY as an
+# FTS5-sourced one. Skipped when the DB predates the `memory_tier`
+# column (`HAS_TIER_COLUMN=false`, legacy-DB safety above), so both
+# branches degrade together. Cost: the vector branch already pays a
+# Python interpreter start (~400ms, see the header latency note); one
+# more bounded (<=3-row) sqlite3 lookup (~1-3ms) does not touch that
+# contract.
 #
 # Issue athenaeum#1343: this same bounded lookup is widened (not a new
 # query) to also carry `audience` and `memory_tier` through for each
@@ -830,27 +853,32 @@ if [ -f "$DB_FILE" ] && [ -n "$VECTOR_RESULTS" ]; then
 
   if [ -n "$_vector_in_list" ]; then
     if [ "$HAS_TIER_COLUMN" = true ]; then
-      # `VECTOR_META` is only populated for filenames that ARE
-      # `memory_tier = 'hot'` — it is therefore simultaneously the
-      # audience/tier lookup AND the authoritative "kept" set for the
-      # hot-tier post-filter below.
+      # ENFORCEMENT SURFACE 2 of 2 (issues athenaeum#1345, athenaeum#1513).
+      # This lookup used to end `AND memory_tier = 'hot'`, which made
+      # `VECTOR_META` do double duty: the metadata join AND the
+      # authoritative "kept" set for an awk post-filter over
+      # `VECTOR_RESULTS`. Both the restriction and the derived
+      # keep-filter are gone. This is the surface that mattered in
+      # practice — live traffic is 100% `backend: "vector"` (32 of 32
+      # sampled sidecar pushes), so a fix that removed only the FTS5
+      # `WHERE` above would have changed nothing observable while
+      # looking green.
+      #
+      # What REMAINS is the lookup itself, unchanged in every other
+      # respect: it is still the audience/tier/description join that
+      # feeds the render and the telemetry row, still bounded to the
+      # (at most 3) filenames the vector backend actually returned —
+      # never an unbounded scan. `memory_tier` is still selected and
+      # still carried through per item; it is recorded, not enforced.
       VECTOR_META=$(sqlite3 -separator $'\t' "$DB_FILE" "
         SELECT filename, audience, memory_tier, ${DESC_COL} FROM wiki
-        WHERE filename IN (${_vector_in_list})
-        AND memory_tier = 'hot';
+        WHERE filename IN (${_vector_in_list});
       " 2>/dev/null || echo "")
-      _hot_vector_filenames=$(printf '%s\n' "$VECTOR_META" | awk -F'\t' 'NF >= 1 && $1 != "" { print $1 }')
-      VECTOR_RESULTS=$(printf '%s\n' "$VECTOR_RESULTS" | awk -F'\t' -v hot="$_hot_vector_filenames" '
-        BEGIN {
-          n = split(hot, arr, "\n")
-          for (i = 1; i <= n; i++) if (arr[i] != "") keep[arr[i]] = 1
-        }
-        NF >= 1 && ($1 in keep)
-      ')
     else
-      # Legacy DB (no memory_tier column): the hot-tier gate is skipped
-      # on BOTH branches (see the FTS5 probe above), so no filtering
-      # happens here either. `audience` predates memory_tier (issue
+      # Legacy DB (no memory_tier column): identical to the branch above
+      # in every respect except that it cannot name the `memory_tier`
+      # column. No filtering happens on either branch (athenaeum#1345,
+      # athenaeum#1513). `audience` predates memory_tier (issue
       # athenaeum#312 vs. schema v4) and is safe to select
       # unconditionally; memory_tier per item is recorded as "" (D8 —
       # the column doesn't exist on this DB, nothing truthful to carry).
