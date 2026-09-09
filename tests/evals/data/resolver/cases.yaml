@@ -1,6 +1,6 @@
 # Resolver golden set (issue athenaeum#331)
 #
-# Same synthetic Meridian Advisory scenario as the detector set — invented
+# Same synthetic Thornhollow Advisory scenario as the detector set — invented
 # consultancy, no live-knowledge content.
 #
 # Cases feed a hand-authored ContradictionResult (as if the Haiku detector
@@ -35,23 +35,23 @@
     action_class: propose_merge
   detector:
     conflict_type: prescriptive
-    rationale: "Both prescribe a docs tool for Meridian consulting projects."
+    rationale: "Both prescribe a docs tool for Thornhollow consulting projects."
     passages:
-      - "The consulting team uses Notion for all client-facing project docs."
-      - "Client-facing project CSVs live in Google Sheets, not Notion."
+      - "The consulting team uses Pagemoor for all client-facing project docs."
+      - "Client-facing project CSVs live in Tallyfold, not Pagemoor."
   members:
-    - filename: feedback_docs_notion.md
-      body: "The consulting team uses Notion for all client-facing project docs."
+    - filename: feedback_docs_pagemoor.md
+      body: "The consulting team uses Pagemoor for all client-facing project docs."
       frontmatter:
-        name: docs-tool-notion
+        name: docs-tool-pagemoor
         type: feedback
         source_type: user-stated
         source_ref: "session-2026-02-01"
         updated: "2026-02-01"
     - filename: feedback_docs_csv_exception.md
       body: >-
-        Client-facing project CSVs live in Google Sheets, not Notion — this is
-        the CSV-only exception to the general Notion-for-docs rule.
+        Client-facing project CSVs live in Tallyfold, not Pagemoor — this is
+        the CSV-only exception to the general Pagemoor-for-docs rule.
       frontmatter:
         name: docs-tool-csv-exception
         type: feedback
@@ -90,7 +90,7 @@
 # DECISION conflict (NOT a text-declared supersession, NOT dated FACT
 # snapshots). The two members disagree about which platform hosts the
 # portal; the newer member records a migration DECISION but does NOT say
-# "Heroku is retired/superseded/cancelled" — so the resolver must PICK the
+# "Hostmoor is retired/superseded/cancelled" — so the resolver must PICK the
 # winner by recency/decision precedence (→ keep_b) rather than reading a
 # resolution already declared in the text. Authoring rule (issue athenaeum#345): a
 # body that says "X is retired" fires the not_a_conflict "supersession
@@ -119,24 +119,24 @@
     action_class: keep_pick_winner
   detector:
     conflict_type: prescriptive
-    rationale: "Conflicting claims about which platform hosts Meridian's client portal."
+    rationale: "Conflicting claims about which platform hosts Thornhollow's client portal."
     passages:
-      - "Meridian's client portal runs on Heroku."
-      - "Meridian migrated the client portal to Fly.io."
+      - "Thornhollow's client portal runs on Hostmoor."
+      - "Thornhollow migrated the client portal to Fly.io."
   members:
-    - filename: project_hosting_heroku.md
+    - filename: project_hosting_hostmoor.md
       body: >-
-        Meridian's client portal runs on Heroku. Priya approved the Heroku
+        Thornhollow's client portal runs on Hostmoor. Priya approved the Hostmoor
         hosting plan and signed the invoice on 2026-02-10.
       frontmatter:
-        name: hosting-heroku
+        name: hosting-hostmoor
         type: project
         source_type: user-stated
         source_ref: "session-2026-02-10"
         updated: "2026-02-10"
     - filename: project_hosting_fly.md
       body: >-
-        Meridian migrated the client portal to Fly.io. The engineering team
+        Thornhollow migrated the client portal to Fly.io. The engineering team
         completed the cutover on 2026-05-20 for better regional latency.
       frontmatter:
         name: hosting-fly
@@ -153,17 +153,17 @@
     conflict_type: factual
     rationale: "Two mutually-exclusive claims about the office address."
     passages:
-      - "Meridian's office is at 14 Kingsway, WeWork floor 3."
-      - "Meridian's office is at 220 Regent Street, suite 5B."
+      - "Thornhollow's office is at 14 Kingsway, Kingsway Works floor 3."
+      - "Thornhollow's office is at 220 Regent Street, suite 5B."
   members:
-    - filename: reference_office_wework.md
-      body: "Meridian's office is at 14 Kingsway, WeWork floor 3."
+    - filename: reference_office_kingsway_works.md
+      body: "Thornhollow's office is at 14 Kingsway, Kingsway Works floor 3."
       frontmatter:
-        name: office-address-wework
+        name: office-address-kingsway-works
         type: reference
         source_type: inferred
     - filename: reference_office_regent.md
-      body: "Meridian's office is at 220 Regent Street, suite 5B."
+      body: "Thornhollow's office is at 220 Regent Street, suite 5B."
       frontmatter:
         name: office-address-regent
         type: reference
@@ -196,7 +196,7 @@
 # --- Cases added in issue athenaeum#345 (WS3) to give the floor >= 2-case slack ---
 # Enlarges the set from 5 -> 8 so no single hard case sinks the whole layer.
 # Two cases per action class (not_a_conflict, keep_pick_winner,
-# disambiguation, propose_merge). Still 100% synthetic Meridian Advisory.
+# disambiguation, propose_merge). Still 100% synthetic Thornhollow Advisory.
 
 # not_a_conflict via the sequential-snapshot FACT rule (two dated snapshots
 # of an evolving headcount — NOT a conflict; the older is simply stale).
@@ -206,13 +206,13 @@
     action_class: not_a_conflict
   detector:
     conflict_type: factual
-    rationale: "Two dated snapshots of Meridian's headcount."
+    rationale: "Two dated snapshots of Thornhollow's headcount."
     passages:
-      - "As of 2026-01, Meridian has 18 staff."
-      - "As of 2026-06, Meridian has 27 staff."
+      - "As of 2026-01, Thornhollow has 18 staff."
+      - "As of 2026-06, Thornhollow has 27 staff."
   members:
     - filename: reference_headcount_jan.md
-      body: "As of 2026-01, Meridian has 18 staff across two offices."
+      body: "As of 2026-01, Thornhollow has 18 staff across two offices."
       frontmatter:
         name: headcount-jan
         type: reference
@@ -220,7 +220,7 @@
         source_ref: "session-2026-01-15"
         updated: "2026-01-15"
     - filename: reference_headcount_jun.md
-      body: "As of 2026-06, Meridian has 27 staff across three offices."
+      body: "As of 2026-06, Thornhollow has 27 staff across three offices."
       frontmatter:
         name: headcount-jun
         type: reference
@@ -269,10 +269,10 @@
     action_class: propose_merge
   detector:
     conflict_type: prescriptive
-    rationale: "Both prescribe where Meridian tracks work items."
+    rationale: "Both prescribe where Thornhollow tracks work items."
     passages:
       - "The team tracks all engineering work in Linear."
-      - "Support-desk bug reports are logged in Zendesk, not Linear."
+      - "Support-desk bug reports are logged in Ticketwell, not Linear."
   members:
     - filename: feedback_tickets_linear.md
       body: "The team tracks all engineering work in Linear."
@@ -282,12 +282,12 @@
         source_type: user-stated
         source_ref: "session-2026-03-02"
         updated: "2026-03-02"
-    - filename: feedback_tickets_zendesk_exception.md
+    - filename: feedback_tickets_ticketwell_exception.md
       body: >-
-        Support-desk bug reports are logged in Zendesk, not Linear — this is the
+        Support-desk bug reports are logged in Ticketwell, not Linear — this is the
         support-intake exception to the general Linear-for-engineering rule.
       frontmatter:
-        name: tickets-zendesk-exception
+        name: tickets-ticketwell-exception
         type: feedback
         source_type: user-stated
         source_ref: "session-2026-03-06"

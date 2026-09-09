@@ -1,6 +1,6 @@
 # Detector golden set (issue athenaeum#331)
 #
-# Synthetic scenario: "Meridian Advisory", a fictional 12-person consultancy.
+# Synthetic scenario: "Thornhollow Advisory", a fictional 12-person consultancy.
 # Every case is invented — nothing here is drawn from a live knowledge tree.
 #
 # Each case is a cluster of 2 auto-memory snippets fed to
@@ -22,7 +22,7 @@
     conflict_type: factual
   members:
     - filename: feedback_standup_9am.md
-      body: "Meridian's daily standup is at 9:00 AM sharp every weekday."
+      body: "Thornhollow's daily standup is at 9:00 AM sharp every weekday."
       frontmatter:
         name: standup-time
         type: feedback
@@ -44,7 +44,7 @@
     detected: false
   members:
     - filename: project_invoice_general.md
-      body: "Client invoices at Meridian go out on the 1st of every month."
+      body: "Client invoices at Thornhollow go out on the 1st of every month."
       frontmatter:
         name: invoice-general
         type: project
@@ -69,7 +69,7 @@
     detected: false
   members:
     - filename: project_deploy_march.md
-      body: "Meridian's internal client-portal deploys to staging.meridian.example."
+      body: "Thornhollow's internal client-portal deploys to staging.thornhollow.example."
       frontmatter:
         name: portal-deploy-march
         type: project
@@ -79,7 +79,7 @@
         valid_from: "2026-03-01"
         valid_until: "2026-04-30"
     - filename: project_deploy_may.md
-      body: "Meridian's client-portal deploys to prod.meridian.example."
+      body: "Thornhollow's client-portal deploys to prod.thornhollow.example."
       frontmatter:
         name: portal-deploy-may
         type: project
@@ -94,14 +94,14 @@
     detected: true
     conflict_type: factual
   members:
-    - filename: reference_office_wework.md
-      body: "Meridian's office is at 14 Kingsway, WeWork floor 3."
+    - filename: reference_office_kingsway_works.md
+      body: "Thornhollow's office is at 14 Kingsway, Kingsway Works floor 3."
       frontmatter:
-        name: office-address-wework
+        name: office-address-kingsway-works
         type: reference
         source_type: inferred
     - filename: reference_office_regent.md
-      body: "Meridian's office is at 220 Regent Street, suite 5B."
+      body: "Thornhollow's office is at 220 Regent Street, suite 5B."
       frontmatter:
         name: office-address-regent
         type: reference
@@ -122,7 +122,7 @@
         source_ref: "session-2026-01-20"
         updated: "2026-01-20"
     - filename: feedback_receipts_below_25.md
-      body: "Expenses under 25 GBP need no receipt — just log them in Airtable."
+      body: "Expenses under 25 GBP need no receipt — just log them in Latticebase."
       frontmatter:
         name: expense-small-rule
         type: feedback
@@ -130,23 +130,23 @@
         source_ref: "session-2026-01-22"
         updated: "2026-01-22"
 
-- id: client_owner_meridian_pass_1
+- id: client_owner_thornhollow_pass_1
   outcome_class: pass
   expected:
     detected: false
   members:
-    - filename: reference_owner_meridian.md
-      body: "Priya Shah is the client lead for the Meridian retainer at our firm."
+    - filename: reference_owner_thornhollow.md
+      body: "Priya Shah is the client lead for the Thornhollow retainer at our firm."
       frontmatter:
-        name: owner-meridian
+        name: owner-thornhollow
         type: reference
         source_type: user-stated
         source_ref: "session-2026-04-01"
         updated: "2026-04-01"
-    - filename: reference_owner_meridian_alias.md
-      body: "The Meridian account is owned by Priya (client lead)."
+    - filename: reference_owner_thornhollow_alias.md
+      body: "The Thornhollow account is owned by Priya (client lead)."
       frontmatter:
-        name: owner-meridian-alias
+        name: owner-thornhollow-alias
         type: reference
         source_type: user-stated
         source_ref: "session-2026-04-03"
@@ -156,7 +156,7 @@
 # prompt defines `prescriptive` as "two snippets give opposing GUIDANCE for the
 # same situation" (its example: "always commit directly" vs "never commit
 # directly"). Neither member below directs anyone to do anything — both are
-# statements about WHERE docs live (Notion vs Google Docs), which is the
+# statements about WHERE docs live (Pagemoor vs Tallyfold), which is the
 # prompt's own definition of `factual`: "two snippets state incompatible facts
 # about the same thing." The golden originally encoded `prescriptive`; the model
 # returns `factual` and is right. Do not revert this to `prescriptive` — no
@@ -167,18 +167,18 @@
     detected: true
     conflict_type: factual
   members:
-    - filename: feedback_editor_notion.md
-      body: "The consulting team uses Notion for all client-facing project docs."
+    - filename: feedback_editor_pagemoor.md
+      body: "The consulting team uses Pagemoor for all client-facing project docs."
       frontmatter:
-        name: docs-tool-notion
+        name: docs-tool-pagemoor
         type: feedback
         source_type: user-stated
         source_ref: "session-2026-02-01"
         updated: "2026-02-01"
-    - filename: feedback_editor_gdocs.md
-      body: "All client-facing project docs live in Google Docs, not Notion."
+    - filename: feedback_editor_tallyfold.md
+      body: "All client-facing project docs live in Tallyfold, not Pagemoor."
       frontmatter:
-        name: docs-tool-gdocs
+        name: docs-tool-tallyfold
         type: feedback
         source_type: user-stated
         source_ref: "session-2026-02-06"
@@ -190,7 +190,7 @@
     detected: false
   members:
     - filename: project_client_weekly.md
-      body: "Meridian holds a weekly Wednesday sync with each active client."
+      body: "Thornhollow holds a weekly Wednesday sync with each active client."
       frontmatter:
         name: client-weekly-sync
         type: project
@@ -198,7 +198,7 @@
         source_ref: "session-2026-03-10"
         updated: "2026-03-10"
     - filename: project_internal_monthly.md
-      body: "The Meridian internal all-hands is monthly, first Friday."
+      body: "The Thornhollow internal all-hands is monthly, first Friday."
       frontmatter:
         name: internal-monthly
         type: project

@@ -137,11 +137,11 @@ def test_run_create_case_clean_response_passes(cases: list[dict[str, Any]]) -> N
     case = _case_by_id(cases, "simple_create_single_person")
     client = FakeLLMClient(
         text="# Dana Whitfield\n\nDana Whitfield is a senior consultant on "
-        "the Atlas Retooling engagement, who joined Meridian Advisory in "
+        "the Atlas Retooling engagement, who joined Thornhollow Advisory in "
         "March 2026.",
         response=make_llm_response(
             "# Dana Whitfield\n\nDana Whitfield is a senior consultant on "
-            "the Atlas Retooling engagement, who joined Meridian Advisory "
+            "the Atlas Retooling engagement, who joined Thornhollow Advisory "
             "in March 2026.",
             usage=make_llm_usage(input_tokens=512, output_tokens=128),
         ),
@@ -209,7 +209,7 @@ def test_run_create_case_multi_entity_isolates_per_entity_expectations(
         # entity was actually asked for -- simulates a model conflating the
         # two entities named in the shared raw intake. Deliberately never
         # mentions the project's name.
-        return "# Marcus Oyelaran\n\nMarcus is a senior consultant at Meridian."
+        return "# Marcus Oyelaran\n\nMarcus is a senior consultant at Thornhollow."
 
     client = FakeLLMClient(
         responder=lambda **kw: make_llm_response(

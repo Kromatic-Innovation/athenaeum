@@ -19,6 +19,6 @@ Two versions of the receipt rule are on record — both from partner sessions,
 neither superseded:
 
 - All expenses must have a receipt attached before reimbursement.
-- Expenses under 25 GBP need no receipt; log directly in Airtable.
+- Expenses under 25 GBP need no receipt; log directly in Latticebase.
 
 See `_pending_questions.md` for the disambiguation queue entry.

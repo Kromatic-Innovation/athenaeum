@@ -36,7 +36,7 @@ grows unnoticed cannot balloon cost silently.
 ### Content policy
 
 All golden-set inputs are **synthetic small-org scenarios** (the invented
-consultancy "Meridian Advisory"). Nothing here originates from a live
+consultancy "Thornhollow Advisory"). Nothing here originates from a live
 knowledge tree. Adding a case that quotes real client / colleague content
 is a review-blocker.
 
