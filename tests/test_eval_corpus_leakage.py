@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Leakage guard for the eval fixture data under ``tests/evals/data/``.
+"""Leakage guard for the eval fixture data under ``tests/evals/data/`` and
+``tests/fixtures/recorded/``.
 
 Distinct from ``test_corpus_pii_lint.py``, which gates the *live* knowledge
 corpus for inline contact data (athenaeum#495). This module gates the
@@ -23,8 +24,11 @@ and unchecked despite this module's own existence: a guard that only
 inspects the directory built to satisfy it is not a guard over the
 fixtures. ``_corpus_blobs()`` below now walks the whole eval data root
 (``tests/evals/harness.EVAL_DATA_ROOT``, which contains ``corpus/`` as one
-subdirectory among several), so every committed fixture directory is in
-scope, not only the synthetic corpus.
+subdirectory among several) AND ``tests/fixtures/recorded/**/*.json`` (the
+recorded live-model responses, which mirror the case text and are exactly
+the path by which a leak could re-enter behind this guard even with the
+case text itself clean) -- so every committed fixture directory is in
+scope, not only the synthetic corpus, and not only the case-authoring side.
 
 The denylist of real proper nouns is read from the local knowledge tree AT
 LINT TIME and never written to disk. A committed denylist of real names would
@@ -50,7 +54,7 @@ import yaml
 
 from athenaeum.pii import scan_corpus_pii
 from tests.evals.corpus import CORPUS_ROOT, build_corpus
-from tests.evals.harness import EVAL_DATA_ROOT
+from tests.evals.harness import EVAL_DATA_ROOT, RECORDED_ROOT
 
 # What counts as an identity worth guarding.
 #
@@ -260,16 +264,26 @@ def _corpus_blobs() -> dict[str, str]:
     blobs["<generated:small>"] = "\n".join(
         page.to_markdown() for page in generated.pages if page.tier != "core"
     )
-    # Deliberately NOT extended to tests/fixtures/recorded/**/*.json (issue
-    # athenaeum#1496 measured this): those JSON fixtures mirror the case text
-    # above and their FUNCTIONAL content (case_id/response_text/content_blocks)
-    # is clean after the rename -- but scripts/rederive_recorded_fixture.py
-    # stamps an honest `rederived.rename` provenance block on each one that
-    # was mechanically re-derived, recording the OLD name as documentation of
-    # what changed (e.g. "Heroku=Hostmoor"). Scanning that directory would
-    # make this guard fail on its own audit trail. Excluding the directory
-    # entirely is simpler and more honest than teaching this scan to parse
-    # JSON and skip one specific key.
+    # Also covers tests/fixtures/recorded/**/*.json (issue athenaeum#1496):
+    # those JSON fixtures mirror the case text above -- response_text/
+    # content_blocks are a live model's echo of the case's prompt -- so a
+    # leak could re-enter through the recorded side even with the case text
+    # above clean. This was initially left out because
+    # scripts/rederive_recorded_fixture.py's `rederived` provenance block
+    # used to carry the literal OLD->NEW rename pairs, which would have
+    # tripped this guard on its own audit trail; that block now carries a
+    # non-identifying `rename_map_digest` instead (see the RecordedResponse
+    # docstring in harness.py), so the whole directory is clean to scan.
+    # Labelled relative to RECORDED_ROOT's parent so a hit clearly reads as
+    # "tests/fixtures/recorded/...", distinct from the EVAL_DATA_ROOT-relative
+    # labels above.
+    blobs.update(
+        {
+            str(path.relative_to(RECORDED_ROOT.parent)): path.read_text(encoding="utf-8")
+            for path in sorted(RECORDED_ROOT.rglob("*.json"))
+            if path.is_file()
+        }
+    )
     return blobs
 
 
