@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2232,6 +2233,264 @@ conn.close()
         assert (
             "Vecdesctest Hot Page — A vector-sourced hot page about "
             "vecdesctest devices" in context
+        )
+
+    # ── issue athenaeum#1516: multi-line `-v` is a hard recall outage ──
+    #
+    # `VECTOR_META` is one tab-separated row per matched filename. The
+    # hook used to hand it to awk as `-v meta="$VECTOR_META"`. BWK awk
+    # (`/usr/bin/awk` on macOS -- the deployed interpreter) REJECTS a
+    # `-v` assignment containing a newline outright, exits 2, and emits
+    # nothing; gawk accepts it. So the bug was invisible on a gnu-awk CI
+    # runner AND invisible in production for as long as the hot-tier gate
+    # existed, because at ~3.5% hot a vector query almost never returned
+    # two or more *hot* metadata rows -- `meta` was empty or exactly one
+    # line, the one shape that works under both awks. Removing the gate
+    # (athenaeum#1513) unmasked it.
+    #
+    # Hence the two properties every test below is built around:
+    #   1. MULTI-ROW metadata. A zero- or one-row fixture is exactly the
+    #      shape that passed for the gate's entire lifetime and cannot
+    #      reproduce this.
+    #   2. BWK-AWK SEMANTICS. `_awk_shim_dir` supplies them on any
+    #      runner, so the guard does not quietly evaporate on a box where
+    #      `awk` is gawk.
+
+    _MULTI_ROW_PAGES = (
+        (
+            "multirowawk-alpha.md",
+            "Multirowawk Alpha",
+            "First of three multirowawk metadata rows",
+            "hot",
+        ),
+        (
+            "multirowawk-beta.md",
+            "Multirowawk Beta",
+            "Second of three multirowawk metadata rows",
+            "warm",
+        ),
+        (
+            "multirowawk-gamma.md",
+            "Multirowawk Gamma",
+            "Third of three multirowawk metadata rows",
+            "cold",
+        ),
+    )
+
+    def _seed_multi_row_vector(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> dict[str, str]:
+        """Seed THREE wiki pages and stub the vector backend to return all
+        three, so the hook's ``VECTOR_META`` lookup is genuinely
+        multi-line.
+
+        Seeding three *pages* (not merely stubbing three *hits*) is the
+        load-bearing part: ``VECTOR_META`` comes from ``SELECT ... FROM
+        wiki WHERE filename IN (...)``, so three hits against one seeded
+        page would still yield a single metadata row -- the exact
+        one-line shape that never reproduced the bug.
+
+        Deliberately spans hot/warm/cold tiers as well. This is not a
+        tier assertion (athenaeum#1345/#1513: no tier predicate may ever
+        return); it is a guard that the fix is not accidentally
+        reintroducing one, since any tier filter would shrink the
+        metadata set back toward the single-row shape that hid the bug.
+        """
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        for filename, name, description, tier in self._MULTI_ROW_PAGES:
+            (wiki / filename).write_text(
+                "---\n"
+                f"name: {name}\n"
+                "tags: [multirowawk]\n"
+                f"description: {description}\n"
+                f"memory_tier: {tier}\n"
+                "---\n\n"
+                "Unrelated body text, not matched by the probe query.\n"
+            )
+
+        # Build the FTS5 index with the checkout's ``src`` on PYTHONPATH.
+        # ``hook_env`` isolates HOME, which hides per-user site-packages
+        # (PEP 370), so on a developer box where athenaeum is only
+        # installed in the user site the index build fails open and
+        # leaves NO ``wiki-index.db`` -- which would leave
+        # ``VECTOR_META`` empty, i.e. single-line, i.e. the exact shape
+        # that never reproduced athenaeum#1516. This test would then pass
+        # vacuously on precisely the platform (macOS/BWK awk) whose awk
+        # it exists to exercise. On CI, where athenaeum is installed,
+        # this is a no-op.
+        seed_env = dict(hook_env)
+        src = str(Path(hook_env["ATHENAEUM_SRC"]) / "src")
+        existing = seed_env.get("PYTHONPATH", "")
+        seed_env["PYTHONPATH"] = f"{src}{os.pathsep}{existing}" if existing else src
+        self._seed_index(seed_env)
+
+        db_file = Path(hook_env["ATHENAEUM_CACHE_DIR"]) / "wiki-index.db"
+        assert db_file.exists(), (
+            "the FTS5 index did not build; without it VECTOR_META is "
+            "empty and this test cannot reproduce athenaeum#1516"
+        )
+
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        (cache_dir / "wiki-vectors").mkdir(parents=True, exist_ok=True)
+        config_env = cache_dir / "config.env"
+        config_env.write_text(
+            config_env.read_text().replace(
+                "SEARCH_BACKEND=fts5", "SEARCH_BACKEND=vector"
+            )
+        )
+
+        fake_pkg = tmp_path / "fake-multirow-src" / "src" / "athenaeum"
+        fake_pkg.mkdir(parents=True)
+        hits = [
+            (filename, name, 0.9 - 0.1 * i)
+            for i, (filename, name, _d, _t) in enumerate(self._MULTI_ROW_PAGES)
+        ]
+        (fake_pkg / "search.py").write_text(
+            "def query_vector_index(query, cache_dir, n=3, exclude=None):\n"
+            "    exclude = exclude or set()\n"
+            f"    hits = {hits!r}\n"
+            "    return [h for h in hits if h[0] not in exclude][:n]\n"
+        )
+
+        vector_env = dict(hook_env)
+        vector_env["ATHENAEUM_SRC"] = str(fake_pkg.parent.parent)
+        return vector_env
+
+    @staticmethod
+    def _awk_shim_dir(tmp_path: Path) -> Path:
+        """A PATH directory holding an ``awk`` that enforces BWK's refusal
+        of a multi-line ``-v`` assignment, then execs the real awk.
+
+        Without this, the regression test is only meaningful on a box
+        whose ``awk`` is BWK awk. CI runs on Linux, where ``awk`` is
+        gawk, and gawk ACCEPTS a multi-line ``-v`` -- so the unfixed hook
+        passes there. That gap is why athenaeum#1516 reached production;
+        a test that inherits it proves nothing.
+
+        The shim is a strict subset of BWK's behaviour: it rejects only
+        what BWK rejects and otherwise delegates verbatim, so it cannot
+        make a passing hook fail for an unrelated reason. Every ``awk``
+        call in the hook is a bare, PATH-resolved ``awk`` (verified: no
+        absolute path, and the hook never reassigns ``PATH``), so the
+        shim covers all of them.
+        """
+        real_awk = shutil.which("awk")
+        assert real_awk, "awk not on PATH"
+        shim_dir = tmp_path / "awk-shim"
+        shim_dir.mkdir(parents=True, exist_ok=True)
+        shim = shim_dir / "awk"
+        # `real_awk` is resolved HERE, not inside the shim: a runtime
+        # `command -v awk` would find the shim itself and recurse.
+        shim.write_text(
+            f"""#!/bin/bash
+REAL_AWK={shlex.quote(real_awk)}
+NL=$'\\n'
+expect_v=0
+for a in "$@"; do
+  if [ "$expect_v" = 1 ]; then
+    val="$a"; expect_v=0
+  elif [ "$a" = -v ]; then
+    expect_v=1; continue
+  elif [ "${{a#-v}}" != "$a" ]; then
+    val="${{a#-v}}"
+  else
+    continue
+  fi
+  case "$val" in
+    *"$NL"*)
+      printf 'awk: newline in string %s... at source line 1\\n' "${{val:0:20}}" >&2
+      exit 2 ;;
+  esac
+done
+exec "$REAL_AWK" "$@"
+"""
+        )
+        shim.chmod(0o755)
+        return shim_dir
+
+    def _assert_all_multi_row_bullets(self, result) -> None:
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, (
+            "a multi-row vector metadata set must still inject a context "
+            "block -- empty stdout here is the athenaeum#1516 outage "
+            "(awk exits 2 on a multi-line `-v` and emits nothing)"
+        )
+        payload = json.loads(result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        for _filename, name, description, _tier in self._MULTI_ROW_PAGES:
+            assert f"{name} — {description}" in context, (
+                f"expected the joined bullet for {name!r} in: {context!r}"
+            )
+
+    def test_multi_row_vector_metadata_still_injects_context(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#1516 regression: three vector hits => a three-line
+        ``VECTOR_META`` => the hook must STILL emit a context block with
+        all three ``name — description`` bullets joined in.
+
+        This runs under whatever ``awk`` the box provides. On macOS (BWK
+        awk) it fails outright against the pre-fix ``-v meta=`` form. On
+        a gawk box it passes either way -- which is precisely why the
+        shim variant below exists; this test is the natural-environment
+        half, not the guarantee.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        vector_env = self._seed_multi_row_vector(hook_env, tmp_path)
+        result = self._run_hook(
+            vector_env, "zzznonmatchingzzz term completely unrelated content"
+        )
+        self._assert_all_multi_row_bullets(result)
+
+    def test_multi_row_vector_metadata_survives_bwk_awk_semantics(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """The same assertion, forced onto the DEPLOYED awk's semantics on
+        every runner via a PATH-prepended shim that refuses a multi-line
+        ``-v`` exactly as BWK awk does.
+
+        This is the test that actually holds the line. Without it the
+        guard above is vacuous on CI's gnu-awk box -- the same blind spot
+        that let athenaeum#1516 ship.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        vector_env = self._seed_multi_row_vector(hook_env, tmp_path)
+        shim_dir = self._awk_shim_dir(tmp_path)
+        vector_env["PATH"] = f"{shim_dir}{os.pathsep}{vector_env['PATH']}"
+
+        result = self._run_hook(
+            vector_env, "zzznonmatchingzzz term completely unrelated content"
+        )
+        assert "newline in string" not in result.stderr, (
+            "the hook still hands a multi-line value to `awk -v` "
+            f"(athenaeum#1516): {result.stderr!r}"
+        )
+        self._assert_all_multi_row_bullets(result)
+
+    def test_vector_meta_is_never_passed_through_awk_dash_v(self) -> None:
+        """Source guard: ``VECTOR_META`` is multi-line by nature, so it may
+        never travel through ``-v`` again (athenaeum#1516). Cheap and
+        interpreter-independent -- it holds even on a runner where both
+        behavioural tests above skip for a missing ``sqlite3``/``jq``.
+        """
+        source = USER_PROMPT.read_text()
+        assert "-v meta=" not in source, (
+            "VECTOR_META must reach awk through awk's own input stream, "
+            "not a `-v` assignment: BWK awk rejects a multi-line `-v` "
+            "outright and emits nothing (athenaeum#1516)"
+        )
+        assert '-v preamble="$PREAMBLE" -v budget="$BUDGET"' in source, (
+            "the budget pass's two `-v` values are audited single-line "
+            "(a static literal and a digits-validated integer); if this "
+            "call site changes shape, re-audit it against athenaeum#1516"
         )
 
     def test_token_cost_increases_with_description(
