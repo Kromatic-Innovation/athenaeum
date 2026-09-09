@@ -317,11 +317,18 @@ class TestCompareInterval:
         instant = (date(2020, 6, 1), date(2020, 6, 2))
         assert compare_interval(window, instant) == Relation.CONTAINS
 
-    def test_both_null_is_unknown_not_separable(self) -> None:
-        # A dimension separates only pairs where at least one side carries a
-        # coordinate (issue athenaeum#714 AC).
-        assert compare_interval(None, None, null_means=NullMeans.UNIVERSAL) == Relation.UNKNOWN
+    def test_both_null_unknown_is_still_unknown(self) -> None:
+        # null_means=unknown: two absent coordinates carry no information that
+        # the pair occupies the same OR different territory -> UNKNOWN
+        # (issue athenaeum#714 AC, unchanged by athenaeum#1483).
         assert compare_interval(None, None, null_means=NullMeans.UNKNOWN) == Relation.UNKNOWN
+
+    def test_both_null_universal_is_equal_not_unknown(self) -> None:
+        # null_means=universal: two claims both valid-always occupy the SAME
+        # territory on this axis -> EQUAL (issue athenaeum#1483's revision of
+        # athenaeum#714's original "UNKNOWN regardless of null_means" — see
+        # _null_relation's docstring for the full reasoning).
+        assert compare_interval(None, None, null_means=NullMeans.UNIVERSAL) == Relation.EQUAL
 
     def test_null_means_universal_contains(self) -> None:
         window = (date(2020, 1, 1), date(2020, 6, 1))
@@ -355,8 +362,12 @@ class TestCompareHierarchy:
     def test_case_and_whitespace_normalized(self) -> None:
         assert compare_hierarchy(" Kromatic/Platform ", "kromatic/platform") == Relation.EQUAL
 
-    def test_both_null_unknown(self) -> None:
-        assert compare_hierarchy(None, None, null_means=NullMeans.UNIVERSAL) == Relation.UNKNOWN
+    def test_both_null_universal_is_equal(self) -> None:
+        # issue athenaeum#1483: both sides scoped-everywhere -> EQUAL, not UNKNOWN.
+        assert compare_hierarchy(None, None, null_means=NullMeans.UNIVERSAL) == Relation.EQUAL
+
+    def test_both_null_unknown_is_still_unknown(self) -> None:
+        assert compare_hierarchy(None, None, null_means=NullMeans.UNKNOWN) == Relation.UNKNOWN
 
     def test_null_means_universal_contains(self) -> None:
         assert (
@@ -431,11 +442,62 @@ class TestCompareIdentity:
         assert compare_identity(None, None) == Relation.UNKNOWN
 
 
+# ---------------------------------------------------------------------------
+# _null_relation both-null decision (issue athenaeum#1483)
+# ---------------------------------------------------------------------------
+
+
+class TestNullRelationBothNullDecision:
+    """Covers the recorded decision in ``_null_relation``'s docstring:
+
+    a dimension with ``null_means=universal`` and BOTH sides null now reads
+    EQUAL (two claims both valid-always / scoped-everywhere occupy the same
+    territory), reversing athenaeum#714's original "UNKNOWN regardless of
+    null_means". A dimension with ``null_means=unknown`` -- ``subject`` in the
+    kernel set -- is UNCHANGED: both-null stays UNKNOWN, because an absent
+    subject on both sides must not be inferred as a co-subject match.
+    """
+
+    def test_universal_both_null_is_equal(self) -> None:
+        from athenaeum.dimensions import _null_relation
+
+        assert _null_relation(True, True, NullMeans.UNIVERSAL) == Relation.EQUAL
+
+    def test_unknown_both_null_is_unknown(self) -> None:
+        from athenaeum.dimensions import _null_relation
+
+        assert _null_relation(True, True, NullMeans.UNKNOWN) == Relation.UNKNOWN
+
+    def test_single_null_side_is_unaffected_by_this_decision(self) -> None:
+        # Only the BOTH-null branch changed; a single null side keeps its
+        # pre-athenaeum#1483 behaviour exactly.
+        from athenaeum.dimensions import _null_relation
+
+        assert _null_relation(True, False, NullMeans.UNIVERSAL) == Relation.CONTAINS
+        assert _null_relation(False, True, NullMeans.UNIVERSAL) == Relation.CONTAINS
+        assert _null_relation(True, False, NullMeans.UNKNOWN) == Relation.UNKNOWN
+        assert _null_relation(False, True, NullMeans.UNKNOWN) == Relation.UNKNOWN
+
+    def test_valid_time_and_scope_are_universal_subject_is_unknown(self) -> None:
+        # Ties the decision to the actual kernel dimensions it applies to
+        # (issue athenaeum#1483's own reasoning): valid-time and scope move to
+        # EQUAL on both-null; subject must stay UNKNOWN.
+        from athenaeum.dimensions import compare
+
+        assert VALID_TIME.null_means == NullMeans.UNIVERSAL
+        assert SCOPE.null_means == NullMeans.UNIVERSAL
+        assert SUBJECT.null_means == NullMeans.UNKNOWN
+        assert compare(VALID_TIME, None, None) == Relation.EQUAL
+        assert compare(SCOPE, None, None) == Relation.EQUAL
+        assert compare(SUBJECT, None, None) == Relation.UNKNOWN
+
+
 class TestCompareDispatch:
     def test_compare_dispatches_per_kind(self) -> None:
         from athenaeum.dimensions import compare
 
-        assert compare(VALID_TIME, None, None) == Relation.UNKNOWN
+        # VALID_TIME is null_means=universal -> both-null is EQUAL (athenaeum#1483).
+        assert compare(VALID_TIME, None, None) == Relation.EQUAL
         hierarchy_dim = Dimension(name="x", kind=DimensionKind.HIERARCHY)
         assert compare(hierarchy_dim, "a", "a") == Relation.EQUAL
         enum_dim = Dimension(name="y", kind=DimensionKind.ENUM, values=("a", "b"))

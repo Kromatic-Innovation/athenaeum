@@ -201,7 +201,7 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
             "Also migrate the name-is-an-email population (issue athenaeum#505): a page "
             "whose name:/preferred_name: IS an email address (the athenaeum#502 carve-"
             "out) is renamed to a display name derived from the local-part "
-            "(e.g. jane.doe@acme.com -> 'Jane Doe'), the address is moved to "
+            "(e.g. jane.doe@example.com -> 'Jane Doe'), the address is moved to "
             "the excluded contact record, and inbound [[wikilink]]s are "
             "rewritten to the new slug. An ambiguous local-part (role address, "
             "+tag, initial-blob, numeric/opaque) is left unrenamed and counted "

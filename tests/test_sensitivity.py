@@ -54,13 +54,13 @@ def _isolate_registered_recognizers() -> None:
 
 class TestShapes:
     def test_sensitivity_match_is_a_frozen_dataclass(self) -> None:
-        m = SensitivityMatch(recognizer="email", value="a@b.com", field=None, span=(0, 7))
-        assert (m.recognizer, m.value, m.field, m.span) == ("email", "a@b.com", None, (0, 7))
+        m = SensitivityMatch(recognizer="email", value="a@example.com", field=None, span=(0, 7))
+        assert (m.recognizer, m.value, m.field, m.span) == ("email", "a@example.com", None, (0, 7))
         with pytest.raises(Exception):
             m.value = "changed"  # type: ignore[misc]
 
     def test_sensitivity_match_field_and_span_default_none(self) -> None:
-        m = SensitivityMatch(recognizer="email", value="a@b.com")
+        m = SensitivityMatch(recognizer="email", value="a@example.com")
         assert m.field is None
         assert m.span is None
 
@@ -203,9 +203,9 @@ class TestBuiltinRegistrationCall:
 class TestEmailRecognizer:
     def test_detects_emails_with_spans(self) -> None:
         rec = available_recognizers(None)["email"]
-        text = "reach alice@example.com or bob@test.co"
+        text = "reach alice@example.com or bob@example.com"
         matches = rec.detect(text=text, frontmatter=None)
-        assert [m.value for m in matches] == ["alice@example.com", "bob@test.co"]
+        assert [m.value for m in matches] == ["alice@example.com", "bob@example.com"]
         for m in matches:
             assert m.recognizer == "email"
             assert m.span is not None
@@ -412,7 +412,7 @@ class TestPiiModuleUntouched:
     def test_pii_public_detectors_still_importable_and_unchanged_shape(self) -> None:
         from athenaeum.pii import find_inline_emails, find_inline_phones
 
-        assert find_inline_emails("a@b.com") == ["a@b.com"]
+        assert find_inline_emails("a@example.com") == ["a@example.com"]
         assert find_inline_phones("call +1-555-0100 now") == ["+1-555-0100"]
 
 

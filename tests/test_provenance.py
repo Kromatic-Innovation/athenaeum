@@ -174,15 +174,15 @@ class TestPerValueFieldSources:
 
     def test_parse_basic_per_value_list(self) -> None:
         v = [
-            {"value": "a@x.com", "source": "api:apollo:2026-04-29"},
-            {"value": "b@y.com", "source": "linkedin:tristankromer"},
+            {"value": "a@example.com", "source": "api:apollo:2026-04-29"},
+            {"value": "b@example.net", "source": "linkedin:tristankromer"},
         ]
         assert parse_per_value_field_sources(v) is v
 
     def test_parse_per_value_with_dict_source(self) -> None:
         v = [
             {
-                "value": "a@x.com",
+                "value": "a@example.com",
                 "source": {"type": "api", "ref": "apollo", "confidence": 0.9},
             },
         ]
@@ -207,29 +207,29 @@ class TestPerValueFieldSources:
 
     def test_missing_source_key_raises(self) -> None:
         with pytest.raises(ValueError):
-            parse_per_value_field_sources([{"value": "a@x.com"}])
+            parse_per_value_field_sources([{"value": "a@example.com"}])
 
     def test_extra_keys_rejected(self) -> None:
         with pytest.raises(ValueError):
             parse_per_value_field_sources(
-                [{"value": "a@x.com", "source": "api:apollo", "ts": "2026"}]
+                [{"value": "a@example.com", "source": "api:apollo", "ts": "2026"}]
             )
 
     def test_bad_source_raises(self) -> None:
         with pytest.raises(ValueError):
             parse_per_value_field_sources(
-                [{"value": "a@x.com", "source": "Has-Uppercase"}]
+                [{"value": "a@example.com", "source": "Has-Uppercase"}]
             )
 
     def test_non_list_raises(self) -> None:
         with pytest.raises(ValueError):
-            parse_per_value_field_sources({"value": "a@x.com", "source": "api:apollo"})
+            parse_per_value_field_sources({"value": "a@example.com", "source": "api:apollo"})
 
     def test_validate_field_sources_accepts_per_value(self) -> None:
         v = {
             "emails": [
-                {"value": "a@x.com", "source": "api:apollo:2026"},
-                {"value": "b@y.com", "source": "linkedin:foo"},
+                {"value": "a@example.com", "source": "api:apollo:2026"},
+                {"value": "b@example.net", "source": "linkedin:foo"},
             ]
         }
         assert validate_field_sources(v) is v
@@ -240,14 +240,14 @@ class TestPerValueFieldSources:
         v = {
             "current_title": "linkedin:foo",
             "emails": [
-                {"value": "a@x.com", "source": "api:apollo:2026"},
+                {"value": "a@example.com", "source": "api:apollo:2026"},
             ],
         }
         assert validate_field_sources(v) is v
 
     def test_validate_field_sources_per_value_invalid_record(self) -> None:
         with pytest.raises(ValueError):
-            validate_field_sources({"emails": [{"value": "a@x.com"}]})  # missing source
+            validate_field_sources({"emails": [{"value": "a@example.com"}]})  # missing source
 
 
 class TestSourceRefToScalar:

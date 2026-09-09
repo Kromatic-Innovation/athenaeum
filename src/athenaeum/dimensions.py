@@ -472,14 +472,32 @@ def _null_relation(a_is_none: bool, b_is_none: bool, null_means: str) -> str | N
     """Return the relation dictated by null handling, or ``None`` to mean
     "both sides are present — proceed with the kind-specific comparison."
 
-    Issue athenaeum#714 AC: two claims both null on a dimension are NOT separable
-    by it (a dimension separates only pairs where at least one side carries a
-    coordinate) -> UNKNOWN regardless of ``null_means``. A single null side
-    resolves per ``null_means``: ``universal`` -> the null side is understood
-    to contain any value (CONTAINS); ``unknown`` -> UNKNOWN.
+    **Both-null decision (issue athenaeum#1483, revising athenaeum#714's original
+    "UNKNOWN regardless of null_means"):** a dimension whose ``null_means`` is
+    ``universal`` treats an absent coordinate as "this claim holds everywhere on
+    this axis" -- so when BOTH sides are absent, both sides assert the SAME
+    universal territory, which is EQUAL, not UNKNOWN. Concretely: two claims that
+    are both valid-always (``valid-time``) or both scoped-everywhere (``scope``)
+    occupy the same territory on that axis; treating that pair as "unknown
+    whether they occupy the same territory" was never the intended reading of
+    ``universal`` -- it was an oversight from writing the both-null branch before
+    considering ``null_means`` at all.
+    ``unknown`` keeps the original behaviour: two absent coordinates carry no
+    information that the pair occupies the same OR different territory, so the
+    dimension is genuinely NOT separable by it -> UNKNOWN. This is deliberate for
+    ``subject``, whose null_means is ``unknown``: two claims with no recorded
+    subject must NOT be inferred co-subject just because neither named one --
+    that would silently launder an absent identity into an asserted match. So
+    ``subject`` stays UNKNOWN on both-null; only ``valid-time`` and ``scope``
+    (the two kernel dimensions declared ``null_means=universal``) move to EQUAL.
+    A single null side (one present, one absent) is unaffected by this decision
+    and keeps resolving per ``null_means`` as before: ``universal`` -> the null
+    side is understood to contain any value (CONTAINS); ``unknown`` -> UNKNOWN.
+    See ``tests/test_dimensions.py::TestNullRelationBothNullDecision`` for the
+    covering tests.
     """
     if a_is_none and b_is_none:
-        return Relation.UNKNOWN
+        return Relation.EQUAL if null_means == NullMeans.UNIVERSAL else Relation.UNKNOWN
     if a_is_none or b_is_none:
         return Relation.CONTAINS if null_means == NullMeans.UNIVERSAL else Relation.UNKNOWN
     return None
