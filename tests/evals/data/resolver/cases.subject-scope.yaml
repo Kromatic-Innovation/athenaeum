@@ -83,14 +83,15 @@
     action_class: keep_pick_winner
   detector:
     conflict_type: prescriptive
-    rationale: Conflicting claims about which platform hosts Thornhollow's client portal.
+    rationale: Conflicting claims about which platform hosts Thornhollow's client
+      portal.
     passages:
     - Thornhollow's client portal runs on Hostmoor.
     - Thornhollow migrated the client portal to Fly.io.
   members:
   - filename: project_hosting_hostmoor.md
-    body: Thornhollow's client portal runs on Hostmoor. Priya approved the Hostmoor hosting
-      plan and signed the invoice on 2026-02-10.
+    body: Thornhollow's client portal runs on Hostmoor. Priya approved the Hostmoor
+      hosting plan and signed the invoice on 2026-02-10.
     frontmatter:
       name: hosting-hostmoor
       type: project
@@ -249,8 +250,8 @@
       subject: tickets
       claimed_scope: tickets
   - filename: feedback_tickets_ticketwell_exception.md
-    body: Support-desk bug reports are logged in Ticketwell, not Linear — this is the
-      support-intake exception to the general Linear-for-engineering rule.
+    body: Support-desk bug reports are logged in Ticketwell, not Linear — this is
+      the support-intake exception to the general Linear-for-engineering rule.
     frontmatter:
       name: tickets-ticketwell-exception
       type: feedback
