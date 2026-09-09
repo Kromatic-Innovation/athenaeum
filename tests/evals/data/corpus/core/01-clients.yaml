@@ -1,0 +1,118 @@
+# Clients and engagements.
+
+- uid: client-alderway
+  type: company
+  name: Alderway Advisory
+  aliases: [Alderway]
+  tags: [client, retainer]
+  source_ref: "session-2026-01-08"
+  created: 2026-01-08
+  links: [person-priya-shah, project-portal-refresh]
+  body: |
+    # Alderway Advisory
+
+    Alderway Advisory is a 12-person strategy consultancy on a monthly
+    retainer. Client lead: Priya Shah. Alderway is the firm's largest retainer
+    client by revenue and the sponsor of the client portal refresh.
+
+- uid: client-bluewater
+  type: company
+  name: Bluewater Marine
+  aliases: [Bluewater]
+  tags: [client, retainer]
+  source_ref: "session-2026-04-02"
+  created: 2026-04-02
+  links: [person-elias-mbeki, policy-invoice-cadence]
+  body: |
+    # Bluewater Marine
+
+    Bluewater Marine is a coastal logistics operator on a six-month retainer.
+    Client lead: Elias Mbeki.
+
+    Retainer terms, verbatim: "Twelve consulting days per month, billed
+    monthly in arrears, with unused days carried forward for one month only
+    and forfeited thereafter."
+
+- uid: client-acme
+  type: company
+  name: Acme Fabrication
+  aliases: [Acme]
+  tags: [client, project-based]
+  source_ref: "session-2026-02-17"
+  created: 2026-02-17
+  links: [policy-invoice-cadence]
+  body: |
+    # Acme Fabrication
+
+    Acme Fabrication is a project-based client, not on retainer. Acme is a
+    documented exception to the standard invoice cadence: they are billed on
+    milestone completion rather than monthly.
+
+- uid: client-castleford
+  type: company
+  name: Castleford Group
+  aliases: [Castleford]
+  tags: [client, retainer]
+  source_ref: "session-2026-03-08"
+  created: 2026-03-08
+  body: |
+    # Castleford Group
+
+    Castleford Group is a property developer on a quarterly advisory retainer.
+    Engagement is limited to board-level advisory; no delivery work.
+
+- uid: client-northgate
+  type: company
+  name: Northgate Health
+  aliases: [Northgate]
+  tags: [client, project-based]
+  source_ref: "session-2026-05-22"
+  created: 2026-05-22
+  links: [policy-confidentiality]
+  body: |
+    # Northgate Health
+
+    Northgate Health is a private healthcare provider engaged for an
+    operational review. Their engagement carries additional confidentiality
+    terms beyond the firm's standard.
+
+- uid: client-verity
+  type: company
+  name: Verity Partners
+  aliases: [Verity]
+  tags: [client, former]
+  source_ref: "session-2026-01-30"
+  created: 2026-01-30
+  body: |
+    # Verity Partners
+
+    Verity Partners was a retainer client through 2025. The engagement ended by
+    mutual agreement in January 2026 and has not been renewed.
+
+- uid: client-atlas
+  type: company
+  name: Atlas Freight
+  aliases: [Atlas]
+  tags: [client, retainer]
+  source_ref: "session-2026-03-02"
+  created: 2026-03-02
+  links: [policy-onboarding]
+  body: |
+    # Atlas Freight
+
+    Atlas Freight is a haulage operator on a monthly retainer. The Atlas
+    onboarding review is what prompted the change to the firm's standard
+    onboarding process.
+
+- uid: client-solent
+  type: company
+  name: Solent Analytics
+  aliases: [Solent]
+  tags: [client, prospect]
+  source_ref: "session-2026-06-10"
+  created: 2026-06-10
+  body: |
+    # Solent Analytics
+
+    Solent Analytics is a prospect, not yet a client. A proposal was issued in
+    June 2026 and is awaiting response. No work has been performed.

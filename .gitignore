@@ -54,3 +54,7 @@ uv.lock
 
 # Internal agent run-logs — never ship in the sdist (v0.20.0 release gate)
 .tmp/
+
+# Eval-corpus shape reports: derived from a local knowledge tree, never committed.
+# See tests/evals/data/corpus/README.md and scripts/measure_corpus_shape.py.
+tests/evals/data/corpus/corpus-shape*.md
