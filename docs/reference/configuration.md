@@ -1630,6 +1630,37 @@ in `ts` is broken by push records before reference records, then by each
 underlying ledger's own on-disk (append) order — deterministic, never an
 arbitrary interleaving.
 
+### `viewer` — read-only recall dashboard (issue athenaeum#1480)
+
+`athenaeum viewer [--session ID] [--port N] [--path PATH] [--cache-dir DIR]`
+serves one localhost-only, read-only HTML page showing, for a single
+session, three columns: **pushed unbidden** (hook/sidecar-sourced push
+records), **pulled deliberately** (push records with no `source` key — an
+explicit MCP `recall` call), and **overlap** (ids appearing in both). Each
+row shows id, tier, scope, memory tier, estimated token cost, and whether
+reference determination marked the id referenced — rendered as `pending`,
+not a misleading `no`, when no reference-determination record has landed for
+the session yet.
+
+**Consumes the `push-metrics tail --json` contract above — never a ledger
+file directly.** The viewer spawns `push-metrics tail --json` as a
+subprocess and parses its NDJSON stdout, exactly the surface any external
+consumer would use; it holds no private shortcut into
+`_push_records.jsonl` / `_push_references.jsonl`. Being the contract's
+first consumer is what keeps the contract honest.
+
+**Localhost-only, read-only, zero new dependencies.** The HTTP server binds
+`127.0.0.1` explicitly (`--port 0` lets the OS assign a free port) and
+serves exactly two `GET` routes — the static page and its `/data.json` feed.
+There is no route that accepts a body or writes anything. Built on stdlib
+`http.server` plus one static HTML file (vanilla JS, no framework) — the
+`pyproject.toml` dependency list is unaffected.
+
+**`--session ID`** is strongly recommended for the same reason `push-metrics
+tail --session` documents above: without it, the view includes every
+session in the ledger, and if the viewer's own process ever triggers a
+recall call its own activity would appear mixed in.
+
 ## LLM schema-observation ledger (athenaeum#570 / athenaeum#724)
 
 Every in-scope LLM contract's response is validated **observe-only** against a

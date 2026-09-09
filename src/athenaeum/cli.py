@@ -144,6 +144,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "drain": ("athenaeum._cmd_drain", "add_drain_subparser"),
     "storage": ("athenaeum._cmd_storage", "add_storage_subparser"),
     "push-metrics": ("athenaeum._cmd_push_metrics", "add_push_metrics_subparser"),
+    "viewer": ("athenaeum._cmd_viewer", "add_viewer_subparser"),
     "usage-report": ("athenaeum._cmd_usage_report", "add_usage_report_subparser"),
     "measure": ("athenaeum._cmd_measure", "add_measure_subparser"),
     "memory-class": ("athenaeum._cmd_memory_class", "add_memory_class_subparser"),
@@ -203,6 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
     from athenaeum._cmd_usage_report import add_usage_report_subparser
     from athenaeum._cmd_verdicts import add_verdicts_subparser
+    from athenaeum._cmd_viewer import add_viewer_subparser
 
     parser = argparse.ArgumentParser(
         prog="athenaeum",
@@ -243,6 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_drain_subparser(subparsers)  # drain
     add_storage_subparser(subparsers)  # storage
     add_push_metrics_subparser(subparsers)  # push-metrics
+    add_viewer_subparser(subparsers)  # viewer (issue athenaeum#1480)
     add_usage_report_subparser(subparsers)  # usage-report (issue athenaeum#968)
     add_measure_subparser(subparsers)  # measure (shadow-linkage, backlog-price, ordinary-night)
     add_memory_class_subparser(subparsers)  # memory-class backfill

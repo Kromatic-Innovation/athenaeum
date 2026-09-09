@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>athenaeum viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    margin: 2rem;
+    color: rgb(30, 30, 30);
+    background: rgb(255, 255, 255);
+  }
+  h1 { font-size: 1.3rem; margin-bottom: 0.25rem; }
+  .meta { color: rgb(90, 90, 90); font-size: 0.85rem; margin-bottom: 1rem; }
+  .notice {
+    border: 1px solid rgb(210, 180, 90);
+    background: rgb(255, 248, 225);
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+  }
+  .error {
+    border: 1px solid rgb(200, 90, 90);
+    background: rgb(255, 235, 235);
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+  }
+  .columns {
+    display: flex;
+    gap: 1.25rem;
+    align-items: flex-start;
+  }
+  .column {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid rgb(220, 220, 220);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .column h2 {
+    font-size: 0.95rem;
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    background: rgb(245, 245, 245);
+    border-bottom: 1px solid rgb(220, 220, 220);
+  }
+  .column .count {
+    font-weight: normal;
+    color: rgb(110, 110, 110);
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  th, td {
+    text-align: left;
+    padding: 0.35rem 0.5rem;
+    border-bottom: 1px solid rgb(235, 235, 235);
+    word-break: break-word;
+  }
+  th { color: rgb(110, 110, 110); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  .empty-row td { color: rgb(150, 150, 150); font-style: italic; }
+  .ref-yes { color: rgb(30, 120, 60); }
+  .ref-no { color: rgb(160, 60, 60); }
+  .ref-pending { color: rgb(140, 140, 140); }
+</style>
+</head>
+<body>
+  <h1>athenaeum viewer</h1>
+  <div class="meta" id="session-meta">loading...</div>
+  <div id="notice-area"></div>
+  <div class="columns">
+    <section class="column" id="col-unbidden">
+      <h2>Pushed unbidden <span class="count" id="count-unbidden"></span></h2>
+      <table>
+        <thead>
+          <tr><th>id</th><th>tier</th><th>scope</th><th>memory tier</th><th>tokens (est.)</th><th>referenced</th></tr>
+        </thead>
+        <tbody id="rows-unbidden"></tbody>
+      </table>
+    </section>
+    <section class="column" id="col-deliberate">
+      <h2>Pulled deliberately <span class="count" id="count-deliberate"></span></h2>
+      <table>
+        <thead>
+          <tr><th>id</th><th>tier</th><th>scope</th><th>memory tier</th><th>tokens (est.)</th><th>referenced</th></tr>
+        </thead>
+        <tbody id="rows-deliberate"></tbody>
+      </table>
+    </section>
+    <section class="column" id="col-overlap">
+      <h2>Overlap <span class="count" id="count-overlap"></span></h2>
+      <table>
+        <thead>
+          <tr><th>id</th><th>tier</th><th>scope</th><th>memory tier</th><th>tokens (est.)</th><th>referenced</th></tr>
+        </thead>
+        <tbody id="rows-overlap"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <script>
+    function referencedLabel(referenced) {
+      if (referenced === true) { return { text: "yes", cls: "ref-yes" }; }
+      if (referenced === false) { return { text: "no", cls: "ref-no" }; }
+      return { text: "pending", cls: "ref-pending" };
+    }
+
+    function renderRows(tbodyId, rows) {
+      var tbody = document.getElementById(tbodyId);
+      tbody.innerHTML = "";
+      if (!rows || rows.length === 0) {
+        var emptyRow = document.createElement("tr");
+        emptyRow.className = "empty-row";
+        var cell = document.createElement("td");
+        cell.colSpan = 6;
+        cell.textContent = "(none yet)";
+        emptyRow.appendChild(cell);
+        tbody.appendChild(emptyRow);
+        return;
+      }
+      rows.forEach(function (row) {
+        var tr = document.createElement("tr");
+        var label = referencedLabel(row.referenced);
+        var cells = [
+          row.id || "",
+          row.tier || "",
+          row.scope || "",
+          row.memory_tier || "",
+          typeof row.token_cost === "number" ? String(row.token_cost) : "",
+        ];
+        cells.forEach(function (text) {
+          var td = document.createElement("td");
+          td.textContent = text;
+          tr.appendChild(td);
+        });
+        var refCell = document.createElement("td");
+        refCell.textContent = label.text;
+        refCell.className = label.cls;
+        tr.appendChild(refCell);
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderNotice(payload) {
+      var area = document.getElementById("notice-area");
+      area.innerHTML = "";
+      if (!payload.has_reference_determination) {
+        var div = document.createElement("div");
+        div.className = "notice";
+        div.textContent =
+          "No reference determination has run for this session yet " +
+          "(this is the common case mid-session) -- the referenced " +
+          "column reads pending rather than a precision figure " +
+          "until session end computes it.";
+        area.appendChild(div);
+      }
+    }
+
+    function renderError(message) {
+      var area = document.getElementById("notice-area");
+      area.innerHTML = "";
+      var div = document.createElement("div");
+      div.className = "error";
+      div.textContent = message;
+      area.appendChild(div);
+    }
+
+    function render(payload) {
+      var meta = document.getElementById("session-meta");
+      meta.textContent = payload.session_id
+        ? "session: " + payload.session_id
+        : "session: (unscoped -- includes every session in the ledger)";
+      renderNotice(payload);
+      renderRows("rows-unbidden", payload.pushed_unbidden);
+      renderRows("rows-deliberate", payload.pulled_deliberately);
+      renderRows("rows-overlap", payload.overlap);
+      document.getElementById("count-unbidden").textContent =
+        "(" + (payload.pushed_unbidden || []).length + ")";
+      document.getElementById("count-deliberate").textContent =
+        "(" + (payload.pulled_deliberately || []).length + ")";
+      document.getElementById("count-overlap").textContent =
+        "(" + (payload.overlap || []).length + ")";
+    }
+
+    fetch("data.json")
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("data.json responded with status " + response.status);
+        }
+        return response.json();
+      })
+      .then(render)
+      .catch(function (err) {
+        document.getElementById("session-meta").textContent = "";
+        renderError("Could not load recall data: " + err.message);
+      });
+  </script>
+</body>
+</html>
