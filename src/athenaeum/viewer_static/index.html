@@ -5,139 +5,256 @@
 <title>athenaeum viewer</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
+  :root {
+    --ink: rgb(28, 28, 30);
+    --muted: rgb(110, 110, 116);
+    --line: rgb(224, 224, 228);
+    --panel: rgb(248, 248, 250);
+    /* The four states. Light green = the sidecar offered it and the session
+       took it. Dark green = the session followed a thread the push started.
+       Red = the session found it with no help. Plain = offered, not taken. */
+    --pushed-recalled: rgb(214, 245, 219);
+    --breadcrumb: rgb(122, 178, 134);
+    --pulled-cold: rgb(255, 226, 226);
+  }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-    margin: 2rem;
-    color: rgb(30, 30, 30);
+    margin: 1.5rem;
+    color: var(--ink);
     background: rgb(255, 255, 255);
   }
-  h1 { font-size: 1.3rem; margin-bottom: 0.25rem; }
-  .meta { color: rgb(90, 90, 90); font-size: 0.85rem; margin-bottom: 1rem; }
-  .notice {
-    border: 1px solid rgb(210, 180, 90);
-    background: rgb(255, 248, 225);
-    padding: 0.5rem 0.75rem;
-    margin-bottom: 1rem;
-    font-size: 0.85rem;
+  h1 { font-size: 1.25rem; margin: 0 0 0.2rem; }
+  h2 { font-size: 0.95rem; margin: 0; padding: 0.55rem 0.75rem;
+       background: var(--panel); border-bottom: 1px solid var(--line); }
+  .meta { color: var(--muted); font-size: 0.85rem; margin-bottom: 0.9rem; }
+  .count { font-weight: normal; color: var(--muted); }
+  section { border: 1px solid var(--line); border-radius: 6px;
+            overflow: hidden; margin-bottom: 1.1rem; }
+  .notice, .error {
+    padding: 0.5rem 0.75rem; margin-bottom: 0.9rem; font-size: 0.85rem;
+    border: 1px solid rgb(210, 180, 90); background: rgb(255, 248, 225);
   }
-  .error {
-    border: 1px solid rgb(200, 90, 90);
-    background: rgb(255, 235, 235);
-    padding: 0.5rem 0.75rem;
-    margin-bottom: 1rem;
-    font-size: 0.85rem;
-  }
-  .columns {
-    display: flex;
-    gap: 1.25rem;
-    align-items: flex-start;
-  }
-  .column {
-    flex: 1;
-    min-width: 0;
-    border: 1px solid rgb(220, 220, 220);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-  .column h2 {
-    font-size: 0.95rem;
-    margin: 0;
-    padding: 0.6rem 0.75rem;
-    background: rgb(245, 245, 245);
-    border-bottom: 1px solid rgb(220, 220, 220);
-  }
-  .column .count {
-    font-weight: normal;
-    color: rgb(110, 110, 110);
-  }
-  table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-  th, td {
-    text-align: left;
-    padding: 0.35rem 0.5rem;
-    border-bottom: 1px solid rgb(235, 235, 235);
-    word-break: break-word;
-  }
-  th { color: rgb(110, 110, 110); font-weight: 600; }
+  .error { border-color: rgb(200, 90, 90); background: rgb(255, 235, 235); }
+
+  /* Legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 0.9rem;
+            padding: 0.6rem 0.75rem; font-size: 0.78rem; color: var(--muted);
+            border-bottom: 1px solid var(--line); }
+  .legend span { display: flex; align-items: center; gap: 0.35rem; }
+  .swatch { width: 0.85rem; height: 0.85rem; border: 1px solid var(--line);
+            border-radius: 3px; display: inline-block; }
+  .swatch.pushed { background: rgb(255, 255, 255); }
+  .swatch.pushed-recalled { background: var(--pushed-recalled); }
+  .swatch.breadcrumb { background: var(--breadcrumb); }
+  .swatch.pulled-cold { background: var(--pulled-cold); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  th, td { text-align: left; padding: 0.4rem 0.6rem;
+           border-bottom: 1px solid rgb(240, 240, 242); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.75rem;
+       text-transform: uppercase; letter-spacing: 0.03em; }
   tr:last-child td { border-bottom: none; }
+
+  tr.pushed-recalled { background: var(--pushed-recalled); }
+  tr.breadcrumb { background: var(--breadcrumb); }
+  /* Dark green needs light text to stay readable. */
+  tr.breadcrumb, tr.breadcrumb .desc, tr.breadcrumb .uid { color: rgb(255, 255, 255); }
+  tr.pulled-cold { background: var(--pulled-cold); }
+
+  tr.page-row { cursor: pointer; }
+  tr.page-row:hover { outline: 2px solid rgb(90, 140, 220); outline-offset: -2px; }
+  tr.in-last-turn td:first-child { box-shadow: inset 3px 0 0 rgb(90, 140, 220); }
+
+  .name { font-weight: 600; }
+  .desc { color: rgb(70, 70, 76); display: block; margin-top: 0.15rem;
+          font-size: 0.78rem; }
+  .uid { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+         font-size: 0.72rem; color: var(--muted); }
+  .unresolved { font-style: italic; color: rgb(150, 60, 60); }
   .empty-row td { color: rgb(150, 150, 150); font-style: italic; }
-  .ref-yes { color: rgb(30, 120, 60); }
-  .ref-no { color: rgb(160, 60, 60); }
-  .ref-pending { color: rgb(140, 140, 140); }
+  .topics-missing { color: var(--muted); font-style: italic; }
+  .turn-meta { padding: 0.5rem 0.75rem; font-size: 0.8rem; color: var(--muted);
+               border-bottom: 1px solid var(--line); }
+  #toast { position: fixed; bottom: 1rem; right: 1rem; padding: 0.5rem 0.8rem;
+           background: rgb(40, 40, 44); color: white; border-radius: 5px;
+           font-size: 0.8rem; display: none; }
 </style>
 </head>
 <body>
   <h1>athenaeum viewer</h1>
   <div class="meta" id="session-meta">loading...</div>
   <div id="notice-area"></div>
-  <div class="columns">
-    <section class="column" id="col-unbidden">
-      <h2>Pushed unbidden <span class="count" id="count-unbidden"></span></h2>
-      <table>
-        <thead>
-          <tr><th>id</th><th>tier</th><th>scope</th><th>memory tier</th><th>tokens (est.)</th><th>referenced</th></tr>
-        </thead>
-        <tbody id="rows-unbidden"></tbody>
-      </table>
-    </section>
-    <section class="column" id="col-deliberate">
-      <h2>Pulled deliberately <span class="count" id="count-deliberate"></span></h2>
-      <table>
-        <thead>
-          <tr><th>id</th><th>tier</th><th>scope</th><th>memory tier</th><th>tokens (est.)</th><th>referenced</th></tr>
-        </thead>
-        <tbody id="rows-deliberate"></tbody>
-      </table>
-    </section>
-    <section class="column" id="col-overlap">
-      <h2>Overlap <span class="count" id="count-overlap"></span></h2>
-      <table>
-        <thead>
-          <tr><th>id</th><th>tier</th><th>scope</th><th>memory tier</th><th>tokens (est.)</th><th>referenced</th></tr>
-        </thead>
-        <tbody id="rows-overlap"></tbody>
-      </table>
-    </section>
-  </div>
+
+  <section id="last-turn">
+    <h2>Last turn <span class="count" id="turn-count"></span></h2>
+    <div class="turn-meta" id="turn-meta"></div>
+    <table>
+      <thead>
+        <tr><th>page</th><th>memory tier</th><th>tokens</th></tr>
+      </thead>
+      <tbody id="rows-turn"></tbody>
+    </table>
+  </section>
+
+  <section id="all-pages">
+    <h2>All pages this session <span class="count" id="count-pages"></span></h2>
+    <div class="legend">
+      <span><i class="swatch pushed"></i> pushed, not pulled</span>
+      <span><i class="swatch pushed-recalled"></i> pushed then pulled</span>
+      <span><i class="swatch breadcrumb"></i> pulled via a pushed page's link</span>
+      <span><i class="swatch pulled-cold"></i> pulled with no sidecar involvement</span>
+      <span>&mdash; click any row to open it</span>
+    </div>
+    <table>
+      <thead>
+        <tr><th>page</th><th>state</th><th>memory tier</th><th>tokens</th></tr>
+      </thead>
+      <tbody id="rows-pages"></tbody>
+    </table>
+  </section>
+
+  <div id="toast"></div>
 
   <script>
-    function referencedLabel(referenced) {
-      if (referenced === true) { return { text: "yes", cls: "ref-yes" }; }
-      if (referenced === false) { return { text: "no", cls: "ref-no" }; }
-      return { text: "pending", cls: "ref-pending" };
+    var NONCE = "__VIEWER_NONCE_PLACEHOLDER__";
+
+    var STATE_LABEL = {
+      "pushed": "pushed",
+      "pushed-recalled": "pushed → pulled",
+      "breadcrumb": "breadcrumb",
+      "pulled-cold": "pulled cold"
+    };
+
+    function toast(message) {
+      var el = document.getElementById("toast");
+      el.textContent = message;
+      el.style.display = "block";
+      window.setTimeout(function () { el.style.display = "none"; }, 3200);
     }
 
-    function renderRows(tbodyId, rows) {
-      var tbody = document.getElementById(tbodyId);
+    function pageCell(row) {
+      var td = document.createElement("td");
+      if (row.resolved) {
+        var name = document.createElement("span");
+        name.className = "name";
+        // A resolved page always gets a title: the server falls back through
+        // frontmatter name -> first heading -> filename stem. Rendering
+        // "no page found" for a nameless page would be a different and wrong
+        // claim about a file that is sitting right there.
+        name.textContent = row.name || row.id;
+        td.appendChild(name);
+      } else {
+        var unresolved = document.createElement("span");
+        unresolved.className = "unresolved";
+        // Never a blank cell: "we recorded a push and can no longer say what
+        // it was" is information, and looks nothing like an empty row.
+        unresolved.textContent = "(no page found for this id)";
+        td.appendChild(unresolved);
+      }
+      if (row.description) {
+        var desc = document.createElement("span");
+        desc.className = "desc";
+        desc.textContent = row.description;
+        td.appendChild(desc);
+      }
+      var uid = document.createElement("span");
+      uid.className = "desc uid";
+      uid.textContent = row.id || "";
+      td.appendChild(uid);
+      return td;
+    }
+
+    function textCell(text) {
+      var td = document.createElement("td");
+      td.textContent = text == null ? "" : String(text);
+      return td;
+    }
+
+    function openPage(uid) {
+      fetch("open", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uid: uid, nonce: NONCE })
+      })
+        .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+        .then(function (res) {
+          if (!res.ok) { toast("Could not open: " + (res.body.error || "unknown error")); }
+        })
+        .catch(function (err) { toast("Could not open: " + err.message); });
+    }
+
+    function renderPages(rows, lastTurnIds) {
+      var tbody = document.getElementById("rows-pages");
       tbody.innerHTML = "";
       if (!rows || rows.length === 0) {
-        var emptyRow = document.createElement("tr");
-        emptyRow.className = "empty-row";
+        var empty = document.createElement("tr");
+        empty.className = "empty-row";
         var cell = document.createElement("td");
-        cell.colSpan = 6;
-        cell.textContent = "(none yet)";
-        emptyRow.appendChild(cell);
-        tbody.appendChild(emptyRow);
+        cell.colSpan = 4;
+        cell.textContent = "(nothing recalled yet this session)";
+        empty.appendChild(cell);
+        tbody.appendChild(empty);
         return;
       }
       rows.forEach(function (row) {
         var tr = document.createElement("tr");
-        var label = referencedLabel(row.referenced);
-        var cells = [
-          row.id || "",
-          row.tier || "",
-          row.scope || "",
-          row.memory_tier || "",
-          typeof row.token_cost === "number" ? String(row.token_cost) : "",
-        ];
-        cells.forEach(function (text) {
-          var td = document.createElement("td");
-          td.textContent = text;
-          tr.appendChild(td);
-        });
-        var refCell = document.createElement("td");
-        refCell.textContent = label.text;
-        refCell.className = label.cls;
-        tr.appendChild(refCell);
+        tr.className = "page-row " + (row.classification || "");
+        if (lastTurnIds[row.id]) { tr.className += " in-last-turn"; }
+        tr.appendChild(pageCell(row));
+        tr.appendChild(textCell(STATE_LABEL[row.classification] || row.classification));
+        tr.appendChild(textCell(row.memory_tier));
+        tr.appendChild(textCell(row.token_cost));
+        if (row.resolved) {
+          tr.addEventListener("click", function () { openPage(row.id); });
+        }
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderLastTurn(turn) {
+      var meta = document.getElementById("turn-meta");
+      var tbody = document.getElementById("rows-turn");
+      tbody.innerHTML = "";
+      meta.innerHTML = "";
+
+      if (!turn || !turn.present) {
+        meta.textContent = "No unprompted push recorded for this session yet.";
+        document.getElementById("turn-count").textContent = "";
+        return;
+      }
+
+      var topics = document.createElement("div");
+      if (turn.topics_status === "not_instrumented") {
+        topics.className = "topics-missing";
+        // Explicit, not an empty box: an empty box reads as "the sidecar
+        // thought nothing", which is a different and wrong claim.
+        topics.textContent =
+          "What the sidecar thought was being discussed: not instrumented yet " +
+          "— push records keep only a query hash (athenaeum#711), never the " +
+          "query text.";
+      } else {
+        topics.textContent = "Topics: " + (turn.topics || []).join(", ");
+      }
+      meta.appendChild(topics);
+
+      var line = document.createElement("div");
+      line.textContent =
+        turn.ts + " · backend: " + turn.backend +
+        " · " + turn.token_cost + " tokens (est.)";
+      meta.appendChild(line);
+
+      document.getElementById("turn-count").textContent =
+        "(" + (turn.items || []).length + ")";
+
+      (turn.items || []).forEach(function (row) {
+        var tr = document.createElement("tr");
+        tr.className = "page-row " + (row.classification || "");
+        tr.appendChild(pageCell(row));
+        tr.appendChild(textCell(row.memory_tier));
+        tr.appendChild(textCell(row.token_cost));
+        if (row.resolved) {
+          tr.addEventListener("click", function () { openPage(row.id); });
+        }
         tbody.appendChild(tr);
       });
     }
@@ -149,10 +266,10 @@
         var div = document.createElement("div");
         div.className = "notice";
         div.textContent =
-          "No reference determination has run for this session yet " +
-          "(this is the common case mid-session) -- the referenced " +
-          "column reads pending rather than a precision figure " +
-          "until session end computes it.";
+          "Colours show what was PUSHED and PULLED, both live. Whether a page " +
+          "was actually USED is a separate signal that only reference " +
+          "determination computes, and that runs once at session end — so it " +
+          "is not reflected here mid-session.";
         area.appendChild(div);
       }
     }
@@ -167,20 +284,19 @@
     }
 
     function render(payload) {
-      var meta = document.getElementById("session-meta");
-      meta.textContent = payload.session_id
+      document.getElementById("session-meta").textContent = payload.session_id
         ? "session: " + payload.session_id
-        : "session: (unscoped -- includes every session in the ledger)";
+        : "session: (unscoped — includes every session in the ledger)";
       renderNotice(payload);
-      renderRows("rows-unbidden", payload.pushed_unbidden);
-      renderRows("rows-deliberate", payload.pulled_deliberately);
-      renderRows("rows-overlap", payload.overlap);
-      document.getElementById("count-unbidden").textContent =
-        "(" + (payload.pushed_unbidden || []).length + ")";
-      document.getElementById("count-deliberate").textContent =
-        "(" + (payload.pulled_deliberately || []).length + ")";
-      document.getElementById("count-overlap").textContent =
-        "(" + (payload.overlap || []).length + ")";
+
+      var turn = payload.last_turn || { present: false };
+      var lastTurnIds = {};
+      (turn.items || []).forEach(function (item) { lastTurnIds[item.id] = true; });
+
+      renderLastTurn(turn);
+      renderPages(payload.pages, lastTurnIds);
+      document.getElementById("count-pages").textContent =
+        "(" + (payload.pages || []).length + ")";
     }
 
     fetch("data.json")

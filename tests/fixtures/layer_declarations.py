@@ -215,6 +215,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_usage_report": 5,
     "_cmd_verdicts": 5,
     "_cmd_viewer": 5,
+    "viewer_corpus": 4,
     "cli": 5,
     # Above L5 -- the package root, which the design's own docstring says
     # "sits above L5 by necessity" (imports the CLI-adjacent librarian
