@@ -352,6 +352,10 @@ A "major bump" here is sometimes Dependabot proposing to raise the upper-bound c
 
 For all of these, the worktree-internal version cap shift is the actual change; the dependency bump is a consequence.
 
+A major bump that arrives outside the four named triggers above (one Dependabot opens that this repo does not schedule a focused PR for) gets closed rather than merged. The only sanctioned close path is `scripts/preserve-then-close-pr.sh`, shipped in `Kromatic-Innovation/code-workspace-config` (see `Kromatic-Innovation/code-workspace-config#2639`). It creates `refs/heads/held/<original-branch-name>` at the PR's head SHA, re-reads the ref to verify it landed, and only then closes the PR — failing closed (leaving the PR open) if the ref cannot be verified. This matters because Dependabot deletes its own `dependabot/*` head ref within seconds of the PR closing, so without a preserved ref the code and its full-green CI evidence would be unrecoverable.
+
+**Recovery trigger:** if a closed major bump needs revisiting, raise a fresh PR from the preserved `held/<original-branch-name>` ref. A new PR opened from that preserved SHA does re-run CI — it is not treated as already-verified.
+
 ### 3.3 Quarterly review checkpoint
 
 Quarterly (next: 2026-08-06):
