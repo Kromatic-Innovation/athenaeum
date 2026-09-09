@@ -96,6 +96,11 @@ KNOWN_GIT_ARGV_MODULES: dict[str, int] = {
     # + commit retirement of reconciled raw files (retire.py's shape) — both
     # go through the SAME single `_git` helper, so this is one AST literal
     # site, not two.
+    "retention_policy": 1,  # athenaeum#1418: the SAME `_git` helper shape as
+    # decay_sweep.py's (`subprocess.run(["git", *args], ...)`, one AST
+    # literal site) -- a scoped two-commit provenance-snapshot-then-
+    # truncating-rewrite sequence over one preserved-log file, not a
+    # whole-tree snapshot, so it does not fold onto FilesystemStore.snapshot.
     "retire": 1,
     "rules": 1,
     "status": 1,
