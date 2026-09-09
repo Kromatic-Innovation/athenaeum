@@ -18,9 +18,12 @@ Layering: L2 primitive, same tier as :mod:`athenaeum.intake`. Imports only
 leaf/service modules — :mod:`athenaeum.models`, :mod:`athenaeum.provenance`,
 :mod:`athenaeum.precedence`, :mod:`athenaeum.registry`,
 :mod:`athenaeum.schemas`, :mod:`athenaeum.atomic_io`, :mod:`athenaeum.config`,
-:mod:`athenaeum.storage`, and (function-local, per call site — see
-:func:`_resolve_email_handle` and the §7.1 sensitivity-routing helpers)
-:mod:`athenaeum.pii`. Must never import :mod:`athenaeum.intake`,
+:mod:`athenaeum.storage`, :mod:`athenaeum.compiled_exempt` (module-scope,
+issue athenaeum#1419 — see :func:`write_correction_handoff`; undeclared in
+``tests/fixtures/layer_declarations.py`` same as every other importer of it),
+and (function-local, per call site — see :func:`_resolve_email_handle` and
+the §7.1 sensitivity-routing helpers) :mod:`athenaeum.pii`. Must never import
+:mod:`athenaeum.intake`,
 :mod:`athenaeum.librarian`, :mod:`athenaeum.merge`, or :mod:`athenaeum.tiers`
 — `intake.py` imports :func:`parse_batch_envelope` from here (the "valid
 envelope" single definition, §3.1), and a back-edge would reintroduce the
@@ -89,6 +92,7 @@ from typing import Any
 from pydantic import ValidationError as PydanticValidationError
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.compiled_exempt import mark_exempt
 from athenaeum.config import (
     resolve_corrections_fields,
     resolve_corrections_max_batch_bytes,
@@ -124,6 +128,20 @@ log = logging.getLogger(__name__)
 #: un-processable by the correction phase, which is exactly the silent-drop
 #: bug §3.1 calls out by name.
 KNOWN_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
+
+#: The exact ``reason`` text ``_raised()`` (inside
+#: :func:`process_correction_record`) emits when a correction's ``field`` has
+#: no ``fields_cfg`` entry at all — the attribute is DELIBERATELY absent from
+#: the §6.3 allowlist, as opposed to merely being mis-permitted for this
+#: writer. Issue athenaeum#1419: :func:`write_correction_handoff` matches on this
+#: EXACT string to decide whether a raised record's ``value`` may reach the
+#: compiled-prose surface at all — the allowlist exists precisely to keep
+#: some attributes (e.g. ``emails``, moved to the ``excluded/`` PII surface
+#: by athenaeum#427/#437) off the wiki, so quoting the rejected value in a note that
+#: itself becomes ordinary raw intake would defeat the allowlist through the
+#: escalation path. Any change to the message at its one call site below
+#: must update this constant too, or the two silently drift apart.
+ALLOWLIST_REJECTION_REASON = "attribute not on the allowlist"
 
 
 def parse_batch_envelope(first_line: str) -> dict[str, Any] | None:
@@ -1127,7 +1145,7 @@ def process_correction_record(
     fields_cfg = resolve_corrections_fields(config)
     field_def = fields_cfg.get(field_name)
     if not isinstance(field_def, dict):
-        return _raised("attribute not on the allowlist")
+        return _raised(ALLOWLIST_REJECTION_REASON)
     shape = field_def.get("shape")
     writers = field_def.get("writers")
     monotone = bool(field_def.get("monotone", False))
@@ -1783,18 +1801,64 @@ def process_batch_file(
 # ---------------------------------------------------------------------------
 
 
+#: Placeholder substituted for ``value`` in the handoff note when a record
+#: was raised for :data:`ALLOWLIST_REJECTION_REASON` (issue athenaeum#1419). The
+#: note must still say WHAT failed (target, field, op, reason, correction_id)
+#: so a human scanning `raw/` understands the shape of the failure — it must
+#: never again say what the value WAS, because that value is precisely what
+#: the allowlist exists to keep off the wiki. The full value is not lost: it
+#: is recorded, unredacted, in the audit ledger's
+#: ``redacted_correction_payloads`` (see :func:`build_ledger_record`), keyed
+#: by the SAME ``correction_id`` this placeholder tells the reader to look up.
+REDACTED_VALUE_PLACEHOLDER = (
+    "<redacted: not on the allowlist — see correction_id in the audit ledger>"
+)
+
+
 def write_correction_handoff(
     outcome: BatchOutcome,
     raised: list[CorrectionRecordResult],
     *,
     raw_root: Path,
+    knowledge_root: Path,
 ) -> Path:
-    """§8.1: for a batch with at least one raised record, write ONE ordinary
-    raw-intake `.md` file in the same `raw/<source>/` directory stating each
-    raised record as a plain claim, carrying its ``note`` and the reason it
-    was raised, and — critically — its ORIGINAL ``source`` in
-    ``field_sources`` (provenance-preserving: the handoff is a transport
-    step, never a new assertion under the handoff's own name).
+    """§8.1: for a batch with at least one raised record, write ONE `.md`
+    file in the same `raw/<source>/` directory stating each raised record as
+    a plain claim, carrying its ``note`` and the reason it was raised, and —
+    critically — its ORIGINAL ``source`` in ``field_sources``
+    (provenance-preserving: the handoff is a transport step, never a new
+    assertion under the handoff's own name).
+
+    Two changes from the pre-athenaeum#1419 behaviour, both required together to
+    close the leak described in that issue (redacting alone still let an
+    unbounded "this failed" bullet accumulate per §12; exempting alone
+    depends on a fail-open manifest for a privacy property that should not
+    be allowed to fail open):
+
+    - **Redaction (AC1, AC2).** A record raised for
+      :data:`ALLOWLIST_REJECTION_REASON` has its ``value`` replaced with
+      :data:`REDACTED_VALUE_PLACEHOLDER` in the note text. The allowlist
+      exists specifically to keep some attributes' values off the wiki
+      (`docs/design/field-corrections.md` §6.3); a note that quotes the
+      rejected value verbatim and then itself becomes raw intake defeats
+      that guarantee through the escalation path instead of the front door.
+      The real value is never discarded — it is written, unredacted, to the
+      audit ledger (:func:`build_ledger_record`'s
+      ``redacted_correction_payloads``) keyed by ``correction_id``, and it
+      also survives in the original batch file's git history once the batch
+      is retired (:func:`retire_batch`'s two-commit, never-hard-deleted
+      pattern).
+    - **Compiled-exempt (AC1, AC3).** This file is marked compiled-exempt
+      (:func:`athenaeum.compiled_exempt.mark_exempt`) the moment it is
+      written, for every handoff note regardless of reason. A handoff note
+      is machinery output describing a failure, never a claim about the
+      entity (`docs/design/field-corrections.md` §12: "event streams do not
+      belong in the entity record") — so, unlike the pre-athenaeum#1419 design,
+      discovery must never offer it to the reasoning tiers at all. This is
+      what actually bounds the "N failed batches -> N accumulating bullets
+      on the entity page" shape (`wiki/34320a40-apollo.md`'s 26 bullets):
+      redaction alone would still add one non-PII bullet per rejected batch,
+      forever.
 
     Idempotency (keyed on batch_id + sorted correction_id set) is the
     CALLER's responsibility via the audit ledger (§5.3) — this function
@@ -1815,9 +1879,15 @@ def write_correction_handoff(
     field_sources: dict[str, Any] = {}
     for r in raised:
         target_desc = json.dumps(r.target, sort_keys=True) if r.target else "?"
+        rendered_value = (
+            REDACTED_VALUE_PLACEHOLDER
+            if r.reason == ALLOWLIST_REJECTION_REASON
+            else repr(r.value)
+        )
         claim = (
-            f"- target={target_desc} field={r.field!r} op={r.op!r} "
-            f"value={r.value!r} — reason: {r.reason}"
+            f"- correction_id={r.correction_id!r} target={target_desc} "
+            f"field={r.field!r} op={r.op!r} value={rendered_value} — "
+            f"reason: {r.reason}"
         )
         if r.note:
             claim += f" (note: {r.note})"
@@ -1832,6 +1902,12 @@ def write_correction_handoff(
     meta_lines.append("---")
     content = "\n".join(meta_lines) + "\n\n" + body
     atomic_write_text(out_path, content)
+    # Issue athenaeum#1419 (AC1/AC3): never offer this file to the reasoning
+    # tiers. See the docstring above for why this must be unconditional
+    # (every handoff note, not just allowlist-redacted ones) — mirrors the
+    # `retain` disposition's own idiom (docs/design/shape-rules.md §5): not
+    # deleted, not compiled, permanently exempt.
+    mark_exempt(knowledge_root, [f"{outcome.source}/{out_path.name}"])
     return out_path
 
 
@@ -1865,12 +1941,30 @@ def build_ledger_record(outcome: BatchOutcome) -> dict[str, Any]:
     counts: dict[str, int] = {}
     non_trivial_ids: list[str] = []
     raised_tier_ids: list[str] = []
+    redacted_payloads: list[dict[str, Any]] = []
     for r in outcome.results:
         counts[r.disposition] = counts.get(r.disposition, 0) + 1
         if r.disposition not in ("applied", "noop"):
             non_trivial_ids.append(r.correction_id)
         if r.disposition == "raised-tier":
             raised_tier_ids.append(r.correction_id)
+            if r.reason == ALLOWLIST_REJECTION_REASON:
+                # Issue athenaeum#1419 (AC2): the ONE durable, unredacted home for
+                # a value the handoff note (write_correction_handoff) had to
+                # redact — this JSONL ledger is never discovered as wiki
+                # intake, so recording the real value here does not
+                # reopen the leak. Keyed on correction_id, the SAME id the
+                # redacted note points a human at.
+                redacted_payloads.append(
+                    {
+                        "correction_id": r.correction_id,
+                        "target": r.target,
+                        "field": r.field,
+                        "op": r.op,
+                        "value": r.value,
+                        "reason": r.reason,
+                    }
+                )
     total_counted = sum(counts.values())
     if total_counted != outcome.records_total:
         raise AssertionError(
@@ -1893,6 +1987,11 @@ def build_ledger_record(outcome: BatchOutcome) -> dict[str, Any]:
         # the §10.2 escalation cap) scans prior lines for this batch_id and
         # skips re-emitting a handoff for ids already listed here.
         "raised_tier_correction_ids": raised_tier_ids,
+        # Issue athenaeum#1419 (AC2): unredacted payloads for every raised-tier
+        # record whose value the handoff note redacted this pass. Empty list
+        # (not omitted) when nothing was redacted, so a reader can rely on
+        # the key's presence.
+        "redacted_correction_payloads": redacted_payloads,
     }
 
 
@@ -2174,7 +2273,9 @@ def run_correction_phase(
             )
             new_raised = [r for r in raised if r.correction_id not in already_handed_off]
             if new_raised:
-                write_correction_handoff(outcome, new_raised, raw_root=raw_root)
+                write_correction_handoff(
+                    outcome, new_raised, raw_root=raw_root, knowledge_root=knowledge_root
+                )
 
         append_corrections_ledger(wiki_root, outcome)
 

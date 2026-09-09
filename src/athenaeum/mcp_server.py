@@ -64,6 +64,7 @@ from athenaeum.config import (
     resolve_cache_dir,
     resolve_person_registry_root,
     resolve_push_token_budget,
+    resolve_recall_relevance_floor,
 )
 from athenaeum.entity_schema import (
     QUERYABLE_FIELDS,
@@ -1056,7 +1057,12 @@ def _recall_via_backend(
     """
     from athenaeum import memory_tiers
     from athenaeum.push_metrics import estimate_tokens
-    from athenaeum.search import DegradedIndexError, get_backend, normalize_type_filter
+    from athenaeum.search import (
+        DegradedIndexError,
+        get_backend,
+        meets_relevance_floor,
+        normalize_type_filter,
+    )
 
     try:
         backend = get_backend(backend_name)
@@ -1149,6 +1155,24 @@ def _recall_via_backend(
                 f"a recognized entity class on this deployment. Known classes: "
                 f"{classes_str}."
             )
+
+    # Issue athenaeum#1492: relevance floor, resolved per (backend, call path) so
+    # the unprompted push path can be tuned independently of an explicit
+    # recall_search call (AC3). ``relevance_floor`` is ``None`` at every
+    # precedence level by default (AC1) -- this whole block is then a no-op
+    # and ``hits`` is unchanged, byte-identical to this issue not existing.
+    # See ``resolve_recall_relevance_floor`` / ``meets_relevance_floor`` for
+    # what this mechanism does and does not decide; picking a production
+    # threshold is explicitly out of scope here.
+    relevance_floor = resolve_recall_relevance_floor(
+        config, backend_name, unprompted=unprompted
+    )
+    if relevance_floor is not None:
+        hits = [
+            hit
+            for hit in hits
+            if meets_relevance_floor(backend_name, hit[2], relevance_floor)
+        ]
 
     if not hits:
         return f"No wiki pages matched query: {query!r}{unrecognized_note}"
@@ -1262,7 +1286,23 @@ def _recall_via_backend(
             )
 
         if isinstance(tags, list):
-            tags = ", ".join(tags)
+            # Issue athenaeum#1491: YAML 1.1 parses unquoted ambiguous scalars
+            # (times like `9:00` -> sexagesimal int 540, `true`/`no` -> bool,
+            # `1.5` -> float, `2026-01-01` -> date) as non-str list elements,
+            # so the container-only `isinstance(tags, list)` check above does
+            # not guarantee every ELEMENT is a str -- ", ".join(tags) then
+            # raises TypeError on the first non-str item. Coerce per element.
+            #
+            # This renders `str(t)` verbatim (e.g. "540", not "9:00").
+            # Recovering the originally-authored text is deliberately NOT
+            # attempted: YAML's sexagesimal grammar is lossy in the reverse
+            # direction -- `9:00`, `09:00`, and `0:09:00` all fold to
+            # different ints, but a single int cannot be mapped back to one
+            # unique original spelling (e.g. 90 has no principled way to
+            # choose between "1:30" and other readings). A "reconstruct the
+            # text" heuristic would produce a plausible-looking guess with no
+            # fidelity guarantee, which is worse than an honest str(int).
+            tags = ", ".join(str(t) for t in tags)
         snip = _snippet(body, tokens) if body else ""
         # Issue athenaeum#325: compact provenance/context header from the FRESH
         # on-disk frontmatter (same ``fm`` the Layer-C re-read populated).

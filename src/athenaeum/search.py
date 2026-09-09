@@ -2553,6 +2553,45 @@ def get_backend(name: str, **kwargs: Any) -> SearchBackend:
     return cls(**kwargs)
 
 
+# Issue athenaeum#1492: the relevance-floor MECHANISM (not the tuning -- see
+# ``athenaeum.config.resolve_recall_relevance_floor``, which resolves the
+# ``floor`` value this compares against and documents which of the issue's
+# open design questions this shape settles at the mechanism level, and which
+# stay genuinely open). Kept tiny and separate from each backend's ``query``
+# so a caller filters hits from ANY backend the same way, without teaching
+# every backend its own floor-comparison logic.
+def meets_relevance_floor(backend_name: str, score: float, floor: float | None) -> bool:
+    """Whether *score* clears *floor* for *backend_name* (issue athenaeum#1492).
+
+    ``floor=None`` always returns ``True`` -- the floor's INACTIVE state.
+    Shipping the floor inactive by default is the acceptance criterion, so
+    every caller must be able to pass ``floor=None`` and get back exactly the
+    hits it was given, unfiltered.
+
+    Comparison direction is BACKEND-NATIVE, never normalized across backends
+    (one of the two open design questions this mechanism settles rather than
+    leaves ambiguous -- see ``resolve_recall_relevance_floor``'s docstring):
+
+    * ``"fts5"`` -- :meth:`FTS5Backend.query` returns SQLite FTS5's ``rank``
+      column verbatim, which follows the bm25 convention that a MORE
+      NEGATIVE value is a BETTER match. A hit clears the floor when its score
+      is AT OR BELOW it (``score <= floor``).
+    * every other backend name (``"keyword"`` today; ``"vector"`` is not
+      named in athenaeum#1492's acceptance criteria and is not specially
+      handled here) -- higher-is-better, so a hit clears the floor when its
+      score is AT OR ABOVE it (``score >= floor``). :meth:`KeywordBackend.query`
+      only ever returns positive scores (``score > 0`` is already enforced
+      there), so this is the correct default for it; a future backend with a
+      different scale/direction should add its own branch here rather than
+      be silently misjudged by the higher-is-better fallback.
+    """
+    if floor is None:
+        return True
+    if backend_name == "fts5":
+        return score <= floor
+    return score >= floor
+
+
 # ---------------------------------------------------------------------------
 # Convenience functions for shell hook scripts
 # ---------------------------------------------------------------------------

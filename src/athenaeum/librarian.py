@@ -151,6 +151,7 @@ from athenaeum.delta import (
     compute_affected_clusters,
     splice_cluster_report,
 )
+from athenaeum.field_constraints import guard_entity_field_constraints
 from athenaeum.identity_resolution import match_person_mentions
 from athenaeum.ingestion_gate import check_ingestion_gate
 from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE re-exported for back-compat
@@ -1627,13 +1628,50 @@ def _apply_tier3_results(
                 _written_metas.append(_entity_meta)
         assert_handles_placed(incoming_handles, _written_metas)
 
-    for _update_path, _update_content in pending_updates:
+    # Issue athenaeum#1416: uids from `updated_uids` whose paired merge write
+    # actually landed on disk (i.e. was NOT refused by the field-constraint
+    # guard below). `tier3_derive_actions` appends to `pending_updates` and
+    # `updated_uids` together, one call site, in lockstep (see that
+    # function's `pending_updates.append` / `updated_uids.append` pair), so
+    # index i of one is index i of the other for every real caller; every
+    # direct test call site passes them pre-paired the same way. Built here
+    # instead of just reusing `updated_uids` so a refused merge is excluded
+    # from both the adapter-provenance ledger below and `result.updated` —
+    # counting an uncommitted write as "updated" would misreport AC7's
+    # refuse-and-surface contract as a silent success.
+    _admitted_updated_uids: list[str] = []
+    for _update_idx, (_update_path, _update_content) in enumerate(pending_updates):
+        # Write-boundary field-constraint guard (issue athenaeum#1416): the
+        # merge path writes an EXISTING page, so unlike the type guard
+        # below there is no "new page" to admit/refuse by type — this is
+        # the join point for AC5's counter-example (a Tier-3 merge writing
+        # a forbidden field onto an already-existing page). A deployment
+        # with no declared wiki/_schema/field-constraints.md pays one
+        # fast no-op check and never reaches the parse below (see
+        # guard_entity_field_constraints's own fast path). A refused merge
+        # leaves the pre-existing page byte-for-byte untouched — the
+        # violating content is parked and ledgered, never applied and
+        # never counted in result.updated.
+        _update_meta, _ = parse_frontmatter(_update_content)
+        _update_admitted, _ = guard_entity_field_constraints(
+            wiki_root,
+            _update_path.name,
+            _update_content,
+            _update_meta or {},
+            source="tier3-merge",
+        )
+        if not _update_admitted:
+            result.field_constraint_rejected += 1
+            continue
         atomic_write_text(_update_path, _update_content)
+        if _update_idx < len(updated_uids):
+            _admitted_updated_uids.append(updated_uids[_update_idx])
 
     # Issue athenaeum#1462: uids this call actually WROTE (never a
-    # type-rejected create — see the ``continue`` below), for the
-    # adapter-provenance ledger call at the end of this function.
-    _written_uids: list[str] = list(updated_uids)
+    # type-rejected create, nor a field-constraint-rejected merge — see the
+    # ``continue``s above/below), for the adapter-provenance ledger call at
+    # the end of this function.
+    _written_uids: list[str] = list(_admitted_updated_uids)
 
     for entity in new_entities:
         page_path = wiki_root / entity.filename
@@ -1659,6 +1697,31 @@ def _apply_tier3_results(
         ):
             result.type_rejected += 1
             continue
+        # Write-boundary field-constraint guard (issue athenaeum#1416),
+        # same shape as the type guard immediately above: a declared
+        # per-type field constraint (e.g. an operator's "no personal
+        # address on a company page" rule) is checked against the
+        # LLM-produced entity's ACTUAL rendered frontmatter, not merely
+        # prompted for — this is what makes the writer constrained rather
+        # than just biased (AC5). A deployment with no declared
+        # field-constraints.md pays one fast no-op check and never parks
+        # anything. The rejected write is parked under
+        # wiki_root/_field_constraint_rejected/ and ledgered, never
+        # applied to wiki/, and never counted in result.created.
+        (
+            _create_admitted,
+            _create_violations,
+        ) = guard_entity_field_constraints(
+            wiki_root, entity.filename, rendered, rendered_meta, source="tier3-create"
+        )
+        if not _create_admitted:
+            result.field_constraint_rejected += 1
+            log.info(
+                "  Refused (field constraint): %s -- %d violation(s)",
+                entity.name,
+                len(_create_violations),
+            )
+            continue
         atomic_write_text(page_path, rendered)
         index.register(entity)
         result.created.append(entity)
@@ -1677,7 +1740,7 @@ def _apply_tier3_results(
             raw.source, raw.ref, raw.content, _written_uids
         )
 
-    result.updated.extend(updated_uids)
+    result.updated.extend(_admitted_updated_uids)
     result.escalated.extend(escalations)
     # Issue athenaeum#1182: derived from the escalations just folded in above,
     # by conflict_type — see ProcessingResult.oversize_suppressed's docstring
@@ -4341,6 +4404,13 @@ class RunContext:
     #: ``BatchRunResult``/``BatchCollectResult.type_rejected`` (batch path),
     #: mirroring the ``total_degraded``/``total_truncated`` accumulators.
     total_type_rejected: int = 0
+    #: Issue athenaeum#1416: Tier-3 writes (create OR merge) refused this
+    #: run by the write-boundary field-constraint guard
+    #: (``field_constraints.guard_entity_field_constraints``) because the
+    #: rendered page violated an operator-declared per-type field
+    #: constraint. Folded in from ``ProcessingResult.field_constraint_rejected``,
+    #: mirroring the ``total_type_rejected`` accumulator immediately above.
+    total_field_constraint_rejected: int = 0
     failed_files: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
     # Issue athenaeum#1144: refs whose Batch API submission was still running when
@@ -7284,6 +7354,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         ctx.total_type_rejected += getattr(
                             result, "type_rejected", 0
                         )  # issue athenaeum#1196
+                        # Issue athenaeum#1416: same getattr-tolerance rationale as
+                        # type_rejected above -- a stubbed-test double predating
+                        # this issue has no `field_constraint_rejected` attribute.
+                        ctx.total_field_constraint_rejected += getattr(
+                            result, "field_constraint_rejected", 0
+                        )
                         # Issue athenaeum#1184: fan-out (matches) and the "produced
                         # actions" denominator — ``getattr`` for the same
                         # stubbed-test-seam reason as ``degraded``/``truncated``
@@ -7715,6 +7791,24 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     **(
                         {"type_rejected": ctx.total_type_rejected}
                         if ctx.total_type_rejected
+                        else {}
+                    ),
+                    # issue athenaeum#1416: Tier-3 writes (create or merge) the
+                    # write-boundary field-constraint guard refused this run
+                    # (a declared operator field constraint was violated).
+                    # Only rendered when non-zero, mirroring type_rejected
+                    # immediately above -- a deployment with no declared
+                    # field-constraints.md never sees this key at all (the
+                    # sync-path counter is always 0, so the batch-path
+                    # counter this run summary does not separately track
+                    # stays consistent with a clean run's summary shape).
+                    **(
+                        {
+                            "field_constraint_rejected": (
+                                ctx.total_field_constraint_rejected
+                            )
+                        }
+                        if ctx.total_field_constraint_rejected
                         else {}
                     ),
                     # athenaeum#663: files skipped/surfaced as stuck this run. Only

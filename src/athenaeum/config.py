@@ -1495,6 +1495,178 @@ def resolve_raw_retention_max_source_bytes(config: dict[str, Any] | None) -> int
     return None
 
 
+# ---------------------------------------------------------------------------
+# Retention POLICY for preserved source logs (issue athenaeum#1418): unlike
+# the detect-only raw_retention resolvers directly above (which only ever
+# REPORT a crossed threshold on raw/<source>/ intake), these three resolvers
+# configure an ENFORCEABLE bound on a source index the operator has already
+# chosen to keep whole -- a file living under `preserved_log_dir` /
+# `preserved_log_adapter` (issue athenaeum#837/#1132), never raw intake. The
+# mechanism that reads these three -- oldest-first truncation, the
+# ledger-before-mutation discipline, the citation-preservation safety check
+# -- lives in :mod:`athenaeum.retention_policy`, which this module must not
+# import (L2 stays below the L4 domain modules that consume it).
+#
+# Per-family shape (``librarian.retention.families.<family>.*`` overrides
+# ``librarian.retention.defaults.*``):
+#
+#   librarian:
+#     retention:
+#       defaults:
+#         policy: truncate-top      # truncate-top | never-truncate | librarian-decides
+#         max_bytes: 1048576
+#         destination: in-repo      # in-repo | adapter:<name> | pii-vault
+#       families:
+#         conversation-index:
+#           policy: never-truncate
+#
+# DEFAULT-NONE at the top level (issue athenaeum#231): a fresh install, or any
+# deployment that has never written a ``librarian.retention`` block at all,
+# gets ``resolve_retention_policy() is None`` for every family -- AC1's
+# "empty/absent config yields today's behaviour unchanged", because a caller
+# that sees ``None`` back must not truncate anything (today, nothing does).
+# Once an operator writes so much as ``librarian.retention: {}``, the family
+# resolves to the STATED default (``truncate-top`` at 1 MiB, ``in-repo``) --
+# an explicit opt-in the operator can then narrow per family. This is also
+# what makes AC3 hold structurally rather than by convention: ``None``
+# ("no policy configured") and the string ``"never-truncate"`` ("operator
+# explicitly chose unbounded") can never collide, because they are two
+# different Python values, not two spellings of one flag.
+# ---------------------------------------------------------------------------
+
+_VALID_RETENTION_POLICIES = ("truncate-top", "never-truncate", "librarian-decides")
+_DEFAULT_RETENTION_POLICY = "truncate-top"
+_DEFAULT_RETENTION_MAX_BYTES = 1_048_576
+_DEFAULT_RETENTION_DESTINATION = "in-repo"
+
+
+def _retention_block(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Shared lookup: ``librarian.retention`` as a dict, or ``None``.
+
+    ``None`` here is the load-bearing "operator has not touched this system
+    at all" signal every resolver below branches on first.
+    """
+    if not isinstance(config, dict):
+        return None
+    cfg = config.get("librarian")
+    if not isinstance(cfg, dict):
+        return None
+    retention = cfg.get("retention")
+    return retention if isinstance(retention, dict) else None
+
+
+def _retention_family_and_defaults(
+    config: dict[str, Any] | None, family: str
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return ``(family_block, defaults_block)``, both coerced to ``{}`` when
+    absent/malformed, or ``None`` when ``librarian.retention`` itself is
+    absent (the AC1 no-op case -- distinguished from "present but both
+    sub-blocks are empty", which still opts into the stated defaults).
+    """
+    retention = _retention_block(config)
+    if retention is None:
+        return None
+    families = retention.get("families")
+    family_block = families.get(family) if isinstance(families, dict) else None
+    defaults_block = retention.get("defaults")
+    return (
+        family_block if isinstance(family_block, dict) else {},
+        defaults_block if isinstance(defaults_block, dict) else {},
+    )
+
+
+def resolve_retention_policy(config: dict[str, Any] | None, family: str) -> str | None:
+    """Resolve *family*'s retention policy (issue athenaeum#1418) from
+    ``librarian.retention.families.<family>.policy`` >
+    ``librarian.retention.defaults.policy`` > the stated default
+    ``"truncate-top"`` -- but ONLY once ``librarian.retention`` exists at
+    all; absent that block entirely, returns ``None`` (AC1).
+
+    Returns one of ``"truncate-top"``, ``"never-truncate"``,
+    ``"librarian-decides"``, or ``None``. A value outside that vocabulary --
+    at either the family or defaults level -- WARNs and falls through to the
+    next level, same malformed-value-falls-through idiom as every other
+    resolver in this module; it is never allowed to silently disable
+    enforcement by being mistaken for ``None``.
+    """
+    resolved = _retention_family_and_defaults(config, family)
+    if resolved is None:
+        return None
+    family_block, defaults_block = resolved
+    for block, level in ((family_block, f"families.{family}"), (defaults_block, "defaults")):
+        raw = block.get("policy")
+        if raw is None:
+            continue
+        if isinstance(raw, str) and raw in _VALID_RETENTION_POLICIES:
+            return raw
+        logger.warning(
+            "librarian.retention.%s.policy %r is not one of %s -- ignoring "
+            "(issue athenaeum#1418)",
+            level,
+            raw,
+            _VALID_RETENTION_POLICIES,
+        )
+    return _DEFAULT_RETENTION_POLICY
+
+
+def resolve_retention_max_bytes(config: dict[str, Any] | None, family: str) -> int:
+    """Resolve *family*'s truncation bound in bytes (issue athenaeum#1418) from
+    ``librarian.retention.families.<family>.max_bytes`` >
+    ``librarian.retention.defaults.max_bytes`` > the stated default
+    ``1048576`` (1 MiB, "sized for a git-tracked file" per the issue).
+
+    Resolvable independent of :func:`resolve_retention_policy` -- a caller
+    enforcing ``truncate-top`` needs this regardless of how the policy
+    itself resolved. ``bool`` (an ``int`` subclass) and non-int /
+    non-positive values -- at either level -- fall through, same as every
+    other numeric resolver here.
+    """
+    resolved = _retention_family_and_defaults(config, family)
+    if resolved is None:
+        return _DEFAULT_RETENTION_MAX_BYTES
+    family_block, defaults_block = resolved
+    for block in (family_block, defaults_block):
+        raw = block.get("max_bytes")
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+            return raw
+    return _DEFAULT_RETENTION_MAX_BYTES
+
+
+def resolve_retention_destination(config: dict[str, Any] | None, family: str) -> str:
+    """Resolve *family*'s retention destination (issue athenaeum#1418) from
+    ``librarian.retention.families.<family>.destination`` >
+    ``librarian.retention.defaults.destination`` > the stated default
+    ``"in-repo"``.
+
+    Returns ``"in-repo"``, ``"pii-vault"``, or ``"adapter:<name>"`` verbatim
+    (the adapter name is validated by the caller that resolves it to an
+    actual root -- :mod:`athenaeum.retention_policy` -- via
+    :func:`athenaeum.storage.available_adapters`, mirroring the `preserve`
+    disposition's fail-loud-on-unknown-adapter contract; this resolver only
+    reads the operator's string, same division of labor as
+    :func:`resolve_preserved_log_adapter`). A value matching neither
+    ``"in-repo"``, ``"pii-vault"`` nor the ``"adapter:"`` prefix -- at either
+    level -- WARNs and falls through.
+    """
+    resolved = _retention_family_and_defaults(config, family)
+    if resolved is None:
+        return _DEFAULT_RETENTION_DESTINATION
+    family_block, defaults_block = resolved
+    for block, level in ((family_block, f"families.{family}"), (defaults_block, "defaults")):
+        raw = block.get("destination")
+        if raw is None:
+            continue
+        if isinstance(raw, str) and (raw in ("in-repo", "pii-vault") or raw.startswith("adapter:")):
+            return raw
+        logger.warning(
+            "librarian.retention.%s.destination %r is not 'in-repo', "
+            "'pii-vault', or 'adapter:<name>' -- ignoring (issue athenaeum#1418)",
+            level,
+            raw,
+        )
+    return _DEFAULT_RETENTION_DESTINATION
+
+
 def resolve_drain_warn_days(config: dict[str, Any] | None) -> int:
     """Resolve the backlog-drain ETA warning threshold in days (issue athenaeum#470,
     default 3) from ``librarian.drain_warn_days``.
@@ -2153,6 +2325,98 @@ def resolve_push_token_budget(config: dict[str, Any] | None) -> int:
             if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
                 return raw
     return 1200
+
+
+# Issue athenaeum#1492 -- kept as a tight, self-contained block (this dispatch's
+# other lane, athenaeum#1418, is the primary editor of the rest of this module):
+# the relevance-floor MECHANISM only. Selecting a production threshold is
+# explicitly out of scope for athenaeum#1492 ("ships INACTIVE" is the acceptance
+# criterion) and is deferred to a follow-up.
+_RECALL_FLOOR_ENV: dict[tuple[str, bool], str] = {
+    ("fts5", False): "ATHENAEUM_RECALL_MIN_SCORE_FTS5",
+    ("keyword", False): "ATHENAEUM_RECALL_MIN_SCORE_KEYWORD",
+    ("fts5", True): "ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5",
+    ("keyword", True): "ATHENAEUM_RECALL_PUSH_MIN_SCORE_KEYWORD",
+}
+
+
+def resolve_recall_relevance_floor(
+    config: dict[str, Any] | None,
+    backend_name: str,
+    *,
+    unprompted: bool = False,
+) -> float | None:
+    """Resolve the recall relevance floor for one (backend, call path) (athenaeum#1492).
+
+    ``None`` — the value at every precedence level, for every backend and
+    both call paths, until an operator opts in — means NO FLOOR: today's
+    behavior, unchanged. That is the acceptance criterion this function
+    exists to satisfy: merging it changes no existing recall output.
+
+    This is the MECHANISM, not the tuning. Two of the issue's four open
+    design questions are settled here at the mechanism-SHAPE level (not the
+    value level), and recorded rather than left ambiguous:
+
+    * absolute vs. relative-to-the-result-set threshold -> ABSOLUTE. Each
+      hit's own score is compared against a fixed configured number.
+    * per-backend vs. one normalized cross-backend confidence -> PER-BACKEND.
+      FTS5's ``rank`` and the keyword scorer's additive score are different
+      scales with different "better" directions (see
+      :func:`athenaeum.search.meets_relevance_floor`), so this resolves and
+      compares in each backend's own units rather than inventing a
+      normalization this issue does not scope. A normalized layer could
+      still be built on top later without reshaping this resolver.
+
+    The other two open questions are genuinely NOT decided here: whether the
+    push path should in practice be set stricter than explicit recall (this
+    function only makes that independently *settable* via ``unprompted``,
+    AC3 — it expresses no opinion on which, if either, should be stricter),
+    and whether a below-floor hit should be suppressed or surfaced as
+    low-confidence (:func:`athenaeum.search.meets_relevance_floor` only
+    supports suppression — marking is a rendering decision for the
+    follow-up).
+
+    Precedence per (backend, path): env var > ``recall.relevance_floor``
+    yaml > ``None``. Vars: ``ATHENAEUM_RECALL_MIN_SCORE_FTS5`` /
+    ``ATHENAEUM_RECALL_MIN_SCORE_KEYWORD`` for an explicit ``recall_search``
+    call; ``ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5`` /
+    ``ATHENAEUM_RECALL_PUSH_MIN_SCORE_KEYWORD`` for the ``unprompted=True``
+    push path. YAML shape::
+
+        recall:
+          relevance_floor:
+            fts5: -6.0
+            keyword: 12.0
+            push:
+              fts5: -3.0
+              keyword: 20.0
+
+    An unrecognized ``backend_name`` (e.g. ``"vector"``, not named in
+    athenaeum#1492's acceptance criteria) always resolves to ``None``: no
+    floor is applied regardless of config. A malformed env value WARNs and
+    falls through to yaml/default (see :func:`_env_number`); a non-numeric
+    yaml value is ignored the same way.
+    """
+    if backend_name not in ("fts5", "keyword"):
+        return None
+    env_name = _RECALL_FLOOR_ENV.get((backend_name, unprompted))
+    if env_name is not None:
+        env_value = _env_number(env_name, float)
+        if env_value is not None:
+            return env_value
+    if isinstance(config, dict):
+        recall_cfg = config.get("recall")
+        if isinstance(recall_cfg, dict):
+            floor_cfg = recall_cfg.get("relevance_floor")
+            if isinstance(floor_cfg, dict):
+                scope_cfg: object = floor_cfg
+                if unprompted:
+                    scope_cfg = floor_cfg.get("push")
+                if isinstance(scope_cfg, dict):
+                    raw = scope_cfg.get(backend_name)
+                    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                        return float(raw)
+    return None
 
 
 def resolve_memory_tier_sweep_enabled(config: dict[str, Any] | None) -> bool:

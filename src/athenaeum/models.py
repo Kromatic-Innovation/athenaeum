@@ -2996,6 +2996,18 @@ class ProcessingResult:
     #: entity was never applied. Surfaced as ``type_rejected=N`` in the run
     #: summary, mirroring the ``degraded``/``truncated`` convention above.
     type_rejected: int = 0
+    #: Count of Tier-3 writes (new-entity create OR merge-into-existing)
+    #: this file's Tier-3 write phase REFUSED because the rendered page
+    #: violated an operator-declared per-type field constraint (issue
+    #: athenaeum#1416, :func:`athenaeum.field_constraints.guard_entity_field_constraints`).
+    #: A deployment with no ``wiki/_schema/field-constraints.md`` (or an
+    #: empty one) always has this stay ``0`` — the guard is a fast no-op
+    #: with nothing declared. Not counted in ``created``/``updated`` — a
+    #: refused write is never applied to ``wiki/``, and the pre-existing
+    #: page (for a refused merge) is left byte-for-byte unchanged. Surfaced
+    #: as ``field_constraint_rejected=N`` in the run summary, mirroring the
+    #: ``type_rejected`` convention above.
+    field_constraint_rejected: int = 0
 
 
 # --- Schema loading ---
