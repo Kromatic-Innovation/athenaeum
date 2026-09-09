@@ -13,26 +13,7 @@
   "rederived": {
     "at": "2026-09-09T23:08:01.153177+00:00",
     "from_prompt_hash": "sha256:0fe09c931172321f6f410b87f07d85236a3a5f533043cd57b7cc4188215a5f4d",
-    "rename": [
-      "Meridian's=Thornhollow's",
-      "Meridian=Thornhollow",
-      "meridian=thornhollow",
-      "Notion=Pagemoor",
-      "notion=pagemoor",
-      "Google Sheets=Tallyfold",
-      "Google-Sheets=Tallyfold",
-      "Google Docs=Tallyfold",
-      "gsheets=tallyfold",
-      "gdocs=tallyfold",
-      "Heroku=Hostmoor",
-      "heroku=hostmoor",
-      "Airtable=Latticebase",
-      "airtable=latticebase",
-      "Zendesk=Ticketwell",
-      "zendesk=ticketwell",
-      "WeWork=Kingsway Works",
-      "wework=kingsway-works"
-    ],
+    "rename_map_digest": "sha256:7166cc089b9aebe108b7b1f3eeeec39e91829925562f0defc92e4172dbc84625",
     "tool": "scripts/rederive_recorded_fixture.py"
   },
   "response_text": "```json\n{\n  \"detected\": false,\n  \"conflict_type\": null,\n  \"members_involved\": [],\n  \"conflicting_passages\": [],\n  \"rationale\": \"Member 2 explicitly narrows and refines Member 1 by stating Acme invoices are a documented exception to the general rule, creating a hierarchical relationship (general rule + specific exception) rather than a contradiction.\"\n}\n```",

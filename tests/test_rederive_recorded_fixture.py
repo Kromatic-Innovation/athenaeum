@@ -11,11 +11,17 @@ parameter):
 * a prompt that changed by EXACTLY the declared rename is re-derived: the
   fixture's ``prompt_hash``/``response_text`` are updated and a
   ``rederived`` provenance block is stamped, while ``recorded_at``/
-  ``model``/``usage`` stay untouched.
+  ``model``/``usage`` stay untouched. The provenance block carries a
+  fingerprint of the rename map, never the literal ``OLD=NEW`` pairs -- this
+  is asserted directly by grepping the whole saved file for the real names
+  used in the test.
 * a prompt that changed by anything ELSE (here: extra wording alongside the
   same rename) is REFUSED: the fixture file on disk is byte-for-byte
   unchanged, so a genuinely stale fixture stays stale rather than being
   silently blessed.
+* ``--force`` re-stamps an ALREADY-current fixture's provenance block (e.g.
+  migrating an older block shape) without touching prompt_hash/response
+  content, and does nothing when not passed.
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ sys.modules[_spec.name] = rederive_recorded_fixture
 _spec.loader.exec_module(rederive_recorded_fixture)
 
 rederive_case = rederive_recorded_fixture.rederive_case
+_rename_map_digest = rederive_recorded_fixture._rename_map_digest
 
 _MODEL = "test-model"
 _RENAME_PAIRS = [("Meridian's", "Thornhollow's"), ("Meridian", "Thornhollow")]
@@ -116,17 +123,28 @@ class TestRederiveCase:
 
         assert outcome.status == "rederived", outcome.detail
 
-        saved = json.loads((_recorded_root / "detector" / "synthetic_pure_rename.json").read_text())
+        fixture_path = _recorded_root / "detector" / "synthetic_pure_rename.json"
+        raw_text = fixture_path.read_text()
+        saved = json.loads(raw_text)
         assert saved["prompt_hash"] != old_hash
         assert saved["response_text"] == "Thornhollow's account is confirmed active."
         assert saved["content_blocks"][0]["text"] == "Thornhollow's account is confirmed active."
         # Provenance: what changed and how, without disturbing the original
         # recording's own identity.
         assert saved["rederived"]["from_prompt_hash"] == old_hash
-        assert saved["rederived"]["rename"] == ["Meridian's=Thornhollow's", "Meridian=Thornhollow"]
+        assert saved["rederived"]["tool"] == "scripts/rederive_recorded_fixture.py"
+        assert saved["rederived"]["rename_map_digest"] == _rename_map_digest(_RENAME_PAIRS)
         assert saved["recorded_at"] == "2026-08-02T18:05:05.955036+00:00"
         assert saved["model"] == _MODEL
         assert saved["usage"]["input_tokens"] == 100
+
+        # The whole point: the rename map's OLD side (a real company name, in
+        # athenaeum#1496's actual case) must not appear anywhere in the saved
+        # file -- provenance is a digest, never the literal pairs.
+        assert "rename" not in saved["rederived"], (
+            "rederived block still carries the literal rename list"
+        )
+        assert "meridian" not in raw_text.lower()
 
     def test_rename_plus_extra_wording_change_is_refused(
         self, _recorded_root: Path, tmp_path: Path
@@ -180,6 +198,108 @@ class TestRederiveCase:
             tmp_path,
             apply=True,
             driver=_driver_returning("Client lead for Bluewater's retainer."),
+        )
+
+        assert outcome.status == "unchanged"
+        assert fixture_path.read_text() == before
+
+
+class TestForceMigratesProvenanceShapeOnly:
+    """``--force`` re-stamps an already-current fixture's ``rederived`` block
+    (e.g. dropping an older schema's literal ``rename`` list in favour of
+    ``rename_map_digest``) without re-proving anything and without touching
+    prompt_hash/response content -- there is nothing to prove when the
+    current prompt already matches what's on disk.
+    """
+
+    def _seed_already_rederived_old_shape(
+        self, _recorded_root: Path, case_id: str, *, current_system: str, current_response: str
+    ) -> str:
+        """Simulate a fixture already re-derived under the OLD provenance
+        shape (literal ``rename`` list, per issue athenaeum#1496's first
+        pass) -- i.e. its CURRENT prompt already matches its stored hash."""
+        messages = [{"role": "user", "content": "describe the account"}]
+        current_hash = prompt_hash(_MODEL, current_system, messages)
+        save_recorded(
+            RecordedResponse(
+                case_id=case_id,
+                layer="detector",
+                model=_MODEL,
+                prompt_hash=current_hash,
+                response_text=current_response,
+                usage={
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+                recorded_at="2026-08-02T18:05:05.955036+00:00",
+                content_blocks=[{"type": "text", "text": current_response}],
+                rederived={
+                    "at": "2026-09-09T00:00:00+00:00",
+                    "tool": "scripts/rederive_recorded_fixture.py",
+                    "rename": ["Meridian's=Thornhollow's", "Meridian=Thornhollow"],
+                    "from_prompt_hash": "sha256:" + "0" * 64,
+                },
+            )
+        )
+        return current_hash
+
+    def test_force_apply_migrates_the_block(self, _recorded_root: Path, tmp_path: Path) -> None:
+        current_hash = self._seed_already_rederived_old_shape(
+            _recorded_root,
+            "synthetic_migrate",
+            current_system="Client lead for Thornhollow's retainer.",
+            current_response="Thornhollow's account is confirmed active.",
+        )
+
+        outcome = rederive_case(
+            "detector",
+            "synthetic_migrate",
+            _RENAME_PAIRS,
+            tmp_path,
+            apply=True,
+            force=True,
+            driver=_driver_returning("Client lead for Thornhollow's retainer."),
+        )
+
+        assert outcome.status == "migrated", outcome.detail
+
+        saved = json.loads((_recorded_root / "detector" / "synthetic_migrate.json").read_text())
+        # Content untouched -- nothing was re-proven, nothing needed to be.
+        assert saved["prompt_hash"] == current_hash
+        assert saved["response_text"] == "Thornhollow's account is confirmed active."
+        # Provenance shape migrated: digest replaces the literal list.
+        assert "rename" not in saved["rederived"]
+        assert saved["rederived"]["rename_map_digest"] == _rename_map_digest(_RENAME_PAIRS)
+        # Pre-existing provenance fields (from the original re-derivation)
+        # are preserved, not regenerated.
+        assert saved["rederived"]["at"] == "2026-09-09T00:00:00+00:00"
+        assert saved["rederived"]["from_prompt_hash"] == "sha256:" + "0" * 64
+
+    def test_without_force_an_already_current_fixture_is_left_alone(
+        self, _recorded_root: Path, tmp_path: Path
+    ) -> None:
+        """The default (no --force) behaviour is unchanged: an already-
+        current fixture is reported unchanged and NOT rewritten, even if its
+        provenance block is in the old shape."""
+        self._seed_already_rederived_old_shape(
+            _recorded_root,
+            "synthetic_no_force",
+            current_system="Client lead for Thornhollow's retainer.",
+            current_response="Thornhollow's account is confirmed active.",
+        )
+        fixture_path = _recorded_root / "detector" / "synthetic_no_force.json"
+        before = fixture_path.read_text()
+
+        outcome = rederive_case(
+            "detector",
+            "synthetic_no_force",
+            _RENAME_PAIRS,
+            tmp_path,
+            apply=True,
+            force=False,
+            driver=_driver_returning("Client lead for Thornhollow's retainer."),
         )
 
         assert outcome.status == "unchanged"

@@ -16,26 +16,7 @@
   "rederived": {
     "at": "2026-09-09T23:08:01.245874+00:00",
     "from_prompt_hash": "sha256:2e7e5562a24a5bef79930a0cfdc3d9abd7b3a862f2e56e886fb576012d889301",
-    "rename": [
-      "Meridian's=Thornhollow's",
-      "Meridian=Thornhollow",
-      "meridian=thornhollow",
-      "Notion=Pagemoor",
-      "notion=pagemoor",
-      "Google Sheets=Tallyfold",
-      "Google-Sheets=Tallyfold",
-      "Google Docs=Tallyfold",
-      "gsheets=tallyfold",
-      "gdocs=tallyfold",
-      "Heroku=Hostmoor",
-      "heroku=hostmoor",
-      "Airtable=Latticebase",
-      "airtable=latticebase",
-      "Zendesk=Ticketwell",
-      "zendesk=ticketwell",
-      "WeWork=Kingsway Works",
-      "wework=kingsway-works"
-    ],
+    "rename_map_digest": "sha256:7166cc089b9aebe108b7b1f3eeeec39e91829925562f0defc92e4172dbc84625",
     "tool": "scripts/rederive_recorded_fixture.py"
   },
   "response_text": "{\n  \"action\": \"propose_merge\",\n  \"merge_target_name\": \"client-facing-project-docs\",\n  \"rationale\": \"Both sides are PREFERENCES forming a canonical general-rule + explicit-narrower-exception pair (Pagemoor for docs, Tallyfold for CSVs) that compose cleanly and read better as one canonical memory.\",\n  \"draft_merged_body\": \"# Client-facing project docs (consulting team)\\n\\n**General rule:** The consulting team uses Pagemoor for all client-facing project docs.\\n\\n**Exception (CSVs only):** Client-facing project CSVs live in Tallyfold, not Pagemoor.\\n\\nEverything that is not a CSV follows the general Pagemoor rule.\",\n  \"confidence\": 0.9,\n  \"source_precedence_used\": [\"a:unsourced > b:unsourced\"]\n}",

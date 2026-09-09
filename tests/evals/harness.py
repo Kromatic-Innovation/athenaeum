@@ -155,10 +155,21 @@ class RecordedResponse:
     live API call. It exists so a re-derived fixture is never mistaken for a
     fresh recording: the original ``recorded_at``/``model``/``usage`` are left
     untouched (they still describe the real live run that produced the
-    underlying response), and this field records what changed instead. See
-    that script's module docstring for why re-derivation is a legitimate,
-    self-limiting operation for a declared rename and refused for anything
-    else. ``None`` for every fixture produced by a real recording.
+    underlying response), and this field records what changed instead --
+    ``tool``, ``at``, and ``from_prompt_hash`` (the pre-rename hash, which
+    together with the CURRENT ``prompt_hash`` above is the actual proof: only
+    a genuine pure-rename re-derivation could produce one from the other).
+
+    Deliberately does NOT carry the rename map itself. An earlier version
+    stamped the literal ``OLD=NEW`` pairs here, which meant every renamed
+    fixture recommitted the real name the rename exists to remove -- once per
+    file. ``rename_map_digest`` is a fingerprint of the map instead (see
+    ``scripts/rederive_recorded_fixture.py::_rename_map_digest``); the map
+    itself lives in the commit that ran the tool and in the tool's own
+    ``--rename`` CLI interface, not in a public fixture. See that script's
+    module docstring for why re-derivation is a legitimate, self-limiting
+    operation for a declared rename and refused for anything else. ``None``
+    for every fixture produced by a real recording.
     """
 
     case_id: str

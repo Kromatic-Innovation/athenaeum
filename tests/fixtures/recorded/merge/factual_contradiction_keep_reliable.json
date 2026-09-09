@@ -13,26 +13,7 @@
   "rederived": {
     "at": "2026-09-09T23:08:01.197125+00:00",
     "from_prompt_hash": "sha256:1c6193a2f37914948349f0a032910be53ceec2d2ccfcf2d4ddae41672d4d86eb",
-    "rename": [
-      "Meridian's=Thornhollow's",
-      "Meridian=Thornhollow",
-      "meridian=thornhollow",
-      "Notion=Pagemoor",
-      "notion=pagemoor",
-      "Google Sheets=Tallyfold",
-      "Google-Sheets=Tallyfold",
-      "Google Docs=Tallyfold",
-      "gsheets=tallyfold",
-      "gdocs=tallyfold",
-      "Heroku=Hostmoor",
-      "heroku=hostmoor",
-      "Airtable=Latticebase",
-      "airtable=latticebase",
-      "Zendesk=Ticketwell",
-      "zendesk=ticketwell",
-      "WeWork=Kingsway Works",
-      "wework=kingsway-works"
-    ],
+    "rename_map_digest": "sha256:7166cc089b9aebe108b7b1f3eeeec39e91829925562f0defc92e4172dbc84625",
     "tool": "scripts/rederive_recorded_fixture.py"
   },
   "response_text": "{\"ops\": [{\"op\": \"replace\", \"anchor\": \"Thornhollow's office is at 14 Kingsway, Kingsway Works floor 3.[^1]\", \"text\": \"Thornhollow's office is at 220 Regent Street, suite 5B, as of 2026-04.[^1][^2] The previous Kingsway address is no longer current.[^2]\"}, {\"op\": \"replace\", \"anchor\": \"[^1]: sessions/2026-01-10.md\", \"text\": \"[^1]: sessions/2026-01-10.md\\n[^2]: sessions/2026-05-02.md\"}]}",

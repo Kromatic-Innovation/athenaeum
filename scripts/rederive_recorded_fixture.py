@@ -43,6 +43,24 @@ why and leaves the fixture untouched (still stale, exactly as the staleness
 contract intends) — rather than guess. A refusal is not a bug in this tool;
 it is the tool correctly declining to vouch for a diff it cannot prove.
 
+**Provenance does not repeat the map.** Each re-derived fixture is stamped
+with a ``rederived`` block (``tests.evals.harness.RecordedResponse``)
+recording ``tool``, ``at``, ``from_prompt_hash`` (the pre-rename hash — the
+actual proof: only a genuine pure-rename re-derivation could have produced
+the CURRENT hash from it), and ``rename_map_digest`` (a fingerprint of the
+declared ``--rename`` pairs, see :func:`_rename_map_digest`). It does NOT
+carry the literal ``OLD=NEW`` pairs: this tool exists because a real
+company's name sat committed in public fixtures, and writing that same name
+into a `rederived` block on every one of 22 fixtures would reintroduce
+exactly the leak the rename fixed, once per file, forever, in a public repo.
+The map itself is a property of the TOOL RUN, not of any one fixture — it
+lives in the commit that ran it and in this script's own ``--rename``
+interface, recoverable from history without needing to live in the
+artifact. Dropping it does not weaken the refusal property: the equality
+check in step 3 always reverts using the ``rename_pairs`` the CURRENT
+invocation was called with, never anything read back out of a fixture's
+``rederived`` block (nothing in this module ever reads that field back in).
+
 **The rename map is an explicit input** (``--rename OLD=NEW``, repeatable),
 never a constant baked into this module — this script re-derives against
 WHATEVER rename the caller declares, and carries no opinion about what
@@ -77,6 +95,13 @@ real re-record, not a guess).
 Omit ``--apply`` for a dry run (reports what WOULD change, touches nothing).
 Order the ``--rename`` pairs longest-phrase-first when one old value is a
 substring of another (not needed for the map above — none overlap).
+
+``--force`` additionally re-stamps a fixture whose prompt ALREADY matches
+(nothing to re-derive) but whose ``rederived`` block predates a provenance
+SHAPE change in this script — e.g. migrating the block from an older format
+to the current one. It never touches ``prompt_hash``/``response_text``/
+``content_blocks`` and re-proves nothing, because there is nothing to prove
+when the current prompt already hashes to what is on disk.
 """
 
 from __future__ import annotations
@@ -97,13 +122,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from tests.evals.harness import (  # noqa: E402
     RECORDED_ROOT,
-    RecordedResponse,
+    _text_of_messages,
+    _text_of_system,
     load_recorded,
     prompt_hash,
     save_recorded,
 )
-from tests.evals.harness import _text_of_messages, _text_of_system  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Capturing stub client — gets the prompt without needing a plausible fake
@@ -266,6 +290,22 @@ def _hash_of(canonical: str) -> str:
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _rename_map_digest(rename_pairs: list[tuple[str, str]]) -> str:
+    """A non-identifying fingerprint of *rename_pairs*, for provenance.
+
+    Deliberately NOT the literal pairs: the tool run's declared rename map
+    names real companies as its OLD side (that is the whole point of the
+    map), and repeating it verbatim into every re-derived fixture would
+    commit those real names right back into the public repo this issue
+    exists to clean up -- see the "why a digest, not the list" note on
+    :data:`RecordedResponse.rederived` in ``tests/evals/harness.py``. The
+    digest lets two fixtures be compared ("were these re-derived under the
+    SAME rename?") without recovering any name from it.
+    """
+    canonical = "\n".join(f"{old}={new}" for old, new in rename_pairs)
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _self_check_canonicalisation() -> None:
     model, system, messages = "m", "s", [{"role": "user", "content": "hi"}]
     if _hash_of(_canonical_text(model, system, messages)) != prompt_hash(model, system, messages):
@@ -326,7 +366,7 @@ def _apply_forward(text: str, rename_pairs: list[tuple[str, str]]) -> str:
 class Outcome:
     layer: str
     case_id: str
-    status: str  # "unchanged" | "rederived" | "refused"
+    status: str  # "unchanged" | "rederived" | "migrated" | "refused"
     detail: str = ""
 
 
@@ -338,6 +378,7 @@ def rederive_case(
     *,
     apply: bool,
     driver: Callable[[str, Path], dict[str, Any]] | None = None,
+    force: bool = False,
 ) -> Outcome:
     """Check (and, if ``apply``, rewrite) one recorded fixture.
 
@@ -348,6 +389,14 @@ def rederive_case(
     on fixtures under ``tmp_path``, without touching real fixtures or the
     real athenaeum call paths (see
     ``tests/test_rederive_recorded_fixture.py``).
+
+    ``force`` re-stamps an ALREADY-current fixture's ``rederived`` provenance
+    block (e.g. after this script's provenance SHAPE changes, as opposed to
+    its content) without re-proving anything -- there is nothing to prove
+    when the current prompt already hashes to what is on disk. It never
+    touches ``prompt_hash``/``response_text``/``content_blocks``, and it is a
+    no-op on a fixture with no existing ``rederived`` block (nothing to
+    migrate).
     """
     driver = driver or _DRIVERS[layer]
     fixture = load_recorded(layer, case_id)
@@ -358,6 +407,18 @@ def rederive_case(
 
     new_hash = prompt_hash(model, system, messages)
     if new_hash == fixture.prompt_hash:
+        if force and apply and fixture.rederived is not None:
+            updated = dataclasses.replace(
+                fixture,
+                rederived={
+                    **fixture.rederived,
+                    "rename_map_digest": _rename_map_digest(rename_pairs),
+                },
+            )
+            # Old-format block carried the literal pairs; drop them on migration.
+            updated.rederived.pop("rename", None)
+            save_recorded(updated)
+            return Outcome(layer, case_id, "migrated", "provenance format only")
         return Outcome(layer, case_id, "unchanged")
 
     new_canonical = _canonical_text(model, system, messages)
@@ -398,8 +459,12 @@ def rederive_case(
             rederived={
                 "at": datetime.now(timezone.utc).isoformat(),
                 "tool": "scripts/rederive_recorded_fixture.py",
-                "rename": [f"{old}={new}" for old, new in rename_pairs],
                 "from_prompt_hash": fixture.prompt_hash,
+                # A fingerprint of the rename map, NOT the map itself -- see
+                # _rename_map_digest()'s docstring for why. The literal
+                # OLD->NEW pairs live in the commit that ran this tool and in
+                # the tool's own --rename interface, never in a public fixture.
+                "rename_map_digest": _rename_map_digest(rename_pairs),
             },
         )
         save_recorded(updated)
@@ -449,6 +514,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="write changes; omit for a dry run",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "also re-stamp an already-current fixture's `rederived` "
+            "provenance block (e.g. after this script's provenance SHAPE "
+            "changes) -- never touches prompt_hash/response_text/"
+            "content_blocks, and re-proves nothing (there is nothing to "
+            "prove when the prompt already matches)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if not args.rename:
@@ -466,17 +542,22 @@ def main(argv: list[str] | None = None) -> int:
                 if not (RECORDED_ROOT / layer / f"{case_id}.json").is_file():
                     continue
                 try:
-                    outcome = rederive_case(layer, case_id, args.rename, tmp_dir, apply=args.apply)
+                    outcome = rederive_case(
+                        layer, case_id, args.rename, tmp_dir, apply=args.apply, force=args.force
+                    )
                 except Exception as exc:  # noqa: BLE001 -- report, keep going
                     outcome = Outcome(layer, case_id, "refused", f"{exc.__class__.__name__}: {exc}")
                 outcomes.append(outcome)
-                print(f"{outcome.status:>10}  {layer}/{case_id}" + (f" -- {outcome.detail}" if outcome.detail else ""))
+                suffix = f" -- {outcome.detail}" if outcome.detail else ""
+                print(f"{outcome.status:>10}  {layer}/{case_id}{suffix}")
 
     refused = [o for o in outcomes if o.status == "refused"]
     rederived = [o for o in outcomes if o.status == "rederived"]
+    migrated = [o for o in outcomes if o.status == "migrated"]
     print(
         f"\n{len(outcomes)} case(s) checked: {len(rederived)} rederived, "
-        f"{len(outcomes) - len(rederived) - len(refused)} unchanged, "
+        f"{len(migrated)} migrated, "
+        f"{len(outcomes) - len(rederived) - len(migrated) - len(refused)} unchanged, "
         f"{len(refused)} refused."
         + ("" if args.apply else " (dry run -- pass --apply to write)")
     )

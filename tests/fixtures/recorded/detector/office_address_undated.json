@@ -13,26 +13,7 @@
   "rederived": {
     "at": "2026-09-09T23:08:01.167741+00:00",
     "from_prompt_hash": "sha256:61d661540734038e4ea498d8bc6f59bc08975d927e7f40d07adeb70c7258317a",
-    "rename": [
-      "Meridian's=Thornhollow's",
-      "Meridian=Thornhollow",
-      "meridian=thornhollow",
-      "Notion=Pagemoor",
-      "notion=pagemoor",
-      "Google Sheets=Tallyfold",
-      "Google-Sheets=Tallyfold",
-      "Google Docs=Tallyfold",
-      "gsheets=tallyfold",
-      "gdocs=tallyfold",
-      "Heroku=Hostmoor",
-      "heroku=hostmoor",
-      "Airtable=Latticebase",
-      "airtable=latticebase",
-      "Zendesk=Ticketwell",
-      "zendesk=ticketwell",
-      "WeWork=Kingsway Works",
-      "wework=kingsway-works"
-    ],
+    "rename_map_digest": "sha256:7166cc089b9aebe108b7b1f3eeeec39e91829925562f0defc92e4172dbc84625",
     "tool": "scripts/rederive_recorded_fixture.py"
   },
   "response_text": "```json\n{\n  \"detected\": true,\n  \"conflict_type\": \"factual\",\n  \"members_involved\": [\"scope-office_address_undated/reference_office_kingsway-works.md\", \"scope-office_address_undated/reference_office_regent.md\"],\n  \"conflicting_passages\": [\"Thornhollow's office is at 14 Kingsway, Kingsway Works floor 3.\", \"Thornhollow's office is at 220 Regent Street, suite 5B.\"],\n  \"rationale\": \"Both snippets state incompatible facts about Thornhollow's current office location\u2014two different addresses cannot both be the office simultaneously without additional temporal or contextual distinction.\"\n}\n```",
