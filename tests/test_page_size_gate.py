@@ -43,6 +43,7 @@ import yaml
 
 from athenaeum import rules as rules_module
 from athenaeum import tiers as tiers_module
+from athenaeum.answers import ingest_answers
 from athenaeum.librarian import _apply_tier3_results
 from athenaeum.models import (
     EntityAction,
@@ -55,13 +56,16 @@ from athenaeum.models import (
 from athenaeum.tiers import (
     DEFAULT_OVERSIZE_PAGE_ACTION,
     DEFAULT_PAGE_SIZE_THRESHOLD_CHARS,
+    OVERSIZE_ESCALATION_CONFLICT_TYPES,
     VALID_OVERSIZE_PAGE_ACTIONS,
     check_page_size_gate,
+    collapse_oversize_escalation_duplicates,
     demote_oversize_pages,
     enumerate_oversize_pages,
     resolve_oversize_page_action,
     resolve_page_size_threshold_chars,
     tier3_derive_actions,
+    tier4_escalate,
 )
 
 
@@ -1123,3 +1127,394 @@ class TestLogDemoteRetiredNameGuard:
         assert results[0].demoted is True
         payload = yaml.safe_load((wiki / "_retired_names.yaml").read_text())
         assert payload["retired"][0]["name"] == name
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1430: oversize-page escalation dedup
+# ---------------------------------------------------------------------------
+
+
+class TestOversizeEscalationDedup:
+    """The "review" disposition (issue athenaeum#1182) used to write a brand-new
+    ``oversize_page`` block into ``_pending_questions.md`` on EVERY suppressed
+    merge -- ~10 hub pages generated 8,502 duplicate blocks on the live
+    corpus (issue athenaeum#1430). ``tier4_escalate`` now suppresses a new
+    oversize-page-family escalation (:data:`OVERSIZE_ESCALATION_CONFLICT_TYPES`)
+    for an entity that already has one UNANSWERED, keyed on "currently
+    unanswered" so an answered/archived block lets a fresh one through.
+    """
+
+    def test_second_suppressed_merge_does_not_duplicate_the_block(
+        self, wiki_dir: Path
+    ) -> None:
+        """AC2's counter-example, run for real through check_page_size_gate +
+        tier4_escalate: two separate suppressed merges against the same
+        over-threshold page leave exactly ONE unanswered oversize_page block,
+        not two -- an explicit BEFORE/AFTER block-count assertion."""
+        pending = wiki_dir / "_pending_questions.md"
+        action = _update_action(name="Kromatic")
+        body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
+
+        # First suppressed merge -- creates the one durable block.
+        first = check_page_size_gate(action, body, "sessions/one.md", None)
+        assert isinstance(first, EscalationItem)
+        tier4_escalate([first], pending)
+
+        before_count = pending.read_text().count("**Conflict type**: oversize_page")
+        assert before_count == 1
+
+        # Second suppressed merge, same entity, same over-threshold page --
+        # this is the defect: pre-fix, this appended a SECOND block.
+        second = check_page_size_gate(action, body, "sessions/two.md", None)
+        assert isinstance(second, EscalationItem)
+        suppressed = tier4_escalate([second], pending)
+
+        after_content = pending.read_text()
+        after_count = after_content.count("**Conflict type**: oversize_page")
+        assert before_count == 1
+        assert after_count == 1  # NOT 2
+        assert suppressed == 1
+        # The suppressed observation's own source ref must not silently
+        # replace the original -- the first block's ref is preserved.
+        assert "sessions/one.md" in after_content
+        assert "sessions/two.md" not in after_content
+
+    def test_first_occurrence_unchanged(self, wiki_dir: Path) -> None:
+        """AC3: an entity with no existing unanswered escalation still gets
+        one created exactly as before -- no regression to the happy path."""
+        pending = wiki_dir / "_pending_questions.md"
+        action = _update_action(name="Fresh Entity")
+        body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
+
+        item = check_page_size_gate(action, body, "sessions/x.md", None)
+        assert isinstance(item, EscalationItem)
+        suppressed = tier4_escalate([item], pending)
+
+        assert suppressed == 0
+        content = pending.read_text()
+        assert content.count("**Conflict type**: oversize_page") == 1
+        assert 'Entity: "Fresh Entity"' in content
+
+    def test_distinct_entities_each_get_their_own_block(self, wiki_dir: Path) -> None:
+        """Two DIFFERENT oversized entities must not collapse into one --
+        dedup is per-entity, not global."""
+        pending = wiki_dir / "_pending_questions.md"
+        body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
+        item_a = check_page_size_gate(
+            _update_action(name="Entity A"), body, "sessions/a.md", None
+        )
+        item_b = check_page_size_gate(
+            _update_action(name="Entity B"), body, "sessions/b.md", None
+        )
+        assert isinstance(item_a, EscalationItem)
+        assert isinstance(item_b, EscalationItem)
+        tier4_escalate([item_a, item_b], pending)
+        content = pending.read_text()
+        assert content.count("**Conflict type**: oversize_page") == 2
+
+    def test_answered_block_lets_a_fresh_escalation_through(
+        self, wiki_dir: Path
+    ) -> None:
+        """AC4: dedup is keyed on CURRENTLY unanswered, not "ever seen". Once
+        the existing escalation is answered/archived, the next suppressed
+        merge against the same entity creates a fresh escalation again."""
+        pending = wiki_dir / "_pending_questions.md"
+        raw_root = wiki_dir.parent / "raw"
+        action = _update_action(name="Kromatic")
+        body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
+
+        first = check_page_size_gate(action, body, "sessions/one.md", None)
+        assert isinstance(first, EscalationItem)
+        tier4_escalate([first], pending)
+        assert pending.read_text().count("**Conflict type**: oversize_page") == 1
+
+        # Answer + archive the block (same mechanism a human answer takes,
+        # via athenaeum.answers.ingest_answers -- the "existing archive-on-
+        # resolve path" AC5 also reuses).
+        text = pending.read_text().replace("- [ ]", "- [x]", 1)
+        text = text.replace("- [x]", "- [x]\n\nSplit the page.\n", 1)
+        pending.write_text(text)
+        ingested = ingest_answers(pending, raw_root)
+        assert ingested == 1
+        assert "**Conflict type**: oversize_page" not in pending.read_text()
+
+        # Next suppressed merge against the SAME entity creates a FRESH block.
+        second = check_page_size_gate(action, body, "sessions/two.md", None)
+        assert isinstance(second, EscalationItem)
+        suppressed = tier4_escalate([second], pending)
+        assert suppressed == 0
+        content = pending.read_text()
+        assert content.count("**Conflict type**: oversize_page") == 1
+        assert "sessions/two.md" in content
+
+    def test_oversize_family_cross_type_dedup(self, wiki_dir: Path) -> None:
+        """An unanswered ``oversize_page`` block for an entity also blocks a
+        NEW ``oversize_split``/``oversize_log_demote`` escalation for that
+        same entity (the "family" dedup the issue's Plan step 1 asks for),
+        not just a second ``oversize_page`` -- avoids double review noise if
+        an operator flips ``librarian.oversize_page_action`` mid-flight."""
+        assert OVERSIZE_ESCALATION_CONFLICT_TYPES == {
+            "oversize_page",
+            "oversize_split",
+            "oversize_log_demote",
+        }
+        pending = wiki_dir / "_pending_questions.md"
+        first = check_page_size_gate(
+            _update_action(name="Kromatic"),
+            "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1),
+            "sessions/one.md",
+            None,
+        )
+        assert isinstance(first, EscalationItem)
+        tier4_escalate([first], pending)
+
+        split_item = EscalationItem(
+            raw_ref="sessions/two.md",
+            entity_name="Kromatic",
+            conflict_type="oversize_split",
+            description="Page 'Kromatic' was split into linked atomic pages.",
+        )
+        suppressed = tier4_escalate([split_item], pending)
+        assert suppressed == 1
+        content = pending.read_text()
+        assert content.count("## [") == 1
+        assert "oversize_split" not in content
+
+    def test_two_new_suppressions_in_the_same_batch_collapse_too(
+        self, wiki_dir: Path
+    ) -> None:
+        """No existing file yet -- two oversize items for the SAME entity in
+        ONE ``tier4_escalate`` call must still collapse to one block
+        (in-batch collapse, not just cross-call)."""
+        pending = wiki_dir / "_pending_questions.md"
+        body = "x" * (DEFAULT_PAGE_SIZE_THRESHOLD_CHARS + 1)
+        item1 = check_page_size_gate(
+            _update_action(name="Kromatic"), body, "sessions/one.md", None
+        )
+        item2 = check_page_size_gate(
+            _update_action(name="Kromatic"), body, "sessions/two.md", None
+        )
+        assert isinstance(item1, EscalationItem)
+        assert isinstance(item2, EscalationItem)
+        suppressed = tier4_escalate([item1, item2], pending)
+        assert suppressed == 1
+        content = pending.read_text()
+        assert content.count("**Conflict type**: oversize_page") == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1430 AC5: collapse_oversize_escalation_duplicates (migration)
+# ---------------------------------------------------------------------------
+
+
+def _oversize_block(entity: str, ref: str, *, date: str = "2026-09-01") -> str:
+    return (
+        f'## [{date}] Entity: "{entity}" (from {ref})\n'
+        "- [ ] some question?\n\n"
+        "**Conflict type**: oversize_page\n"
+        f"**Description**: over threshold, ref={ref}\n"
+    )
+
+
+def _answered_block(entity: str, ref: str, *, date: str = "2026-09-01") -> str:
+    return (
+        f'## [{date}] Entity: "{entity}" (from {ref})\n'
+        "- [x] some question?\n\nAlready answered.\n\n"
+        "**Conflict type**: oversize_page\n"
+        f"**Description**: over threshold, ref={ref}\n"
+    )
+
+
+def _write_pending(wiki: Path, blocks: list[str]) -> Path:
+    pending = wiki / "_pending_questions.md"
+    pending.write_text("# Pending Questions\n\n" + "\n\n---\n\n".join(blocks) + "\n")
+    return pending
+
+
+class TestCollapseOversizeEscalationDuplicates:
+    def test_no_file_returns_zero(self, tmp_path: Path) -> None:
+        assert collapse_oversize_escalation_duplicates(tmp_path / "missing.md") == 0
+
+    def test_no_duplicates_is_a_noop(self, wiki_dir: Path) -> None:
+        pending = _write_pending(
+            wiki_dir,
+            [_oversize_block("Alpha", "sessions/a.md"), _oversize_block("Beta", "sessions/b.md")],
+        )
+        before = pending.read_text()
+        archived = collapse_oversize_escalation_duplicates(pending)
+        assert archived == 0
+        assert pending.read_text() == before
+        assert not (wiki_dir / "_pending_questions_archive.md").exists()
+
+    def test_collapses_duplicates_keeping_the_newest(self, wiki_dir: Path) -> None:
+        pending = _write_pending(
+            wiki_dir,
+            [
+                _oversize_block("Kromatic", "sessions/0.md", date="2026-08-01"),
+                _oversize_block("Kromatic", "sessions/1.md", date="2026-08-15"),
+                _oversize_block("Kromatic", "sessions/2.md", date="2026-09-01"),  # newest
+            ],
+        )
+        before_count = pending.read_text().count("**Conflict type**: oversize_page")
+        assert before_count == 3
+
+        archived = collapse_oversize_escalation_duplicates(pending)
+
+        after_text = pending.read_text()
+        after_count = after_text.count("**Conflict type**: oversize_page")
+        assert archived == 2
+        assert after_count == 1
+        assert "sessions/2.md" in after_text  # newest kept
+        assert "sessions/0.md" not in after_text
+        assert "sessions/1.md" not in after_text
+
+        # Never deleted -- archived instead.
+        archive_text = (wiki_dir / "_pending_questions_archive.md").read_text()
+        assert "sessions/0.md" in archive_text
+        assert "sessions/1.md" in archive_text
+        assert archive_text.count("**Archived reason**") == 2
+        assert "athenaeum#1430" in archive_text
+
+    def test_is_idempotent(self, wiki_dir: Path) -> None:
+        pending = _write_pending(
+            wiki_dir,
+            [
+                _oversize_block("Kromatic", "sessions/0.md"),
+                _oversize_block("Kromatic", "sessions/1.md"),
+            ],
+        )
+        first = collapse_oversize_escalation_duplicates(pending)
+        second = collapse_oversize_escalation_duplicates(pending)
+        assert first == 1
+        assert second == 0
+        assert pending.read_text().count("**Conflict type**: oversize_page") == 1
+
+    def test_distinct_entities_are_independent(self, wiki_dir: Path) -> None:
+        pending = _write_pending(
+            wiki_dir,
+            [
+                _oversize_block("Alpha", "sessions/a1.md"),
+                _oversize_block("Alpha", "sessions/a2.md"),
+                _oversize_block("Beta", "sessions/b1.md"),
+            ],
+        )
+        archived = collapse_oversize_escalation_duplicates(pending)
+        assert archived == 1
+        content = pending.read_text()
+        assert content.count('Entity: "Alpha"') == 1
+        assert content.count('Entity: "Beta"') == 1
+
+    def test_answered_blocks_are_never_touched(self, wiki_dir: Path) -> None:
+        """Only UNANSWERED oversize blocks are collapsed -- an already
+        answered ``[x]`` block (even a duplicate-looking one) is left
+        exactly where it is; that's ``ingest_answers``'s job, not this
+        migration's."""
+        pending = _write_pending(
+            wiki_dir,
+            [
+                _answered_block("Kromatic", "sessions/0.md"),
+                _oversize_block("Kromatic", "sessions/1.md"),
+                _oversize_block("Kromatic", "sessions/2.md"),
+            ],
+        )
+        archived = collapse_oversize_escalation_duplicates(pending)
+        # Only ONE unanswered duplicate collapsed; the answered block is not
+        # part of the unanswered group at all.
+        assert archived == 1
+        content = pending.read_text()
+        assert "sessions/0.md" in content  # answered block untouched, kept
+        assert content.count("- [x]") == 1
+
+    def test_non_oversize_blocks_are_untouched(self, wiki_dir: Path) -> None:
+        principled_block = (
+            '## [2026-09-01] Entity: "Gamma" (from sessions/g.md)\n'
+            "- [ ] unrelated question?\n\n"
+            "**Conflict type**: principled\n"
+            "**Description**: not an oversize escalation at all\n"
+        )
+        pending = _write_pending(
+            wiki_dir,
+            [
+                principled_block,
+                _oversize_block("Kromatic", "sessions/0.md"),
+                _oversize_block("Kromatic", "sessions/1.md"),
+            ],
+        )
+        archived = collapse_oversize_escalation_duplicates(pending)
+        assert archived == 1
+        content = pending.read_text()
+        assert 'Entity: "Gamma"' in content
+        assert "principled" in content
+
+    def test_malformed_block_is_preserved_verbatim_not_dropped(
+        self, wiki_dir: Path
+    ) -> None:
+        """Safety property: this migration uses ``_split_blocks``/``_parse_block``
+        directly (not ``parse_pending_questions``, which silently DROPS
+        unparseable blocks from its returned list) specifically so a
+        corrupt block already on disk is never lost by this rewrite.
+
+        A block with no header at all is preamble/leader text that
+        ``_split_blocks`` itself discards (matching ``ingest_answers``'s own
+        behavior -- not something this migration changes). The interesting
+        case is a block that STARTS with a valid header (so the splitter
+        keeps it as its own block) but has neither a checkbox line nor a
+        ``**Description**:`` line, so ``_parse_block`` genuinely cannot
+        recover a question from it and returns ``None``."""
+        malformed = (
+            '## [2026-09-01] Entity: "Broken" (from sessions/broken.md)\n'
+            "Stray text with no checkbox line and no Description field.\n"
+        )
+        pending = _write_pending(
+            wiki_dir,
+            [
+                malformed.rstrip("\n"),
+                _oversize_block("Kromatic", "sessions/0.md"),
+                _oversize_block("Kromatic", "sessions/1.md"),
+            ],
+        )
+        archived = collapse_oversize_escalation_duplicates(pending)
+        assert archived == 1
+        content = pending.read_text()
+        assert "Broken" in content
+        assert "Stray text with no checkbox line" in content
+
+    def test_cross_conflict_type_family_collapses_together(self, wiki_dir: Path) -> None:
+        """The "family" dedup: an unanswered oversize_page block and an
+        unanswered oversize_split block for the SAME entity count as
+        duplicates of each other, not two independent groups."""
+        split_block = (
+            '## [2026-09-01] Entity: "Kromatic" (from sessions/1.md)\n'
+            "- [ ] split question?\n\n"
+            "**Conflict type**: oversize_split\n"
+            "**Description**: page was split\n"
+        )
+        pending = _write_pending(
+            wiki_dir,
+            [_oversize_block("Kromatic", "sessions/0.md"), split_block],
+        )
+        archived = collapse_oversize_escalation_duplicates(pending)
+        assert archived == 1
+        content = pending.read_text()
+        assert content.count("## [") == 1
+
+    def test_re_appending_to_an_existing_archive_prepends_newest_first(
+        self, wiki_dir: Path
+    ) -> None:
+        archive_path = wiki_dir / "_pending_questions_archive.md"
+        archive_path.write_text("# Answered Questions\n\nSOME OLDER ARCHIVED ENTRY\n")
+        pending = _write_pending(
+            wiki_dir,
+            [
+                _oversize_block("Kromatic", "sessions/0.md"),
+                _oversize_block("Kromatic", "sessions/1.md"),
+            ],
+        )
+        collapse_oversize_escalation_duplicates(pending)
+        archive_text = archive_path.read_text()
+        assert "sessions/0.md" in archive_text
+        assert "SOME OLDER ARCHIVED ENTRY" in archive_text
+        # newest-first: the new archive entry comes before the old one.
+        assert archive_text.index("sessions/0.md") < archive_text.index(
+            "SOME OLDER ARCHIVED ENTRY"
+        )
