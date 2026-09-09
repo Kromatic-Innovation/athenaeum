@@ -85,6 +85,7 @@ MODULE_LAYER: dict[str, int] = {
     "config": 2,
     "corrections": 2,
     "dimensions": 2,       # "L1/L2" -> upper bound
+    "field_constraints": 2,
     "intake": 2,
     "measurement_docs": 2,
     "memory_class_backfill": 2,
