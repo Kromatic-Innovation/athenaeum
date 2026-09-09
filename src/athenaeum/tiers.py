@@ -6294,8 +6294,8 @@ def tier4_escalate(
 
     # Issue athenaeum#1430: count of oversize-family candidates suppressed below
     # because the entity already had an unanswered escalation open — tracked
-    # separately from suppressed_count's #198 reason so the run-summary log
-    # line at the end of this function can name it explicitly.
+    # separately from suppressed_count's issue athenaeum#198 reason so the
+    # run-summary log line at the end of this function can name it explicitly.
     oversize_dedup_suppressed = 0
 
     for item in items:
@@ -6304,10 +6304,11 @@ def tier4_escalate(
         # suppressed merge. If this entity already has an unanswered
         # oversize-page-family block (OVERSIZE_ESCALATION_CONFLICT_TYPES) —
         # either already on disk (open_oversize_entities, seeded above from
-        # the SAME parse_pending_questions() pass athenaeum#157 already pays for) or
-        # created earlier in THIS SAME batch — skip creating a new block
-        # entirely: no "Also affects" merge (unlike the #157 pair-key path
-        # below), just counted + logged so the suppression stays observable.
+        # the SAME parse_pending_questions() pass issue athenaeum#157 already
+        # pays for) or created earlier in THIS SAME batch — skip creating a
+        # new block entirely: no "Also affects" merge (unlike the issue
+        # athenaeum#157 pair-key path below), just counted + logged so the
+        # suppression stays observable.
         # Keyed on "currently UNANSWERED": once the open block is
         # answered/archived, open_oversize_entities no longer contains this
         # entity on the next call and a fresh escalation is created again.
