@@ -88,18 +88,30 @@ class Page:
     links: tuple[str, ...] = ()
 
     def to_markdown(self) -> str:
-        """Render frontmatter + body, matching the existing fixture shape."""
+        """Render frontmatter + body, matching the existing fixture shape.
+
+        Scalar values are QUOTED. YAML 1.1 parses an unquoted ``9:00`` as the
+        sexagesimal integer 540, so a page tagged with a time silently loads a
+        non-string tag. That is not a hypothetical: it surfaced here as a hard
+        ``TypeError`` inside ``recall_search`` on the FTS5 path, from a
+        distractor carrying a ``9:00`` tag. Fixtures must emit unambiguous
+        YAML so an eval measures retrieval rather than a parser accident.
+        """
+
+        def q(value: str) -> str:
+            return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
         fm: list[str] = ["---", f"uid: {self.uid}", f"type: {self.type}"]
-        fm.append(f"name: {self.name}")
+        fm.append(f"name: {q(self.name)}")
         if self.aliases:
             fm.append("aliases:")
-            fm.extend(f"  - {a}" for a in self.aliases)
+            fm.extend(f"  - {q(a)}" for a in self.aliases)
         fm.append(f"access: {self.access}")
         if self.tags:
             fm.append("tags:")
-            fm.extend(f"  - {t}" for t in self.tags)
+            fm.extend(f"  - {q(t)}" for t in self.tags)
         fm.append(f"source_type: {self.source_type}")
-        fm.append(f'source_ref: "{self.source_ref}"')
+        fm.append(f"source_ref: {q(self.source_ref)}")
         fm.append(f"created: {self.created}")
         fm.append(f"updated: {self.updated}")
         fm.append("---")

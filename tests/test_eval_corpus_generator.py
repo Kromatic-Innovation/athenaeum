@@ -229,6 +229,35 @@ def test_probe_taxonomy_is_complete() -> None:
     } <= classes
 
 
+def test_frontmatter_scalars_survive_yaml_round_trip(tmp_path: Path) -> None:
+    """Every rendered tag/alias/name must load back as a STRING.
+
+    YAML 1.1 reads an unquoted ``9:00`` as the integer 540. A distractor
+    carrying a time-shaped tag therefore loaded a non-string and crashed
+    ``recall_search`` outright -- an eval that dies in the parser measures
+    nothing, and the failure looks like a backend fault rather than a fixture
+    one. Probe terms legitimately include times, so this must stay pinned.
+    """
+    import yaml
+
+    corpus = build_corpus(scale="medium_verydense")
+    wiki = corpus.materialize(tmp_path)
+
+    checked = 0
+    for path in wiki.glob("*.md"):
+        text = path.read_text(encoding="utf-8")
+        front = yaml.safe_load(text[3 : text.find("\n---", 3)])
+        for field in ("tags", "aliases"):
+            for value in front.get(field) or ():
+                assert isinstance(value, str), (
+                    f"{path.name}: {field} entry {value!r} loaded as "
+                    f"{type(value).__name__}, not str"
+                )
+                checked += 1
+        assert isinstance(front["name"], str)
+    assert checked, "no tags/aliases were actually checked"
+
+
 def test_materialize_writes_a_readable_wiki_tree(tmp_path: Path) -> None:
     corpus = build_corpus(scale="core")
     wiki = corpus.materialize(tmp_path)
