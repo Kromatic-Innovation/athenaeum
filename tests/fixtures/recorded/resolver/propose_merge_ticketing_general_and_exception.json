@@ -5,15 +5,40 @@
       "type": "thinking"
     },
     {
-      "text": "{\n  \"action\": \"propose_merge\",\n  \"merge_target_name\": \"engineering-work-tracking\",\n  \"rationale\": \"PREFERENCE pair: a general rule (Linear for engineering work) plus an explicitly narrower support-intake exception (Zendesk) that compose cleanly and read better as one canonical memory.\",\n  \"draft_merged_body\": \"## Where work items are tracked\\n\\n- **General rule:** The team tracks all engineering work in Linear.\\n- **Exception (support intake):** Support-desk bug reports are logged in Zendesk, not Linear.\\n\\nIf a support-desk report is escalated into engineering work, it should be carried into Linear per the general rule.\",\n  \"confidence\": 0.9,\n  \"source_precedence_used\": [\"a:unsourced > b:unsourced\"]\n}",
+      "text": "{\n  \"action\": \"propose_merge\",\n  \"merge_target_name\": \"engineering-work-tracking\",\n  \"rationale\": \"PREFERENCE pair: a general rule (Linear for engineering work) plus an explicitly narrower support-intake exception (Ticketwell) that compose cleanly and read better as one canonical memory.\",\n  \"draft_merged_body\": \"## Where work items are tracked\\n\\n- **General rule:** The team tracks all engineering work in Linear.\\n- **Exception (support intake):** Support-desk bug reports are logged in Ticketwell, not Linear.\\n\\nIf a support-desk report is escalated into engineering work, it should be carried into Linear per the general rule.\",\n  \"confidence\": 0.9,\n  \"source_precedence_used\": [\"a:unsourced > b:unsourced\"]\n}",
       "type": "text"
     }
   ],
   "layer": "resolver",
   "model": "claude-opus-5",
-  "prompt_hash": "sha256:4be7a6f577892928b43e804f289f9f89507172e4cb0cd682721b9d0e8009ffe8",
+  "prompt_hash": "sha256:dd907c13a5253c02da4bbdf24dab2a507a90943644f2c56f66f733a086b7c5f4",
   "recorded_at": "2026-08-02T18:06:06.379722+00:00",
-  "response_text": "{\n  \"action\": \"propose_merge\",\n  \"merge_target_name\": \"engineering-work-tracking\",\n  \"rationale\": \"PREFERENCE pair: a general rule (Linear for engineering work) plus an explicitly narrower support-intake exception (Zendesk) that compose cleanly and read better as one canonical memory.\",\n  \"draft_merged_body\": \"## Where work items are tracked\\n\\n- **General rule:** The team tracks all engineering work in Linear.\\n- **Exception (support intake):** Support-desk bug reports are logged in Zendesk, not Linear.\\n\\nIf a support-desk report is escalated into engineering work, it should be carried into Linear per the general rule.\",\n  \"confidence\": 0.9,\n  \"source_precedence_used\": [\"a:unsourced > b:unsourced\"]\n}",
+  "rederived": {
+    "at": "2026-09-09T23:08:01.237084+00:00",
+    "from_prompt_hash": "sha256:4be7a6f577892928b43e804f289f9f89507172e4cb0cd682721b9d0e8009ffe8",
+    "rename": [
+      "Meridian's=Thornhollow's",
+      "Meridian=Thornhollow",
+      "meridian=thornhollow",
+      "Notion=Pagemoor",
+      "notion=pagemoor",
+      "Google Sheets=Tallyfold",
+      "Google-Sheets=Tallyfold",
+      "Google Docs=Tallyfold",
+      "gsheets=tallyfold",
+      "gdocs=tallyfold",
+      "Heroku=Hostmoor",
+      "heroku=hostmoor",
+      "Airtable=Latticebase",
+      "airtable=latticebase",
+      "Zendesk=Ticketwell",
+      "zendesk=ticketwell",
+      "WeWork=Kingsway Works",
+      "wework=kingsway-works"
+    ],
+    "tool": "scripts/rederive_recorded_fixture.py"
+  },
+  "response_text": "{\n  \"action\": \"propose_merge\",\n  \"merge_target_name\": \"engineering-work-tracking\",\n  \"rationale\": \"PREFERENCE pair: a general rule (Linear for engineering work) plus an explicitly narrower support-intake exception (Ticketwell) that compose cleanly and read better as one canonical memory.\",\n  \"draft_merged_body\": \"## Where work items are tracked\\n\\n- **General rule:** The team tracks all engineering work in Linear.\\n- **Exception (support intake):** Support-desk bug reports are logged in Ticketwell, not Linear.\\n\\nIf a support-desk report is escalated into engineering work, it should be carried into Linear per the general rule.\",\n  \"confidence\": 0.9,\n  \"source_precedence_used\": [\"a:unsourced > b:unsourced\"]\n}",
   "usage": {
     "cache_creation_input_tokens": 0,
     "cache_read_input_tokens": 4390,

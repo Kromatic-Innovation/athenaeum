@@ -2,15 +2,40 @@
   "case_id": "single_person_entity",
   "content_blocks": [
     {
-      "text": "```json\n[\n  {\n    \"name\": \"Priya Shah\",\n    \"entity_type\": \"person\",\n    \"tags\": [\"active\", \"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client lead at the firm with four years tenure. Responsible for managing the Meridian retainer. Recently flagged client preference for mid-month check-ins in addition to end-of-month reviews.\"\n  },\n  {\n    \"name\": \"Meridian retainer\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"active\", \"client\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client retainer project with Q3 roadmap planning underway. Client has requested more frequent check-in cadence, shifting from end-of-month only to include mid-month reviews.\"\n  }\n]\n```",
+      "text": "```json\n[\n  {\n    \"name\": \"Priya Shah\",\n    \"entity_type\": \"person\",\n    \"tags\": [\"active\", \"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client lead at the firm with four years tenure. Responsible for managing the Thornhollow retainer. Recently flagged client preference for mid-month check-ins in addition to end-of-month reviews.\"\n  },\n  {\n    \"name\": \"Thornhollow retainer\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"active\", \"client\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client retainer project with Q3 roadmap planning underway. Client has requested more frequent check-in cadence, shifting from end-of-month only to include mid-month reviews.\"\n  }\n]\n```",
       "type": "text"
     }
   ],
   "layer": "classify",
   "model": "claude-haiku-4-5-20251001",
-  "prompt_hash": "sha256:627dda5072caa9021da136ed075ed6639ac7ec4b0364d12a140cea37bd94798e",
+  "prompt_hash": "sha256:fa32a675fd008010daa66bddd52b8fb04ab1d74fce04a35f55430a4d76d2ef5c",
   "recorded_at": "2026-08-02T18:04:57.397381+00:00",
-  "response_text": "```json\n[\n  {\n    \"name\": \"Priya Shah\",\n    \"entity_type\": \"person\",\n    \"tags\": [\"active\", \"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client lead at the firm with four years tenure. Responsible for managing the Meridian retainer. Recently flagged client preference for mid-month check-ins in addition to end-of-month reviews.\"\n  },\n  {\n    \"name\": \"Meridian retainer\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"active\", \"client\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client retainer project with Q3 roadmap planning underway. Client has requested more frequent check-in cadence, shifting from end-of-month only to include mid-month reviews.\"\n  }\n]\n```",
+  "rederived": {
+    "at": "2026-09-09T23:08:01.107709+00:00",
+    "from_prompt_hash": "sha256:627dda5072caa9021da136ed075ed6639ac7ec4b0364d12a140cea37bd94798e",
+    "rename": [
+      "Meridian's=Thornhollow's",
+      "Meridian=Thornhollow",
+      "meridian=thornhollow",
+      "Notion=Pagemoor",
+      "notion=pagemoor",
+      "Google Sheets=Tallyfold",
+      "Google-Sheets=Tallyfold",
+      "Google Docs=Tallyfold",
+      "gsheets=tallyfold",
+      "gdocs=tallyfold",
+      "Heroku=Hostmoor",
+      "heroku=hostmoor",
+      "Airtable=Latticebase",
+      "airtable=latticebase",
+      "Zendesk=Ticketwell",
+      "zendesk=ticketwell",
+      "WeWork=Kingsway Works",
+      "wework=kingsway-works"
+    ],
+    "tool": "scripts/rederive_recorded_fixture.py"
+  },
+  "response_text": "```json\n[\n  {\n    \"name\": \"Priya Shah\",\n    \"entity_type\": \"person\",\n    \"tags\": [\"active\", \"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client lead at the firm with four years tenure. Responsible for managing the Thornhollow retainer. Recently flagged client preference for mid-month check-ins in addition to end-of-month reviews.\"\n  },\n  {\n    \"name\": \"Thornhollow retainer\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"active\", \"client\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client retainer project with Q3 roadmap planning underway. Client has requested more frequent check-in cadence, shifting from end-of-month only to include mid-month reviews.\"\n  }\n]\n```",
   "usage": {
     "cache_creation_input_tokens": 0,
     "cache_read_input_tokens": 0,

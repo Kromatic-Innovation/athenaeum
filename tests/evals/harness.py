@@ -147,6 +147,18 @@ class RecordedResponse:
     :func:`athenaeum.provider.response_text`'s block-walking was invisible to
     replay. ``response_text`` is retained as the extracted answer for
     human-readability and backward compatibility.
+
+    ``rederived`` (issue athenaeum#1496) is set ONLY on a fixture whose
+    ``prompt_hash``/``response_text``/``content_blocks`` were produced by
+    ``scripts/rederive_recorded_fixture.py`` mechanically re-deriving a prior
+    live recording after a pure vocabulary rename, rather than by a fresh
+    live API call. It exists so a re-derived fixture is never mistaken for a
+    fresh recording: the original ``recorded_at``/``model``/``usage`` are left
+    untouched (they still describe the real live run that produced the
+    underlying response), and this field records what changed instead. See
+    that script's module docstring for why re-derivation is a legitimate,
+    self-limiting operation for a declared rename and refused for anything
+    else. ``None`` for every fixture produced by a real recording.
     """
 
     case_id: str
@@ -157,6 +169,7 @@ class RecordedResponse:
     usage: dict[str, int]
     recorded_at: str
     content_blocks: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    rederived: dict[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -172,6 +185,7 @@ class RecordedResponse:
             # extracted text. Synthesise a single text block so replay still
             # reconstructs a faithful (single-block) response.
             content_blocks = [{"type": "text", "text": response_text}]
+        raw_rederived = payload.get("rederived")
         return cls(
             case_id=str(payload["case_id"]),
             layer=str(payload["layer"]),
@@ -181,6 +195,7 @@ class RecordedResponse:
             usage={k: int(v) for k, v in dict(payload.get("usage", {})).items()},
             recorded_at=str(payload.get("recorded_at", "")),
             content_blocks=content_blocks,
+            rederived=dict(raw_rederived) if raw_rederived else None,
         )
 
 

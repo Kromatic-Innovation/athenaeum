@@ -90,6 +90,34 @@ git add tests/fixtures/recorded/
 git commit -m "evals: re-record fixtures after prompt edit"
 ```
 
+### Re-deriving instead of re-recording (no live key available)
+
+A real re-record needs a live `ANTHROPIC_API_KEY` (or the `claude-cli`
+provider). When neither is available — as in an offline/CI-only
+environment — and the prompt edit is a **pure find-and-replace rename**
+(for example: an invented name in a case turned out to collide with a real
+one, per issue athenaeum#1496), `scripts/rederive_recorded_fixture.py` can
+mechanically re-derive the affected fixtures instead:
+
+```bash
+.venv/bin/python scripts/rederive_recorded_fixture.py --apply \
+  --rename "OldName=NewName" --rename "oldname=newname"
+git add tests/fixtures/recorded/
+git commit -m "evals: re-derive fixtures after renaming OldName -> NewName"
+```
+
+This is legitimate ONLY for a pure substitution: the tool drives the same
+call path the corresponding test drives, then proves the ONLY difference
+between the old and new prompt is the declared `--rename` pairs (by
+reverting the new prompt and checking it hashes to the fixture's stored
+hash) before touching anything. A fixture whose prompt changed for any
+other reason — reworded prose, a different scenario, an unrelated prompt
+edit — is refused and stays stale; re-record it for real instead. Every
+re-derived fixture carries a `rederived` provenance block recording what
+was renamed and the pre-rename hash, so it is never mistaken for a fresh
+live recording. See the script's module docstring for the full design and
+`tests/test_rederive_recorded_fixture.py` for the proof it works both ways.
+
 ## Build prerequisites
 
 - CI pulls `ANTHROPIC_API_KEY` from 1Password at run time

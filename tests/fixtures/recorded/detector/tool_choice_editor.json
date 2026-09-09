@@ -2,15 +2,40 @@
   "case_id": "tool_choice_editor",
   "content_blocks": [
     {
-      "text": "```json\n{\n  \"detected\": true,\n  \"conflict_type\": \"factual\",\n  \"members_involved\": [\"scope-tool_choice_editor/feedback_editor_notion.md\", \"scope-tool_choice_editor/feedback_editor_gdocs.md\"],\n  \"conflicting_passages\": [\"The consulting team uses Notion for all client-facing project docs.\", \"All client-facing project docs live in Google Docs, not Notion.\"],\n  \"rationale\": \"The two snippets make directly incompatible claims about where client-facing project docs are stored: one states Notion is used, the other explicitly states Google Docs is used instead of Notion.\"\n}\n```",
+      "text": "```json\n{\n  \"detected\": true,\n  \"conflict_type\": \"factual\",\n  \"members_involved\": [\"scope-tool_choice_editor/feedback_editor_pagemoor.md\", \"scope-tool_choice_editor/feedback_editor_tallyfold.md\"],\n  \"conflicting_passages\": [\"The consulting team uses Pagemoor for all client-facing project docs.\", \"All client-facing project docs live in Tallyfold, not Pagemoor.\"],\n  \"rationale\": \"The two snippets make directly incompatible claims about where client-facing project docs are stored: one states Pagemoor is used, the other explicitly states Tallyfold is used instead of Pagemoor.\"\n}\n```",
       "type": "text"
     }
   ],
   "layer": "detector",
   "model": "claude-haiku-4-5-20251001",
-  "prompt_hash": "sha256:ccadc3bc2b64a01c0f91d0a16235ad605549716eaf129a1e12cff623c66eef2c",
+  "prompt_hash": "sha256:717bb7569b677ece522b33bbc73298226d122ace3ebe8f1470c66412c2985bb7",
   "recorded_at": "2026-08-02T18:05:13.940979+00:00",
-  "response_text": "```json\n{\n  \"detected\": true,\n  \"conflict_type\": \"factual\",\n  \"members_involved\": [\"scope-tool_choice_editor/feedback_editor_notion.md\", \"scope-tool_choice_editor/feedback_editor_gdocs.md\"],\n  \"conflicting_passages\": [\"The consulting team uses Notion for all client-facing project docs.\", \"All client-facing project docs live in Google Docs, not Notion.\"],\n  \"rationale\": \"The two snippets make directly incompatible claims about where client-facing project docs are stored: one states Notion is used, the other explicitly states Google Docs is used instead of Notion.\"\n}\n```",
+  "rederived": {
+    "at": "2026-09-09T23:08:01.190452+00:00",
+    "from_prompt_hash": "sha256:ccadc3bc2b64a01c0f91d0a16235ad605549716eaf129a1e12cff623c66eef2c",
+    "rename": [
+      "Meridian's=Thornhollow's",
+      "Meridian=Thornhollow",
+      "meridian=thornhollow",
+      "Notion=Pagemoor",
+      "notion=pagemoor",
+      "Google Sheets=Tallyfold",
+      "Google-Sheets=Tallyfold",
+      "Google Docs=Tallyfold",
+      "gsheets=tallyfold",
+      "gdocs=tallyfold",
+      "Heroku=Hostmoor",
+      "heroku=hostmoor",
+      "Airtable=Latticebase",
+      "airtable=latticebase",
+      "Zendesk=Ticketwell",
+      "zendesk=ticketwell",
+      "WeWork=Kingsway Works",
+      "wework=kingsway-works"
+    ],
+    "tool": "scripts/rederive_recorded_fixture.py"
+  },
+  "response_text": "```json\n{\n  \"detected\": true,\n  \"conflict_type\": \"factual\",\n  \"members_involved\": [\"scope-tool_choice_editor/feedback_editor_pagemoor.md\", \"scope-tool_choice_editor/feedback_editor_tallyfold.md\"],\n  \"conflicting_passages\": [\"The consulting team uses Pagemoor for all client-facing project docs.\", \"All client-facing project docs live in Tallyfold, not Pagemoor.\"],\n  \"rationale\": \"The two snippets make directly incompatible claims about where client-facing project docs are stored: one states Pagemoor is used, the other explicitly states Tallyfold is used instead of Pagemoor.\"\n}\n```",
   "usage": {
     "cache_creation_input_tokens": 0,
     "cache_read_input_tokens": 0,

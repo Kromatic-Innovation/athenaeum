@@ -2,15 +2,40 @@
   "case_id": "skip_already_matched_entity",
   "content_blocks": [
     {
-      "text": "```json\n[\n  {\n    \"name\": \"Meridian\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"client\"],\n    \"access\": \"internal\",\n    \"observations\": \"Retainer arrangement renewed for another year as confirmed by Priya Shah.\"\n  }\n]\n```",
+      "text": "```json\n[\n  {\n    \"name\": \"Thornhollow\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"client\"],\n    \"access\": \"internal\",\n    \"observations\": \"Retainer arrangement renewed for another year as confirmed by Priya Shah.\"\n  }\n]\n```",
       "type": "text"
     }
   ],
   "layer": "classify",
   "model": "claude-haiku-4-5-20251001",
-  "prompt_hash": "sha256:58a7d6c4287bf8047daea930ea824de67dc45bc6a2f32f8b78728009f124a284",
+  "prompt_hash": "sha256:d883d24ae3ba4990f870f724a4b1d24dbd47f8d14b952fd43018c322ea11bd98",
   "recorded_at": "2026-08-02T18:05:00.169267+00:00",
-  "response_text": "```json\n[\n  {\n    \"name\": \"Meridian\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"client\"],\n    \"access\": \"internal\",\n    \"observations\": \"Retainer arrangement renewed for another year as confirmed by Priya Shah.\"\n  }\n]\n```",
+  "rederived": {
+    "at": "2026-09-09T23:08:01.110920+00:00",
+    "from_prompt_hash": "sha256:58a7d6c4287bf8047daea930ea824de67dc45bc6a2f32f8b78728009f124a284",
+    "rename": [
+      "Meridian's=Thornhollow's",
+      "Meridian=Thornhollow",
+      "meridian=thornhollow",
+      "Notion=Pagemoor",
+      "notion=pagemoor",
+      "Google Sheets=Tallyfold",
+      "Google-Sheets=Tallyfold",
+      "Google Docs=Tallyfold",
+      "gsheets=tallyfold",
+      "gdocs=tallyfold",
+      "Heroku=Hostmoor",
+      "heroku=hostmoor",
+      "Airtable=Latticebase",
+      "airtable=latticebase",
+      "Zendesk=Ticketwell",
+      "zendesk=ticketwell",
+      "WeWork=Kingsway Works",
+      "wework=kingsway-works"
+    ],
+    "tool": "scripts/rederive_recorded_fixture.py"
+  },
+  "response_text": "```json\n[\n  {\n    \"name\": \"Thornhollow\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"client\"],\n    \"access\": \"internal\",\n    \"observations\": \"Retainer arrangement renewed for another year as confirmed by Priya Shah.\"\n  }\n]\n```",
   "usage": {
     "cache_creation_input_tokens": 0,
     "cache_read_input_tokens": 0,
