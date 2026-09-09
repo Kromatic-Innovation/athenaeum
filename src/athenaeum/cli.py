@@ -146,6 +146,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "storage": ("athenaeum._cmd_storage", "add_storage_subparser"),
     "push-metrics": ("athenaeum._cmd_push_metrics", "add_push_metrics_subparser"),
     "viewer": ("athenaeum._cmd_viewer", "add_viewer_subparser"),
+    "demo": ("athenaeum._cmd_demo", "add_demo_subparser"),
     "usage-report": ("athenaeum._cmd_usage_report", "add_usage_report_subparser"),
     "measure": ("athenaeum._cmd_measure", "add_measure_subparser"),
     "memory-class": ("athenaeum._cmd_memory_class", "add_memory_class_subparser"),
@@ -179,6 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_curate import add_curate_subparsers
     from athenaeum._cmd_decay import add_decay_subparser
     from athenaeum._cmd_decisions import add_decisions_subparser
+    from athenaeum._cmd_demo import add_demo_subparser
     from athenaeum._cmd_description import add_description_subparser
     from athenaeum._cmd_dimensions import add_dimensions_subparser
     from athenaeum._cmd_drain import add_drain_subparser
@@ -248,6 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_storage_subparser(subparsers)  # storage
     add_push_metrics_subparser(subparsers)  # push-metrics
     add_viewer_subparser(subparsers)  # viewer (issue athenaeum#1480)
+    add_demo_subparser(subparsers)  # demo (issue athenaeum#1525)
     add_usage_report_subparser(subparsers)  # usage-report (issue athenaeum#968)
     add_measure_subparser(subparsers)  # measure (shadow-linkage, backlog-price, ordinary-night)
     add_memory_class_subparser(subparsers)  # memory-class backfill

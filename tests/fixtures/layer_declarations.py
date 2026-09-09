@@ -187,6 +187,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_curate": 5,
     "_cmd_decay": 5,
     "_cmd_decisions": 5,
+    "_cmd_demo": 5,
     "_cmd_dimensions": 5,
     "_cmd_drain": 5,
     "_cmd_enumerate": 5,
