@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pytest wiring for the live-API eval suite (issue athenaeum#331).
 
-Adds three knobs:
+Adds four knobs:
 
 - ``--record`` (CLI flag / ``ATHENAEUM_EVAL_RECORD=1`` env) — each eval
   case writes its raw response body to a fixture under
@@ -9,6 +9,10 @@ Adds three knobs:
 - ``--eval-summary=PATH`` — override the JSON summary output path (default
   ``eval-summary.json`` at repo root). The evals.yml workflow uploads
   this as a build artifact.
+- ``--rollout-summary=PATH`` — the same override, for
+  ``rollout_session`` below (default ``rollout-summary.json`` at repo
+  root). Deliberately mirrors ``--eval-summary`` rather than inventing a
+  second mechanism (issue athenaeum#1521 PR review, finding 2).
 - Session-scoped :class:`EvalSession` fixture — accumulates per-case
   outcomes + ``TokenUsage`` for the run summary + budget guard.
 
@@ -62,6 +66,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "(default: eval-summary.json at repo root)."
         ),
     )
+    group.addoption(
+        "--rollout-summary",
+        action="store",
+        default=None,
+        help=(
+            "Override the rollout-session JSON summary output path "
+            "(default: rollout-summary.json at repo root)."
+        ),
+    )
 
 
 def _record_enabled(config: pytest.Config) -> bool:
@@ -107,10 +120,19 @@ def rollout_session(request: pytest.FixtureRequest) -> Any:
     A SEPARATE :class:`EvalSession` instance from ``eval_session`` above —
     never shares state with it — so rollout usage cannot accumulate into
     ``EVAL_TOKEN_CEILING``'s teardown assert. Emits its own summary artifact
-    (``rollout-summary.json``) and is guarded by its own
-    ``ROLLOUT_TOKEN_CEILING`` via :func:`tests.evals.rollout_session.assert_rollout_ceiling`.
+    (default ``rollout-summary.json`` at repo root, overridable via
+    ``--rollout-summary`` — mirrors ``eval_session``'s ``--eval-summary``
+    configurability exactly rather than hardcoding the path) and is guarded
+    by its own ``ROLLOUT_TOKEN_CEILING`` via
+    :func:`tests.evals.rollout_session.assert_rollout_ceiling`.
     """
     session = EvalSession()
     yield session
-    session.emit_summary(REPO_ROOT / "rollout-summary.json")
+    summary_path_opt = request.config.getoption("--rollout-summary")
+    summary_path = (
+        Path(summary_path_opt)
+        if summary_path_opt
+        else REPO_ROOT / "rollout-summary.json"
+    )
+    session.emit_summary(summary_path)
     assert_rollout_ceiling(session)
