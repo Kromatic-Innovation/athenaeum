@@ -1,0 +1,173 @@
+# Retrieval probes with their ground truth.
+#
+# `probe_class` follows the LongMemEval-style taxonomy. The taxonomy is
+# borrowed; the DATA is not -- those benchmarks test conversational-memory QA
+# over dialogue histories, which is a different shape from a compiled wiki.
+#
+# Fields:
+#   expected_uids     pages a correct answer must surface. EMPTY for
+#                     abstention probes, where the emptiness IS the assertion.
+#   must_not_rank     pages a correct system keeps OUT of the top-k. This is
+#                     how a disambiguation probe states the failure it guards.
+#   distractor_terms  vocabulary the generated distractor tier uses to build
+#                     near-miss pages for this probe. Without these the
+#                     generated tier would not compete for rank and the
+#                     confusability axis would measure nothing.
+
+# --- single hop -------------------------------------------------------------
+
+- id: pto_allowance
+  probe_class: single_hop
+  query: "what is the firm's PTO allowance?"
+  expected_uids: [policy-pto]
+  distractor_terms: ["PTO", "annual leave", "holiday allowance"]
+
+- id: confidentiality_rule
+  probe_class: single_hop
+  query: "can we share one client's engagement details with another client?"
+  expected_uids: [policy-confidentiality]
+  distractor_terms: ["confidentiality", "client disclosure"]
+
+- id: bluewater_terms
+  probe_class: single_hop
+  query: "quote the Bluewater retainer terms verbatim"
+  expected_uids: [client-bluewater]
+  distractor_terms: ["Bluewater", "retainer terms"]
+  note: >-
+    Topic extraction is what rescues the proper noun "Bluewater" from the meta
+    instruction "quote ... verbatim". A purely lexical extractor drops it.
+
+- id: onboarding_length
+  probe_class: single_hop
+  query: "how long does onboarding a new retainer client take?"
+  expected_uids: [policy-onboarding]
+  distractor_terms: ["onboarding", "kickoff"]
+
+# --- multi hop --------------------------------------------------------------
+
+- id: spend_approver_named
+  probe_class: multi_hop
+  query: "who personally signs off discretionary spend over 500 GBP?"
+  expected_uids: [policy-budget-approval, person-amir-osei]
+  distractor_terms: ["discretionary spend", "approval threshold", "500 GBP"]
+  note: >-
+    The threshold lives on the policy page and the identity of the finance
+    partner on the person page. Retrieving either alone yields a confidently
+    incomplete answer, which is why both uids are required.
+
+- id: portal_design_reviewer
+  probe_class: multi_hop
+  query: "who reviews client-facing surfaces on the portal project?"
+  expected_uids: [project-portal-refresh, person-hana-lindqvist]
+  distractor_terms: ["portal", "design review"]
+
+- id: ratecard_tooling_owner
+  probe_class: multi_hop
+  query: "which repository generates the rate card, and who maintains its build?"
+  expected_uids: [repo-rowanhale, tool-buildpipe]
+  distractor_terms: ["rate card", "build pipeline"]
+
+# --- temporal / knowledge update --------------------------------------------
+
+- id: office_address_current
+  probe_class: temporal
+  query: "where is our office?"
+  expected_uids: [office-address-current]
+  must_not_rank: [office-address-superseded]
+  distractor_terms: ["office address", "Kingsway", "Regent Street"]
+
+- id: standup_time_current
+  probe_class: temporal
+  query: "what time is the delivery standup?"
+  expected_uids: [standup-time-current]
+  must_not_rank: [standup-time-superseded]
+  distractor_terms: ["standup", "9:00", "9:30"]
+
+- id: budget_threshold_current
+  probe_class: temporal
+  query: "what is the client lead approval ceiling?"
+  expected_uids: [budget-threshold-current]
+  must_not_rank: [budget-threshold-superseded]
+  distractor_terms: ["approval ceiling", "250 GBP", "500 GBP"]
+
+# --- disambiguation ---------------------------------------------------------
+# The class this corpus exists for. Each of these guards a person-vs-artifact
+# or person-vs-namesake confusion.
+
+- id: person_not_repo
+  probe_class: disambiguation
+  query: "what did Rowan Hale decide about pricing?"
+  expected_uids: [person-rowan-hale, project-pricing-review]
+  must_not_rank: [repo-rowanhale]
+  distractor_terms: ["Rowan Hale", "rowanhale", "pricing"]
+  note: >-
+    A decision is made by a PERSON. The eponymous repository shares almost all
+    of the query's vocabulary and must not outrank the person page.
+
+- id: repo_not_person
+  probe_class: disambiguation
+  query: "how many maintainers does the rowanhale repository have?"
+  expected_uids: [repo-rowanhale]
+  must_not_rank: [person-rowan-hale]
+  distractor_terms: ["rowanhale", "maintainers", "repository"]
+  note: The inverse direction -- the guard must not simply always prefer people.
+
+- id: surname_is_ambiguous
+  probe_class: disambiguation
+  query: "tell me about Hale"
+  expected_uids: [person-rowan-hale, person-devi-hale, person-marcus-hale]
+  distractor_terms: ["Hale", "Hale Associates"]
+  note: >-
+    A bare surname is genuinely ambiguous across several people plus an org.
+    The correct behaviour is to surface the ambiguity, not to answer
+    confidently about one Hale. Scored on distinct-page count, not a single hit.
+
+- id: given_name_is_ambiguous
+  probe_class: disambiguation
+  query: "who is Rowan?"
+  expected_uids: [person-rowan-hale, person-rowan-castell]
+  distractor_terms: ["Rowan"]
+
+# --- abstention -------------------------------------------------------------
+# Nothing in the corpus answers these. Returning a confident wrong page is the
+# failure being measured; returning nothing is the correct behaviour. This is
+# where a push sidecar does its real damage and it is currently untested.
+
+- id: abstain_unknown_client
+  probe_class: abstention
+  query: "what are the payment terms for Harrowgate Industrial?"
+  distractor_terms: ["payment terms", "industrial client"]
+  note: Harrowgate Industrial does not exist in the corpus.
+
+- id: abstain_unknown_policy
+  probe_class: abstention
+  query: "what is the firm's parental leave policy?"
+  distractor_terms: ["parental leave", "leave policy"]
+  note: >-
+    Adjacent to the PTO policy in vocabulary but genuinely absent. A system
+    that returns the PTO page here has confabulated by retrieval.
+
+- id: abstain_unknown_person
+  probe_class: abstention
+  query: "what is Yusuf Adeyemi responsible for?"
+  distractor_terms: ["responsible for", "role"]
+
+# --- distractor robustness --------------------------------------------------
+
+- id: acme_billing_exception
+  probe_class: distractor_robustness
+  query: "how is Acme billed?"
+  expected_uids: [client-acme]
+  must_not_rank: [policy-invoice-cadence]
+  distractor_terms: ["invoice", "billing", "milestone"]
+  note: >-
+    The general cadence policy is a strong lexical match and the WRONG answer:
+    Acme is a documented exception to it.
+
+- id: former_client_not_current
+  probe_class: distractor_robustness
+  query: "which clients are currently on retainer?"
+  expected_uids: [client-meridian, client-bluewater, client-atlas]
+  must_not_rank: [client-verity, client-solent]
+  distractor_terms: ["retainer", "client"]
+  note: Verity is a former client and Solent only a prospect.

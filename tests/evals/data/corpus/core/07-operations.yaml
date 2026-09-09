@@ -1,0 +1,255 @@
+# Operational pages. Ordinary firm minutiae, present because a real knowledge
+# tree is mostly this: pages that are individually unremarkable but that
+# collectively give retrieval something to sift.
+
+- uid: ops-invoice-run
+  type: note
+  name: Monthly invoice run
+  tags: [operations, finance]
+  source_ref: "session-2026-02-17"
+  created: 2026-02-17
+  links: [policy-invoice-cadence]
+  body: |
+    # Monthly invoice run
+
+    Invoices are raised on the first working day of the month and settled on
+    30-day terms. The run takes about half a day.
+
+- uid: ops-timesheet-cadence
+  type: note
+  name: Timesheet cadence
+  tags: [operations, delivery]
+  source_ref: "session-2026-01-22"
+  created: 2026-01-22
+  body: |
+    # Timesheet cadence
+
+    Timesheets are submitted weekly on Friday. Late submission blocks the
+    invoice run, which is why the deadline is enforced rather than nominal.
+
+- uid: ops-resourcing-model
+  type: note
+  name: Resourcing model
+  tags: [operations, delivery]
+  source_ref: "session-2026-02-05"
+  created: 2026-02-05
+  links: [tool-gsheets]
+  body: |
+    # Resourcing model
+
+    A spreadsheet mapping people to engagements eight weeks ahead. Maintained
+    weekly; treated as indicative rather than committed beyond four weeks.
+
+- uid: ops-forecast-model
+  type: note
+  name: Revenue forecast model
+  tags: [operations, finance]
+  source_ref: "session-2026-02-05"
+  created: 2026-02-05
+  links: [tool-gsheets]
+  body: |
+    # Revenue forecast model
+
+    Rolling twelve-month revenue forecast built from signed retainers plus a
+    probability-weighted pipeline.
+
+- uid: ops-proposal-template
+  type: note
+  name: Proposal template
+  tags: [operations, sales]
+  source_ref: "session-2026-03-12"
+  created: 2026-03-12
+  links: [policy-rate-card]
+  body: |
+    # Proposal template
+
+    Standard proposal structure: context, approach, team, timeline, commercials.
+    Commercials always quote the blended day rate.
+
+- uid: ops-engagement-letter
+  type: note
+  name: Engagement letter
+  tags: [operations, legal]
+  source_ref: "session-2026-03-19"
+  created: 2026-03-19
+  links: [person-nadia-frost]
+  body: |
+    # Engagement letter
+
+    Every engagement opens with a signed letter setting scope, rate, and
+    confidentiality terms. Reviewed by Nadia Frost before issue.
+
+- uid: ops-new-starter-checklist
+  type: note
+  name: New starter checklist
+  tags: [operations, people]
+  source_ref: "session-2026-04-09"
+  created: 2026-04-09
+  links: [person-sofia-renn, policy-office-access]
+  body: |
+    # New starter checklist
+
+    Accounts, access fob, laptop, payroll, and a first-week buddy. Owned by
+    people operations.
+
+- uid: ops-leaver-checklist
+  type: note
+  name: Leaver checklist
+  tags: [operations, people]
+  source_ref: "session-2026-04-09"
+  created: 2026-04-09
+  links: [note-fob-deactivation]
+  body: |
+    # Leaver checklist
+
+    Account deactivation, fob return, equipment return, and a handover note
+    per live engagement. Completed on the last working day.
+
+- uid: ops-training-allowance
+  type: note
+  name: Training allowance
+  tags: [operations, people]
+  source_ref: "session-2026-04-22"
+  created: 2026-04-22
+  body: |
+    # Training allowance
+
+    Each person has an annual training allowance covering courses,
+    conferences, and books. Unspent allowance does not carry forward.
+
+- uid: ops-equipment-refresh
+  type: note
+  name: Equipment refresh cycle
+  tags: [operations, facilities]
+  source_ref: "session-2026-05-07"
+  created: 2026-05-07
+  body: |
+    # Equipment refresh cycle
+
+    Laptops are refreshed on a three-year cycle. Older machines are wiped and
+    donated rather than resold.
+
+- uid: ops-client-reporting
+  type: note
+  name: Client reporting rhythm
+  tags: [operations, delivery]
+  source_ref: "session-2026-02-12"
+  created: 2026-02-12
+  body: |
+    # Client reporting rhythm
+
+    Retainer clients receive a short written update fortnightly and a fuller
+    review each quarter.
+
+- uid: ops-escalation-path
+  type: note
+  name: Escalation path
+  tags: [operations, delivery]
+  source_ref: "session-2026-03-26"
+  created: 2026-03-26
+  links: [person-nadia-frost, person-amir-osei]
+  body: |
+    # Escalation path
+
+    Delivery concerns go to the client lead, then the delivery lead.
+    Commercial concerns go to the finance partner; contractual ones to legal.
+
+- uid: ops-document-retention
+  type: note
+  name: Document retention
+  tags: [operations, legal]
+  source_ref: "session-2026-03-19"
+  created: 2026-03-19
+  body: |
+    # Document retention
+
+    Engagement records are kept for seven years from close, then destroyed.
+    Working drafts are not retained.
+
+- uid: ops-supplier-list
+  type: note
+  name: Approved suppliers
+  tags: [operations, finance]
+  source_ref: "session-2026-04-30"
+  created: 2026-04-30
+  links: [policy-tooling-procurement]
+  body: |
+    # Approved suppliers
+
+    A short list of pre-approved suppliers for recurring spend. Anything off
+    the list goes through the standard approval thresholds.
+
+- uid: ops-insurance
+  type: note
+  name: Professional indemnity insurance
+  tags: [operations, legal]
+  source_ref: "session-2026-05-28"
+  created: 2026-05-28
+  body: |
+    # Professional indemnity insurance
+
+    Renewed annually each June. Cover level is set by the largest single
+    engagement value in the preceding year.
+
+- uid: ops-bank-mandate
+  type: note
+  name: Bank mandate
+  tags: [operations, finance]
+  source_ref: "session-2026-01-16"
+  created: 2026-01-16
+  links: [person-amir-osei]
+  body: |
+    # Bank mandate
+
+    Two partner signatures are required for payments above 5,000 GBP. The
+    finance partner is a mandatory signatory on all of them.
+
+- uid: ops-vat-returns
+  type: note
+  name: VAT returns
+  tags: [operations, finance]
+  source_ref: "session-2026-01-16"
+  created: 2026-01-16
+  body: |
+    # VAT returns
+
+    Filed quarterly by the external accountant from the invoice ledger.
+
+- uid: ops-payroll-date
+  type: note
+  name: Payroll date
+  tags: [operations, people]
+  source_ref: "session-2026-01-16"
+  created: 2026-01-16
+  body: |
+    # Payroll date
+
+    Salaries are paid on the 26th of each month, or the preceding working day
+    when the 26th falls on a weekend.
+
+- uid: ops-expenses-deadline
+  type: note
+  name: Expense submission deadline
+  tags: [operations, finance]
+  source_ref: "session-2026-01-08"
+  created: 2026-01-08
+  links: [policy-expense]
+  body: |
+    # Expense submission deadline
+
+    Expenses must be submitted by the last working day of the month in which
+    they were incurred. Later claims go into the following month's run.
+
+- uid: ops-meeting-notes-practice
+  type: note
+  name: Meeting notes practice
+  tags: [operations, knowledge]
+  source_ref: "session-2026-01-12"
+  created: 2026-01-12
+  links: [tool-notion, project-knowledge-base]
+  body: |
+    # Meeting notes practice
+
+    Every client meeting gets a short written note within a working day. The
+    inconsistency of this practice is part of what motivated the knowledge
+    base effort.

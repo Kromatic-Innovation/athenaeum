@@ -1,0 +1,137 @@
+# Projects, tools, and recurring meetings.
+
+- uid: project-portal-refresh
+  type: project
+  name: Client portal refresh
+  aliases: [portal refresh, portal project]
+  tags: [project, delivery]
+  source_ref: "session-2026-01-20"
+  created: 2026-01-20
+  links: [person-lena-varga, person-hana-lindqvist, client-meridian]
+  body: |
+    # Client portal refresh
+
+    A rebuild of the client-facing portal, sponsored by Meridian. Delivery lead
+    Lena Varga; design lead Hana Lindqvist. Running since January 2026.
+
+- uid: project-portal-hosting
+  type: project
+  name: Portal hosting migration
+  aliases: [hosting migration]
+  tags: [project, infrastructure]
+  source_ref: "session-2026-05-11"
+  created: 2026-05-11
+  links: [project-portal-refresh, person-jonas-weir]
+  body: |
+    # Portal hosting migration
+
+    A workstream of the portal refresh moving the portal to managed hosting.
+    Owned by Jonas Weir.
+
+- uid: project-market-scan
+  type: project
+  name: Market scan
+  aliases: [market scan workstream]
+  tags: [project, research]
+  source_ref: "session-2026-02-25"
+  created: 2026-02-25
+  links: [person-ines-koval, person-gabriel-orsini]
+  body: |
+    # Market scan
+
+    A recurring research workstream mapping the firm's competitive landscape.
+    Led by Ines Koval with analytics support from Gabriel Orsini.
+
+- uid: project-knowledge-base
+  type: project
+  name: Internal knowledge base
+  aliases: [knowledge base, KB]
+  tags: [project, internal]
+  source_ref: "session-2026-06-05"
+  created: 2026-06-05
+  body: |
+    # Internal knowledge base
+
+    An effort to consolidate the firm's scattered internal documentation into
+    one searchable place. Scoping only; no delivery date set.
+
+- uid: tool-buildpipe
+  type: project
+  name: buildpipe
+  aliases: [the build pipeline]
+  tags: [tooling, internal]
+  source_ref: "session-2026-02-11"
+  created: 2026-02-11
+  links: [person-tomas-briell]
+  body: |
+    # buildpipe
+
+    The firm's internal build and release pipeline. Maintained by Tomas Briell.
+    All internal repositories build through it, including the rate-card tooling.
+
+- uid: tool-notion
+  type: project
+  name: Notion
+  aliases: [the wiki]
+  tags: [tooling, saas]
+  source_ref: "session-2026-01-12"
+  created: 2026-01-12
+  body: |
+    # Notion
+
+    Used for meeting notes and project pages. Not used for anything containing
+    client-identifying data, per the tooling procurement policy.
+
+- uid: tool-gsheets
+  type: project
+  name: Google Sheets
+  aliases: [spreadsheets]
+  tags: [tooling, saas]
+  source_ref: "session-2026-01-12"
+  created: 2026-01-12
+  body: |
+    # Google Sheets
+
+    Used for the rate card, resourcing, and forecast models. The rate-card
+    sheet is generated from the rowanhale tooling rather than edited by hand.
+
+- uid: meeting-standup
+  type: meeting
+  name: Delivery standup
+  aliases: [standup, daily standup]
+  tags: [meeting, delivery]
+  source_ref: "session-2026-01-20"
+  created: 2026-01-20
+  links: [person-lena-varga]
+  body: |
+    # Delivery standup
+
+    A 15-minute delivery standup, weekdays at 9:30 AM, chaired by Lena Varga.
+    Attendance is delivery team only.
+
+- uid: meeting-partners
+  type: meeting
+  name: Partners meeting
+  aliases: [partner meeting]
+  tags: [meeting, governance]
+  source_ref: "session-2026-01-15"
+  created: 2026-01-15
+  links: [person-rowan-hale, person-amir-osei]
+  body: |
+    # Partners meeting
+
+    Monthly, first Tuesday. Partners only. Pricing, hiring, and client
+    portfolio decisions are made here.
+
+- uid: meeting-retro
+  type: meeting
+  name: Engagement retrospective
+  aliases: [retro, engagement retro]
+  tags: [meeting, delivery]
+  source_ref: "session-2026-02-20"
+  created: 2026-02-20
+  body: |
+    # Engagement retrospective
+
+    Held at the close of every engagement. Findings feed the onboarding and
+    delivery policies.

@@ -1,0 +1,203 @@
+# Decisions and their rationale. These deepen the link graph so multi-hop
+# probes have genuine paths to traverse, and give the corpus the mix of
+# decision/observation/policy claim kinds a real tree carries.
+
+- uid: decision-hosting-managed
+  type: note
+  name: Decision - move portal to managed hosting
+  tags: [decision, infrastructure]
+  source_ref: "session-2026-05-11"
+  created: 2026-05-11
+  links: [project-portal-hosting, person-jonas-weir]
+  body: |
+    # Decision - move portal to managed hosting
+
+    Self-hosting the portal was costing roughly six engineer-days a month in
+    maintenance. The decision was to move to managed hosting and accept the
+    higher line-item cost. Taken by Jonas Weir with delivery sign-off.
+
+- uid: decision-single-rate
+  type: note
+  name: Decision - keep a single blended rate
+  tags: [decision, pricing]
+  source_ref: "session-2026-05-20"
+  created: 2026-05-20
+  links: [policy-rate-card, project-pricing-review]
+  body: |
+    # Decision - keep a single blended rate
+
+    Grade-banded rates were considered and rejected: they made proposals
+    harder to explain and invited line-by-line negotiation. A single blended
+    day rate stays.
+
+- uid: decision-no-client-data-in-notion
+  type: note
+  name: Decision - no client data in Notion
+  tags: [decision, tooling, confidentiality]
+  source_ref: "session-2026-01-12"
+  created: 2026-01-12
+  links: [tool-notion, policy-confidentiality]
+  body: |
+    # Decision - no client data in Notion
+
+    Notion holds meeting notes and project pages only. Anything
+    client-identifying stays out, because the workspace is broadly readable
+    internally and confidentiality is a firm value rather than a control.
+
+- uid: decision-quarterly-retros
+  type: note
+  name: Decision - retros at engagement close, not quarterly
+  tags: [decision, delivery]
+  source_ref: "session-2026-02-20"
+  created: 2026-02-20
+  links: [meeting-retro]
+  body: |
+    # Decision - retros at engagement close, not quarterly
+
+    Quarterly retrospectives were too far from the work to produce specifics.
+    Retros now run at engagement close while detail is still recoverable.
+
+- uid: decision-carry-forward-cap
+  type: note
+  name: Decision - cap PTO carry-forward at five days
+  tags: [decision, people]
+  source_ref: "session-2026-05-14"
+  created: 2026-05-14
+  links: [policy-pto, person-sofia-renn]
+  body: |
+    # Decision - cap PTO carry-forward at five days
+
+    Uncapped carry-forward had built a liability on the balance sheet. Capped
+    at five days from FY2026; the rest lapse.
+
+- uid: obs-portal-latency
+  type: note
+  name: Portal latency observation
+  tags: [observation, delivery]
+  source_ref: "session-2026-06-03"
+  created: 2026-06-03
+  links: [project-portal-hosting]
+  body: |
+    # Portal latency observation
+
+    Portal response times degrade noticeably during month-end invoicing. Not
+    yet diagnosed; recorded so the hosting migration can be measured against it.
+
+- uid: obs-retainer-utilisation
+  type: note
+  name: Retainer utilisation observation
+  tags: [observation, finance]
+  source_ref: "session-2026-06-08"
+  created: 2026-06-08
+  links: [client-bluewater]
+  body: |
+    # Retainer utilisation observation
+
+    Bluewater has consistently used nine or ten of its twelve contracted days.
+    Carry-forward has therefore never been exercised.
+
+- uid: obs-proposal-turnaround
+  type: note
+  name: Proposal turnaround observation
+  tags: [observation, sales]
+  source_ref: "session-2026-06-12"
+  created: 2026-06-12
+  links: [client-solent]
+  body: |
+    # Proposal turnaround observation
+
+    Proposals issued within a week of first contact convert noticeably better
+    than those issued later. Sample is small; treated as a hint, not a rule.
+
+- uid: note-anniversary-dinner
+  type: meeting
+  name: 2026 anniversary dinner
+  tags: [meeting, social]
+  source_ref: "session-2026-02-03"
+  created: 2026-02-03
+  links: [person-devi-hale]
+  body: |
+    # 2026 anniversary dinner
+
+    The firm's anniversary dinner. Partners, staff and guests attended. Devi
+    Hale attended as Rowan Hale's guest.
+
+- uid: note-mailing-list-correction
+  type: note
+  name: Client mailing list correction
+  tags: [note, operations]
+  source_ref: "session-2026-04-18"
+  created: 2026-04-18
+  links: [person-marcus-hale]
+  body: |
+    # Client mailing list correction
+
+    Marcus Hale was added to the client mailing list in error in April 2026
+    and removed the same week. He has never been a client.
+
+- uid: note-fy2027-planning
+  type: meeting
+  name: FY2027 planning session
+  tags: [meeting, planning]
+  source_ref: "session-2026-06-20"
+  created: 2026-06-20
+  links: [project-pricing-review, policy-rate-card]
+  body: |
+    # FY2027 planning session
+
+    Scheduled for autumn 2026. The rate card is on the agenda for review; the
+    FY2026 decision to hold flat expires at that point.
+
+- uid: note-atlas-onboarding-review
+  type: note
+  name: Atlas onboarding review
+  tags: [note, delivery]
+  source_ref: "session-2026-03-02"
+  created: 2026-03-02
+  links: [client-atlas, policy-onboarding]
+  body: |
+    # Atlas onboarding review
+
+    The Atlas onboarding ran long because finance contacts were identified
+    late. The review recommended a mandatory kickoff call with the client's
+    finance lead in week one, which was adopted into the onboarding policy.
+
+- uid: note-northgate-terms
+  type: note
+  name: Northgate confidentiality addendum
+  tags: [note, legal]
+  source_ref: "session-2026-05-22"
+  created: 2026-05-22
+  links: [client-northgate, person-nadia-frost]
+  body: |
+    # Northgate confidentiality addendum
+
+    Northgate's engagement carries an addendum requiring named-individual
+    access control on all deliverables. Negotiated by Nadia Frost.
+
+- uid: note-verity-closeout
+  type: note
+  name: Verity engagement closeout
+  tags: [note, client]
+  source_ref: "session-2026-01-30"
+  created: 2026-01-30
+  links: [client-verity]
+  body: |
+    # Verity engagement closeout
+
+    The Verity retainer ended by mutual agreement. No dispute; the scope had
+    simply completed. Final invoice settled in February 2026.
+
+- uid: note-fob-deactivation
+  type: note
+  name: Fob deactivation practice
+  tags: [note, facilities]
+  source_ref: "session-2026-03-04"
+  created: 2026-03-04
+  links: [policy-office-access, person-oscar-delaney]
+  body: |
+    # Fob deactivation practice
+
+    Access fobs are deactivated on a leaver's last working day rather than at
+    the end of the month, after an audit found three active fobs belonging to
+    former staff.

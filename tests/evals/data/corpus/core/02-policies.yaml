@@ -1,0 +1,162 @@
+# Firm policies. Several are multi-hop targets: the answer to "who approves X"
+# lives on a policy page while the person's identity lives on a person page,
+# so a correct answer requires both.
+
+- uid: policy-expense
+  type: principle
+  name: Expense policy
+  aliases: [expenses, expense claims]
+  tags: [policy, finance]
+  source_ref: "session-2026-01-08"
+  created: 2026-01-08
+  links: [person-amir-osei]
+  body: |
+    # Expense policy
+
+    All expenses require a receipt, with one exception: expenses under 25 GBP
+    may be claimed without one, capped at four such claims per month.
+
+    The expense policy is owned by Amir Osei. Claims are submitted monthly.
+
+- uid: policy-budget-approval
+  type: principle
+  name: Budget approval thresholds
+  aliases: [spend approval, discretionary spend]
+  tags: [policy, finance]
+  source_ref: "session-2026-01-08"
+  created: 2026-01-08
+  links: [person-priya-shah, person-amir-osei]
+  body: |
+    # Budget approval thresholds
+
+    Discretionary spend up to 500 GBP is approved by the relevant client lead.
+    Spend above 500 GBP requires the finance partner's approval.
+
+    The finance partner is Amir Osei. Priya Shah approves within her threshold
+    for the Meridian account.
+
+- uid: policy-pto
+  type: principle
+  name: PTO policy
+  aliases: [holiday, annual leave, PTO]
+  tags: [policy, people]
+  source_ref: "session-2026-05-14"
+  created: 2026-05-14
+  links: [person-sofia-renn]
+  body: |
+    # PTO policy
+
+    The firm's PTO allowance is 25 days per year plus UK bank holidays. Up to
+    five days may be carried into the following year; the rest lapse.
+
+    Owned by Sofia Renn.
+
+- uid: policy-invoice-cadence
+  type: principle
+  name: Invoice cadence
+  aliases: [billing cadence, invoicing]
+  tags: [policy, finance]
+  source_ref: "session-2026-02-17"
+  created: 2026-02-17
+  links: [client-acme, client-bluewater]
+  body: |
+    # Invoice cadence
+
+    Retainer clients are invoiced monthly in arrears. Project-based clients are
+    invoiced on milestone completion.
+
+    Acme Fabrication is a documented exception: milestone billing despite a
+    long-running engagement. This is a narrowing of the general rule, not a
+    contradiction of it.
+
+- uid: policy-confidentiality
+  type: principle
+  name: Client confidentiality
+  aliases: [confidentiality]
+  tags: [policy, legal, values]
+  source_ref: "session-2026-03-19"
+  created: 2026-03-19
+  links: [person-nadia-frost, client-northgate]
+  body: |
+    # Client confidentiality
+
+    The firm never discloses one client's engagement details to another client,
+    under any circumstances. This is a core value, not a contractual term.
+
+    Escalation point: Nadia Frost.
+
+- uid: policy-onboarding
+  type: principle
+  name: Client onboarding
+  aliases: [onboarding]
+  tags: [policy, delivery]
+  source_ref: "session-2026-03-02"
+  created: 2026-03-02
+  links: [client-atlas]
+  body: |
+    # Client onboarding
+
+    Standard onboarding for a new retainer client takes two weeks and now
+    includes a mandatory kickoff call with the client's finance lead in week
+    one. The finance-lead call was added after the Atlas engagement onboarding
+    review.
+
+- uid: policy-office-access
+  type: principle
+  name: Office access
+  aliases: [building access, door codes]
+  tags: [policy, facilities]
+  source_ref: "session-2026-03-04"
+  created: 2026-03-04
+  links: [person-oscar-delaney]
+  body: |
+    # Office access
+
+    Building access is by fob. Fobs are issued by the office manager and
+    deactivated on the last working day. Visitors sign in at reception and must
+    be accompanied.
+
+    Owned by Oscar Delaney.
+
+- uid: policy-rate-card
+  type: principle
+  name: Rate card
+  aliases: [day rate, rates]
+  tags: [policy, pricing]
+  source_ref: "session-2026-05-20"
+  created: 2026-05-20
+  links: [project-pricing-review]
+  body: |
+    # Rate card
+
+    The firm bills a single blended day rate across all grades. The rate is
+    reviewed annually in the pricing review and held flat for FY2026.
+
+- uid: policy-remote-work
+  type: principle
+  name: Remote work
+  aliases: [working from home, hybrid]
+  tags: [policy, people]
+  source_ref: "session-2026-04-22"
+  created: 2026-04-22
+  body: |
+    # Remote work
+
+    Staff work from the office two days per week, with the specific days set
+    per team rather than firm-wide. Client-site days count toward the office
+    requirement.
+
+- uid: policy-tooling-procurement
+  type: principle
+  name: Tooling procurement
+  aliases: [software purchases, tool approval]
+  tags: [policy, finance, tooling]
+  source_ref: "session-2026-02-11"
+  created: 2026-02-11
+  links: [policy-budget-approval]
+  body: |
+    # Tooling procurement
+
+    New software subscriptions follow the standard budget approval thresholds.
+    Anything handling client data additionally requires a confidentiality
+    review before purchase.

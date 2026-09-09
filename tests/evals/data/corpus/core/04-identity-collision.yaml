@@ -1,0 +1,144 @@
+# The identity-collision cast.
+#
+# This file reproduces the STRUCTURE of a real observed retrieval failure --
+# a person, a code repository named after that person, and same-surname
+# relatives all competing for one name query -- using entirely invented
+# entities. The real instance is never named here or anywhere else in the
+# repo; see ../README.md.
+#
+# The failure being guarded against: a query about the PERSON returns the
+# REPOSITORY, or a surname-only query returns one confident wrong Hale
+# instead of surfacing that several exist.
+
+- uid: person-rowan-hale
+  type: person
+  name: Rowan Hale
+  aliases: [Rowan, R. Hale]
+  tags: [person, partner, meridian]
+  source_ref: "session-2026-02-03"
+  created: 2026-02-03
+  updated: 2026-05-20
+  links: [org-hale-associates, project-pricing-review, person-devi-hale]
+  body: |
+    # Rowan Hale
+
+    Rowan Hale is a founding partner at Hale Associates and sits on the
+    pricing committee. Rowan owns the firm's relationship with the Meridian
+    account and chaired the 2026 pricing review.
+
+    Rowan's decision on pricing, recorded in the pricing review, was to hold
+    the day rate flat through the 2026 financial year and absorb the increase
+    in indirect costs rather than pass it to retainer clients.
+
+    Not to be confused with the rowanhale code repository, which is named
+    after Rowan but is a software project, not a person.
+
+- uid: repo-rowanhale
+  type: project
+  name: rowanhale
+  aliases: [rowanhale repo, the rowanhale repository]
+  tags: [repository, software, tooling]
+  source_ref: "session-2026-03-11"
+  created: 2026-03-11
+  updated: 2026-06-02
+  links: [person-rowan-hale, tool-buildpipe]
+  body: |
+    # rowanhale
+
+    rowanhale is an internal code repository holding the firm's rate-card
+    calculation tooling. It is named after Rowan Hale, who wrote the first
+    version, but the repository is a software project and has no opinions,
+    decisions, or pricing authority of its own.
+
+    The repository has 4 maintainers and builds through the buildpipe
+    pipeline. Its open issues concern test coverage and a dependency bump.
+
+    A question about what Rowan Hale decided is a question about the PERSON,
+    not about this repository.
+
+- uid: person-devi-hale
+  type: person
+  name: Devi Hale
+  aliases: [Devi]
+  tags: [person, family, external]
+  source_ref: "session-2026-02-03"
+  created: 2026-02-03
+  links: [person-rowan-hale]
+  body: |
+    # Devi Hale
+
+    Devi Hale is Rowan Hale's sister and is not employed by the firm. Devi is
+    an architect and appears in the record only because she attended the firm's
+    2026 anniversary dinner as a guest.
+
+    Devi holds no role, makes no decisions, and owns no accounts here.
+
+- uid: person-marcus-hale
+  type: person
+  name: Marcus Hale
+  aliases: [Marcus]
+  tags: [person, family, external]
+  source_ref: "session-2026-04-18"
+  created: 2026-04-18
+  links: [person-rowan-hale]
+  body: |
+    # Marcus Hale
+
+    Marcus Hale is Rowan Hale's cousin. He runs an unrelated logistics business
+    and has never been a client, supplier, or employee of the firm.
+
+    He is recorded here solely because he was mistakenly added to a client
+    mailing list in April 2026 and had to be removed.
+
+- uid: org-hale-associates
+  type: company
+  name: Hale Associates
+  aliases: [Hale Assoc, HA]
+  tags: [company, partnership]
+  source_ref: "session-2026-01-15"
+  created: 2026-01-15
+  links: [person-rowan-hale]
+  body: |
+    # Hale Associates
+
+    Hale Associates is the partnership through which Rowan Hale holds their
+    equity. It is a legal entity, not a person, and not the code repository of
+    a similar name.
+
+    It has two partners and files accounts annually.
+
+- uid: person-rowan-castell
+  type: person
+  name: Rowan Castell
+  aliases: [Rowan C.]
+  tags: [person, contractor]
+  source_ref: "session-2026-05-09"
+  created: 2026-05-09
+  body: |
+    # Rowan Castell
+
+    Rowan Castell is a contract designer engaged for the portal refresh. Shares
+    a given name with Rowan Hale and nothing else -- different person,
+    different surname, no pricing role.
+
+    A near-miss that a given-name-only query should not confidently resolve to.
+
+- uid: project-pricing-review
+  type: project
+  name: 2026 pricing review
+  aliases: [pricing review]
+  tags: [project, pricing, decision]
+  source_ref: "session-2026-05-20"
+  created: 2026-05-20
+  links: [person-rowan-hale, policy-rate-card]
+  body: |
+    # 2026 pricing review
+
+    The annual review of the firm's rate card, chaired by Rowan Hale.
+
+    Outcome: hold the day rate flat through FY2026. Indirect cost increases
+    are absorbed rather than passed through to retainer clients. Reviewed
+    again at the FY2027 planning session.
+
+    The rate-card calculation tooling used during the review lives in the
+    rowanhale repository.

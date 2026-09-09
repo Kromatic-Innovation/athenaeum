@@ -1,0 +1,145 @@
+# Slot-fill templates for the GENERATED corpus tiers (distractor + ballast).
+#
+# Nothing here is prose anybody needs to read for meaning -- these pages exist
+# to occupy index space and compete for rank. The hand-authored `core/` tier
+# is where meaning lives.
+#
+# Content policy: every string below is invented. Names are COMPOSED from the
+# syllable pools at the bottom rather than sampled from any list of real
+# people, so there is no source list to leak from.
+
+# --- Distractor forms -------------------------------------------------------
+# Rendered once per (probe, i). `{term}` is drawn from the probe's own
+# `distractor_terms`, so these pages genuinely compete with it for rank --
+# which is the entire reason this tier exists.
+distractor_forms:
+  - type: note
+    name: "{term} — background notes"
+    tags: [notes, background]
+    body: |
+      # {term} — background notes
+
+      Notes gathered while reviewing {term} alongside {other_term}. These are
+      working notes only and record no decision. {person} collected them in
+      {month} and flagged them for later revision.
+
+      Nothing here supersedes the canonical page on this topic.
+
+  - type: meeting
+    name: "Working session: {term}"
+    tags: [meeting, working-session]
+    body: |
+      # Working session: {term}
+
+      A {n}-minute working session covering {term} and, briefly, {other_term}.
+      {person} facilitated. The session surfaced open questions and closed
+      none of them; no policy, owner, or date was agreed.
+
+  - type: project
+    name: "{term} review ({month})"
+    tags: [project, review]
+    body: |
+      # {term} review ({month})
+
+      A periodic review touching {term}. {person} led it. The review confirmed
+      that {n} items remain open and referred the substantive questions about
+      {other_term} elsewhere. No conclusions are recorded on this page.
+
+  - type: note
+    name: "Correspondence re {term}"
+    tags: [notes, correspondence]
+    body: |
+      # Correspondence re {term}
+
+      A thread about {term} between {person} and the wider group during
+      {month}. The thread mentions {other_term} in passing. It ends without
+      resolution and is retained only for provenance.
+
+# --- Ballast forms ----------------------------------------------------------
+# Topic-diverse and deliberately NOT competitive with any probe: ballast
+# measures the effect of corpus SIZE alone. If ballast shared probe vocabulary
+# it would be distractor mass under another name and the two axes would be
+# confounded.
+ballast_forms:
+  - type: note
+    name: "{topic} notes"
+    tags: [notes]
+    body: |
+      # {topic} notes
+
+      Working notes on {topic}, kept by {person}. Reviewed in {month};
+      {n} follow-ups were logged and are tracked elsewhere.
+
+  - type: meeting
+    name: "{topic} sync"
+    tags: [meeting]
+    body: |
+      # {topic} sync
+
+      A recurring sync on {topic}, chaired by {person}. Ran {n} minutes in
+      {month}. Adjacent topic raised: {other_topic}.
+
+  - type: project
+    name: "{topic} workstream"
+    tags: [project]
+    body: |
+      # {topic} workstream
+
+      A workstream covering {topic}, owned by {person}. {n} deliverables are
+      scoped. It has a loose dependency on {other_topic}.
+
+  - type: principle
+    name: "Practice: {topic}"
+    tags: [principle, practice]
+    body: |
+      # Practice: {topic}
+
+      The working practice for {topic}, as described by {person}. It has held
+      for {n} months and is reviewed alongside {other_topic}.
+
+ballast_topics:
+  - archive retention
+  - office supplies ordering
+  - travel booking
+  - equipment refresh
+  - printing and stationery
+  - desk allocation
+  - courier arrangements
+  - conference attendance
+  - subscription renewals
+  - training budgets
+  - fire drill scheduling
+  - first aid cover
+  - cycle storage
+  - visitor sign-in
+  - kitchen restocking
+  - recycling collection
+  - phone system upgrades
+  - furniture disposal
+  - window cleaning
+  - lift maintenance
+
+months:
+  - January
+  - February
+  - March
+  - April
+  - May
+  - June
+  - July
+  - August
+  - September
+  - October
+  - November
+  - December
+
+# --- Synthetic name pools ---------------------------------------------------
+# Names are COMPOSED (syllable + ending), never sampled from a list of real
+# people. Chance collisions with a real name remain possible, which is exactly
+# why tests/test_corpus_pii_lint.py re-checks generated output against a
+# runtime denylist instead of trusting composition alone.
+name_pools:
+  given_syllables: [ma, te, lo, vi, ka, ru, ni, so, be, ja, fe, du, pi, ha, ze]
+  given_endings: [ren, lia, ton, sha, vik, nor, ela, mir, ath, une]
+  surname_syllables: [bran, kel, vor, mar, tal, quen, dris, fal, oss, wend]
+  surname_endings: [wick, ford, holm, ridge, stone, mere, dale, worth, cliff]

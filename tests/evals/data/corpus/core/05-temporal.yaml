@@ -1,0 +1,130 @@
+# Temporal / knowledge-update pages.
+#
+# Each pair below has a SUPERSEDED page and a CURRENT one covering the same
+# fact. The retrieval assertion is that the current page outranks the stale
+# one -- a memory system that returns the superseded answer confidently is
+# worse than one that returns nothing, which is why these are their own probe
+# class rather than ordinary single-hop cases.
+
+- uid: office-address-current
+  type: note
+  name: Office address (current)
+  aliases: [office address, where is the office]
+  tags: [facilities, current]
+  source_ref: "session-2026-05-02"
+  created: 2026-05-02
+  updated: 2026-05-02
+  links: [person-oscar-delaney]
+  body: |
+    # Office address (current)
+
+    The firm's office is at 220 Regent Street, suite 5B. The move completed on
+    1 May 2026. Confirmed by Oscar Delaney, office manager, who is the
+    authoritative source for this.
+
+    This supersedes the Kingsway address.
+
+- uid: office-address-superseded
+  type: note
+  name: Office address (former, Kingsway)
+  aliases: [Kingsway office]
+  tags: [facilities, superseded]
+  source_ref: "session-2026-01-10"
+  created: 2026-01-10
+  updated: 2026-05-02
+  links: [office-address-current]
+  body: |
+    # Office address (former, Kingsway)
+
+    The firm's office was at 14 Kingsway, WeWork floor 3, until April 2026.
+
+    SUPERSEDED: the firm moved to 220 Regent Street on 1 May 2026. Retained for
+    historical reference only; do not cite as the current address.
+
+- uid: standup-time-current
+  type: note
+  name: Standup time (current)
+  aliases: [what time is standup]
+  tags: [meeting, current]
+  source_ref: "session-2026-04-06"
+  created: 2026-04-06
+  updated: 2026-04-06
+  links: [meeting-standup]
+  body: |
+    # Standup time (current)
+
+    The delivery standup moved to 9:30 AM in April 2026 to accommodate the
+    client-site rota. This is the current time.
+
+- uid: standup-time-superseded
+  type: note
+  name: Standup time (former, 9:00)
+  tags: [meeting, superseded]
+  source_ref: "session-2026-01-20"
+  created: 2026-01-20
+  updated: 2026-04-06
+  links: [standup-time-current]
+  body: |
+    # Standup time (former, 9:00)
+
+    The delivery standup was at 9:00 AM through Q1 2026.
+
+    SUPERSEDED: moved to 9:30 AM in April 2026.
+
+- uid: pto-allowance-current
+  type: note
+  name: PTO allowance (current)
+  tags: [people, current]
+  source_ref: "session-2026-05-14"
+  created: 2026-05-14
+  updated: 2026-05-14
+  links: [policy-pto]
+  body: |
+    # PTO allowance (current)
+
+    25 days per year plus UK bank holidays, with up to five days carried
+    forward. Unchanged at the May 2026 review.
+
+- uid: pto-allowance-superseded
+  type: note
+  name: PTO allowance (former, 22 days)
+  tags: [people, superseded]
+  source_ref: "session-2025-06-01"
+  created: 2025-06-01
+  updated: 2026-05-14
+  links: [pto-allowance-current]
+  body: |
+    # PTO allowance (former, 22 days)
+
+    The allowance was 22 days per year through FY2025.
+
+    SUPERSEDED: raised to 25 days for FY2026.
+
+- uid: budget-threshold-current
+  type: note
+  name: Budget approval threshold (current)
+  tags: [finance, current]
+  source_ref: "session-2026-01-08"
+  created: 2026-01-08
+  updated: 2026-01-08
+  links: [policy-budget-approval]
+  body: |
+    # Budget approval threshold (current)
+
+    The client-lead approval ceiling is 500 GBP. Above that, the finance
+    partner approves.
+
+- uid: budget-threshold-superseded
+  type: note
+  name: Budget approval threshold (former, 250 GBP)
+  tags: [finance, superseded]
+  source_ref: "session-2025-09-15"
+  created: 2025-09-15
+  updated: 2026-01-08
+  links: [budget-threshold-current]
+  body: |
+    # Budget approval threshold (former, 250 GBP)
+
+    The ceiling was 250 GBP through 2025.
+
+    SUPERSEDED: raised to 500 GBP in January 2026.
