@@ -45,14 +45,14 @@ from tests.evals.corpus import CORPUS_ROOT, build_corpus
 # of this test failed on exactly that: the word "retention".
 #
 # So the rule is about SHAPE, not a growing list of exceptions:
-#   * multi-word names are always checked -- "Rowan Hale", "Hale Associates";
-#     that is where people and orgs live
+#   * multi-word names are always checked -- a person's full name, an org's
+#     two-word name; that is where people and orgs live
 #   * single tokens are checked unless they are common English words, since a
 #     lowercase single-token identity (a repo or product name) is precisely
 #     the case this corpus exists to test
-# 4, not 5: `Hale`, `Acme` and `Devi` are all four characters, and all three
-# were live in this corpus. A five-character floor excluded exactly the class
-# of short surname most likely to collide with a real person.
+# 4, not 5: several four-character surnames were live in this corpus and each
+# collided with a real person page. A five-character floor excluded exactly
+# the class of short surname most likely to collide.
 _MIN_NAME_LEN = 4
 
 #: Common English words that appear as real page titles but identify nobody.
@@ -157,11 +157,17 @@ def _iter_frontmatter(wiki: Path) -> "tuple[dict, ...]":
 def _real_entity_name_tokens(wiki: Path) -> set[str]:
     """Individual word tokens from the names of real PEOPLE, ORGS and PROJECTS.
 
-    Tokenised, not whole-phrase: a real page named ``Landon Hale`` must be
-    able to collide with a fixture character called ``Rowan Hale``, and a real
-    ``Blue Meridian`` with a fixture ``Meridian Advisory``. Whole-phrase
-    matching made every such collision structurally invisible, which is how a
-    real surname ended up as the corpus's central cast name.
+    Tokenised, not whole-phrase: a real person's full name must be able to
+    collide with a fixture character sharing only their surname, and a real
+    two-word company name with a fixture that reuses one of its words.
+    Whole-phrase matching made every such collision structurally invisible,
+    which is how a real surname ended up as the corpus's central cast name.
+
+    Real examples are deliberately NOT quoted here. This file is public, and
+    naming the real person in a comment explaining why we stopped naming them
+    would reproduce the leak inside its own fix -- which is exactly what
+    happened once in the corpus README before the path lint's glob was widened
+    to see .md files.
 
     Restricted to entity-typed pages so the set stays selective -- these are
     the names that identify somebody, as opposed to every word in the tree.

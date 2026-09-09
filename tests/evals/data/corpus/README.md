@@ -50,9 +50,9 @@ green at the time:
 1. The denylist scanned `sorted(...)[:4000]` of 25,487 files. Pages are named
    by hex uid, so that was not a sample but "uids beginning 0, 1 or 2" -- the
    same 16% every run. Removing the limit cost 0.9s.
-2. Matching was whole-phrase, so a real `Landon Hale` could never collide with
-   a fixture `Rowan Hale`. The corpus had built its entire cast on a real
-   person's surname.
+2. Matching was whole-phrase, so a real person's full name could never collide
+   with a fixture character sharing only their surname. The corpus had built
+   its entire cast on a real person's surname without any check noticing.
 
 ### The identity-collision cast
 
