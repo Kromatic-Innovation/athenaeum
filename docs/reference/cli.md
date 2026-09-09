@@ -39,6 +39,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum dedupe`](#athenaeum-dedupe) (group) — Find or merge duplicate wiki entries.
 - [`athenaeum dedupe persons`](#athenaeum-dedupe-persons) (command) — Person-wiki dedupe (HIGH-confidence apollo_id / linkedin / exact-name match). Default --find prints a YAML report; --apply consumes the report and merges.
 - [`athenaeum dedupe wiki-pages`](#athenaeum-dedupe-wiki-pages) (command) — Cluster concept/reference/principle wiki pages and propose merges for near-duplicate topics. Writes idempotent proposals to wiki/_pending_merges.md; --dry-run previews without writing.
+- [`athenaeum demo`](#athenaeum-demo) (command) — Open the recall viewer for the current Claude session — resolves the session id, picks a free port, and opens a browser.
 - [`athenaeum description`](#athenaeum-description) (group) — Page-summary maintenance: backfill the one-line description: frontmatter the recall hook injects.
 - [`athenaeum description backfill`](#athenaeum-description-backfill) (command) — Write description: onto pages that lack it — batched LLM summaries through the 'classify' knob, or --mechanical for a zero-LLM opening-paragraph derivation. Dry-run unless --apply. Never overwrites an existing value. Resumable: re-run to continue.
 - [`athenaeum dimensions`](#athenaeum-dimensions) (group) — Dimension registry: show a claim's coordinates or compare two claims' coordinates axis-by-axis.
@@ -440,6 +441,19 @@ Cluster concept/reference/principle wiki pages and propose merges for near-dupli
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--threshold` | — | — | Cosine similarity cutoff (default: librarian.cluster_threshold / 0.55 — same threshold the raw auto-memory cluster pass uses). |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
+
+## `athenaeum demo`
+
+Open the recall viewer for the current Claude session — resolves the session id, picks a free port, and opens a browser.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
+| `--no-browser` | `False` | — | Serve without opening a browser (headless/CI). |
+| `--path` | — | — | Knowledge directory (default: ~/knowledge) |
+| `--port` | `8756` | — | Preferred TCP port on localhost (default: 8756). Falls back to an OS-assigned free port if this one is busy. |
+| `--projects-root` | — | — | Claude Code transcript root (default: ~/.claude/projects) |
+| `--session` | — | — | Session id to scope to. Default: $CLAUDE_CODE_SESSION_ID, then $CLAUDE_SESSION_ID, then the newest Claude Code transcript. |
 
 ## `athenaeum description`
 
