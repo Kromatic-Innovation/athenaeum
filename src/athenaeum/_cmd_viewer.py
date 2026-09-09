@@ -106,6 +106,19 @@ _UNBIDDEN_SOURCES = ("hook", "sidecar")
 #: is split into an argv list so it never reaches a shell.
 DEFAULT_EDITOR_COMMAND: tuple[str, ...] = ("subl",)
 
+#: Token in the static page that :meth:`_ViewerRequestHandler._serve_html`
+#: swaps for the live nonce.
+#:
+#: The name deliberately avoids the project's own env-var prefix.
+#: ``scripts/check_env_docs.py`` scans ``src/`` for tokens carrying that prefix
+#: and treats each as an environment variable requiring documentation, so
+#: naming this placeholder after the project made it surface in the generated
+#: configuration reference as though it were a config knob. Caught by CI
+#: (``tests/test_env_docs.py``); worth a comment because the obvious name is
+#: the wrong one, and because writing the bad spelling out even inside a
+#: comment is enough to trip the same scanner.
+NONCE_PLACEHOLDER = b"__VIEWER_NONCE_PLACEHOLDER__"
+
 
 def _allowed_origins(server_address: Any) -> frozenset[str]:
     """Origins the ``/open`` route accepts.
@@ -550,7 +563,7 @@ class _ViewerRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_html(self) -> None:
-        body = _load_static_html().replace(b"__ATHENAEUM_NONCE__", self.nonce.encode("utf-8"))
+        body = _load_static_html().replace(NONCE_PLACEHOLDER, self.nonce.encode("utf-8"))
         self.send_response(200)
         # The page holds the nonce; a cache would outlive the server that
         # minted it and hand a stale one to the next run.

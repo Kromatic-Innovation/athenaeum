@@ -378,7 +378,7 @@ def test_serve_html_and_data_json_end_to_end_no_reference_determination(tmp_path
         assert "pulled with no sidecar involvement" in html
         # The nonce placeholder must be substituted before the page is served,
         # or every click would fail the /open route's check.
-        assert "__ATHENAEUM_NONCE__" not in html
+        assert "__VIEWER_NONCE_PLACEHOLDER__" not in html
 
         with urllib.request.urlopen(f"{base}/data.json", timeout=5) as resp:
             assert resp.status == 200
