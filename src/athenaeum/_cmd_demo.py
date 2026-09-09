@@ -54,7 +54,15 @@ import webbrowser
 from http.server import HTTPServer
 from pathlib import Path
 
-from athenaeum._cmd_viewer import DEFAULT_PORT, ViewerContractError, build_viewer_data, make_server
+from athenaeum._cmd_viewer import (
+    DEFAULT_EDITOR_COMMAND,
+    DEFAULT_PORT,
+    ViewerContractError,
+    build_viewer_data,
+    make_server,
+    resolve_editor_command,
+    warn_if_editor_missing,
+)
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
 #: Default Claude Code transcript root. Overridable via the ``--projects-root``
@@ -110,6 +118,7 @@ def bind_server(
     path: Path,
     cache_dir: Path | None,
     port: int,
+    editor_command: tuple[str, ...] = DEFAULT_EDITOR_COMMAND,
 ) -> tuple[HTTPServer, bool]:
     """Bind the viewer server, falling back to an OS-assigned port.
 
@@ -122,11 +131,29 @@ def bind_server(
     degraded outcome.
     """
     try:
-        return make_server(session_id=session_id, path=path, cache_dir=cache_dir, port=port), False
+        return (
+            make_server(
+                session_id=session_id,
+                path=path,
+                cache_dir=cache_dir,
+                port=port,
+                editor_command=editor_command,
+            ),
+            False,
+        )
     except OSError:
         if port == 0:
             raise
-    return make_server(session_id=session_id, path=path, cache_dir=cache_dir, port=0), True
+    return (
+        make_server(
+            session_id=session_id,
+            path=path,
+            cache_dir=cache_dir,
+            port=0,
+            editor_command=editor_command,
+        ),
+        True,
+    )
 
 
 def _probe_rows(*, session_id: str | None, path: Path, cache_dir: Path | None) -> int | None:
@@ -184,9 +211,15 @@ def cmd_demo(args: argparse.Namespace) -> int:
         )
         return 1
 
+    editor = resolve_editor_command(getattr(args, "editor", None))
     server, fell_back = bind_server(
-        session_id=session_id, path=path, cache_dir=args.cache_dir, port=args.port
+        session_id=session_id,
+        path=path,
+        cache_dir=args.cache_dir,
+        port=args.port,
+        editor_command=editor,
     )
+    warn_if_editor_missing(editor)
     host, bound_port = str(server.server_address[0]), server.server_address[1]
     url = f"http://{host}:{bound_port}/"
 
@@ -274,6 +307,11 @@ def add_demo_subparser(subparsers: argparse._SubParsersAction) -> None:
         type=Path,
         default=None,
         help=f"Claude Code transcript root (default: {DEFAULT_PROJECTS_ROOT})",
+    )
+    demo_p.add_argument(
+        "--editor",
+        default=None,
+        help="Command used to open a clicked page (default: subl).",
     )
     demo_p.add_argument(
         "--no-browser",

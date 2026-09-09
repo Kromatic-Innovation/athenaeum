@@ -369,9 +369,16 @@ def test_serve_html_and_data_json_end_to_end_no_reference_determination(tmp_path
         with urllib.request.urlopen(f"{base}/", timeout=5) as resp:
             assert resp.status == 200
             html = resp.read().decode("utf-8")
-        assert "Pushed unbidden" in html
-        assert "Pulled deliberately" in html
-        assert "Overlap" in html
+        # The three separate tables became one colour-coded list plus a
+        # last-turn panel (issue athenaeum#1528); assert the new structure and
+        # the legend that makes the colours mean anything.
+        assert "All pages this session" in html
+        assert "Last turn" in html
+        assert "pushed then pulled" in html
+        assert "pulled with no sidecar involvement" in html
+        # The nonce placeholder must be substituted before the page is served,
+        # or every click would fail the /open route's check.
+        assert "__ATHENAEUM_NONCE__" not in html
 
         with urllib.request.urlopen(f"{base}/data.json", timeout=5) as resp:
             assert resp.status == 200
