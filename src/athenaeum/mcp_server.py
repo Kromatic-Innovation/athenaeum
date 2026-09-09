@@ -82,6 +82,7 @@ from athenaeum.models import (
     is_page_authorized,
     parse_bucket,
     parse_frontmatter,
+    parse_superseded_by,
     render_frontmatter,
     resolve_page_type,
     valid_until_expired,
@@ -280,7 +281,10 @@ def recall_search(
             currency-aware reorder to every result; ``True`` returns results
             in the backend's own relevance order, unchanged. Deliberately the
             most conservative opt-in mechanism (an explicit flag, not query-
-            text inference) — see ``_recall_via_backend``'s docstring.
+            text inference) — see ``_recall_via_backend``'s docstring. Issue
+            athenaeum#1493's supersession reorder shares this same gate: a
+            superseded page is not demoted below its replacement in history
+            mode either.
         type_filter: Issue athenaeum#964 — narrow the search to one or more entity
             classes (a page's ``type:``). ``None`` (default) searches every
             class, byte-identical to pre-athenaeum#964 behavior. An opaque,
@@ -301,6 +305,13 @@ def recall_search(
             Intended for a non-interactive automation deciding what to
             surface into a turn on its own, not for an agent's own
             conversational tool call.
+
+            Issue athenaeum#1493 (AC6): ``unprompted=True`` also EXCLUDES any hit
+            carrying a declared ``superseded_by`` pointer, on top of the
+            behavior above — a deliberately stricter policy than an explicit
+            ``recall`` call, which demotes-and-marks a superseded hit rather
+            than dropping it. An unprompted push has no caller turn to
+            adjudicate a stale fact against, so it never volunteers one.
         session_scope: Issue athenaeum#718 — the calling session's scope
             coordinate (the same shape as a page's `claimed_scope`
             frontmatter value, issue athenaeum#714's ``scope`` dimension).
@@ -603,6 +614,13 @@ def _recall_metadata_lines(fm: dict[str, object]) -> list[str]:
       queue when the page is contradiction-flagged. This is the load-bearing
       case — silently returning one side of a disputed pair is the failure
       this header prevents.
+    - Line 3 (only when set, issue athenaeum#1493 AC2): a SECOND ``**Status:**``
+      line naming what a declared ``superseded_by`` pointer names as the
+      replacement, when the hit carries one. Distinct from the contradiction
+      line above (a page can be both, or either, independently) — this is
+      what lets the agent adjudicate a hit :func:`_reorder_hits_by_supersession`
+      demoted but did not exclude, rather than reading a stale fact with the
+      same authority as its replacement.
 
     When none of source/updated/valid/status apply the list is empty and the
     caller renders exactly the pre-athenaeum#325 output (no blank metadata line).
@@ -645,6 +663,15 @@ def _recall_metadata_lines(fm: dict[str, object]) -> list[str]:
     )
     if contested:
         lines.append("**Status:** contradiction-flagged (see _pending_questions.md)")
+
+    # Issue athenaeum#1493 AC2: mark a declared supersession so the agent can
+    # adjudicate two conflicting hits instead of receiving them with equal,
+    # undistinguished authority. Shows the NEXT hop only (the value the
+    # page's own frontmatter names) — never resolved transitively — which is
+    # what keeps this a plain per-hit read with no chain-walk to hang on.
+    superseded_by = parse_superseded_by(fm)
+    if superseded_by:
+        lines.append(f"**Status:** superseded — see {superseded_by!r}")
 
     return lines
 
@@ -714,6 +741,85 @@ def _reorder_hits_by_currency(
         else:
             primary.append(hit)
     return primary + deprioritized
+
+
+def _is_superseded(fm: dict[str, object]) -> bool:
+    """True when *fm* declares a non-empty ``superseded_by`` pointer (issue athenaeum#1493).
+
+    Deliberately a ONE-HOP, purely local check: it reads only the hit's own
+    frontmatter and never follows the pointer to see whether the replacement
+    is itself superseded (a longer chain), and never checks for a cycle. That
+    is what makes chain length and cycles a non-issue here rather than
+    something handled defensively — every page in an N-hop chain marks/
+    demotes off its OWN field independently, so there is nothing to traverse
+    and therefore nothing to hang on. (A mutual ``supersedes``/
+    ``superseded_by`` pair is also already rejected as a declared
+    contradiction at merge time — ``merge.py``'s MUST #3 — so an intake-clean
+    corpus cannot even produce the cycle case; this function does not rely on
+    that guarantee to stay safe.)
+    """
+    return bool(parse_superseded_by(fm))
+
+
+def _reorder_hits_by_supersession(
+    hits: list[tuple[str, str, float]],
+    *,
+    wiki_root: Path,
+    extra_roots: list[Path],
+    off_corpus_root: Path | None = None,
+) -> list[tuple[str, str, float]]:
+    """Stable-partition *hits* so a declared-superseded page sorts after every
+    other hit, without changing relative order within either group (issue
+    athenaeum#1493, AC1/AC4).
+
+    Same technique, and same "deprioritizes, does not filter" contract, as
+    :func:`_reorder_hits_by_currency` (issue athenaeum#904) just above — see
+    that function's docstring for why a stable partition over the backend's
+    own top-*n* works identically across FTS5/vector/keyword without needing
+    any backend's score semantics. A superseded page that would have
+    appeared still appears (AC2 needs it present to mark); it is simply no
+    longer guaranteed to rank above its replacement.
+
+    **Index-vs-render-time (AC1):** this reads FRESH on-disk frontmatter per
+    hit, exactly like the currency reorder and the Layer-C re-checks below —
+    it is NOT carried as a column in the FTS5/vector index. Two reasons: (1)
+    neither indexed backend's ``query()`` return shape carries frontmatter,
+    so demoting to a plain ``(filename, name, score)`` slot cannot be done
+    without either enlarging the shared ``SearchBackend`` Protocol return
+    (a cross-cutting change well beyond this issue) or re-reading the page —
+    and reading the page is exactly what render already does one line below
+    this call, so a second read here is one extra cheap stat+read against a
+    result set bounded by ``top_k``, not a new I/O shape; (2) it keeps the
+    change purely ADDITIVE to ``search.py`` (only ``_is_recall_inactive``
+    changed there, to stop hard-excluding a superseded page — see its
+    docstring) rather than bumping the FTS5 schema version / vector metadata
+    schema version, both of which force a full reindex on next build.
+
+    Called unconditionally alongside :func:`_reorder_hits_by_currency` at
+    their shared call site (skipped together under ``history=True`` — an
+    explicit "I am asking about the past" query gets no currency-style
+    demotion of any kind, matching the reasoning ``history`` already applies
+    to the daily-bucket case).
+    """
+    current: list[tuple[str, str, float]] = []
+    superseded: list[tuple[str, str, float]] = []
+    for hit in hits:
+        filename = hit[0]
+        page_path, _ = _resolve_hit_path(
+            filename, wiki_root, extra_roots, off_corpus_root=off_corpus_root
+        )
+        fm: dict[str, object] = {}
+        if page_path is not None and page_path.is_file():
+            try:
+                text = page_path.read_text(encoding="utf-8")
+                fm, _ = parse_frontmatter(text)
+            except (OSError, UnicodeDecodeError):
+                fm = {}
+        if _is_superseded(fm):
+            superseded.append(hit)
+        else:
+            current.append(hit)
+    return current + superseded
 
 
 def _excluded_block_for_hit(
@@ -1050,8 +1156,20 @@ def _recall_via_backend(
     # Issue athenaeum#904 (AC4/AC5): currency-aware reorder, skipped entirely in
     # history mode. Reorders only — never changes which hits are present or
     # how many, so every filter/count below is unaffected by this call.
+    #
+    # Issue athenaeum#1493 (AC1/AC4): supersession reorder, same ``history`` gate —
+    # an explicit historical query gets no currency-style demotion of any
+    # kind. Applied AFTER the currency reorder as a separate stable-partition
+    # pass (see that function's docstring for why this stays two passes
+    # instead of one combined predicate).
     if not history:
         hits = _reorder_hits_by_currency(
+            hits,
+            wiki_root=wiki_root,
+            extra_roots=extra_roots,
+            off_corpus_root=off_corpus_root,
+        )
+        hits = _reorder_hits_by_supersession(
             hits,
             wiki_root=wiki_root,
             extra_roots=extra_roots,
@@ -1210,6 +1328,17 @@ def _recall_via_backend(
     # select within the configured token budget. `unprompted=False`
     # (default) skips this entirely: `_rows` keeps every hit, in the same
     # relevance order the backend/currency-reorder already produced.
+    if unprompted and _rows:
+        # Issue athenaeum#1493 (AC6): EXCLUDE superseded pages from the unprompted
+        # push path specifically — a decision, not an inheritance from the
+        # explicit-call path's demote+mark above. The issue's own framing:
+        # the agent did not ask, so unlike an explicit `recall` call it has
+        # no context for adjudicating two conflicting pages it was simply
+        # handed. Demote-and-mark alone is not a safe default for content
+        # pushed into a turn unprompted; the explicit path (this branch not
+        # taken) is unaffected and keeps a superseded page reachable, ranked
+        # below its replacement, and marked.
+        _rows = [row for row in _rows if not _is_superseded(row.pushed_hit[1])]
     if unprompted and _rows:
         budget = resolve_push_token_budget(config)
         candidates = [
