@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for `athenaeum push-metrics {baseline,coverage-audit,record}`
-(issue athenaeum#711; `record` added by issue athenaeum#1478)."""
+"""Tests for `athenaeum push-metrics {baseline,coverage-audit,record,tail}`
+(issue athenaeum#711; `record` added by issue athenaeum#1478; `tail` added by
+issue athenaeum#1479)."""
 
 from __future__ import annotations
 
@@ -953,9 +954,172 @@ def test_parser_tree_binds_func_for_push_metrics_subcommands() -> None:
         for a in push_metrics_parser._actions
         if isinstance(a, argparse._SubParsersAction)
     )
-    assert set(inner.choices) == {"baseline", "coverage-audit", "liveness", "record"}
+    assert set(inner.choices) == {"baseline", "coverage-audit", "liveness", "record", "tail"}
     for name, sub in inner.choices.items():
         assert (
             sub.get_default("func") is not None
             or push_metrics_parser.get_default("func") is not None
         ), f"push-metrics {name} has no resolvable func"
+
+
+# ---------------------------------------------------------------------------
+# tail (issue athenaeum#1479)
+# ---------------------------------------------------------------------------
+
+
+def _seed_push(cache_dir: Path, *, session_id: str, uid: str, source: str = "") -> None:
+    if source == push_metrics.SOURCE_HOOK:
+        push_metrics.record_hook_push(session_id, [uid], cache_dir=cache_dir)
+        return
+    record = push_metrics.build_push_record(
+        session_id=session_id,
+        query="q",
+        backend="fts5",
+        hits=[(f"{uid}.md", {"uid": uid, "access": "internal", "audience": ["owner"]}, "body")],
+    )
+    if source:
+        record.source = source
+    push_metrics.record_push(record, cache_dir=cache_dir)
+
+
+def test_tail_json_emits_documented_ndjson_shape(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    _seed_push(cache_dir, session_id="s1", uid="u1", source=push_metrics.SOURCE_HOOK)
+    push_metrics.record_reference_result(
+        push_metrics.ReferenceResult(
+            session_id="s1", ts="2026-01-01T00:00:05Z", pushed_ids=["u1"], referenced_ids=["u1"]
+        ),
+        cache_dir=cache_dir,
+    )
+    rc, out = _run(["push-metrics", "tail", "--json", "--cache-dir", str(cache_dir)])
+    assert rc == 0
+    lines = [json.loads(line) for line in out.splitlines() if line.strip()]
+    assert len(lines) == 2
+    kinds = {rec["record_type"] for rec in lines}
+    assert kinds == {"push", "reference"}
+    push_rec = next(r for r in lines if r["record_type"] == "push")
+    assert push_rec["source"] == "hook"
+    assert push_rec["query_hash"]
+    assert "query" not in push_rec
+
+
+def test_tail_session_filter_against_multi_session_ledger(tmp_path: Path) -> None:
+    """AC: --session filtering verified against a ledger containing
+    multiple sessions."""
+    cache_dir = tmp_path / "cache"
+    _seed_push(cache_dir, session_id="viewer", uid="v1")
+    _seed_push(cache_dir, session_id="target", uid="t1")
+    _seed_push(cache_dir, session_id="other", uid="o1")
+
+    rc, out = _run(
+        ["push-metrics", "tail", "--json", "--cache-dir", str(cache_dir), "--session", "target"]
+    )
+    assert rc == 0
+    lines = [json.loads(line) for line in out.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert lines[0]["session_id"] == "target"
+    assert lines[0]["items"][0]["id"] == "t1"
+
+
+def test_tail_without_follow_drains_and_exits(tmp_path: Path) -> None:
+    """A bare `tail --json` (no --follow) must return, not hang."""
+    cache_dir = tmp_path / "cache"
+    _seed_push(cache_dir, session_id="s1", uid="u1")
+    rc, out = _run(["push-metrics", "tail", "--json", "--cache-dir", str(cache_dir)])
+    assert rc == 0
+    assert len(out.splitlines()) == 1
+
+
+def test_tail_text_mode_renders_a_readable_summary(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    _seed_push(cache_dir, session_id="s1", uid="u1")
+    push_metrics.record_reference_result(
+        push_metrics.ReferenceResult(
+            session_id="s1", ts="2026-01-01T00:00:05Z", pushed_ids=["u1"], referenced_ids=["u1"]
+        ),
+        cache_dir=cache_dir,
+    )
+    rc, out = _run(["push-metrics", "tail", "--cache-dir", str(cache_dir)])
+    assert rc == 0
+    lines = out.splitlines()
+    assert any(line.startswith("push") and "session=s1" in line for line in lines)
+    assert any(line.startswith("ref") and "session=s1" in line for line in lines)
+
+
+def test_tail_stops_gracefully_on_keyboard_interrupt(tmp_path: Path, monkeypatch) -> None:
+    """A ^C mid-stream (typical for `--follow`) must exit 0, not crash with a
+    traceback."""
+
+    def _raise(**kwargs):
+        # A generator function (note the unreachable `yield`) so calling
+        # this — matching `tail_records`'s own generator contract — does
+        # nothing until iterated, same as a real KeyboardInterrupt arriving
+        # mid-stream rather than at the call site.
+        if True:
+            raise KeyboardInterrupt
+        yield
+
+    monkeypatch.setattr(push_metrics, "tail_records", _raise)
+    cache_dir = tmp_path / "cache"
+    rc, out = _run(["push-metrics", "tail", "--json", "--cache-dir", str(cache_dir), "--follow"])
+    assert rc == 0
+    assert out == ""
+
+
+def test_tail_since_filters_older_records(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    push_metrics.record_reference_result(
+        push_metrics.ReferenceResult(
+            session_id="s1", ts="2020-01-01T00:00:00Z", pushed_ids=["u1"], referenced_ids=["u1"]
+        ),
+        cache_dir=cache_dir,
+    )
+    push_metrics.record_reference_result(
+        push_metrics.ReferenceResult(
+            session_id="s1", ts="2030-01-01T00:00:00Z", pushed_ids=["u1"], referenced_ids=["u1"]
+        ),
+        cache_dir=cache_dir,
+    )
+    rc, out = _run(
+        [
+            "push-metrics",
+            "tail",
+            "--json",
+            "--cache-dir",
+            str(cache_dir),
+            "--since",
+            "2025-01-01",
+        ]
+    )
+    assert rc == 0
+    lines = [json.loads(line) for line in out.splitlines() if line.strip()]
+    assert [r["ts"] for r in lines] == ["2030-01-01T00:00:00Z"]
+
+
+def test_tail_empty_ledger_exits_cleanly(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    rc, out = _run(["push-metrics", "tail", "--json", "--cache-dir", str(cache_dir)])
+    assert rc == 0
+    assert out == ""
+
+
+def test_tail_follow_flag_forwards_to_tail_records(tmp_path: Path, monkeypatch) -> None:
+    """Dispatch-level wiring test: `--follow` must reach `tail_records(...,
+    follow=True)`. Deliberately does not exercise the real (potentially
+    unbounded) follow loop here — that behaviour is covered, bounded and
+    deterministically, by `TestTailRecords.test_follow_*` in
+    `test_push_metrics.py`.
+    """
+    captured: dict = {}
+
+    def _fake_tail_records(**kwargs):
+        captured.update(kwargs)
+        return iter(())
+
+    monkeypatch.setattr(push_metrics, "tail_records", _fake_tail_records)
+    cache_dir = tmp_path / "cache"
+    rc, _ = _run(
+        ["push-metrics", "tail", "--json", "--cache-dir", str(cache_dir), "--follow"]
+    )
+    assert rc == 0
+    assert captured["follow"] is True

@@ -1524,6 +1524,112 @@ sidecar's own `items[].tier` limitation above: a safe, documented default,
 never a fabricated real value. `items[].id` is derived the same way as the
 sidecar path's, via `push_metrics.opaque_push_id_from_filename`.
 
+### `push-metrics tail` — the public NDJSON contract (issue athenaeum#1479)
+
+Every reader so far — `baseline`, `coverage-audit`, `usage-report` — is
+aggregate: ids and counts, never a raw feed of individual pushes. Before this
+issue, seeing recall activity as it happens meant reading
+`<cache dir>/_push_records.jsonl` directly and parsing an undocumented
+internal format that is free to change in any patch release.
+
+`athenaeum push-metrics tail --json [--session ID] [--follow] [--since ...]`
+streams **one shaped JSON object per line** (NDJSON), one per push record and
+one per reference-determination record, oldest-first / **newest-last**,
+draining what is currently on disk and exiting — unless `--follow` is given,
+in which case it keeps polling and emits records appended afterward (like
+`tail -f`; run until interrupted, e.g. Ctrl-C). Without `--json`, `tail`
+prints a one-line-per-record human-readable summary instead; **`--json` is
+the documented, stable machine-readable shape below** — the plain-text
+rendering is not a contract and may change.
+
+**This is a promotion, not a passthrough.** The on-disk ledger rows (built by
+`PushRecord.to_dict()` / `ReferenceResult.to_dict()`, `push_metrics.py`) stay
+internal and free to change — `tail` builds its output from an explicit
+field allowlist (`push_metrics._shape_tail_push_record` /
+`_shape_tail_reference_record`), never by serializing the raw ledger dict
+verbatim. That indirection is the whole point: the ledger format can be
+refactored without breaking a consumer of this command's output.
+
+**Read-only.** `tail` only calls `read_push_records` / `read_reference_records`
+(covered above) — no write path of any kind, on any flag combination.
+
+**Schema version: `1`** (`push_metrics.SCHEMA_VERSION`), stamped as the `v`
+key on every emitted object — the SAME version stamped on the underlying
+ledger rows. **Compatibility note:** within schema version `1`, a future
+change may ADD a key to either shape (additive, same precedent as
+`items[].memory_tier` and `source` above) — a consumer must not treat an
+unrecognized key as an error. A version bump is required before any key is
+renamed or removed, or before an existing key's meaning changes; a consumer
+pinned to `v == 1` can rely on every key documented below continuing to mean
+exactly this until that bump.
+
+**A push record** (`"record_type": "push"`):
+
+```json
+{"record_type":"push","v":1,"session_id":"23f3dd8b-...","ts":"2026-09-08T23:01:57Z","query_hash":"2f4df398040fbe0b","backend":"vector","items":[{"id":"auto-athenaeum-spend-2026.md","tier":"internal","scope":"owner","token_cost":100,"memory_tier":"warm"}],"pushed_count":1,"token_cost":100,"token_cost_estimated":true,"source":"hook"}
+```
+
+**A reference-determination record** (`"record_type": "reference"`):
+
+```json
+{"record_type":"reference","v":1,"session_id":"23f3dd8b-...","ts":"2026-09-08T23:05:12Z","pushed_count":1,"referenced_count":1,"referenced_ids":["auto-athenaeum-spend-2026.md"],"precision":1.0}
+```
+
+- **`record_type`** is the discriminator: `"push"` vs. `"reference"`. Always
+  present, always the first key, and it is the ONLY field a consumer needs to
+  branch on — the two shapes otherwise share only `v`, `session_id`, `ts`,
+  and `pushed_count` (which mean the same thing in both: schema version,
+  consuming session id, event timestamp, and count of ids pushed that
+  session, respectively).
+- **`source`** (push records only) distinguishes the three writers, and is
+  **omitted entirely** — never present with any value, including
+  `"recall"` — for an explicit MCP `recall` push:
+  - key absent → explicit MCP `recall` push.
+  - `"sidecar"` → the `athenaeum context` adapter's unprompted push
+    (issue athenaeum#1362).
+  - `"hook"` (`push_metrics.SOURCE_HOOK`) → the per-turn `UserPromptSubmit`
+    recall hook's reporting call, `athenaeum push-metrics record`
+    (issue athenaeum#1478).
+
+  **Never read by elimination** — "anything but `sidecar` means `recall`" is
+  false once the hook path exists. Check for the specific value: `source ==
+  "sidecar"` → sidecar; `source == "hook"` → hook; key absent → recall.
+- **`query_hash`** (push records only) is a hash, never the raw query text —
+  per this repo's athenaeum#711 design, and this command must not
+  reintroduce it to make output nicer. There is no way to recover the
+  original query string from a `tail` stream.
+- **`items[].id`** is an opaque id — a compiled entity's frontmatter `uid`,
+  or (no-frontmatter paths) a filename-derived id via
+  `push_metrics.opaque_push_id_from_filename` — never a name-derived slug,
+  never content.
+- **Known limitation, inherited unchanged from the underlying ledger:
+  `items[].tier` is always `"internal"` on a sidecar-sourced row** (the FTS5
+  `wiki` table `athenaeum context` queries has no `access` column, so
+  `record_context_push` cannot read the real value — see "The sidecar is a
+  second writer" above). `tail` does not, and cannot, correct this: it
+  reports exactly what the ledger recorded. Use `items[].memory_tier`
+  instead for anything tier-related on a sidecar-sourced record.
+- **ids, tiers, scopes, counts, timestamps, and estimated token cost only —
+  never claim content, never personal data.** This is unchanged from the
+  underlying ledger's own bar (`push_metrics.py`'s module docstring) and
+  applies identically to `tail`'s output.
+
+**`--session ID`** filters to records whose `session_id` field exactly
+matches `ID`. This matters because a viewer process that itself calls
+`recall` (or is invoked from inside a Claude Code session that runs the
+per-turn recall hook) writes its own push records into the same ledger — 
+without session filtering, a viewer observes itself.
+
+**`--since ...`** reuses `spend.parse_since` exactly (relative `7d` / `24h` /
+`30m` / `2w`, or an absolute ISO-8601 date/datetime) — the same flag
+`usage-report --since` and `push-metrics baseline --since` already use.
+Records are filtered on `ts`.
+
+**Ordering and ties.** Records are sorted oldest-first (newest-last). A tie
+in `ts` is broken by push records before reference records, then by each
+underlying ledger's own on-disk (append) order — deterministic, never an
+arbitrary interleaving.
+
 ## LLM schema-observation ledger (athenaeum#570 / athenaeum#724)
 
 Every in-scope LLM contract's response is validated **observe-only** against a
