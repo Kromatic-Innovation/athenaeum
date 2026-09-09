@@ -4036,7 +4036,12 @@ def _resolve_corrections_int(
 
 
 def resolve_corrections_max_records_per_batch(config: dict[str, Any] | None) -> int:
-    """§10.2 ``librarian.corrections.max_records_per_batch`` (default 5,000)."""
+    """§10.2 ``librarian.corrections.max_records_per_batch`` (default 5,000).
+
+    Caps how many records :func:`athenaeum.corrections.run_correction_phase`
+    reads out of a single correction batch file in one pass; the remainder
+    is carried over to a later run rather than processed in the same pass.
+    """
     return _resolve_corrections_int(
         config,
         "ATHENAEUM_CORRECTIONS_MAX_RECORDS_PER_BATCH",
@@ -4048,7 +4053,12 @@ def resolve_corrections_max_records_per_batch(config: dict[str, Any] | None) -> 
 
 
 def resolve_corrections_max_records_per_run(config: dict[str, Any] | None) -> int:
-    """§10.2 ``librarian.corrections.max_records_per_run`` (default 50,000)."""
+    """§10.2 ``librarian.corrections.max_records_per_run`` (default 50,000).
+
+    Caps how many correction records :func:`athenaeum.corrections.run_correction_phase`
+    applies across ALL batch files in one run; once the cap is hit, every
+    remaining batch is left untouched and carried over to the next run.
+    """
     return _resolve_corrections_int(
         config,
         "ATHENAEUM_CORRECTIONS_MAX_RECORDS_PER_RUN",
@@ -4060,7 +4070,12 @@ def resolve_corrections_max_records_per_run(config: dict[str, Any] | None) -> in
 
 
 def resolve_corrections_max_batch_bytes(config: dict[str, Any] | None) -> int:
-    """§10.2 ``librarian.corrections.max_batch_bytes`` (default 32 MiB)."""
+    """§10.2 ``librarian.corrections.max_batch_bytes`` (default 32 MiB).
+
+    Caps the on-disk size of a single correction batch file
+    :func:`athenaeum.corrections.run_correction_phase` will process in one
+    pass; an oversize batch is carried over rather than read in full.
+    """
     return _resolve_corrections_int(
         config,
         "ATHENAEUM_CORRECTIONS_MAX_BATCH_BYTES",
@@ -4072,7 +4087,13 @@ def resolve_corrections_max_batch_bytes(config: dict[str, Any] | None) -> int:
 
 
 def resolve_corrections_max_escalations_per_run(config: dict[str, Any] | None) -> int:
-    """§10.2 ``librarian.corrections.max_escalations_per_run`` (default 50)."""
+    """§10.2 ``librarian.corrections.max_escalations_per_run`` (default 50).
+
+    Caps how many correction conflicts the librarian's escalation phase may
+    push onto ``_pending_questions.md`` in a single run, tracked per
+    (submitter, field) so the operator sees which target tripped the flood
+    guard rather than an undifferentiated count.
+    """
     return _resolve_corrections_int(
         config,
         "ATHENAEUM_CORRECTIONS_MAX_ESCALATIONS_PER_RUN",
