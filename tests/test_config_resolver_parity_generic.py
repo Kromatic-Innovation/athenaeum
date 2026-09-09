@@ -136,7 +136,20 @@ _RESOLVER_NAMES = sorted(name for name, _ in _ALL_RESOLVERS)
 # AST walk only follows PRIVATE ``_resolve*`` helpers, not calls to other
 # public ``resolve_*`` functions, so it cannot see through the delegation.
 _NO_YAML_KEY = frozenset({"resolve_cache_dir", "resolve_reasoning_tier_any_screen_enabled"})
-_GENERIC_HELPER_SIGNATURE = frozenset({"resolve_model"})
+_GENERIC_HELPER_SIGNATURE = frozenset(
+    {
+        "resolve_model",
+        # Issue athenaeum#1418: family-parameterized retention resolvers, same
+        # shape problem as resolve_model — the generic prober only ever
+        # calls fn(config), and `family` is a required second positional
+        # arg with no single "correct" probe value the source can reveal.
+        # Exercised directly, with real family names, in
+        # TestRetentionResolversDirect below.
+        "resolve_retention_policy",
+        "resolve_retention_max_bytes",
+        "resolve_retention_destination",
+    }
+)
 _STRUCTURED_CONTAINER_VALUE = frozenset({"resolve_model_rates"})
 # Issue athenaeum#715: returns a frozenset filtered against a CLOSED vocabulary,
 # so every out-of-vocabulary sentinel correctly returns the default. Covered
@@ -537,6 +550,55 @@ class TestResolveModelDirect:
             "parity_probe", "ATHENAEUM_PARITY_PROBE_MODEL", "code-default", None
         )
         assert result == "code-default"
+
+
+# ---------------------------------------------------------------------------
+# resolve_retention_policy / resolve_retention_max_bytes /
+# resolve_retention_destination (issue athenaeum#1418): family-parameterized,
+# same generic-helper exclusion reason as resolve_model above — exercised
+# directly with real family names rather than a synthetic knob string.
+# ---------------------------------------------------------------------------
+
+
+class TestRetentionResolversDirect:
+    def test_policy_reads_family_yaml_key(self) -> None:
+        config = {
+            "librarian": {
+                "retention": {"families": {"probe-family": {"policy": "never-truncate"}}}
+            }
+        }
+        assert config_mod.resolve_retention_policy(config, "probe-family") == "never-truncate"
+
+    def test_policy_reads_defaults_yaml_key(self) -> None:
+        config = {"librarian": {"retention": {"defaults": {"policy": "librarian-decides"}}}}
+        assert (
+            config_mod.resolve_retention_policy(config, "unrelated-family")
+            == "librarian-decides"
+        )
+
+    def test_policy_none_when_retention_block_absent(self) -> None:
+        assert config_mod.resolve_retention_policy(None, "probe-family") is None
+        assert config_mod.resolve_retention_policy({}, "probe-family") is None
+
+    def test_max_bytes_reads_family_yaml_key(self) -> None:
+        config = {
+            "librarian": {"retention": {"families": {"probe-family": {"max_bytes": 4096}}}}
+        }
+        assert config_mod.resolve_retention_max_bytes(config, "probe-family") == 4096
+
+    def test_max_bytes_default_when_unset(self) -> None:
+        assert config_mod.resolve_retention_max_bytes(None, "probe-family") == 1_048_576
+
+    def test_destination_reads_family_yaml_key(self) -> None:
+        config = {
+            "librarian": {
+                "retention": {"families": {"probe-family": {"destination": "pii-vault"}}}
+            }
+        }
+        assert config_mod.resolve_retention_destination(config, "probe-family") == "pii-vault"
+
+    def test_destination_default_when_unset(self) -> None:
+        assert config_mod.resolve_retention_destination(None, "probe-family") == "in-repo"
 
 
 # ---------------------------------------------------------------------------
