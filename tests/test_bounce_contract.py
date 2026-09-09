@@ -381,7 +381,7 @@ class TestNoDirectPiiDetectorImport:
 
         assert not hasattr(bc, "find_inline_emails")
         # athenaeum.pii's own export is untouched (AC8).
-        assert find_inline_emails("reach a@b.com") == ["a@b.com"]
+        assert find_inline_emails("reach a@example.com") == ["a@example.com"]
 
 
 class TestSensitivityRegistryEquivalence:

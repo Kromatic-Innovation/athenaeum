@@ -458,3 +458,181 @@ def test_gate_runs_under_system_bash_3_2(tmp_path: Path) -> None:
     assert "command not found" not in combined, combined
     assert nonempty.returncode == 0, combined
     assert "bare-issue-ref" in nonempty.stdout, combined
+
+
+# ---------------------------------------------------------------------------
+# Email-domain guard (athenaeum#1443)
+#
+# Fixture and source email addresses must live on RFC 2606 / RFC 6761
+# reserved domains, not real ones someone else owns -- the same rule
+# code-workspace-config/scripts/_gh-email-guard.sh already enforces on
+# outbound gh writes. This is the "narrow allowance" version of that rule
+# for the corpus itself.
+#
+# IMPORTANT: this test's own file is IN SCOPE of the scan it defines
+# (it lives in tests/, which the scan walks). Every negative-control
+# address below is therefore built BY CONSTRUCTION (string concatenation,
+# f-string interpolation, or a scratch file under tmp_path) so the raw
+# source text of this file never contains a forbidden address as a
+# contiguous literal -- a plain grep of this file would not find one either.
+# ---------------------------------------------------------------------------
+
+EMAIL_SHAPE_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+#: RFC 2606 (example.com/.net/.org) plus RFC 6761 (.example/.invalid/.test/
+#: .localhost) reserved names. A domain is reserved if it equals one of
+#: these or is a subdomain of one (e.g. ``mail.example.com``,
+#: ``sub.corp.example``).
+RESERVED_DOMAIN_SUFFIXES: tuple[str, ...] = (
+    "example.com",
+    "example.net",
+    "example.org",
+    "example",  # RFC 6761 .example TLD -- covers any *.example domain
+    "invalid",  # RFC 6761 .invalid TLD
+    "test",  # RFC 6761 .test TLD
+    "localhost",  # RFC 6761 .localhost TLD
+)
+
+#: Genuine infrastructure addresses -- not a person's contact data. The
+#: issue's own three (git@github.com, *@users.noreply.github.com,
+#: open-source@kromatic.com) plus two judgement-call additions made while
+#: building this guard: ``git@gitlab.com`` and ``git@bitbucket.org`` are
+#: already-documented siblings of ``git@github.com`` in
+#: ``src/athenaeum/pii.py``'s ``SERVICE_ADDRESSES`` (issue athenaeum#507) --
+#: the same SSH pseudo-user shape, just the other two git hosts the corpus
+#: references. Not in the issue's literal list, but squarely the same
+#: category, so allowlisted here with the reason on record rather than
+#: migrated (migrating them would falsify the product's own fixture data).
+INFRA_EXACT_ADDRESSES: frozenset[str] = frozenset(
+    {
+        "git@github.com",
+        "open-source@kromatic.com",
+        "git@gitlab.com",
+        "git@bitbucket.org",
+    }
+)
+
+#: Genuine infrastructure domains (any local-part), matched as an exact
+#: domain or a suffix of one. ``group.calendar.google.com`` and
+#: ``iam.gserviceaccount.com`` are the other two judgement-call additions:
+#: both are already recognized as service-identifier domains, not contact
+#: data, by ``src/athenaeum/pii.py`` and ``src/athenaeum/pii_restore.py``
+#: (issue athenaeum#507) -- a Calendar group id and a GCP service-account
+#: pseudo-user are transport identifiers, the same reasoning that exempts
+#: ``git@github.com``.
+INFRA_DOMAIN_SUFFIXES: tuple[str, ...] = (
+    "users.noreply.github.com",
+    "group.calendar.google.com",
+    "iam.gserviceaccount.com",
+)
+
+
+def _is_reserved_or_infra(address: str) -> bool:
+    """True when *address* (an email-shaped token) is safe to appear in the
+    corpus: a reserved RFC 2606/6761 domain, or named genuine
+    infrastructure."""
+    lowered = address.lower()
+    if lowered in INFRA_EXACT_ADDRESSES:
+        return True
+    domain = lowered.rsplit("@", 1)[-1]
+    for suffix in INFRA_DOMAIN_SUFFIXES:
+        if domain == suffix or domain.endswith("." + suffix):
+            return True
+    for suffix in RESERVED_DOMAIN_SUFFIXES:
+        if domain == suffix or domain.endswith("." + suffix):
+            return True
+    return False
+
+
+def find_non_reserved_emails(text: str) -> list[str]:
+    """Every email-shaped token in *text* whose domain is neither reserved
+    nor named infrastructure."""
+    return [addr for addr in EMAIL_SHAPE_RE.findall(text) if not _is_reserved_or_infra(addr)]
+
+
+def _tracked_files(*subdirs: str) -> list[Path]:
+    """Tracked files under *subdirs* via ``git ls-files`` -- never an
+    unbounded ``rglob``, which would also walk ``.venv/``, ``.git/`` and any
+    other untracked vendored tree a lane happens to have on disk."""
+    result = subprocess.run(
+        ["git", "ls-files", *subdirs],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [REPO_ROOT / p for p in result.stdout.splitlines() if p]
+
+
+class TestNoNonReservedEmailDomains:
+    """athenaeum#1443 -- no string in ``src/athenaeum/`` or ``tests/`` may
+    carry an email address on a real, non-reserved domain."""
+
+    def test_repo_has_no_non_reserved_email_addresses(self) -> None:
+        offenders: list[str] = []
+        for path in _tracked_files("src/athenaeum", "tests"):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for addr in find_non_reserved_emails(text):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: {addr}")
+        assert not offenders, (
+            "email address(es) on a non-reserved domain found -- migrate to "
+            "example.com/.net/.org, a *.example/*.invalid/*.test/*.localhost "
+            "subdomain, or add a justified allowance to INFRA_EXACT_ADDRESSES "
+            "/ INFRA_DOMAIN_SUFFIXES above:\n" + "\n".join(offenders)
+        )
+
+    def test_predicate_flags_a_synthetic_non_reserved_address(self) -> None:
+        """AC3, minimally: a made-up address on a real-shaped domain, built
+        from parts so this file's own source never contains it as a
+        contiguous literal, is caught by the predicate."""
+        local = "jo" + "hn"
+        domain = "acme" + "." + "com"
+        synthetic = f"{local}@{domain}"
+        assert find_non_reserved_emails(f"contact {synthetic} for details") == [synthetic]
+
+    def test_predicate_flags_each_migrated_address_if_reintroduced(
+        self, tmp_path: Path
+    ) -> None:
+        """AC3 concretely: the four addresses this issue migrated out of the
+        tree, reassembled from parts and written into a SCRATCH file (never
+        this repo), are each still caught by the exact predicate the
+        repo-wide scan above uses -- proving a regression would fail CI."""
+        migrated_local_domain_parts = [
+            ("jane" + ".doe", "acme" + ".com"),
+            ("sales", "acme" + ".com"),
+            ("foo", "bar" + ".com"),
+            ("jo.5551234567", "x" + ".com"),
+        ]
+        for local, domain in migrated_local_domain_parts:
+            address = f"{local}@{domain}"
+            scratch = tmp_path / "reintroduced.py"
+            scratch.write_text(f'FIXTURE_EMAIL = "{address}"\n', encoding="utf-8")
+            found = find_non_reserved_emails(scratch.read_text(encoding="utf-8"))
+            assert found == [address], f"predicate failed to flag {address!r}"
+
+    def test_reserved_and_infra_addresses_are_not_flagged(self) -> None:
+        """Negative control: the reserved set and the named infrastructure
+        allowance are not false positives."""
+        allowed = [
+            "person@example.com",
+            "person@example.net",
+            "person@example.org",
+            "person@sub.example.com",
+            "person@corp.example",
+            "person@thing.invalid",
+            "person@thing.test",
+            "person@thing.localhost",
+            "git@github.com",
+            "GIT@GitHub.com",
+            "someone@users.noreply.github.com",
+            "open-source@kromatic.com",
+            "git@gitlab.com",
+            "git@bitbucket.org",
+            "cal-abc@group.calendar.google.com",
+            "svc@my-project.iam.gserviceaccount.com",
+        ]
+        for addr in allowed:
+            assert find_non_reserved_emails(f"see {addr}") == [], addr

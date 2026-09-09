@@ -609,22 +609,22 @@ class TestDedupeMergePrimitives:
         co-indexed BY VALUE, not by position. Reordering the underlying
         list must carry attributions with the values."""
         cmeta = {
-            "emails": ["a@x.com", "b@y.com"],
+            "emails": ["a@example.com", "b@example.net"],
             "field_sources": {
                 "emails": [
-                    {"value": "a@x.com", "source": "api:apollo:2026-04-29"},
-                    {"value": "b@y.com", "source": "linkedin:bhandle"},
+                    {"value": "a@example.com", "source": "api:apollo:2026-04-29"},
+                    {"value": "b@example.net", "source": "linkedin:bhandle"},
                 ]
             },
         }
         ameta: dict[str, object] = {"field_sources": {}}
         # Merged list reordered relative to canonical's field_sources order.
-        merged = {"emails": ["b@y.com", "a@x.com"]}
+        merged = {"emails": ["b@example.net", "a@example.com"]}
         out = _merge_field_sources(cmeta, ameta, merged)
         assert out is not None
         assert out["emails"] == [
-            {"value": "b@y.com", "source": "linkedin:bhandle"},
-            {"value": "a@x.com", "source": "api:apollo:2026-04-29"},
+            {"value": "b@example.net", "source": "linkedin:bhandle"},
+            {"value": "a@example.com", "source": "api:apollo:2026-04-29"},
         ]
 
     def test_merge_field_sources_list_of_dicts_employment_history(self) -> None:
@@ -670,21 +670,21 @@ class TestDedupeMergePrimitives:
         entry whose ``value`` no longer appears in the merged list is
         dropped at write time, mirroring the prune-dangling rule."""
         cmeta = {
-            "emails": ["a@x.com"],
+            "emails": ["a@example.com"],
             "field_sources": {
                 "emails": [
-                    {"value": "a@x.com", "source": "api:apollo:2026-04-29"},
-                    # Stale — ``b@y.com`` is not in the merged list.
-                    {"value": "b@y.com", "source": "linkedin:bhandle"},
+                    {"value": "a@example.com", "source": "api:apollo:2026-04-29"},
+                    # Stale — ``b@example.net`` is not in the merged list.
+                    {"value": "b@example.net", "source": "linkedin:bhandle"},
                 ]
             },
         }
         ameta: dict[str, object] = {"field_sources": {}}
-        merged = {"emails": ["a@x.com"]}
+        merged = {"emails": ["a@example.com"]}
         out = _merge_field_sources(cmeta, ameta, merged)
         assert out is not None
         assert out["emails"] == [
-            {"value": "a@x.com", "source": "api:apollo:2026-04-29"},
+            {"value": "a@example.com", "source": "api:apollo:2026-04-29"},
         ]
 
 
@@ -698,7 +698,7 @@ class TestDedupePerformMerge:
             uid="canon01",
             name="Alice",
             extra={
-                "emails": ["alice@a.com"],
+                "emails": ["alice@example.com"],
                 "tags": ["client"],
                 "aliases": [],
                 "warm_score": 5.0,
@@ -718,7 +718,7 @@ class TestDedupePerformMerge:
             uid="absorb1",
             name="Alice Smith",  # different name → alias
             extra={
-                "emails": ["alice@b.com"],
+                "emails": ["alice@example.net"],
                 "tags": ["fintech"],
                 "warm_score": 9.0,
                 "updated": "2025-04-01",
@@ -739,7 +739,7 @@ class TestDedupePerformMerge:
         cpath, apath = self._setup_pair(tmp_path)
         _perform_merge(cpath, apath, dry_run=False)
         meta, _body = parse_frontmatter(cpath.read_text())
-        assert meta["emails"] == ["alice@a.com", "alice@b.com"]
+        assert meta["emails"] == ["alice@example.com", "alice@example.net"]
         assert meta["tags"] == ["client", "fintech"]
         # name differs → absorbed.name appended to aliases
         assert "Alice Smith" in meta["aliases"]

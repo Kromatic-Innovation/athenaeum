@@ -394,9 +394,9 @@ class TestIsBouncedIdentifier:
     def test_absent_and_malformed_read_as_not_bounced(self) -> None:
         assert is_bounced_identifier({}, "alex@example.org") is False
         assert is_bounced_identifier(None, "alex@example.org") is False
-        assert is_bounced_identifier({"identifier_validity": "nonsense"}, "a@b.org") is False
-        assert is_bounced_identifier({"identifier_validity": [None, 7]}, "a@b.org") is False
-        assert is_bounced_identifier({"emails": ["a@b.org"]}, "") is False
+        assert is_bounced_identifier({"identifier_validity": "nonsense"}, "a@example.net") is False
+        assert is_bounced_identifier({"identifier_validity": [None, 7]}, "a@example.net") is False
+        assert is_bounced_identifier({"emails": ["a@example.net"]}, "") is False
 
     def test_matches_case_insensitively(self, tmp_path: Path) -> None:
         contacts_root = tmp_path / "contacts"

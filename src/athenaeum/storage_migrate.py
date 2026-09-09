@@ -305,12 +305,12 @@ def _migrate_str_value(
       - no migratable PII → *value* unchanged (a bare ``git@github.com`` service
         address, or a value whose only token is allowlisted, is left
         byte-identical, not redacted).
-      - the value is ENTIRELY contact data (a bare ``foo@bar.com`` alias, or a
+      - the value is ENTIRELY contact data (a bare ``foo@example.com`` alias, or a
         scalar that is just the address) → ``None``, signalling the caller to
         DROP this list entry / frontmatter key (nothing archival is lost — the
         token is preserved on the excluded record).
       - PII embedded in surrounding text (a ``source:`` provenance string like
-        ``"imported from foo@bar.com via Streak"``, or a ``sources[].claim``
+        ``"imported from foo@example.com via Streak"``, or a ``sources[].claim``
         like ``"Reached Priya at priya@example.com"``) → the token redacted
         in place with :data:`INLINE_REDACTION_MARKER`, keeping the non-PII
         context so the field stays meaningful.
@@ -349,7 +349,7 @@ def _migrate_value(
 
     Returns ``(new_value, emails, phones, skipped)``. ``new_value is None``
     signals the caller to DROP this leaf — a list entry or dict key whose
-    value was ENTIRELY contact data (a bare ``foo@bar.com``) — exactly the
+    value was ENTIRELY contact data (a bare ``foo@example.com``) — exactly the
     scalar contract in :func:`_migrate_str_value`; an emptied container is
     likewise dropped, mirroring the top-level "drop a key whose every entry
     was contact data" rule. Non-string, non-container scalars (int/bool/date)
