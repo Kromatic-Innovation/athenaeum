@@ -29,6 +29,8 @@ Task-shaped. *"I want to ___."* Each guide names the module page that backs it.
 - [Answering decisions](guides/decisions.md) — working the pending-questions and
   pending-merges queue.
 - [Sidecar](guides/sidecar.md) — passive recall on every turn.
+- [Field constraints](guides/field-constraints.md) — declaring a per-type field
+  constraint in `wiki/_schema/` and what happens when a write violates it.
 - [Claude Code integration](guides/claude-code.md) — wiring the MCP server and the example hooks.
 - [Vector search](guides/vector-search.md) — optional embedding backends and query-topic extraction.
 - [Upgrading](guides/upgrading.md) — data lifecycle and what a version bump does to an existing wiki.
@@ -46,6 +48,8 @@ integrating anything.
   correction is refused.
 - [Shape](modules/shape.md) — shape rules, claim kinds, provenance shape.
 - [Routing](modules/routing.md) — entity routing and classification.
+- [Field constraints](modules/field-constraints.md) — operator-declared per-type
+  field constraints and the write-boundary guard that enforces them.
 - [Conflicts](modules/conflicts.md) — contradiction detection, source precedence, merges,
   the decision queue.
 - [Retention](modules/retention.md) — decay, the `preserve` disposition, preserved logs.
