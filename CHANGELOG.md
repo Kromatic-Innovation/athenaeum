@@ -7,7 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Scope-aware read side for the `specialization` verdict. The verdict's write
+  side (a `refines:` declaration on the specific claim) has had no matching
+  reader since it shipped, and no query surface in the repo took a scope
+  argument at all. A new `scope_resolution` module answers "which claims apply
+  to this query scope, and which are the most specific": a claim applies iff
+  its `claimed_scope` CONTAINS the query scope, and the answer is the minimal
+  set under that containment order, with `refines:` edges consumed as an
+  additional explicit specificity relation. The containment order is PARTIAL —
+  incomparable claims are all returned, no total order is invented, and no
+  similarity, recency or confidence scalar gates the result. Wired into
+  `recall` behind `librarian.scope_aware_recall_enabled` (default off); with
+  the key off, recall is byte-identical to before.
+  ([#715](https://github.com/Kromatic-Innovation/athenaeum/issues/715))
+
 ### Fixed
+
+- Rejecting a merge proposal recorded the rejection as a **fabricated
+  directional claim**: `resolve_merge(decision="reject")` wrote a `refines:`
+  declaration into one source naming the other, purely so the detector's
+  declared-pair short-circuit would suppress the pair. "A refines B" is a
+  different assertion from "a human said these two are not the same claim",
+  and it was never adjudicated. Rejection now writes an honest, non-directional
+  `merge_rejected_with:` declaration instead, suppression is preserved through
+  a distinct `declared-merge-rejection` rationale on every path that already
+  honoured `refines:`, and `refines:` is left with exactly one writer — the
+  `specialization` verdict. This matters more than tidiness now that retrieval
+  consumes `refines:` as a specificity signal: left unfixed, a merge rejection
+  would have started silently dropping a claim from recall results. Existing
+  fabricated edges already on disk are not rewritten by this change.
+  ([#715](https://github.com/Kromatic-Innovation/athenaeum/issues/715))
 
 - `_null_relation` (the shared null-handling helper behind every dimension
   comparator) returned UNKNOWN whenever both sides of a `null_means=universal`

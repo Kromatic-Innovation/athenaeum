@@ -91,11 +91,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from athenaeum._lint import _strip_self_reference
+from athenaeum._lint import (
+    _strip_self_reference,
+    _strip_self_reference_merge_rejected_with,
+)
 from athenaeum.models import (
     AutoMemoryFile,
     parse_deprecated,
     parse_frontmatter,
+    parse_merge_rejected_with,
     parse_refines,
     parse_superseded_by,
     parse_supersedes,
@@ -534,16 +538,25 @@ def candidate_to_auto_memory_files(
         try:
             refines = parse_refines(meta if isinstance(meta, dict) else None)
             supersedes = parse_supersedes(meta if isinstance(meta, dict) else None)
+            merge_rejected_with = parse_merge_rejected_with(
+                meta if isinstance(meta, dict) else None
+            )
         except ValueError as exc:
             log.warning(
-                "auto-memory %s: invalid refines/supersedes (%s); " "treating as empty",
+                "auto-memory %s: invalid refines/supersedes/merge_rejected_with "
+                "(%s); treating as empty",
                 path,
                 exc,
             )
             refines = []
             supersedes = []
+            merge_rejected_with = []
         # Issue athenaeum#181: same self-reference lint as discover_auto_memory_files.
         refines, supersedes = _strip_self_reference(name, refines, supersedes, path)
+        # Issue athenaeum#715: same self-reference lint for merge_rejected_with.
+        merge_rejected_with = _strip_self_reference_merge_rejected_with(
+            name, merge_rejected_with, path
+        )
         # Issue athenaeum#191: non-destructive inactive markers (keep_*/deprecate_both).
         meta_for_markers = meta if isinstance(meta, dict) else None
         out.append(
@@ -555,6 +568,7 @@ def candidate_to_auto_memory_files(
                 description=description,
                 refines=refines,
                 supersedes=supersedes,
+                merge_rejected_with=merge_rejected_with,
                 superseded_by=parse_superseded_by(meta_for_markers),
                 deprecated=parse_deprecated(meta_for_markers),
                 # Issue athenaeum#308: claim-level temporal validity bounds.

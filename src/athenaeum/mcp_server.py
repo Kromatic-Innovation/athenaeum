@@ -2980,9 +2980,11 @@ def create_server(
                 purges their vectors from the search index (when a vector
                 backend is configured). Either way, flips the checkbox and
                 records a provenance entry naming the sources folded/merged
-                in. ``"reject"`` flips the checkbox and writes a
-                ``refines:`` declaration into the first source memory so
-                the detector's declared-refinement short-circuit
+                in. ``"reject"`` flips the checkbox and writes an honest,
+                non-directional ``merge_rejected_with:`` declaration
+                (issue athenaeum#715 — never ``refines:``, which is reserved for
+                a genuine specialization verdict) into the first source
+                memory so the detector's declared-pair short-circuit
                 suppresses the pair on future runs.
             note: Optional human note attached to the decision block.
 

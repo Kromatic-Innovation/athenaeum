@@ -29,6 +29,7 @@ from athenaeum.contradictions import ContradictionResult
 from athenaeum.merge import _declared_relationship, _filter_declared_pairs
 from athenaeum.models import (
     AutoMemoryFile,
+    parse_merge_rejected_with,
     parse_refines,
     parse_supersedes,
 )
@@ -47,6 +48,7 @@ def _write_am(
     name: str,
     refines: list[str] | None = None,
     supersedes: list[dict[str, str]] | None = None,
+    merge_rejected_with: list[str] | None = None,
     origin_scope: str = "scope-x",
 ) -> AutoMemoryFile:
     scope_dir.mkdir(parents=True, exist_ok=True)
@@ -64,6 +66,10 @@ def _write_am(
                 fm_lines.append(f"    as_of: {rec['as_of']}")
             if rec.get("reason"):
                 fm_lines.append(f"    reason: {rec['reason']!r}")
+    if merge_rejected_with:
+        fm_lines.append("merge_rejected_with:")
+        for r in merge_rejected_with:
+            fm_lines.append(f"  - {r}")
     fm_lines.append("---")
     path.write_text("\n".join(fm_lines) + "\n" + body + "\n", encoding="utf-8")
     return AutoMemoryFile(
@@ -73,6 +79,7 @@ def _write_am(
         name=name,
         refines=list(refines or []),
         supersedes=list(supersedes or []),
+        merge_rejected_with=list(merge_rejected_with or []),
     )
 
 
@@ -146,6 +153,39 @@ class TestParseSupersedes:
             parse_supersedes({"supersedes": [{"as_of": "2026-01-01"}]})
 
 
+class TestParseMergeRejectedWith:
+    """Issue athenaeum#715: mirrors TestParseRefines exactly — same shape/errors."""
+
+    def test_missing_key_returns_empty(self) -> None:
+        assert parse_merge_rejected_with({}) == []
+        assert parse_merge_rejected_with({"name": "x"}) == []
+
+    def test_none_meta_returns_empty(self) -> None:
+        assert parse_merge_rejected_with(None) == []
+
+    def test_happy_path(self) -> None:
+        assert parse_merge_rejected_with(
+            {"merge_rejected_with": ["a-slug", "b-slug"]}
+        ) == ["a-slug", "b-slug"]
+
+    def test_strips_whitespace(self) -> None:
+        assert parse_merge_rejected_with({"merge_rejected_with": ["  spaced  "]}) == [
+            "spaced"
+        ]
+
+    def test_scalar_raises(self) -> None:
+        with pytest.raises(ValueError, match="must be a list"):
+            parse_merge_rejected_with({"merge_rejected_with": "not-a-list"})
+
+    def test_empty_entry_raises(self) -> None:
+        with pytest.raises(ValueError, match="non-empty"):
+            parse_merge_rejected_with({"merge_rejected_with": [""]})
+
+    def test_non_string_entry_raises(self) -> None:
+        with pytest.raises(ValueError, match="non-empty"):
+            parse_merge_rejected_with({"merge_rejected_with": [123]})
+
+
 # ---------------------------------------------------------------------------
 # AutoMemoryFile dataclass
 # ---------------------------------------------------------------------------
@@ -162,6 +202,7 @@ def test_auto_memory_defaults_empty(tmp_path: Path) -> None:
     )
     assert am.refines == []
     assert am.supersedes == []
+    assert am.merge_rejected_with == []
     assert am.supersedes_names() == []
 
 
@@ -280,6 +321,110 @@ class TestDetectorSkip:
         # `a` had no undeclared partners → pruned. Only (b, c) remains.
         assert filtered == [b, c]
         assert a not in filtered
+
+    def test_declared_merge_rejection_skips_detector(self, tmp_path: Path) -> None:
+        """Issue athenaeum#715: ``a`` rejected a merge against ``b`` → short-circuit
+        with the distinct ``"declared-merge-rejection"`` rationale — never
+        ``"declared-refinement"``, since a rejection is a different fact
+        (not the same claim) than a refinement (a narrower claim)."""
+        a = _write_am(
+            tmp_path / "s",
+            "feedback_a.md",
+            "claim a",
+            name="memory-a",
+            merge_rejected_with=["memory-b"],
+        )
+        b = _write_am(tmp_path / "s", "feedback_b.md", "claim b", name="memory-b")
+        assert _declared_relationship(a, b) == "declared-merge-rejection"
+        filtered, declared = _filter_declared_pairs([a, b])
+        assert declared == "declared-merge-rejection"
+        assert filtered == []
+
+    def test_declared_merge_rejection_reverse_direction_also_skips(
+        self, tmp_path: Path
+    ) -> None:
+        """Declaration on EITHER side suppresses — same as refines/supersedes."""
+        a = _write_am(tmp_path / "s", "feedback_a.md", "claim a", name="memory-a")
+        b = _write_am(
+            tmp_path / "s",
+            "feedback_b.md",
+            "claim b",
+            name="memory-b",
+            merge_rejected_with=["memory-a"],
+        )
+        assert _declared_relationship(a, b) == "declared-merge-rejection"
+
+    def test_refinement_supersession_and_rejection_stay_distinct(
+        self, tmp_path: Path
+    ) -> None:
+        """The three declared-relationship slugs must never collapse into
+        each other — a caller branching on the rationale string needs to
+        tell a genuine refinement, a genuine supersession, and an honest
+        "these are not the same claim" rejection apart."""
+        refines_a = _write_am(
+            tmp_path / "s1",
+            "feedback_a.md",
+            "narrowed",
+            name="refines-a",
+            refines=["refines-b"],
+        )
+        refines_b = _write_am(
+            tmp_path / "s1", "feedback_b.md", "general", name="refines-b"
+        )
+        supersedes_a = _write_am(
+            tmp_path / "s2",
+            "feedback_a.md",
+            "new",
+            name="supersedes-a",
+            supersedes=[{"name": "supersedes-b"}],
+        )
+        supersedes_b = _write_am(
+            tmp_path / "s2", "feedback_b.md", "old", name="supersedes-b"
+        )
+        rejected_a = _write_am(
+            tmp_path / "s3",
+            "feedback_a.md",
+            "claim a",
+            name="rejected-a",
+            merge_rejected_with=["rejected-b"],
+        )
+        rejected_b = _write_am(
+            tmp_path / "s3", "feedback_b.md", "claim b", name="rejected-b"
+        )
+        assert _declared_relationship(refines_a, refines_b) == "declared-refinement"
+        assert (
+            _declared_relationship(supersedes_a, supersedes_b)
+            == "declared-supersession"
+        )
+        assert (
+            _declared_relationship(rejected_a, rejected_b)
+            == "declared-merge-rejection"
+        )
+        slugs = {
+            _declared_relationship(refines_a, refines_b),
+            _declared_relationship(supersedes_a, supersedes_b),
+            _declared_relationship(rejected_a, rejected_b),
+        }
+        assert len(slugs) == 3, slugs
+
+    def test_fully_rejected_chunk_prunes_without_supersession_or_refinement(
+        self, tmp_path: Path
+    ) -> None:
+        """A chunk whose only declaration is a merge-rejection must short-
+        circuit with ``"declared-merge-rejection"``, not silently fall
+        into the refinement bucket (the historical two-slug ``else``
+        branch would have miscounted this)."""
+        a = _write_am(
+            tmp_path / "s",
+            "feedback_a.md",
+            "claim a",
+            name="memory-a",
+            merge_rejected_with=["memory-b"],
+        )
+        b = _write_am(tmp_path / "s", "feedback_b.md", "claim b", name="memory-b")
+        filtered, declared = _filter_declared_pairs([a, b])
+        assert filtered == []
+        assert declared == "declared-merge-rejection"
 
 
 # ---------------------------------------------------------------------------

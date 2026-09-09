@@ -91,7 +91,10 @@ from pathlib import Path
 from typing import Any, cast
 
 from athenaeum import detection_state, spend
-from athenaeum._lint import _strip_self_reference
+from athenaeum._lint import (
+    _strip_self_reference,
+    _strip_self_reference_merge_rejected_with,
+)
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.clusters import resolve_cluster_output_path, resolve_cluster_threshold
 from athenaeum.config import (
@@ -142,6 +145,7 @@ from athenaeum.models import (
     parse_bucket,
     parse_deprecated,
     parse_frontmatter,
+    parse_merge_rejected_with,
     parse_refines,
     parse_superseded_by,
     parse_supersedes,
@@ -220,8 +224,14 @@ def _declared_relationship(a: "AutoMemoryFile", b: "AutoMemoryFile") -> str | No
         ``supersedes`` list (the resolution is in the text — no human
         review needed). ``"declared-refinement"`` when one side names the
         other in its ``refines`` list (general + exception; both stay
-        active and never count as a conflict). ``None`` when no
-        declaration applies.
+        active and never count as a conflict). ``"declared-merge-rejection"``
+        (issue athenaeum#715) when one side names the other in its
+        ``merge_rejected_with`` list — a human REJECTED a merge proposal
+        for this pair, an honest non-directional fact that is distinct
+        from both of the above and must never be conflated with
+        ``"declared-refinement"``: a refinement is an adjudicated
+        specialization claim, a rejection is only "these are not the same
+        claim". ``None`` when no declaration applies.
     """
     a_name = (a.name or "").strip()
     b_name = (b.name or "").strip()
@@ -235,6 +245,8 @@ def _declared_relationship(a: "AutoMemoryFile", b: "AutoMemoryFile") -> str | No
     b_super = {slugify(n) for n in b.supersedes_names()}
     a_refines = {slugify(n) for n in (a.refines or [])}
     b_refines = {slugify(n) for n in (b.refines or [])}
+    a_rejected = {slugify(n) for n in (a.merge_rejected_with or [])}
+    b_rejected = {slugify(n) for n in (b.merge_rejected_with or [])}
     a_supersedes_b = b_slug in a_super
     b_supersedes_a = a_slug in b_super
     # MUST #3: mutual supersedes is itself a declared contradiction —
@@ -251,6 +263,8 @@ def _declared_relationship(a: "AutoMemoryFile", b: "AutoMemoryFile") -> str | No
         return "declared-supersession"
     if b_slug in a_refines or a_slug in b_refines:
         return "declared-refinement"
+    if b_slug in a_rejected or a_slug in b_rejected:
+        return "declared-merge-rejection"
     return None
 
 
@@ -269,7 +283,8 @@ def _filter_declared_pairs(
 
     * Fully declared chunk → ``([], rationale)``. Caller short-circuits.
       Rationale records the strongest declaration class observed
-      (supersession beats refinement when both appear).
+      (supersession beats refinement beats merge-rejection when more than
+      one appears — issue athenaeum#715 added the third class).
     * Partially declared chunk → ``(pruned_members, None)``. Members
       involved only in declared pairs are removed. Rationale is
       ``None`` because the caller still runs the detector on the
@@ -287,6 +302,7 @@ def _filter_declared_pairs(
     has_undeclared_partner = [False] * n
     saw_supersession = False
     saw_refinement = False
+    saw_rejection = False
     saw_undeclared = False
     for i in range(n):
         for j in range(i + 1, n):
@@ -297,14 +313,22 @@ def _filter_declared_pairs(
                 has_undeclared_partner[j] = True
             elif verdict == "declared-supersession":
                 saw_supersession = True
-            else:
+            elif verdict == "declared-refinement":
                 saw_refinement = True
+            else:
+                # issue athenaeum#715: "declared-merge-rejection" — the only
+                # other slug _declared_relationship can return. Named
+                # explicitly (not folded into the refinement branch) so a
+                # future fourth slug cannot silently fall through here.
+                saw_rejection = True
     if not saw_undeclared:
         # Fully declared — short-circuit the detector entirely.
         if saw_supersession:
             return [], "declared-supersession"
         if saw_refinement:
             return [], "declared-refinement"
+        if saw_rejection:
+            return [], "declared-merge-rejection"
         return [], None
     pruned = [m for m, keep in zip(members, has_undeclared_partner) if keep]
     return pruned, None
@@ -1045,19 +1069,27 @@ def merge_cluster_row(
             try:
                 shim_refines = parse_refines(meta if meta else None)
                 shim_supersedes = parse_supersedes(meta if meta else None)
+                shim_merge_rejected_with = parse_merge_rejected_with(
+                    meta if meta else None
+                )
             except ValueError as exc:
                 log.warning(
-                    "cluster %s shim: invalid refines/supersedes on %s (%s); treating as empty",
+                    "cluster %s shim: invalid refines/supersedes/merge_rejected_with "
+                    "on %s (%s); treating as empty",
                     cluster_id,
                     resolved,
                     exc,
                 )
                 shim_refines = []
                 shim_supersedes = []
+                shim_merge_rejected_with = []
             # Issue athenaeum#181: same self-reference lint as discover_auto_memory_files.
             shim_name = str(meta.get("name", "")) if meta else ""
             shim_refines, shim_supersedes = _strip_self_reference(
                 shim_name, shim_refines, shim_supersedes, resolved
+            )
+            shim_merge_rejected_with = _strip_self_reference_merge_rejected_with(
+                shim_name, shim_merge_rejected_with, resolved
             )
             am = AutoMemoryFile(
                 path=resolved,
@@ -1072,6 +1104,7 @@ def merge_cluster_row(
                 sources=sources,
                 refines=shim_refines,
                 supersedes=shim_supersedes,
+                merge_rejected_with=shim_merge_rejected_with,
                 # Issue athenaeum#191: non-destructive inactive markers.
                 superseded_by=parse_superseded_by(meta if meta else None),
                 deprecated=parse_deprecated(meta if meta else None),

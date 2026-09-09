@@ -746,12 +746,28 @@ def _rewrite_block_resolved(
     return "\n".join(new_lines).rstrip() + "\n"
 
 
-def _add_refines_declaration(source_path: Path, other_name: str) -> bool:
-    """Append ``other_name`` to ``refines:`` in ``source_path``'s frontmatter.
+def _add_merge_rejection_declaration(source_path: Path, other_name: str) -> bool:
+    """Append ``other_name`` to ``merge_rejected_with:`` in ``source_path``'s frontmatter.
 
-    Used by ``resolve_merge(reject)`` so Lane 1's declared-refinement
-    short-circuit suppresses future detector firings on this pair.
-    Returns True when the file was modified.
+    Issue athenaeum#715. Used by ``resolve_merge(reject)`` to record an
+    HONEST, non-directional suppression marker — a human reviewed this
+    pair and decided they are NOT the same claim. This is the direct
+    replacement for a former ``_add_refines_declaration`` helper that
+    wrote this same suppression fact into ``refines:`` (a fabricated
+    directional "A refines B" claim that was never adjudicated);
+    ``merge._declared_relationship`` reads this field and returns the
+    distinct ``"declared-merge-rejection"`` rationale, so Lane 1's
+    declared-pair short-circuit still suppresses future detector firings
+    on this pair — with NO config gate — while never again writing
+    ``refines:`` to record a rejection. Mechanically identical to the
+    prior helper (atomic write, idempotent/order-preserving append, same
+    error handling) — only the frontmatter key and the value's meaning
+    changed. Returns True when the file was modified.
+
+    Migration note: existing corpus pages may already carry fabricated
+    ``refines:`` edges written by rejections recorded before this change.
+    This function stops writing NEW ones; it does not rewrite any
+    existing store — that is a separate, not-yet-scheduled migration.
     """
     if not source_path.is_file():
         log.warning("pending_merges: source file missing: %s", source_path)
@@ -764,17 +780,17 @@ def _add_refines_declaration(source_path: Path, other_name: str) -> bool:
     if not isinstance(meta, dict):
         meta = {}
     target_slug = slugify(other_name)
-    refines_raw = meta.get("refines")
-    if isinstance(refines_raw, list):
-        existing = [str(r) for r in refines_raw]
-    elif isinstance(refines_raw, str) and refines_raw.strip():
-        existing = [refines_raw.strip()]
+    rejected_raw = meta.get("merge_rejected_with")
+    if isinstance(rejected_raw, list):
+        existing = [str(r) for r in rejected_raw]
+    elif isinstance(rejected_raw, str) and rejected_raw.strip():
+        existing = [rejected_raw.strip()]
     else:
         existing = []
     if any(slugify(r) == target_slug for r in existing):
         return False
     existing.append(other_name)
-    meta["refines"] = existing
+    meta["merge_rejected_with"] = existing
     new_text = render_frontmatter(meta) + body
     atomic_write_text(source_path, new_text)
     return True
@@ -1397,10 +1413,13 @@ def resolve_merge(
             merge target already existed and review has already happened
             at approval time.
 
-            ``"reject"`` flips the checkbox and writes a ``refines:``
-            declaration into the first source memory so the detector's
-            declared-refinement short-circuit suppresses the pair on
-            future runs.
+            ``"reject"`` flips the checkbox and writes an honest,
+            non-directional ``merge_rejected_with:`` declaration into the
+            first source memory (issue athenaeum#715 — NEVER a ``refines:``
+            declaration; a rejection is not a specialization claim) so
+            the detector's declared-pair short-circuit suppresses the
+            pair on future runs via the distinct
+            ``"declared-merge-rejection"`` rationale.
         note: Optional human note attached to the decision block.
         wiki_root: Optional wiki root override (defaults to
             ``merges_path.parent``).
@@ -1595,9 +1614,33 @@ def resolve_merge(
             auto_applied=auto_applied,
         )
     elif decision == "reject" and len(target_pm.sources) >= 2:
-        # Write a `refines:` declaration into the first source memory
-        # naming the second one. Lane 1 / athenaeum#167's declared-refinement
-        # short-circuit then suppresses the pair on future detector runs.
+        # Issue athenaeum#715 (restating athenaeum#658's D3): a rejection means "these
+        # two are NOT the same claim" — a completely different assertion
+        # from "A refines B", so it must never be recorded as a
+        # fabricated `refines:` declaration. Instead write an honest,
+        # non-directional `merge_rejected_with:` record into the first
+        # source memory naming the second. merge.py's
+        # `_declared_relationship` reads this field and returns the
+        # distinct `"declared-merge-rejection"` rationale, which keeps
+        # Lane 1 / athenaeum#167's declared-pair short-circuit suppressing this
+        # pair on future detector runs with NO config gate — deleting the
+        # marker outright without a replacement would make every rejected
+        # pair re-propose on every nightly run, which the issue's
+        # Definition of Done forbids.
+        #
+        # Deliberately NOT plumbed into the verdict ledger here:
+        # `verdicts.append_verdict` requires a `RunLock` that
+        # `resolve_merge` does not hold, and this module has no ledger
+        # integration at all today. Writing a `distinct` verdict from this
+        # path is a materially larger change than this fix and properly
+        # belongs to the comparator's own `athenaeum merges recompare`
+        # command, which already exists — do not re-derive this boundary
+        # in a future pass without re-reading this comment.
+        #
+        # Migration note: existing corpus pages may already carry
+        # fabricated `refines:` edges from rejections recorded before this
+        # change. This stops NEW ones; it does not rewrite any existing
+        # store (out of scope here).
         src_a = Path(target_pm.sources[0])
         src_b = Path(target_pm.sources[1])
         # Prefer source B's frontmatter `name:` so renames / custom slugs
@@ -1629,15 +1672,15 @@ def resolve_merge(
             other_name = other_stem
         if not src_a.is_file():
             warning = (
-                "refines_write_failed: source A unavailable or unwritable; "
+                "merge_rejection_write_failed: source A unavailable or unwritable; "
                 "merge will re-propose on next run"
             )
         else:
             try:
-                _add_refines_declaration(src_a, other_name)
+                _add_merge_rejection_declaration(src_a, other_name)
             except OSError:
                 warning = (
-                    "refines_write_failed: source A unavailable or "
+                    "merge_rejection_write_failed: source A unavailable or "
                     "unwritable; merge will re-propose on next run"
                 )
 

@@ -85,7 +85,13 @@ def test_resolve_merge_returns_correct_resolved_block(tmp_path: Path) -> None:
 
 
 def test_resolve_merge_reject_warns_when_source_a_missing(tmp_path: Path) -> None:
-    """reject path: source A gone → ok=True with warning, not silent success."""
+    """reject path: source A gone → ok=True with warning, not silent success.
+
+    Ported from the pre-athenaeum#715 ``refines_write_failed`` assertion — the
+    write target changed (``merge_rejected_with:`` instead of ``refines:``,
+    issue athenaeum#715) but the warning-on-missing-source-A behavior and its
+    "merge will re-propose" semantics are unchanged.
+    """
     merges = tmp_path / "_pending_merges.md"
     # Note: source A path is never created on disk.
     src_a = tmp_path / "feedback_missing_a.md"
@@ -108,7 +114,8 @@ def test_resolve_merge_reject_warns_when_source_a_missing(tmp_path: Path) -> Non
 
     assert result["ok"] is True, result
     assert "warning" in result, f"expected warning field, got {result}"
-    assert "refines_write_failed" in result["warning"]
+    assert "merge_rejection_write_failed" in result["warning"]
+    assert "re-propose on next run" in result["warning"]
     # Checkbox still flipped — half-progress is useful.
     new_text = merges.read_text(encoding="utf-8")
     assert "- [x]" in new_text
@@ -116,7 +123,11 @@ def test_resolve_merge_reject_warns_when_source_a_missing(tmp_path: Path) -> Non
 
 
 def test_resolve_merge_reject_uses_source_b_frontmatter_name(tmp_path: Path) -> None:
-    """refines: declaration must use source B's frontmatter name, not stem."""
+    """merge_rejected_with: declaration must use source B's frontmatter name, not stem.
+
+    Ported from the pre-athenaeum#715 ``refines:`` version of this test — same
+    name-vs-stem coverage, new field.
+    """
     merges = tmp_path / "_pending_merges.md"
     src_a = tmp_path / "feedback_a_side.md"
     # Filename stem ('weird-stem') differs from frontmatter name.
@@ -141,11 +152,62 @@ def test_resolve_merge_reject_uses_source_b_frontmatter_name(tmp_path: Path) -> 
     assert "warning" not in result
 
     meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
-    refines = meta.get("refines")
-    assert isinstance(refines, list)
-    assert "real-canonical-name" in refines, refines
+    rejected_with = meta.get("merge_rejected_with")
+    assert isinstance(rejected_with, list)
+    assert "real-canonical-name" in rejected_with, rejected_with
     # The filename stem should NOT be the declared value.
-    assert "weird-stem" not in refines
+    assert "weird-stem" not in rejected_with
+
+
+def test_resolve_merge_reject_writes_no_refines(tmp_path: Path) -> None:
+    """athenaeum#715 criterion: a rejection must NEVER write refines: anywhere.
+
+    Asserting only the presence of ``merge_rejected_with:`` is not enough —
+    the whole point of the fix is that the OLD fabricated-relationship
+    write no longer happens, on either source.
+    """
+    merges = tmp_path / "_pending_merges.md"
+    src_a = tmp_path / "feedback_a.md"
+    src_b = tmp_path / "feedback_b.md"
+    _write_source(src_a, name="a")
+    _write_source(src_b, name="b")
+
+    write_pending_merge(
+        merges,
+        merge_target_name="no-refines-merge",
+        sources=[str(src_a), str(src_b)],
+        rationale="r",
+        draft_merged_body="draft",
+        confidence=0.9,
+    )
+    from athenaeum.pending_merges import parse_pending_merges
+
+    pm_id = parse_pending_merges(merges)[0].id
+    result = resolve_merge(merges, pm_id, "reject")
+    assert result["ok"] is True
+
+    a_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+    b_meta, _ = parse_frontmatter(src_b.read_text(encoding="utf-8"))
+    assert "refines" not in a_meta, a_meta
+    assert "refines" not in b_meta, b_meta
+    # And the honest field landed on source A, naming source B.
+    assert a_meta.get("merge_rejected_with") == ["b"]
+
+
+def test_resolve_merge_reject_is_idempotent(tmp_path: Path) -> None:
+    """Rejecting the same pair twice must not duplicate the entry."""
+    src_a = tmp_path / "feedback_a.md"
+    src_b = tmp_path / "feedback_b.md"
+    _write_source(src_a, name="a")
+    _write_source(src_b, name="b")
+
+    from athenaeum.pending_merges import _add_merge_rejection_declaration
+
+    assert _add_merge_rejection_declaration(src_a, "b") is True
+    assert _add_merge_rejection_declaration(src_a, "b") is False
+
+    meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+    assert meta.get("merge_rejected_with") == ["b"]
 
 
 def test_resolve_merge_approve_fails_when_target_exists(tmp_path: Path) -> None:
