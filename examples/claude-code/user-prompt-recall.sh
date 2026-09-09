@@ -904,17 +904,49 @@ fi
 # `VECTOR_META` row (shouldn't happen: every surviving vector hit was
 # looked up above) degrades to an empty description, i.e. a name-only
 # bullet, same as the FTS5 branch's own degrade path.
+#
+# `VECTOR_META` is fed to awk as the LEADING SECTION OF AWK'S OWN INPUT
+# STREAM, terminated by a sentinel line — never through `-v` (issue
+# athenaeum#1516). This is not a style preference. `VECTOR_META` is a
+# multi-LINE blob (one row per matched filename), and a `-v` assignment
+# whose value contains a newline is REJECTED OUTRIGHT by BWK awk — the
+# `awk` shipped as /usr/bin/awk on macOS, i.e. the interpreter this hook
+# actually runs under in deployment:
+#
+#   $ printf 'a\n' | awk -v m="$(printf 'x1\ty\nx2\tz\n')" '{print NR}'
+#   awk: newline in string x1     y x2      z... at source line 1
+#
+# awk exits 2 having produced NOTHING on stdout, so the hook injected no
+# context at all — a hard recall outage, not a graceful degrade (the
+# hook's contract is the reverse: degrade to "no push record", never to
+# "no injected context"). gawk ACCEPTS the same assignment, which is why
+# this was invisible on a gnu-awk CI runner. The one-line case succeeds
+# under both, which is why it was also invisible in PRODUCTION for the
+# entire lifetime of the hot-tier gate: at ~3.5% hot, a vector query
+# essentially never returned two or more *hot* metadata rows, so `meta`
+# was empty or exactly one line. Removing that gate (athenaeum#1513) did
+# not cause this bug, it merely stopped hiding it.
+#
+# Cost note: this stays ONE `printf | awk` pipe — `printf` is a bash
+# builtin, so the newline-safe route adds no process, no temp file and
+# no cleanup path, which matters on a per-turn critical path with a hard
+# wall-clock budget. Field semantics are unchanged: the join is still by
+# filename and the emitted row is still the same 7 fields.
 if [ -n "$VECTOR_RESULTS" ]; then
-  VECTOR_RESULTS=$(printf '%s\n' "$VECTOR_RESULTS" | awk -F'\t' -v meta="$VECTOR_META" '
-    BEGIN {
-      m = split(meta, marr, "\n")
-      for (i = 1; i <= m; i++) {
-        if (marr[i] == "") continue
-        split(marr[i], f, "\t")
-        aud[f[1]] = f[2]
-        tier[f[1]] = f[3]
-        desc[f[1]] = f[4]
-      }
+  VECTOR_RESULTS=$(printf '%s\n__ATHENAEUM_VECTOR_META_END__\n%s\n' "$VECTOR_META" "$VECTOR_RESULTS" | awk -F'\t' '
+    BEGIN { inmeta = 1 }
+    # The sentinel is a literal inside the program, not a `-v` value: a
+    # filename column can never equal it, and hardcoding keeps this pass
+    # entirely free of `-v`.
+    inmeta && $0 == "__ATHENAEUM_VECTOR_META_END__" { inmeta = 0; next }
+    inmeta {
+      # An empty `VECTOR_META` still yields one blank leading line from
+      # the printf above; skip it exactly as the old split() loop did.
+      # `next` is load-bearing: a metadata row has a non-empty $1 and at
+      # least 2 fields, so without it the emit rule below would fall
+      # through and print metadata rows as though they were vector hits.
+      if ($0 != "") { aud[$1] = $2; tier[$1] = $3; desc[$1] = $4 }
+      next
     }
     NF >= 2 && $1 != "" {
       a = ($1 in aud) ? aud[$1] : "|"
@@ -971,6 +1003,20 @@ RESULTS=$(printf '%s\n%s\n' "$FTS_RESULTS" "$VECTOR_RESULTS" \
 # consumers of this stream (`_pm_record_push` and the output loop) both
 # read through to this same field by position, so the priced text and the
 # emitted text are identical by construction.
+#
+# The two `-v` assignments below are SAFE and are deliberately left as
+# `-v` (audited under issue athenaeum#1516, which fixed the multi-line
+# `-v` outage in the VECTOR_META join above). Neither value can ever
+# contain a newline, so neither can trip BWK awk's "newline in string"
+# rejection:
+#   * `preamble` is a static literal defined on the very next line. It
+#     carries no prompt text, no user input and no DB content, and its
+#     only `\n` is trailing — which `$(...)` strips. Single-line by
+#     construction.
+#   * `budget` is validated near the top of this file (`case "$BUDGET"
+#     in ''|*[!0-9]*) BUDGET=1200`). Any embedded newline makes the
+#     value non-numeric and it is replaced by the integer default, so by
+#     the time it reaches here it is a string of ASCII digits.
 PREAMBLE=$(printf '[Knowledge context] Wiki pages relevant to this message (use `recall` MCP tool for full details):\n')
 RESULTS=$(printf '%s' "$RESULTS" | awk -F'\t' -v preamble="$PREAMBLE" -v budget="$BUDGET" '
   BEGIN { total = int(length(preamble) / 4) }
