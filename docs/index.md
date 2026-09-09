@@ -60,15 +60,12 @@ integrating anything.
 
 ## Reference
 
-- [Configuration](reference/configuration.md) — every configurable key.
+- [Configuration](reference/configuration.md) — every configurable key, generated from
+  `config.py`'s `resolve_*` functions.
+- [CLI](reference/cli.md) — every subcommand and flag, generated from the real argparse tree.
 - [Environment variables](reference/environment.md) — the common knobs and the precedence chain.
 - [Data formats](reference/data-formats.md) — raw intake, wiki frontmatter, degraded-run artifacts.
 - [Exit codes](reference/exit-codes.md).
-
-> **Not yet generated.** A CLI reference, and a config reference generated from the
-> `resolve_*` functions with a CI staleness check, are planned. Today
-> `reference/configuration.md` is hand-maintained and `athenaeum --help` is the CLI's
-> source of truth.
 
 ## Extending
 

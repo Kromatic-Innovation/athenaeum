@@ -22,17 +22,15 @@ with counts and duration; both exit non-zero on failure.
 # refresh the search index — the round-trip that makes a memory recallable.
 athenaeum ingest              # --incremental is the DEFAULT (fast no-op if nothing changed)
 athenaeum reindex             # --incremental hash-diff delta
-
-athenaeum ingest --full       # recompile all pending raw intake
-athenaeum reindex --full      # rebuild the index from scratch
-athenaeum ingest --session <id>   # scope new/changed detection to one session
 ```
 
 `ingest --incremental` tracks a content-hash stamp
 (`~/.cache/athenaeum/ingest-manifest.json`), so it's a fast no-op when
 nothing has changed. Pre-structured intake compiles with no LLM cost.
 `reindex` is the canonical name; `rebuild-index` is a back-compat alias for
-the exact same command.
+the exact same command. Both also take `--full` (recompile/rebuild from
+scratch) and `--session <id>` (scope to one session) — see the
+[CLI reference](../reference/cli.md#athenaeum-ingest) for every flag.
 
 ## I want cross-agent recall to close automatically at session end
 
@@ -42,10 +40,11 @@ nightly-after-librarian path):
 
 ```bash
 athenaeum session-end                     # incremental ingest + reindex (DEFAULT)
-athenaeum session-end --session <id>      # scope new/changed detection to one session
-athenaeum session-end --full              # force a full recompile + full index rebuild
 athenaeum session-end --dry-run           # cheap manifest-diff preview — no compile, no reindex, no model load
 ```
+
+`--session <id>` and `--full` are also available — see the
+[CLI reference](../reference/cli.md#athenaeum-session-end) for every flag.
 
 Both steps are change-gated so an idle SessionEnd is cheap:
 
@@ -74,12 +73,12 @@ grouping claims that recur across two or more distinct entities:
 
 ```bash
 athenaeum claims --find
-athenaeum claims --find --threshold 0.9 --path ~/knowledge
 ```
 
-Default cosine cutoff is `0.85`. This command never mutates `wiki/` — it
-only reports. With no embedding backend available it degrades to an empty
-report rather than failing.
+Default cosine cutoff is `0.85`, overridable with `--threshold`. This command
+never mutates `wiki/` — it only reports. With no embedding backend available
+it degrades to an empty report rather than failing. See the
+[CLI reference](../reference/cli.md#athenaeum-claims) for every flag.
 
 ## I want to find and merge duplicate wiki pages
 
@@ -89,7 +88,6 @@ clustering that runs during `athenaeum run`:
 
 ```bash
 athenaeum dedupe wiki-pages
-athenaeum dedupe wiki-pages --dry-run --threshold 0.6
 ```
 
 True duplicates are routed through the same `wiki/_pending_merges.md` /
@@ -98,7 +96,8 @@ auto-applied. Writing a proposal is idempotent: rerunning for a source set
 already proposed is a no-op. `--threshold` overrides
 `librarian.cluster_threshold` (default `0.55`). `athenaeum run` also runs
 this pass automatically whenever `wiki/` exists; failures are logged and
-non-fatal to the run.
+non-fatal to the run. See the
+[CLI reference](../reference/cli.md#athenaeum-dedupe-wiki-pages) for every flag.
 
 ## I want the resolved-decisions archive to stop growing unbounded
 
@@ -160,4 +159,4 @@ the `bucket:` / `valid_until:` frontmatter contract in
 - Guides — [Answering pending decisions](decisions.md) · [Upgrading](upgrading.md) · [Troubleshooting](troubleshooting.md)
 - Modules — [librarian](../modules/librarian.md) · [intake](../modules/intake.md) · [retention](../modules/retention.md)
 - Design — [provenance shape](../design/provenance-shape.md)
-- Reference — [configuration](../reference/configuration.md) · [exit codes](../reference/exit-codes.md)
+- Reference — [configuration](../reference/configuration.md) · [CLI](../reference/cli.md) · [exit codes](../reference/exit-codes.md)
