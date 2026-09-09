@@ -90,6 +90,36 @@ git add tests/fixtures/recorded/
 git commit -m "evals: re-record fixtures after prompt edit"
 ```
 
+## Layer 3 — containment harness (`tests/evals/containment.py`, issue athenaeum#1521)
+
+Generic machinery for the (future) north-star arm comparison — a grid of
+probes x arms x corpus-scales x replicates. Bradley-Terry fitting and the
+actual arm-comparison rollouts are OUT of this layer's scope; it only
+provides the containment the real comparison will need:
+
+- **Pre-flight spend gate** (`price_grid`) — prices a planned grid against
+  `athenaeum.models.TokenUsage`'s per-model rate table (the same table
+  every other cost estimate in this repo uses) and refuses to start
+  (`SpendCeilingExceededError`) above a declared `--max-spend`.
+- **Append-only result store** (`ResultStore`, `run_grid`) — one JSONL line
+  per completed cell, flushed and `fsync`'d immediately, keyed by
+  `(probe, arm, corpus_scale, replicate)`. A resume reads the store once
+  and never re-executes a cell already present.
+- **`--scale` knob** (`build_grid`, `SCALE_BUDGETS`) — `smoke`/`small`/`full`
+  cap the same four axes through the SAME function; `smoke` always
+  collapses to a single cell, so it is runnable without thinking about cost.
+- **Separate rollout ceiling** (`rollout_session.py`, `ROLLOUT_TOKEN_CEILING`)
+  — agent-rollout token usage must never accumulate into `EVAL_TOKEN_CEILING`
+  (see that module's docstring for the collision this avoids). Its own
+  pytest fixture (`rollout_session`, `tests/evals/conftest.py`) and its own
+  marker (`rollout`, deselected by default alongside `eval`/`embedding`) are
+  registered now so the future rollout-eval work needs no wiring changes.
+
+Try it locally: `python -m tests.evals.containment_cli` (defaults to
+`--scale smoke`, zero cost, zero flags needed). Offline, machine-checked in
+`tests/evals/test_containment_*.py` and `tests/evals/test_rollout_ceiling_separation.py`
+— none of it runs in `ci.yml` or `evals.yml` (`tests/evals/test_containment_ci_wiring.py`).
+
 ## Build prerequisites
 
 - CI pulls `ANTHROPIC_API_KEY` from 1Password at run time

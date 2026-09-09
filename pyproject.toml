@@ -232,10 +232,21 @@ testpaths = ["tests"]
 # Deselected by default alongside `eval`; runs in evals.yml's
 # `embedding-suite` job (workflow_dispatch or push:main), same non-required
 # cadence as the eval suite.
-addopts = "--ignore=tests/benchmarks -m 'not eval and not embedding'"
+#
+# athenaeum#1521: `rollout` is registered alongside `eval`/`embedding` for the
+# same reason — agent-rollout tests (the north-star arm comparison, not yet
+# built; Bradley-Terry fitting is out of this issue's scope) must never run
+# in the default contributor/CI selection either, and must never accumulate
+# into EVAL_TOKEN_CEILING (see tests/evals/rollout_session.py). No test in
+# this repo carries the marker yet; it is deselected here so a FUTURE
+# rollout-marked test is excluded by construction from the moment it lands,
+# rather than needing this line added in the same PR that adds the first
+# such test.
+addopts = "--ignore=tests/benchmarks -m 'not eval and not embedding and not rollout'"
 markers = [
     "regression: contract regression tests pinning resolver outputs against canonical fixtures",
     "live: opt-in live-LLM tests; require ATHENAEUM_LIVE_TESTS=1 and ANTHROPIC_API_KEY",
     "eval: live-API eval suite under tests/evals/; deselected by default (see evals.yml)",
     "embedding: asserts on real MiniLM cosine values; deselected by default, runs in evals.yml's embedding-suite job (athenaeum#1091)",
+    "rollout: agent-rollout eval suite (north-star arm comparison); deselected by default (athenaeum#1521)",
 ]
