@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum push-metrics {baseline,coverage-audit}`` — v6 MVP (a), issue athenaeum#711.
+"""``athenaeum push-metrics {baseline,coverage-audit,record}`` — v6 MVP (a),
+issue athenaeum#711; ``record`` added by issue athenaeum#1478.
 
-Two subcommands over :mod:`athenaeum.push_metrics`:
+Three subcommands over :mod:`athenaeum.push_metrics`:
 
 - ``baseline``       compute precision + coverage over a stated window and
                        write/append a dated snapshot into
@@ -19,10 +20,22 @@ Two subcommands over :mod:`athenaeum.push_metrics`:
                        concentration, window-mate filter removal, policy-set
                        bounds) — never a per-candidate relevance marking or a
                        measured miss rate (issue athenaeum#1036).
+- ``record``          the hook-path push-recording entry point (issue
+                       athenaeum#1478): the per-turn ``UserPromptSubmit``
+                       recall hook (``code-workspace-config#3227``, a separate
+                       repo, out of this repo's scope) calls this,
+                       fire-and-forget, with the session id and the ids it
+                       actually injected, so that recall moment stops being
+                       invisible to the push ledger. Thin argv/stdin parsing
+                       over :func:`athenaeum.push_metrics.record_hook_push` —
+                       all the recording logic lives there.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` —
-mirrors :mod:`athenaeum._cmd_calibration`'s shape.
+mirrors :mod:`athenaeum._cmd_calibration`'s shape. ``record`` is added here
+rather than a new module because ``push-metrics`` already has this one file
+(issue athenaeum#1479, tracked to extend it again right after this issue,
+keeps ``push-metrics``'s subcommands cohesive and localised in one place).
 """
 
 from __future__ import annotations
@@ -37,14 +50,17 @@ from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
 
 def cmd_push_metrics(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum push-metrics {baseline,coverage-audit}``."""
+    """Dispatch ``athenaeum push-metrics {baseline,coverage-audit,record}``."""
     sub = getattr(args, "push_metrics_target", None)
-    if sub not in ("baseline", "coverage-audit"):
+    if sub not in ("baseline", "coverage-audit", "record"):
         print(
-            "usage: athenaeum push-metrics {baseline,coverage-audit} [...]",
+            "usage: athenaeum push-metrics {baseline,coverage-audit,record} [...]",
             file=sys.stderr,
         )
         return 2
+
+    if sub == "record":
+        return _cmd_push_metrics_record(args)
 
     from athenaeum import push_metrics
 
@@ -144,14 +160,74 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_push_metrics_record(args: argparse.Namespace) -> int:
+    """``athenaeum push-metrics record`` — the hook-path push-recording
+    entry point (issue athenaeum#1478).
+
+    Fire-and-forget by design (this issue's own decided approach, option
+    2): the caller — the per-turn ``UserPromptSubmit`` recall hook,
+    ``code-workspace-config#3227``, out of this repo's scope — is specified
+    to invoke this in the background without checking its output, so this
+    subcommand always exits ``0``. A recording failure is never fully
+    silent (see :func:`athenaeum.push_metrics.record_hook_push`'s own
+    ``log.debug`` contract), but it is also never surfaced as a nonzero
+    exit a fire-and-forget caller was never going to inspect.
+
+    Accepts either argv flags or a JSON stdin payload (``--stdin-json``,
+    mirroring ``athenaeum context --stdin-json``'s established hook-input
+    convention): ``{"session_id": ..., "ids": [...], "query": ...,
+    "backend": ...}``. When ``--stdin-json`` is passed, its ``ids`` array
+    (when present) REPLACES any ``--id`` flags rather than merging with
+    them, and its ``session_id``/``query``/``backend`` keys take precedence
+    over the matching flags only when non-empty — so a caller can mix a
+    fixed ``--session-id`` flag with a per-call stdin ``ids`` array if it
+    wants to.
+    """
+    from athenaeum import push_metrics
+
+    session_id = args.session_id
+    ids = list(args.id or [])
+    query = args.query or ""
+    backend = args.backend or ""
+
+    if args.stdin_json:
+        raw = sys.stdin.read()
+        try:
+            payload = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            payload = {}
+        session_id = payload.get("session_id") or session_id
+        payload_ids = payload.get("ids")
+        if isinstance(payload_ids, list):
+            ids = [str(i) for i in payload_ids]
+        query = payload.get("query") or query
+        backend = payload.get("backend") or backend
+
+    if not session_id:
+        session_id = push_metrics.resolve_session_id()
+
+    wrote = push_metrics.record_hook_push(
+        session_id,
+        ids,
+        query=query,
+        backend=backend,
+        cache_dir=args.cache_dir,
+        wiki_root=_resolve_wiki_root(args),
+    )
+    if args.json:
+        sys.stdout.write(json.dumps({"wrote": wrote}) + "\n")
+    return 0
+
+
 def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``athenaeum push-metrics`` and its two modes on ``subparsers``."""
+    """Register ``athenaeum push-metrics`` and its three modes on ``subparsers``."""
     p_parser = subparsers.add_parser(
         "push-metrics",
         help=(
             "Push-precision + coverage baseline: compute/record the "
-            "precision snapshot, and sample sessions for a human-reviewed "
-            "coverage-audit worksheet (issue athenaeum#711)."
+            "precision snapshot, sample sessions for a human-reviewed "
+            "coverage-audit worksheet (issue athenaeum#711), and record a "
+            "single hook-path push (issue athenaeum#1478)."
         ),
     )
     p_parser.set_defaults(func=cmd_push_metrics)
@@ -262,4 +338,49 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         "unambiguous prefix of exactly one known session id (issue "
         "athenaeum#987); a value matching zero or multiple known session "
         "ids is a hard error (exit 1), never a silent zero-effect success.",
+    )
+
+    record_p = p_sub.add_parser(
+        "record",
+        help="Record one hook-path push (issue athenaeum#1478): the "
+        "fire-and-forget entry point the per-turn UserPromptSubmit recall "
+        "hook calls with the session id and the ids it actually injected. "
+        "Writes a push record tagged source=hook, distinct from an "
+        "explicit MCP `recall` push (no source key) and the `athenaeum "
+        "context` sidecar adapter (source=sidecar, issue athenaeum#1362). "
+        "Always exits 0 — see this subcommand's own docstring.",
+    )
+    _add_common(record_p)
+    record_p.add_argument(
+        "--session-id",
+        default=None,
+        help="Consuming session id. Falls back to CLAUDE_CODE_SESSION_ID / "
+        "CLAUDE_SESSION_ID (push_metrics.resolve_session_id) when omitted "
+        "and --stdin-json was not passed, or its payload carried none.",
+    )
+    record_p.add_argument(
+        "--id",
+        action="append",
+        default=None,
+        metavar="PUSHED_ID",
+        help="One id actually injected into the turn. Repeatable. Replaced "
+        "entirely (not merged) when --stdin-json supplies an `ids` array.",
+    )
+    record_p.add_argument(
+        "--query",
+        default=None,
+        help="Optional raw query text for this push — only its hash is "
+        "ever retained.",
+    )
+    record_p.add_argument(
+        "--backend",
+        default=None,
+        help="Optional retrieval-backend label, recorded as-is.",
+    )
+    record_p.add_argument(
+        "--stdin-json",
+        action="store_true",
+        help='Read {"session_id": ..., "ids": [...], "query": ..., '
+        '"backend": ...} from stdin (hook-input shape, mirrors '
+        "`athenaeum context --stdin-json`).",
     )

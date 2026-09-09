@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for `athenaeum push-metrics {baseline,coverage-audit}` (issue athenaeum#711)."""
+"""Tests for `athenaeum push-metrics {baseline,coverage-audit,record}`
+(issue athenaeum#711; `record` added by issue athenaeum#1478)."""
 
 from __future__ import annotations
 
@@ -604,6 +605,241 @@ def test_coverage_audit_exclude_session_ambiguous_prefix_is_a_loud_failure(tmp_p
     assert out == ""
 
 
+# ---------------------------------------------------------------------------
+# `push-metrics record` — hook-path push recording entry point (athenaeum#1478)
+# ---------------------------------------------------------------------------
+
+
+def _isolated_cache_and_path(tmp_path: Path) -> tuple[Path, Path]:
+    """An isolated ``--cache-dir``/``--path`` pair for a `record` test.
+
+    `record`'s ledger write goes through the SAME behind-the-seam resolution
+    (`push_metrics.durable_push_records_path`) `baseline`/`coverage-audit`
+    already use, which prefers a ``--path``-relative ``wiki/`` location over
+    ``--cache-dir`` once anything exists there. Passing both, both pointed at
+    this test's own ``tmp_path``, keeps every `record` test byte-isolated
+    from a real ``~/knowledge`` regardless of what already exists on the
+    host running the suite.
+    """
+    cache_dir = tmp_path / "cache"
+    knowledge_root = tmp_path / "knowledge"
+    cache_dir.mkdir()
+    knowledge_root.mkdir()
+    return cache_dir, knowledge_root
+
+
+def _read_hook_ledger_row(cache_dir: Path, knowledge_root: Path) -> dict:
+    rows = push_metrics.read_push_records(cache_dir=cache_dir, wiki_root=knowledge_root / "wiki")
+    assert len(rows) == 1, f"expected exactly one row, got {rows}"
+    return rows[0]
+
+
+def test_record_argv_ids_writes_one_row(tmp_path: Path) -> None:
+    """AC1: an external caller (here, argv flags) can invoke this with a
+    session id and a list of injected ids and get a written push record."""
+    cache_dir, knowledge_root = _isolated_cache_and_path(tmp_path)
+    rc, out = _run(
+        [
+            "push-metrics",
+            "record",
+            "--session-id",
+            "sess-argv",
+            "--id",
+            "abc12345",
+            "--id",
+            "def67890",
+            "--backend",
+            "fts5",
+            "--cache-dir",
+            str(cache_dir),
+            "--path",
+            str(knowledge_root),
+            "--json",
+        ]
+    )
+    assert rc == 0
+    assert json.loads(out) == {"wrote": True}
+    row = _read_hook_ledger_row(cache_dir, knowledge_root)
+    assert row["session_id"] == "sess-argv"
+    assert row["source"] == "hook"
+    assert [it["id"] for it in row["items"]] == ["abc12345", "def67890"]
+
+
+def test_record_stdin_json_hook_input_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors `athenaeum context --stdin-json`'s established hook-input
+    convention: `{"session_id": ..., "ids": [...], ...}` from stdin."""
+    cache_dir, knowledge_root = _isolated_cache_and_path(tmp_path)
+    payload = json.dumps(
+        {
+            "session_id": "sess-stdin",
+            "ids": ["11111111-page.md", "raw-note.md"],
+            "backend": "vector",
+        }
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    rc, out = _run(
+        [
+            "push-metrics",
+            "record",
+            "--stdin-json",
+            "--cache-dir",
+            str(cache_dir),
+            "--path",
+            str(knowledge_root),
+            "--json",
+        ]
+    )
+    assert rc == 0
+    assert json.loads(out) == {"wrote": True}
+    row = _read_hook_ledger_row(cache_dir, knowledge_root)
+    assert row["session_id"] == "sess-stdin"
+    assert row["backend"] == "vector"
+    # Entity filename truncated to its 8-hex uid prefix; raw-intake filename
+    # (never name-derived) recorded whole.
+    assert [it["id"] for it in row["items"]] == ["11111111", "raw-note.md"]
+
+
+def test_record_stdin_json_ids_replace_rather_than_merge_argv_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_dir, knowledge_root = _isolated_cache_and_path(tmp_path)
+    payload = json.dumps({"ids": ["from-stdin"]})
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    rc, _ = _run(
+        [
+            "push-metrics",
+            "record",
+            "--session-id",
+            "sess-1",
+            "--id",
+            "from-argv",
+            "--stdin-json",
+            "--cache-dir",
+            str(cache_dir),
+            "--path",
+            str(knowledge_root),
+        ]
+    )
+    assert rc == 0
+    row = _read_hook_ledger_row(cache_dir, knowledge_root)
+    assert [it["id"] for it in row["items"]] == ["from-stdin"]
+
+
+def test_record_falls_back_to_resolve_session_id_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Counter-example that must fail: athenaeum#734's silent no-op — a
+    session-id variable name read but never exported by anything, so the
+    guard was always false and zero rows were ever written. This pins the
+    GOOD path: when `--session-id` is omitted, the CLI resolves via
+    `push_metrics.resolve_session_id()`, same as every other push-metrics
+    call site (issue athenaeum#734's single sanctioned resolver)."""
+    cache_dir, knowledge_root = _isolated_cache_and_path(tmp_path)
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-from-env")
+    rc, out = _run(
+        [
+            "push-metrics",
+            "record",
+            "--id",
+            "abc12345",
+            "--cache-dir",
+            str(cache_dir),
+            "--path",
+            str(knowledge_root),
+            "--json",
+        ]
+    )
+    assert rc == 0
+    assert json.loads(out) == {"wrote": True}
+    row = _read_hook_ledger_row(cache_dir, knowledge_root)
+    assert row["session_id"] == "sess-from-env"
+
+
+def test_record_no_session_id_anywhere_is_an_honest_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same counter-example as above, the negative direction: with no
+    `--session-id`, no stdin payload, and nothing in the environment, the
+    CLI must still exit 0 (fire-and-forget contract) but write NOTHING —
+    never a row with a fabricated or empty session id."""
+    cache_dir, knowledge_root = _isolated_cache_and_path(tmp_path)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    rc, out = _run(
+        [
+            "push-metrics",
+            "record",
+            "--id",
+            "abc12345",
+            "--cache-dir",
+            str(cache_dir),
+            "--path",
+            str(knowledge_root),
+            "--json",
+        ]
+    )
+    assert rc == 0
+    assert json.loads(out) == {"wrote": False}
+    assert push_metrics.read_push_records(
+        cache_dir=cache_dir, wiki_root=knowledge_root / "wiki"
+    ) == []
+
+
+def test_record_survives_an_unwritable_ledger_path(tmp_path: Path) -> None:
+    """AC4: the ledger path is replaced with a DIRECTORY so the append
+    write raises `IsADirectoryError` — the CLI must still exit 0 (never
+    surface a ledger failure as a nonzero exit a fire-and-forget caller
+    was never going to check)."""
+    cache_dir, knowledge_root = _isolated_cache_and_path(tmp_path)
+    (knowledge_root / "wiki").mkdir(parents=True)
+    (knowledge_root / "wiki" / "_push_records.jsonl").mkdir()
+    rc, out = _run(
+        [
+            "push-metrics",
+            "record",
+            "--session-id",
+            "sess-1",
+            "--id",
+            "abc12345",
+            "--cache-dir",
+            str(cache_dir),
+            "--path",
+            str(knowledge_root),
+            "--json",
+        ]
+    )
+    assert rc == 0
+    assert json.loads(out) == {"wrote": False}
+
+
+def test_record_malformed_stdin_json_is_an_honest_noop_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_dir, knowledge_root = _isolated_cache_and_path(tmp_path)
+    monkeypatch.setattr("sys.stdin", io.StringIO("not valid json {"))
+    rc, out = _run(
+        [
+            "push-metrics",
+            "record",
+            "--stdin-json",
+            "--session-id",
+            "sess-1",
+            "--cache-dir",
+            str(cache_dir),
+            "--path",
+            str(knowledge_root),
+            "--json",
+        ]
+    )
+    assert rc == 0
+    # No `ids` survived the malformed payload and none were on argv either
+    # -> an honest no-op, not a crash.
+    assert json.loads(out) == {"wrote": False}
+
+
 def test_no_subcommand_prints_usage(tmp_path: Path) -> None:
     buf = io.StringIO()
     with redirect_stderr(buf):
@@ -635,7 +871,7 @@ def test_parser_tree_binds_func_for_push_metrics_subcommands() -> None:
         for a in push_metrics_parser._actions
         if isinstance(a, argparse._SubParsersAction)
     )
-    assert set(inner.choices) == {"baseline", "coverage-audit"}
+    assert set(inner.choices) == {"baseline", "coverage-audit", "record"}
     for name, sub in inner.choices.items():
         assert (
             sub.get_default("func") is not None

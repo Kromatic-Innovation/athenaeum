@@ -55,8 +55,11 @@ Layering: L3 service. Imports :mod:`athenaeum.config` (cache dir + the
 enable/disable accessor) and :mod:`athenaeum.transcript_verify` (read-only
 transcript access) at L2/L3. Consumed by :mod:`athenaeum.mcp_server` (write
 side, push records), :mod:`athenaeum.librarian` (``session_end``, reference
-determination), and :mod:`athenaeum._cmd_push_metrics` (the CLI baseline +
-coverage-audit commands). Never imports either back.
+determination), :mod:`athenaeum.context` (the sidecar adapter's push path,
+issue athenaeum#1362), and :mod:`athenaeum._cmd_push_metrics` (the CLI
+``baseline`` + ``coverage-audit`` + ``record`` commands, the last of which is
+the hook-path reporting entry point, issue athenaeum#1478). Never imports
+either back.
 """
 
 from __future__ import annotations
@@ -106,6 +109,15 @@ _CHARS_PER_TOKEN = 4
 #: export it keeps working. Asserted explicitly in a test, so reading a name
 #: nothing exports becomes a visible diff rather than a silent no-op.
 SESSION_ID_ENV_VARS: tuple[str, ...] = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID")
+
+#: ``PushRecord.source`` value for a row written by :func:`record_hook_push`
+#: (issue athenaeum#1478): the per-turn ``UserPromptSubmit`` recall hook's own
+#: reporting call (``athenaeum push-metrics record``), as opposed to the MCP
+#: ``recall`` path (source key omitted) or the ``athenaeum context`` sidecar
+#: adapter (``"sidecar"``, issue athenaeum#1362). A named constant, not a bare
+#: string literal, so every writer and every future reader (``usage-report``,
+#: issue athenaeum#1479's tail) shares one spelling.
+SOURCE_HOOK = "hook"
 
 
 def resolve_session_id() -> str:
@@ -265,13 +277,18 @@ class PushRecord:
     ``source`` (issue athenaeum#1362, additive, SCHEMA_VERSION unchanged —
     same precedent as ``PushedItem.memory_tier``): ``"sidecar"`` for a row
     written by :func:`athenaeum.context.record_context_push` (the
-    ``athenaeum context`` CLI adapter's unprompted push path); left at its
-    default ``""`` for the MCP ``recall`` path, which must keep OMITTING the
-    key entirely rather than writing an explicit ``"recall"`` value — every
-    row written before this issue has no ``source`` key at all, and the
-    documented reader rule (``docs/reference/configuration.md``) is "key absent, or
-    any other value, means an explicit ``recall`` push" — changing that
-    default would reinterpret every historical row.
+    ``athenaeum context`` CLI adapter's unprompted push path); :data:`SOURCE_HOOK`
+    (issue athenaeum#1478) for a row written by :func:`record_hook_push` (the
+    per-turn ``UserPromptSubmit`` recall hook's own unprompted push, reported
+    via ``athenaeum push-metrics record``); left at its default ``""`` for
+    the MCP ``recall`` path, which must keep OMITTING the key entirely
+    rather than writing an explicit ``"recall"`` value — every row written
+    before issue athenaeum#1362 has no ``source`` key at all, and the
+    documented reader rule (``docs/reference/configuration.md``) is "check
+    for the specific value; an absent key, and ONLY an absent key, means an
+    explicit ``recall`` push" — changing that default, or treating any
+    unrecognized value as ``recall`` by elimination, would reinterpret
+    either every historical row or every future third-source row.
     """
 
     session_id: str
@@ -438,6 +455,107 @@ def record_push(
             type(exc).__name__,
             exc,
         )
+        return False
+
+
+def record_hook_push(
+    session_id: str,
+    ids: Iterable[str],
+    *,
+    query: str = "",
+    backend: str = "",
+    cache_dir: Path | None = None,
+    wiki_root: Path | None = None,
+    config: dict[str, Any] | None = None,
+) -> bool:
+    """Route one hook-path push into the durable ledger, tagged :data:`SOURCE_HOOK`
+    (issue athenaeum#1478).
+
+    The per-turn ``UserPromptSubmit`` recall hook (``code-workspace-config#3227``,
+    a separate repo, out of this issue's scope) fires on EVERY prompt and
+    injects wiki content unbidden — the highest-frequency recall moment in
+    the system, and, before this issue, the only one with no push instrument
+    at all. This issue's own comparison, measured on the operator's host:
+    5657 spend rows against 200 push rows, because the hook's extractor
+    (:mod:`athenaeum.query_topics`) records spend but nothing calls
+    :func:`record_push` on that path.
+
+    This is the **decided option 2** from the issue body: a small reporting
+    entry point the hook calls with the ids it actually injected, rather
+    than instrumenting inside :mod:`athenaeum.query_topics` and recording a
+    superset of what the hook's own downstream ranking/rendering decided to
+    show (option 1, rejected — a knowingly-approximate precision figure is
+    worse than an absent one; see this function's caller,
+    ``athenaeum push-metrics record`` in :mod:`athenaeum._cmd_push_metrics`).
+
+    Routes through the SAME :func:`record_push` / :class:`PushRecord` /
+    :class:`PushedItem` the MCP ``recall`` path and the sidecar adapter
+    (:func:`athenaeum.context.record_context_push`, issue athenaeum#1362)
+    already write through, so a hook-path row can never drift onto an
+    independently-shaped ledger row.
+
+    Args:
+        session_id: the consuming Claude Code session's id. The CALLER is
+            expected to have already resolved this (its own
+            ``CLAUDE_CODE_SESSION_ID``/stdin payload, or
+            :func:`resolve_session_id`) — this function performs no
+            resolution of its own, so an empty string here is always a
+            genuine, loud-in-the-caller no-op, never the silent-no-op shape
+            issue athenaeum#734 caught once (a variable name read but never
+            exported, so the guard was always false).
+        ids: the ids ACTUALLY injected into the turn — opaque uids or raw-
+            intake filenames, the same vocabulary :func:`opaque_push_id` /
+            :func:`opaque_push_id_from_filename` produce. Each is passed
+            through :func:`opaque_push_id_from_filename`, so a caller that
+            hands through a raw compiled-entity filename (rather than an
+            already-opaque id) still never leaks its name-derived slug.
+            Blank/whitespace-only entries are dropped.
+        query: optional raw query text; only its hash is ever retained (see
+            :func:`_query_hash`) — never the caller's substrings.
+        backend: optional retrieval-backend label, recorded as-is.
+
+    Known limitation: the hook hands over ids only — no frontmatter, no
+    rendered text, no audience string — so per-item ``tier``, ``scope``, and
+    ``token_cost`` cannot be read from the caller. They are recorded at the
+    same safe, documented defaults :func:`athenaeum.context.record_context_push`
+    already uses for its own no-frontmatter case (``tier="internal"``,
+    ``scope="owner"``), plus ``token_cost=0`` (no rendered text to size an
+    estimate from) — never fabricated, and never omitted, since the record
+    shape must stay indistinguishable from every other :func:`record_push`
+    caller's (this issue's own acceptance criterion).
+
+    Best-effort: catches everything and returns ``False`` without raising —
+    same guarantee :func:`athenaeum.context.record_context_push` makes for
+    the sidecar path. This call runs fire-and-forget, out of band of the
+    turn it instruments (this issue's own constraint: "a ledger failure must
+    never break the 3s recall budget"), so it must never leave a traceback
+    in a backgrounded caller's stderr. Failures are logged at ``debug``
+    (issue athenaeum#540 L19) — swallowed, never fully silent.
+    """
+    try:
+        clean_ids = [str(i).strip() for i in ids if str(i).strip()]
+        if not session_id or not clean_ids:
+            return False
+        items = [
+            PushedItem(
+                id=opaque_push_id_from_filename(pid),
+                tier="internal",
+                scope="owner",
+                token_cost=0,
+            )
+            for pid in clean_ids
+        ]
+        record = PushRecord(
+            session_id=session_id,
+            ts=now_iso(),
+            query_hash=_query_hash(query),
+            backend=backend,
+            items=items,
+            source=SOURCE_HOOK,
+        )
+        return record_push(record, cache_dir=cache_dir, wiki_root=wiki_root, config=config)
+    except Exception:  # must never break the turn this hook instruments
+        log.debug("push-metrics: hook-path push recording failed", exc_info=True)
         return False
 
 
