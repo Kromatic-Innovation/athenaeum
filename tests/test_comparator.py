@@ -708,14 +708,21 @@ class TestAC12Specialization:
 
 class TestAC13DuplicateAssumedAndWidened:
     def test_duplicate_returns_assumed_unknowns_and_widened_coords(self) -> None:
-        # subject unset on both sides -> UNKNOWN (both-null) -> assumed.
+        # subject unset on both sides -> null_means=unknown -> UNKNOWN (both-null)
+        # -> assumed (unaffected by athenaeum#1483's both-null decision).
         page_a = _page("alpha", claimed_scope="engineering", body="claim")
         page_b = _page("beta", claimed_scope="engineering", body="claim restated")
         client = _fake_client(_content_payload(ContentRelation.EQUIVALENT))
         outcome = compare_pages(page_a, page_b, client=client)
         assert outcome.verdict == VERDICT_DUPLICATE
         assert "subject" in outcome.assumed
-        assert "valid-time" in outcome.assumed
+        # valid-time unset on both sides -> null_means=universal -> EQUAL
+        # (athenaeum#1483), so it is CONSULTED (not "assumed") and widened; two
+        # fully-absent coordinates have nothing to widen to, so the widened
+        # value is None rather than an interval.
+        assert "valid-time" not in outcome.assumed
+        assert outcome.widened_coords.get("valid-time") is None
+        assert "valid-time" in outcome.widened_coords
         assert outcome.widened_coords.get("scope") == "engineering"
 
     def test_compare_outcome_has_no_merged_body_field(self) -> None:

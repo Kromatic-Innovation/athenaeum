@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     # talk to a model.
     import anthropic
 
+    from athenaeum.answers import PendingQuestion
     from athenaeum.pii import ExcludedRecordIndex
 
 from athenaeum._retry import with_retry
@@ -4695,6 +4696,17 @@ def stamp_merge_provenance(
 # to the window does not have to chase this threshold, or vice versa.
 DEFAULT_PAGE_SIZE_THRESHOLD_CHARS = 10_000
 
+# Issue athenaeum#1430: the three EscalationItem.conflict_type values
+# check_page_size_gate can produce (below), treated as one dedup FAMILY by
+# tier4_escalate's oversize-entity dedup -- an unanswered escalation of ANY
+# of these for an entity suppresses a NEW one of ANY of these for that SAME
+# entity, so a "review" default that later has an unanswered "oversize_page"
+# block open does not also get an "oversize_split"/"oversize_log_demote"
+# duplicate the moment an operator flips librarian.oversize_page_action.
+OVERSIZE_ESCALATION_CONFLICT_TYPES = frozenset(
+    {"oversize_page", "oversize_split", "oversize_log_demote"}
+)
+
 # The action an over-threshold page routes to instead of another merge.
 # "review" (issue athenaeum#1182) is the shipped DEFAULT and the only action
 # that ever runs unattended: it escalates and leaves the page byte-for-byte
@@ -6004,10 +6016,20 @@ def tier4_escalate(
     ``athenaeum.transcript_verify.default_projects_root()`` (honors
     ``CLAUDE_CONFIG_DIR``) inside the gate helper.
 
-    Returns the number of candidate escalations SUPPRESSED because their
-    claim-pair fingerprint was already resolved (issue athenaeum#198). A settled
-    claim-pair stops re-surfacing as a fresh pending question on every new
-    page that carries it.
+    Returns the number of candidate escalations SUPPRESSED, for either of
+    two reasons:
+
+    - their claim-pair fingerprint was already resolved (issue athenaeum#198). A
+      settled claim-pair stops re-surfacing as a fresh pending question on
+      every new page that carries it.
+    - (issue athenaeum#1430) the item's ``conflict_type`` is one of
+      :data:`OVERSIZE_ESCALATION_CONFLICT_TYPES` and its ``entity_name``
+      already has an UNANSWERED oversize-page-family block open in
+      *pending_path* — a page that keeps attracting suppressed merges gets
+      ONE durable block, not one per suppressed merge. Keyed on "currently
+      unanswered": once that block is answered/archived, the next
+      over-threshold merge for the same entity creates a fresh escalation
+      again.
 
     Each block is rendered with a leading checkbox line directly under the
     header so the user (or the ``resolve_question`` MCP tool) can flip
@@ -6203,9 +6225,22 @@ def tier4_escalate(
     from athenaeum.answers import parse_pending_questions
 
     open_index: dict[tuple[str, ...], str] = {}
-    if dedup_enabled and pending_path.exists():
+    # Issue athenaeum#1430: entities that already have an unanswered
+    # oversize-page-family block open (see OVERSIZE_ESCALATION_CONFLICT_TYPES).
+    # Built from the SAME parse_pending_questions() pass the athenaeum#157
+    # open-pair index above already pays for whenever there is at least one
+    # escalation to flush — no second full-file parse is introduced. Kept as
+    # its own index (rather than folded into open_index, whose keys are
+    # claim-PAIR tuples) because oversize items have no member-pair key at
+    # all: their dedup identity is just the entity name.
+    open_oversize_entities: set[str] = set()
+    if pending_path.exists():
         for pq in parse_pending_questions(pending_path):
             if pq.answered:
+                continue
+            if pq.conflict_type in OVERSIZE_ESCALATION_CONFLICT_TYPES:
+                open_oversize_entities.add(pq.entity)
+            if not dedup_enabled:
                 continue
             key = _pair_key_from_description(pq.description)
             if key is not None and key not in open_index:
@@ -6257,7 +6292,42 @@ def tier4_escalate(
     # auto-apply so a future swapped re-surfacing can be orientation-reconciled.
     key_side_norms: dict[tuple[str, ...], tuple[str, str]] = {}
 
+    # Issue athenaeum#1430: count of oversize-family candidates suppressed below
+    # because the entity already had an unanswered escalation open — tracked
+    # separately from suppressed_count's issue athenaeum#198 reason so the
+    # run-summary log line at the end of this function can name it explicitly.
+    oversize_dedup_suppressed = 0
+
     for item in items:
+        # Issue athenaeum#1430: an oversized page that keeps attracting merge
+        # attempts must get ONE durable open escalation, not one per
+        # suppressed merge. If this entity already has an unanswered
+        # oversize-page-family block (OVERSIZE_ESCALATION_CONFLICT_TYPES) —
+        # either already on disk (open_oversize_entities, seeded above from
+        # the SAME parse_pending_questions() pass issue athenaeum#157 already
+        # pays for) or created earlier in THIS SAME batch — skip creating a
+        # new block entirely: no "Also affects" merge (unlike the issue
+        # athenaeum#157 pair-key path below), just counted + logged so the
+        # suppression stays observable.
+        # Keyed on "currently UNANSWERED": once the open block is
+        # answered/archived, open_oversize_entities no longer contains this
+        # entity on the next call and a fresh escalation is created again.
+        if item.conflict_type in OVERSIZE_ESCALATION_CONFLICT_TYPES:
+            if item.entity_name in open_oversize_entities:
+                suppressed_count += 1
+                oversize_dedup_suppressed += 1
+                log.info(
+                    "oversize-page-gate dedup (issue athenaeum#1430): suppressed a "
+                    "new %s escalation for entity=%s — an unanswered "
+                    "oversize-page-family escalation is already open for this "
+                    "entity in %s",
+                    item.conflict_type,
+                    item.entity_name,
+                    pending_path,
+                )
+                continue
+            open_oversize_entities.add(item.entity_name)
+
         # Issue athenaeum#198: suppress candidates whose claim-pair was already
         # adjudicated (human or auto). Computed from the two passages +
         # conflict_type — page-independent, so a settled pair never re-fires
@@ -6631,10 +6701,175 @@ def tier4_escalate(
     )
 
     # Issue athenaeum#198: surface suppression once per pass (observable, not silent).
-    if suppressed_count:
-        log.info("suppressed %d already-adjudicated conflicts", suppressed_count)
+    # athenaeum#1430's oversize-entity dedup is counted separately in
+    # suppressed_count (see the loop above) but logged with its own message
+    # below so the two suppression reasons stay distinguishable in run logs.
+    already_adjudicated_suppressed = suppressed_count - oversize_dedup_suppressed
+    if already_adjudicated_suppressed:
+        log.info(
+            "suppressed %d already-adjudicated conflicts", already_adjudicated_suppressed
+        )
+    if oversize_dedup_suppressed:
+        log.info(
+            "oversize-page-gate dedup (issue athenaeum#1430): suppressed %d "
+            "duplicate escalation(s) for entities that already had an "
+            "unanswered oversize-page-family escalation open",
+            oversize_dedup_suppressed,
+        )
 
     return suppressed_count
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1430 — migration: collapse EXISTING oversize-page-family
+# escalation duplicates
+# ---------------------------------------------------------------------------
+#
+# tier4_escalate's dedup above only stops the bleeding for NEW escalations
+# going forward. It does nothing for duplicates already on disk from every
+# run before this fix shipped -- on the live corpus, 8,502 of them. This is
+# the one-shot cleanup pass (issue athenaeum#1430 AC5): collapse every affected
+# entity's pile of unanswered oversize-page-family blocks down to the single
+# NEWEST one, archiving the rest via _render_archive_block -- the exact
+# rendering function athenaeum.answers.ingest_answers uses for a genuinely
+# ANSWERED block -- so a collapsed duplicate is never silently deleted, only
+# ever moved to _pending_questions_archive.md with a note explaining why.
+#
+# Deliberately does NOT route through ingest_answers itself: that function's
+# job is human-ADJUDICATED answers -- it writes raw intake files, attempts to
+# write the verdict back to source memory files, and (for a free-text answer
+# it cannot parse as a recognized verdict token) can invoke the LLM-backed
+# resolver. None of that applies to a duplicate that was never answered at
+# all; flipping its checkbox to route it through that pipeline would risk an
+# unwanted network call and would persist a bogus fingerprint-cache entry
+# (issue athenaeum#198) for a "resolution" nobody made. This pass is pure,
+# deterministic file rewriting -- no LLM, no network, no writeback.
+#
+# CAUTION: exercise ONLY against a tmp_path fixture -- never point pending_path
+# at a real ~/knowledge/wiki/_pending_questions.md from an automated context.
+
+
+def collapse_oversize_escalation_duplicates(pending_path: Path) -> int:
+    """One-shot cleanup: collapse duplicate oversize-page-family blocks.
+
+    For every entity with more than one UNANSWERED
+    :data:`OVERSIZE_ESCALATION_CONFLICT_TYPES` block in *pending_path*, keeps
+    the single NEWEST one (latest ``created_at`` date; ties broken by
+    position in the file, later wins) open and archives every other one for
+    that entity into ``<pending_path.parent>/_pending_questions_archive.md``
+    -- never deletes. Answered (``[x]``) blocks and non-oversize blocks are
+    left completely untouched, in their original position, whether or not
+    they parse cleanly (a malformed block that :func:`athenaeum.answers._parse_block`
+    cannot parse is preserved VERBATIM, exactly like
+    :func:`athenaeum.answers.ingest_answers` already guarantees -- this
+    function uses the same lower-level ``_split_blocks``/``_parse_block``
+    primitives directly, rather than :func:`athenaeum.answers.parse_pending_questions`
+    (which silently DROPS unparseable blocks from its returned list), so a
+    corrupt block already on disk is never lost by this rewrite).
+
+    Idempotent: a second run over an already-collapsed file finds at most
+    one unanswered oversize block per entity and archives nothing (returns
+    ``0``).
+
+    Returns the number of blocks archived (``0`` when there was nothing to
+    collapse, including when *pending_path* does not exist).
+    """
+    if not pending_path.exists():
+        return 0
+
+    from athenaeum.answers import _parse_block, _render_archive_block, _split_blocks
+    from athenaeum.store import now_iso
+
+    text = pending_path.read_text(encoding="utf-8")
+    raw_blocks = _split_blocks(text)
+    if not raw_blocks:
+        return 0
+
+    # Parse once; keep raw block text alongside (None for unparseable ones,
+    # preserved verbatim below exactly like ingest_answers's own fallback).
+    parsed: list[tuple[str, PendingQuestion | None]] = [
+        (b, _parse_block(b)) for b in raw_blocks
+    ]
+
+    by_entity: dict[str, list[PendingQuestion]] = {}
+    for _raw, pq in parsed:
+        if pq is None or pq.answered:
+            continue
+        if pq.conflict_type not in OVERSIZE_ESCALATION_CONFLICT_TYPES:
+            continue
+        by_entity.setdefault(pq.entity, []).append(pq)
+
+    to_archive_ids: set[str] = set()
+    for group in by_entity.values():
+        if len(group) <= 1:
+            continue
+        # Newest = latest created_at date; ties broken by position in the
+        # group (later occurrence in the file = appended more recently).
+        newest_idx = max(range(len(group)), key=lambda i: (group[i].created_at, i))
+        for i, pq in enumerate(group):
+            if i != newest_idx:
+                to_archive_ids.add(pq.id)
+
+    if not to_archive_ids:
+        return 0
+
+    kept_raw_blocks: list[str] = []
+    archived_pqs: list[PendingQuestion] = []
+    for raw, pq in parsed:
+        if pq is not None and pq.id in to_archive_ids:
+            archived_pqs.append(pq)
+            continue
+        kept_raw_blocks.append(raw)
+
+    primary_body = (
+        "# Pending Questions\n\n" + "\n\n---\n\n".join(kept_raw_blocks) + "\n"
+        if kept_raw_blocks
+        else "# Pending Questions\n"
+    )
+    atomic_write_text(pending_path, primary_body)
+
+    archived_at = now_iso()
+    rendered: list[str] = []
+    for pq in archived_pqs:
+        block = _render_archive_block(pq, archived_at)
+        block += (
+            "**Archived reason**: duplicate oversize-page-family escalation, "
+            "superseded by a newer unanswered escalation already open for "
+            "this entity (issue athenaeum#1430 collapse-oversize-escalation-"
+            "duplicates migration)\n"
+        )
+        rendered.append(block)
+
+    archive_path = pending_path.parent / "_pending_questions_archive.md"
+    existing_archive = (
+        archive_path.read_text(encoding="utf-8") if archive_path.exists() else ""
+    )
+    new_section = "\n\n---\n\n".join(rendered)
+    if existing_archive.strip():
+        if existing_archive.startswith("# Answered Questions"):
+            _, _, rest = existing_archive.partition("\n")
+            combined = (
+                "# Answered Questions\n\n" + new_section + "\n\n---\n\n" + rest.lstrip()
+            )
+        else:
+            combined = (
+                "# Answered Questions\n\n"
+                + new_section
+                + "\n\n---\n\n"
+                + existing_archive.lstrip()
+            )
+    else:
+        combined = "# Answered Questions\n\n" + new_section + "\n"
+    atomic_write_text(archive_path, combined)
+
+    log.info(
+        "oversize-page-gate dedup migration (issue athenaeum#1430): archived %d "
+        "duplicate block(s) across %d affected entit(y/ies), collapsing to one "
+        "unanswered oversize-page-family block per entity",
+        len(archived_pqs),
+        sum(1 for g in by_entity.values() if len(g) > 1),
+    )
+    return len(archived_pqs)
 
 
 # ---------------------------------------------------------------------------

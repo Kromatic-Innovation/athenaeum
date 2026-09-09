@@ -683,13 +683,13 @@ class TestTier0Passthrough:
             "name: Per Value Pat\n"
             "access: personal\n"
             "emails:\n"
-            "  - pat@one.com\n"
-            "  - pat@two.com\n"
+            "  - pat@example.com\n"
+            "  - pat@example.net\n"
             "field_sources:\n"
             "  emails:\n"
-            "    - value: pat@one.com\n"
+            "    - value: pat@example.com\n"
             "      source: api:apollo:2026-04-29\n"
-            "    - value: pat@two.com\n"
+            "    - value: pat@example.net\n"
             "      source: linkedin:patshandle\n"
             "---\n"
             "\n"
@@ -722,7 +722,7 @@ class TestTier0Passthrough:
         meta, _ = parse_frontmatter(out)
         emails_fs = meta["field_sources"]["emails"]
         assert isinstance(emails_fs, list)
-        assert {e["value"] for e in emails_fs} == {"pat@one.com", "pat@two.com"}
+        assert {e["value"] for e in emails_fs} == {"pat@example.com", "pat@example.net"}
 
 
 class TestTier0HandleUpsert:

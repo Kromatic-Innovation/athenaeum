@@ -115,6 +115,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "ingest-answers": ("athenaeum._cmd_pending", "add_pending_subparsers"),
     "ingest-merges": ("athenaeum._cmd_pending", "add_pending_subparsers"),
     "reresolve-questions": ("athenaeum._cmd_pending", "add_pending_subparsers"),
+    "dedup-oversize-escalations": ("athenaeum._cmd_pending", "add_pending_subparsers"),
     "dedupe": ("athenaeum._cmd_curate", "add_curate_subparsers"),
     "claims": ("athenaeum._cmd_curate", "add_curate_subparsers"),
     "auto-memory": ("athenaeum._cmd_curate", "add_curate_subparsers"),
@@ -221,7 +222,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_query_subparsers(subparsers)  # test-mcp, entity, query-topics, stopwords, recall
     add_enumerate_subparser(subparsers)  # enumerate (issue athenaeum#965)
     add_explain_routing_subparser(subparsers)  # explain-routing (issue athenaeum#1176)
-    add_pending_subparsers(subparsers)  # ingest-answers, ingest-merges, reresolve-questions
+    # ingest-answers, ingest-merges, reresolve-questions, dedup-oversize-escalations
+    add_pending_subparsers(subparsers)
     add_curate_subparsers(subparsers)  # dedupe, claims, auto-memory
     add_decay_subparser(subparsers)  # decay-sweep
     add_reconcile_subparser(subparsers)  # reconcile (issue athenaeum#1143)

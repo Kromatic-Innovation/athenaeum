@@ -128,10 +128,10 @@ class TestValidityIsStructuredAndProvenanced:
         between a value someone has vouched for and one nobody has looked at.
         """
         recorded_open = pii.validity_for_value(
-            {"identifier_validity": [{"identifier": "a@b.com", "valid_until": "2099-01-01"}]},
-            "a@b.com",
+            {"identifier_validity": [{"identifier": "a@example.com", "valid_until": "2099-01-01"}]},
+            "a@example.com",
         )
-        never_seen = pii.validity_for_value({"emails": ["a@b.com"]}, "a@b.com")
+        never_seen = pii.validity_for_value({"emails": ["a@example.com"]}, "a@example.com")
 
         assert recorded_open.closed is False and recorded_open.recorded is True
         assert never_seen.closed is False and never_seen.recorded is False
@@ -140,12 +140,12 @@ class TestValidityIsStructuredAndProvenanced:
         """A campaign asks "was this closed when the segment was cut"."""
         meta = {
             "identifier_validity": [
-                {"identifier": "a@b.com", "valid_until": "2026-06-01"}
+                {"identifier": "a@example.com", "valid_until": "2026-06-01"}
             ]
         }
 
-        assert pii.validity_for_value(meta, "a@b.com", date(2026, 8, 1)).closed is True
-        assert pii.validity_for_value(meta, "a@b.com", date(2026, 1, 1)).closed is False
+        assert pii.validity_for_value(meta, "a@example.com", date(2026, 8, 1)).closed is True
+        assert pii.validity_for_value(meta, "a@example.com", date(2026, 1, 1)).closed is False
 
     def test_slug_keyed_record_answers_only_for_its_own_address(self) -> None:
         """A one-address record must never answer for a neighbouring address.
@@ -167,7 +167,7 @@ class TestValidityIsStructuredAndProvenanced:
     def test_malformed_validity_field_degrades_rather_than_raising(self) -> None:
         """A hand-edited record must not crash a consumer's send loop."""
         for broken in ({"identifier_validity": "nonsense"}, {"identifier_validity": [7]}):
-            result = pii.validity_for_value(broken, "a@b.com")
+            result = pii.validity_for_value(broken, "a@example.com")
             assert result.closed is False
             assert result.recorded is False
 
@@ -236,7 +236,7 @@ class TestRepresentationTrapIsIrrelevantToCallers:
 
 class TestDoNotEmailIsFirstClass:
     def test_absent_field_is_marked_false_with_no_provenance(self) -> None:
-        state = pii.do_not_email_state({"emails": ["a@b.com"]})
+        state = pii.do_not_email_state({"emails": ["a@example.com"]})
         assert state.marked is False
         assert state.source is None and state.reason is None
 
@@ -332,7 +332,7 @@ class TestDoNotEmailReadsBothSurfaces:
         assert state.surface == "excluded"
 
     def test_neither_surface_marked_is_false_with_no_provenance(self) -> None:
-        state = pii.do_not_email_state({"emails": ["a@b.com"]}, {"name": "Alex"})
+        state = pii.do_not_email_state({"emails": ["a@example.com"]}, {"name": "Alex"})
 
         assert state.marked is False
         assert state.source is None
@@ -956,14 +956,14 @@ class TestNoEligibilityPredicateShips:
         contradicting a function that already exists.
         """
         meta = {
-            "emails": ["a@b.com"],
+            "emails": ["a@example.com"],
             "contact_classification": [
-                {"identifier": "a@b.com", "usage_class": pii.USAGE_CLASS_OBSERVED}
+                {"identifier": "a@example.com", "usage_class": pii.USAGE_CLASS_OBSERVED}
             ],
-            "identifier_validity": [{"identifier": "a@b.com", "valid_until": "2020-01-01"}],
+            "identifier_validity": [{"identifier": "a@example.com", "valid_until": "2020-01-01"}],
         }
 
         # Bounced, yet still "outreach eligible" — because that function answers
         # a different question. A caller about to send needs BOTH facts.
-        assert pii.is_bounced_identifier(meta, "a@b.com") is True
-        assert pii.is_outreach_eligible(meta, "a@b.com") is True
+        assert pii.is_bounced_identifier(meta, "a@example.com") is True
+        assert pii.is_outreach_eligible(meta, "a@example.com") is True

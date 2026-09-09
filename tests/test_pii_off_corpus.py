@@ -251,9 +251,9 @@ class TestPiiFlagBeltAndSuspenders:
 
 class TestEntityPageLint:
     def test_find_inline_emails(self) -> None:
-        assert find_inline_emails("reach alice@example.com or bob@test.co") == [
+        assert find_inline_emails("reach alice@example.com or bob@example.com") == [
             "alice@example.com",
-            "bob@test.co",
+            "bob@example.com",
         ]
         assert find_inline_emails("no email here") == []
 
@@ -526,9 +526,9 @@ class TestPhoneDetectorIssueNumberAndDateShapes:
         body = (
             "Contact alice@example.com about issues 445--436--435--374 and\n"
             "256-257-280, dated 02-08-2018 and (2020--2021), ref 1778 (2026-08-01,\n"
-            "closed 2026-04-27)\n\n1. Cc bob+tag@sub.example.co.uk please."
+            "closed 2026-04-27)\n\n1. Cc bob+tag@sub.corp.example please."
         )
-        assert find_inline_emails(body) == ["alice@example.com", "bob+tag@sub.example.co.uk"]
+        assert find_inline_emails(body) == ["alice@example.com", "bob+tag@sub.corp.example"]
         # And the phone axis on that same body is empty — all shapes excluded.
         assert find_inline_phones(body) == []
 
@@ -659,9 +659,9 @@ class TestPhoneDetector732GenuineNumbersStayFlagged:
         body = (
             "Contact alice@example.com re QBO realm 1008563730 and GA4 stream\n"
             "`5139685489`, ISBN 9798183760910, issues 410-414-416-412, at\n"
-            "2026-04-23 05 on 2018-05-06-07. Cc bob+tag@sub.example.co.uk please."
+            "2026-04-23 05 on 2018-05-06-07. Cc bob+tag@sub.corp.example please."
         )
-        assert find_inline_emails(body) == ["alice@example.com", "bob+tag@sub.example.co.uk"]
+        assert find_inline_emails(body) == ["alice@example.com", "bob+tag@sub.corp.example"]
         # And the phone axis on that same body is empty — all shapes excluded.
         assert find_inline_phones(body) == []
 

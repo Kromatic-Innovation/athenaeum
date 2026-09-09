@@ -10,7 +10,7 @@ from athenaeum.owner import route_owner_memory
 OWNER = {
     "uid": "a545c038",
     "google_contact": "people/c765728850212863135",
-    "aliases": ["user_tristan", "tristan@kromatic.com", "Tristan Kromer"],
+    "aliases": ["user_tristan", "tristan@example.com", "Tristan Kromer"],
 }
 
 
@@ -37,7 +37,7 @@ class TestRouteOwnerMemory:
 
     def test_alias_prefixed_namespace_matches(self) -> None:
         # An alias-prefixed (non-user_) name is still owner namespace.
-        assert route_owner_memory("tristan@kromatic.com_family", OWNER) == "reference"
+        assert route_owner_memory("tristan@example.com_family", OWNER) == "reference"
 
     def test_non_owner_memory_is_none(self) -> None:
         assert route_owner_memory("acme_corp_overview", OWNER) is None

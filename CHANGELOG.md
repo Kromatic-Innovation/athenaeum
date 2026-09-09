@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `_null_relation` (the shared null-handling helper behind every dimension
+  comparator) returned UNKNOWN whenever both sides of a `null_means=universal`
+  dimension were absent — but two claims that are both valid-always
+  (`valid-time`) or both scoped-everywhere (`scope`) occupy the SAME
+  territory, which is EQUAL, not "unknown whether they occupy the same
+  territory." This was the root cause of the 2026-09-04 shadow-parity NO-GO:
+  with `subject` (a `null_means=unknown` dimension, correctly unaffected by
+  this fix) absent on 100% of the eval corpus, every conflicting pair was
+  intercepted into `VERDICT_UNDERDETERMINED` before the comparator's
+  contradiction verdict could ever be reached. `null_means=unknown`
+  dimensions (`subject`) are unchanged: two absent coordinates still carry
+  no information that a pair shares (or doesn't share) that axis, so they
+  stay UNKNOWN — an absent subject must never be inferred as a co-subject
+  match. ([#1483](https://github.com/Kromatic-Innovation/athenaeum/issues/1483))
+
 - `session-end` reindexed only when the *compile* found new raw, not when the
   *index* was behind the corpus. Ingest and the index keep separate manifests,
   so a page that missed its indexing window was `new_or_changed: 0` forever

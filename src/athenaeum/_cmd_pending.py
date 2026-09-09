@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum {ingest-answers,ingest-merges,reresolve-questions}`` — pending-sidecar maintenance.
+"""``athenaeum {ingest-answers,ingest-merges,reresolve-questions,
+dedup-oversize-escalations}`` — pending-sidecar maintenance.
 
-Three subcommands grouped here because each is an idempotent, scheduler-safe
+Four subcommands grouped here because each is an idempotent, scheduler-safe
 maintenance pass over one of the pending-decision sidecars
 (``wiki/_pending_questions.md`` / ``wiki/_pending_merges.md``): archiving
-resolved blocks into raw intake or an archive file, and self-healing
-proposal-less open questions. All three share the same CLI shape (load
-config, optionally build an LLM client via the provider seam, acquire the
-run lock, delegate to an L3/L4 function, print a one-line summary).
+resolved blocks into raw intake or an archive file, self-healing
+proposal-less open questions, and (issue athenaeum#1430) collapsing duplicate
+oversize-page-family escalations already on disk down to one unanswered
+block per entity. All four share the same CLI shape (load config,
+optionally build an LLM client via the provider seam, acquire the run lock,
+delegate to an L3/L4 function, print a one-line summary) --
+``dedup-oversize-escalations`` is the one command in this module that never
+builds an LLM client: its cleanup pass is pure deterministic file rewriting.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` (or a small same-domain group module like this
@@ -30,7 +35,8 @@ from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
 
 def add_pending_subparsers(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``ingest-answers``, ``ingest-merges``, ``reresolve-questions``."""
+    """Register ``ingest-answers``, ``ingest-merges``, ``reresolve-questions``,
+    ``dedup-oversize-escalations`` (issue athenaeum#1430)."""
 
     # ingest-answers command — convert resolved `[x]` blocks in
     # _pending_questions.md into raw intake files and archive the answered
@@ -95,6 +101,28 @@ def add_pending_subparsers(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_lock_args(reresolve_parser)
     reresolve_parser.set_defaults(func=cmd_reresolve_questions)
+
+    # dedup-oversize-escalations command (issue athenaeum#1430) -- one-shot cleanup:
+    # collapse existing duplicate oversize-page-family escalation blocks
+    # (``**Conflict type**: oversize_page``/``oversize_split``/
+    # ``oversize_log_demote``) down to one UNANSWERED block per affected
+    # entity, archiving the rest via the same rendering ingest-answers uses
+    # for a genuinely answered block. Deterministic, no LLM, no network --
+    # safe to run from a scheduler like the other two commands above.
+    dedup_oversize_parser = subparsers.add_parser(
+        "dedup-oversize-escalations",
+        help="Collapse duplicate oversize-page-family escalations in "
+        "_pending_questions.md to one unanswered block per entity "
+        "(issue athenaeum#1430)",
+    )
+    dedup_oversize_parser.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    _add_lock_args(dedup_oversize_parser)
+    dedup_oversize_parser.set_defaults(func=cmd_dedup_oversize_escalations)
 
 
 def cmd_ingest_answers(args: argparse.Namespace) -> int:
@@ -340,4 +368,51 @@ def cmd_reresolve_questions(args: argparse.Namespace) -> int:
         print("No ANTHROPIC_API_KEY; offline — left proposal-less questions as-is.")
     else:
         print(f"Re-resolved {count} proposal-less question(s).")
+    return 0
+
+
+def cmd_dedup_oversize_escalations(args: argparse.Namespace) -> int:
+    """Collapse existing duplicate oversize-page-family escalations (issue athenaeum#1430).
+
+    See :func:`athenaeum.tiers.collapse_oversize_escalation_duplicates` for
+    the semantics: for every entity with more than one unanswered
+    ``oversize_page``/``oversize_split``/``oversize_log_demote`` block in
+    ``wiki/_pending_questions.md``, keeps the single newest one and archives
+    every other one into ``wiki/_pending_questions_archive.md`` -- never
+    deletes. Pure file rewriting: no LLM client, no network call, unlike
+    :func:`cmd_ingest_answers`/:func:`cmd_reresolve_questions` above.
+
+    Safe to re-run: idempotent, and finds nothing to do once the corpus is
+    already collapsed to one open block per entity.
+    """
+    from athenaeum.tiers import collapse_oversize_escalation_duplicates
+
+    target = args.path.expanduser().resolve()
+    if not target.exists():
+        print(f"Knowledge directory not found: {target}", file=sys.stderr)
+        print(
+            f"Run 'athenaeum init --path {args.path}' first, then retry.",
+            file=sys.stderr,
+        )
+        return 1
+
+    pending_path = target / "wiki" / "_pending_questions.md"
+
+    from athenaeum.config import load_config
+
+    lock = _acquire_or_exit(target, args, load_config(target))  # issue athenaeum#309
+    if isinstance(lock, int):
+        return lock
+    try:
+        archived = collapse_oversize_escalation_duplicates(pending_path)
+    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
+        print(
+            f"Fatal error collapsing oversize escalations ({type(exc).__name__}): {exc}",
+            file=sys.stderr,
+        )
+        return 2
+    finally:
+        lock.release()
+
+    print(f"Archived {archived} duplicate oversize-page-family escalation block(s).")
     return 0

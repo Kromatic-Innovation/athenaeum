@@ -35,7 +35,7 @@ tags:
 - warm
 emails:
 - bob@example.com
-- bob@other.com
+- bob@example.net
 ---
 
 # Bob Test
@@ -122,7 +122,7 @@ def test_tag_indent_apply_writes_and_parses(tmp_path: Path) -> None:
     fm = text[4:end]
     meta = yaml.safe_load(fm)
     assert meta["tags"] == ["person", "apollo:enriched", "warm"]
-    assert meta["emails"] == ["bob@example.com", "bob@other.com"]
+    assert meta["emails"] == ["bob@example.com", "bob@example.net"]
 
 
 def test_tag_indent_idempotent(tmp_path: Path) -> None:

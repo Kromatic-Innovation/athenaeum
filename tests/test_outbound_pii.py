@@ -83,7 +83,7 @@ class TestDetection:
         assert (f.line, f.column) == (1, len("reach ") + 1)
 
     def test_multiple_findings_are_in_document_order(self) -> None:
-        text = "first a@b.com then call 555-010-0100 then c@d.org"
+        text = "first a@example.com then call 555-010-0100 then c@example.org"
         findings = scan_outbound_text(text)
         assert [f.kind for f in findings] == [
             PII_KIND_EMAIL,
@@ -167,9 +167,9 @@ class TestNoFalsePositives:
 
 class TestAllowlist:
     def test_allowlisted_email_passes(self) -> None:
-        text = "reach jane@example.com or john@other.com"
+        text = "reach jane@example.com or john@example.com"
         findings = scan_outbound_text(text, allowlist=["jane@example.com"])
-        assert [f.value for f in findings] == ["john@other.com"]
+        assert [f.value for f in findings] == ["john@example.com"]
 
     def test_allowlist_email_is_case_insensitive(self) -> None:
         findings = scan_outbound_text(
@@ -360,7 +360,7 @@ class TestOutboundPiiUnchangedOnFixtures:
         "write to jane.doe@example.com please",
         "call me at (555) 010-0100 tomorrow",
         "call me at +1 555 010 0100 tomorrow",
-        "first a@b.com then call 555-010-0100 then c@d.org",
+        "first a@example.com then call 555-010-0100 then c@example.org",
         "ping jo.5551234567@example.com",
         "a perfectly ordinary sentence.",
         "mention @janedoe on the thread",
