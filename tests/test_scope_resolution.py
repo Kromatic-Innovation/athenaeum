@@ -196,6 +196,34 @@ class TestRefinesEdges:
         result = resolve_most_specific([a, b, c], "kromatic")
         assert {claim.id for claim in result} == {"a", "b", "c"}
 
+    def test_bridge_edge_between_two_disjoint_cycles_still_suppresses(self) -> None:
+        """A `refines:` edge JOINING two separate cycles is an ordinary edge.
+
+        Regression for a review finding on the first cut of this module: cycle
+        members were tracked as one flat "is on some cycle" set, so both
+        endpoints of a bridging edge tested as cyclic and the edge was thrown
+        away — keeping a general claim that a specific one legitimately
+        refines. Point 4 only ever meant an edge INTERNAL to a cycle
+        establishes no specificity.
+        """
+        # Cycle 1: a <-> b.  Cycle 2: c <-> d.  Bridge: b refines c.
+        a = ScopedClaim(id="a", claimed_scope="kromatic", refines=("b",))
+        b = ScopedClaim(id="b", claimed_scope="kromatic", refines=("a", "c"))
+        c = ScopedClaim(id="c", claimed_scope="kromatic", refines=("d",))
+        d = ScopedClaim(id="d", claimed_scope="kromatic", refines=("c",))
+        kept = {x.id for x in resolve_most_specific([a, b, c, d], "kromatic")}
+        # The bridge is honoured: b refines c, so c is suppressed.
+        assert "c" not in kept
+        # ...while neither cycle suppresses its own members.
+        assert kept == {"a", "b", "d"}
+
+    def test_edge_internal_to_a_cycle_still_suppresses_nothing(self) -> None:
+        """The other direction of the same rule, pinned alongside it."""
+        a = ScopedClaim(id="a", claimed_scope="kromatic", refines=("b",))
+        b = ScopedClaim(id="b", claimed_scope="kromatic", refines=("a",))
+        kept = {x.id for x in resolve_most_specific([a, b], "kromatic")}
+        assert kept == {"a", "b"}
+
     def test_refines_override_mapping_takes_precedence_over_claim_attribute(self) -> None:
         general = ScopedClaim(id="general", claimed_scope="kromatic")
         specific = ScopedClaim(id="specific", claimed_scope="kromatic")  # no .refines set

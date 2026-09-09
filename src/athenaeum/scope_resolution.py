@@ -164,17 +164,22 @@ def resolve_most_specific(
             if general_id in in_scope_ids:
                 refines_graph[claim.id].add(general_id)
 
-    cyclic_ids = _strongly_connected_with_self_edges(refines_graph)
+    cycle_components = _cycle_components(refines_graph)
 
     def _refines_dominates(specific: ScopedClaim, general: ScopedClaim) -> bool:
         """True when *specific* strictly dominates *general* via a
         non-cyclic ``refines:`` edge."""
         if general.id not in refines_graph.get(specific.id, ()):
             return False
-        if specific.id in cyclic_ids and general.id in cyclic_ids:
-            # Both sides of this edge are in the same cycle -- ignore it
-            # (point 4: suppress nothing among cycle members via the cycle's
-            # own edges).
+        specific_component = cycle_components.get(specific.id)
+        if (
+            specific_component is not None
+            and specific_component == cycle_components.get(general.id)
+        ):
+            # Both sides sit in the SAME cycle -- ignore this edge (point 4:
+            # suppress nothing among cycle members via the cycle's own
+            # edges). An edge BRIDGING two disjoint cycles is ordinary and
+            # still establishes specificity.
             return False
         return True
 
@@ -196,43 +201,71 @@ def resolve_most_specific(
                 suppressed.add(general.id)
                 break
 
-    if cyclic_ids:
+    if cycle_components:
         log.debug(
             "scope_resolution: refines cycle detected among claim ids %s; "
             "suppressing nothing among them via those edges",
-            sorted(cyclic_ids),
+            sorted(cycle_components),
         )
 
     return [c for c in claims if c.id in in_scope_ids and c.id not in suppressed]
 
 
-def _strongly_connected_with_self_edges(graph: Mapping[str, set[str]]) -> set[str]:
-    """Return every node that sits on a cycle in *graph* (a directed graph of
-    claim id -> the general-claim ids it refines).
+def _cycle_components(graph: Mapping[str, set[str]]) -> dict[str, int]:
+    """Map every node that sits on a cycle in *graph* to its component id.
 
-    A node is "on a cycle" when it can reach itself by following one or more
-    edges — covers both a direct 2-cycle (``A refines B`` and ``B refines
-    A``) and a longer transitive cycle (``A -> B -> C -> A``). Implemented as
-    plain iterative reachability per node (the graphs this function sees are
-    the in-scope refines edges for one resolve call — small by construction,
-    so Tarjan's linear-time SCC algorithm would be premature machinery here;
-    this is O(V*(V+E)), fine at that scale) rather than recursive DFS, so an
-    adversarially long cycle cannot blow the call stack.
+    *graph* is a directed graph of claim id -> the general-claim ids it
+    refines. A node is "on a cycle" when it can reach itself by following one
+    or more edges — covering both a direct 2-cycle (``A refines B`` and ``B
+    refines A``) and a longer transitive one (``A -> B -> C -> A``). Two nodes
+    share a component id exactly when each can reach the other, i.e. they are
+    in the same strongly connected component.
+
+    Returning COMPONENTS rather than a flat "is on some cycle" set is
+    load-bearing, not tidiness. Two disjoint cycles can be joined by a
+    perfectly ordinary ``refines:`` edge; with a flat set both endpoints of
+    that bridging edge test as "cyclic" and the edge is discarded, silently
+    keeping a general claim that a specific one legitimately refines. Point 4
+    only ever meant "an edge INTERNAL to a cycle establishes no specificity" —
+    a bridge between two cycles is not such an edge.
+
+    Implemented as plain iterative reachability per node (the graphs this
+    function sees are the in-scope refines edges for one resolve call — small
+    by construction, so Tarjan's linear-time SCC algorithm would be premature
+    machinery here; this is O(V*(V+E)), fine at that scale) rather than
+    recursive DFS, so an adversarially long cycle cannot blow the call stack.
     """
-    on_cycle: set[str] = set()
+    reachable: dict[str, set[str]] = {}
     for start in graph:
-        stack = list(graph.get(start, ()))
         seen: set[str] = set()
+        stack = list(graph.get(start, ()))
         while stack:
             node = stack.pop()
-            if node == start:
-                on_cycle.add(start)
-                break
             if node in seen:
                 continue
             seen.add(node)
             stack.extend(graph.get(node, ()))
-    return on_cycle
+        reachable[start] = seen
+
+    components: dict[str, int] = {}
+    next_id = 0
+    for node in graph:
+        if node in components:
+            continue
+        # Reaching itself is what "on a cycle" means; a node that cannot is
+        # in no component at all and its edges are always ordinary.
+        if node not in reachable.get(node, ()):
+            continue
+        members = {
+            other
+            for other in graph
+            if other in reachable.get(node, ()) and node in reachable.get(other, ())
+        }
+        members.add(node)
+        for member in members:
+            components[member] = next_id
+        next_id += 1
+    return components
 
 
 __all__ = [
