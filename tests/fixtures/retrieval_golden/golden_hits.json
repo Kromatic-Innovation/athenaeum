@@ -1,0 +1,160 @@
+{
+  "queries": {
+    "fts5": {
+      "Acme Corp fintech vendor invoice financing": [
+        {
+          "filename": "acme-corp-vendor.md",
+          "name": "Acme Corp"
+        },
+        {
+          "filename": "entity-vendor-00.md",
+          "name": "Vendor 00"
+        },
+        {
+          "filename": "entity-vendor-01.md",
+          "name": "Vendor 01"
+        }
+      ],
+      "Jane Doe founder biography": [
+        {
+          "filename": "jane-doe-founder.md",
+          "name": "Jane Doe"
+        }
+      ],
+      "customer development four step process Steve Blank": [
+        {
+          "filename": "customer-development-process.md",
+          "name": "Customer Development Process"
+        },
+        {
+          "filename": "principle-customer-obsession.md",
+          "name": "Customer Obsession"
+        },
+        {
+          "filename": "principle-fail-fast.md",
+          "name": "Fail Fast"
+        }
+      ],
+      "daily standup digest quarterly summary": [
+        {
+          "filename": "auto-memory-standup-digest.md",
+          "name": "Standup Digest"
+        }
+      ],
+      "iterate fast ship weekly build measure learn loop": [
+        {
+          "filename": "principle-iterate-fast.md",
+          "name": "Iterate Fast"
+        },
+        {
+          "filename": "lean-startup-method.md",
+          "name": "Lean Startup Method"
+        },
+        {
+          "filename": "principle-fail-fast.md",
+          "name": "Fail Fast"
+        }
+      ],
+      "lean startup build measure learn methodology": [
+        {
+          "filename": "lean-startup-method.md",
+          "name": "Lean Startup Method"
+        },
+        {
+          "filename": "principle-iterate-fast.md",
+          "name": "Iterate Fast"
+        },
+        {
+          "filename": "customer-development-process.md",
+          "name": "Customer Development Process"
+        }
+      ]
+    },
+    "vector": {
+      "Acme Corp fintech vendor invoice financing": [
+        {
+          "filename": "acme-corp-vendor.md",
+          "name": "Acme Corp"
+        },
+        {
+          "filename": "entity-vendor-01.md",
+          "name": "Vendor 01"
+        },
+        {
+          "filename": "entity-vendor-00.md",
+          "name": "Vendor 00"
+        }
+      ],
+      "Jane Doe founder biography": [
+        {
+          "filename": "jane-doe-founder.md",
+          "name": "Jane Doe"
+        },
+        {
+          "filename": "lean-startup-method.md",
+          "name": "Lean Startup Method"
+        },
+        {
+          "filename": "principle-iterate-fast.md",
+          "name": "Iterate Fast"
+        }
+      ],
+      "customer development four step process Steve Blank": [
+        {
+          "filename": "customer-development-process.md",
+          "name": "Customer Development Process"
+        },
+        {
+          "filename": "principle-customer-obsession.md",
+          "name": "Customer Obsession"
+        },
+        {
+          "filename": "principle-fail-fast.md",
+          "name": "Fail Fast"
+        }
+      ],
+      "daily standup digest quarterly summary": [
+        {
+          "filename": "auto-memory-standup-digest.md",
+          "name": "Standup Digest"
+        },
+        {
+          "filename": "project-roadmap-01.md",
+          "name": "Roadmap 01"
+        },
+        {
+          "filename": "project-roadmap-02.md",
+          "name": "Roadmap 02"
+        }
+      ],
+      "iterate fast ship weekly build measure learn loop": [
+        {
+          "filename": "principle-iterate-fast.md",
+          "name": "Iterate Fast"
+        },
+        {
+          "filename": "lean-startup-method.md",
+          "name": "Lean Startup Method"
+        },
+        {
+          "filename": "jane-doe-founder.md",
+          "name": "Jane Doe"
+        }
+      ],
+      "lean startup build measure learn methodology": [
+        {
+          "filename": "lean-startup-method.md",
+          "name": "Lean Startup Method"
+        },
+        {
+          "filename": "principle-iterate-fast.md",
+          "name": "Iterate Fast"
+        },
+        {
+          "filename": "jane-doe-founder.md",
+          "name": "Jane Doe"
+        }
+      ]
+    }
+  }
+}

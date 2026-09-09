@@ -678,12 +678,13 @@ on a valid envelope. The file is ordinary intake by construction.
 **Per-record** (rows 3-6 — the envelope is valid, but individual records are not
 cheaply applicable). The generic discovery function has already skipped this file, so
 these records reach nothing unless the correction phase hands them over explicitly. It
-must: for each batch with at least one raised record, the phase writes **one ordinary
-raw-intake file** — canonical `<timestamp>-<uuid8>.md` in the same `raw/<source>/`
-directory — whose body states each raised record as a plain claim, carrying its `note`
-(the *why*) and the reason it was raised. The next pass classifies it as ordinary prose.
+must: for each batch with at least one raised record, the phase writes **one handoff
+file** — canonical `<timestamp>-<uuid8>.md` in the same `raw/<source>/` directory — whose
+body states each raised record as a plain claim, carrying its `note` (the *why*) and the
+reason it was raised.
 
-Three properties this must have:
+Four properties this must have (the fourth added by athenaeum#1419; the note below explains
+why the original three were not enough on their own):
 
 - **Idempotent.** The handoff file is written once per (batch, raised-record-set); a batch
   re-examined on a later run must not re-emit it. Key it on `batch_id` plus the sorted
@@ -691,10 +692,32 @@ Three properties this must have:
 - **Provenance-preserving.** The handoff file carries the original `source` per claim in
   `field_sources`, not `script:correction-handoff`. The submitter's authority is the
   submitter's; the handoff is a transport step, not a new assertion.
-- **Visible.** It is a normal intake file with normal provenance, so retirement, dedupe
-  and contradiction detection all apply to it unchanged. Nothing about a raised record is
-  special downstream — it is just a fact that arrived as prose, which is what it would
-  have been had the submitter not tried the cheap path.
+- **Value-redacting for an allowlist raise.** A record raised because its attribute is
+  not on the §6.3 allowlist has its `value` replaced with a fixed redaction placeholder in
+  the note text, never the value itself. The allowlist exists to keep some attributes'
+  values off the wiki entirely; a note that quotes the rejected value verbatim and then
+  itself becomes raw intake defeats that guarantee through the escalation path instead of
+  the front door — this is exactly the leak athenaeum#1419 describes. The value is not
+  discarded: it is written, unredacted, to the audit ledger (§5.3) keyed by
+  `correction_id`, and it also survives in the original batch file's git history once the
+  batch retires (§5.4's two-commit, never-hard-deleted pattern). Every OTHER raise reason
+  (malformed JSON, an unparseable source, an ambiguous target, and so on) still carries
+  its value verbatim — those failures are not the allowlist's content policy being
+  defeated, and showing the value helps a human fix the submission.
+- **Compiled-exempt, not "ordinary intake."** Before athenaeum#1419 this file was
+  deliberately ordinary raw intake — "the next pass classifies it as ordinary prose,"
+  meaning retirement, dedupe and contradiction detection all applied to it unchanged, and
+  a raised record was "just a fact that arrived as prose." That was the second half of the
+  leak: redaction alone still adds one non-PII "this batch's correction could not be
+  applied" bullet to the target entity's page per rejected batch, forever — exactly the
+  event-stream-on-an-entity-page shape §12 rules out (`wiki/34320a40-apollo.md`'s 26
+  accumulated bullets). A handoff note is machinery output describing a failure, never a
+  claim about the entity, so it is now marked compiled-exempt
+  (`athenaeum.compiled_exempt.mark_exempt`) the moment it is written — the same "not
+  deleted, not compiled" idiom `docs/design/shape-rules.md` §5's `retain` disposition uses for a
+  long-lived source document. Discovery never offers it to the reasoning tiers again; it
+  still exists on disk (and in git) as a durable, human-readable trace of the batch, the
+  reason, and (redaction aside) the correction_id a human needs to look up the real value.
 
 **On cost.** Bulk writers propose at thousands-per-pass scale, and in a large corpus a
 substantial share of proposed targets may not resolve — so fallthrough is a common path,
