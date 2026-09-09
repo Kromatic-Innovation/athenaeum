@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum push-metrics {baseline,coverage-audit,record}`` — v6 MVP (a),
-issue athenaeum#711; ``record`` added by issue athenaeum#1478.
+"""``athenaeum push-metrics {baseline,coverage-audit,record,tail}`` — v6 MVP
+(a), issue athenaeum#711; ``record`` added by issue athenaeum#1478; ``tail``
+added by issue athenaeum#1479.
 
-Three subcommands over :mod:`athenaeum.push_metrics`:
+Four subcommands over :mod:`athenaeum.push_metrics`:
 
 - ``baseline``       compute precision + coverage over a stated window and
                        write/append a dated snapshot into
@@ -29,13 +30,26 @@ Three subcommands over :mod:`athenaeum.push_metrics`:
                        invisible to the push ledger. Thin argv/stdin parsing
                        over :func:`athenaeum.push_metrics.record_hook_push` —
                        all the recording logic lives there.
+- ``tail``             stream NDJSON — one shaped object per push record and
+                       per reference-determination record, newest-last,
+                       optionally filtered by ``--session``/``--since`` and
+                       optionally following the ledgers as they grow
+                       (``--follow``) (issue athenaeum#1479). Read-only;
+                       never mutates the ledgers. This is the documented
+                       public contract over the ledgers — see
+                       docs/reference/configuration.md ("push-metrics tail —
+                       the public NDJSON contract") for the exact ``--json``
+                       shape, schema version, and compatibility note. Thin
+                       argv parsing + output shaping over
+                       :func:`athenaeum.push_metrics.tail_records` — all the
+                       draining/filtering/follow logic lives there.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` —
-mirrors :mod:`athenaeum._cmd_calibration`'s shape. ``record`` is added here
+mirrors :mod:`athenaeum._cmd_calibration`'s shape. ``record`` (issue
+athenaeum#1478) and ``tail`` (issue athenaeum#1479) are both added here
 rather than a new module because ``push-metrics`` already has this one file
-(issue athenaeum#1479, tracked to extend it again right after this issue,
-keeps ``push-metrics``'s subcommands cohesive and localised in one place).
+— keeps ``push-metrics``'s subcommands cohesive and localised in one place.
 """
 
 from __future__ import annotations
@@ -50,17 +64,20 @@ from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
 
 def cmd_push_metrics(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum push-metrics {baseline,coverage-audit,record}``."""
+    """Dispatch ``athenaeum push-metrics {baseline,coverage-audit,record,tail}``."""
     sub = getattr(args, "push_metrics_target", None)
-    if sub not in ("baseline", "coverage-audit", "record"):
+    if sub not in ("baseline", "coverage-audit", "record", "tail"):
         print(
-            "usage: athenaeum push-metrics {baseline,coverage-audit,record} [...]",
+            "usage: athenaeum push-metrics {baseline,coverage-audit,record,tail} [...]",
             file=sys.stderr,
         )
         return 2
 
     if sub == "record":
         return _cmd_push_metrics_record(args)
+
+    if sub == "tail":
+        return _cmd_push_metrics_tail(args)
 
     from athenaeum import push_metrics
 
@@ -219,6 +236,60 @@ def _cmd_push_metrics_record(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_tail_row(rec: dict) -> None:
+    """Plain-text rendering of one shaped tail record (see
+    :func:`athenaeum.push_metrics.tail_records`) — a one-line-per-record
+    summary; ``--json`` is the documented, stable machine-readable shape."""
+    if rec["record_type"] == "push":
+        source = rec.get("source") or "recall"
+        print(
+            f"push  session={rec['session_id']} ts={rec['ts']} source={source} "
+            f"backend={rec['backend']} pushed={rec['pushed_count']} "
+            f"token_cost={rec['token_cost']}"
+        )
+    else:
+        print(
+            f"ref   session={rec['session_id']} ts={rec['ts']} "
+            f"pushed={rec['pushed_count']} referenced={rec['referenced_count']} "
+            f"precision={rec['precision']}"
+        )
+
+
+def _cmd_push_metrics_tail(args: argparse.Namespace) -> int:
+    """``athenaeum push-metrics tail`` — the documented NDJSON contract over
+    the push / reference-determination ledgers (issue athenaeum#1479).
+
+    Read-only, thin argv parsing + output shaping over
+    :func:`athenaeum.push_metrics.tail_records` — all the
+    draining/filtering/follow logic lives there.
+    """
+    from athenaeum import push_metrics
+
+    since = None
+    if getattr(args, "since", None):
+        from athenaeum.spend import parse_since
+
+        since = parse_since(args.since)
+
+    records = push_metrics.tail_records(
+        cache_dir=args.cache_dir,
+        wiki_root=_resolve_wiki_root(args),
+        session_id=getattr(args, "session", None),
+        since=since,
+        follow=getattr(args, "follow", False),
+    )
+    try:
+        for rec in records:
+            if args.json:
+                sys.stdout.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            else:
+                _print_tail_row(rec)
+            sys.stdout.flush()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
     """Register ``athenaeum push-metrics`` and its three modes on ``subparsers``."""
     p_parser = subparsers.add_parser(
@@ -226,8 +297,10 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "Push-precision + coverage baseline: compute/record the "
             "precision snapshot, sample sessions for a human-reviewed "
-            "coverage-audit worksheet (issue athenaeum#711), and record a "
-            "single hook-path push (issue athenaeum#1478)."
+            "coverage-audit worksheet (issue athenaeum#711), record a "
+            "single hook-path push (issue athenaeum#1478), and stream the "
+            "documented NDJSON tail contract over the ledgers (issue "
+            "athenaeum#1479)."
         ),
     )
     p_parser.set_defaults(func=cmd_push_metrics)
@@ -383,4 +456,36 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         help='Read {"session_id": ..., "ids": [...], "query": ..., '
         '"backend": ...} from stdin (hook-input shape, mirrors '
         "`athenaeum context --stdin-json`).",
+    )
+
+    tail_p = p_sub.add_parser(
+        "tail",
+        help="Stream NDJSON — one object per push record and per "
+        "reference-determination record, newest-last (issue athenaeum#1479). "
+        "Read-only; never mutates the ledgers. See "
+        "docs/reference/configuration.md ('push-metrics tail — the public "
+        "NDJSON contract') for the documented --json record shape, schema "
+        "version, and compatibility note.",
+    )
+    _add_common(tail_p)
+    tail_p.add_argument(
+        "--session",
+        default=None,
+        metavar="SESSION_ID",
+        help="Only emit records for this consuming session id (exact "
+        "match). Without this, a viewer process that itself calls recall "
+        "observes its own pushes mixed into the stream.",
+    )
+    tail_p.add_argument(
+        "--follow",
+        action="store_true",
+        help="After draining the ledgers, keep polling and emit records "
+        "appended afterward, like `tail -f`. Without it, drain and exit. "
+        "Runs until interrupted (e.g. Ctrl-C).",
+    )
+    tail_p.add_argument(
+        "--since",
+        default=None,
+        help="Only emit records timestamped at/after this bound: relative "
+        "(7d/24h/30m/2w) or absolute ISO-8601. Default: the whole ledger.",
     )

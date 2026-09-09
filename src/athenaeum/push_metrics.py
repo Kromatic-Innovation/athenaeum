@@ -610,6 +610,161 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Tail (issue athenaeum#1479): the documented public NDJSON contract
+# ---------------------------------------------------------------------------
+
+#: Field allowlist for a shaped push-tail record (issue athenaeum#1479). Built
+#: explicitly from the raw ledger dict rather than passed through unchanged —
+#: that indirection is the whole point of this issue: the on-disk row (built by
+#: :meth:`PushRecord.to_dict`) stays free to change; only fields named here are
+#: promoted into the documented CLI-output contract. See
+#: docs/reference/configuration.md ("push-metrics tail — the public NDJSON
+#: contract") for the authoritative shape.
+_TAIL_PUSH_ITEM_FIELDS = ("id", "tier", "scope", "token_cost", "memory_tier")
+
+
+def _shape_tail_push_record(raw: dict[str, Any]) -> dict[str, Any]:
+    """Build one ``record_type: "push"`` tail object from a raw push-ledger row.
+
+    ``source`` is included ONLY when the raw row carries a non-empty value
+    (an explicit MCP ``recall`` push never had the key at all) — the same
+    "absent key means recall" reader rule documented for the raw ledger
+    carries through unchanged to this shaped, public form.
+    """
+    shaped: dict[str, Any] = {
+        "record_type": "push",
+        "v": raw.get("v", SCHEMA_VERSION),
+        "session_id": raw.get("session_id", ""),
+        "ts": raw.get("ts", ""),
+        "query_hash": raw.get("query_hash", ""),
+        "backend": raw.get("backend", ""),
+        "items": [
+            {field: item.get(field) for field in _TAIL_PUSH_ITEM_FIELDS}
+            for item in raw.get("items", [])
+            if isinstance(item, dict)
+        ],
+        "pushed_count": raw.get("pushed_count", 0),
+        "token_cost": raw.get("token_cost", 0),
+        "token_cost_estimated": raw.get("token_cost_estimated", True),
+    }
+    source = raw.get("source")
+    if source:
+        shaped["source"] = source
+    return shaped
+
+
+def _shape_tail_reference_record(raw: dict[str, Any]) -> dict[str, Any]:
+    """Build one ``record_type: "reference"`` tail object from a raw
+    reference-determination ledger row. Same explicit-allowlist discipline as
+    :func:`_shape_tail_push_record`."""
+    return {
+        "record_type": "reference",
+        "v": raw.get("v", SCHEMA_VERSION),
+        "session_id": raw.get("session_id", ""),
+        "ts": raw.get("ts", ""),
+        "pushed_count": raw.get("pushed_count", 0),
+        "referenced_count": raw.get("referenced_count", 0),
+        "referenced_ids": list(raw.get("referenced_ids", [])),
+        "precision": raw.get("precision"),
+    }
+
+
+def _tail_sort_key(rec: dict[str, Any]) -> datetime:
+    """Sort key for newest-last ordering. An unparsable/missing ``ts`` sorts
+    first (oldest), never dropped — a malformed timestamp is a data problem to
+    surface, not to hide by silent exclusion."""
+    return _parse_ts(rec.get("ts")) or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def tail_records(
+    *,
+    cache_dir: Path | None = None,
+    wiki_root: Path | None = None,
+    session_id: str | None = None,
+    since: datetime | None = None,
+    follow: bool = False,
+    poll_interval: float = 0.5,
+    max_polls: int | None = None,
+) -> Iterable[dict[str, Any]]:
+    """Yield the documented NDJSON tail contract: one shaped object per push
+    record and per reference-determination record, newest-last (issue
+    athenaeum#1479).
+
+    Read-only: only calls :func:`read_push_records` / :func:`read_reference_records`
+    (which never mutate the ledgers), never a write path of any kind.
+
+    Args:
+        session_id: when given, only records whose raw ``session_id`` field
+            equals this value (exact match) are emitted. Without it, a viewer
+            process that itself calls ``recall`` observes its own pushes mixed
+            into the stream — the reason this filter exists.
+        since: when given, only records whose ``ts`` is at/after this
+            (timezone-aware) bound are emitted. Callers pass the result of
+            :func:`athenaeum.spend.parse_since`.
+        follow: after draining every currently-on-disk record, keep polling
+            the ledgers and yield newly-appended records as they land — like
+            ``tail -f``. Without it, this generator drains and returns.
+        poll_interval: seconds slept between polls while following. Callers
+            needing a fast, deterministic test loop pass a small value
+            (including ``0``); the CLI default (``0.5``) is a real wall-clock
+            wait.
+        max_polls: bounds the number of follow polls (``None`` = unbounded,
+            the CLI's real behaviour — runs until the caller stops iterating,
+            e.g. Ctrl-C). A test passes a small integer so the loop is
+            provably bounded rather than relying on wall-clock luck.
+
+    Both ledgers are re-read on every drain/poll (the same whole-file read
+    :func:`compute_baseline` and :func:`build_coverage_worksheet` already do)
+    — simple and correct for the append-only ledgers this reads, not tuned
+    for a ledger too large to reread. Ties in ``ts`` are broken by push
+    records before reference records, then by each ledger's own on-disk
+    order (a stable sort over that concatenation) — deterministic, never an
+    arbitrary interleaving.
+    """
+
+    def _matches(rec: dict[str, Any]) -> bool:
+        if session_id is not None and rec.get("session_id") != session_id:
+            return False
+        if since is not None:
+            ts = _parse_ts(rec.get("ts"))
+            if ts is None or ts < since:
+                return False
+        return True
+
+    seen_push = 0
+    seen_ref = 0
+
+    def _drain() -> list[dict[str, Any]]:
+        nonlocal seen_push, seen_ref
+        pushes = read_push_records(cache_dir, wiki_root=wiki_root)
+        refs = read_reference_records(cache_dir)
+        new_pushes = pushes[seen_push:]
+        new_refs = refs[seen_ref:]
+        seen_push = len(pushes)
+        seen_ref = len(refs)
+        batch = [_shape_tail_push_record(r) for r in new_pushes] + [
+            _shape_tail_reference_record(r) for r in new_refs
+        ]
+        batch = [rec for rec in batch if _matches(rec)]
+        batch.sort(key=_tail_sort_key)
+        return batch
+
+    yield from _drain()
+
+    if not follow:
+        return
+
+    import time
+
+    polls = 0
+    while max_polls is None or polls < max_polls:
+        if poll_interval:
+            time.sleep(poll_interval)
+        yield from _drain()
+        polls += 1
+
+
+# ---------------------------------------------------------------------------
 # Reference determination (session end)
 # ---------------------------------------------------------------------------
 

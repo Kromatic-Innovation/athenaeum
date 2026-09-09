@@ -1576,3 +1576,235 @@ class TestDurablePushRecordsPath:
         # records via the old cache-dir default.
         stale = push_metrics.read_push_records(cache_dir)
         assert stale == []
+
+
+# ---------------------------------------------------------------------------
+# tail_records — the documented NDJSON contract (issue athenaeum#1479)
+# ---------------------------------------------------------------------------
+
+
+class TestTailRecords:
+    """``push_metrics.tail_records`` is the logic behind ``athenaeum
+    push-metrics tail --json`` — see also ``tests/test_push_metrics_cli.py``
+    for the CLI-surface tests (argv wiring, --json rendering)."""
+
+    def _seed_push(
+        self, cache_dir: Path, *, session_id: str, source: str = "", uid: str = "u1"
+    ) -> None:
+        if source == push_metrics.SOURCE_HOOK:
+            push_metrics.record_hook_push(session_id, [uid], cache_dir=cache_dir)
+            return
+        record = push_metrics.build_push_record(
+            session_id=session_id,
+            query="q",
+            backend="fts5",
+            hits=[(f"{uid}.md", {"uid": uid, "access": "internal", "audience": ["owner"]}, "body")],
+        )
+        if source:
+            record.source = source
+        push_metrics.record_push(record, cache_dir=cache_dir)
+
+    def _seed_reference(
+        self, cache_dir: Path, *, session_id: str, ts: str, pushed=("u1",), referenced=("u1",)
+    ) -> None:
+        push_metrics.record_reference_result(
+            push_metrics.ReferenceResult(
+                session_id=session_id,
+                ts=ts,
+                pushed_ids=list(pushed),
+                referenced_ids=list(referenced),
+            ),
+            cache_dir=cache_dir,
+        )
+
+    def test_field_set_is_pinned_for_a_push_record(self, tmp_path: Path) -> None:
+        """AC: a test pins the emitted field set, so adding a field is a
+        visible diff and removing one is a caught break."""
+        cache_dir = tmp_path / "cache"
+        self._seed_push(cache_dir, session_id="s1", source=push_metrics.SOURCE_HOOK)
+        [rec] = list(push_metrics.tail_records(cache_dir=cache_dir))
+        assert rec["record_type"] == "push"
+        assert set(rec) == {
+            "record_type",
+            "v",
+            "session_id",
+            "ts",
+            "query_hash",
+            "backend",
+            "items",
+            "pushed_count",
+            "token_cost",
+            "token_cost_estimated",
+            "source",
+        }
+        assert set(rec["items"][0]) == {"id", "tier", "scope", "token_cost", "memory_tier"}
+        assert rec["source"] == "hook"
+
+    def test_field_set_is_pinned_for_an_explicit_recall_push(self, tmp_path: Path) -> None:
+        """An explicit MCP ``recall`` push omits ``source`` entirely — the
+        documented reader rule (absent key means recall) must carry through
+        into the shaped tail contract unchanged."""
+        cache_dir = tmp_path / "cache"
+        self._seed_push(cache_dir, session_id="s1")
+        [rec] = list(push_metrics.tail_records(cache_dir=cache_dir))
+        assert "source" not in rec
+        assert set(rec) == {
+            "record_type",
+            "v",
+            "session_id",
+            "ts",
+            "query_hash",
+            "backend",
+            "items",
+            "pushed_count",
+            "token_cost",
+            "token_cost_estimated",
+        }
+
+    def test_field_set_is_pinned_for_a_reference_record(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        self._seed_reference(cache_dir, session_id="s1", ts="2026-01-01T00:00:00Z")
+        [rec] = list(push_metrics.tail_records(cache_dir=cache_dir))
+        assert rec["record_type"] == "reference"
+        assert set(rec) == {
+            "record_type",
+            "v",
+            "session_id",
+            "ts",
+            "pushed_count",
+            "referenced_count",
+            "referenced_ids",
+            "precision",
+        }
+
+    def test_never_reintroduces_raw_query_text(self, tmp_path: Path) -> None:
+        """Constraint: query_hash stays a hash — the tail contract must not
+        widen the ledger to make output nicer."""
+        cache_dir = tmp_path / "cache"
+        record = push_metrics.build_push_record(
+            session_id="s1", query="a raw query with secrets", backend="fts5", hits=[]
+        )
+        # build_push_record with no hits writes no items; force a session +
+        # item so record_push doesn't no-op.
+        record.items = [
+            push_metrics.PushedItem(id="u1", tier="internal", scope="owner", token_cost=1)
+        ]
+        push_metrics.record_push(record, cache_dir=cache_dir)
+        [rec] = list(push_metrics.tail_records(cache_dir=cache_dir))
+        assert "query" not in rec
+        assert "a raw query with secrets" not in json.dumps(rec)
+        assert rec["query_hash"] == push_metrics._query_hash("a raw query with secrets")
+
+    def test_source_distinguishes_all_three_writers(self, tmp_path: Path) -> None:
+        """Constraint: a consumer must be able to tell hook / sidecar /
+        recall apart — never by elimination."""
+        cache_dir = tmp_path / "cache"
+        self._seed_push(
+            cache_dir, session_id="s1", uid="hook-item", source=push_metrics.SOURCE_HOOK
+        )
+        self._seed_push(cache_dir, session_id="s2", uid="sidecar-item", source="sidecar")
+        self._seed_push(cache_dir, session_id="s3", uid="recall-item")
+
+        by_uid = {r["items"][0]["id"]: r for r in push_metrics.tail_records(cache_dir=cache_dir)}
+        assert by_uid["hook-item"]["source"] == "hook"
+        assert by_uid["sidecar-item"]["source"] == "sidecar"
+        assert "source" not in by_uid["recall-item"]
+
+    def test_session_filter_isolates_one_session_from_a_multi_session_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        """AC: --session filtering verified against a ledger containing
+        multiple sessions."""
+        cache_dir = tmp_path / "cache"
+        self._seed_push(cache_dir, session_id="viewer-session", uid="v1")
+        self._seed_push(cache_dir, session_id="target-session", uid="t1")
+        self._seed_push(cache_dir, session_id="third-session", uid="x1")
+        self._seed_reference(cache_dir, session_id="target-session", ts="2026-01-01T00:00:05Z")
+        self._seed_reference(cache_dir, session_id="viewer-session", ts="2026-01-01T00:00:06Z")
+
+        recs = list(push_metrics.tail_records(cache_dir=cache_dir, session_id="target-session"))
+        assert recs, "expected at least one record for target-session"
+        assert all(r["session_id"] == "target-session" for r in recs)
+        # both a push AND a reference record for the target session are seen
+        assert {r["record_type"] for r in recs} == {"push", "reference"}
+
+    def test_since_filter_excludes_older_records(self, tmp_path: Path) -> None:
+        from datetime import datetime, timezone
+
+        cache_dir = tmp_path / "cache"
+        self._seed_reference(cache_dir, session_id="s1", ts="2020-01-01T00:00:00Z")
+        self._seed_reference(cache_dir, session_id="s1", ts="2030-01-01T00:00:00Z")
+        since = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        recs = list(push_metrics.tail_records(cache_dir=cache_dir, since=since))
+        assert [r["ts"] for r in recs] == ["2030-01-01T00:00:00Z"]
+
+    def test_newest_last_ordering(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        self._seed_reference(cache_dir, session_id="s1", ts="2026-06-01T00:00:00Z")
+        self._seed_reference(cache_dir, session_id="s1", ts="2026-01-01T00:00:00Z")
+        self._seed_reference(cache_dir, session_id="s1", ts="2026-12-01T00:00:00Z")
+        recs = list(push_metrics.tail_records(cache_dir=cache_dir))
+        assert [r["ts"] for r in recs] == [
+            "2026-01-01T00:00:00Z",
+            "2026-06-01T00:00:00Z",
+            "2026-12-01T00:00:00Z",
+        ]
+
+    def test_never_mutates_the_ledgers(self, tmp_path: Path) -> None:
+        """Constraint: read-only, never mutates the ledgers."""
+        cache_dir = tmp_path / "cache"
+        self._seed_push(cache_dir, session_id="s1")
+        self._seed_reference(cache_dir, session_id="s1", ts="2026-01-01T00:00:00Z")
+        push_path = push_metrics.push_records_path(cache_dir)
+        ref_path = push_metrics.reference_records_path(cache_dir)
+        before_push = push_path.read_bytes()
+        before_ref = ref_path.read_bytes()
+        list(push_metrics.tail_records(cache_dir=cache_dir, session_id="s1", since=None))
+        list(push_metrics.tail_records(cache_dir=cache_dir, follow=False))
+        assert push_path.read_bytes() == before_push
+        assert ref_path.read_bytes() == before_ref
+
+    def test_follow_picks_up_a_record_appended_after_draining(self, tmp_path: Path) -> None:
+        """AC: --follow picks up records appended after the command starts.
+
+        Bounded and deterministic (no wall-clock reliance, no sleeps that
+        could hang CI): ``poll_interval=0`` and an explicit ``max_polls``
+        make this an injectable stop condition, not a race against real
+        time. The new record is appended to the ledger IN BETWEEN two
+        ``next()`` calls on the generator, so the test controls exactly
+        when the follow loop is given something new to find.
+        """
+        cache_dir = tmp_path / "cache"
+        self._seed_push(cache_dir, session_id="s1", uid="first")
+
+        gen = push_metrics.tail_records(
+            cache_dir=cache_dir, follow=True, poll_interval=0, max_polls=5
+        )
+        first = next(gen)
+        assert first["items"][0]["id"] == "first"
+
+        # Nothing new yet: append after the generator already drained the
+        # initial snapshot, simulating a ledger that grows while `tail` runs.
+        self._seed_push(cache_dir, session_id="s1", uid="second")
+        second = next(gen)
+        assert second["items"][0]["id"] == "second"
+
+        # The generator terminates once max_polls is exhausted with nothing
+        # further appended — proving the stop condition is real, not an
+        # infinite loop a test would hang on.
+        with pytest.raises(StopIteration):
+            next(gen)
+
+    def test_follow_terminates_at_max_polls_with_nothing_appended(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        gen = push_metrics.tail_records(
+            cache_dir=cache_dir, follow=True, poll_interval=0, max_polls=3
+        )
+        with pytest.raises(StopIteration):
+            next(gen)
+
+    def test_without_follow_drains_and_stops(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        self._seed_push(cache_dir, session_id="s1")
+        recs = list(push_metrics.tail_records(cache_dir=cache_dir, follow=False))
+        assert len(recs) == 1
