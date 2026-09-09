@@ -1562,6 +1562,106 @@ class TestSessionEndReferenceDetermination:
         assert result.session == "sess-no-transcript"
 
 
+class TestSessionEndLiveness:
+    """issue athenaeum#1422: `session_end` is the chosen automatic path for
+    the post-merge push-telemetry liveness assertion — it is invoked by the
+    cwc SessionEnd hook after every interactive session AND by the
+    nightly-after-librarian path, both on the operator's own host where the
+    push-telemetry ledger actually lives (unlike a fresh GitHub Actions
+    runner, which would read INCONCLUSIVE forever). The assertion is
+    read-only and must never affect `exit_code`.
+    """
+
+    def test_liveness_result_is_attached_and_summarized(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        from athenaeum import push_metrics
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+        for i in range(push_metrics.LIVENESS_WINDOW):
+            push_metrics.record_push(
+                push_metrics.build_push_record(
+                    session_id=f"s{i}",
+                    query="q",
+                    backend="fts5",
+                    hits=[("f.md", {"uid": f"u{i}"}, "b")],
+                ),
+                cache_dir=cache,
+            )
+
+        result = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+
+        assert result.liveness is not None
+        assert result.liveness.outcome == push_metrics.LIVENESS_FAIL
+        assert result.exit_code == 0  # never affects exit_code (read-and-assert only)
+        summary = result.summary()
+        assert summary["push_telemetry_liveness"]["outcome"] == push_metrics.LIVENESS_FAIL
+
+    def test_liveness_pass_never_fails_session_end(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        from athenaeum import push_metrics
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+        for i in range(push_metrics.LIVENESS_WINDOW - 1):
+            push_metrics.record_push(
+                push_metrics.build_push_record(
+                    session_id=f"s{i}",
+                    query="q",
+                    backend="fts5",
+                    hits=[("f.md", {"uid": f"u{i}"}, "b")],
+                ),
+                cache_dir=cache,
+            )
+        sidecar_record = push_metrics.build_push_record(
+            session_id="s-sidecar", query="q", backend="fts5", hits=[("f.md", {"uid": "u-sc"}, "b")]
+        )
+        sidecar_record.source = "sidecar"
+        push_metrics.record_push(sidecar_record, cache_dir=cache)
+
+        result = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+        )
+
+        assert result.liveness.outcome == push_metrics.LIVENESS_PASS
+        assert result.exit_code == 0
+
+    def test_runs_on_dry_run_too(self, tmp_path: Path, mock_anthropic: MagicMock) -> None:
+        """Unlike reference determination (skipped on dry-run because it
+        writes), liveness is a pure read and runs even on a preview call."""
+        from athenaeum import push_metrics
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+
+        result = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+            dry_run=True,
+        )
+
+        assert result.liveness is not None
+        assert result.liveness.outcome == push_metrics.LIVENESS_INCONCLUSIVE
+
+
 # ---------------------------------------------------------------------------
 # Issue athenaeum#896 — derived inner budgets wired into cmd_session_end
 # ---------------------------------------------------------------------------

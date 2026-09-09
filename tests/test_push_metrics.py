@@ -1412,3 +1412,117 @@ class TestDurablePushRecordsPath:
         # records via the old cache-dir default.
         stale = push_metrics.read_push_records(cache_dir)
         assert stale == []
+
+
+# ---------------------------------------------------------------------------
+# Liveness assertion (issue athenaeum#1422)
+# ---------------------------------------------------------------------------
+
+
+def _write_raw_row(cache_dir: Path, row: dict) -> None:
+    """Append one raw JSONL row directly to the push-records ledger, bypassing
+    :func:`push_metrics.record_push` — needed here so a test can construct a
+    row with NO ``source`` key at all (an explicit ``recall`` push), which
+    ``build_push_record`` also produces but only via the full record-building
+    path. Writing the raw dict is the more direct, less coupled fixture."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = push_metrics.push_records_path(cache_dir)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
+def _recall_row(n: int) -> dict:
+    """A row with no ``source`` key — the MCP `recall` path's shape."""
+    return {"v": 1, "session_id": f"s{n}", "ts": "2026-01-01T00:00:00Z", "items": []}
+
+
+def _sidecar_row(n: int) -> dict:
+    """A row carrying ``"source": "sidecar"`` — the athenaeum#1362 shape."""
+    row = _recall_row(n)
+    row["source"] = "sidecar"
+    return row
+
+
+class TestSidecarLiveness:
+    """issue athenaeum#1422: read-and-assert liveness check over the
+    push-telemetry ledger's `source` field — never a write, never a raise."""
+
+    def test_absent_ledger_is_inconclusive_never_pass(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"  # never created
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir)
+        assert result.outcome == push_metrics.LIVENESS_INCONCLUSIVE
+        assert result.rows_checked == 0
+        assert result.sidecar_rows == 0
+
+    def test_fewer_than_window_rows_is_inconclusive(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        for i in range(5):
+            _write_raw_row(cache_dir, _recall_row(i))
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20)
+        assert result.outcome == push_metrics.LIVENESS_INCONCLUSIVE
+        assert result.rows_checked == 5
+
+    def test_window_rows_with_zero_sidecar_tags_is_fail(self, tmp_path: Path) -> None:
+        """The observed incident's exact signature: 186 rows, zero
+        sidecar-tagged. A smaller window reproduces the same shape."""
+        cache_dir = tmp_path / "cache"
+        for i in range(20):
+            _write_raw_row(cache_dir, _recall_row(i))
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20)
+        assert result.outcome == push_metrics.LIVENESS_FAIL
+        assert result.rows_checked == 20
+        assert result.sidecar_rows == 0
+        assert "next step" in result.message
+        assert "which copy" in result.message
+
+    def test_at_least_one_sidecar_row_in_window_is_pass(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        for i in range(19):
+            _write_raw_row(cache_dir, _recall_row(i))
+        _write_raw_row(cache_dir, _sidecar_row(19))
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20)
+        assert result.outcome == push_metrics.LIVENESS_PASS
+        assert result.sidecar_rows == 1
+
+    def test_only_the_most_recent_window_rows_are_considered(self, tmp_path: Path) -> None:
+        """A sidecar row OUTSIDE the trailing window must not turn a live
+        FAIL into a false PASS — liveness is about the most RECENT window."""
+        cache_dir = tmp_path / "cache"
+        _write_raw_row(cache_dir, _sidecar_row(0))
+        for i in range(1, 21):
+            _write_raw_row(cache_dir, _recall_row(i))
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20)
+        assert result.outcome == push_metrics.LIVENESS_FAIL
+        assert result.rows_checked == 20
+
+    def test_exactly_window_rows_is_conclusive_not_inconclusive(self, tmp_path: Path) -> None:
+        """Boundary: total == window must be evaluated, not treated as
+        'fewer than window' (AC2's INCONCLUSIVE condition is strictly
+        `< window`, per the module docstring)."""
+        cache_dir = tmp_path / "cache"
+        for i in range(20):
+            _write_raw_row(cache_dir, _recall_row(i))
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20)
+        assert result.outcome != push_metrics.LIVENESS_INCONCLUSIVE
+
+    def test_default_window_is_the_named_constant(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        for i in range(push_metrics.LIVENESS_WINDOW):
+            _write_raw_row(cache_dir, _recall_row(i))
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir)
+        assert result.window == push_metrics.LIVENESS_WINDOW
+        assert result.outcome == push_metrics.LIVENESS_FAIL
+
+    def test_never_raises_on_a_torn_trailing_line(self, tmp_path: Path) -> None:
+        """`read_push_records` already tolerates a torn trailing line
+        (`_read_jsonl`); the liveness assertion must inherit that, never a
+        new raise path over the same file."""
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        path = push_metrics.push_records_path(cache_dir)
+        with path.open("w", encoding="utf-8") as fh:
+            for i in range(20):
+                fh.write(json.dumps(_recall_row(i)) + "\n")
+            fh.write('{"v": 1, "session_id": "torn"')  # no closing brace/newline
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20)
+        assert result.outcome == push_metrics.LIVENESS_FAIL

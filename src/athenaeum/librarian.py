@@ -10065,6 +10065,21 @@ class SessionEndResult:
     # and never pays for the diff.
     dry_run: bool = False
     reindex_would_change: int | None = None
+    # Issue athenaeum#1422: the post-merge push-telemetry liveness assertion
+    # (`push_metrics.check_sidecar_liveness`), read-only and best-effort —
+    # folded into THIS result (never a separate script) so it rides the same
+    # automatic invocations `session_end` already gets: the cwc SessionEnd
+    # hook after every interactive session, and the nightly-after-librarian
+    # path. Both run on the operator's own host, where the ledger actually
+    # lives — unlike a GitHub Actions runner, which starts fresh with no
+    # ledger and would read INCONCLUSIVE forever. Typed as `object | None`
+    # (rather than importing `push_metrics.LivenessResult` at module level)
+    # to avoid a new import edge from this L4 module into L3 `push_metrics`
+    # at class-definition time; the value is always a `LivenessResult` in
+    # practice. Never affects `exit_code` — a telemetry read must never fail
+    # an otherwise-successful SessionEnd (same non-destructive discipline as
+    # every other push_metrics call site in this function).
+    liveness: object | None = None
 
     @property
     def exit_code(self) -> int:
@@ -10092,6 +10107,9 @@ class SessionEndResult:
                 )
         if self.session is not None:
             data["session"] = self.session
+        if self.liveness is not None:
+            # `object | None` above; always a `LivenessResult` when set.
+            data["push_telemetry_liveness"] = self.liveness.to_dict()  # type: ignore[attr-defined]
         return data
 
 
@@ -10254,6 +10272,26 @@ def session_end(
             session, cache_dir=cache_dir, config=config, wiki_root=wiki_root
         )
 
+    # Issue athenaeum#1422: post-merge sidecar-liveness assertion. Read-only
+    # (never mutates the ledger, never raises), so unlike the reference
+    # determination above it runs unconditionally — on a dry-run too — at
+    # negligible cost (one JSONL read). This is the chosen automatic path:
+    # `session_end` is invoked by the cwc SessionEnd hook after every
+    # interactive session AND by the nightly-after-librarian path (see this
+    # function's own docstring), both on the operator's host where the
+    # ledger lives, so the assertion actually gets exercised against real
+    # data on every run instead of reading INCONCLUSIVE forever on a fresh
+    # CI runner. Folded into `SessionEndResult.summary()` rather than a
+    # bare log line so it is visible in the SAME JSON line
+    # `cmd_session_end` already prints on every invocation.
+    from athenaeum import push_metrics
+
+    liveness = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, wiki_root=wiki_root)
+    if liveness.outcome == push_metrics.LIVENESS_FAIL:
+        log.warning("session-end: %s", liveness.message)
+    else:
+        log.debug("session-end: %s", liveness.message)
+
     return SessionEndResult(
         ingest=ingest_result,
         reindexed=reindexed,
@@ -10263,4 +10301,5 @@ def session_end(
         session=session,
         dry_run=dry_run,
         reindex_would_change=reindex_would_change,
+        liveness=liveness,
     )
