@@ -606,6 +606,88 @@ def test_coverage_audit_exclude_session_ambiguous_prefix_is_a_loud_failure(tmp_p
 
 
 # ---------------------------------------------------------------------------
+# liveness (issue athenaeum#1422)
+# ---------------------------------------------------------------------------
+
+
+def test_liveness_inconclusive_on_empty_ledger(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    rc, out = _run(
+        ["push-metrics", "liveness", "--cache-dir", str(cache_dir), "--json"]
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["outcome"] == "inconclusive"
+
+
+def test_liveness_fail_exits_nonzero(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    for i in range(20):
+        push_metrics.record_push(
+            push_metrics.build_push_record(
+                session_id=f"s{i}",
+                query="q",
+                backend="fts5",
+                hits=[("f.md", {"uid": f"u{i}"}, "b")],
+            ),
+            cache_dir=cache_dir,
+        )
+    rc, out = _run(
+        ["push-metrics", "liveness", "--cache-dir", str(cache_dir), "--window", "20", "--json"]
+    )
+    assert rc == 1
+    payload = json.loads(out)
+    assert payload["outcome"] == "fail"
+    assert payload["sidecar_rows"] == 0
+
+
+def test_liveness_pass_exits_zero(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    for i in range(19):
+        push_metrics.record_push(
+            push_metrics.build_push_record(
+                session_id=f"s{i}",
+                query="q",
+                backend="fts5",
+                hits=[("f.md", {"uid": f"u{i}"}, "b")],
+            ),
+            cache_dir=cache_dir,
+        )
+    sidecar_record = push_metrics.build_push_record(
+        session_id="s-sidecar", query="q", backend="fts5", hits=[("f.md", {"uid": "u-sc"}, "b")]
+    )
+    sidecar_record.source = "sidecar"
+    push_metrics.record_push(sidecar_record, cache_dir=cache_dir)
+    rc, out = _run(
+        ["push-metrics", "liveness", "--cache-dir", str(cache_dir), "--window", "20", "--json"]
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["outcome"] == "pass"
+    assert payload["sidecar_rows"] == 1
+
+
+def test_liveness_text_output_names_next_step_on_fail(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    for i in range(20):
+        push_metrics.record_push(
+            push_metrics.build_push_record(
+                session_id=f"s{i}",
+                query="q",
+                backend="fts5",
+                hits=[("f.md", {"uid": f"u{i}"}, "b")],
+            ),
+            cache_dir=cache_dir,
+        )
+    rc, out = _run(
+        ["push-metrics", "liveness", "--cache-dir", str(cache_dir), "--window", "20"]
+    )
+    assert rc == 1
+    assert "next step" in out
+    assert "which copy" in out
+
+
+# ---------------------------------------------------------------------------
 # `push-metrics record` — hook-path push recording entry point (athenaeum#1478)
 # ---------------------------------------------------------------------------
 
@@ -871,7 +953,7 @@ def test_parser_tree_binds_func_for_push_metrics_subcommands() -> None:
         for a in push_metrics_parser._actions
         if isinstance(a, argparse._SubParsersAction)
     )
-    assert set(inner.choices) == {"baseline", "coverage-audit", "record"}
+    assert set(inner.choices) == {"baseline", "coverage-audit", "liveness", "record"}
     for name, sub in inner.choices.items():
         assert (
             sub.get_default("func") is not None

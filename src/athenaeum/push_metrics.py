@@ -578,6 +578,136 @@ def read_push_records(
     return _read_jsonl(path)
 
 
+# ---------------------------------------------------------------------------
+# Liveness assertion (issue athenaeum#1422)
+# ---------------------------------------------------------------------------
+
+#: Window size for the sidecar-liveness assertion below. The incident this
+#: assertion exists to catch: the live ledger accumulated 186 total rows with
+#: ZERO ``"source":"sidecar"`` rows before anyone noticed — the sidecar code
+#: was merged, tested, and correct, but the deployed hook pointed at a
+#: different (unwired) copy, so it never actually ran. 20 is chosen so the
+#: SAME failure is flagged roughly an order of magnitude sooner than the 186
+#: rows it took a human to notice it manually, while still being wide enough
+#: to span several turns/sessions so one MCP-only session (no sidecar
+#: activity, e.g. an agent that only ever calls `recall` explicitly) doesn't
+#: read as a false FAIL by itself.
+LIVENESS_WINDOW = 20
+
+#: Outcome literals for :class:`LivenessResult`.
+LIVENESS_PASS = "pass"
+LIVENESS_FAIL = "fail"
+LIVENESS_INCONCLUSIVE = "inconclusive"
+
+#: AC3: the FAIL message's mandated next diagnostic step, verbatim — the
+#: observed incident was a ready-time-clean, deploy-time-wrong artifact (two
+#: merged PRs, an epic and four child issues, all aimed at a reference copy
+#: wired to nothing), so the actionable next step is never "the code must be
+#: broken" but "find out which copy is actually live."
+_LIVENESS_NEXT_STEP = (
+    "next step: determine which copy of the artifact is actually live before "
+    "assuming the code is wrong"
+)
+
+
+@dataclass
+class LivenessResult:
+    """Outcome of one sidecar-liveness assertion run (issue athenaeum#1422).
+
+    ``outcome`` is one of :data:`LIVENESS_PASS`, :data:`LIVENESS_FAIL`,
+    :data:`LIVENESS_INCONCLUSIVE` — never inferred by a caller from the other
+    fields, always this field directly, so "empty ledger reads as PASS" (the
+    exact hazard AC2 rules out) cannot silently regress at a call site.
+    """
+
+    outcome: str
+    message: str
+    window: int
+    rows_checked: int
+    sidecar_rows: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "outcome": self.outcome,
+            "message": self.message,
+            "window": self.window,
+            "rows_checked": self.rows_checked,
+            "sidecar_rows": self.sidecar_rows,
+        }
+
+
+def check_sidecar_liveness(
+    *,
+    cache_dir: Path | None = None,
+    wiki_root: Path | None = None,
+    window: int = LIVENESS_WINDOW,
+) -> LivenessResult:
+    """Read-only assertion: does the push-telemetry ledger show the sidecar
+    is actually running?
+
+    Reads the ledger via :func:`read_push_records` (the sanctioned reader —
+    never re-parses the JSONL itself) and checks the most recent *window*
+    rows for at least one ``"source":"sidecar"`` row, per the documented
+    reader rule (``docs/reference/configuration.md`` §"The sidecar is a second
+    writer"): ``rec.get("source") == "sidecar"`` marks a sidecar push; a
+    missing key or any other value is an explicit ``recall`` push.
+
+    Three outcomes, distinguished explicitly (AC2) — an empty or absent
+    ledger NEVER reads as PASS:
+
+    - :data:`LIVENESS_INCONCLUSIVE` — fewer than *window* rows recorded
+      (this also covers an absent ledger: :func:`read_push_records` returns
+      ``[]`` for a missing file, and ``0 < window``). Not enough signal to
+      assert anything either way.
+    - :data:`LIVENESS_FAIL` — *window* rows exist and NONE is sidecar-tagged
+      — the observed incident's exact signature.
+    - :data:`LIVENESS_PASS` — at least one of the most recent *window* rows
+      is sidecar-tagged.
+
+    Never raises: this mirrors every other reader in this module (a ledger
+    read must never be able to break the caller it's embedded in — see
+    :func:`record_push`'s docstring for the write-side version of the same
+    discipline).
+    """
+    records = read_push_records(cache_dir, wiki_root=wiki_root)
+    total = len(records)
+    if total < window:
+        return LivenessResult(
+            outcome=LIVENESS_INCONCLUSIVE,
+            message=(
+                f"push-telemetry liveness: INCONCLUSIVE — {total} row(s) recorded "
+                f"(ledger absent or under the {window}-row window); not enough "
+                "signal to assert sidecar liveness yet."
+            ),
+            window=window,
+            rows_checked=total,
+            sidecar_rows=0,
+        )
+    recent = records[-window:]
+    sidecar_rows = sum(1 for rec in recent if rec.get("source") == "sidecar")
+    if sidecar_rows == 0:
+        return LivenessResult(
+            outcome=LIVENESS_FAIL,
+            message=(
+                f"push-telemetry liveness: FAIL — 0/{window} of the most recent "
+                f"rows are sidecar-tagged; {_LIVENESS_NEXT_STEP}."
+            ),
+            window=window,
+            rows_checked=window,
+            sidecar_rows=0,
+        )
+    return LivenessResult(
+        outcome=LIVENESS_PASS,
+        message=(
+            f"push-telemetry liveness: PASS — {sidecar_rows}/{window} of the "
+            "most recent rows are sidecar-tagged."
+        ),
+        window=window,
+        rows_checked=window,
+        sidecar_rows=sidecar_rows,
+    )
+
+
 def read_reference_records(cache_dir: Path | None = None) -> list[dict[str, Any]]:
     """Read every reference-determination record. Tolerates a torn trailing
     line; never raises. Public counterpart to :func:`read_push_records`

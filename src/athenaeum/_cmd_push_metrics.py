@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum push-metrics {baseline,coverage-audit,record}`` — v6 MVP (a),
-issue athenaeum#711; ``record`` added by issue athenaeum#1478.
+"""``athenaeum push-metrics {baseline,coverage-audit,liveness,record}`` — v6
+MVP (a), issue athenaeum#711; ``liveness`` added by issue athenaeum#1422,
+``record`` by issue athenaeum#1478.
 
-Three subcommands over :mod:`athenaeum.push_metrics`:
+Four subcommands over :mod:`athenaeum.push_metrics`:
 
 - ``baseline``       compute precision + coverage over a stated window and
                        write/append a dated snapshot into
@@ -20,6 +21,17 @@ Three subcommands over :mod:`athenaeum.push_metrics`:
                        concentration, window-mate filter removal, policy-set
                        bounds) — never a per-candidate relevance marking or a
                        measured miss rate (issue athenaeum#1036).
+- ``liveness``        read-only assertion (issue athenaeum#1422):
+                       PASS/FAIL/INCONCLUSIVE on whether the most recent
+                       :data:`athenaeum.push_metrics.LIVENESS_WINDOW` rows
+                       include at least one ``"source":"sidecar"`` row.
+                       Exits non-zero on FAIL for CI/manual invocation; the
+                       automatic path this issue's AC5 requires is
+                       :func:`athenaeum.librarian.session_end`, which calls
+                       the same underlying assertion on every invocation —
+                       see that function's docstring for why THAT call site
+                       (not a scheduled GitHub Actions job) is the one that
+                       actually has the ledger to read.
 - ``record``          the hook-path push-recording entry point (issue
                        athenaeum#1478): the per-turn ``UserPromptSubmit``
                        recall hook (``code-workspace-config#3227``, a separate
@@ -50,11 +62,12 @@ from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
 
 def cmd_push_metrics(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum push-metrics {baseline,coverage-audit,record}``."""
+    """Dispatch ``athenaeum push-metrics {baseline,coverage-audit,liveness,record}``."""
     sub = getattr(args, "push_metrics_target", None)
-    if sub not in ("baseline", "coverage-audit", "record"):
+    if sub not in ("baseline", "coverage-audit", "liveness", "record"):
         print(
-            "usage: athenaeum push-metrics {baseline,coverage-audit,record} [...]",
+            "usage: athenaeum push-metrics "
+            "{baseline,coverage-audit,liveness,record} [...]",
             file=sys.stderr,
         )
         return 2
@@ -63,6 +76,19 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
         return _cmd_push_metrics_record(args)
 
     from athenaeum import push_metrics
+
+    if sub == "liveness":
+        window = args.window if args.window is not None else push_metrics.LIVENESS_WINDOW
+        result = push_metrics.check_sidecar_liveness(
+            cache_dir=args.cache_dir,
+            wiki_root=_resolve_wiki_root(args),
+            window=window,
+        )
+        if args.json:
+            sys.stdout.write(json.dumps(result.to_dict()) + "\n")
+        else:
+            print(result.message)
+        return 1 if result.outcome == push_metrics.LIVENESS_FAIL else 0
 
     if sub == "baseline":
         since = None
@@ -340,6 +366,21 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         "ids is a hard error (exit 1), never a silent zero-effect success.",
     )
 
+    liveness_p = p_sub.add_parser(
+        "liveness",
+        help="Read-only assertion (issue athenaeum#1422): PASS if any of the "
+        "most recent --window rows is sidecar-tagged, FAIL (exit 1) if "
+        "--window rows exist and none is, INCONCLUSIVE (exit 0) if fewer "
+        "than --window rows are recorded (including an absent ledger).",
+    )
+    _add_common(liveness_p)
+    liveness_p.add_argument(
+        "--window",
+        type=int,
+        default=None,
+        help="Row-count window to check (default: "
+        "athenaeum.push_metrics.LIVENESS_WINDOW).",
+    )
     record_p = p_sub.add_parser(
         "record",
         help="Record one hook-path push (issue athenaeum#1478): the "
