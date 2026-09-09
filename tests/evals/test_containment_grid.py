@@ -78,6 +78,64 @@ def test_cell_keys_are_unique_and_stable() -> None:
         assert variant.cell_key() != a.cell_key()
 
 
+@pytest.mark.parametrize(
+    "cell_a, cell_b",
+    [
+        pytest.param(
+            GridCell(probe="a|b", arm="c", corpus_scale="core", replicate=0),
+            GridCell(probe="a", arm="b|c", corpus_scale="core", replicate=0),
+            id="pipe-the-old-delimiter",
+        ),
+        pytest.param(
+            GridCell(probe="a,b", arm="c", corpus_scale="core", replicate=0),
+            GridCell(probe="a", arm="b,c", corpus_scale="core", replicate=0),
+            id="comma-json-array-separator",
+        ),
+        pytest.param(
+            GridCell(probe='a"b', arm="c", corpus_scale="core", replicate=0),
+            GridCell(probe="a", arm='b"c', corpus_scale="core", replicate=0),
+            id="double-quote-json-string-delimiter",
+        ),
+        pytest.param(
+            GridCell(probe="a\\b", arm="c", corpus_scale="core", replicate=0),
+            GridCell(probe="a", arm="b\\c", corpus_scale="core", replicate=0),
+            id="backslash-json-escape-character",
+        ),
+        pytest.param(
+            GridCell(probe="a:b", arm="c", corpus_scale="core", replicate=0),
+            GridCell(probe="a", arm="b:c", corpus_scale="core", replicate=0),
+            id="colon-json-kv-separator",
+        ),
+        pytest.param(
+            GridCell(probe="[a", arm="b]", corpus_scale="core", replicate=0),
+            GridCell(probe="[a,b]", arm="", corpus_scale="core", replicate=0),
+            id="brackets-json-array-delimiters",
+        ),
+    ],
+)
+def test_cell_key_is_injective_against_adversarial_delimiter_content(
+    cell_a: GridCell, cell_b: GridCell
+) -> None:
+    """Two DISTINCT cells must never collide on cell_key, even when a
+    component contains a character the encoding itself uses as a
+    separator (issue athenaeum#1521 PR review, finding 1). The first case
+    ("pipe-the-old-delimiter") is the literal collision the bare
+    ``f"{probe}|{arm}|..."`` join used to produce: both cells joined to the
+    identical string ``"a|b|c|core|0"``."""
+    assert cell_a != cell_b, "test setup bug: cells must be genuinely distinct"
+    assert cell_a.cell_key() != cell_b.cell_key()
+
+
+def test_cell_key_round_trips_to_the_exact_component_tuple() -> None:
+    """Direct proof of injectivity, not just spot-checked pairs: decoding a
+    cell_key recovers exactly the tuple that produced it."""
+    import json
+
+    cell = GridCell(probe='we,ird"stuff\\|:[]', arm="c", corpus_scale="core", replicate=7)
+    decoded = json.loads(cell.cell_key())
+    assert decoded == [cell.probe, cell.arm, cell.corpus_scale, cell.replicate]
+
+
 def test_unknown_scale_is_rejected() -> None:
     with pytest.raises(ValueError, match="unknown scale"):
         build_grid(

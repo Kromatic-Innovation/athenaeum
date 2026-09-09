@@ -56,7 +56,7 @@ class GridCell:
     """One (probe, arm, corpus scale, replicate) unit of grid work.
 
     These four fields are the cell's STABLE IDENTITY — :meth:`cell_key`
-    hashes exactly them, nothing else. Anything that changes what work a
+    encodes exactly them, nothing else. Anything that changes what work a
     cell represents (a fifth axis, in a future extension) must join this
     identity, or two genuinely different cells could collide on the same
     result-store key and one would silently shadow the other.
@@ -68,8 +68,31 @@ class GridCell:
     replicate: int
 
     def cell_key(self) -> str:
-        """Stable identity key for the append-only result store."""
-        return f"{self.probe}|{self.arm}|{self.corpus_scale}|{self.replicate}"
+        """Stable identity key for the append-only result store.
+
+        A canonical JSON encoding of the ``(probe, arm, corpus_scale,
+        replicate)`` tuple, NOT a bare ``"|"``-joined string (issue
+        athenaeum#1521 PR review, finding 1: a naive delimiter join collides
+        whenever a component itself contains the delimiter — e.g.
+        ``probe="a|b", arm="c"`` and ``probe="a", arm="b|c"`` both joined to
+        ``"a|b|c|core|0"``, which means the resume logic would have silently
+        treated an unrun cell as already-paid-for). JSON array encoding is
+        injective for this fixed-position, fixed-type tuple: quoting and
+        backslash-escaping make component boundaries unambiguous regardless
+        of what characters a component contains, and ``json.loads(cell_key())``
+        round-trips to the exact original tuple, which two DIFFERENT tuples
+        could never both do.
+
+        The key FORMAT is not a stable, documented contract — nothing in
+        this repo persists a result-store file across a code change (issue
+        athenaeum#1521 shipped with none committed), so there is no
+        migration concern today, but a reader should not assume today's
+        JSON shape is guaranteed not to change again.
+        """
+        return json.dumps(
+            [self.probe, self.arm, self.corpus_scale, self.replicate],
+            separators=(",", ":"),
+        )
 
 
 @dataclass(frozen=True)
