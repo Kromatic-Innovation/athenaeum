@@ -95,6 +95,18 @@ resolver cannot silently join the exclusion set without this file changing):
   bottom of this file, which sets REAL in-vocabulary values and asserts both
   the yaml key and the env var are read.
 
+- ``resolve_recall_relevance_floor`` (issue athenaeum#1492): its first two
+  parameters are ``(config, backend_name)`` — a REQUIRED, caller-supplied
+  ``backend_name`` positional after ``config``, plus a keyword-only
+  ``unprompted`` flag that selects between two independently-resolved knob
+  families (the explicit-call floor vs. the push-path floor, AC3). Neither
+  shape fits this module's two generic calling conventions (bare
+  ``fn(config)`` or ``fn(knowledge_root, config)``), so — same "excluded
+  from generic, covered by a direct test" treatment as ``resolve_model`` —
+  it is exercised directly in ``TestResolveRecallRelevanceFloorDirect``,
+  which calls it with real ``backend_name``/``unprompted`` combinations for
+  both the yaml-key and the env-var channel.
+
 Every other resolver goes through the full generic check.
 """
 
@@ -139,6 +151,10 @@ _NO_YAML_KEY = frozenset({"resolve_cache_dir", "resolve_reasoning_tier_any_scree
 _GENERIC_HELPER_SIGNATURE = frozenset(
     {
         "resolve_model",
+        # Issue athenaeum#1492: resolved per (backend_name, unprompted); the
+        # generic prober only ever calls fn(config), so it cannot supply
+        # either. Exercised directly in TestResolveRecallRelevanceFloorDirect.
+        "resolve_recall_relevance_floor",
         # Issue athenaeum#1418: family-parameterized retention resolvers, same
         # shape problem as resolve_model — the generic prober only ever
         # calls fn(config), and `family` is a required second positional
@@ -550,6 +566,44 @@ class TestResolveModelDirect:
             "parity_probe", "ATHENAEUM_PARITY_PROBE_MODEL", "code-default", None
         )
         assert result == "code-default"
+
+
+class TestResolveRecallRelevanceFloorDirect:
+    """Direct coverage for the ``(config, backend_name, *, unprompted)`` shape
+    the generic prober can't call (issue athenaeum#1492; see module docstring).
+    """
+
+    def test_yaml_knob_is_read_per_backend(self) -> None:
+        config = {"recall": {"relevance_floor": {"fts5": -6.0, "keyword": 12.0}}}
+        assert config_mod.resolve_recall_relevance_floor(config, "fts5") == -6.0
+        assert config_mod.resolve_recall_relevance_floor(config, "keyword") == 12.0
+
+    def test_push_yaml_knob_is_read_independently(self) -> None:
+        config = {"recall": {"relevance_floor": {"fts5": -2.0, "push": {"fts5": -9.0}}}}
+        assert config_mod.resolve_recall_relevance_floor(config, "fts5", unprompted=False) == -2.0
+        assert config_mod.resolve_recall_relevance_floor(config, "fts5", unprompted=True) == -9.0
+
+    def test_env_var_is_read_and_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_RECALL_MIN_SCORE_KEYWORD", raising=False)
+        monkeypatch.setenv("ATHENAEUM_RECALL_MIN_SCORE_KEYWORD", "42")
+        config = {"recall": {"relevance_floor": {"keyword": 5.0}}}
+        assert config_mod.resolve_recall_relevance_floor(config, "keyword") == 42.0
+
+    def test_push_env_var_is_independent_of_explicit_call_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_RECALL_MIN_SCORE_FTS5", raising=False)
+        monkeypatch.delenv("ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5", raising=False)
+        monkeypatch.setenv("ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5", "-11")
+        assert config_mod.resolve_recall_relevance_floor(None, "fts5", unprompted=False) is None
+        assert config_mod.resolve_recall_relevance_floor(None, "fts5", unprompted=True) == -11.0
+
+    def test_default_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for key in list(__import__("os").environ):
+            if key.startswith("ATHENAEUM_RECALL"):
+                monkeypatch.delenv(key, raising=False)
+        assert config_mod.resolve_recall_relevance_floor(None, "fts5") is None
+        assert config_mod.resolve_recall_relevance_floor(None, "keyword", unprompted=True) is None
 
 
 # ---------------------------------------------------------------------------

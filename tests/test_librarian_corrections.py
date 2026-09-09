@@ -14,6 +14,7 @@ import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -903,3 +904,155 @@ class TestHandoffIdempotency:
             "idempotency on (batch_id, sorted correction_id set) was violated"
         )
         assert handoff_files_pass_1 == handoff_files_pass_2
+
+
+class TestAllowlistRejectionRedaction:
+    """athenaeum#1419: a correction rejected for an allowlist reason must not leak its
+    value onto any compiled wiki page, and must not accumulate an unbounded
+    per-batch "this failed" bullet on the target entity's page either.
+
+    This is a genuine end-to-end regression test, not a unit check on the
+    redaction helper: it submits a real correction batch for `emails` (an
+    attribute deliberately absent from the allowlist), lets the correction
+    phase reject it and write the real `write_correction_handoff` note, and
+    then runs the ACTUAL entity-tier compile pass (`athenaeum.librarian.run`)
+    against a worst-case "leaky" mocked LLM that echoes verbatim whatever
+    text it is shown back into the page it writes -- a positive control: if
+    the rejected address ever reaches a compile-tier prompt, this mock
+    guarantees it reaches a compiled page too. The test then asserts the
+    address is absent from EVERY page under `wiki/`.
+    """
+
+    def test_emails_correction_rejected_by_allowlist_never_reaches_compiled_page(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anthropic as anthropic_mod
+
+        from athenaeum.compiled_exempt import load_exempt
+
+        address = "alice.leak@example.org"
+
+        root = tmp_path / "knowledge"
+        root.mkdir()
+        wiki = root / "wiki"
+        (wiki / "_schema").mkdir(parents=True)
+        (wiki / "_schema" / "types.md").write_text(
+            "# Types\n\n| Type |\n|------|\n| person |\n| company |\n"
+        )
+        (wiki / "_schema" / "tags.md").write_text("# Tags\n\n| Tag |\n|-----|\n| active |\n")
+        (wiki / "_schema" / "access-levels.md").write_text(
+            "# Access\n\n| Level |\n|-------|\n| internal |\n"
+        )
+        _write_page(wiki, "person-a.md", {"uid": "person-a", "type": "person", "name": "A"})
+
+        raw = root / "raw" / "enrichment-service"
+        raw.mkdir(parents=True)
+        batch_path = raw / "20260904T155314Z-38e5f1b0.jsonl"
+        batch_path.write_text(
+            _batch(
+                {
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "op": "add",
+                    "field": "emails",
+                    "value": address,
+                    "source": "api:apollo",
+                    "observed_at": "2026-09-04T15:53:14Z",
+                },
+                submitter="enrichment-service",
+            )
+        )
+
+        # No "emails" entry at all -- deliberately absent from the allowlist
+        # (§6.3), same as production. Empty corrections config is enough to
+        # reject every field; no other config needed.
+        _git_init(root)
+
+        call_log: list[str] = []
+
+        def _leaky_responder(**kwargs: object) -> MagicMock:
+            """Worst-case positive-control LLM double: echoes whatever text
+            it is shown straight back into its response. If the rejected
+            address ever reaches this call's prompt, it reaches the entity
+            it "classifies"/"creates" too -- so a clean wiki afterwards is a
+            real assertion about what the pipeline fed the compiler, not an
+            artifact of a mock that never looked at its input.
+            """
+            user_msg = kwargs["messages"][0]["content"]  # type: ignore[index]
+            call_log.append(user_msg)
+            resp = MagicMock()
+            if len(call_log) == 1:
+                entity = {
+                    "name": "Echoed Handoff Entity",
+                    # Deliberately "company", not "person" -- issue athenaeum#1183
+                    # refuses any LLM full-page (re)write for a `person` target
+                    # regardless of this issue's fix, which would make a
+                    # `person`-typed positive control fail for an unrelated
+                    # reason and mask what this test is actually checking.
+                    "entity_type": "company",
+                    "tags": [],
+                    "access": "internal",
+                    "observations": user_msg,
+                }
+                resp.content = [MagicMock(text=json.dumps([entity]))]
+            else:
+                resp.content = [MagicMock(text=f"# Echoed Handoff Entity\n\n{user_msg}\n")]
+            return resp
+
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = _leaky_responder
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+
+        rc = run(raw_root=root / "raw", wiki_root=wiki, knowledge_root=root, max_runtime=30)
+        assert rc == 0
+
+        # The batch was rejected at tier 0 (attribute not on the allowlist)
+        # and a handoff note was written.
+        handoff_files = sorted(raw.glob("*.md"))
+        assert len(handoff_files) == 1, "expected exactly one handoff note"
+        handoff_text = handoff_files[0].read_text()
+        assert "emails" in handoff_text
+        assert "attribute not on the allowlist" in handoff_text
+        assert "correction_id=" in handoff_text
+        # AC1 (note-level): the note itself never quotes the rejected value.
+        assert address not in handoff_text
+
+        # AC3 mechanism: the handoff note is marked compiled-exempt, so
+        # discovery never offers it to the reasoning tiers -- this is what
+        # actually bounds the accumulation (redaction alone would still add
+        # one non-PII bullet per rejected batch, forever).
+        exempt_refs = load_exempt(root)
+        assert f"enrichment-service/{handoff_files[0].name}" in exempt_refs
+
+        # The leaky positive-control LLM was never even invoked with this
+        # content -- the exemption kept it out of every compile-tier prompt.
+        assert call_log == [], (
+            "the handoff note reached an LLM prompt -- compiled-exempt "
+            "marking did not take effect (AC1/AC3 mechanism failed)"
+        )
+
+        # AC1 (compiled-surface, the actual end-to-end claim): the address
+        # is absent from EVERY compiled wiki page body or frontmatter,
+        # regardless of which page it might have landed on.
+        wiki_pages = [p for p in wiki.rglob("*.md") if "_schema" not in p.parts]
+        assert wiki_pages, "expected at least the seeded person-a.md page"
+        for page in wiki_pages:
+            text = page.read_text()
+            assert address not in text, f"leaked address found in {page}"
+
+        # AC2: the value is not destroyed -- it is recoverable, unredacted,
+        # from the audit ledger, keyed by the SAME correction_id the
+        # (redacted) note points a human at.
+        ledger_path = wiki / "_corrections_applied.jsonl"
+        assert ledger_path.exists()
+        ledger_records = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+        redacted_payloads = [
+            payload
+            for record in ledger_records
+            for payload in record.get("redacted_correction_payloads", [])
+        ]
+        assert any(p["value"] == address and p["field"] == "emails" for p in redacted_payloads), (
+            "the rejected address must remain recoverable, unredacted, in the "
+            "audit ledger (AC2)"
+        )
