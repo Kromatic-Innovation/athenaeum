@@ -290,12 +290,30 @@ class TestGate1ZeroMovement:
         assert rels.get("subject") == Relation.UNKNOWN
         assert Relation.DISJOINT not in rels.values()
 
-    def test_both_pages_fully_uncoordinated_settles_nothing(self) -> None:
+    def test_both_pages_fully_uncoordinated_settles_only_subject_as_unknown(self) -> None:
         """The corpus's actual current state (issue athenaeum#1244's baseline):
-        no valid-time/scope/subject coordinates anywhere -> every separator
-        dimension is UNKNOWN (both-null) -> Gate 1 settles nothing."""
+        no valid-time/scope/subject coordinates anywhere.
+
+        Issue athenaeum#1483 revised ``_null_relation``'s both-null handling
+        (``src/athenaeum/dimensions.py``): a ``null_means=universal``
+        dimension with both sides absent now reads EQUAL, not UNKNOWN --
+        two claims that are both valid-always / scoped-everywhere occupy the
+        SAME territory. ``valid-time`` and ``scope`` are ``universal``, so
+        an uncoordinated pair settles them as EQUAL. ``subject`` is
+        ``null_means=unknown`` by design (an absent subject on both sides
+        must never be inferred as a co-subject match) and is UNCHANGED:
+        still UNKNOWN. So Gate 1 no longer "settles nothing" on a fully
+        uncoordinated pair -- it settles two of three consulted dimensions,
+        and leaves exactly ``subject`` open. This is NOT the athenaeum#1244
+        live-corpus backfill (no ``subject``/``claimed_scope`` VALUES are
+        authored here or anywhere by this issue) -- it is this repo's
+        already-shipped dimension semantics applying uniformly to every
+        pair, backfilled data or not.
+        """
         meta_a: dict[str, object] = {"uid": "aaa111", "type": "concept", "name": "A"}
         meta_b: dict[str, object] = {"uid": "bbb222", "type": "concept", "name": "B"}
         rels = gate1_separator_relations(DEFAULT_REGISTRY, meta_a, meta_b)
         assert Relation.DISJOINT not in rels.values()
-        assert all(rel == Relation.UNKNOWN for rel in rels.values())
+        assert rels.get("valid-time") == Relation.EQUAL
+        assert rels.get("scope") == Relation.EQUAL
+        assert rels.get("subject") == Relation.UNKNOWN
