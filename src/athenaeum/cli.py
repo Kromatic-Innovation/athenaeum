@@ -24,7 +24,8 @@ reresolve-questions), ``_cmd_curate`` (dedupe/claims/auto-memory),
 ``_cmd_questions``, ``_cmd_merges``,
 ``_cmd_decisions``, ``_cmd_authority``, ``_cmd_axiom``, ``_cmd_calibration``,
 ``_cmd_outbound``, ``_cmd_drain``, ``_cmd_storage``, ``_cmd_push_metrics``
-(push-metrics baseline/coverage-audit, issue athenaeum#711),
+(push-metrics baseline/coverage-audit, issue athenaeum#711;
+push-metrics liveness, issue athenaeum#1422),
 ``_cmd_memory_class`` (memory-class backfill, issue athenaeum#996),
 ``_cmd_verdicts`` (verdict ledger inspection, issue athenaeum#712),
 ``_cmd_explain_routing`` (explain-routing, issue athenaeum#1176),
