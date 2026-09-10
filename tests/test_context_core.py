@@ -341,9 +341,13 @@ def test_no_tier_predicate_in_source() -> None:
     built in ``_query_fts5``, OR on the vector-hit metadata lookup built in
     ``_query_vector`` — the original gate had two enforcement surfaces, and
     a fix that only closes one reintroduces the divergence with the sign
-    flipped. Also checked: no call into the tier-weight scoring machinery
-    (:mod:`athenaeum.memory_tiers`'s ``TIER_WEIGHTS``/``tier_weight``/
-    ``push_score``), which this module must never import for ranking.
+    flipped. Also checked: no call into tier-weight scoring machinery
+    (``TIER_WEIGHTS``/``tier_weight``/``push_score`` -- the tier-weighted
+    formula :mod:`athenaeum.memory_tiers` carried until issue athenaeum#1353
+    deleted it for having no production caller), which this module must
+    never import for ranking -- a regression guard against either the
+    names being reintroduced upstream and re-imported here, or a
+    same-named local reimplementation.
     """
     text = CONTEXT_PY.read_text(encoding="utf-8")
 

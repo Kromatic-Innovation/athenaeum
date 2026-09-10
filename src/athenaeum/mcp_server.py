@@ -334,17 +334,23 @@ def recall_search(
             registry. A value this deployment has never seen returns an
             empty match together with the classes it DOES have, never a
             silent "no results" and never an error.
-        unprompted: Issue athenaeum#718 — opt into the UNPROMPTED push path: hits
-            are ranked by relevance x tier x coordinate-fit
-            (:func:`athenaeum.memory_tiers.push_score`), restricted to the
-            ``hot`` retrieval-cost tier, and greedily selected within
+        unprompted: Issue athenaeum#718, re-scoped by athenaeum#1353 — opt into
+            the UNPROMPTED push path: hits are packed, in the existing
+            relevance order, within
             :func:`athenaeum.config.resolve_push_token_budget`'s token
             budget. Default ``False`` is today's behavior, byte-identical:
-            every tier is returned in plain relevance order with no budget
-            cap — the ``warm`` tier's "explicit recall only" contract.
-            Intended for a non-interactive automation deciding what to
-            surface into a turn on its own, not for an agent's own
-            conversational tool call.
+            every hit is returned in plain relevance order with no budget
+            cap. ``True`` no longer restricts to a retrieval-cost tier or
+            re-ranks by coordinate fit — issue athenaeum#1353 deleted that
+            tier-weighted formula (:func:`athenaeum.memory_tiers.push_score`
+            / ``select_for_push``): it had no production caller and
+            duplicated the real spec, which lives in
+            :func:`athenaeum.context._apply_budget`. The only remaining
+            differences from ``False`` are the token-budget cap and the
+            supersession exclusion described below. Intended for a
+            non-interactive automation deciding what to surface into a
+            turn on its own, not for an agent's own conversational tool
+            call.
 
             Issue athenaeum#1493 (AC6): ``unprompted=True`` also EXCLUDES any hit
             carrying a declared ``superseded_by`` pointer, on top of the
@@ -357,10 +363,11 @@ def recall_search(
             frontmatter value, issue athenaeum#714's ``scope`` dimension).
             When supplied, each hit's coordinate fit against this scope is
             computed (:func:`athenaeum.memory_tiers.scope_relation`) and
-            reported in the recall hit header's ``**Scope:**`` segment;
-            with ``unprompted=True`` it also weights push selection. ``None``
-            (default) skips coordinate-fit weighting entirely (neutral
-            weight) and the header shows tier only.
+            reported in the recall hit header's ``**Scope:**`` segment
+            only — it no longer weights push selection (issue athenaeum#1353
+            deleted the coordinate-fit-weighted ranking that used to read
+            this value for ``unprompted=True``). ``None`` (default) skips
+            the header segment entirely.
         claimed_scope: Issue athenaeum#715 (read side) — the caller's query scope,
             the same coordinate shape as *session_scope* and a page's
             ``claimed_scope`` frontmatter value. Unlike *session_scope* (which
@@ -1056,14 +1063,18 @@ def _render_facts_block(facts: Mapping[str, object]) -> str:
 
 @dataclass
 class _RecallRow:
-    """One rendered recall hit plus its athenaeum#718 push-selection inputs
-    (relevance/tier/scope-relation/token cost) — see `_recall_via_backend`."""
+    """One rendered recall hit plus its `unprompted` push-selection inputs
+    (tier for the rendered header, token cost for the budget pack) — see
+    `_recall_via_backend`. `relevance`/`scope_relation` were dropped
+    (issue athenaeum#1353) once tier-weighted, coordinate-fit-weighted
+    selection was deleted — the unprompted path now packs `_rows` in its
+    existing (already relevance-ordered) sequence, so per-row relevance and
+    scope-relation are no longer selection inputs, only header-rendering
+    ones (computed locally, not stored on this row)."""
 
     block: str
     pushed_hit: tuple[str, dict[str, object], str]
     tier: str
-    scope_relation: str | None
-    relevance: float
     tokens: int
 
 
@@ -1117,13 +1128,15 @@ def _recall_via_backend(
     returns hits in the backend's own relevance order, exactly as before this
     issue existed.
 
-    ``unprompted``/``session_scope`` (issue athenaeum#718): see
-    :func:`recall_search`'s docstring. ``unprompted=False`` (default) is
-    byte-identical to this issue not existing — the tier/coordinate-fit
-    re-ranking and token-budget selection below apply ONLY when
-    ``unprompted=True``. The recall hit header's tier + matched-scope
-    segment (:func:`athenaeum.memory_tiers.tier_scope_header_line`) is
-    computed unconditionally, on every call, regardless of ``unprompted``.
+    ``unprompted``/``session_scope`` (issue athenaeum#718, re-scoped by
+    athenaeum#1353): see :func:`recall_search`'s docstring.
+    ``unprompted=False`` (default) is byte-identical to this issue not
+    existing — the supersession exclusion and token-budget pack below
+    apply ONLY when ``unprompted=True``. There is no tier or
+    coordinate-fit re-ranking any more (deleted, issue athenaeum#1353). The
+    recall hit header's tier + matched-scope segment
+    (:func:`athenaeum.memory_tiers.tier_scope_header_line`) is computed
+    unconditionally, on every call, regardless of ``unprompted``.
 
     ``claimed_scope`` (issue athenaeum#715, read side): applied AFTER every row is
     built (so it sees each hit's fresh on-disk ``claimed_scope``/``refines:``
@@ -1291,11 +1304,11 @@ def _recall_via_backend(
     # whose audience changed since the last rebuild) cannot leak a forbidden
     # page's title, tags, snippet, OR body. Rendered blocks are collected
     # first so the "Found N" header counts only the authorized hits.
-    # Issue athenaeum#718: rows are collected here first (block text + the tier/
-    # relevance/scope inputs `select_for_push` needs) rather than appended
-    # straight into `blocks`/`_pushed_hits`, so an `unprompted=True` call can
-    # re-rank and budget-select the FINAL set below without re-deriving any
-    # of this per-hit work. With `unprompted=False` (default) every row
+    # Issue athenaeum#718: rows are collected here first (block text + the
+    # tier + rendered-block token cost) rather than appended straight into
+    # `blocks`/`_pushed_hits`, so an `unprompted=True` call can supersession-
+    # filter and budget-pack the FINAL set below without re-deriving any of
+    # this per-hit work. With `unprompted=False` (default) every row
     # collected here survives unchanged, in the same order — byte-identical
     # to this issue not existing.
     _rows: list[_RecallRow] = []
@@ -1429,8 +1442,6 @@ def _recall_via_backend(
                 block=block,
                 pushed_hit=(filename, fm, snip),
                 tier=memory_tier,
-                scope_relation=relation,
-                relevance=float(score),
                 # Issue athenaeum#718: meter the FULLY RENDERED block --
                 # path/tags/uid/type/meta/tier-scope/links/excluded headers
                 # plus the snippet -- never just `snip` alone. The token
@@ -1528,11 +1539,16 @@ def _recall_via_backend(
         }
         _rows = [row for row in _rows if row.pushed_hit[0] in _kept_ids]
 
-    # Issue athenaeum#718: the unprompted push path — restrict to the `hot`
-    # tier, re-rank by relevance x tier x coordinate-fit, and greedily
-    # select within the configured token budget. `unprompted=False`
-    # (default) skips this entirely: `_rows` keeps every hit, in the same
-    # relevance order the backend/currency-reorder already produced.
+    # Issue athenaeum#718, re-scoped by athenaeum#1353: the unprompted push
+    # path packs `_rows` — already in relevance order from the
+    # backend/currency-reorder above — into the configured token budget.
+    # There is no tier restriction and no coordinate-fit re-ranking here
+    # any more (issue athenaeum#1353 deleted `memory_tiers.push_score` /
+    # `select_for_push`: tier-weighted selection had no production caller
+    # and duplicated the real spec, which lives in
+    # `athenaeum.context._apply_budget`). `unprompted=False` (default)
+    # skips this entirely: `_rows` keeps every hit, in the same relevance
+    # order the backend/currency-reorder already produced.
     if unprompted and _rows:
         # Issue athenaeum#1493 (AC6): EXCLUDE superseded pages from the unprompted
         # push path specifically — a decision, not an inheritance from the
@@ -1546,18 +1562,14 @@ def _recall_via_backend(
         _rows = [row for row in _rows if not _is_superseded(row.pushed_hit[1])]
     if unprompted and _rows:
         budget = resolve_push_token_budget(config)
-        candidates = [
-            memory_tiers.PushCandidate(
-                key=i,
-                relevance=row.relevance,
-                tier=row.tier,
-                scope_relation=row.scope_relation,
-                tokens=row.tokens,
-            )
-            for i, row in enumerate(_rows)
-        ]
-        selected_order = memory_tiers.select_for_push(candidates, token_budget=budget)
-        _rows = [_rows[i] for i in selected_order]
+        _packed: list[_RecallRow] = []
+        _total_tokens = 0
+        for row in _rows:
+            if _total_tokens + row.tokens > budget:
+                continue
+            _packed.append(row)
+            _total_tokens += row.tokens
+        _rows = _packed
 
     blocks: list[str] = [row.block for row in _rows]
     _pushed_hits: list[tuple[str, dict[str, object], str]] = [row.pushed_hit for row in _rows]

@@ -4,6 +4,18 @@ of the athenaeum#911 memory-model v6 three-way split — see that issue's re-sco
 comment for the (a)/(b)/(c) boundary; (b) off-corpus storage is athenaeum#984, (c)
 erasure classification/taint is athenaeum#985).
 
+**Not the live push path (issue athenaeum#1353).** If you were sent here to
+change what gets pushed into a turn unprompted, this is the wrong file.
+Push selection and its token budget actually live in
+`examples/claude-code/user-prompt-recall.sh` (the live per-turn shell hook —
+the real entry point for unprompted recall) and :mod:`athenaeum.context`
+(the `athenaeum context` CLI / agent-neutral sidecar core the hook runs
+through; its `_apply_budget` does the real relevance-ranked, token-budget
+packing). This module decides exactly one thing: an index-build-time
+retrieval-cost classification (:func:`resolve_tier`, stored in the FTS5
+`memory_tier` column when a page is compiled) — never selection, never a
+budget.
+
 **NOT to be confused with :mod:`athenaeum.tiers`** — that module is the
 UNRELATED T0-T4 *entity-compilation* pipeline (tier1 programmatic matching /
 tier2 LLM classify / tier3 LLM write / tier4 human escalation). This module
@@ -18,11 +30,14 @@ Retrieval-COST classes, not storage classes — every tier shares the same
 disk (`docs/extending/whole-store-adapter-design.md` §8 governs storage-adapter
 placement; this module never decides where bytes live):
 
-- **hot** — indexed, eligible for unprompted push under the token budget
+- **hot** — indexed, the "cheap to retrieve" classification
   (:data:`MEMORY_TIERS`), reachable by everything.
-- **warm** — indexed, never pushed unprompted, reachable by explicit recall
-  only (an ordinary `recall_search(..., unprompted=False)` call, today's
-  default for every existing caller).
+- **warm** — indexed, the "retrieve on demand" classification, reachable by
+  explicit recall (an ordinary `recall_search(..., unprompted=False)` call,
+  today's default for every existing caller). Neither tier gates
+  unprompted-push eligibility in this module (issue athenaeum#1353) — see
+  the routing note at the top of this docstring for where selection
+  actually happens.
 - **cold** — NOT indexed. Reuses the existing class+config
   :func:`athenaeum.storage.is_embedded` mechanism exactly as shipped by
   issue athenaeum#429/athenaeum#911 — **not** a new per-page flag. A page whose
@@ -82,28 +97,19 @@ tier change can happen without a matching governance-ledger row.
 
 ## Push selection
 
-**Push selection = relevance x tier x coordinate fit**
-(:func:`push_score`). Only a *hot*-tier hit ever has a nonzero
-:func:`tier_weight` — warm/cold/refused are excluded from an unprompted push
-by construction, matching "warm: explicit recall only." Coordinate fit
-(:func:`coordinate_fit_weight`) rewards a claim whose `claimed_scope`
-CONTAINS (or is contained by — :mod:`athenaeum.dimensions`' relation
-vocabulary is deliberately undirected, see its module docstring) the
-session's scope over a sibling (DISJOINT) scope claim.
-
-**The push budget is ONE documented config key, tokens per turn**
-(`push_budget.tokens_per_turn`, :func:`athenaeum.config.resolve_push_token_budget`)
-— deliberately the only push-budget dial. :func:`select_for_push` enforces
-it at the boundary: candidates are ranked by :func:`push_score` descending,
-then greedily included while the running token total stays within budget; a
-candidate that would push the total over budget is skipped (not truncated),
-never included partially.
-
-Relevance itself, and the fail-closed filtering of superseded/expired/
-unauthorized claims, are untouched by this module — both already live in
-:mod:`athenaeum.search` (`_is_recall_inactive`) and
-:mod:`athenaeum.mcp_server` (Layer B/C audience + `recallable` drops); this
-module only re-weights and re-ranks what those layers already produced.
+Deleted (issue athenaeum#1353) — the tier-weighted `push_score` formula and
+`select_for_push`'s budget enforcement never had a production caller and
+duplicated the real spec, so both were removed rather than kept as
+unreachable "executable documentation." See the routing note at the top of
+this docstring for where push selection and its token budget actually live
+today: the shell hook mirrors relevance order directly (no tier
+reimplementation needed, since this module's tier gate never applied to
+it), and :func:`athenaeum.context._apply_budget` does the real
+relevance-ranked, token-budget-capped packing for the `athenaeum context`
+path. The `unprompted=True` flag on `recall_search` /
+`_recall_via_backend` still exists and still does two real things — see
+:mod:`athenaeum.mcp_server`'s `_recall_via_backend` docstring — but neither
+of them is tier-weighted selection.
 """
 
 from __future__ import annotations
@@ -149,55 +155,6 @@ DEFAULT_TIER_BY_MEMORY_CLASS: dict[str, str] = {
 #: unprompted push is the "expensive and noisy" side, so an unclassified
 #: claim starts on the conservative side of that line).
 _FALLBACK_DEFAULT_TIER = "warm"
-
-#: Push-selection tier weight. Only `hot` is nonzero — this is what makes
-#: "warm: explicit recall only" true for the unprompted-push path: a warm
-#: (or cold/refused, neither of which can appear as a recall hit anyway)
-#: candidate's :func:`push_score` is always exactly 0.
-TIER_WEIGHTS: dict[str, float] = {
-    "hot": 1.0,
-    "warm": 0.0,
-    "cold": 0.0,
-    "refused": 0.0,
-}
-
-#: Coordinate-fit weight per :class:`athenaeum.dimensions.Relation` value.
-#: CONTAINS outranks EQUAL (a broader-scope claim generalizes further, so it
-#: is favored over an exact-scope duplicate when both otherwise tie) which
-#: outranks OVERLAPS/UNKNOWN which outranks DISJOINT (sibling scopes — the
-#: AC's explicit "outranks a sibling-scope claim" case). `None` (no session
-#: scope supplied, or the page carries no `claimed_scope`) is neutral: it
-#: neither rewards nor penalizes, so a caller that never passes
-#: `session_scope` gets pure relevance x tier ranking, byte-identical to
-#: this module not existing.
-COORDINATE_FIT_WEIGHTS: dict[str | None, float] = {
-    "contains": 1.25,
-    "equal": 1.0,
-    "overlaps": 0.85,
-    "unknown": 0.75,
-    "disjoint": 0.6,
-    None: 1.0,
-}
-
-
-def tier_weight(tier: str) -> float:
-    """Push-selection weight for *tier*. Unrecognized values weight 0 (fail closed)."""
-    return TIER_WEIGHTS.get(tier, 0.0)
-
-
-def coordinate_fit_weight(relation: str | None) -> float:
-    """Push-selection weight for a :mod:`athenaeum.dimensions` *relation* value
-    (or `None` — no scope information available)."""
-    return COORDINATE_FIT_WEIGHTS.get(relation, COORDINATE_FIT_WEIGHTS[None])
-
-
-def push_score(relevance: float, tier: str, scope_relation: str | None) -> float:
-    """Push selection formula: relevance x tier x coordinate fit (issue athenaeum#718 AC).
-
-    A non-hot tier always scores exactly 0, regardless of relevance or
-    coordinate fit — see :data:`TIER_WEIGHTS`.
-    """
-    return relevance * tier_weight(tier) * coordinate_fit_weight(scope_relation)
 
 
 def resolve_tier(fm: dict[str, Any] | None, *, config: dict[str, Any] | None = None) -> str:
@@ -296,66 +253,6 @@ def is_refused(
     from athenaeum.never_ingest import classify_never_ingest
 
     return classify_never_ingest(meta, body, manifest=manifest) is not None
-
-
-# ---------------------------------------------------------------------------
-# Push selection (token budget enforcement)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class PushCandidate:
-    """One recall hit's inputs to the push-selection formula.
-
-    *key* is an opaque caller-defined identifier (e.g. a list index) used
-    only to report which candidates were selected, in ranked order —
-    :func:`select_for_push` never inspects it.
-    """
-
-    key: Any
-    relevance: float
-    tier: str
-    scope_relation: str | None
-    tokens: int
-
-
-def select_for_push(
-    candidates: list[PushCandidate], *, token_budget: int
-) -> list[Any]:
-    """Rank *candidates* by :func:`push_score` and select within *token_budget*.
-
-    Enforced at the boundary: candidates are visited in descending
-    push-score order (ties broken by original input order, for
-    determinism); a candidate is included and its token cost added to the
-    running total ONLY if doing so keeps the total `<= token_budget`.
-    A candidate that would exceed the budget is skipped (never truncated,
-    never included partially) — later, smaller candidates are still
-    considered, so the budget is packed rather than cut off at the first
-    miss. A `push_score` of exactly 0 (any non-hot tier) is never selected,
-    regardless of remaining budget.
-
-    Returns the selected candidates' `key`s, in the order they were
-    selected (highest push_score first) — the order a caller should render
-    them in.
-    """
-    ranked = sorted(
-        enumerate(candidates),
-        key=lambda pair: (
-            -push_score(pair[1].relevance, pair[1].tier, pair[1].scope_relation),
-            pair[0],
-        ),
-    )
-    selected: list[Any] = []
-    total_tokens = 0
-    budget = max(0, token_budget)
-    for _input_index, candidate in ranked:
-        if push_score(candidate.relevance, candidate.tier, candidate.scope_relation) <= 0:
-            continue
-        if total_tokens + max(0, candidate.tokens) > budget:
-            continue
-        selected.append(candidate.key)
-        total_tokens += max(0, candidate.tokens)
-    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -716,21 +613,14 @@ __all__ = [
     "MEMORY_TIERS",
     "SETTABLE_TIERS",
     "DEFAULT_TIER_BY_MEMORY_CLASS",
-    "TIER_WEIGHTS",
-    "COORDINATE_FIT_WEIGHTS",
     "TIER_SWEEP_LEDGER_FILENAME",
     "TIER_SWEEP_LEDGER_VERSION",
-    "PushCandidate",
     "TierChange",
     "TierSweepReport",
-    "tier_weight",
-    "coordinate_fit_weight",
-    "push_score",
     "resolve_tier",
     "scope_relation",
     "tier_scope_header_line",
     "is_refused",
-    "select_for_push",
     "evaluate_tier_movement",
     "set_memory_tier_text",
     "discover_wiki_pages",

@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for retrieval-cost memory tiers + push budget/ranking (issue athenaeum#718).
+"""Tests for retrieval-cost memory tiers (issue athenaeum#718; push-selection
+scope narrowed by athenaeum#1353).
 
 Covers: tier resolution (explicit pin / class default / cold via
-`storage.is_embedded` / fallback), coordinate-fit scope comparison, the
-push-selection formula and its token-budget boundary enforcement, automatic
-hot<->warm tier movement (class-default/age/precision triggers, the axiom
-refusal, promote-on-use), frontmatter text-surgery round-tripping, the
+`storage.is_embedded` / fallback), coordinate-fit scope comparison (the
+header-rendering use of `scope_relation`, not push selection — the
+tier-weighted `push_score`/`select_for_push` formula that used to live here
+was deleted, issue athenaeum#1353; see tests/test_mcp_server.py for the
+surviving token-budget-boundary coverage), automatic hot<->warm tier
+movement (class-default/age/precision triggers, the axiom refusal,
+promote-on-use), frontmatter text-surgery round-tripping, the
 `run_tier_sweep` end-to-end scan+write+ledger path, and the three new
 `athenaeum.config` resolvers.
 """
@@ -14,7 +18,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -196,96 +199,19 @@ class TestIsRefused:
 
 
 # ---------------------------------------------------------------------------
-# push_score / tier_weight / coordinate_fit_weight
+# push_score / tier_weight / coordinate_fit_weight / select_for_push /
+# PushCandidate -- deleted (issue athenaeum#1353). This formula and its
+# token-budget-boundary enforcement had no production caller (only
+# tests/test_mcp_server.py exercised `unprompted=True`) and duplicated the
+# real spec, which lives in `athenaeum.context._apply_budget`. The
+# token-budget-boundary BEHAVIOUR itself (not this formula) is still real
+# and still covered -- see tests/test_mcp_server.py's
+# `TestRecallSearch.test_unprompted_enforces_token_budget_at_the_boundary`
+# and `test_unprompted_budget_meters_full_block_not_just_snippet`, which
+# exercise the surviving inline greedy-pack in `mcp_server._recall_via_backend`
+# through the public `recall_search` contract instead of this deleted
+# internal formula.
 # ---------------------------------------------------------------------------
-
-
-class TestPushScore:
-    def test_hot_full_weight(self) -> None:
-        assert memory_tiers.push_score(2.0, "hot", None) == 2.0
-
-    @pytest.mark.parametrize("tier", ["warm", "cold", "refused", "garbage"])
-    def test_non_hot_is_zero(self, tier: str) -> None:
-        assert memory_tiers.push_score(100.0, tier, "contains") == 0.0
-
-    def test_contains_outranks_disjoint(self) -> None:
-        contains_score = memory_tiers.push_score(1.0, "hot", "contains")
-        disjoint_score = memory_tiers.push_score(1.0, "hot", "disjoint")
-        assert contains_score > disjoint_score
-
-    def test_none_relation_is_neutral(self) -> None:
-        assert memory_tiers.push_score(1.0, "hot", None) == memory_tiers.push_score(
-            1.0, "hot", "equal"
-        )
-
-
-# ---------------------------------------------------------------------------
-# select_for_push -- the token-budget boundary
-# ---------------------------------------------------------------------------
-
-
-def _candidate(
-    key: Any,
-    *,
-    relevance: float,
-    tier: str,
-    scope_relation: str | None = None,
-    tokens: int,
-) -> memory_tiers.PushCandidate:
-    return memory_tiers.PushCandidate(
-        key=key, relevance=relevance, tier=tier, scope_relation=scope_relation, tokens=tokens
-    )
-
-
-class TestSelectForPush:
-    def test_only_hot_tier_selected(self) -> None:
-        candidates = [
-            _candidate("a", relevance=10.0, tier="warm", tokens=1),
-            _candidate("b", relevance=1.0, tier="hot", tokens=1),
-        ]
-        selected = memory_tiers.select_for_push(candidates, token_budget=1000)
-        assert selected == ["b"]
-
-    def test_ranked_by_push_score_descending(self) -> None:
-        candidates = [
-            _candidate("low", relevance=1.0, tier="hot", scope_relation="disjoint", tokens=1),
-            _candidate("high", relevance=1.0, tier="hot", scope_relation="contains", tokens=1),
-        ]
-        selected = memory_tiers.select_for_push(candidates, token_budget=1000)
-        assert selected == ["high", "low"]
-
-    def test_budget_boundary_excludes_the_item_that_would_exceed_it(self) -> None:
-        # Budget exactly fits candidate "a" (100 tokens) alone; adding "b"
-        # (50 more) would push the total to 150 > 100, so "b" is excluded --
-        # this is the AC's "enforced, tested at the boundary" case.
-        candidates = [
-            _candidate("a", relevance=2.0, tier="hot", tokens=100),
-            _candidate("b", relevance=1.0, tier="hot", tokens=50),
-        ]
-        selected = memory_tiers.select_for_push(candidates, token_budget=100)
-        assert selected == ["a"]
-
-    def test_budget_packs_a_smaller_later_candidate(self) -> None:
-        # "big" alone would exceed budget and is skipped (not truncated);
-        # the smaller "small" candidate, ranked below it, still fits and is
-        # included -- packing, not a hard cutoff at the first miss.
-        candidates = [
-            _candidate("big", relevance=3.0, tier="hot", tokens=90),
-            _candidate("small", relevance=2.0, tier="hot", tokens=10),
-        ]
-        selected = memory_tiers.select_for_push(candidates, token_budget=50)
-        assert selected == ["small"]
-
-    def test_exactly_at_budget_is_included(self) -> None:
-        candidates = [_candidate("a", relevance=1.0, tier="hot", tokens=100)]
-        assert memory_tiers.select_for_push(candidates, token_budget=100) == ["a"]
-
-    def test_one_over_budget_is_excluded(self) -> None:
-        candidates = [_candidate("a", relevance=1.0, tier="hot", tokens=101)]
-        assert memory_tiers.select_for_push(candidates, token_budget=100) == []
-
-    def test_empty_candidates(self) -> None:
-        assert memory_tiers.select_for_push([], token_budget=100) == []
 
 
 # ---------------------------------------------------------------------------
