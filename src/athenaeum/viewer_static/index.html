@@ -464,8 +464,13 @@
 
       renderLastTurn(turn);
       renderPages(payload.pages, lastTurnIds);
+      // "distinct pages", not a bare count (issue athenaeum#1543 AC1). This
+      // number is one page per uid no matter how many turns pushed it, which
+      // is why it sits below `athenaeum demo --list-sessions`' "items pushed"
+      // (a sum over turns) and need not match athenaeum-demo's launcher probe
+      // (ledger records). Saying which is which on screen is the whole fix.
       document.getElementById("count-pages").textContent =
-        "(" + (payload.pages || []).length + ")";
+        "(" + (payload.pages || []).length + " distinct pages)";
     }
 
     function formatAge(ts) {

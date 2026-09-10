@@ -223,6 +223,19 @@ def test_nonzero_rows_reported_without_warning(capsys: pytest.CaptureFixture[str
     assert "warning" not in err
 
 
+def test_report_rows_says_what_it_counted(capsys: pytest.CaptureFixture[str]) -> None:
+    """Issue athenaeum#1543 AC1: a bare count is what made three surfaces
+    unreconcilable. This one is BUCKET rows across pushed/pulled/overlap -- a
+    third quantity again, matching neither the viewer's distinct-page header
+    nor ``--list-sessions``' items-pushed sum -- so it must say so itself.
+    """
+    _report_rows(7, "sess-abc")
+    err = capsys.readouterr().err
+    assert "pushed / pulled / overlap buckets" in err
+    assert "NOT distinct pages" in err
+    assert "All pages this session" in err
+
+
 # --------------------------------------------------------------------------
 # cmd_demo wiring (AC1, AC3)
 # --------------------------------------------------------------------------
@@ -782,6 +795,47 @@ def test_sessions_ordered_newest_activity_first_and_limit_applied(
     assert len(body) == 2
     assert body[0].startswith("newest")
     assert body[1].startswith("middle")
+
+
+def test_list_sessions_column_is_named_for_what_it_counts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue athenaeum#1543 AC1. The column used to be headed ``rows``, which
+    said nothing; it sums ``pushed_count``, so a page pushed on five turns
+    counts five times. That fact is the one that lets an operator reconcile
+    this number with the viewer's distinct-page header, so it belongs in the
+    surface -- and the header must stay on stdout with exactly one line per
+    session, which is why the reconciling caption goes to stderr.
+    """
+    records = [
+        {
+            "record_type": "push",
+            "session_id": "s1",
+            "ts": "2026-01-01T00:00:00Z",
+            "pushed_count": 4,
+        },
+    ]
+    monkeypatch.setattr(_cmd_demo, "_run_tail_contract", lambda **_k: records)
+    monkeypatch.setattr(_cmd_demo, "_project_label", lambda *_a, **_k: "~/proj")
+
+    assert cmd_list_sessions(_ls_args(path=tmp_path)) == 0
+    captured = capsys.readouterr()
+
+    lines = [line for line in captured.out.splitlines() if line.strip()]
+    assert "items pushed" in lines[0]
+    assert "rows" not in lines[0]
+    # stdout stays machine-shaped: header + one row, caption nowhere near it.
+    assert len(lines) == 2
+    assert lines[1].startswith("s1")
+    assert lines[1].split()[1] == "4"
+
+    assert "sums pushed_count" in captured.err
+    assert "counts N times" in captured.err
+    assert "DISTINCT PAGES" in captured.err
+    # Named, not alluded to: the caption points at the other two surfaces by
+    # name so the operator can reconcile all three without reading any code.
+    assert "watch-session.sh" in captured.err
+    assert "LEDGER" in captured.err
 
 
 def test_cmd_list_sessions_rejects_zero_limit_from_a_hand_built_namespace(
