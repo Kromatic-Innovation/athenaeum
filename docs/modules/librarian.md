@@ -23,7 +23,9 @@ of `--apply` maintenance commands — acquires the same **run lock** before touc
 - `raw/` and its configured extra intake roots, via `discover_raw_files` /
   `discover_auto_memory_files` (see [intake](intake.md)).
 - `wiki/` — the existing corpus each Tier-3 merge and each contradiction check compares
-  against.
+  against. A deterministic merge-worthiness pre-check was measured against thousands of
+  live candidate pairs and then removed: it suppressed effectively none of them, because
+  raw files summarise onto pages rather than echoing them verbatim.
 - `librarian.max_api_calls` / `ATHENAEUM_MAX_API_CALLS` / `--max-api-calls` — the per-run
   spend ceiling (env > yaml > default 800, CLI flag wins over both). It is a run-level
   budget: one `TokenUsage` is created at run start and threaded through the

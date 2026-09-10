@@ -787,6 +787,37 @@ class TestLoadConfig:
         assert cfg["auto_recall"] is True  # default preserved
         assert cfg["search_backend"] == "vector"
 
+    def test_removed_merge_worthiness_gate_key_warns_loudly(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """athenaeum#1582: ``librarian.merge_worthiness_gate_enabled`` (the
+        athenaeum#1172 pre-check) no longer resolves to anything — nothing
+        reads it — but a stale ``athenaeum.yaml`` left over from before its
+        removal must not silently look ignored. ``load_config`` still merges
+        the key through (it is not stripped), and logs a WARNING naming it,
+        so an operator relying on it discovers it is inert instead of
+        wondering why the gate never fires."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  merge_worthiness_gate_enabled: true\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            cfg = load_config(tmp_path)
+        assert cfg["librarian"]["merge_worthiness_gate_enabled"] is True
+        assert any(
+            "merge_worthiness_gate_enabled" in r.message and "athenaeum#1582" in r.message
+            for r in caplog.records
+        ), caplog.text
+
+    def test_no_warning_when_removed_key_absent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        (tmp_path / "athenaeum.yaml").write_text("librarian:\n  max_files: 5\n")
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            load_config(tmp_path)
+        assert not [
+            r for r in caplog.records if "merge_worthiness_gate_enabled" in r.message
+        ]
+
     def test_vector_nested_merge(self, tmp_path: Path) -> None:
         (tmp_path / "athenaeum.yaml").write_text("vector:\n  provider: faiss\n")
         cfg = load_config(tmp_path)
