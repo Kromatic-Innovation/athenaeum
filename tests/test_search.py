@@ -2081,3 +2081,183 @@ class TestEmbedTextsFallbackObservability:
         second = search_module.embed_texts(["hello"])
         assert second is None
         assert not caplog.records  # one-time — no repeat warning
+
+
+def _auto_memory_page(name: str, topic_sentence: str, filler_claim: str) -> str:
+    """Build a page shaped like a real auto-memory wiki page (athenaeum#1603).
+
+    The frontmatter mirrors the real ``wiki/auto-*.md`` shape: a
+    ``sources:`` provenance block carrying a verbose quoted ``claim:`` that
+    has nothing to do with the page's own topic — this is what a cluster-
+    fusion auto-memory page's frontmatter actually looks like, and it is
+    long enough on its own (~1000+ chars) to exhaust the embedding model's
+    effective context window before the body is ever reached. The body then
+    carries the real, on-topic sentence — including the page's own title —
+    that a title query should match.
+    """
+    return (
+        "---\n"
+        f"name: {name}\n"
+        "type: auto-memory\n"
+        "cluster_id: some-project-deadbeef0123\n"
+        "cluster_centroid_score: 1.0\n"
+        "contradictions_detected: false\n"
+        "origin_scopes:\n"
+        "- -some-project-scope\n"
+        "sources:\n"
+        "- session: 11111111-2222-3333-4444-555555555555\n"
+        "  origin_scope: -some-project-scope\n"
+        "  source_type: inferred\n"
+        "  source_ref: 11111111-2222-3333-4444-555555555555\n"
+        f"  claim: '{filler_claim}'\n"
+        "---\n\n"
+        f"{topic_sentence}\n"
+    )
+
+
+@pytest.mark.embedding
+class TestExactTitleRanking:
+    """athenaeum#1603 AC2/AC3/AC5: an exact-title query must rank its own page
+    first, even when the page's frontmatter (routine for auto-memory pages
+    with a ``sources:`` provenance block) is long enough to exhaust the
+    embedding model's own context window before the body is reached.
+
+    Cause (AC1), established by direct measurement (not inferred): for a
+    real page whose frontmatter exceeds ~850 chars, embedding the
+    frontmatter alone, the ``_DOC_LIMIT`` (4000-char) slice, and the whole
+    file produced the SAME vector — cosine distance 1.5167 against the
+    page's own title, all three ways. ``all-MiniLM-L6-v2``'s own max
+    sequence length (~256 tokens ≈ 850 chars) truncates far below
+    ``_DOC_LIMIT``, and ``_add_records`` fed it raw ``text`` — frontmatter
+    first, body after — for every non-stub page, so that window was spent
+    entirely on YAML/UUID boilerplate: the body never reached the model.
+    The title (line 1) DID reach the model, just diluted into one line
+    among ~250 tokens of noise. H1 (query/document embedded differently)
+    and H4 (normalization mismatch) were ruled out separately: embedding
+    identical short text through both the add and query code paths
+    produced byte-identical, already-unit-norm vectors (distance 0.0). The
+    fix strips frontmatter and leads with the title for every page (not
+    only pointer stubs, and only when frontmatter parses — a page whose
+    YAML fails to parse keeps the pre-fix behavior rather than guessing at
+    a title), so the ~850 chars that actually reach the model are the ones
+    an exact-title query can match.
+
+    AC4: post-fix, the target page (0.9928) sits only 0.08 from the
+    nearest unrelated distractor (0.9928 vs the real corpus's 1.0692) —
+    too tight a margin for any relevance floor (athenaeum#1571) to separate
+    on vector distance alone. FTS5 answered every phrasing of the real
+    query with exactly one hit. Recommendation: treat FTS5 as the primary
+    path for short, title/lexical-shaped queries, with vector search as
+    the semantic complement — not as a below-floor fallback, since the
+    floor cannot be set reliably at these distances.
+
+    Deliberately marked ``embedding`` (deselected from the default suite,
+    see ``pyproject.toml``): the bug is specifically about the REAL
+    ``all-MiniLM-L6-v2`` model's ~256-token input window, which the
+    default suite's offline lexical stand-in (``tests/offline_embeddings.py``,
+    unbounded token hashing, no truncation) cannot reproduce — running
+    this under the stub would pass regardless of the fix. Runs local/offline
+    once the ONNX model is cached; no API key or metered spend involved.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_chromadb(self) -> None:
+        pytest.importorskip("chromadb")
+
+    _FILLER = (
+        "On 2026-09-10 the operator set the next focus: evals for a "
+        "completely unrelated workstream, because retrieval is downstream "
+        "of compilation and cannot be fixed first. Operator stated belief: "
+        "fields like related are written only by narrow routines, verified: "
+        "sole writer is the split disposition in some other module, so the "
+        "model judgement never gets to link, attach, consolidate or "
+        "decompose. Live examples: one programme across several unlinked "
+        "pages with no sub-pages spanning financials and people; several "
+        "boards compiled as standalone pages instead of attached to the "
+        "project or client page as source evidence. Graph: an epic with "
+        "several children that land first, then a relatedness writer, a "
+        "consolidation verdict, an intake-attachment eval, a decomposition "
+        "eval, and a heuristic accuracy eval; retrieval siblings and a "
+        "north-star run that several of them block. Decision on a prior "
+        "issue (closed): delete a merge-worthiness gate outright rather than "
+        "leave it default-off, since zero of many thousands of pairs were "
+        "suppressed and a screening pass flips a double-digit percentage. "
+        "Removal chore filed. Why: dead code that looks like a safety "
+        "mechanism misleads; and evals must exist before any change so a "
+        "fix is measurable, not anecdotal. How to apply: when asked to fix "
+        "this area, route to the epic children and grade against the "
+        "corpus; do not propose a change without an eval that fails today."
+    )
+
+    @pytest.fixture
+    def wiki_with_auto_memory_pages(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+
+        pages = {
+            "auto-librarian-organisation-thesis.md": (
+                "librarian-organisation-thesis",
+                "The librarian organisation thesis argues that recall is "
+                "downstream of how the wiki is compiled and organised.",
+            ),
+            "auto-goodreads-key-librarian.md": (
+                "goodreads-key-librarian",
+                "The goodreads key librarian workflow rotates the API key "
+                "used to enrich book metadata for the print catalog.",
+            ),
+            "auto-librarian-scheduler.md": (
+                "librarian-scheduler",
+                "The librarian scheduler is the librarian component that "
+                "schedules when the librarian's nightly compilation pass "
+                "runs, relative to idle SessionEnd ticks.",
+            ),
+        }
+        for filename, (title, sentence) in pages.items():
+            (wiki / filename).write_text(
+                _auto_memory_page(title, sentence, self._FILLER)
+            )
+        # A short, frontmatter-light distractor that mentions "librarian"
+        # directly and plainly (like the real Davidson College library
+        # workshop person-page from athenaeum#1603) — its whole body sits
+        # comfortably inside the model's context window with nothing to
+        # dilute it, so it is exactly the kind of page that wrongly
+        # outranks a verbose auto-memory page pre-fix.
+        (wiki / "molly-k.md").write_text(
+            "---\nname: Molly K.\n---\n\n"
+            "Molly K. is a person met at a Davidson College library "
+            "workshop titled 'the librarian as opaque stage', where she "
+            "discussed archival cataloguing of special collections.\n"
+        )
+        return wiki
+
+    @pytest.mark.parametrize(
+        ("query", "expected_filename"),
+        [
+            (
+                "librarian organisation thesis",
+                "auto-librarian-organisation-thesis.md",
+            ),
+            ("goodreads key librarian", "auto-goodreads-key-librarian.md"),
+            ("librarian scheduler", "auto-librarian-scheduler.md"),
+        ],
+    )
+    def test_exact_title_query_ranks_page_first(
+        self,
+        wiki_with_auto_memory_pages: Path,
+        tmp_path: Path,
+        query: str,
+        expected_filename: str,
+    ) -> None:
+        cache = tmp_path / "cache"
+        backend = VectorBackend()
+        backend.build_index(wiki_with_auto_memory_pages, cache)
+
+        results = backend.query(query, cache, n=5)
+        assert results, f"no results at all for {query!r}"
+        top_filename = results[0][0]
+        assert top_filename == expected_filename, (
+            f"query {query!r} should rank its own page "
+            f"({expected_filename!r}) first, got ranking "
+            f"{[r[0] for r in results]} with distances "
+            f"{[round(r[2], 4) for r in results]}"
+        )

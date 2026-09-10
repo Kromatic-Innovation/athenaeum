@@ -1795,6 +1795,40 @@ class VectorBackend:
             if meta and is_pointer_stub(meta):
                 _fm, doc_body = parse_frontmatter(text)
                 doc_text = doc_body.strip()
+            elif meta:
+                # Issue athenaeum#1603: for a page whose frontmatter alone
+                # exceeds ~850 chars (routine for an auto-memory page with a
+                # ``sources:`` provenance block), the embedded vector was
+                # BYTE-IDENTICAL whether ``_add_records`` fed the model the
+                # frontmatter alone, the ``_DOC_LIMIT`` (4000-char) slice, or
+                # the whole file — measured at cosine distance 1.5167 for all
+                # three against the page's own title as query. That is
+                # because ``all-MiniLM-L6-v2``'s own max sequence length
+                # (~256 tokens ≈ that same ~850 chars) truncates far below
+                # ``_DOC_LIMIT``, and the tokens that make it into that
+                # window are frontmatter first (``name:``, ``cluster_id:``,
+                # ``sources:`` session UUIDs, quoted ``claim:`` text) — so
+                # the body never reaches the model at all. The page's own
+                # title (the first line) DOES reach the model, but diluted
+                # into a single line among ~250 tokens of YAML/UUID noise
+                # semantically unrelated to any topical query.
+                # ``_DOC_LIMIT`` is therefore dead code with respect to what
+                # actually gets embedded for these pages — verified by
+                # embedding query/document text through the same code path
+                # for identical input (byte-identical vectors, distance
+                # 0.0), which rules out a query/document embedding-path or
+                # model mismatch (H1) and a raw-vs-normalized distance
+                # mismatch (H4): the returned vectors are already unit-norm.
+                # Fix: strip the frontmatter and lead with the title, so the
+                # ~850 chars that actually reach the model are exactly the
+                # ones a title/topic query can match against. A page whose
+                # frontmatter fails to parse (``meta`` falsy) keeps the
+                # pre-athenaeum#1603 full-``text`` behavior below —
+                # deliberately conservative: don't guess at a title this
+                # code couldn't extract.
+                _fm, doc_body = parse_frontmatter(text)
+                doc_body = doc_body.strip()
+                doc_text = f"{name}\n\n{doc_body}" if doc_body else name
             else:
                 doc_text = text
             documents.append(doc_text[: self._DOC_LIMIT])

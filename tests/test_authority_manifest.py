@@ -618,7 +618,19 @@ class TestStubEmbedsOnlyPointerLine:
         assert "pointer_stub" not in doc
         assert "type: concept" not in doc
 
-    def test_add_records_embeds_full_text_for_non_stub(self, tmp_path: Path) -> None:
+    def test_add_records_embeds_title_plus_body_for_non_stub(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for issue athenaeum#1603.
+
+        Pre-fix, a non-stub page embedded raw ``text`` (frontmatter
+        included) up to ``_DOC_LIMIT``. That silently lost the body for any
+        page whose frontmatter alone exceeded the embedding model's own
+        (much smaller) input window — see ``TestExactTitleRanking`` in
+        ``tests/test_search.py`` for the measured reproduction. The fix
+        strips frontmatter and leads with the title for every page whose
+        frontmatter parses, matching the stub path below.
+        """
         from athenaeum.search import VectorBackend
 
         text = (
@@ -640,7 +652,10 @@ class TestStubEmbedsOnlyPointerLine:
         backend._add_records(fake_collection, [record])
 
         assert len(fake_collection.documents) == 1
-        assert fake_collection.documents[0] == text[: backend._DOC_LIMIT]
+        doc = fake_collection.documents[0]
+        assert doc == "Regular Page\n\nThis is the full regular body content."
+        # The frontmatter block itself must NOT be part of the embedded doc.
+        assert "type: concept" not in doc
 
 
 # ---------------------------------------------------------------------------
