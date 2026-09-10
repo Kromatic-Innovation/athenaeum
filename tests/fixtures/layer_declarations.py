@@ -168,6 +168,7 @@ MODULE_LAYER: dict[str, int] = {
     "retention_policy": 4,
     "retire": 4,
     "retraction_cascade": 4,
+    "name_structure": 4,
     "rule_proposals": 4,
     "sensitivity_lint": 4,
     "shadow_linkage": 4,
