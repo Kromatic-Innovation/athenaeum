@@ -1524,6 +1524,81 @@ class TestPerKnobClientRouting:
             }
         ) == 4
 
+    def test_reasoning_t1_armed_records_a_decision_row_end_to_end(
+        self, contradiction_merge_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#1487 AC3 (regression gate): with T1 armed via a REAL
+        config dict (mirroring an operator's ``athenaeum.yaml`` shape, not a
+        hand-passed ``enabled=True`` bool) and a cluster that reaches the
+        screen, a decision row IS written to
+        ``wiki/_reasoning_tier_decisions.jsonl``.
+
+        This exercises the full production call chain issue athenaeum#1487 traced:
+        ``resolve_reasoning_tier_auditing_enabled`` (config.py) ->
+        ``merge_clusters_to_wiki``'s single ``t1_screen_rejects_merge_proposal``
+        call site (merge.py) -> ``run_reasoning_pipeline`` /
+        ``record_reasoning_tier_decision`` (reasoning_tiers.py) — the same
+        chain ``tests/test_reasoning_tiers.py::test_pipeline_records_every_tier_decision``
+        and ``test_reasoning_t1_and_t2_knobs_use_their_own_clients`` (above)
+        each cover in part, chained here end to end through the real entry
+        point an operator's nightly run actually uses.
+        """
+        from athenaeum import merge as merge_mod
+        from athenaeum.config import load_config
+        from athenaeum.reasoning_tiers import (
+            T1_TIER_NAME,
+            default_reasoning_tier_log_path,
+            read_reasoning_tier_decisions,
+        )
+
+        monkeypatch.setattr(merge_mod.spend, "ceiling_tripped", lambda *a, **k: None)
+        config = load_config(contradiction_merge_root)
+        config.setdefault("librarian", {})["reasoning_tier_auditing_enabled"] = True
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        resolver_payload = (
+            '{"action": "propose_merge", '
+            '"merge_target_name": "prior-session-debris-policy", '
+            '"draft_merged_body": "Prefer parking prior-session debris on WIP.", '
+            '"confidence": 0.9, "source_precedence_used": []}'
+        )
+        classify_client = self._fake_client(detector_payload)
+        resolve_client = self._fake_client(resolver_payload)
+        # Unparseable text -> T1 degrades to pass_up (reasoning_tiers._parse_t1_response)
+        # — still a logged decision, just not a reject. The regression gate is
+        # "a row exists", not "the row is a reject".
+        reasoning_t1_client = self._fake_client("T1 pass-up (test)")
+
+        wiki_root = contradiction_merge_root / "wiki"
+        log_path = default_reasoning_tier_log_path(wiki_root)
+        assert not log_path.exists()
+
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=classify_client,
+            resolve_client=resolve_client,
+            reasoning_t1_client=reasoning_t1_client,
+            config=config,
+        )
+
+        assert log_path.exists(), (
+            "T1 was armed via config['librarian']['reasoning_tier_auditing_enabled'] "
+            "and a proposal reached the screen, but no decision row was written"
+        )
+        records = read_reasoning_tier_decisions(wiki_root, tier=T1_TIER_NAME)
+        assert len(records) >= 1
+        assert records[0]["proposal_id"]
+        assert records[0]["decision"] in ("reject", "pass_up")
+
     def test_unset_knob_clients_fall_back_to_client_ac6(
         self, contradiction_merge_root: Path
     ) -> None:

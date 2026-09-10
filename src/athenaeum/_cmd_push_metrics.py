@@ -225,6 +225,10 @@ def _cmd_push_metrics_record(args: argparse.Namespace) -> int:
     over the matching flags only when non-empty — so a caller can mix a
     fixed ``--session-id`` flag with a per-call stdin ``ids`` array if it
     wants to.
+
+    ``--cache-dir`` isolation (issue athenaeum#1512): see
+    :func:`_resolve_record_wiki_root` for why this subcommand resolves its
+    own ``wiki_root`` instead of the shared :func:`_resolve_wiki_root`.
     """
     from athenaeum import push_metrics
 
@@ -255,11 +259,51 @@ def _cmd_push_metrics_record(args: argparse.Namespace) -> int:
         query=query,
         backend=backend,
         cache_dir=args.cache_dir,
-        wiki_root=_resolve_wiki_root(args),
+        wiki_root=_resolve_record_wiki_root(args),
     )
     if args.json:
         sys.stdout.write(json.dumps({"wrote": wrote}) + "\n")
     return 0
+
+
+def _resolve_record_wiki_root(args: argparse.Namespace) -> Path:
+    """``wiki_root`` resolution for ``push-metrics record`` ONLY (issue
+    athenaeum#1512) — every other ``push-metrics`` subcommand keeps using
+    the shared :func:`athenaeum._cli_shared._resolve_wiki_root`.
+
+    ``durable_push_records_path`` cannot itself tell "the operator typed
+    ``--cache-dir`` to isolate a test/scratch run" apart from "a caller
+    resolved ``cache_dir`` eagerly as part of its own plumbing" — both
+    arrive as a concrete, non-``None`` :class:`Path`. Its ``new_path``
+    branch is governed entirely by ``wiki_root`` / ``--path``, which
+    ``--cache-dir`` does not touch. Left alone, ``--cache-dir <scratch>``
+    with no ``--path`` override resolves ``wiki_root`` to the live default
+    (``~/knowledge/wiki``), and an empty scratch dir makes the legacy
+    branch's ``not legacy_path.exists()`` true — so the "isolated" call
+    writes straight into the real wiki root. That is the exact incident
+    this issue reports (399 rows orphaned by one scratch-dir invocation).
+
+    Chosen semantics ("scope both branches", the issue's own suggested
+    option, judged safer than a refusal here because ``record`` is
+    documented fire-and-forget and must keep exiting 0 — see this
+    subcommand's own docstring): when ``--cache-dir`` was given AND
+    ``--path`` was left at its argparse default (i.e. the operator did not
+    also scope the wiki root away from the live default), root
+    ``wiki_root`` under the SAME explicit ``--cache-dir`` value instead of
+    falling through to the live default. ``.expanduser()`` only (no
+    ``.resolve()``) deliberately matches :func:`athenaeum.config.resolve_cache_dir`
+    exactly, so ``durable_push_records_path``'s ``new_path`` and
+    ``legacy_path`` become the IDENTICAL :class:`Path` in this case — the
+    two-branch check can no longer matter, because there is only one branch
+    left to land in.
+
+    A caller who explicitly passes ``--path`` (to any value, including one
+    that happens to equal the default) is left alone: providing ``--path``
+    at all is treated as an informed, deliberate choice of wiki root.
+    """
+    if args.cache_dir is not None and args.path == DEFAULT_KNOWLEDGE_ROOT:
+        return args.cache_dir.expanduser()
+    return _resolve_wiki_root(args)
 
 
 def _print_tail_row(rec: dict) -> None:

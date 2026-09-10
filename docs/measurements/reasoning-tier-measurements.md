@@ -449,3 +449,110 @@ grep -n "reasoning_tier_auditing_enabled\|reasoning_tier_t2_auto_apply_enabled" 
 zgrep -h "wiki-page dedup" ~/Library/Logs/pre-dawn-sweep.out.log.1.gz \
   | grep -v SUPPRESSED | awk '{print substr($1,1,10)}' | sort | uniq -c
 ```
+
+---
+
+## Follow-up — root-cause investigation, 2026-09-10 (issue athenaeum#1487)
+
+Window 1 above ended with an open question and an explicit deferral: "Root cause
+was **not** investigated here... diagnosing the live code path belongs in a
+dedicated follow-up bug." issue athenaeum#1487 is that follow-up. This section is a
+CODE-LEVEL trace, not a new live-store measurement pass (this investigation ran
+from a read-only mount of the store's `wiki/`/`raw/` trees, with no access to the
+operator's `athenaeum.yaml`, `spend` ledger, or sweep logs — those remain
+host-side; see the PR for athenaeum#1487).
+
+**Re-confirmed, live:** `wiki/_reasoning_tier_decisions.jsonl` still does not
+exist under the mounted store as of this date — same finding as Window 1,
+unchanged.
+
+### The traced path (config resolver -> consumer -> log writer)
+
+1. `athenaeum.config.resolve_reasoning_tier_auditing_enabled(config)` — reads
+   env `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED` first, else
+   `config["librarian"]["reasoning_tier_auditing_enabled"]` (bool only), else
+   `False`. `athenaeum.config.load_config` reloads the yaml fresh on every call
+   (no caching), so a stale cached config is not a live explanation.
+2. `athenaeum.merge.merge_clusters_to_wiki` resolves this ONCE per run into
+   `reasoning_t1_enabled` and threads it, together with the `reasoning_t1`
+   knob's own per-knob LLM client (`athenaeum.provider.resolve_provider` /
+   `LLMClientCache`, issue athenaeum#841), into
+   `athenaeum.reasoning_screens.t1_screen_rejects_merge_proposal` at the one
+   call site in `_emit_escalation` — immediately before the ONLY
+   `write_pending_merge` call in `merge.py`. Every proposal that reaches the
+   human queue passes this line first.
+3. `t1_screen_rejects_merge_proposal` calls
+   `athenaeum.reasoning_tiers.run_reasoning_pipeline`, passing `wiki_root`.
+   That function appends a record via
+   `athenaeum.reasoning_tiers.record_reasoning_tier_decision` for **every**
+   decision it produces — reject or pass-up — before ever inspecting the
+   verdict. This is unit-pinned
+   (`tests/test_reasoning_tiers.py::TestDecisionLog::test_pipeline_records_every_tier_decision`)
+   and exercised at full `merge_clusters_to_wiki` fidelity, with a real
+   `config["librarian"]["reasoning_tier_auditing_enabled"] = True` dict (not a
+   hand-passed bool) and a real per-knob client, in
+   `tests/test_librarian_merge.py::test_reasoning_t1_and_t2_knobs_use_their_own_clients`,
+   which already asserts the `reasoning_t1` client's `messages.create` is
+   called exactly once.
+
+### Cause, ruled in/out
+
+- **"Never reads the flag / wrong key / wrong file / stale cache" (candidate
+  1) — ruled OUT.** The resolver reads exactly
+  `librarian.reasoning_tier_auditing_enabled` from a freshly-reloaded config on
+  every call, and every call site names and reads that same resolver. No
+  alternate key, file, or cache path exists in the code.
+- **"Four predicates gate the tier out" (candidate 2) — ruled OUT, and
+  additionally misattributed in the issue.** The four-predicate safe class
+  (same `memory_class`, <=3 pages, no `pii`, no `axiom` member —
+  `athenaeum.reasoning_tiers.safe_class_violation`) belongs to **T2's**
+  auto-apply eligibility gate, not T1's. T1 has its own, different, two-item
+  set of cheap pre-model checks (cross-`memory_class`, live-source-duplicate),
+  but even when one of THOSE fires, the resulting `reject` decision is still
+  appended to the log via `run_reasoning_pipeline` before the function
+  returns — a predicate can change which verdict gets logged, never whether a
+  row gets logged at all. Window 1's own safe-class table (472 SAFE / 153
+  cross_memory_class / 127 too_many_pages / 0 pii / 0 axiom, of 752 total) is
+  additional evidence for the same point: the population is not predicate-
+  starved (472 of 752 are SAFE), yet the T1 log is still entirely empty. AC4 is
+  therefore discharged as conditional-not-applicable: no new live-corpus
+  predicate measurement was taken, because the predicates are demonstrably not
+  the mechanism at fault.
+- **"Decisions are written elsewhere" (candidate 3) — ruled OUT.**
+  `record_reasoning_tier_decision` is the only writer of tier-decision records
+  anywhere in the codebase; `REASONING_TIER_LOG_FILENAME` /
+  `default_reasoning_tier_log_path` are the single source of truth for the
+  path, consistently `wiki_root / "_reasoning_tier_decisions.jsonl"` at every
+  call site (`wiki_root` is one variable, `knowledge_root / "wiki"`, shared with
+  the `_pending_merges.md` write in the same function). Nothing else in the
+  tree constructs a similarly-shaped decision record.
+- **Actual defect found: an observability gap, not a wiring bug.** The write
+  path is provably correct by code trace and by the two tests named above. The
+  gap is that nothing ever READS the unsampled log to report tier health.
+  `athenaeum calibration summary` — the one existing status surface — reads
+  ONLY `athenaeum.calibration.calibration_summary`, which is fed exclusively
+  by `sample_tier_decision`, itself called only on a T1 **reject** (sampled at
+  `audit_sample_rate_t1_rejects`, default 7.5%) or a T2 auto-applied
+  **approve**. A T1 that is fully armed, fully invoked, and correctly passing
+  every proposal up (a legitimate, common outcome — "these are different
+  entities") produces the exact same permanent `sampled: 0` that a T1 which
+  was never invoked at all would produce. `read_reasoning_tier_decisions`
+  (the unsampled reader) existed in `reasoning_tiers.py` with **zero callers**
+  anywhere in the codebase before this fix — nothing had ever wired it to a
+  report. This is why 16 days of silence was indistinguishable from "off" and
+  required a code-reading investigation rather than a one-line status check.
+  Fixed in athenaeum#1487 by extending `athenaeum calibration summary` to also
+  report, per tier, the unsampled decision count and last-decision timestamp
+  from the raw log, with an explicit "ARMED BUT SILENT" warning when a tier's
+  own flag resolves true and its logged-decision count is zero — see
+  `src/athenaeum/_cmd_calibration.py`.
+- **What remains host-side.** Whether THIS store's T1 is (a) genuinely never
+  invoked (e.g. the `reasoning_t1` knob's client resolves to `None` — an
+  `llm.providers.reasoning_t1` / API-key issue specific to that knob, unlike
+  the global provider) or (b) invoked but degrading somewhere not covered by
+  the two tests above cannot be settled from a read-only mount with no
+  `athenaeum.yaml` access. `athenaeum calibration summary --json` run against
+  the live store, once this fix ships, will show `T1.decisions_logged` (and,
+  if it comes back `0` with `armed: true`, the specific "ARMED BUT SILENT"
+  line to hand to the operator as the next diagnostic step) — this is a
+  reportable follow-up, not something decided here.

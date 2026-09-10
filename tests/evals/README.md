@@ -165,6 +165,52 @@ Try it locally: `python -m tests.evals.containment_cli` (defaults to
 `tests/evals/test_containment_*.py` and `tests/evals/test_rollout_ceiling_separation.py`
 — none of it runs in `ci.yml` or `evals.yml` (`tests/evals/test_containment_ci_wiring.py`).
 
+## Layer 4 — four-arm rollout runner (`tests/evals/rollout.py`, issue athenaeum#1522)
+
+The runner Layer 3's containment machinery was built for: one probe run
+across all four memory-delivery arms — `NONE` / `PUSH` / `ORACLE` / `PULL`
+(`tests.evals.rollout.Arm`) — against a materialized corpus at a chosen
+scale (`run_probe_all_arms`), captured as a `RolloutRecord` per (probe, arm)
+pair with a per-TURN token-usage series (not only a summed-per-task total —
+issue athenaeum#1523 needs the series), tool calls, and the raw transcript.
+
+The arms split unevenly on purpose:
+
+- **NONE / PUSH / ORACLE** (`run_none` / `run_push` / `run_oracle`) are
+  single-shot completions — only the assembled context differs. They reuse
+  `tests/evals/harness.py`'s `EvalSession.observe_response` / provider call
+  shape directly rather than a second provider abstraction. PUSH's context
+  is exactly what `athenaeum.mcp_server.recall_search` would deliver;
+  ORACLE's is the probe's ground-truth pages verbatim (the retrieval
+  ceiling); NONE gets nothing.
+- **PULL** (`run_pull`) is a real tool-use loop: it spawns `claude -p` with
+  a scoped `--mcp-config` exposing only athenaeum's `recall` tool plus
+  `--output-format stream-json --verbose`, so whether the model *chooses*
+  to call recall is directly observable in the stream
+  (`parse_pull_stream`). Not calling recall is a recorded outcome, never an
+  error. `src/athenaeum/provider.py`'s own text-only CLI pinning
+  (`--tools ""` / unscoped `--strict-mcp-config`, athenaeum#906/#775) is
+  untouched — this is a sibling argv builder, not a parameterization of it.
+
+The PULL spike (proving the subprocess actually reaches the scoped MCP
+server and that `stream-json` records the call) is reproduced as a test —
+`tests/evals/test_rollout_pull_spike.py` — split into an unauthenticated
+half (spawns the real `claude` binary, asserts the `system`/`init` event
+names athenaeum connected with `mcp__athenaeum__recall` available; skips
+cleanly if `claude` is absent) and a credential-gated half (the actual
+tool-use decision; gated on `ATHENAEUM_LIVE_TESTS=1` plus `claude` on
+`PATH`, mirroring `tests/regression/test_live_prompt_regression.py`'s
+gating idiom). `tests/evals/test_rollout.py` covers the stream-json parser
+and all four arms offline, against a committed redacted fixture
+(`tests/evals/data/rollout/pull_stream_spike.jsonl`) and
+`tests.conftest.FakeLLMClient` — no network, no subprocess.
+
+Every test in both files carries `pytest.mark.rollout` — deselected by
+default alongside `eval`/`embedding` (see `pyproject.toml`) — and rollout
+token usage is recorded on a caller-supplied `EvalSession` (typically the
+`rollout_session` fixture), never `harness.EVAL_TOKEN_CEILING`'s own
+accumulator.
+
 ## Build prerequisites
 
 - CI pulls `ANTHROPIC_API_KEY` from 1Password at run time

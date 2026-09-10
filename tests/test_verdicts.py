@@ -30,6 +30,7 @@ from athenaeum.verdicts import (
     mark_pairs_stale,
     note_run_night,
     open_epoch,
+    page_id_for_path,
     record_pair_decision,
     refuse_if_erasure_class,
     select_stale_for_authority_revoked,
@@ -203,6 +204,111 @@ class TestMakePairKey:
         assert make_pair_key("beta", "alpha") == "alpha+beta"
 
 
+class TestPageIdForPath:
+    """Issue athenaeum#1484: ``page_id_for_path`` derived a pair-member id
+    from the bare filename stem, discarding the directory -- two same-stem
+    pages in different directories collided onto one id, and
+    ``make_pair_key`` builds ledger pair-keys from those ids."""
+
+    def test_default_is_unchanged_bare_stem_slug(self, tmp_path: Path) -> None:
+        """No *root* supplied -> byte-identical to this function's
+        pre-athenaeum#1484 behavior. This is deliberate, not incidental:
+        cluster_comparator's adapter and scope_resolution's ``refines:``
+        matching both pin this exact shape (see their own test suites), so
+        the default must never move out from under them."""
+        page = tmp_path / "sub" / "project_widget.md"
+        page.parent.mkdir(parents=True)
+        page.write_text("claim", encoding="utf-8")
+        assert page_id_for_path(page) == "project-widget"
+
+    def test_same_stem_different_directories_collide_without_root(
+        self, tmp_path: Path
+    ) -> None:
+        """Reproduces the bug exactly as filed: two pages sharing a stem in
+        different directories, called the old (no-*root*) way, still
+        collide onto one id -- pinning that the fix is *root*-gated, not a
+        change to the unqualified default."""
+        dir_a = tmp_path / "dir-a"
+        dir_b = tmp_path / "dir-b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        page_a = dir_a / "note.md"
+        page_b = dir_b / "note.md"
+        page_a.write_text("a", encoding="utf-8")
+        page_b.write_text("b", encoding="utf-8")
+        assert page_id_for_path(page_a) == page_id_for_path(page_b)
+
+    def test_same_stem_different_directories_get_different_ids_and_pair_keys(
+        self, tmp_path: Path
+    ) -> None:
+        """AC3: with *root* supplied, the same two same-stem pages from
+        different directories get different ids AND different pair keys --
+        the fix for the collision above."""
+        wiki_root = tmp_path / "wiki"
+        dir_a = wiki_root / "dir-a"
+        dir_b = wiki_root / "dir-b"
+        dir_a.mkdir(parents=True)
+        dir_b.mkdir(parents=True)
+        page_a = dir_a / "note.md"
+        page_b = dir_b / "note.md"
+        page_a.write_text("a", encoding="utf-8")
+        page_b.write_text("b", encoding="utf-8")
+
+        id_a = page_id_for_path(page_a, root=wiki_root)
+        id_b = page_id_for_path(page_b, root=wiki_root)
+        assert id_a != id_b
+
+        scoped_pair = make_pair_key(id_a, id_b)
+        # The pair key the OLD (no-root) ids would have produced -- a single
+        # collapsed pair, exactly the bug athenaeum#1484 reports.
+        unscoped_pair = make_pair_key(
+            page_id_for_path(page_a), page_id_for_path(page_b)
+        )
+        assert unscoped_pair == "note+note"
+        assert scoped_pair != unscoped_pair
+
+    def test_page_directly_in_root_keeps_bare_stem_id(self, tmp_path: Path) -> None:
+        """AC2 (ledger-rows-remain-readable route): a page with no
+        intermediate directory under *root* gets the identical bare-stem id
+        whether or not *root* is passed -- nothing about an unambiguous
+        page's id moves, so every pre-existing ledger row for a flat corpus
+        (the live corpus today, per the issue's own measurement) keeps
+        reading and writing the same id."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        page = wiki_root / "topic.md"
+        page.write_text("claim", encoding="utf-8")
+        assert page_id_for_path(page, root=wiki_root) == page_id_for_path(page)
+
+    def test_path_outside_root_falls_back_to_bare_stem(self, tmp_path: Path) -> None:
+        """*root* is best-effort: a path that does not resolve under it must
+        never raise -- a resolution edge case must not take down a
+        merge-decision recording."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        elsewhere = tmp_path / "elsewhere" / "topic.md"
+        elsewhere.parent.mkdir()
+        elsewhere.write_text("claim", encoding="utf-8")
+        assert page_id_for_path(elsewhere, root=wiki_root) == page_id_for_path(elsewhere)
+
+    def test_pair_key_order_independent_with_scoped_ids(self, tmp_path: Path) -> None:
+        """AC4: pair keys built from root-scoped (disambiguated) ids remain
+        order-independent, same as the plain-slug case."""
+        wiki_root = tmp_path / "wiki"
+        dir_a = wiki_root / "dir-a"
+        dir_b = wiki_root / "dir-b"
+        dir_a.mkdir(parents=True)
+        dir_b.mkdir(parents=True)
+        page_a = dir_a / "note.md"
+        page_b = dir_b / "note.md"
+        page_a.write_text("a", encoding="utf-8")
+        page_b.write_text("b", encoding="utf-8")
+
+        id_a = page_id_for_path(page_a, root=wiki_root)
+        id_b = page_id_for_path(page_b, root=wiki_root)
+        assert make_pair_key(id_a, id_b) == make_pair_key(id_b, id_a)
+
+
 # ---------------------------------------------------------------------------
 # Schema round-trip
 # ---------------------------------------------------------------------------
@@ -366,6 +472,61 @@ class TestLedgerGrowthLinear:
         # 6 pages -> C(6,2) = 15 possible pairs; only the ONE real
         # disposition may ever be recorded.
         assert ledger_count(wiki_root) == 1
+
+
+class TestRecordPairDecisionScopedIds:
+    """Issue athenaeum#1484, end to end: ``record_pair_decision`` passes
+    ``root=wiki_root`` into ``page_id_for_path``, so two real pair
+    decisions that share a same-stem page in different directories land as
+    two distinct ledger rows instead of one silently overwriting/aliasing
+    the other's verdict."""
+
+    def test_same_stem_pages_in_different_directories_get_distinct_ledger_rows(
+        self, tmp_path: Path
+    ) -> None:
+        wiki_root = tmp_path / "wiki"
+        (wiki_root / "dir-a").mkdir(parents=True)
+        (wiki_root / "dir-b").mkdir(parents=True)
+        anchor = wiki_root / "anchor.md"
+        note_a = wiki_root / "dir-a" / "note.md"
+        note_b = wiki_root / "dir-b" / "note.md"
+        _write_page(anchor, name="anchor")
+        _write_page(note_a, name="note-a")
+        _write_page(note_b, name="note-b")
+
+        lock = RunLock(tmp_path)
+        with lock:
+            result_1 = record_pair_decision(
+                wiki_root,
+                source_a=str(anchor),
+                source_b=str(note_a),
+                verdict="duplicate",
+                decided_by="pipeline:merge-approve",
+                lock=lock,
+            )
+            result_2 = record_pair_decision(
+                wiki_root,
+                source_a=str(anchor),
+                source_b=str(note_b),
+                verdict="distinct",
+                decided_by="pipeline:merge-reject",
+                lock=lock,
+            )
+
+        assert result_1["ok"] is True
+        assert result_2["ok"] is True
+        # The bug as filed: bare-stem ids would key BOTH pairs as
+        # "anchor+note", so the second write would silently overwrite (or
+        # be read as) the first's verdict. Fixed, they must be two
+        # different pair keys...
+        assert result_1["pair"] != result_2["pair"]
+        # ...and therefore two separate ledger rows, each still bearing its
+        # own correct verdict.
+        assert ledger_count(wiki_root) == 2
+        row_1 = lookup_pair(wiki_root, result_1["pair"])
+        row_2 = lookup_pair(wiki_root, result_2["pair"])
+        assert row_1 is not None and row_1.verdict == "duplicate"
+        assert row_2 is not None and row_2.verdict == "distinct"
 
 
 # ---------------------------------------------------------------------------

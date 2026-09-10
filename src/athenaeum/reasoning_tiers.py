@@ -93,6 +93,26 @@ athenaeum#518) and do not describe T2 as "unwired" (stale as of athenaeum#602) �
 tiers are wired, each opt-in behind its OWN flag (athenaeum#1200), each
 defaulting to the identical unscreened behavior when it is off.
 
+**Diagnosing "armed but shows nothing" (issue athenaeum#1487).** The flag path is
+:func:`athenaeum.config.resolve_reasoning_tier_auditing_enabled` (T1) /
+:func:`athenaeum.config.resolve_reasoning_tier_t2_auto_apply_enabled` (T2) ->
+:mod:`athenaeum.reasoning_screens`'s two screen functions (the sole
+consumers) -> :func:`run_reasoning_pipeline` in this module, which calls
+:func:`record_reasoning_tier_decision` for EVERY decision (reject or
+pass-up) it produces, unconditionally. Do not mistake ``athenaeum
+calibration summary`` reading all-zero for "the tier never ran": that
+command is fed by :mod:`athenaeum.calibration`'s SAMPLED audit ledger
+(``sample_tier_decision``, ~7.5% of T1 rejects / T2 approvals by default) —
+a T1 that only ever passes proposals up produces a permanent zero there by
+design, indistinguishable from one that was never invoked. Use
+:func:`read_reasoning_tier_decisions` (the unsampled log, now surfaced by
+``athenaeum calibration summary``'s per-tier ``decisions_logged`` /
+``last_decision_at`` fields — see ``src/athenaeum/_cmd_calibration.py``) to
+tell "armed and quiet" apart from "armed and broken". Full trace + the
+live-store investigation that motivated this note:
+``docs/measurements/reasoning-tier-measurements.md``'s
+"Follow-up — root-cause investigation" section.
+
 **M17 retrofit (athenaeum#609), applying athenaeum#608's decided strictness posture to this
 authority boundary.** T1/T2 now parse the model's raw JSON verdict through a
 Pydantic response model (:class:`T1VerdictResponse` / :class:`T2VerdictResponse`)

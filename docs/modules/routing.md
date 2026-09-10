@@ -122,6 +122,6 @@ see that design doc for it.
 ## See also
 
 - Guides — [Daily operation](../guides/daily-operation.md) · [Answering decisions](../guides/decisions.md)
-- Modules — [corrections](corrections.md) · [MCP surface](mcp.md)
+- Modules — [corrections](corrections.md) · [retention](retention.md) · [MCP surface](mcp.md)
 - Design — [sensitivity-value routing](../design/sensitivity-value-routing.md) · [sensitivity class vocabulary](../design/sensitivity-class-vocabulary.md) · [security posture](../design/security-posture.md)
 - Reference — [configuration](../reference/configuration.md)
