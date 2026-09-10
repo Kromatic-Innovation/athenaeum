@@ -485,7 +485,7 @@ def enrich_payload(
         # They are, since athenaeum#1530, recoverable from a separate local
         # trace the hook writes and this lookup joins on that same hash. A
         # miss here (trace absent, rotated past, or never instrumented on
-        # this machine) renders the pre-#1530 explicit not-instrumented
+        # this machine) renders the pre-athenaeum#1530 explicit not-instrumented
         # state rather than an empty box, which would read as "the sidecar
         # thought nothing" -- a different and wrong claim.
         topics = _load_topics_for_query_hash(query_hash, cache_dir=cache_dir)
