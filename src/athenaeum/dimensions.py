@@ -1078,6 +1078,27 @@ def cross_corpus_compare(
     return compare(dim_local, a, b, **kwargs)
 
 
+def scope_relation(fm: dict[str, Any] | None, session_scope: str | None) -> str | None:
+    """Compare a page's `claimed_scope` (issue athenaeum#714's `scope` dimension)
+    against *session_scope*. Returns `None` when either side is absent — "no
+    scope information," never a fabricated relation.
+
+    Moved here from the deleted ``athenaeum.memory_tiers`` (issue
+    athenaeum#1514). It never had any tier content: it reads the page's
+    coordinate through :func:`coordinate_value` (never ``fm.get("claimed_scope")``
+    raw) and delegates the comparison to :func:`compare_hierarchy`, so it is
+    scope-dimension machinery and belongs in this module — the same
+    frontmatter-key <-> dimension-name binding discipline this module's own
+    write-discipline note describes.
+    """
+    if not session_scope or not isinstance(fm, dict):
+        return None
+    page_scope = coordinate_value(SCOPE, fm)
+    if not isinstance(page_scope, str) or not page_scope.strip():
+        return None
+    return compare_hierarchy(page_scope, session_scope)
+
+
 __all__ = [
     "DEEP_BACKDATE_THRESHOLD_DAYS",
     "DEFAULT_REGISTRY",
@@ -1114,6 +1135,7 @@ __all__ = [
     "parse_dimension_entry",
     "parsed_coordinate",
     "retire_dimension_coordinate",
+    "scope_relation",
     "stamp_recorded_time",
     "validate_intake_temporal",
 ]

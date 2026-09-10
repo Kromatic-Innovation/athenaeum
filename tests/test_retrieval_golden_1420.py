@@ -136,52 +136,73 @@ def golden_caches(
     return caches
 
 
-class TestFixtureTierMix:
-    """AC2: the fixture corpus carries a realistic tier and type mix.
+class TestFixtureTypeMixAndOrphanedTierKeys:
+    """AC2: the fixture corpus carries a realistic type mix.
 
-    An all-hot or all-warm fixture cannot express the substitution bug this
-    issue is about (a hot page silently backfilling for a suppressed warm
-    one) — these assertions exist so a future edit to ``corpus.py`` cannot
-    silently collapse the mix back into that degenerate shape.
+    Originally this asserted a realistic TIER mix — an all-hot or all-warm
+    fixture cannot express the substitution bug athenaeum#1420 is about (an
+    eagerly-surfaced page silently backfilling for a suppressed one). Issue
+    athenaeum#1514 retired the tier vocabulary, so the same property is now
+    asserted where it actually lives: the TYPE mix, with the
+    principle/preference/auto-memory pool a small minority of the corpus.
+
+    The second half pins the orphaned `memory_tier:` frontmatter key that
+    athenaeum#1514's chosen migration leaves on disk. It must still be
+    present in the fixture (so the goldens keep exercising pages that carry
+    one) and must still be inert (so a page carrying one is retrieved
+    exactly like a page that does not).
     """
 
-    def test_hot_pages_are_confined_to_principle_preference_auto_memory(self) -> None:
-        from athenaeum.memory_tiers import resolve_tier
+    _EAGER_TYPES = {"principle", "preference", "auto-memory"}
 
-        hot_types = set()
-        for spec in golden_corpus.all_pages():
-            fm = {"type": spec.type}
-            if spec.memory_tier is not None:
-                fm["memory_tier"] = spec.memory_tier
-            if resolve_tier(fm) == "hot":
-                hot_types.add(spec.type)
+    def test_eagerly_surfaced_types_are_a_small_minority(self) -> None:
+        pages = golden_corpus.all_pages()
+        eager = [spec for spec in pages if spec.type in self._EAGER_TYPES]
+        assert eager, "fixture must contain at least one eagerly-surfaced page"
 
-        assert hot_types, "fixture must contain at least one hot page"
-        assert hot_types <= {"principle", "preference", "auto-memory"}, (
-            f"hot tier leaked into unexpected type(s): "
-            f"{hot_types - {'principle', 'preference', 'auto-memory'}}"
+        eager_fraction = len(eager) / len(pages)
+        # Counter-example this guards against: a degenerate fixture whose
+        # corpus is all one pool. The real corpus measured 96.56% / 3.44%;
+        # this synthetic fixture is far smaller so exact percentages aren't
+        # meaningful, but the SHAPE (small minority) must hold.
+        assert 0 < eager_fraction <= 0.15, (
+            f"eagerly-surfaced fraction out of range: {eager_fraction:.2%}"
         )
 
-    def test_warm_is_the_dominant_majority(self) -> None:
-        from athenaeum.memory_tiers import resolve_tier
+    def test_orphaned_memory_tier_pins_are_still_in_the_fixture(self) -> None:
+        """Issue athenaeum#1514's migration is "leave the key in place, stop
+        reading it" — so the fixture must keep carrying it, or the goldens
+        would stop covering the on-disk shape the real corpus has.
+        """
+        pinned = [spec for spec in golden_corpus.all_pages() if spec.memory_tier is not None]
+        assert pinned, (
+            "the fixture must keep at least one orphaned `memory_tier:` pin, "
+            "so retrieval is exercised against the shape the real corpus has"
+        )
+        assert all(spec.type in self._EAGER_TYPES for spec in pinned)
 
-        pages = golden_corpus.all_pages()
-        tiers = []
-        for spec in pages:
-            fm = {"type": spec.type}
-            if spec.memory_tier is not None:
-                fm["memory_tier"] = spec.memory_tier
-            tiers.append(resolve_tier(fm))
+    def test_the_orphaned_key_reaches_the_page_but_not_the_index(
+        self, golden_wiki: Path, golden_caches: dict[str, Path]
+    ) -> None:
+        """The key is inert, not absent: it IS written to the page's
+        frontmatter, and it is NOT carried into the retrieval index. A test
+        asserting only the second half would also pass on a fixture that had
+        quietly stopped writing the key at all.
+        """
+        import sqlite3
 
-        warm_fraction = tiers.count("warm") / len(tiers)
-        hot_fraction = tiers.count("hot") / len(tiers)
-        # Counter-example this guards against: an all-hot or all-warm
-        # fixture. The real corpus measured 96.56% warm / 3.44% hot; this
-        # synthetic fixture is far smaller so exact percentages aren't
-        # meaningful, but the SHAPE (small hot minority, dominant warm
-        # majority) must hold.
-        assert warm_fraction >= 0.85, f"warm fraction too low: {warm_fraction:.2%}"
-        assert 0 < hot_fraction <= 0.15, f"hot fraction out of range: {hot_fraction:.2%}"
+        pinned = [spec for spec in golden_corpus.all_pages() if spec.memory_tier is not None]
+        page = golden_wiki / pinned[0].filename
+        assert "memory_tier:" in page.read_text(encoding="utf-8")
+
+        conn = sqlite3.connect(golden_caches["fts5"] / "wiki-index.db")
+        try:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(wiki)")}
+        finally:
+            conn.close()
+        assert "memory_tier" not in cols, (
+            f"the retired tier axis is back in the index schema: {sorted(cols)}"
+        )
 
 
 class TestGoldenHitIdentity:

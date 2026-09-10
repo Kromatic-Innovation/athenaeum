@@ -33,11 +33,12 @@ literally here: a `grep` of this file for either of the two forbidden
 wrapper-key strings must return nothing — see this issue's own acceptance
 criteria and ``tests/test_context_core.py``'s literal-grep guard.)
 
-**Selection and ranking are by relevance alone.** ``memory_tier`` is carried
-on each candidate as METADATA ONLY (issue athenaeum#1345 owns this
-invariant) — it never appears in a ``WHERE``/``ORDER BY`` clause and never
-adjusts a score. Swapping two candidates' ``memory_tier`` values must never
-change which candidates are selected or their order.
+**Selection and ranking are by relevance alone.** Issue athenaeum#1345
+established this as an invariant while ``memory_tier`` was still carried on
+each candidate as metadata; issue athenaeum#1514 retired that vocabulary and
+removed the field from the envelope entirely (schema v2), so the invariant is
+now structural rather than merely observed — there is no tier value left to
+appear in a ``WHERE``/``ORDER BY`` clause or to adjust a score.
 
 Layering: L3 service, same tier as :mod:`athenaeum.search` and
 :mod:`athenaeum.push_metrics`, which this module deliberately does not
@@ -194,7 +195,6 @@ class Candidate:
     description: str
     backend: str  # "fts5" | "vector"
     relevance: float | None  # BM25 rank for fts5; None for vector (different scale)
-    memory_tier: str  # metadata only — see module docstring
     audience: str
     token_cost: int = 0
 
@@ -209,7 +209,6 @@ class Candidate:
             "description": self.description,
             "backend": self.backend,
             "relevance": self.relevance,
-            "memory_tier": self.memory_tier,
             "audience": self.audience,
             "token_cost": self.token_cost,
         }
@@ -218,7 +217,6 @@ class Candidate:
 @dataclass
 class _Schema:
     has_description: bool
-    has_memory_tier: bool
 
 
 def _open_ro(db_file: Path) -> sqlite3.Connection:
@@ -242,9 +240,11 @@ def _open_ro(db_file: Path) -> sqlite3.Connection:
 
 def _probe_schema(conn: sqlite3.Connection) -> _Schema:
     """Issue athenaeum#1344 / athenaeum#1358 — legacy-DB safety, probed ONCE per
-    connection. A DB built by an older athenaeum predates the
-    ``memory_tier`` (schema v4) or ``description`` columns; selecting a
-    column that doesn't exist raises ``sqlite3.OperationalError``. A naive
+    connection. A DB built by an older athenaeum predates the ``description``
+    column; selecting a column that doesn't exist raises
+    ``sqlite3.OperationalError``. (It used to probe ``memory_tier`` too, until
+    issue athenaeum#1514 removed that column — a v4 DB that still HAS the
+    column is simply not selected from, which needs no probe.) A naive
     implementation that lets that propagate (or swallows it into an empty
     result) degrades to a total recall outage every turn for anyone on an
     un-rebuilt index — the counter-example athenaeum#1358's acceptance
@@ -252,10 +252,7 @@ def _probe_schema(conn: sqlite3.Connection) -> _Schema:
     degrades to a working, if narrower, push instead.
     """
     cols = {row[1] for row in conn.execute("PRAGMA table_info(wiki)").fetchall()}
-    return _Schema(
-        has_description="description" in cols,
-        has_memory_tier="memory_tier" in cols,
-    )
+    return _Schema(has_description="description" in cols)
 
 
 def _query_fts5(
@@ -267,7 +264,6 @@ def _query_fts5(
     exclude: frozenset[str],
 ) -> list[Candidate]:
     desc_col = _DESC_EXPR if schema.has_description else "''"
-    tier_col = "memory_tier" if schema.has_memory_tier else "''"
     # One query, no per-row follow-up lookup — the counter-example this
     # issue's wall-clock criterion names explicitly ("an implementation
     # that re-spawns a query per result rather than selecting `description`
@@ -278,7 +274,7 @@ def _query_fts5(
     placeholders = ",".join("?" for _ in exclude_list)
     exclude_clause = f"AND filename NOT IN ({placeholders})" if exclude_list else ""
     sql = (
-        f"SELECT filename, name, rank, audience, {tier_col}, {desc_col} "
+        f"SELECT filename, name, rank, audience, {desc_col} "
         f"FROM wiki WHERE wiki MATCH ? {exclude_clause} ORDER BY rank LIMIT ?"
     )
     params: list[Any] = [fts_query, *exclude_list, n]
@@ -297,7 +293,7 @@ def _query_fts5(
         log.warning("FTS5 query failed, degrading to no candidates: %s", exc)
         return []
     out: list[Candidate] = []
-    for filename, name, rank, audience, memory_tier, description in rows:
+    for filename, name, rank, audience, description in rows:
         out.append(
             Candidate(
                 filename=filename,
@@ -305,7 +301,6 @@ def _query_fts5(
                 description=description or "",
                 backend="fts5",
                 relevance=float(rank) if rank is not None else None,
-                memory_tier=memory_tier or "",
                 audience=audience or "",
             )
         )
@@ -342,23 +337,22 @@ def _query_vector(
         return []
     out: list[Candidate] = []
     filenames = [h[0] for h in hits if h[0]]
-    meta: dict[str, tuple[str, str, str]] = {}
+    meta: dict[str, tuple[str, str]] = {}
     if conn is not None and schema is not None and filenames:
         desc_col = _DESC_EXPR if schema.has_description else "''"
-        tier_col = "memory_tier" if schema.has_memory_tier else "''"
         placeholders = ",".join("?" for _ in filenames)
         try:
             rows = conn.execute(
-                f"SELECT filename, audience, {tier_col}, {desc_col} "
+                f"SELECT filename, audience, {desc_col} "
                 f"FROM wiki WHERE filename IN ({placeholders})",
                 filenames,
             ).fetchall()
-            meta = {r[0]: (r[1] or "", r[2] or "", r[3] or "") for r in rows}
+            meta = {r[0]: (r[1] or "", r[2] or "") for r in rows}
         except sqlite3.OperationalError as exc:
             log.warning("vector-hit metadata lookup failed, degrading to name-only: %s", exc)
             meta = {}
     for filename, name, _score in hits:
-        audience, memory_tier, description = meta.get(filename, ("", "", ""))
+        audience, description = meta.get(filename, ("", ""))
         out.append(
             Candidate(
                 filename=filename,
@@ -372,7 +366,6 @@ def _query_vector(
                 # the epic converges on" inherits this distinction from
                 # the shell hook it replaces).
                 relevance=None,
-                memory_tier=memory_tier,
                 audience=audience,
             )
         )
@@ -550,8 +543,8 @@ def build_context(
         )
 
     # Merge: FTS5 first (lexical precision), then vector, dedupe, cap n.
-    # Selection/ordering are relevance-alone here — nothing above orders by
-    # `memory_tier` (issue athenaeum#1345's invariant; see module docstring).
+    # Selection/ordering are relevance-alone here (issue athenaeum#1345's
+    # invariant; see module docstring).
     merged = _dedupe([*fts_candidates, *vector_candidates], n)
     packed = _apply_budget(merged, budget, PREAMBLE)
 
@@ -660,13 +653,10 @@ def record_context_push(
                     # queries has no `access` column to read a real value
                     # from (docs/reference/configuration.md, "Known limitation" —
                     # same default `build_push_record` assigns when
-                    # frontmatter carries no `access`; see `memory_tier`
-                    # below for the field that DOES carry real information
-                    # on a sidecar-sourced row).
+                    # frontmatter carries no `access`).
                     tier="internal",
                     scope=scope,
                     token_cost=int(c.get("token_cost", 0) or 0),
-                    memory_tier=str(c.get("memory_tier", "") or ""),
                 )
             )
 

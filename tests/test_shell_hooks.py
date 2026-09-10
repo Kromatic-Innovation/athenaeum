@@ -552,19 +552,25 @@ class TestUserPromptRecall:
             f"athenaeum#1513). context={context!r}"
         )
 
-    def test_fixture_index_actually_discriminates_gated_vs_ungated(
+    def test_index_carries_no_tier_column_so_no_gate_is_expressible(
         self, hook_env: dict[str, str]
     ) -> None:
-        """Issue athenaeum#1345 AC: "a fixture-index before/after
-        demonstrates the substitution."
+        """Issue athenaeum#1514 AC: "`memory_tier` no longer appears as a
+        tier axis in retrieval, ranking, or selection anywhere."
 
-        This is the BEFORE half, asserted directly against the built index
-        rather than by reintroducing the gate into the shipped hook: on
-        `_seed_realistic_tier_mix`'s corpus the gated query and the
-        ungated query return DISJOINT result sets. Without this the
-        `test_gate_removal_returns_the_true_bm25_top3` assertion below
-        would be unfalsifiable — it could pass on a fixture where the
-        gate happened to make no difference.
+        This replaces athenaeum#1345's `test_fixture_index_actually_
+        discriminates_gated_vs_ungated`, which built a hot/warm-mixed
+        fixture and proved a gated query returned a DIFFERENT set from an
+        ungated one — the "before" half that made
+        `test_gate_removal_returns_the_true_bm25_top3` falsifiable.
+
+        That proof is no longer constructible, and its absence is the
+        point: with the column gone from the schema, `AND memory_tier =
+        'hot'` is not a weaker filter, it is a `sqlite3.OperationalError`.
+        So the guard is inverted — instead of demonstrating the gate could
+        discriminate, assert that no query CAN name the axis, which is a
+        strictly stronger statement and cannot silently lapse the way a
+        fixture-dependent one could.
         """
         import sqlite3
 
@@ -577,11 +583,15 @@ class TestUserPromptRecall:
 
         conn = sqlite3.connect(_index_db(hook_env))
         try:
-            tier_counts = dict(
-                conn.execute(
-                    "SELECT memory_tier, COUNT(*) FROM wiki GROUP BY 1"
-                ).fetchall()
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(wiki)")}
+            assert "memory_tier" not in cols, (
+                f"the retired tier axis is back in the index schema: {sorted(cols)}"
             )
+            with pytest.raises(sqlite3.OperationalError):
+                conn.execute(
+                    "SELECT name FROM wiki WHERE wiki MATCH '\"sonderling\"' "
+                    "AND memory_tier = 'hot'"
+                ).fetchall()
             ungated = [
                 row[0]
                 for row in conn.execute(
@@ -589,34 +599,14 @@ class TestUserPromptRecall:
                     "ORDER BY rank LIMIT 3"
                 )
             ]
-            gated = [
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM wiki WHERE wiki MATCH '\"sonderling\"' "
-                    "AND memory_tier = 'hot' ORDER BY rank LIMIT 3"
-                )
-            ]
         finally:
             conn.close()
 
-        # Realistic mix, not all-hot / all-warm (athenaeum#1345
-        # counter-example): hot is a small minority and confined to
-        # `principle`, exactly as on the real corpus.
-        assert tier_counts.get("hot", 0) > 0 and tier_counts.get("warm", 0) > 0
-        assert tier_counts["hot"] < tier_counts["warm"] / 5, (
-            f"fixture must be warm-dominated like the real corpus: {tier_counts}"
+        assert set(ungated) == set(TIER_MIX_PERSON_NAMES), (
+            "the true BM25 top-3 on this corpus is the three person pages; "
+            f"got {ungated}"
         )
 
-        assert set(ungated) == set(TIER_MIX_PERSON_NAMES), (
-            f"true BM25 top-3 should be the warm person pages, got {ungated}"
-        )
-        assert set(gated) == set(TIER_MIX_PRINCIPLE_NAMES), (
-            f"the gate should substitute hot principle pages, got {gated}"
-        )
-        assert not set(ungated) & set(gated), (
-            "gated and ungated results must be disjoint for the before/after "
-            "to be legible"
-        )
 
     def test_gate_removal_returns_the_true_bm25_top3(
         self, hook_env: dict[str, str]
@@ -691,52 +681,49 @@ class TestUserPromptRecall:
             f"after={sorted(after)}"
         )
 
-    def test_cold_and_refused_stay_absent_after_the_gate_is_removed(
+    def test_cold_and_refused_boundaries_survive_the_tier_retirement(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
-        """Issues athenaeum#1345 / athenaeum#1513 AC: "`cold` and `refused`
-        remain absolutely excluded... a `refused` page must be shown still
-        absent."
+        """Issue athenaeum#1514 AC3/AC4: the `cold` and `refused`
+        boundaries are PRESERVED and are now named for their real
+        mechanisms — storage-surface policy and the never-ingest gate.
 
-        Stated plainly, because it drove the shape of this test: the
-        removed gate was NEVER what excluded `cold`/`refused`, so there is
-        no hook-side filter here to preserve, and this change could not
-        expose them. They are excluded structurally, upstream:
+        Both counter-examples the issue names are asserted here:
 
-        * `refused` and `cold` are not in `memory_tiers.SETTABLE_TIERS`,
-          so no frontmatter pin can produce a page carrying either —
-          `resolve_tier` demotes a `memory_tier: refused` pin to the class
-          default. A `refused` page is therefore not a thing that can
-          reach the index at all.
-        * A page whose entity class routes to a non-`embedded` storage
-          surface is dropped at index build (athenaeum#532 H4), so a cold
-          page produces no index row for any query to return.
-        * The one absolute exclusion reachable from an ordinary wiki
-          fixture, `pii: true` (athenaeum#427), is asserted end to end
-          through the real hook.
+        * AC3 — "a `pii`-class page must still be absent from the index
+          and from `recall` after the change; a test asserting only that
+          'warm pages still appear' does not satisfy this."
+        * AC4 — "content that the never-ingest gate refuses must still
+          never be written."
 
-        This test fails if the gate returns (the warm page stops being
-        pushed) AND if any of the three structural exclusions is weakened.
+        The vocabulary this test used to reach for is gone, and that is
+        the substance of the change rather than an obstacle to testing it:
+        `cold` was never enforced by a tier value, it was enforced by
+        `storage.is_embedded` (class+config), and `refused` was never
+        enforced by a tier value either, it was enforced by
+        `never_ingest.classify_never_ingest` upstream of storage. So each
+        assertion below now names the mechanism that actually does the
+        work, which is what makes this test survive the retirement instead
+        of dying with it.
         """
         import sqlite3
 
-        from athenaeum.memory_tiers import SETTABLE_TIERS, resolve_tier
+        from athenaeum.authority import CLASS_PENDING_STATE_TODO, AuthorityManifest
+        from athenaeum.never_ingest import classify_never_ingest
         from athenaeum.search import FTS5Backend
+        from athenaeum.storage import is_embedded
 
         _require("bash")
         _require("jq")
         _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
-        # 1. `refused` (and `cold`) are structurally unrepresentable as a
-        #    per-page pin.
-        assert "refused" not in SETTABLE_TIERS
-        assert "cold" not in SETTABLE_TIERS
-        assert (
-            resolve_tier({"type": "person", "memory_tier": "refused"}) != "refused"
-        ), "a `refused` frontmatter pin must not be honoured as a tier"
+        # 1. AC3 mechanism — the `cold` boundary is `storage.is_embedded`,
+        #    a class+config decision, and it produces NO index row at all.
+        cold_config = {"storage": {"mapping": {"credential": "excluded"}}}
+        assert is_embedded("credential", cold_config) is False
+        assert is_embedded("person", cold_config) is True
 
-        # 2. A non-embedded (cold) class produces NO index row at all.
         cold_root = tmp_path / "cold-wiki"
         cold_root.mkdir()
         (cold_root / "secret-sonderling.md").write_text(
@@ -747,15 +734,13 @@ class TestUserPromptRecall:
             "description: Sonderling protocol lead\n"
             "---\n\nbody\n"
         )
-        cold_config = {"storage": {"mapping": {"credential": "excluded"}}}
-        assert resolve_tier({"type": "credential"}, config=cold_config) == "cold"
         cold_cache = tmp_path / "cold-cache"
         cold_cache.mkdir()
         FTS5Backend().build_index(cold_root, cold_cache, config=cold_config)
         conn = sqlite3.connect(cold_cache / "wiki-index.db")
         try:
             cold_rows = conn.execute(
-                "SELECT name, memory_tier FROM wiki WHERE wiki MATCH '\"sonderling\"'"
+                "SELECT name FROM wiki WHERE wiki MATCH '\"sonderling\"'"
             ).fetchall()
         finally:
             conn.close()
@@ -764,8 +749,43 @@ class TestUserPromptRecall:
             f"(athenaeum#532 H4); got {cold_rows}"
         )
 
-        # 3. A `pii: true` page stays absent end to end, on the SAME run
-        #    that proves warm pages are now reachable.
+        # 2. AC4 mechanism — the `refused` boundary is `never_ingest`, and
+        #    it refuses UPSTREAM of storage: refused content is never
+        #    written, so there is nothing downstream to exclude. The
+        #    "never written" half is asserted against the real write path
+        #    in `tests/test_never_ingest.py`
+        #    (`test_refused_file_never_deleted_and_no_wiki_page_written`,
+        #    unchanged by this issue); what is pinned HERE is that the
+        #    gate is still the thing making that call, now that no tier
+        #    value shadows it.
+        manifest = AuthorityManifest(
+            version=1,
+            sources=(),
+            never_ingest_classes=(CLASS_PENDING_STATE_TODO,),
+        )
+        assert (
+            classify_never_ingest(
+                {"name": "Sonderling rollout", "pending_state": True},
+                "body",
+                manifest=manifest,
+            )
+            is not None
+        ), "never-ingest must still refuse a declared never-ingest class"
+        # The negative control matters: a gate that refused EVERYTHING
+        # would satisfy the assertion above vacuously.
+        assert (
+            classify_never_ingest(
+                {"name": "Ada Sonderling", "type": "person"},
+                "Sonderling protocol lead.",
+                manifest=manifest,
+            )
+            is None
+        ), "never-ingest must not refuse ordinary content"
+
+        # 3. AC3 end to end — a `pii: true` page stays absent from BOTH
+        #    the index and the hook's rendered recall, on the SAME run
+        #    that proves ordinary pages are reachable. Asserting only the
+        #    latter is the counter-example the AC rules out.
         wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
         _seed_realistic_tier_mix(wiki)
         (wiki / "pii-sonderling.md").write_text(
@@ -781,17 +801,11 @@ class TestUserPromptRecall:
 
         conn = sqlite3.connect(_index_db(hook_env))
         try:
-            indexed_tiers = {
-                row[0] for row in conn.execute("SELECT DISTINCT memory_tier FROM wiki")
-            }
             pii_rows = conn.execute(
                 "SELECT name FROM wiki WHERE filename = 'pii-sonderling'"
             ).fetchall()
         finally:
             conn.close()
-        assert indexed_tiers <= {"hot", "warm"}, (
-            f"no index row may carry a cold/refused tier; got {indexed_tiers}"
-        )
         assert pii_rows == [], f"a pii-flagged page must not be indexed: {pii_rows}"
 
         result = self._run_hook(hook_env, TIER_MIX_PROMPT)
@@ -799,9 +813,10 @@ class TestUserPromptRecall:
         context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "Sonderling Private Dossier" not in context
         assert _pushed_names(result) == set(TIER_MIX_PERSON_NAMES), (
-            "warm pages must be reachable now (so this test can fail if the "
-            f"gate returns). context={context!r}"
+            "ordinary pages must still be reachable, so this test can fail "
+            f"if an exclusion is over-applied. context={context!r}"
         )
+
 
     def test_push_token_budget_discriminates_tiny_vs_generous(
         self, hook_env: dict[str, str]
@@ -952,7 +967,7 @@ conn.close()
         context = payload["hookSpecificOutput"]["additionalContext"]
         assert "Legacy Recall Target" in context
 
-    def test_vector_backend_surfaces_a_warm_hit_and_still_reports_its_tier(
+    def test_vector_backend_surfaces_every_page_and_records_no_tier(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
         """Issues athenaeum#1345 / athenaeum#1513 -- the inversion of the
@@ -963,11 +978,15 @@ conn.close()
         observable while looking green. athenaeum#1420 was closed
         precisely because retrieval tests never exercised this backend.
 
-        A warm vector hit must now surface, a hot one must still surface
-        (proving the change is not a no-op that eats every vector hit),
-        and `VECTOR_META` must keep carrying the true `memory_tier`
-        through to telemetry for both -- it stops gating, it does not
-        stop being recorded.
+        Both fixture pages must surface through the vector path (the two
+        are pinned to the old `hot`/`warm` frontmatter values purely so
+        this test keeps exercising what used to be the discriminating
+        case -- proving the change is not a no-op that eats every vector
+        hit). Issue athenaeum#1514 additionally retired the vocabulary, so
+        `VECTOR_META` no longer carries a tier and vector telemetry
+        records no `memory_tier` key at all -- pinned below, since a
+        vector-sourced row is exactly where a reintroduced tier join would
+        show up first.
 
         chromadb's real embedder can't run in this container (the ONNX
         weights host is blocked), so `query_vector_index` is stubbed via
@@ -1043,7 +1062,7 @@ conn.close()
         )
         assert warm_result.returncode == 0, f"stderr: {warm_result.stderr}"
         assert warm_result.stdout, (
-            "a warm-tier vector hit must now surface -- the vector "
+            "a warm-pinned vector hit must surface -- the vector "
             "enforcement surface (the hot-only VECTOR_META lookup and the "
             "awk keep-filter it fed) is removed (athenaeum#1345, "
             "athenaeum#1513)"
@@ -1053,10 +1072,12 @@ conn.close()
         ]
         assert "Vectester Warm Page" in warm_context, f"got: {warm_context!r}"
 
-        # Telemetry AC: the tier stops gating, it does not stop being
-        # recorded. `VECTOR_META` is still the metadata join, so a
-        # vector-sourced item must carry its TRUE tier -- "warm" here,
-        # which the gate made unobservable by construction.
+        # Telemetry: `VECTOR_META` is still the metadata join (audience
+        # and description), but issue athenaeum#1514 dropped the tier
+        # column from it along with the vocabulary, so a vector-sourced
+        # item carries NO `memory_tier` key. This is the narrowest place
+        # the join's width is observable end to end, which is why the
+        # assertion lives here rather than only in the FTS5 tests.
         warm_records = read_push_records(
             wiki_root=Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki",
             cache_dir=Path(hook_env["ATHENAEUM_CACHE_DIR"]),
@@ -1064,12 +1085,18 @@ conn.close()
         assert warm_records, "expected a sidecar push record for the warm hit"
         warm_items = [it for rec in warm_records for it in rec["items"]]
         assert warm_items and all(it["backend"] == "vector" for it in warm_items)
-        assert {it["memory_tier"] for it in warm_items} == {"warm"}, (
-            f"vector telemetry must report the true tier: {warm_items}"
+        assert all("memory_tier" not in it for it in warm_items), (
+            f"the retired tier vocabulary is back in vector telemetry: {warm_items}"
+        )
+        # The join itself must still be intact — a `VECTOR_META` lookup
+        # that silently returned nothing would also satisfy the assertion
+        # above. `scope` is derived from the joined `audience` column.
+        assert all(it["scope"] for it in warm_items), (
+            f"VECTOR_META's audience join must still populate scope: {warm_items}"
         )
 
-        # Same stub, hot page instead -- proves the change isn't a no-op
-        # that happens to eat every vector hit.
+        # Same stub, the hot-pinned page instead -- proves the change
+        # isn't a no-op that happens to eat every vector hit.
         _set_stub_hit("hot-vectester.md", "Vectester Hot Page")
         hot_result = subprocess.run(
             ["bash", str(USER_PROMPT)],
@@ -1082,7 +1109,7 @@ conn.close()
             timeout=10,
         )
         assert hot_result.returncode == 0, f"stderr: {hot_result.stderr}"
-        assert hot_result.stdout, "expected a hot-tier vector hit to surface"
+        assert hot_result.stdout, "expected the hot-pinned vector hit to surface"
         payload = json.loads(hot_result.stdout)
         context = payload["hookSpecificOutput"]["additionalContext"]
         assert "Vectester Hot Page" in context
@@ -1226,31 +1253,41 @@ conn.close()
         assert isinstance(item["token_cost"], int)
         assert isinstance(item["relevance"], float)
         assert item["backend"] == "fts5"
-        # athenaeum#1513: truthful, not constant. `customer-development.md`
-        # in the shared fixture is pinned `memory_tier: hot`, so "hot" is
-        # the CORRECT answer here -- but it is now asserted against the
-        # page's own frontmatter rather than against the gate's
-        # by-construction guarantee. The warm counterpart is asserted on
-        # the vector surface in
-        # `test_vector_backend_surfaces_a_warm_hit_and_still_reports_its_tier`
-        # and across the realistic mix in
-        # `test_telemetry_records_the_true_tier_of_a_warm_push`.
+        # Issue athenaeum#1514 retired the retrieval-cost vocabulary, so a
+        # hook-written row carries NO `memory_tier` key at all. Absence is
+        # the contract, not an empty string: `athenaeum.push_metrics` reads
+        # an absent key as "written after the retirement", which an empty
+        # value could not be distinguished from. The fixture page still
+        # carries the orphaned frontmatter key -- nothing reads it, and
+        # nothing rewrote the corpus to remove it (that is this issue's
+        # stated frontmatter migration).
         pushed_page = (
             Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki" / "customer-development.md"
         )
         assert "memory_tier: hot" in pushed_page.read_text()
-        assert item["memory_tier"] == "hot"
+        assert "memory_tier" not in item, (
+            "the retired tier vocabulary must not reappear in telemetry: "
+            f"{item}"
+        )
 
-    def test_telemetry_records_the_true_tier_of_a_warm_push(
+    def test_telemetry_records_no_tier_for_the_realistic_mix(
         self, hook_env: dict[str, str]
     ) -> None:
-        """Issue athenaeum#1513 AC: "telemetry still records each pushed
-        page's `memory_tier`, so the mix shifting off 3.5% hot is
-        observable."
+        """Issue athenaeum#1514 AC2, on the surface athenaeum#1513 used as
+        its evidence channel.
 
-        Under the gate this assertion was unwritable -- `warm` could never
-        appear in a push record, because a warm page could never be
-        pushed. That is exactly why it is the AC.
+        athenaeum#1513's AC was "telemetry still records each pushed
+        page's `memory_tier`, so the mix shifting off 3.5% hot is
+        observable" — deliberately kept alive so the shift could be
+        measured. It WAS measured (athenaeum#1560: the sidecar path went
+        from 98 hot / 0 warm before the fix's deploy to 66 hot / 1824
+        warm after), which is what unblocked this issue. With the evidence
+        gathered, the field is retired rather than left recording a
+        vocabulary nothing else uses.
+
+        The push itself is still asserted by identity — the three warm
+        `person` pages, not a count — so this cannot pass on a hook that
+        stopped pushing anything at all.
         """
         _require("bash")
         _require("jq")
@@ -1270,9 +1307,8 @@ conn.close()
         )
         items = [it for rec in records for it in rec["items"]]
         assert len(items) == 3, f"expected the three person pages: {items}"
-        assert {it["memory_tier"] for it in items} == {"warm"}, (
-            "every pushed page here is a warm `person` page and telemetry "
-            f"must say so: {items}"
+        assert all("memory_tier" not in it for it in items), (
+            f"the retired tier vocabulary is back in telemetry: {items}"
         )
 
     def test_id_derivation_uid_prefix_and_timestamp_fallback(
@@ -2624,6 +2660,10 @@ exec "$REAL_AWK" "$@"
         future edit that slips a tier/type term into the ordering, or
         adds a second ranking expression, fails this test even if no
         fixture happens to exercise the difference.
+
+        There is ONE such clause since issue athenaeum#1514 collapsed the
+        hook's tier/no-tier query branches into a single query (the tier
+        column it chose between no longer exists).
         """
         # Whole-line matches only (the actual SQL clauses each sit alone
         # on their own line inside the heredocs) -- excludes prose
@@ -2635,9 +2675,8 @@ exec "$REAL_AWK" "$@"
             for ln in lines
             if ln.strip().startswith("ORDER BY") and not ln.strip().startswith("#")
         ]
-        assert len(order_by_lines) >= 2, (
-            "expected an ORDER BY clause in both the FTS5 tier and "
-            "no-tier branches"
+        assert len(order_by_lines) >= 1, (
+            "expected an ORDER BY clause in the FTS5 query"
         )
         for clause in order_by_lines:
             assert clause == "ORDER BY rank", f"unexpected ordering term: {clause!r}"
@@ -2809,6 +2848,9 @@ exec "$REAL_AWK" "$@"
         assert "topics" not in rec
 
         for item in rec["items"]:
+            # No `memory_tier`: issue athenaeum#1514 retired the
+            # retrieval-cost vocabulary and this writer stopped emitting
+            # the key. `tier` here is the unrelated ACCESS tier.
             assert set(item) == {
                 "id",
                 "tier",
@@ -2816,7 +2858,6 @@ exec "$REAL_AWK" "$@"
                 "token_cost",
                 "relevance",
                 "backend",
-                "memory_tier",
             }, f"push record item shape changed: {sorted(item)}"
             assert "topics" not in item
 

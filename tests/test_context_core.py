@@ -15,6 +15,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 SRC = str(Path(__file__).resolve().parent.parent / "src")
 CONTEXT_PY = Path(__file__).resolve().parent.parent / "src" / "athenaeum" / "context.py"
 
@@ -245,13 +247,38 @@ def test_degrades_to_working_push_when_description_column_missing(tmp_path: Path
     assert env["candidates"][0]["name"]
 
 
-def test_degrades_to_working_push_when_memory_tier_column_missing(tmp_path: Path) -> None:
+def test_pushes_from_an_index_that_still_carries_the_retired_tier_column(
+    tmp_path: Path,
+) -> None:
+    """Issue athenaeum#1514 removed `memory_tier` from the schema (v5) and
+    from the envelope (v2). A v4 index still HAS the column until the
+    force-rebuild the version bump triggers actually runs, so the reader
+    must ignore a present-but-unselected column rather than trip on it —
+    and must not resurrect the key on a candidate.
+
+    `_build_index`'s default `with_memory_tier=True` is what makes this a
+    legacy-shaped fixture; the companion below is the post-rebuild shape.
+    """
+    _build_index(tmp_path / "wiki-index.db", 5, with_memory_tier=True)
+    from athenaeum.context import build_context
+
+    env = build_context("recall architecture note 3", "sess", cache_dir=tmp_path, use_llm=False)
+    assert len(env["candidates"]) >= 1
+    assert "memory_tier" not in env["candidates"][0]
+
+
+def test_pushes_from_an_index_without_the_retired_tier_column(tmp_path: Path) -> None:
+    """The post-rebuild (schema v5) shape — no `memory_tier` column at
+    all. Both fixtures must produce the same candidate keys, which is what
+    makes the column's presence genuinely irrelevant rather than merely
+    tolerated in one direction.
+    """
     _build_index(tmp_path / "wiki-index.db", 5, with_memory_tier=False)
     from athenaeum.context import build_context
 
     env = build_context("recall architecture note 3", "sess", cache_dir=tmp_path, use_llm=False)
     assert len(env["candidates"]) >= 1
-    assert env["candidates"][0]["memory_tier"] == ""
+    assert "memory_tier" not in env["candidates"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -484,10 +511,16 @@ def _build_tier_mix_fixture(path: Path) -> tuple[list[str], list[str]]:
 
 
 def _gated_query_simulation(db_file: Path, fts_query: str, n: int) -> list[str]:
-    """TEST-ONLY simulation of the OLD gate this issue removes — never
+    """TEST-ONLY simulation of the OLD gate athenaeum#1345 removed — never
     production code, never imported by ``athenaeum.context``. Mirrors the
-    exact shape the issue's own counter-example names: ``AND memory_tier =
+    exact shape that issue's own counter-example names: ``AND memory_tier =
     'hot'`` appended to the lexical query.
+
+    Since issue athenaeum#1514 dropped the column (schema v5) this shape is
+    not merely unused in production, it is unrunnable there: against a real
+    index it raises ``sqlite3.OperationalError``. It survives here only
+    because ``_build_tier_mix_fixture`` hand-builds a legacy-shaped table,
+    which is what keeps the before/after substitution demonstrable at all.
     """
     conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True)
     try:
@@ -538,11 +571,15 @@ def test_fixture_index_before_after_demonstrates_tier_substitution(tmp_path: Pat
     # The substitution itself: the two behaviours diverge completely.
     assert set(pushed_filenames).isdisjoint(gated)
 
-    # AC6 (partial): the envelope still carries each pushed page's
-    # memory_tier, untouched from the fixture's own "warm" value, even
-    # though it played no role in selection.
+    # athenaeum#1345's AC6 additionally required the envelope to still
+    # CARRY each pushed page's `memory_tier`, so the mix could be watched.
+    # It was watched (athenaeum#1560), and issue athenaeum#1514 then
+    # retired the vocabulary and removed the field at envelope schema v2 —
+    # so what is pinned now is its absence. The fixture index above still
+    # HAS the column, because `_gated_query_simulation` needs something to
+    # simulate against; that the reader ignores it is the point.
     for c in env["candidates"]:
-        assert c["memory_tier"] == "warm"
+        assert "memory_tier" not in c
 
 
 def test_cold_and_refused_pages_never_enter_the_index(tmp_path: Path) -> None:
@@ -635,7 +672,8 @@ def test_envelope_shape(tmp_path: Path) -> None:
     from athenaeum.context import build_context
 
     env = build_context("recall architecture note 1", "sess-x", cache_dir=tmp_path, use_llm=False)
-    assert env["v"] == 1
+    # v2: issue athenaeum#1514 removed `candidates[].memory_tier`.
+    assert env["v"] == 2
     assert env["session_id"] == "sess-x"
     assert isinstance(env["candidates"], list)
     assert set(env["budget"]) == {"tokens", "used"}
@@ -847,3 +885,123 @@ def test_cli_session_dedup_is_scoped_per_session(tmp_path: Path) -> None:
     _invoke("session-x")
     second_session = _invoke("session-y")
     assert [c["filename"] for c in second_session["candidates"]] == ["quixtor-page.md"]
+
+
+# ---------------------------------------------------------------------------
+# The vector leg's metadata join (issue athenaeum#1514 narrowed it)
+# ---------------------------------------------------------------------------
+
+
+class TestVectorMetadataJoin:
+    """Issue athenaeum#1514 dropped `memory_tier` from `_query_vector`'s
+    bounded metadata lookup, narrowing both the SELECT list and the tuple it
+    unpacks into.
+
+    That function had no direct coverage — the vector leg needs chromadb, so
+    every existing test reaches it only through `build_context`, which skips
+    it entirely when `wiki-vectors/` is absent. A tuple-arity mistake there
+    would therefore have surfaced only at runtime, on the backend that
+    carries essentially all live traffic. These tests stub
+    `query_vector_index` (the same technique `tests/test_shell_hooks.py`
+    uses for the shell path) so the join itself is exercised without an
+    embedder.
+    """
+
+    def _index_and_conn(self, tmp_path: Path, *, with_memory_tier: bool):
+        from athenaeum.context import _open_ro, _probe_schema
+
+        db_file = tmp_path / "wiki-index.db"
+        _build_index(db_file, 0, with_memory_tier=with_memory_tier, extra_rows=[
+            tuple(
+                ["v1.md", "Vector Note One", "vec", "", "first description",
+                 "|opsadmin|", "reference"]
+                + (["hot"] if with_memory_tier else [])
+            ),
+            tuple(
+                ["v2.md", "Vector Note Two", "vec", "", "second description",
+                 "|__access_open__|", "reference"]
+                + (["warm"] if with_memory_tier else [])
+            ),
+        ])
+        conn = _open_ro(db_file)
+        return conn, _probe_schema(conn)
+
+    def _stub_hits(self, monkeypatch: pytest.MonkeyPatch, hits: list) -> None:
+        import athenaeum.search as search_mod
+
+        monkeypatch.setattr(
+            search_mod,
+            "query_vector_index",
+            lambda query, cache_dir, n=3, exclude=None: hits,
+            raising=False,
+        )
+
+    @pytest.mark.parametrize("with_memory_tier", [True, False])
+    def test_join_populates_audience_and_description(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_memory_tier: bool
+    ) -> None:
+        """Parameterized over BOTH index shapes — a v4 index that still has
+        the retired column and a v5 one that does not — because the join must
+        be indifferent to it, not merely correct on the new shape.
+        """
+        from athenaeum.context import _query_vector
+
+        (tmp_path / "wiki-vectors").mkdir()
+        self._stub_hits(monkeypatch, [("v1.md", "Vector Note One", 0.9)])
+        conn, schema = self._index_and_conn(tmp_path, with_memory_tier=with_memory_tier)
+        try:
+            candidates = _query_vector(
+                tmp_path, "anything", n=3, exclude=frozenset(), conn=conn, schema=schema
+            )
+        finally:
+            conn.close()
+
+        assert len(candidates) == 1
+        c = candidates[0]
+        assert c.filename == "v1.md"
+        assert c.backend == "vector"
+        # A vector similarity score is never recorded as a BM25 rank.
+        assert c.relevance is None
+        # The join is what supplies these two — a silently-empty lookup would
+        # leave both blank, which is the failure the arity change could cause.
+        assert c.audience == "|opsadmin|"
+        assert c.description == "first description"
+        assert not hasattr(c, "memory_tier")
+
+    def test_a_hit_with_no_index_row_degrades_to_name_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The `meta.get(filename, ("", ""))` default — its tuple width moved
+        with the SELECT list, so it needs its own case rather than riding on
+        the happy path.
+        """
+        from athenaeum.context import _query_vector
+
+        (tmp_path / "wiki-vectors").mkdir()
+        self._stub_hits(monkeypatch, [("ghost.md", "Ghost Page", 0.5)])
+        conn, schema = self._index_and_conn(tmp_path, with_memory_tier=False)
+        try:
+            candidates = _query_vector(
+                tmp_path, "anything", n=3, exclude=frozenset(), conn=conn, schema=schema
+            )
+        finally:
+            conn.close()
+
+        assert len(candidates) == 1
+        assert candidates[0].name == "Ghost Page"
+        assert candidates[0].audience == ""
+        assert candidates[0].description == ""
+
+    def test_join_is_skipped_without_a_connection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.context import _query_vector
+
+        (tmp_path / "wiki-vectors").mkdir()
+        self._stub_hits(monkeypatch, [("v1.md", "Vector Note One", 0.9)])
+        candidates = _query_vector(
+            tmp_path, "anything", n=3, exclude=frozenset(), conn=None, schema=None
+        )
+        assert len(candidates) == 1
+        assert candidates[0].audience == ""
+

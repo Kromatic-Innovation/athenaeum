@@ -1073,29 +1073,28 @@ class FTS5Backend:
     # ``OperationalError`` → empty recall. Version 2 == the ``audience``-aware
     # shape (athenaeum#312); version 3 == the ``type``-aware shape (issue athenaeum#964,
     # AC amendment 1); version 4 == the ``memory_tier``-aware shape (issue
-    # athenaeum#1120) — the index-carried tier verdict the unprompted-recall
-    # shell hook filters on directly (``memory_tiers.resolve_tier`` runs once
-    # here, at build time, so the hook never has to reimplement tier
-    # resolution in shell). Exactly like the version-2/version-3 bumps above,
-    # an unchanged page's stat-matched incremental scan never re-reads its
-    # frontmatter, so without this bump a contract change ("tier is now
-    # filterable") would silently serve the old (missing) column value — i.e.
-    # NULL, which never equals ``'hot'`` — for every page an ordinary
-    # incremental build leaves untouched, turning tier-filtered recall
-    # silently empty for exactly the pages that hadn't changed.
-    _SCHEMA_VERSION = 4
+    # athenaeum#1120); version 5 == that column REMOVED again (issue
+    # athenaeum#1514, which retired the hot/warm retrieval-cost vocabulary
+    # the column carried — see ``docs/modules/retention.md``). The removal
+    # needs a bump for the same reason the addition did: an unchanged page's
+    # stat-matched incremental scan never re-reads its frontmatter, so
+    # without it an existing v4 DB would keep an eight-column ``wiki`` table
+    # while this build path inserts seven values, and every incremental
+    # build would raise straight into an empty recall. The stamp mismatch
+    # force-rebuilds instead, which is safe here because the index is a
+    # derived cache — no corpus content is lost by rebuilding it.
+    _SCHEMA_VERSION = 5
 
     # SQL fragments shared by the full and incremental build paths. ``type``
-    # and ``memory_tier`` are both UNINDEXED (out of the BM25 term space,
-    # exact-matched via WHERE) — same storage shape ``audience`` established
-    # (issue athenaeum#312) and ``type`` followed (issue athenaeum#964).
+    # is UNINDEXED (out of the BM25 term space, exact-matched via WHERE) —
+    # same storage shape ``audience`` established (issue athenaeum#312).
     _CREATE_SQL = (
         "CREATE VIRTUAL TABLE IF NOT EXISTS wiki USING fts5"
         "(filename, name, tags, aliases, description, audience UNINDEXED, "
-        "type UNINDEXED, memory_tier UNINDEXED, "
+        "type UNINDEXED, "
         'tokenize="porter unicode61")'
     )
-    _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?,?,?)"
+    _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?,?)"
 
     def incremental_reuse_blocker(
         self, cache_dir: Path, stored: dict[str, Any] | None
@@ -1162,7 +1161,7 @@ class FTS5Backend:
         meta: dict[str, Any],
         *,
         config: dict[str, Any] | None = None,
-    ) -> tuple[str, str, str, str, str, str, str, str]:
+    ) -> tuple[str, str, str, str, str, str, str]:
         """Build the FTS5 row tuple for one page."""
         name, tags, aliases, description = _extract_frontmatter_fields(text)
         if not name:
@@ -1179,17 +1178,12 @@ class FTS5Backend:
         # either the top-level or nested ``metadata:`` shape is found the
         # same way regardless of which scanner produced ``meta``.
         page_type = resolve_page_type(meta)
-        # Issue athenaeum#1120: resolve the retrieval-cost tier ONCE here, at
-        # index-build time, and store the verdict so the unprompted-recall
-        # shell hook can filter ``WHERE memory_tier = 'hot'`` directly instead
-        # of reimplementing ``memory_tiers.resolve_tier``'s cascade in shell.
-        # Function-local import: ``athenaeum.memory_tiers`` is an L4
-        # domain/pipeline module and this module's docstring states L3 never
-        # imports L4 at module scope (mirrors the pattern ``resolve_tier``
-        # itself already uses for its own ``athenaeum.storage`` import).
-        from athenaeum.memory_tiers import resolve_tier
-
-        memory_tier = resolve_tier(meta, config=config)
+        # Issue athenaeum#1120 also stored a per-page ``memory_tier`` verdict
+        # here, resolved once at index-build time so the unprompted-recall
+        # shell hook could filter ``WHERE memory_tier = 'hot'`` without
+        # reimplementing the tier cascade in shell. Issue athenaeum#1345
+        # removed that filter and issue athenaeum#1514 retired the vocabulary
+        # itself, so nothing resolves or stores a tier any more.
         return (
             indexed_name,
             name,
@@ -1198,7 +1192,6 @@ class FTS5Backend:
             description,
             audience,
             page_type,
-            memory_tier,
         )
 
     def build_index(

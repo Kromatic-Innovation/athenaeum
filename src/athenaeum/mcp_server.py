@@ -342,9 +342,9 @@ def recall_search(
             every hit is returned in plain relevance order with no budget
             cap. ``True`` no longer restricts to a retrieval-cost tier or
             re-ranks by coordinate fit — issue athenaeum#1353 deleted that
-            tier-weighted formula (:func:`athenaeum.memory_tiers.push_score`
-            / ``select_for_push``): it had no production caller and
-            duplicated the real spec, which lives in
+            tier-weighted formula (``push_score`` / ``select_for_push``, in
+            the since-deleted ``athenaeum.memory_tiers``): it had no
+            production caller and duplicated the real spec, which lives in
             :func:`athenaeum.context._apply_budget`. The only remaining
             differences from ``False`` are the token-budget cap and the
             supersession exclusion described below. Intended for a
@@ -362,7 +362,7 @@ def recall_search(
             coordinate (the same shape as a page's `claimed_scope`
             frontmatter value, issue athenaeum#714's ``scope`` dimension).
             When supplied, each hit's coordinate fit against this scope is
-            computed (:func:`athenaeum.memory_tiers.scope_relation`) and
+            computed (:func:`athenaeum.dimensions.scope_relation`) and
             reported in the recall hit header's ``**Scope:**`` segment
             only — it no longer weights push selection (issue athenaeum#1353
             deleted the coordinate-fit-weighted ranking that used to read
@@ -1063,18 +1063,18 @@ def _render_facts_block(facts: Mapping[str, object]) -> str:
 
 @dataclass
 class _RecallRow:
-    """One rendered recall hit plus its `unprompted` push-selection inputs
-    (tier for the rendered header, token cost for the budget pack) — see
-    `_recall_via_backend`. `relevance`/`scope_relation` were dropped
-    (issue athenaeum#1353) once tier-weighted, coordinate-fit-weighted
-    selection was deleted — the unprompted path now packs `_rows` in its
-    existing (already relevance-ordered) sequence, so per-row relevance and
-    scope-relation are no longer selection inputs, only header-rendering
-    ones (computed locally, not stored on this row)."""
+    """One rendered recall hit plus the token cost the `unprompted` budget
+    pack needs — see `_recall_via_backend`. `relevance`/`scope_relation` were
+    dropped (issue athenaeum#1353) once tier-weighted, coordinate-fit-weighted
+    selection was deleted, and `tier` followed (issue athenaeum#1514) when the
+    hot/warm retrieval-cost vocabulary was retired — the unprompted path packs
+    `_rows` in its existing (already relevance-ordered) sequence, so relevance,
+    scope-relation and tier are none of them selection inputs. Scope relation
+    is still rendered into the header, computed locally rather than stored
+    here."""
 
     block: str
     pushed_hit: tuple[str, dict[str, object], str]
-    tier: str
     tokens: int
 
 
@@ -1134,9 +1134,11 @@ def _recall_via_backend(
     existing — the supersession exclusion and token-budget pack below
     apply ONLY when ``unprompted=True``. There is no tier or
     coordinate-fit re-ranking any more (deleted, issue athenaeum#1353). The
-    recall hit header's tier + matched-scope segment
-    (:func:`athenaeum.memory_tiers.tier_scope_header_line`) is computed
-    unconditionally, on every call, regardless of ``unprompted``.
+    recall hit header's matched-scope segment
+    (:func:`athenaeum.dimensions.scope_relation`) is computed
+    unconditionally, on every call, regardless of ``unprompted``; its
+    former ``**Tier:**`` half went with the retrieval-cost vocabulary
+    (issue athenaeum#1514).
 
     ``claimed_scope`` (issue athenaeum#715, read side): applied AFTER every row is
     built (so it sees each hit's fresh on-disk ``claimed_scope``/``refines:``
@@ -1147,7 +1149,7 @@ def _recall_via_backend(
     *claimed_scope* being non-``None`` — either condition false and this is a
     complete no-op, byte-identical to before this parameter existed.
     """
-    from athenaeum import memory_tiers
+    from athenaeum.dimensions import scope_relation
     from athenaeum.push_metrics import estimate_tokens
     from athenaeum.search import (
         DegradedIndexError,
@@ -1420,34 +1422,35 @@ def _recall_via_backend(
         outbound = _extract_outbound_links(body) if body else []
         if outbound:
             links_line = f"**Links:** {', '.join(outbound)}\n"
-        # Issue athenaeum#718: tier + matched-scope header segment — computed on
+        # Issue athenaeum#718: matched-scope header segment — computed on
         # EVERY hit, unconditionally (not gated on `unprompted`), so the
         # consuming agent sees why a hit was pushed regardless of which
-        # recall mode produced it.
-        memory_tier = memory_tiers.resolve_tier(fm, config=config)
-        relation = memory_tiers.scope_relation(fm, session_scope)
-        tier_scope_line = memory_tiers.tier_scope_header_line(memory_tier, relation)
-        tier_scope_block = f"{tier_scope_line}\n" if tier_scope_line else ""
+        # recall mode produced it. Issue athenaeum#1514 dropped this
+        # segment's `**Tier:** hot|warm` half along with the retrieval-cost
+        # vocabulary itself; the scope half is omit-at-default exactly as
+        # before (rendered only when a `session_scope` was supplied AND the
+        # page carries a `claimed_scope`).
+        relation = scope_relation(fm, session_scope)
+        scope_block = f"**Scope:** {relation}\n" if relation is not None else ""
         block = (
             f"{display_name} (score: {score:.1f})\n"
             f"**Path:** {display_prefix}\n"
             f"**Tags:** {tags}\n"
             f"**Uid:** {uid}\n"
             f"**Type:** {page_type}\n"
-            f"{meta_block}{tier_scope_block}{links_line}{excluded_block}\n"
+            f"{meta_block}{scope_block}{links_line}{excluded_block}\n"
             f"{snip}\n"
         )
         _rows.append(
             _RecallRow(
                 block=block,
                 pushed_hit=(filename, fm, snip),
-                tier=memory_tier,
                 # Issue athenaeum#718: meter the FULLY RENDERED block --
-                # path/tags/uid/type/meta/tier-scope/links/excluded headers
+                # path/tags/uid/type/meta/scope/links/excluded headers
                 # plus the snippet -- never just `snip` alone. The token
                 # budget must bound what actually gets pushed into the
                 # session; metering only the snippet undercounts by the
-                # header overhead (which this issue's own tier/scope segment
+                # header overhead (which this issue's own scope segment
                 # adds to) and lets the budget be consistently overrun.
                 tokens=estimate_tokens(block),
             )
@@ -1543,10 +1546,11 @@ def _recall_via_backend(
     # path packs `_rows` — already in relevance order from the
     # backend/currency-reorder above — into the configured token budget.
     # There is no tier restriction and no coordinate-fit re-ranking here
-    # any more (issue athenaeum#1353 deleted `memory_tiers.push_score` /
+    # any more (issue athenaeum#1353 deleted the tier-weighted `push_score` /
     # `select_for_push`: tier-weighted selection had no production caller
     # and duplicated the real spec, which lives in
-    # `athenaeum.context._apply_budget`). `unprompted=False` (default)
+    # `athenaeum.context._apply_budget`; issue athenaeum#1514 then retired
+    # the hot/warm vocabulary itself). `unprompted=False` (default)
     # skips this entirely: `_rows` keeps every hit, in the same relevance
     # order the backend/currency-reorder already produced.
     if unprompted and _rows:
@@ -1573,13 +1577,6 @@ def _recall_via_backend(
 
     blocks: list[str] = [row.block for row in _rows]
     _pushed_hits: list[tuple[str, dict[str, object], str]] = [row.pushed_hit for row in _rows]
-    # Issue athenaeum#1345 AC7: reuse each row's ALREADY-resolved
-    # `memory_tiers.resolve_tier` verdict (`row.tier`, computed unconditionally
-    # above) for the push-metrics record below — see
-    # `push_metrics.build_push_record`'s `memory_tier_by_filename` docstring
-    # for why this is resolved HERE rather than inside that function.
-    _memory_tier_by_filename: dict[str, str] = {row.pushed_hit[0]: row.tier for row in _rows}
-
     if not blocks:
         return f"No wiki pages matched query: {query!r}{unrecognized_note}"
 
@@ -1630,7 +1627,6 @@ def _recall_via_backend(
                 query=query,
                 backend=backend_name,
                 hits=_pushed_hits,
-                memory_tier_by_filename=_memory_tier_by_filename,
                 session_attribution=attribution.attribution,
             )
             push_metrics.record_push(

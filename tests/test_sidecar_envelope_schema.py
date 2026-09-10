@@ -36,11 +36,11 @@ def _build_index(path: Path, extra_rows: list[tuple]) -> Path:
     conn.execute(
         "CREATE VIRTUAL TABLE wiki USING fts5("
         "filename, name, tags, aliases, description, "
-        "audience UNINDEXED, type UNINDEXED, memory_tier UNINDEXED, "
+        "audience UNINDEXED, type UNINDEXED, "
         'tokenize="porter unicode61")'
     )
     conn.executemany(
-        "INSERT INTO wiki VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO wiki VALUES (?,?,?,?,?,?,?)",
         extra_rows,
     )
     conn.commit()
@@ -69,7 +69,6 @@ def golden_envelope(tmp_path: Path) -> dict:
                 "the golden fixture page",
                 "|__access_open__|",
                 "ref",
-                "hot",
             )
         ],
     )
@@ -161,8 +160,13 @@ def test_wrong_type_fails_validation(golden_envelope: dict) -> None:
 
 
 def test_version_mismatch_fails_validation(golden_envelope: dict) -> None:
+    # v1 is the PREVIOUS version (issue athenaeum#1514 bumped the envelope
+    # to v2 when it removed `candidates[].memory_tier`), so an envelope
+    # stamped v1 must be rejected by a v2 validator — the same "a schema
+    # change is a deliberate, visible act" contract, exercised from the
+    # reader's side.
     broken = dict(golden_envelope)
-    broken["v"] = 2
+    broken["v"] = 1
     with pytest.raises(EnvelopeValidationError, match="v="):
         validate_envelope(broken)
 
@@ -170,10 +174,23 @@ def test_version_mismatch_fails_validation(golden_envelope: dict) -> None:
 def test_candidate_missing_required_field_fails_validation(golden_envelope: dict) -> None:
     broken = dict(golden_envelope)
     broken_candidate = dict(broken["candidates"][0])
-    del broken_candidate["memory_tier"]
+    del broken_candidate["audience"]
     broken["candidates"] = [broken_candidate]
-    with pytest.raises(EnvelopeValidationError, match="memory_tier"):
+    with pytest.raises(EnvelopeValidationError, match="audience"):
         validate_envelope(broken)
+
+
+def test_retired_memory_tier_is_absent_from_the_candidate_contract() -> None:
+    """Issue athenaeum#1514: `candidates[].memory_tier` was removed in
+    schema v2. Pinned explicitly rather than left implicit in the field-set
+    comparison above, because an adapter written against v1 reads its
+    absence as the whole migration.
+    """
+    assert "memory_tier" not in context_schema.CANDIDATE_REQUIRED_FIELDS
+    assert "memory_tier" in context_schema.SCHEMA_HISTORY[1]["candidate"]
+    assert "memory_tier" not in context_schema.SCHEMA_HISTORY[2]["candidate"]
+    assert context_schema.SCHEMA_VERSION == 2
+    assert 2 in context_schema.MIGRATIONS
 
 
 def test_elapsed_ms_is_diagnostic_not_required() -> None:

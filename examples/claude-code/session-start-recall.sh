@@ -16,8 +16,8 @@
 # stderr diagnostics only and emits no `hookSpecificOutput`/
 # `additionalContext` at all, so it is not an unprompted-push path — it has
 # no `hot`-tier gap and no push-budget gap to route. It IS the writer for
-# the `memory_tier`-carrying FTS5 index (`athenaeum.search.build_fts5_index`,
-# schema v4) and for `PUSH_TOKEN_BUDGET` in config.env, both of which
+# the FTS5 index (`athenaeum.search.build_fts5_index`) and for
+# `PUSH_TOKEN_BUDGET` in config.env, both of which
 # `user-prompt-recall.sh` (the actual unprompted-push hook) reads.
 #
 # Configure in ~/.claude/settings.json:

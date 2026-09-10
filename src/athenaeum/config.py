@@ -2308,8 +2308,9 @@ def resolve_push_token_budget(config: dict[str, Any] | None) -> int:
     stays within this budget — a hit that would exceed it is skipped, never
     truncated. (Issue athenaeum#1353 removed the retrieval-cost-tier
     restriction and coordinate-fit re-ranking that used to sit in front of
-    this budget check — see :mod:`athenaeum.memory_tiers`'s module
-    docstring for where selection actually lives now.)
+    this budget check, and issue athenaeum#1514 retired the tier vocabulary
+    itself — selection lives in :func:`athenaeum.context._apply_budget` and
+    in the per-turn recall hook.)
 
     Precedence: ``ATHENAEUM_PUSH_TOKEN_BUDGET`` env > ``push_budget.tokens_per_turn``
     yaml > ``1200``. A malformed env value WARNs and falls through (see
@@ -2418,62 +2419,6 @@ def resolve_recall_relevance_floor(
                     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
                         return float(raw)
     return None
-
-
-def resolve_memory_tier_sweep_enabled(config: dict[str, Any] | None) -> bool:
-    """Resolve whether the automatic memory-tier sweep runs (issue athenaeum#718).
-
-    OFF by default — a new, additive librarian phase
-    (:func:`athenaeum.librarian._run_memory_tier_sweep_phase`) that can
-    rewrite a page's ``memory_tier:`` frontmatter field (demote hot -> warm,
-    promote warm -> hot; see :mod:`athenaeum.memory_tiers`), so it must not
-    change the nightly run's behavior for any existing operator until they
-    opt in (DoD: "lands dark behind a documented config key defaulting to
-    off"). Precedence: ``ATHENAEUM_MEMORY_TIER_SWEEP_ENABLED`` env >
-    ``librarian.memory_tier_sweep_enabled`` yaml > ``False``. Any env value
-    other than a falsey token (``0`` / ``false`` / ``no`` / ``off``,
-    case-insensitive) is truthy; a non-bool yaml value falls through to the
-    default. No seed in ``_DEFAULTS`` (issue athenaeum#231) — mirrors
-    :func:`resolve_ingestion_gate_enabled`'s shape.
-    """
-    env = os.environ.get("ATHENAEUM_MEMORY_TIER_SWEEP_ENABLED")
-    if env is not None:
-        return env.strip().lower() not in ("0", "false", "no", "off", "")
-    if isinstance(config, dict):
-        cfg = config.get("librarian")
-        if isinstance(cfg, dict):
-            raw = cfg.get("memory_tier_sweep_enabled")
-            if isinstance(raw, bool):
-                return raw
-    return False
-
-
-def resolve_memory_tier_demote_after_days(config: dict[str, Any] | None) -> int:
-    """Resolve the age-without-use / precision-grace window in days (issue athenaeum#718).
-
-    Shared threshold :func:`athenaeum.memory_tiers.evaluate_tier_movement`
-    uses for two of its three automatic hot -> warm demotion triggers: a hot
-    claim with no usage record at all after this many days, or a hot claim
-    that HAS been pushed but never referenced and whose last push is older
-    than this many days. The third trigger (class-default: superseded/
-    deprecated) is unconditional and ignores this knob.
-
-    Precedence: ``ATHENAEUM_MEMORY_TIER_DEMOTE_AFTER_DAYS`` env >
-    ``memory_tiers.demote_after_days`` yaml > ``60``. A malformed env value
-    WARNs and falls through (see :func:`_env_number`); a non-int / ``<= 0``
-    yaml value falls through to the default. No seed in ``_DEFAULTS``
-    (issue athenaeum#231).
-    """
-    value = _env_number("ATHENAEUM_MEMORY_TIER_DEMOTE_AFTER_DAYS", int)
-    if value is not None and value > 0:
-        return value
-    if isinstance(config, dict):
-        cfg = config.get("memory_tiers")
-        if isinstance(cfg, dict):
-            raw = cfg.get("demote_after_days")
-            if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
-                return raw
-    return 60
 
 
 def resolve_spend_ledger_path(config: dict[str, Any] | None) -> Path | None:

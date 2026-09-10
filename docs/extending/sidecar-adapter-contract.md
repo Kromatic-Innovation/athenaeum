@@ -52,7 +52,6 @@ truth a test enforces against.
 | `description` | `str` | Clamped to 200 characters, tab/newline/CR-sanitised (issue athenaeum#1344's `PM_DESC_EXPR`, carried forward by athenaeum#1358). Empty string, never absent, when the index predates the `description` column. |
 | `backend` | `str` | `"fts5"` or `"vector"` — which backend surfaced THIS candidate (a merged turn can mix both). |
 | `relevance` | `float \| null` | BM25 rank for an `fts5` candidate; **always `null` for a `vector` candidate** — a vector similarity score is a different scale and must never be read as comparable to a BM25 rank. |
-| `memory_tier` | `str` | **Metadata only — see §2.3.** Empty string, never absent, when the index predates the `memory_tier` column. |
 | `audience` | `str` | The index's delimiter-anchored audience string (`"|__access_open__|"`, `"|role|role|"`, `"|"`). See §2.4 below for what an adapter may do with it. |
 | `token_cost` | `int` | This candidate's estimated token cost (`athenaeum.context.estimate_tokens`), as counted against `budget`. |
 
@@ -153,24 +152,46 @@ allowed to do on its side of that boundary.
   e.g. writing `hookSpecificOutput` into a cache file another adapter
   parses. Host-specific shaping happens at the OUTERMOST layer only.
 
-### 2.3 `memory_tier` is metadata, never a filter or a ranking input
+### 2.3 Selection and ordering are by relevance alone
 
-This is issue athenaeum#1345's invariant, and it binds adapters too: an
-adapter may DISPLAY, LOG, or otherwise use `memory_tier` as metadata (e.g.
-"this candidate is tier X" in a debug view), but **may not filter candidates
-by tier, and may not use tier to re-order candidates**. `build_context()`
-already selects and orders by relevance alone; an adapter that adds a tier
-gate on top has reintroduced the exact `AND memory_tier = 'hot'` behaviour
-the converged core deliberately removed (see athenaeum#1358's own scope
-note and the `test_memory_tier_swap_does_not_change_selection_or_order`
-test).
+This is issue athenaeum#1345's invariant, and it binds adapters too:
+`build_context()` selects and orders by relevance alone, and **an adapter
+may not filter or re-order candidates by any other axis it can reach.**
 
-#### 2.3.1 Rollback path for this invariant
+It used to be phrased around `memory_tier`, a per-candidate metadata field
+an adapter could display but not filter on. Issue athenaeum#1514 retired
+the retrieval-cost tier vocabulary and **removed
+`candidates[].memory_tier` at envelope schema v2** — so the invariant is
+now structural on this surface: there is no tier value in the envelope for
+an adapter to gate on. See §2.3.1 for what a v1 adapter should do.
 
-If a future change reintroduces a tier predicate on the push path (the
-`AND memory_tier = 'hot'` shape §2.3 forbids, on either the FTS5 or the
-vector surface — see `tests/test_context_core.py::test_no_tier_predicate_in_source`),
-two independent stops apply:
+`tests/test_context_core.py::test_no_tier_predicate_in_source` still pins
+the source-level guard.
+
+#### 2.3.1 Migrating a v1 adapter (`candidates[].memory_tier` removed)
+
+`SCHEMA_VERSION` is `2`. The only change from v1 is that
+`candidates[].memory_tier` is gone
+(`athenaeum.context_schema.MIGRATIONS[2]`).
+
+- **An adapter that ignored the field** needs no change beyond accepting
+  `v == 2`.
+- **An adapter that DISPLAYED it** should drop the display. Reading its
+  absence as "no tier information" is correct — that is what an empty
+  value already meant, and after athenaeum#1345 removed the gate the field
+  was pure telemetry, never a decision input.
+- **An adapter that FILTERED on it** was already violating §2.3 and must
+  stop; there is nothing to migrate to.
+
+The on-disk `memory_tier:` frontmatter key is **not** removed from any
+page — it is orphaned in place, read by nothing. See
+[retention](../modules/retention.md#retired-memory-tiers-athenaeummemory_tiers)
+for why that was chosen and how to reverse it.
+
+#### 2.3.2 Rollback path for this invariant
+
+If a future change reintroduces a filter or ranking term on the push path
+(on either the FTS5 or the vector surface), two independent stops apply:
 
 - **No-deploy stop-gap: the athenaeum#379 kill switch.** `athenaeum disable`
   (or `ATHENAEUM_DISABLED=all` in the environment, or a hand-written
@@ -181,15 +202,14 @@ two independent stops apply:
   no code deploy. This stops a regressed gate from reaching any live
   session while the code fix lands.
 - **Revert-is-sufficient.** Reverting whatever commit reintroduced the
-  predicate is sufficient on its own — **no migration and no reindex**.
-  Every criterion above leaves `memory_tier` untouched: it stays populated
-  in the FTS5 index (`_probe_schema`/`_query_fts5`/`_query_vector` only ever
-  SELECT it, never write it) and in page frontmatter (`athenaeum.context`
-  contains no write path at all — confirmed by grep: no `write_text`,
-  `open(..., "w")`, or `atomic_write` call anywhere in the module). A
-  revert therefore restores relevance-alone ranking with the index already
-  in the correct shape; there is no drifted or half-migrated state to
-  reconcile.
+  predicate is sufficient on its own — **no migration**, because
+  `athenaeum.context` contains no write path at all (confirmed by grep: no
+  `write_text`, `open(..., "w")`, or `atomic_write` call anywhere in the
+  module), so a regression here can never have left drifted state to
+  reconcile. A revert that also restores an index COLUMN needs a rebuild,
+  which the schema-version stamp triggers by itself
+  (`FTS5Backend._SCHEMA_VERSION`) — the index is a derived cache, so
+  rebuilding it loses nothing.
 
 ### 2.4 `audience` is an access-control token, not a display field
 

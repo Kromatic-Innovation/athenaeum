@@ -56,28 +56,26 @@
 # section near the bottom of this file for the one subprocess it does
 # spend, and the <50ms contract this is measured against above).
 #
-# Hot-tier filter + push-token budget (issue athenaeum#1120). Unprompted
-# recall (this hook) previously queried FTS5 directly and never saw the
-# `hot`-tier filter or `push_budget.tokens_per_turn` budget that issue
-# athenaeum#718 / PR athenaeum#1117 built for the *prompted* (`recall` MCP tool)
-# path. The tier model itself is NOT reimplemented here in shell:
-# `athenaeum.memory_tiers.resolve_tier` runs once, at index-build time
-# (`athenaeum.search.FTS5Backend._row_for`, schema v4), and stores its
-# verdict in the `memory_tier` FTS5 column — this hook just reads that
-# column, the same established pattern `audience` (athenaeum#312) and
-# `type` (athenaeum#964) already use so shell/SQL can filter without
-# Python. The ONLY duplicated surface is the greedy budget-accumulation
-# loop and the token estimator (`athenaeum.push_metrics.estimate_tokens`
-# = `max(0, len(text) // 4)`, a single arithmetic expression, faithfully
-# expressed in awk as `int(length(s)/4)`). Coordinate fit and tier
-# weighting are no longer part of push selection anywhere (issue
-# athenaeum#1353 deleted `athenaeum.memory_tiers`'s tier-weighted
-# `push_score` formula and `select_for_push`, which had no production
-# caller): selection is plain relevance order, budget-packed, everywhere
-# it happens — i.e. the FTS5 `rank` ordering this hook already uses. That
-# is why this hook needs NO push-selection-formula reimplementation, and
-# it is the load-bearing reason the shell-native seam is safe rather than
-# a silent behavioural drift from the Python path.
+# Push-token budget (issue athenaeum#1120). Unprompted recall (this hook)
+# previously queried FTS5 directly and never saw the `hot`-tier filter or
+# the `push_budget.tokens_per_turn` budget that issue athenaeum#718 / PR
+# athenaeum#1117 built for the *prompted* (`recall` MCP tool) path. The
+# tier half of that is now moot in both directions: issue athenaeum#1345
+# removed the filter, and issue athenaeum#1514 retired the retrieval-cost
+# vocabulary and its index column outright, so there is no tier model to
+# reimplement in shell or to read out of a column. The ONLY duplicated
+# surface is the greedy budget-accumulation loop and the token estimator
+# (`athenaeum.push_metrics.estimate_tokens` = `max(0, len(text) // 4)`, a
+# single arithmetic expression, faithfully expressed in awk as
+# `int(length(s)/4)`). Coordinate fit and tier weighting are no longer
+# part of push selection anywhere (issue athenaeum#1353 deleted the
+# tier-weighted `push_score` formula and `select_for_push`, which had no
+# production caller): selection is plain relevance order, budget-packed,
+# everywhere it happens — i.e. the FTS5 `rank` ordering this hook already
+# uses. That is why this hook needs NO push-selection-formula
+# reimplementation, and it is the load-bearing reason the shell-native
+# seam is safe rather than a silent behavioural drift from the Python
+# path.
 #
 # Optional LLM query-rewriting. If `athenaeum query-topics` is available,
 # the raw prompt is first run through the configured LLM provider (Haiku
@@ -315,7 +313,7 @@ _pm_scope_from_audience() {
 # Used before ANY value derived from a parsed `$RESULTS` row is either
 # used in bash arithmetic or interpolated unquoted into JSON. Two
 # distinct hazards this closes:
-#   (1) `read -r fname name rank audience mtier backend cost` shifts
+#   (1) `read -r fname name rank audience backend cost` shifts
 #       fields if an indexed column (e.g. `name`) ever contains a literal
 #       tab -- `read` dumps all overflow into the LAST variable, so
 #       `cost` can become a compound non-numeric string. Arithmetic on
@@ -346,8 +344,9 @@ _pm_is_number() {
 #   awk -F'\t' on the same line               -> NF=3 $2="" $3=c  (right)
 #
 # That is not hypothetical here: `description` is absent on ~14% of the
-# corpus and `memory_tier` is the empty literal on a legacy DB, so the
-# naive form recorded `token_cost: 0` for every description-less page —
+# corpus, and the vector branch emits an empty `rank` field for every
+# row, so the naive form recorded `token_cost: 0` for every
+# description-less page —
 # the ledger's own cost accounting reading as zero, which is precisely
 # the "reads as zero forever" hazard issue athenaeum#1343 exists to
 # close. Parameter expansion has no such special-casing, costs no fork,
@@ -441,7 +440,7 @@ _pm_ensure_query_hash() {
 # immediately regardless of how the failing command's exit status would
 # otherwise be tested (verified separately). A tab embedded in an
 # indexed `name` column shifts the `read -r fname name rank audience
-# mtier backend description bullet cost` fields — `read` dumps all
+# backend description bullet cost` fields — `read` dumps all
 # overflow into the LAST variable, so `cost` can become a compound
 # non-numeric string, and bash arithmetic on it (`$(( total + cost ))`)
 # tries to resolve a leading-identifier-shaped token as a variable name,
@@ -452,28 +451,27 @@ _pm_ensure_query_hash() {
 # in arithmetic or unquoted JSON with `_pm_is_number` first, so even a
 # shifted/garbled row degrades to a safe default (cost 0, relevance null)
 # instead of crashing. `description`/`bullet` (issue athenaeum#1344, fields
-# 7-8) are read into named locals purely to keep `cost` (field 9) in the
+# 6-7) are read into named locals purely to keep `cost` (field 8) in the
 # LAST position this function's arithmetic guard expects — this function
 # never uses either value itself, since `tier`/`scope`/`relevance` etc.
 # don't derive from the rendered bullet text.
 _pm_record_push() {
   [ "$PM_ENABLED" = true ] || return 0
 
-  local fname name rank audience mtier backend description bullet cost
-  local _pm_id _pm_scope _pm_id_esc _pm_scope_esc _pm_mtier_esc _pm_backend_esc
+  local fname name rank audience backend description bullet cost
+  local _pm_id _pm_scope _pm_id_esc _pm_scope_esc _pm_backend_esc
   local _pm_cost _pm_relevance _pm_item
   local pm_items_json="" pm_total_cost=0 pm_item_count=0
 
   while IFS= read -r _PM_ROW_REST; do
     [ -n "$_PM_ROW_REST" ] || continue
-    # Nine TAB-delimited fields, split WITHOUT `read`'s IFS-whitespace
+    # Eight TAB-delimited fields, split WITHOUT `read`'s IFS-whitespace
     # field-squashing — see `_pm_shift_field` above for why that matters
     # and for the verified counter-example.
     _pm_shift_field; fname="$_PM_RET"
     _pm_shift_field; name="$_PM_RET"
     _pm_shift_field; rank="$_PM_RET"
     _pm_shift_field; audience="$_PM_RET"
-    _pm_shift_field; mtier="$_PM_RET"
     _pm_shift_field; backend="$_PM_RET"
     _pm_shift_field; description="$_PM_RET"
     _pm_shift_field; bullet="$_PM_RET"
@@ -498,14 +496,18 @@ _pm_record_push() {
     _pm_scope_from_audience "$audience"; _pm_scope="$_PM_RET"
     _pm_json_escape "$_pm_id"; _pm_id_esc="$_PM_RET"
     _pm_json_escape "$_pm_scope"; _pm_scope_esc="$_PM_RET"
-    _pm_json_escape "$mtier"; _pm_mtier_esc="$_PM_RET"
     # `backend` is escaped too (not just interpolated raw): under normal
     # operation it is always the literal "fts5"/"vector" this script
     # itself wrote, but a shifted/garbled row (the tab-in-`name` case
     # above) could otherwise carry a stray quote/backslash into it.
     _pm_json_escape "$backend"; _pm_backend_esc="$_PM_RET"
 
-    _pm_item="{\"id\":\"${_pm_id_esc}\",\"tier\":\"internal\",\"scope\":\"${_pm_scope_esc}\",\"token_cost\":${_pm_cost},\"relevance\":${_pm_relevance},\"backend\":\"${_pm_backend_esc}\",\"memory_tier\":\"${_pm_mtier_esc}\"}"
+    # Issue athenaeum#1514: no `memory_tier` key. The retrieval-cost
+    # vocabulary is retired, and `athenaeum.push_metrics` treats an ABSENT
+    # per-item `memory_tier` as "written after the retirement" — writing
+    # an empty string instead would be indistinguishable from a
+    # pre-retirement row whose tier genuinely could not be resolved.
+    _pm_item="{\"id\":\"${_pm_id_esc}\",\"tier\":\"internal\",\"scope\":\"${_pm_scope_esc}\",\"token_cost\":${_pm_cost},\"relevance\":${_pm_relevance},\"backend\":\"${_pm_backend_esc}\"}"
     if [ -n "$pm_items_json" ]; then
       pm_items_json="${pm_items_json},${_pm_item}"
     else
@@ -769,54 +771,43 @@ if [ -s "$SEEN_FILE" ]; then
 fi
 
 # ── Query backends ──────────────────────────────────────────────────────
-# Issue athenaeum#1120 — legacy-DB safety, probed ONCE and shared by BOTH
-# the FTS5 query below and the vector-hit metadata lookup further down. A
-# DB built by an older athenaeum predates the `memory_tier` column (schema
-# v4, see athenaeum.search.FTS5Backend._SCHEMA_VERSION's comment).
-# Selecting a column that doesn't exist raises `sqlite3.OperationalError`,
-# which this hook's own `2>/dev/null || echo ""` swallow would otherwise
-# turn into a ZERO recall for every turn until the index happens to be
-# rebuilt — exactly the failure class that _SCHEMA_VERSION comment warns
-# about. Probe for the column first and fall back to a query that names a
-# literal `''` instead when it's absent, so an un-rebuilt index degrades
-# BOTH branches consistently together.
+# Issue athenaeum#1120 added a `memory_tier` column (schema v4) and a
+# `HAS_TIER_COLUMN` probe that chose between naming it and substituting a
+# literal `''`. Issue athenaeum#1345 removed the tier FILTER, issue
+# athenaeum#1513 shipped that removal, and issue athenaeum#1514 retired
+# the tier vocabulary and dropped the column again (schema v5). The probe
+# and both of its branches are gone with it: this hook now names only
+# columns that exist in every schema version it can meet, so there is
+# nothing left to degrade between.
 #
-# Issues athenaeum#1345 / athenaeum#1513 — this probe no longer guards a
-# FILTER. It once selected between a gated (`AND memory_tier = 'hot'`)
-# and an ungated query; the gate is gone from both the lexical and the
-# vector surface (see each site below), so the ONLY difference between
-# the two branches is now whether the SELECT list can name the
-# `memory_tier` column for telemetry. Tier is recorded, never enforced.
-HAS_TIER_COLUMN=false
-if [ -f "$DB_FILE" ] && sqlite3 "$DB_FILE" "PRAGMA table_info(wiki);" 2>/dev/null | grep -q '|memory_tier|'; then
-  HAS_TIER_COLUMN=true
-fi
+# NOTE the legacy-DB hazard that probe existed for is still real for
+# OTHER columns — see HAS_DESCRIPTION_COLUMN immediately below, which
+# keeps exactly the shape this one had. Dropping a column is the safe
+# direction (a SELECT that does not name it works against a v4 DB and a
+# v5 DB alike); it was only ever ADDING one that needed the probe.
 
-# Issue athenaeum#1344 — same legacy-DB hazard as HAS_TIER_COLUMN above,
-# same probe shape: a DB built before `description` existed would raise
-# `sqlite3.OperationalError` on a SELECT that names it, which this hook's
-# own `2>/dev/null || echo ""` would otherwise swallow into a silent ZERO
-# recall for the whole turn. Probed once and shared by both the FTS5
-# query below and the vector-hit metadata lookup further down, exactly
-# like HAS_TIER_COLUMN.
+# Issue athenaeum#1344 — the legacy-DB hazard the note above describes,
+# for the one column it still applies to: a DB built before `description`
+# existed would raise `sqlite3.OperationalError` on a SELECT that names
+# it, which this hook's own `2>/dev/null || echo ""` would otherwise
+# swallow into a silent ZERO recall for the whole turn. Probed once and
+# shared by both the FTS5 query below and the vector-hit metadata lookup
+# further down, so the two degrade together.
 #
-# Unlike HAS_TIER_COLUMN, this does NOT need a second whole-query branch:
-# tier changes the WHERE clause (a column that doesn't exist can't be
-# filtered on), but description only changes one SELECT-list expression,
-# so gating just that expression through `DESC_COL` below degrades both
-# the tier and no-tier branches to the SAME name-only render together,
-# rather than duplicating all four combinations of (tier x description)
-# column presence into four near-identical queries.
+# This needs no second whole-query branch: `description` only changes one
+# SELECT-list expression, so gating just that expression through
+# `DESC_COL` below degrades every read site to the SAME name-only render
+# at once.
 HAS_DESCRIPTION_COLUMN=false
 if [ -f "$DB_FILE" ] && sqlite3 "$DB_FILE" "PRAGMA table_info(wiki);" 2>/dev/null | grep -q '|description|'; then
   HAS_DESCRIPTION_COLUMN=true
 fi
 
 # Issue athenaeum#1344 — the ONE SQL expression that renders `description`
-# for the bullet, reused verbatim everywhere a row is read (both FTS5
-# branches below, and both vector-metadata branches further down) so the
-# render can never disagree with itself between backends or between the
-# tier/no-tier branches (AC "the vector branch renders identically").
+# for the bullet, reused verbatim everywhere a row is read (the FTS5
+# query below and the vector-metadata lookup further down) so the render
+# can never disagree with itself between backends (AC "the vector branch
+# renders identically").
 # Two things happen here, deliberately in SQL rather than in awk/bash:
 #   1. `replace(...)` collapses any embedded tab/newline/CR in the
 #      description to a single space BEFORE the value ever reaches the
@@ -851,52 +842,38 @@ fi
 
 FTS_RESULTS=""
 if [ -f "$DB_FILE" ]; then
-  if [ "$HAS_TIER_COLUMN" = true ]; then
-    # Issue athenaeum#1343 (Plan step 3): `audience` and `memory_tier` added
-    # to the SELECT list purely to feed the telemetry row below — a wider
-    # row from the SAME query, no new query. The trailing literal
-    # `'fts5'` tags each row with the backend it came from, so the merge
-    # step downstream never needs to guess. Issue athenaeum#1344 widens
-    # this SAME query once more with `${DESC_COL}` (see above) — still one
-    # query, no second lookup, no new process. Ordering stays `ORDER BY
-    # rank` alone: no tier or description term participates in selection
-    # or ordering (AC "ordering and selection are by relevance alone").
-    #
-    # ENFORCEMENT SURFACE 1 of 2 (issues athenaeum#1345, athenaeum#1513).
-    # This WHERE clause used to carry `AND memory_tier = 'hot'`. It is
-    # gone. `memory_tier` stays in the SELECT list — it is recorded in
-    # the telemetry row below and rendered nowhere else — but it no
-    # longer participates in selection, ordering, or exclusion, "not as
-    # a filter, a weight, a multiplier, or an additive nudge"
-    # (athenaeum#1345's invariant). The gate excluded 96.5% of the real
-    # corpus (892 hot of 25,505) including every one of 17,265 `person`
-    # pages, and its failure mode was silent substitution rather than
-    # silence: in 10 of 12 sampled queries it still returned three hits,
-    # just materially worse ones. Surface 2 is the vector post-filter
-    # further down; both come out together, because removing only one
-    # reintroduces branch divergence with the sign flipped.
-    FTS_RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
-      SELECT filename, name, rank, audience, memory_tier, 'fts5', ${DESC_COL}
-      FROM wiki
-      WHERE wiki MATCH '${FTS_QUERY}'
-      ${EXCLUDE}
-      ORDER BY rank
-      LIMIT 3;
-    " 2>/dev/null || echo "")
-  else
-    # Legacy DB (no memory_tier column): `audience` predates memory_tier
-    # (issue athenaeum#312 vs. schema v4) and is safe to select
-    # unconditionally; memory_tier is recorded as the literal empty
-    # string per item (D8 — the column doesn't exist on this DB).
-    FTS_RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
-      SELECT filename, name, rank, audience, '', 'fts5', ${DESC_COL}
-      FROM wiki
-      WHERE wiki MATCH '${FTS_QUERY}'
-      ${EXCLUDE}
-      ORDER BY rank
-      LIMIT 3;
-    " 2>/dev/null || echo "")
-  fi
+  # Issue athenaeum#1343 (Plan step 3): `audience` was added to the SELECT
+  # list purely to feed the telemetry row below — a wider row from the
+  # SAME query, no new query. The trailing literal `'fts5'` tags each row
+  # with the backend it came from, so the merge step downstream never
+  # needs to guess. Issue athenaeum#1344 widens this SAME query once more
+  # with `${DESC_COL}` (see above) — still one query, no second lookup,
+  # no new process. Ordering stays `ORDER BY rank` alone: no description
+  # term participates in selection or ordering (AC "ordering and
+  # selection are by relevance alone").
+  #
+  # ENFORCEMENT SURFACE 1 of 2 (issues athenaeum#1345, athenaeum#1513).
+  # This WHERE clause used to carry `AND memory_tier = 'hot'`. It is
+  # gone. The gate excluded 96.5% of the real corpus (892 hot of 25,505)
+  # including every one of 17,265 `person` pages, and its failure mode
+  # was silent substitution rather than silence: in 10 of 12 sampled
+  # queries it still returned three hits, just materially worse ones.
+  # Surface 2 is the vector metadata join further down; both came out
+  # together, because removing only one reintroduces branch divergence
+  # with the sign flipped.
+  #
+  # Issue athenaeum#1514 then removed `memory_tier` from the SELECT list
+  # too. It had survived the gate's removal as a telemetry-only column;
+  # retiring the vocabulary retired the column (schema v5), so there is
+  # no longer anything to select or to record.
+  FTS_RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
+    SELECT filename, name, rank, audience, 'fts5', ${DESC_COL}
+    FROM wiki
+    WHERE wiki MATCH '${FTS_QUERY}'
+    ${EXCLUDE}
+    ORDER BY rank
+    LIMIT 3;
+  " 2>/dev/null || echo "")
 fi
 
 VECTOR_RESULTS=""
@@ -945,21 +922,21 @@ fi
 # What the block does NOW is purely a metadata join: one bounded lookup
 # into the SAME index rows the FTS5 query reads, restricted to the (at
 # most 3) filenames the vector backend actually returned — never an
-# unbounded scan — carrying `audience`, `memory_tier` and `description`
+# unbounded scan — carrying `audience` and `description`
 # through so a vector-sourced item renders and reports EXACTLY as an
-# FTS5-sourced one. Skipped when the DB predates the `memory_tier`
-# column (`HAS_TIER_COLUMN=false`, legacy-DB safety above), so both
-# branches degrade together. Cost: the vector branch already pays a
+# FTS5-sourced one. Cost: the vector branch already pays a
 # Python interpreter start (~400ms, see the header latency note); one
 # more bounded (<=3-row) sqlite3 lookup (~1-3ms) does not touch that
 # contract.
 #
 # Issue athenaeum#1343: this same bounded lookup is widened (not a new
-# query) to also carry `audience` and `memory_tier` through for each
-# surviving vector hit into `VECTOR_META` (a `filename\taudience\tmemory_tier`
-# map), so the telemetry row built below can record `scope` (D5) and
-# `memory_tier` (D8) for a vector-sourced item exactly as it does for an
-# FTS5-sourced one.
+# query) to also carry `audience` through for each surviving vector hit
+# into `VECTOR_META` (a `filename\taudience\tdescription` map), so the
+# telemetry row built below can record `scope` (D5) for a vector-sourced
+# item exactly as it does for an FTS5-sourced one. That issue also
+# carried `memory_tier` (D8) through the same map; issue athenaeum#1514
+# retired the tier vocabulary and dropped the column, so the map is one
+# field narrower.
 #
 # Issue athenaeum#1344: widened once more (still the SAME bounded lookup,
 # still no new query) to also carry `${DESC_COL}` — the identical
@@ -990,47 +967,33 @@ if [ -f "$DB_FILE" ] && [ -n "$VECTOR_RESULTS" ]; then
   fi
 
   if [ -n "$_vector_in_list" ]; then
-    if [ "$HAS_TIER_COLUMN" = true ]; then
-      # ENFORCEMENT SURFACE 2 of 2 (issues athenaeum#1345, athenaeum#1513).
-      # This lookup used to end `AND memory_tier = 'hot'`, which made
-      # `VECTOR_META` do double duty: the metadata join AND the
-      # authoritative "kept" set for an awk post-filter over
-      # `VECTOR_RESULTS`. Both the restriction and the derived
-      # keep-filter are gone. This is the surface that mattered in
-      # practice — live traffic is 100% `backend: "vector"` (32 of 32
-      # sampled sidecar pushes), so a fix that removed only the FTS5
-      # `WHERE` above would have changed nothing observable while
-      # looking green.
-      #
-      # What REMAINS is the lookup itself, unchanged in every other
-      # respect: it is still the audience/tier/description join that
-      # feeds the render and the telemetry row, still bounded to the
-      # (at most 3) filenames the vector backend actually returned —
-      # never an unbounded scan. `memory_tier` is still selected and
-      # still carried through per item; it is recorded, not enforced.
-      VECTOR_META=$(sqlite3 -separator $'\t' "$DB_FILE" "
-        SELECT filename, audience, memory_tier, ${DESC_COL} FROM wiki
-        WHERE filename IN (${_vector_in_list});
-      " 2>/dev/null || echo "")
-    else
-      # Legacy DB (no memory_tier column): identical to the branch above
-      # in every respect except that it cannot name the `memory_tier`
-      # column. No filtering happens on either branch (athenaeum#1345,
-      # athenaeum#1513). `audience` predates memory_tier (issue
-      # athenaeum#312 vs. schema v4) and is safe to select
-      # unconditionally; memory_tier per item is recorded as "" (D8 —
-      # the column doesn't exist on this DB, nothing truthful to carry).
-      VECTOR_META=$(sqlite3 -separator $'\t' "$DB_FILE" "
-        SELECT filename, audience, '', ${DESC_COL} FROM wiki
-        WHERE filename IN (${_vector_in_list});
-      " 2>/dev/null || echo "")
-    fi
+    # ENFORCEMENT SURFACE 2 of 2 (issues athenaeum#1345, athenaeum#1513).
+    # This lookup used to end `AND memory_tier = 'hot'`, which made
+    # `VECTOR_META` do double duty: the metadata join AND the
+    # authoritative "kept" set for an awk post-filter over
+    # `VECTOR_RESULTS`. Both the restriction and the derived keep-filter
+    # are gone. This is the surface that mattered in practice — live
+    # traffic is 100% `backend: "vector"` (32 of 32 sampled sidecar
+    # pushes), so a fix that removed only the FTS5 `WHERE` above would
+    # have changed nothing observable while looking green.
+    #
+    # What REMAINS is the lookup itself: the audience/description join
+    # that feeds the render and the telemetry row, still bounded to the
+    # (at most 3) filenames the vector backend actually returned — never
+    # an unbounded scan. Issue athenaeum#1514 dropped `memory_tier` from
+    # the projection along with the column itself (schema v5), which is
+    # also what collapsed this site's two legacy/current branches into
+    # the single query below.
+    VECTOR_META=$(sqlite3 -separator $'\t' "$DB_FILE" "
+      SELECT filename, audience, ${DESC_COL} FROM wiki
+      WHERE filename IN (${_vector_in_list});
+    " 2>/dev/null || echo "")
   fi
 fi
 
-# Normalize VECTOR_RESULTS (filename, name, score) to the SAME 7-field
+# Normalize VECTOR_RESULTS (filename, name, score) to the SAME 6-field
 # shape the FTS5 branch's widened SELECT already produces (filename,
-# name, rank-or-empty, audience, memory_tier, backend, description),
+# name, rank-or-empty, audience, backend, description),
 # joining in `VECTOR_META` by filename. `score` is a vector-similarity
 # score, NOT a BM25 rank — recording it as `relevance` would silently mix
 # two incomparable scales, so the rank/relevance field is left EMPTY
@@ -1069,7 +1032,8 @@ fi
 # builtin, so the newline-safe route adds no process, no temp file and
 # no cleanup path, which matters on a per-turn critical path with a hard
 # wall-clock budget. Field semantics are unchanged: the join is still by
-# filename and the emitted row is still the same 7 fields.
+# filename and the emitted row is still the same width as the FTS5
+# branch's (6 fields since issue athenaeum#1514 dropped `memory_tier`).
 if [ -n "$VECTOR_RESULTS" ]; then
   VECTOR_RESULTS=$(printf '%s\n__ATHENAEUM_VECTOR_META_END__\n%s\n' "$VECTOR_META" "$VECTOR_RESULTS" | awk -F'\t' '
     BEGIN { inmeta = 1 }
@@ -1083,22 +1047,22 @@ if [ -n "$VECTOR_RESULTS" ]; then
       # `next` is load-bearing: a metadata row has a non-empty $1 and at
       # least 2 fields, so without it the emit rule below would fall
       # through and print metadata rows as though they were vector hits.
-      if ($0 != "") { aud[$1] = $2; tier[$1] = $3; desc[$1] = $4 }
+      if ($0 != "") { aud[$1] = $2; desc[$1] = $3 }
       next
     }
     NF >= 2 && $1 != "" {
       a = ($1 in aud) ? aud[$1] : "|"
-      t = ($1 in tier) ? tier[$1] : ""
       d = ($1 in desc) ? desc[$1] : ""
-      printf "%s\t%s\t\t%s\t%s\tvector\t%s\n", $1, $2, a, t, d
+      printf "%s\t%s\t\t%s\tvector\t%s\n", $1, $2, a, d
     }
   ')
 fi
 
 # Merge: FTS5 first (lexical precision), then vector, dedupe, cap 3. Rows
-# are 7 fields wide now (issue athenaeum#1344 added `description` as the
-# 7th — see the SELECTs above); `NF >= 2` only ever checked that a row
-# has at least a filename and a name, so it needed no change.
+# are 6 fields wide (issue athenaeum#1344 added `description` as the last
+# one, issue athenaeum#1514 removed `memory_tier` from the middle — see
+# the SELECT above); `NF >= 2` only ever checked that a row has at least
+# a filename and a name, so it has needed no change through either.
 RESULTS=$(printf '%s\n%s\n' "$FTS_RESULTS" "$VECTOR_RESULTS" \
   | awk -F'\t' 'NF >= 2 && $1 != "" && !seen[$1]++' \
   | head -3)
@@ -1114,7 +1078,7 @@ RESULTS=$(printf '%s\n%s\n' "$FTS_RESULTS" "$VECTOR_RESULTS" \
 # reproduces; issue athenaeum#1353 retired the older
 # `athenaeum.memory_tiers.select_for_push` reference this comment used to
 # cite — that function had no production caller and duplicated this same
-# behaviour).
+# behaviour, and issue athenaeum#1514 deleted the module itself).
 #
 # What is metered: the literal text this hook actually emits. Each
 # candidate's own cost is its "  - ${bullet}\n" line — the exact text
@@ -1163,14 +1127,14 @@ RESULTS=$(printf '%s' "$RESULTS" | awk -F'\t' -v preamble="$PREAMBLE" -v budget=
   BEGIN { total = int(length(preamble) / 4) }
   {
     name = $2
-    desc = $7
+    desc = $6
     bullet = (desc != "") ? name " — " desc : name
     block = "  - " bullet "\n"
     cost = int(length(block) / 4)
     if (total + cost > budget) next
     total += cost
-    # Issue athenaeum#1343/#1344: append the rendered `bullet` (8th field)
-    # and this candidate'"'"'s own token cost (9th field) — the telemetry
+    # Issue athenaeum#1343/#1344: append the rendered `bullet` (7th field)
+    # and this candidate'"'"'s own token cost (8th field) — the telemetry
     # row built below REUSES `cost` verbatim (per-item and, summed, in
     # aggregate) rather than recomputing the estimate a second way, and
     # the output loop below REUSES `bullet` verbatim rather than
@@ -1188,11 +1152,10 @@ RESULTS=$(printf '%s' "$RESULTS" | awk -F'\t' -v preamble="$PREAMBLE" -v budget=
 # silently SQUASHES the empty middle field and shifts `c` into `$b` —
 # verified directly against this box's bash 5.2; non-whitespace IFS
 # characters like `,` do not do this, but tab is special-cased regardless
-# of the IFS value). `audience` and `memory_tier` (fields 4-5 of the
-# 9-field row) are BOTH genuinely empty for a legacy pre-athenaeum#1120 DB
-# (see that branch's SQL above) — exactly the shape the legacy-DB test
-# below feeds through this hook — and reading a `read -r` variable list
-# deep enough to reach `bullet` (field 8) over that row would silently
+# of the IFS value). `audience` (field 4 of the 8-field row) is genuinely
+# empty for a page carrying no `audience:` frontmatter — and reading a
+# `read -r` variable list deep enough to reach `bullet` (field 7) over
+# such a row would silently
 # swallow it into an earlier field, corrupting the very text this loop
 # exists to render (the render loop has none of `_pm_record_push`'s
 # numeric guards to fail safe with — a shifted field here is just WRONG
@@ -1201,7 +1164,7 @@ RESULTS=$(printf '%s' "$RESULTS" | awk -F'\t' -v preamble="$PREAMBLE" -v budget=
 # every OTHER awk pass in this file) — extracting just the two fields the
 # render loop needs, in awk, sidesteps the hazard entirely rather than
 # working around it.
-MATCH_LINES=$(printf '%s\n' "$RESULTS" | awk -F'\t' '{ print $1 "\t" $8 }')
+MATCH_LINES=$(printf '%s\n' "$RESULTS" | awk -F'\t' '{ print $1 "\t" $7 }')
 
 # ── Format output ───────────────────────────────────────────────────────
 # Must be wrapped in hookSpecificOutput.hookEventName — Claude Code

@@ -35,7 +35,14 @@ class PageSpec:
     tags: list[str]
     description: str
     body: str
-    memory_tier: str | None = None  # explicit pin; None = resolve_tier's class default
+    # An explicit `memory_tier:` frontmatter pin. The retrieval-cost tier
+    # vocabulary was retired by issue athenaeum#1514 and nothing reads this
+    # key any more — it is kept here deliberately, as the fixture's
+    # representation of the ORPHANED key the corpus still carries on disk
+    # (that issue's stated frontmatter migration is "leave it in place, stop
+    # reading it"), so the golden retrieval set keeps exercising pages that
+    # have one.
+    memory_tier: str | None = None
 
 
 def _frontmatter(spec: PageSpec) -> str:
@@ -55,9 +62,9 @@ def _frontmatter(spec: PageSpec) -> str:
 
 # ---------------------------------------------------------------------------
 # Signal pages -- distinctive vocabulary, each the intended top hit for one
-# entry in QUERIES below. All resolve to the WARM tier by class default (no
-# memory_tier: override) -- see memory_class.TYPE_TO_MEMORY_CLASS /
-# memory_tiers.DEFAULT_TIER_BY_MEMORY_CLASS.
+# entry in QUERIES below. None carries a `memory_tier:` pin (see PageSpec's
+# field note: the key is orphaned since issue athenaeum#1514), so together
+# with the pinned pages below the fixture covers both shapes.
 # ---------------------------------------------------------------------------
 
 SIGNAL_PAGES: list[PageSpec] = [
@@ -110,13 +117,12 @@ SIGNAL_PAGES: list[PageSpec] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Hot pages -- confined to principle/preference/auto-memory (AC2). The three
-# `principle` pages are naturally hot via the class default
-# (type -> memory_class "guideline" -> DEFAULT_TIER_BY_MEMORY_CLASS["guideline"]
-# == "hot"); preference/auto-memory have no class-default mapping at all
-# (memory_class.TYPE_TO_MEMORY_CLASS deliberately omits them -- see that
-# module's docstring) so they need an explicit memory_tier: hot pin, exactly
-# the "human pin" resolution branch resolve_tier documents.
+# Eagerly-surfaced page types -- principle/preference/auto-memory (AC2). These
+# were the corpus's "hot" pool when a retrieval-cost tier still existed; the
+# preference/auto-memory pages carry a literal `memory_tier: hot` pin from
+# that era. Issue athenaeum#1514 retired the vocabulary, so the pins are now
+# orphaned frontmatter and the distinction they encode is a TYPE
+# distinction, which is what AC2's mix assertion is written against.
 # ---------------------------------------------------------------------------
 
 HOT_PRINCIPLE_PAGES: list[PageSpec] = [
