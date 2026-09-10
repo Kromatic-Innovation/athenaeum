@@ -96,6 +96,7 @@ MODULE_LAYER: dict[str, int] = {
     "push_state": 2,
     "recovery_yield": 2,
     "run_summary_log": 2,
+    "stuck_ledger": 2,
     "verdicts": 2,
     "wiki_write_guard": 2,
     "zero_yield": 2,

@@ -70,8 +70,18 @@ from athenaeum.config import (
 from athenaeum.intake import discover_raw_files
 from athenaeum.models import parse_frontmatter
 from athenaeum.run_summary_log import read_latest_embedder_counts, read_refusal_streak
+from athenaeum.stuck_ledger import held_stuck_summary, load_stuck_ledger
 from athenaeum.tiers import schema_fragment_state
 from athenaeum.zero_yield import load_state as load_zero_yield_state
+
+# Issue athenaeum#1597 AC3: the entity phase's intake window is reported as
+# starved (rather than merely a normal, non-actionable "0 slots used this
+# run") when at least this fraction of the CURRENTLY discoverable raw-file
+# backlog is permanently held by the stuck ledger. 355 of 358 ledger entries
+# were escalated on the reference deployment (an ~0.99 ratio) — 0.9 catches
+# that with room to spare while still requiring the backlog to be genuinely
+# dominated by stuck entries, not just contain a few.
+STUCK_BACKLOG_ALERT_RATIO = 0.9
 
 log = logging.getLogger(__name__)
 
@@ -166,6 +176,19 @@ class StatusInfo(TypedDict):
     # the corpus currently show" and "is this run's chromadb service
     # healthy".
     cluster_embedder_snapshot: dict[str, int] | None
+    # Issue athenaeum#1597 AC3: set when the CURRENT raw-intake backlog
+    # (``raw_pending`` above) is dominated by permanently-held stuck-ledger
+    # entries — i.e. the entity phase's slot budget has nothing workable to
+    # give a run, and that is invisible in ``raw_pending`` alone (a "308
+    # pending" line reads as a normal backlog, not a stalled one). Shape:
+    # ``{"considered": int, "held": int, "ratio": float, "dominant_error":
+    # str, "dominant_error_count": int}``, or ``None`` when the backlog is
+    # empty or the held fraction is below :data:`STUCK_BACKLOG_ALERT_RATIO`.
+    # See :func:`athenaeum.stuck_ledger.held_stuck_summary` for the held
+    # predicate — the SAME one :func:`athenaeum.librarian._hold_out_unworkable_raw`
+    # uses to exclude a file from the entity phase's intake window, so this
+    # WARNING and that hold-out never disagree about which files are stuck.
+    stuck_backlog_warning: dict[str, object] | None
 
 
 def scan_page_sizes(
@@ -237,6 +260,41 @@ def status(knowledge_root: Path) -> StatusInfo:
     # report work that is never going to drain.
     raw_files = discover_raw_files(raw_root, config)
     raw_pending = len(raw_files)
+
+    # Issue athenaeum#1597 AC3: is this backlog dominated by permanently-held
+    # stuck-ledger entries? Best-effort — a ledger read hiccup must never
+    # break status, same discipline as the other advisory sections below.
+    stuck_backlog_warning: dict[str, object] | None = None
+    try:
+        ledger = load_stuck_ledger(wiki_root)
+        if ledger and raw_files:
+            summary = held_stuck_summary(ledger, raw_files)
+            considered = summary["considered"]
+            held = summary["held"]
+            if considered > 0 and (held / considered) >= STUCK_BACKLOG_ALERT_RATIO:
+                stuck_backlog_warning = {
+                    "considered": considered,
+                    "held": held,
+                    "ratio": held / considered,
+                    "dominant_error": summary["dominant_error"],
+                    "dominant_error_count": summary["dominant_error_count"],
+                }
+                log.warning(
+                    "librarian-stuck-backlog: %d/%d pending raw file(s) "
+                    "(%.0f%%) are permanently held; dominant last_error=%s "
+                    "(%d file(s)) — issue athenaeum#1597",
+                    held,
+                    considered,
+                    (held / considered) * 100,
+                    summary["dominant_error"] or "unknown",
+                    summary["dominant_error_count"],
+                )
+    except Exception as exc:  # noqa: BLE001 — must never break status
+        log.debug(
+            "status: stuck-backlog check skipped (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
 
     # Entity counts
     entities_by_type: dict[str, int] = {}
@@ -419,6 +477,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         "verdict_ledger_duty_cycle": verdict_ledger_duty_cycle,
         "embedder_provenance": embedder_provenance,
         "cluster_embedder_snapshot": cluster_embedder_snapshot,
+        "stuck_backlog_warning": stuck_backlog_warning,
     }
 
 
@@ -427,6 +486,28 @@ def format_status(info: StatusInfo) -> str:
     lines = ["Athenaeum Status", "=" * 40]
 
     lines.append(f"Raw files pending:    {info['raw_pending']}")
+
+    # Issue athenaeum#1597 AC3: a pending count dominated by permanently-held
+    # stuck-ledger entries is not a backlog awaiting capacity — it is entity
+    # phase throughput reading as "308 pending" while it is actually
+    # "all-slots-skipped" every run. Surfaced loudly, right beside the count
+    # it re-contextualizes, naming the dominant `last_error` so the operator
+    # does not have to open `wiki/_stuck_files.json` by hand to learn why.
+    stuck_backlog_warning = info.get("stuck_backlog_warning")
+    if stuck_backlog_warning:
+        held = stuck_backlog_warning["held"]
+        considered = stuck_backlog_warning["considered"]
+        ratio = stuck_backlog_warning["ratio"]
+        dominant_error = stuck_backlog_warning.get("dominant_error") or "unknown"
+        dominant_count = stuck_backlog_warning.get("dominant_error_count", 0)
+        lines.append(
+            "WARNING: entity phase starved — "
+            f"{held}/{considered} pending raw files ({ratio:.0%}) are "
+            "permanently held (stuck) and cannot occupy the entity phase's "
+            f"slot budget; dominant last_error={dominant_error} "
+            f"({dominant_count} file(s)) — issue athenaeum#1597"
+        )
+
     lines.append(f"Wiki entities:        {info['entity_count']}")
 
     if info["entities_by_type"]:

@@ -91,6 +91,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from athenaeum import batch_state, detection_state, push_state, spend, zero_yield
+from athenaeum import stuck_ledger as stuck_ledger_mod
 from athenaeum._retry import TransientAPIError
 from athenaeum.adapter_provenance import record_adapter_provenance_for_pages
 from athenaeum.atomic_io import atomic_write_text
@@ -447,7 +448,14 @@ DEFERRED_MANIFEST_NAME = "_deferred_work.md"
 # into a per-run warning. Written under wiki_root beside the deferred manifest;
 # the ``_`` prefix + ``.json`` suffix keep it out of ``rebuild_index`` (which
 # only globs ``*.md`` and skips ``_``-prefixed names). Removed when empty.
-STUCK_MANIFEST_NAME = "_stuck_files.json"
+#
+# Issue athenaeum#1597: the manifest name and the ledger load/write/hash
+# primitives moved to the :mod:`athenaeum.stuck_ledger` leaf so
+# ``status.py`` can read the SAME ledger without importing ``librarian.py``
+# (which would reopen the ``{librarian, drain, status}`` SCC athenaeum#640
+# dissolved). Re-exported here under their original names for back-compat —
+# every existing call site and test in this module is unchanged.
+STUCK_MANIFEST_NAME = stuck_ledger_mod.STUCK_MANIFEST_NAME
 
 # Consecutive-failure count at which a raw file is treated as stuck (skipped +
 # surfaced) rather than retried again. Resolved via
@@ -3482,56 +3490,27 @@ def librarian_push_failure_alert_threshold() -> int:
 def _stuck_content_hash(raw: Any) -> str:
     """Stable short hash of a raw file's content (athenaeum#663 stuck-file ledger key).
 
-    Keying the ledger on (ref, content-hash) means a re-edited raw file — one
-    whose author fixed whatever made it time out — starts a FRESH consecutive
-    count instead of inheriting the old file's stuck verdict. Best-effort: any
-    read error hashes the empty string, which simply means the entry never
-    matches and the file is retried (fail-open, never fail-stuck)."""
-    try:
-        payload = raw.content
-    except Exception:  # noqa: BLE001 — a raw we cannot read is retried, not stuck
-        payload = ""
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+    Issue athenaeum#1597: delegates to
+    :func:`athenaeum.stuck_ledger.stuck_content_hash` — the shared leaf
+    implementation both this module and ``status.py`` use, so the two never
+    drift apart on what "held" means."""
+    return stuck_ledger_mod.stuck_content_hash(raw)
 
 
 def _load_stuck_ledger(wiki_root: Path) -> dict[str, dict[str, Any]]:
     """Load the persistent stuck-file ledger (athenaeum#663). Missing/corrupt → empty.
 
-    A corrupt ledger must never wedge a run — a parse error is treated as "no
-    stuck files known", so at worst a genuinely-stuck file gets one more retry
-    while the ledger rebuilds, never a crash."""
-    path = wiki_root / STUCK_MANIFEST_NAME
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    files = data.get("files") if isinstance(data, dict) else None
-    if not isinstance(files, dict):
-        return {}
-    # Keep only well-shaped entries; drop anything a future/older schema wrote.
-    return {
-        ref: entry
-        for ref, entry in files.items()
-        if isinstance(entry, dict) and isinstance(entry.get("failures"), int)
-    }
+    Issue athenaeum#1597: delegates to
+    :func:`athenaeum.stuck_ledger.load_stuck_ledger`."""
+    return stuck_ledger_mod.load_stuck_ledger(wiki_root)
 
 
 def _write_stuck_ledger(wiki_root: Path, ledger: dict[str, dict[str, Any]]) -> None:
     """Persist the stuck-file ledger (athenaeum#663), or remove it when empty.
 
-    Written beside the deferred manifest under wiki_root so it rides the run's
-    git snapshot (it is durable cross-run state, exactly like the deferred
-    manifest). An empty ledger removes the file so a corpus that has recovered
-    leaves no stale stuck record behind."""
-    path = wiki_root / STUCK_MANIFEST_NAME
-    if not ledger:
-        if path.exists():
-            path.unlink()
-        return
-    payload = {"updated": now_iso(), "files": ledger}
-    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    Issue athenaeum#1597: delegates to
+    :func:`athenaeum.stuck_ledger.write_stuck_ledger`."""
+    stuck_ledger_mod.write_stuck_ledger(wiki_root, ledger)
 
 
 def _record_stuck_failure(
