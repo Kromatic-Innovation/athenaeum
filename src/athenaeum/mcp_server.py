@@ -205,6 +205,40 @@ _MAX_TOP_K = 50
 _MAX_CONTENT_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
+def active_tool_use_id() -> str | None:
+    """This MCP request's ``claudecode/toolUseId``, or ``None`` (issue athenaeum#1541).
+
+    Read from the ACTIVE request's ``_meta`` via FastMCP's context dependency
+    rather than from a ``ctx: Context`` tool parameter, deliberately: the
+    ``recall`` tool's signature is also its published schema, and the model
+    reading that schema must not be shown a plumbing argument it might try to
+    fill in. Nothing about the tool's declared surface changes.
+
+    Verified by frame capture and again over a real stdio transport (the
+    transport athenaeum actually runs under, where there is no MCP session id
+    of any kind): a ``tools/call`` frame carries ``progressToken`` and this
+    key, and nothing else identifying. Returns ``None`` — never raises — when
+    there is no active request (any direct in-process call, e.g. the CLI or a
+    test) or when the client sets no such key.
+    """
+    try:
+        from fastmcp.server.dependencies import get_context
+
+        from athenaeum.push_metrics import TOOL_USE_ID_META_KEY
+
+        request_context = get_context().request_context
+        meta: Any = request_context.meta if request_context is not None else None
+        if meta is None:
+            return None
+        if hasattr(meta, "model_dump"):
+            meta = meta.model_dump()
+        value = meta.get(TOOL_USE_ID_META_KEY) if hasattr(meta, "get") else None
+        return value if isinstance(value, str) and value else None
+    except Exception:  # attribution must never break recall
+        log.debug("push-metrics: no active-request toolUseId available", exc_info=True)
+        return None
+
+
 def recall_search(
     wiki_root: Path,
     query: str,
@@ -222,6 +256,8 @@ def recall_search(
     unprompted: bool = False,
     session_scope: str | None = None,
     claimed_scope: str | None = None,
+    tool_use_id: str | None = None,
+    session_resolver: Any | None = None,
 ) -> str:
     """Search the knowledge wiki for pages relevant to *query*.
 
@@ -339,6 +375,17 @@ def recall_search(
             wrote). Default ``None``, and with the config key off or this
             left ``None``, behavior is byte-identical to before this
             parameter existed — no filtering, no ranking change.
+        tool_use_id: issue athenaeum#1541 — the calling MCP request's
+            ``claudecode/toolUseId`` (``_meta`` on the ``tools/call`` frame),
+            used ONLY to attribute this call's push record to the session that
+            actually made it. Purely instrumentation: it cannot affect which
+            pages are returned or how they rank. ``None`` (every non-MCP
+            caller) records against the environment id, stamped unresolved.
+        session_resolver: issue athenaeum#1541 — the
+            :class:`athenaeum.push_metrics.ToolUseSessionResolver` performing
+            that join, held for the life of the connection so its scope /
+            last-transcript caches survive across calls. ``None`` constructs a
+            throwaway one, which is free on the ``tool_use_id=None`` path.
 
     Returns a formatted string of matching wiki pages with relevance scores
     and content snippets.
@@ -395,6 +442,8 @@ def recall_search(
         unprompted=unprompted,
         session_scope=session_scope,
         claimed_scope=claimed_scope,
+        tool_use_id=tool_use_id,
+        session_resolver=session_resolver,
     )
 
 
@@ -1035,6 +1084,8 @@ def _recall_via_backend(
     unprompted: bool = False,
     session_scope: str | None = None,
     claimed_scope: str | None = None,
+    tool_use_id: str | None = None,
+    session_resolver: Any | None = None,
 ) -> str:
     """Delegate recall to a registered search backend, then format results.
 
@@ -1532,11 +1583,24 @@ def _recall_via_backend(
     try:
         from athenaeum import push_metrics
 
-        # Resolve the session id via the single helper (issue athenaeum#734):
-        # Claude Code exports CLAUDE_CODE_SESSION_ID, not the CLAUDE_SESSION_ID
-        # this path used to read — so the guard was always false and no push
-        # record was ever written.
-        session_id = push_metrics.resolve_session_id()
+        # Issue athenaeum#1541: attribute the push to the session that made
+        # THIS call, not to whatever id was in the environment when this
+        # server process was spawned. `os.environ` is frozen at spawn and
+        # Claude Code rotates a conversation's session id (compaction/resume)
+        # without restarting the stdio server, so `resolve_session_id()` alone
+        # pins every recall of a long-lived server to the conversation's
+        # ORIGINAL id — while the per-turn sidecar hook records the current
+        # one. That divergence is what makes the pushed-then-pulled overlap
+        # structurally unrenderable.
+        #
+        # `session_resolver` joins this request's `claudecode/toolUseId` into
+        # the transcript that contains it; a call with no such id (every
+        # non-MCP caller) short-circuits to the env id with zero I/O. Either
+        # way the answer arrives STAMPED — a fallback is recorded as
+        # unresolved rather than substituted silently (issue athenaeum#1513).
+        resolver = session_resolver or push_metrics.ToolUseSessionResolver()
+        attribution = resolver.resolve(tool_use_id)
+        session_id = attribution.session_id
         if session_id:
             record = push_metrics.build_push_record(
                 session_id=session_id,
@@ -1544,6 +1608,7 @@ def _recall_via_backend(
                 backend=backend_name,
                 hits=_pushed_hits,
                 memory_tier_by_filename=_memory_tier_by_filename,
+                session_attribution=attribution.attribution,
             )
             push_metrics.record_push(
                 record, cache_dir=cache_dir, config=config, wiki_root=wiki_root
@@ -1958,6 +2023,15 @@ def create_server(
         ),
     )
 
+    # Issue athenaeum#1541: ONE resolver per server process. A stdio MCP
+    # server is spawned once per conversation, so "the life of this object" is
+    # "the life of this connection" — which is what makes its scope-directory
+    # and last-transcript caches sound, and what keeps a hot-path `recall`
+    # down to a single tail read of one already-known file.
+    from athenaeum import push_metrics as _push_metrics
+
+    _session_resolver = _push_metrics.ToolUseSessionResolver()
+
     def recall(
         query: str,
         top_k: int = 5,
@@ -1977,6 +2051,8 @@ def create_server(
             with_pii=with_pii,
             history=history,
             type_filter=type,
+            tool_use_id=active_tool_use_id(),
+            session_resolver=_session_resolver,
         )
 
     # Issue athenaeum#964: the docstring — and therefore the ``type`` parameter's

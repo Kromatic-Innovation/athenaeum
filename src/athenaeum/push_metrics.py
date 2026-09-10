@@ -137,6 +137,289 @@ def resolve_session_id() -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Session attribution for the MCP `recall` path (issue athenaeum#1541)
+# ---------------------------------------------------------------------------
+
+#: The ``_meta`` key Claude Code sets on every MCP ``tools/call`` frame
+#: (issue athenaeum#1541). Established by raw frame capture against an
+#: instrumented stdio server: an ``initialize`` frame carries only static
+#: ``clientInfo``, and a ``tools/call`` frame carries only ``progressToken``
+#: and this key. There is NO session field on the wire, and on stdio there is
+#: no MCP transport session id at all — so this per-request id is the only
+#: LIVE handle a long-lived server has on the conversation calling it.
+TOOL_USE_ID_META_KEY = "claudecode/toolUseId"
+
+#: :attr:`PushRecord.session_attribution` value when the recorded session id
+#: was JOINED from the transcript containing this call's ``toolUseId``.
+#: Authoritative, not inferred: the id is unique per request and the file
+#: that contains it IS the calling conversation's transcript.
+ATTRIBUTION_TRANSCRIPT = "transcript"
+
+#: :attr:`PushRecord.session_attribution` value when the join could not be
+#: made and the row fell back to the process environment's (possibly stale)
+#: id — see :func:`resolve_session_id`. Issue athenaeum#1513's lesson is that
+#: a substitution nobody can see is worse than one they can, so the fallback
+#: is STAMPED rather than silent.
+ATTRIBUTION_ENV_UNRESOLVED = "env-unresolved"
+
+#: Bytes read from the END of a candidate transcript when hunting a
+#: ``toolUseId``. ``recall`` is the demo's hot path and a live transcript
+#: routinely runs to several MB, so a transcript is NEVER scanned whole: the
+#: client appends the ``tool_use`` record immediately before issuing the call
+#: (observed ~900ms ahead of it), so the id sits within the last few KB of
+#: the live transcript by construction.
+_TRANSCRIPT_TAIL_BYTES = 256 * 1024
+
+#: Newest-first cap on how many transcripts in the scope directory are
+#: tailed per attempt. The live one is almost always the first candidate;
+#: this bounds the pathological case rather than describing the normal one.
+_TRANSCRIPT_MAX_CANDIDATES = 12
+
+#: Bounded retry for the "record not on disk yet" race. The ~900ms observed
+#: lead is a MESSAGE timestamp, not a proven fsync, so a miss is retried a
+#: few times with a short backoff before the loud fallback. Total added
+#: latency on a miss is bounded by ``(attempts - 1) * delay``; a call with no
+#: ``toolUseId`` at all does zero I/O and zero waiting.
+_TRANSCRIPT_LOOKUP_ATTEMPTS = 3
+_TRANSCRIPT_LOOKUP_DELAY_S = 0.075
+
+#: Bound on the resolver's positive id->session cache, so a very long-lived
+#: server cannot grow it without limit.
+_TOOL_USE_CACHE_MAX = 512
+
+
+@dataclass(frozen=True)
+class SessionAttribution:
+    """The session id a push record should be attributed to, plus HOW it was
+    determined (issue athenaeum#1541).
+
+    ``attribution`` is :data:`ATTRIBUTION_TRANSCRIPT` when *session_id* came
+    from the transcript join and :data:`ATTRIBUTION_ENV_UNRESOLVED` when it
+    fell back to the process environment. The distinction is stamped on the
+    ledger row precisely so a reader can tell a joined attribution from a
+    possibly-stale one WITHOUT re-deriving anything.
+    """
+
+    session_id: str
+    attribution: str
+
+
+def _session_id_for_tool_use(record: dict[str, Any], tool_use_id: str) -> str | None:
+    """Return the session id of *record* if it STRUCTURALLY issues *tool_use_id*.
+
+    Deliberately not a substring test. Transcripts quote each other — an agent
+    that reads a ``.jsonl`` embeds another session's ``toolUseId``s inside its
+    own transcript as ordinary text — so a substring match would silently join
+    to the wrong session, which is exactly the athenaeum#1513 failure shape
+    this issue exists to avoid. Only an assistant ``tool_use`` CONTENT BLOCK
+    whose ``id`` equals *tool_use_id* counts: that block is written by the
+    client that is making this very call, and a quoted copy of it lands inside
+    a string, never as a decoded block of the quoting record.
+
+    The record's own ``sessionId`` field is preferred over the filename so a
+    copied or renamed transcript cannot rename the session it describes.
+    """
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if not isinstance(content, list):
+        return None
+    for block in content:
+        if (
+            isinstance(block, dict)
+            and block.get("type") == "tool_use"
+            and block.get("id") == tool_use_id
+        ):
+            sid = record.get("sessionId")
+            return sid if isinstance(sid, str) and sid else ""
+    return None
+
+
+class ToolUseSessionResolver:
+    """Resolve the CURRENT session id by joining a ``tools/call`` ``toolUseId``
+    into the Claude Code transcript that contains it (issue athenaeum#1541).
+
+    The defect this exists for: a stdio MCP server is spawned once per
+    conversation and its ``os.environ`` is frozen at spawn, but Claude Code
+    ROTATES a conversation's session id (compaction/resume) without restarting
+    the server. :func:`resolve_session_id` therefore returns the id the
+    conversation *started* with, forever, while the per-turn sidecar hook (a
+    fresh process each turn) records the CURRENT id — so a session's pushes
+    and its pulls land under different ids and the pushed-then-pulled overlap
+    is structurally unrenderable.
+
+    One instance is held for the life of a connection (one stdio server
+    process = one conversation), which is what makes the caching below sound:
+
+    - the SCOPE directory is resolved once (a rotated id keeps the same
+      project scope, so the spawn id's own transcript locates it);
+    - the last transcript that won a join is tried FIRST on the next call, so
+      consecutive recalls in one conversation cost one tail read of one known
+      path until the id rotates;
+    - joined ids are memoised, which costs nothing to keep and matters only
+      for a retried request.
+
+    Every failure mode returns the env id stamped
+    :data:`ATTRIBUTION_ENV_UNRESOLVED`. It never raises, and it never sweeps
+    every scope directory looking for a match — an unbounded hunt for a
+    plausible answer is how a wrong one gets found.
+    """
+
+    def __init__(
+        self,
+        *,
+        projects_root: Path | None = None,
+        tail_bytes: int = _TRANSCRIPT_TAIL_BYTES,
+        max_candidates: int = _TRANSCRIPT_MAX_CANDIDATES,
+        attempts: int = _TRANSCRIPT_LOOKUP_ATTEMPTS,
+        retry_delay: float = _TRANSCRIPT_LOOKUP_DELAY_S,
+        sleep: Any = None,
+    ) -> None:
+        self._projects_root = projects_root
+        self._tail_bytes = tail_bytes
+        self._max_candidates = max_candidates
+        self._attempts = max(1, attempts)
+        self._retry_delay = retry_delay
+        self._sleep = sleep
+        self._scope_dir: Path | None = None
+        self._scope_dir_resolved = False
+        self._last_transcript: Path | None = None
+        self._joined: dict[str, str] = {}
+
+    # -- public -------------------------------------------------------------
+
+    def resolve(self, tool_use_id: str | None) -> SessionAttribution:
+        """Resolve *tool_use_id* to the calling session, or fall back loudly."""
+        env_id = resolve_session_id()
+        if not tool_use_id:
+            # No id on the wire (a CLI caller, or a client that does not set
+            # the key): straight to the stamped fallback, zero I/O, zero wait.
+            return SessionAttribution(env_id, ATTRIBUTION_ENV_UNRESOLVED)
+        cached = self._joined.get(tool_use_id)
+        if cached:
+            return SessionAttribution(cached, ATTRIBUTION_TRANSCRIPT)
+        for attempt in range(self._attempts):
+            try:
+                found = self._scan(tool_use_id, env_id)
+            except Exception:  # attribution must never break recall
+                log.debug("push-metrics: toolUseId join failed", exc_info=True)
+                found = None
+            if found:
+                if len(self._joined) >= _TOOL_USE_CACHE_MAX:
+                    self._joined.clear()
+                self._joined[tool_use_id] = found
+                return SessionAttribution(found, ATTRIBUTION_TRANSCRIPT)
+            if attempt + 1 < self._attempts:
+                self._nap()
+        log.debug(
+            "push-metrics: could not join toolUseId to a transcript; "
+            "attributing to the environment id and stamping it unresolved"
+        )
+        return SessionAttribution(env_id, ATTRIBUTION_ENV_UNRESOLVED)
+
+    # -- internals ----------------------------------------------------------
+
+    def _nap(self) -> None:
+        sleep = self._sleep
+        if sleep is None:
+            import time
+
+            sleep = time.sleep
+        sleep(self._retry_delay)
+
+    def _root(self) -> Path:
+        if self._projects_root is not None:
+            return self._projects_root
+        from athenaeum.transcript_verify import default_projects_root
+
+        return default_projects_root()
+
+    def _scope(self, env_id: str) -> Path | None:
+        """The project-scope directory this conversation's transcripts live in.
+
+        Resolved from the SPAWN-time env id's own transcript: a rotated id
+        stays in the same scope directory, so the stale id is still a perfectly
+        good pointer to the right folder even though it is a bad pointer to the
+        right session. Cached for the life of the connection.
+        """
+        if self._scope_dir_resolved:
+            return self._scope_dir
+        self._scope_dir_resolved = True
+        if env_id:
+            located = _find_session_transcript(env_id, self._root())
+            if located is not None:
+                self._scope_dir = located[0]
+        return self._scope_dir
+
+    def _candidates(self, scope_dir: Path) -> list[Path]:
+        """Transcripts to tail, most-likely first.
+
+        The last winner leads (consecutive recalls in one conversation land in
+        the same file), then the scope's transcripts newest-mtime-first — which
+        does double duty: the live transcript is the one being appended to, so
+        mtime order is both the cheap order and the right tiebreak.
+        """
+        ordered: list[Path] = []
+        if self._last_transcript is not None and self._last_transcript.is_file():
+            ordered.append(self._last_transcript)
+        try:
+            entries = [p for p in scope_dir.iterdir() if p.suffix == ".jsonl" and p.is_file()]
+        except OSError:
+            return ordered
+        entries.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for path in entries:
+            if path not in ordered:
+                ordered.append(path)
+            if len(ordered) >= self._max_candidates:
+                break
+        return ordered
+
+    def _scan(self, tool_use_id: str, env_id: str) -> str | None:
+        scope_dir = self._scope(env_id)
+        if scope_dir is None:
+            return None
+        needle = tool_use_id.encode("utf-8")
+        for path in self._candidates(scope_dir):
+            session_id = self._scan_one(path, tool_use_id, needle)
+            if session_id:
+                self._last_transcript = path
+                return session_id
+        return None
+
+    def _scan_one(self, path: Path, tool_use_id: str, needle: bytes) -> str | None:
+        try:
+            with path.open("rb") as fh:
+                size = fh.seek(0, os.SEEK_END)
+                start = max(0, size - self._tail_bytes)
+                fh.seek(start)
+                blob = fh.read()
+        except OSError:
+            return None
+        if needle not in blob:
+            return None
+        lines = blob.split(b"\n")
+        if start > 0 and lines:
+            # The window almost certainly begins mid-record; that partial line
+            # is unparseable and is dropped rather than guessed at.
+            lines = lines[1:]
+        for raw in lines:
+            if needle not in raw:
+                continue
+            try:
+                record = json.loads(raw)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            session_id = _session_id_for_tool_use(record, tool_use_id)
+            if session_id is None:
+                continue
+            return session_id or path.stem
+        return None
+
+
 def _append_line(path: Path, line: str) -> None:
     """Append one line to *path* durably (``O_APPEND`` + fsync), via
     :func:`athenaeum.store.append_line_durable` — the single shared
@@ -289,6 +572,23 @@ class PushRecord:
     explicit ``recall`` push" — changing that default, or treating any
     unrecognized value as ``recall`` by elimination, would reinterpret
     either every historical row or every future third-source row.
+
+    ``session_attribution`` (issue athenaeum#1541, additive, SCHEMA_VERSION
+    unchanged — same precedent as ``source`` and ``PushedItem.memory_tier``)
+    records HOW ``session_id`` was determined:
+    :data:`ATTRIBUTION_TRANSCRIPT` when it was joined from the transcript
+    carrying this call's ``toolUseId``, :data:`ATTRIBUTION_ENV_UNRESOLVED`
+    when that join failed and the row fell back to the process environment's
+    possibly-stale id. Default ``""`` (key omitted) for every writer that
+    does not resolve attribution — including every row written before this
+    field existed, which must keep reading as "provenance unknown" rather
+    than being retroactively claimed as either value (AC5: history is not
+    rewritten).
+
+    **Deliberately NOT named or shaped like ``source``**, and never conflated
+    with it: ``source`` says which WRITER produced the row (sidecar / hook /
+    MCP recall); this says how much to trust the row's session id. Issue
+    athenaeum#1542 owns ``source``'s semantics concurrently.
     """
 
     session_id: str
@@ -297,6 +597,7 @@ class PushRecord:
     backend: str
     items: list[PushedItem] = field(default_factory=list)
     source: str = ""
+    session_attribution: str = ""
 
     @property
     def total_token_cost(self) -> int:
@@ -325,6 +626,8 @@ class PushRecord:
         }
         if self.source:
             d["source"] = self.source
+        if self.session_attribution:
+            d["session_attribution"] = self.session_attribution
         return d
 
 
@@ -342,6 +645,7 @@ def build_push_record(
     backend: str,
     hits: list[tuple[str, dict[str, object], str]],
     memory_tier_by_filename: dict[str, str] | None = None,
+    session_attribution: str = "",
 ) -> PushRecord:
     """Build a :class:`PushRecord` from rendered recall hits.
 
@@ -383,6 +687,13 @@ def build_push_record(
             function is ever called) — reusing that already-resolved value
             here is strictly cheaper than a second call, not just
             cycle-avoiding.
+        session_attribution: issue athenaeum#1541 — how *session_id* was
+            determined (:data:`ATTRIBUTION_TRANSCRIPT` /
+            :data:`ATTRIBUTION_ENV_UNRESOLVED`), normally
+            :attr:`SessionAttribution.attribution` straight from
+            :meth:`ToolUseSessionResolver.resolve`. Default ``""`` omits the
+            key entirely, which is what a caller that did not resolve
+            attribution must write — never a guessed value.
     """
     tier_map = memory_tier_by_filename or {}
     items: list[PushedItem] = []
@@ -411,6 +722,7 @@ def build_push_record(
         query_hash=_query_hash(query),
         backend=backend,
         items=items,
+        session_attribution=session_attribution,
     )
 
 
@@ -760,6 +1072,11 @@ def _shape_tail_push_record(raw: dict[str, Any]) -> dict[str, Any]:
     (an explicit MCP ``recall`` push never had the key at all) — the same
     "absent key means recall" reader rule documented for the raw ledger
     carries through unchanged to this shaped, public form.
+
+    ``session_attribution`` (issue athenaeum#1541) follows the identical
+    include-only-when-present rule, for the identical reason: every row
+    written before the field existed has no such key, and an absent key means
+    "provenance unknown", never either of its two values.
     """
     shaped: dict[str, Any] = {
         "record_type": "push",
@@ -780,6 +1097,9 @@ def _shape_tail_push_record(raw: dict[str, Any]) -> dict[str, Any]:
     source = raw.get("source")
     if source:
         shaped["source"] = source
+    attribution = raw.get("session_attribution")
+    if attribution:
+        shaped["session_attribution"] = attribution
     return shaped
 
 
