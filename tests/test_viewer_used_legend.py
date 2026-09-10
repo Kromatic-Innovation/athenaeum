@@ -2,8 +2,9 @@
 """The viewer must say what its ``used`` column actually means (athenaeum#1575 AC5).
 
 The demo audience reads ``used`` as "the sidecar helped". Today it means only
-that the page's uid appears verbatim in the transcript — a proxy that both
-misses content-only use and counts a bare echo (measured in
+that the page's recorded push id (the full uid on the MCP path, an 8-hex uid
+prefix on the sidecar path) appears as a substring in the transcript — a proxy
+that both misses content-only use and counts a bare echo (measured in
 ``docs/measurements/used-column-heuristic-accuracy-*.md``). The legend has to
 say so in the browser, which is where the overclaim would happen; a module
 docstring in ``_cmd_viewer.py`` is not that surface.
@@ -24,7 +25,8 @@ def test_legend_defines_used_as_a_uid_appearance() -> None:
     html = INDEX_HTML.read_text(encoding="utf-8")
     legend = html.split('<div class="legend">', 1)[1].split("</div>", 1)[0]
     assert "used" in legend
-    assert "uid appears verbatim" in legend
+    assert "recorded push id" in legend
+    assert "substring" in legend
     assert "session transcript" in legend
 
 

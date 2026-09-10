@@ -21,7 +21,8 @@ DRIVER = "used_heuristic_cli"
 
 def _workflow_text(name: str) -> str:
     path = WORKFLOWS / name
-    return path.read_text(encoding="utf-8") if path.is_file() else ""
+    assert path.is_file(), f"expected workflow file not found: {path}"
+    return path.read_text(encoding="utf-8")
 
 
 def test_driver_is_not_invoked_by_ci_yml() -> None:

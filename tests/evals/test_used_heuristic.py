@@ -98,6 +98,8 @@ def test_no_fixture_uid_leaks_into_another_fixture_body() -> None:
 
 
 def test_synthetic_eval_produces_all_four_matrix_cells(tmp_path: Path) -> None:
+    """RED here means the heuristic changed: re-run `used_heuristic_cli` and
+    regenerate the measurement doc."""
     result = run_synthetic_eval(tmp_path)
     cells = {o.quadrant: o.cell for o in result.outcomes}
     assert cells == {
@@ -113,6 +115,8 @@ def test_synthetic_eval_produces_all_four_matrix_cells(tmp_path: Path) -> None:
 
 
 def test_rates_are_computed_from_the_matrix(tmp_path: Path) -> None:
+    """RED here means the heuristic changed: re-run `used_heuristic_cli` and
+    regenerate the measurement doc."""
     matrix = run_synthetic_eval(tmp_path).matrix
     assert matrix.false_negative_rate == 0.5
     assert matrix.false_positive_rate == 0.5

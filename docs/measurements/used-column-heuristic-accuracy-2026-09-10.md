@@ -1,4 +1,4 @@
-# `used` column heuristic accuracy
+# `used` column heuristic accuracy (synthetic)
 
 Generated: 2026-09-10T16:43:14+00:00
 
@@ -6,11 +6,15 @@ Measures `athenaeum.push_metrics.determine_references` — the rule behind the v
 
 ## What `used` means today
 
-A pushed page is marked **used** if and only if its uid string appears verbatim somewhere in the session transcript (user text, assistant text, or tool-result text). No content signal is consulted.
+A pushed page is marked **used** when its recorded push id appears as an unanchored substring anywhere in the session transcript (user text, assistant text, or tool-result text) — `push_metrics.determine_references` does `pid in blob`, not a whole-token match. No content signal is consulted.
+
+The id recorded is not the same shape on every push path: the MCP `recall` path (`opaque_push_id`) records a compiled entity's full uid, while the sidecar / `UserPromptSubmit` push path (`opaque_push_id_from_filename`) records only the 8-hex uid prefix — and that hook path is the dominant producer of push records in real sessions.
+
+**Scope of this measurement.** The four fixtures below exercise the MCP / full-uid path only. The truncated-prefix (sidecar) path is unmeasured here and is tracked separately in athenaeum#1585.
 
 ## Synthetic confusion matrix (AC1)
 
-Unit: **one pushed page**. Positive class: the heuristic says the page was used. Ground truth is known by construction — one fixture per reachable quadrant.
+Unit: **one pushed page**. Positive class: the heuristic says the page was used. Ground truth is known by construction — one fixture per reachable quadrant. **These rates describe the fixture design, not real-session frequency** — see "How to read these rates" below.
 
 | | heuristic: used | heuristic: not used |
 |---|---|---|
