@@ -107,6 +107,37 @@ git add tests/fixtures/recorded/
 git commit -m "evals: re-record fixtures after prompt edit"
 ```
 
+### Seeding the `decomposition` layer (issue athenaeum#1581, not yet seeded)
+
+The layer ships with its fixture directory empty and **absent from
+`tests/fixtures/recorded/seeded-layers.yml`** — the never-seeded state, which
+the replay suite passes trivially (athenaeum#551). It has exactly one metered
+case, `decomposed_hub_new_intake`; the layer's other three cases are
+deterministic and are graded with no key in
+`tests/test_eval_decomposition.py`.
+
+Seeding it is a metered operator action. The command:
+
+```bash
+gh workflow run evals.yml -f record=true --repo Kromatic-Innovation/athenaeum
+```
+
+Then download the `recorded-fixtures` artifact from that run, commit
+`tests/fixtures/recorded/decomposition/decomposed_hub_new_intake.json`, and
+append to `seeded-layers.yml` in the same PR:
+
+```yaml
+  decomposition:
+    date: <ISO date of the run>
+    run: https://github.com/Kromatic-Innovation/athenaeum/actions/runs/<id>
+```
+
+A layer added to that manifest MUST keep a non-empty fixture directory, so
+append the key only once the fixture is committed alongside it. Update
+`docs/measurements/decomposition-baseline-2026-09-10.md` with Case D's
+observed result at the same time — the baseline's Case D row currently reads
+"not yet measured".
+
 ### Re-deriving instead of re-recording (no live key available)
 
 A real re-record needs a live `ANTHROPIC_API_KEY` (or the `claude-cli`

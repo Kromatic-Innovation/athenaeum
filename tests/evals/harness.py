@@ -62,6 +62,15 @@ LAYER_WRITE_TIER_COMPARE = "write_tier_compare"
 # competing claims); this layer's cases give tier3_create a source with
 # nothing to reconcile, only a gap.
 LAYER_UNDERDETERMINED = "underdetermined"
+# Issue athenaeum#1581: DECOMPOSITION -- does a page that has grown several
+# facets become a hub plus linked facet sub-pages, and is a page that is
+# merely long left alone. Most of that layer is DETERMINISTIC (the size gate
+# is a `len()` and a heading regex) and is graded without a key in
+# tests/test_eval_decomposition.py. This layer name covers the one case that
+# is not: an already-decomposed hub receiving new facet intake, where what
+# decides is whether the classify tier mints a NEW page for something an
+# existing sub-page already covers.
+LAYER_DECOMPOSITION = "decomposition"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EVAL_DATA_ROOT = REPO_ROOT / "tests" / "evals" / "data"
@@ -548,6 +557,7 @@ class EvalSession:
                         LAYER_MERGE,
                         LAYER_WRITE_TIER_COMPARE,
                         LAYER_UNDERDETERMINED,
+                        LAYER_DECOMPOSITION,
                     )
                 )
                 if total
