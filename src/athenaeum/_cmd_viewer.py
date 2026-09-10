@@ -10,11 +10,24 @@ HTML page with three columns:
 - **pushed unbidden**   — hook/sidecar-sourced push records (``source`` key
                            present): context the passive recall path injected
                            without being asked.
-- **pulled deliberately** — push records with no ``source`` key: an explicit
-                           MCP ``recall`` call.
+- **pulled deliberately** — push records with no ``source`` key *that were
+                           written after the key existed*: an explicit MCP
+                           ``recall`` call.
 - **overlap**           — ids appearing in both: the passive path having
                            independently surfaced something the session also
                            went and pulled for itself.
+
+**Absence of a field is not evidence of a positive fact (issue
+athenaeum#1542).** This module used to read "no ``source`` key" as "pulled
+deliberately" full stop. The key was added partway through the ledger's life,
+so every record written before it existed rendered as a deliberate pull that
+never happened — 391 of them in this deployment, an entire screen of confident
+wrong answers. A source-less record is now split on
+:data:`SOURCE_FIELD_FIRST_SEEN`: at or after that instant the absence still
+means an explicit ``recall``; before it (or with an unusable ``ts``) the
+provenance is UNKNOWN, and the page says so in its own visibly distinct state
+rather than folding it into the pulled column. Unknown rows are never counted
+into ``pulled_deliberately`` or ``overlap``.
 
 Per row: id, tier, scope, memory tier, estimated token cost, and whether
 reference determination marked the id referenced (``yes`` / ``no`` /
@@ -90,6 +103,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from importlib import resources
 from pathlib import Path
@@ -115,9 +129,74 @@ DEFAULT_POLL_INTERVAL = 3.0
 #: athenaeum#1479's documented reader rule, reproduced here rather than
 #: imported — this module deliberately never imports
 #: :mod:`athenaeum.push_metrics`; see the module docstring's AC4 section).
-#: A push record with NO ``source`` key at all is the third case: pulled
-#: deliberately (an explicit MCP ``recall`` call).
+#: A push record with NO ``source`` key is pulled deliberately (an explicit
+#: MCP ``recall`` call) ONLY IF it was written after the key existed at all --
+#: see :data:`SOURCE_FIELD_FIRST_SEEN` and
+#: :func:`source_absence_means_deliberate_pull`. Older than that, the absence
+#: carries no information and the record's provenance is unknown.
 _UNBIDDEN_SOURCES = ("hook", "sidecar")
+
+#: The instant the ``source`` key first appears in a push record.
+#:
+#: **A corpus-observed cutover, not a protocol constant.** Nothing in the
+#: push-metrics contract declares this moment; it was derived by draining
+#: ``athenaeum push-metrics tail --json`` over the whole ledger and taking the
+#: earliest ``ts`` of any record carrying a ``source`` key (2026-09-09T03:48:00Z
+#: in this deployment, issue athenaeum#1542). It exists solely so that the
+#: ABSENCE of the key stops being read as evidence of a positive fact: before
+#: this instant no writer emitted ``source`` at all, so absence says nothing;
+#: at or after it, the MCP ``recall`` path is the one writer that still omits
+#: the key, so absence is once again meaningful.
+#:
+#: Defined ONCE and consumed only through
+#: :func:`source_absence_means_deliberate_pull` -- a value derived from an
+#: observation of one corpus must have exactly one place to be corrected if
+#: the observation is ever refined.
+SOURCE_FIELD_FIRST_SEEN = datetime(2026, 9, 9, 3, 48, 0, tzinfo=timezone.utc)
+
+
+def _parse_record_ts(ts: Any) -> datetime | None:
+    """Parse a ledger ``ts`` to an aware UTC datetime, or ``None``.
+
+    Deliberately NOT a string comparison against
+    :data:`SOURCE_FIELD_FIRST_SEEN`'s ISO spelling: the ledger carries both
+    ``2026-08-02T18:53:18.111270Z`` and ``2026-09-09T03:48:00Z``, and ``.``
+    sorts below ``Z``, so ``"...T03:48:00.5Z" < "...T03:48:00Z"`` would put a
+    record half a second AFTER the cutover on the wrong side of it.
+
+    Returns ``None`` for anything unusable (missing, non-string, unparsable);
+    the caller must treat that as unknown provenance, never as a pull.
+    """
+    if not isinstance(ts, str) or not ts:
+        return None
+    text = ts[:-1] + "+00:00" if ts.endswith("Z") else ts
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def source_absence_means_deliberate_pull(ts: Any) -> bool:
+    """Whether a push record's MISSING ``source`` key can be read as "this was
+    a deliberate pull" (issue athenaeum#1542).
+
+    ``True`` only when the record is timestamped at or after
+    :data:`SOURCE_FIELD_FIRST_SEEN` -- i.e. written in an era where some
+    writer WOULD have set ``source`` had it been a passive push, which is what
+    makes the omission informative.
+
+    Fails toward unknown: an absent, malformed, or unparsable ``ts`` returns
+    ``False``, because an unusable timestamp is no more evidence of a positive
+    fact than an unset field is.
+    """
+    parsed = _parse_record_ts(ts)
+    if parsed is None:
+        return False
+    return parsed >= SOURCE_FIELD_FIRST_SEEN
+
 
 #: Editor the ``/open`` route launches. Sublime Text's CLI by default because
 #: that is what this deployment uses; ``--editor`` overrides it, and the value
@@ -262,12 +341,16 @@ def _row(
     }
 
 
-#: The four ways a page can appear in a session. Values double as the CSS class
+#: The ways a page can appear in a session. Values double as the CSS class
 #: the page uses, so a rename is one edit rather than two that can drift.
 CLASSIFICATION_PUSHED = "pushed"
 CLASSIFICATION_PUSHED_RECALLED = "pushed-recalled"
 CLASSIFICATION_BREADCRUMB = "breadcrumb"
 CLASSIFICATION_PULLED_COLD = "pulled-cold"
+#: Fifth state (issue athenaeum#1542): the only record naming this page
+#: predates the ``source`` key, so whether the session pushed it or pulled it
+#: is genuinely not knowable. Rendered, never dropped; never counted as a pull.
+CLASSIFICATION_UNKNOWN_PROVENANCE = "unknown-provenance"
 
 
 def classify(
@@ -276,6 +359,7 @@ def classify(
     pushed_ids: set[str],
     pulled_ids: set[str],
     breadcrumb_ids: set[str],
+    unknown_ids: set[str],
 ) -> str:
     """Which of the four states one page is in for this session.
 
@@ -287,17 +371,24 @@ def classify(
        cheap offer that goes unused is the system working as designed.
     3. pulled, not pushed, but related to something pushed - the push started a
        thread the session followed. Credited to the sidecar.
-    4. pulled, not pushed, unrelated - the session found it alone. The miss,
+    4. provenance unknown - every record naming it predates the ``source``
+       key, so neither "pushed" nor "pulled" can be asserted (issue
+       athenaeum#1542). Tested BEFORE breadcrumb and pulled-cold: both of
+       those are claims about the session having *pulled* the page, and this
+       is exactly the case where that is not known.
+    5. pulled, not pushed, unrelated - the session found it alone. The miss,
        and the only state that should alarm anyone.
 
     A page can be both pushed and related-to-something-pushed; (1)/(2) win,
     because having been pushed outright is the stronger statement about it.
+    A page with BOTH a pre-``source`` record and a modern one is likewise
+    classified from the modern one - a known fact beats an unknown.
 
     "Pulled" here means an explicit recall landed on the page - a push record
-    with no ``source`` key, available live. It is NOT the session-end reference
-    determination, which cannot populate mid-session. The page's legend has to
-    say so, or light green reads as a claim about usefulness that this data
-    does not support.
+    with no ``source`` key written after that key existed, available live. It
+    is NOT the session-end reference determination, which cannot populate
+    mid-session. The page's legend has to say so, or light green reads as a
+    claim about usefulness that this data does not support.
     """
     was_pushed = item_id in pushed_ids
     was_pulled = item_id in pulled_ids
@@ -305,6 +396,8 @@ def classify(
         return CLASSIFICATION_PUSHED_RECALLED
     if was_pushed:
         return CLASSIFICATION_PUSHED
+    if not was_pulled and item_id in unknown_ids:
+        return CLASSIFICATION_UNKNOWN_PROVENANCE
     if item_id in breadcrumb_ids:
         return CLASSIFICATION_BREADCRUMB
     return CLASSIFICATION_PULLED_COLD
@@ -323,13 +416,22 @@ def shape_viewer_payload(
     """
     unbidden: dict[str, dict[str, Any]] = {}
     deliberate: dict[str, dict[str, Any]] = {}
+    unknown: dict[str, dict[str, Any]] = {}
     has_reference_record = False
     referenced_ids: set[str] = set()
 
     for rec in records:
         record_type = rec.get("record_type")
         if record_type == "push":
-            bucket = unbidden if rec.get("source") in _UNBIDDEN_SOURCES else deliberate
+            if rec.get("source") in _UNBIDDEN_SOURCES:
+                bucket = unbidden
+            elif source_absence_means_deliberate_pull(rec.get("ts")):
+                bucket = deliberate
+            else:
+                # Pre-``source``-key record (issue athenaeum#1542): the missing
+                # key is an artefact of when it was written, not a statement
+                # about how it got here.
+                bucket = unknown
             for item in rec.get("items", []):
                 item_id = item.get("id") if isinstance(item, dict) else None
                 if item_id:
@@ -337,6 +439,16 @@ def shape_viewer_payload(
         elif record_type == "reference":
             has_reference_record = True
             referenced_ids.update(rec.get("referenced_ids") or [])
+
+    # A page can carry BOTH a pre-``source`` record and a modern one. The
+    # modern record settles it, so such an id is dropped from the unknown ROWS
+    # here -- otherwise it would render in one state (classify() prefers the
+    # known fact) while being counted in another, which AC5 forbids.
+    unknown_only = {
+        item_id: item
+        for item_id, item in unknown.items()
+        if item_id not in unbidden and item_id not in deliberate
+    }
 
     overlap_ids = sorted(set(unbidden) & set(deliberate))
     last_turn_record = next(
@@ -376,9 +488,15 @@ def shape_viewer_payload(
         "pushed_unbidden": _rows(unbidden),
         "pulled_deliberately": _rows(deliberate),
         "overlap": overlap_rows,
+        # Issue athenaeum#1542. Additive: the three keys above keep their exact
+        # pre-athenaeum#1542 meaning MINUS the pre-field records that never
+        # belonged in `pulled_deliberately`, and no unknown row is counted in
+        # any of them.
+        "unknown_provenance": _rows(unknown_only),
         "pushed_ids": sorted(unbidden),
         "pulled_ids": sorted(deliberate),
-        "all_items": {**deliberate, **unbidden},
+        "unknown_ids": sorted(unknown_only),
+        "all_items": {**unknown, **deliberate, **unbidden},
         "last_turn_record": last_turn_record,
     }
 
@@ -445,6 +563,7 @@ def enrich_payload(
     all_items: dict[str, dict[str, Any]] = payload.pop("all_items", {})
     pushed_ids = set(payload.pop("pushed_ids", []))
     pulled_ids = set(payload.pop("pulled_ids", []))
+    unknown_ids = set(payload.pop("unknown_ids", []))
     last_turn_record = payload.pop("last_turn_record", None)
 
     info = {uid: load_page_info(uid, index) for uid in all_items}
@@ -470,6 +589,7 @@ def enrich_payload(
             pushed_ids=pushed_ids,
             pulled_ids=pulled_ids,
             breadcrumb_ids=breadcrumb_ids,
+            unknown_ids=unknown_ids,
         )
         row["referenced"] = _referenced_flag(
             uid,
@@ -485,6 +605,10 @@ def enrich_payload(
         CLASSIFICATION_PUSHED_RECALLED: 1,
         CLASSIFICATION_BREADCRUMB: 2,
         CLASSIFICATION_PUSHED: 3,
+        # Listed explicitly rather than falling through the `.get(..., 9)`
+        # default, so its position is a decision on the record: below every
+        # state that asserts something, above nothing.
+        CLASSIFICATION_UNKNOWN_PROVENANCE: 4,
     }
     pages = sorted(
         (_page_row(uid) for uid in all_items),
@@ -506,6 +630,7 @@ def enrich_payload(
                 pushed_ids=pushed_ids,
                 pulled_ids=pulled_ids,
                 breadcrumb_ids=breadcrumb_ids,
+                unknown_ids=unknown_ids,
             )
             turn_items.append(row)
         query_hash = last_turn_record.get("query_hash", "")

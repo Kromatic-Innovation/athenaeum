@@ -96,12 +96,28 @@ def test_poll_interval_flag_parses_zero_to_disable() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _push_record(session_id: str, items: list[dict], *, source: str | None = None) -> dict:
+#: A ``ts`` safely AFTER _cmd_viewer.SOURCE_FIELD_FIRST_SEEN. Every fixture
+#: that means "an explicit MCP recall" must carry a post-cutover timestamp:
+#: since issue athenaeum#1542 a source-less record OLDER than the cutover is
+#: unknown-provenance, not a pull.
+_TS_AFTER_SOURCE_FIELD = "2026-09-09T10:00:00Z"
+#: ...and one safely BEFORE it: the 391 legacy rows the viewer used to
+#: misreport as deliberate pulls.
+_TS_BEFORE_SOURCE_FIELD = "2026-08-02T18:53:18.111270Z"
+
+
+def _push_record(
+    session_id: str,
+    items: list[dict],
+    *,
+    source: str | None = None,
+    ts: str = _TS_AFTER_SOURCE_FIELD,
+) -> dict:
     rec = {
         "record_type": "push",
         "v": 1,
         "session_id": session_id,
-        "ts": "2026-01-01T00:00:00Z",
+        "ts": ts,
         "query_hash": "abc",
         "backend": "fts5",
         "items": items,
@@ -119,7 +135,7 @@ def _reference_record(session_id: str, *, pushed_count: int, referenced_ids: lis
         "record_type": "reference",
         "v": 1,
         "session_id": session_id,
-        "ts": "2026-01-01T00:00:05Z",
+        "ts": "2026-09-09T10:00:05Z",
         "pushed_count": pushed_count,
         "referenced_count": len(referenced_ids),
         "referenced_ids": referenced_ids,
@@ -195,6 +211,128 @@ def test_shape_viewer_payload_reference_determination_present_marks_true_and_fal
     by_id = {r["id"]: r["referenced"] for r in payload["pushed_unbidden"]}
     assert by_id == {"a": True, "b": False}
     assert payload["has_reference_determination"] is True
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1542 -- a missing `source` key is not evidence of a pull
+# ---------------------------------------------------------------------------
+
+
+def test_source_absence_only_means_a_pull_from_the_cutover_onward() -> None:
+    """AC1 + AC3, at the smallest possible granularity.
+
+    Both directions, because a test that pins only one cannot tell the fixed
+    behaviour from the broken one: the broken code returned "deliberate pull"
+    for every source-less record regardless of age.
+    """
+    cutover = _cmd_viewer.SOURCE_FIELD_FIRST_SEEN
+    assert _cmd_viewer.source_absence_means_deliberate_pull(_TS_AFTER_SOURCE_FIELD) is True
+    assert _cmd_viewer.source_absence_means_deliberate_pull(_TS_BEFORE_SOURCE_FIELD) is False
+    # The boundary instant itself is INCLUSIVE -- it is the first observed
+    # source-bearing record, so the field demonstrably existed by then.
+    assert (
+        _cmd_viewer.source_absence_means_deliberate_pull(cutover.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        is True
+    )
+
+
+@pytest.mark.parametrize("ts", [None, "", "t", "not-a-timestamp", 17, {"ts": 1}])
+def test_unusable_timestamp_fails_toward_unknown_never_toward_a_pull(ts: object) -> None:
+    """AC1's principle generalised: an unusable `ts` is no more evidence of a
+    positive fact than an unset `source` is."""
+    assert _cmd_viewer.source_absence_means_deliberate_pull(ts) is False
+
+
+def test_sub_second_timestamps_are_compared_as_instants_not_strings() -> None:
+    """Regression guard: `.` sorts below `Z`, so a naive string comparison
+    against the cutover's ISO spelling puts a record a fraction of a second
+    AFTER the cutover on the wrong side of it."""
+    assert _cmd_viewer.source_absence_means_deliberate_pull("2026-09-09T03:48:00.500000Z") is True
+    assert _cmd_viewer.source_absence_means_deliberate_pull("2026-09-09T03:47:59.999999Z") is False
+
+
+def test_pre_field_record_is_unknown_and_post_field_record_is_a_pull() -> None:
+    """AC1/AC2/AC3/AC4: ONE fixture holding both a pre-field and a post-field
+    source-less record. `a` predates the `source` key entirely; `c` does not.
+    """
+    records = [
+        _push_record("s1", [_ITEM_A], ts=_TS_BEFORE_SOURCE_FIELD),
+        _push_record("s1", [_ITEM_C], ts=_TS_AFTER_SOURCE_FIELD),
+    ]
+    payload = _cmd_viewer.shape_viewer_payload(session_id="s1", records=records)
+
+    # AC1: the legacy record is NOT a deliberate pull...
+    assert {r["id"] for r in payload["pulled_deliberately"]} == {"c"}
+    # AC2: ...but it is rendered, not dropped.
+    assert {r["id"] for r in payload["unknown_provenance"]} == {"a"}
+    # AC5: and it is not counted into any pulled/overlap total.
+    assert payload["overlap"] == []
+    assert "a" not in payload["pulled_ids"]
+
+
+def test_unknown_rows_carry_the_same_shape_as_every_other_row() -> None:
+    """AC2: "visibly distinct" must not mean "degraded" -- an unknown row is a
+    full row, so the page can show its tier/scope/cost like any other."""
+    records = [_push_record("s1", [_ITEM_A], ts=_TS_BEFORE_SOURCE_FIELD)]
+    payload = _cmd_viewer.shape_viewer_payload(session_id="s1", records=records)
+    assert payload["unknown_provenance"] == [
+        {
+            "id": "a",
+            "tier": "internal",
+            "scope": "owner",
+            "memory_tier": "warm",
+            "token_cost": 10,
+            "referenced": None,
+        }
+    ]
+
+
+def test_a_known_record_beats_an_unknown_one_for_the_same_id() -> None:
+    """AC5's no-row-in-two-states rule at its one genuinely ambiguous case: an
+    id named by BOTH a pre-field record and a modern one. The modern record
+    settles it, and the id must then appear in exactly one bucket."""
+    records = [
+        _push_record("s1", [_ITEM_A], ts=_TS_BEFORE_SOURCE_FIELD),
+        _push_record("s1", [_ITEM_A], ts=_TS_AFTER_SOURCE_FIELD),
+        _push_record("s1", [_ITEM_B], ts=_TS_BEFORE_SOURCE_FIELD),
+        _push_record("s1", [_ITEM_B], source=push_metrics.SOURCE_HOOK),
+    ]
+    payload = _cmd_viewer.shape_viewer_payload(session_id="s1", records=records)
+
+    assert {r["id"] for r in payload["pulled_deliberately"]} == {"a"}
+    assert {r["id"] for r in payload["pushed_unbidden"]} == {"b"}
+    assert payload["unknown_provenance"] == []
+
+
+def test_bucket_id_sets_are_disjoint_except_the_intended_overlap() -> None:
+    """AC5 as an invariant rather than a case: the only id set allowed to
+    intersect another is pushed-and-pulled, which is what `overlap` IS."""
+    records = [
+        _push_record("s1", [_ITEM_A], ts=_TS_BEFORE_SOURCE_FIELD),
+        _push_record("s1", [_ITEM_B, _ITEM_C], source="sidecar"),
+        _push_record("s1", [_ITEM_C], ts=_TS_AFTER_SOURCE_FIELD),
+    ]
+    payload = _cmd_viewer.shape_viewer_payload(session_id="s1", records=records)
+
+    unbidden = {r["id"] for r in payload["pushed_unbidden"]}
+    deliberate = {r["id"] for r in payload["pulled_deliberately"]}
+    unknown = {r["id"] for r in payload["unknown_provenance"]}
+    overlap = {r["id"] for r in payload["overlap"]}
+
+    assert unknown & unbidden == set()
+    assert unknown & deliberate == set()
+    assert overlap == unbidden & deliberate == {"c"}
+    assert unknown == {"a"}
+
+
+def test_legacy_bucket_keys_still_present_alongside_the_new_one() -> None:
+    """`athenaeum demo`'s row probe (_cmd_demo.py) counts the original three
+    keys; athenaeum#1542 is additive and must not rename or remove any."""
+    payload = _cmd_viewer.shape_viewer_payload(
+        session_id="s1", records=[_push_record("s1", [_ITEM_A], ts=_TS_BEFORE_SOURCE_FIELD)]
+    )
+    for key in ("pushed_unbidden", "pulled_deliberately", "overlap", "unknown_provenance"):
+        assert key in payload
 
 
 # ---------------------------------------------------------------------------
