@@ -135,7 +135,7 @@ class TestEmptyRootVsNoRootsConfigured:
     """AC2: a configured root that resolves to an existing directory with no
     matching files must be distinguishable from a silent pass. AC3: that
     case must, in turn, be distinguishable from no roots being configured at
-    all -- #1457 could tell neither apart.
+    all -- athenaeum#1457 could tell neither apart.
 
     Neither ``resolve_extra_intake_roots`` nor the injection-based tests are
     touched (out of scope per the issue); these tests only inspect the
