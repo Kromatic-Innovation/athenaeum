@@ -275,105 +275,61 @@ class TestBuildPushRecordRedaction:
             assert key in d
         assert d["session_id"] == "sess-9"
         item = d["items"][0]
-        for key in ("id", "tier", "scope", "token_cost", "memory_tier"):
+        for key in ("id", "tier", "scope", "token_cost"):
             assert key in item
 
 
 class TestBuildPushRecordMemoryTier:
-    """athenaeum#1345 AC7: telemetry records each pushed page's ``memory_tier``
-    (the retrieval-cost tier), separate from the pre-existing ``tier`` field
-    (the ACCESS tier). Before this, ``PushedItem.tier`` was the only tier
-    on a ledger record and it was never ``memory_tier`` — closing that gap
-    is the field this class pins.
+    """athenaeum#1345 AC7 added a per-item ``memory_tier`` (the
+    retrieval-cost tier) beside the pre-existing ``tier`` field (the ACCESS
+    tier), so the push mix could be watched shifting off 3.5% hot. It was
+    watched (athenaeum#1560), and issue athenaeum#1514 retired the
+    vocabulary — so this class now pins the field's REMOVAL from the write
+    path, and the two things that removal must not break.
 
-    ``build_push_record`` takes the resolved value via the caller-supplied
-    ``memory_tier_by_filename`` map rather than calling
-    :func:`athenaeum.memory_tiers.resolve_tier` itself — see that
-    parameter's own docstring for why a same-module import would close a
-    genuine 3-node import cycle (``{memory_tiers, push_metrics,
-    usage_report}``) that ``tests/test_import_graph_acyclic.py`` forbids.
-    The production caller (``mcp_server._recall_via_backend``) resolves via
-    ``resolve_tier`` and passes the map in; these tests exercise
-    ``build_push_record``'s side of that contract directly.
+    ``SCHEMA_VERSION`` is deliberately NOT bumped, for the same reason the
+    addition did not bump it: this is a per-item optional key, and every
+    documented reader rule for the ledger is already "check for the
+    specific value; an absent key means the writer did not have one."
     """
 
-    def test_memory_tier_populated_from_the_caller_supplied_map(self) -> None:
-        """A filename present in ``memory_tier_by_filename`` is recorded
-        with that exact value."""
+    def test_writer_emits_no_memory_tier_key(self) -> None:
         fm = {"uid": "p1", "access": "open"}
         record = push_metrics.build_push_record(
             session_id="sess-mt",
             query="q",
             backend="fts5",
             hits=[("p1-page.md", fm, "some body text")],
-            memory_tier_by_filename={"p1-page.md": "hot"},
         )
         item = record.to_dict()["items"][0]
-        assert item["memory_tier"] == "hot"
-        # The pre-existing ACCESS tier is untouched by this change.
+        assert "memory_tier" not in item
+        # The unrelated ACCESS tier is untouched by the retirement.
         assert item["tier"] == "open"
 
-    def test_memory_tier_defaults_to_empty_when_filename_absent_from_map(self) -> None:
-        """A filename NOT present in the map (or no map at all) records
-        ``""`` — additive default, never a fabricated guess."""
-        fm = {"uid": "p2", "access": "internal"}
-        record = push_metrics.build_push_record(
-            session_id="sess-mt2",
-            query="q",
-            backend="fts5",
-            hits=[("p2-page.md", fm, "body")],
-        )
-        item = record.to_dict()["items"][0]
-        assert item["memory_tier"] == ""
+    def test_build_push_record_no_longer_accepts_a_tier_map(self) -> None:
+        """The ``memory_tier_by_filename`` parameter is gone, not merely
+        ignored. A caller still passing it must fail loudly rather than
+        silently having its map dropped — the shape of bug that would
+        otherwise let a stale caller believe it was still recording tiers.
+        """
+        with pytest.raises(TypeError):
+            push_metrics.build_push_record(
+                session_id="sess-mt2",
+                query="q",
+                backend="fts5",
+                hits=[("p2-page.md", {"uid": "p2"}, "body")],
+                memory_tier_by_filename={"p2-page.md": "hot"},  # type: ignore[call-arg]
+            )
 
-    def test_memory_tier_matches_resolve_tier_end_to_end(self) -> None:
-        """End-to-end sanity check: a caller that resolves via the real
-        :func:`athenaeum.memory_tiers.resolve_tier` (the way
-        ``mcp_server._recall_via_backend`` does) and passes the result
-        through round-trips unchanged onto the record."""
-        from athenaeum.memory_tiers import resolve_tier
+    def test_pushed_item_has_no_memory_tier_field(self) -> None:
+        """The dataclass field itself is gone, so a direct construction
+        cannot reintroduce the key either."""
+        import dataclasses
 
-        fm = {"uid": "p3", "access": "open", "type": "principle"}
-        resolved = resolve_tier(fm)
-        record = push_metrics.build_push_record(
-            session_id="sess-mt-e2e",
-            query="q",
-            backend="fts5",
-            hits=[("p3-page.md", fm, "body")],
-            memory_tier_by_filename={"p3-page.md": resolved},
-        )
-        item = record.to_dict()["items"][0]
-        assert item["memory_tier"] == resolved == "hot"
+        names = {f.name for f in dataclasses.fields(push_metrics.PushedItem)}
+        assert names == {"id", "tier", "scope", "token_cost"}
 
-    def test_memory_tier_distinct_per_item_in_the_same_record(self) -> None:
-        """Two hits in one push record with different tiers are each
-        recorded with their OWN memory_tier — never a single record-level
-        value applied to every item."""
-        fm_hot = {"uid": "h1", "access": "open"}
-        fm_warm = {"uid": "w1", "access": "open"}
-        record = push_metrics.build_push_record(
-            session_id="sess-mt3",
-            query="q",
-            backend="fts5",
-            hits=[
-                ("h1-page.md", fm_hot, "a"),
-                ("w1-page.md", fm_warm, "b"),
-            ],
-            memory_tier_by_filename={"h1-page.md": "hot", "w1-page.md": "warm"},
-        )
-        items = record.to_dict()["items"]
-        by_id = {it["id"]: it["memory_tier"] for it in items}
-        assert by_id == {"h1": "hot", "w1": "warm"}
-
-    def test_directly_constructed_pushed_item_without_memory_tier_still_round_trips(
-        self,
-    ) -> None:
-        """Additive-field contract: a pre-existing direct
-        :class:`push_metrics.PushedItem` construction that doesn't pass
-        ``memory_tier`` (e.g. ``tests/test_usage_report.py``) keeps working
-        unchanged — SCHEMA_VERSION is not bumped for this addition, matching
-        this module's established precedent of adding fields without a
-        version bump (e.g. the athenaeum#1036 coverage-audit fields)."""
+    def test_schema_version_is_unchanged_by_the_removal(self) -> None:
         record = push_metrics.PushRecord(
             session_id="old-shape",
             ts="2020-01-01T00:00:00Z",
@@ -383,7 +339,8 @@ class TestBuildPushRecordMemoryTier:
         )
         d = record.to_dict()
         assert d["v"] == push_metrics.SCHEMA_VERSION == 1
-        assert d["items"][0]["memory_tier"] == ""
+        assert "memory_tier" not in d["items"][0]
+
 
     def test_source_defaults_to_omitted_the_recall_path_contract(self) -> None:
         """Issue athenaeum#1362's ``source`` field: additive, no SCHEMA_VERSION
@@ -654,7 +611,9 @@ class TestRecordHookPush:
         assert item["tier"] == "internal"
         assert item["scope"] == "owner"
         assert item["token_cost"] == 0
-        assert item["memory_tier"] == ""
+        # No `memory_tier` at all since issue athenaeum#1514 — the safest
+        # "known limitation" default for a retired field is not to write it.
+        assert "memory_tier" not in item
 
 
 # ---------------------------------------------------------------------------
@@ -1826,8 +1785,50 @@ class TestTailRecords:
             "token_cost_estimated",
             "source",
         }
-        assert set(rec["items"][0]) == {"id", "tier", "scope", "token_cost", "memory_tier"}
+        # A row written after issue athenaeum#1514 carries no
+        # `memory_tier`, and the shaper must OMIT the key rather than
+        # project it as `null` — see `_shape_tail_push_item`. The
+        # historical-row direction is pinned by
+        # `test_a_pre_1514_row_still_projects_its_memory_tier` below.
+        assert set(rec["items"][0]) == {"id", "tier", "scope", "token_cost"}
         assert rec["source"] == "hook"
+
+    def test_a_pre_1514_row_still_projects_its_memory_tier(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1514 stopped WRITING `memory_tier`, but the
+        ledger's own history still carries it — including the exact rows
+        athenaeum#1560's bucketed audit read to discharge this issue's
+        evidence gate. The documented CLI surface must stay able to read
+        them, so the field remains projectable, include-when-present.
+        """
+        import json
+
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir(parents=True)
+        legacy = {
+            "v": 1,
+            "session_id": "s-legacy",
+            "ts": "2026-09-08T00:00:00Z",
+            "query_hash": "deadbeef00000000",
+            "backend": "vector",
+            "items": [
+                {
+                    "id": "u1",
+                    "tier": "internal",
+                    "scope": "owner",
+                    "token_cost": 7,
+                    "memory_tier": "hot",
+                }
+            ],
+            "pushed_count": 1,
+            "token_cost": 7,
+            "token_cost_estimated": True,
+            "source": "sidecar",
+        }
+        (cache_dir / push_metrics.PUSH_RECORDS_FILENAME).write_text(
+            json.dumps(legacy) + "\n", encoding="utf-8"
+        )
+        [rec] = list(push_metrics.tail_records(cache_dir=cache_dir))
+        assert rec["items"][0]["memory_tier"] == "hot"
 
     def test_field_set_is_pinned_for_an_explicit_recall_push(self, tmp_path: Path) -> None:
         """An explicit MCP ``recall`` push omits ``source`` entirely — the

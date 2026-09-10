@@ -240,7 +240,6 @@ UNDECLARED: frozenset[str] = frozenset(
         "enumeration",
         "identity_resolution",
         "mcp_server",
-        "memory_tiers",
         "name_collisions",
         "pending_merges_pii",
         "reasoning_tiers",

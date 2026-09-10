@@ -21,20 +21,21 @@ SRC = str(Path(__file__).resolve().parent.parent / "src")
 
 
 def _build_index(path: Path, rows: list[tuple]) -> Path:
-    """One FTS5 ``wiki`` table, schema v4 shape (``memory_tier`` column
-    present) — the shape ``athenaeum.context`` queries against.
+    """One FTS5 ``wiki`` table, schema v5 shape (issue athenaeum#1514
+    removed the ``memory_tier`` column) — the shape
+    ``athenaeum.context`` queries against.
 
-    Each row: ``(filename, name, tags, description, audience, memory_tier)``.
+    Each row: ``(filename, name, tags, description, audience)``.
     """
     conn = sqlite3.connect(path)
     conn.execute(
         'CREATE VIRTUAL TABLE wiki USING fts5(filename, name, tags, aliases, '
         'description, audience UNINDEXED, type UNINDEXED, '
-        'memory_tier UNINDEXED, tokenize="porter unicode61")'
+        'tokenize="porter unicode61")'
     )
     conn.executemany(
         "INSERT INTO wiki (filename, name, tags, aliases, description, audience, "
-        "type, memory_tier) VALUES (?, ?, ?, '', ?, ?, 'reference', ?)",
+        "type) VALUES (?, ?, ?, '', ?, ?, 'reference')",
         rows,
     )
     conn.commit()
@@ -86,7 +87,6 @@ def test_cli_end_to_end_writes_exactly_one_sidecar_row(tmp_path: Path) -> None:
                 "recall",
                 "description number 0",
                 "|opsadmin|",
-                "hot",
             )
         ],
     )
@@ -113,8 +113,12 @@ def test_cli_end_to_end_writes_exactly_one_sidecar_row(tmp_path: Path) -> None:
     # never reach the ledger — only the 8-hex uid prefix.
     assert item["id"] == "abc12345"
     assert "recall-architecture-note" not in item["id"]
-    # AC4: memory_tier carried per item, from the index's own column.
-    assert item["memory_tier"] == "hot"
+    # athenaeum#1343's AC4 required a per-item `memory_tier`, carried from
+    # the index's own column. Issue athenaeum#1514 retired the vocabulary
+    # and dropped the column, so the key is gone — asserted explicitly,
+    # since a sidecar row is one of the two writers whose shapes
+    # `test_sidecar_and_mcp_records_share_key_structure` pins together.
+    assert "memory_tier" not in item
     # Scope derived from the stored audience string (issue athenaeum#1362,
     # docs/extending/sidecar-adapter-contract.md §2.4's inverse-parsing helper).
     assert item["scope"] == "opsadmin"
@@ -153,7 +157,7 @@ def test_sidecar_and_mcp_records_share_key_structure() -> None:
         backend="fts5",
         items=[
             push_metrics.PushedItem(
-                id="abc12345", tier="internal", scope="opsadmin", token_cost=10, memory_tier="hot"
+                id="abc12345", tier="internal", scope="opsadmin", token_cost=10
             )
         ],
         source="sidecar",
@@ -163,7 +167,6 @@ def test_sidecar_and_mcp_records_share_key_structure() -> None:
         query="some raw prompt text",
         backend="fts5",
         hits=[("abc12345-page.md", {"uid": "abc12345", "audience": ["opsadmin"]}, "body text")],
-        memory_tier_by_filename={"abc12345-page.md": "hot"},
     )
 
     sidecar_dict = sidecar_record.to_dict()
@@ -202,7 +205,6 @@ def test_cli_survives_an_unwritable_ledger_path(tmp_path: Path) -> None:
                 "recall",
                 "description number 0",
                 "|__access_open__|",
-                "hot",
             )
         ],
     )
@@ -232,7 +234,6 @@ def test_record_context_push_swallows_write_failure_directly(tmp_path: Path) -> 
             {
                 "filename": "abc12345-page.md",
                 "audience": "|__access_open__|",
-                "memory_tier": "hot",
                 "token_cost": 5,
             }
         ],
@@ -242,11 +243,23 @@ def test_record_context_push_swallows_write_failure_directly(tmp_path: Path) -> 
 
 
 # ---------------------------------------------------------------------------
-# AC4 — memory_tier is carried per item, not just globally
+# Issue athenaeum#1514 — the retired `memory_tier` is not resurrected from a
+# stale envelope
 # ---------------------------------------------------------------------------
 
 
-def test_memory_tier_is_per_item_not_a_single_shared_value(tmp_path: Path) -> None:
+def test_a_stale_envelope_carrying_memory_tier_never_writes_it_through(
+    tmp_path: Path,
+) -> None:
+    """athenaeum#1343's AC4 was "memory_tier is carried per item, not just
+    globally"; this is that test after the vocabulary was retired.
+
+    The interesting case is not "the writer omits a field it never had" —
+    it is a schema-v1 envelope, produced by an adapter that has not been
+    rebuilt, still carrying `candidates[].memory_tier`. The writer must
+    drop it rather than pass it through, or the ledger would keep
+    accreting the retired vocabulary from whichever caller is stalest.
+    """
     envelope = {
         "session_id": "s1",
         "query": "q",
@@ -270,5 +283,7 @@ def test_memory_tier_is_per_item_not_a_single_shared_value(tmp_path: Path) -> No
 
     ledger_path = tmp_path / "_push_records.jsonl"
     row = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[0])
-    tiers_by_id = {it["id"]: it["memory_tier"] for it in row["items"]}
-    assert tiers_by_id == {"aaaaaaaa": "hot", "bbbbbbbb": "cold"}
+    assert {it["id"] for it in row["items"]} == {"aaaaaaaa", "bbbbbbbb"}
+    assert all("memory_tier" not in it for it in row["items"]), (
+        f"a stale envelope's tier must not reach the ledger: {row['items']}"
+    )

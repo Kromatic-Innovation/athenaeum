@@ -56,6 +56,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`memory_tier` retired as a tier vocabulary, and the promote-on-use tier
+  sweep retired with it.** `athenaeum.memory_tiers` is deleted. After
+  athenaeum#1345 removed the `hot`-only push gate and athenaeum#1513 shipped
+  that removal, the field had exactly one live value for everything indexed
+  and influenced nothing; athenaeum#1560's bucketed ledger reading confirmed
+  the injected mix had inverted (on the gated `sidecar` path: 98 hot / 0 warm
+  before the fix's deploy instant, 66 hot / 1824 warm after), which is the
+  evidence this issue gated on.
+
+  The deeper problem the retirement fixes: one four-valued word spanned three
+  unrelated mechanisms, and only one of them was a preference. `hot`/`warm`
+  was a push preference (already gone). **`cold` was always
+  storage-surface policy** — `storage.is_embedded`, class+config, which is why
+  a non-embedded class produces no index row at all. **`refused` was always
+  the never-ingest gate** (`athenaeum.never_ingest`), upstream of storage
+  entirely, which is why refused content is never written. Both boundaries are
+  preserved unchanged; only their naming changed, so a privacy-sounding word
+  no longer sits in the same enum as a preference knob.
+
+  Removed with the vocabulary: the `memory_tier` FTS5 index column
+  (`FTS5Backend._SCHEMA_VERSION` 4 -> 5 — the stamp mismatch force-rebuilds a
+  stale index automatically, and the index is a derived cache so nothing is
+  lost); the `**Tier:**` segment of the `recall` hit header (the `**Scope:**`
+  half is unchanged and still omit-at-default); the per-item `memory_tier` in
+  push telemetry (`PushedItem`, and `build_push_record`'s
+  `memory_tier_by_filename` parameter); the recall viewer's "memory tier"
+  column; the `librarian.memory_tier_sweep_enabled` /
+  `memory_tiers.demote_after_days` config keys and their env vars, the
+  `_run_memory_tier_sweep_phase` librarian phase, and the
+  `_tier_sweep_records.jsonl` ledger. Measured before removal: that ledger had
+  never been created, so promote-on-use had never run and no page had ever
+  moved tier automatically.
+
+  Survivors, moved to the module that owns their mechanism rather than
+  deleted: `scope_relation` is now `athenaeum.dimensions.scope_relation` (it
+  only ever compared a page's `claimed_scope` against a session scope, with no
+  tier content).
+
+  **BREAKING (sidecar adapters):** the context envelope is now schema `v2` —
+  `candidates[].memory_tier` is removed. It was metadata only (athenaeum#1345
+  already forbade it from affecting selection or order), so no adapter that
+  respected the contract can have branched on it; one that displayed it should
+  read its absence as "no tier information", which is what an empty value
+  already meant. See `docs/extending/sidecar-adapter-contract.md` §2.3.1.
+
+  **Frontmatter migration, stated explicitly and reversible: no page is
+  rewritten.** A `memory_tier:` frontmatter scalar is left on disk, orphaned —
+  nothing reads it, nothing writes it, and no schema validates frontmatter
+  against a closed key set, so it produces no warnings. This was chosen over
+  deleting the key because it is the only fully reversible option: reverting is
+  `git revert` plus one index rebuild, with no page content to reconstruct
+  because none was destroyed. Rewriting the key out of a ~25k-page corpus
+  would not have been reversible in the same sense, and the corpus is not in
+  this repository.
+
+  The push-ledger's history is deliberately still readable: `push-metrics tail`
+  keeps projecting a per-item `memory_tier` **when the raw row carries one**,
+  so an audit of pre-athenaeum#1514 traffic — including athenaeum#1560's own
+  reading — stays reproducible. A row written after the retirement has no such
+  key, and its absence (never an empty string) is what distinguishes the two.
+  ([#1514](https://github.com/Kromatic-Innovation/athenaeum/issues/1514))
+
 - `athenaeum.memory_tiers`'s tier-weighted push-selection machinery —
   `TIER_WEIGHTS`, `COORDINATE_FIT_WEIGHTS`, `tier_weight`,
   `coordinate_fit_weight`, `push_score`, `PushCandidate`, and

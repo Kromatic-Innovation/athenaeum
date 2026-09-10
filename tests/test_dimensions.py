@@ -43,6 +43,7 @@ from athenaeum.dimensions import (
     dimension_applies,
     maybe_flip_to_enforced,
     retire_dimension_coordinate,
+    scope_relation,
     stamp_recorded_time,
     validate_intake_temporal,
 )
@@ -1133,3 +1134,32 @@ class TestDimensionsCLI:
     def test_show_missing_file_exits_nonzero(self, tmp_path: Path) -> None:
         rc = main(["dimensions", "show", str(tmp_path / "missing.md"), "--path", str(tmp_path)])
         assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# scope_relation (issue athenaeum#718, moved here from the deleted
+# `athenaeum.memory_tiers` by issue athenaeum#1514 — it never had any tier
+# content, only a `claimed_scope` <-> session-scope hierarchy comparison)
+# ---------------------------------------------------------------------------
+
+
+class TestScopeRelation:
+    def test_none_session_scope_returns_none(self) -> None:
+        assert scope_relation({"claimed_scope": "org/team"}, None) is None
+
+    def test_none_page_scope_returns_none(self) -> None:
+        assert scope_relation({}, "org/team") is None
+
+    def test_non_dict_fm_returns_none(self) -> None:
+        assert scope_relation(None, "org/team") is None
+
+    def test_equal(self) -> None:
+        assert scope_relation({"claimed_scope": "org/team"}, "org/team") == "equal"
+
+    def test_contains(self) -> None:
+        # page scope is an ancestor of the session scope.
+        assert scope_relation({"claimed_scope": "org"}, "org/team/sub") == "contains"
+
+    def test_disjoint(self) -> None:
+        assert scope_relation({"claimed_scope": "org/team-a"}, "org/team-b") == "disjoint"
+

@@ -50,13 +50,19 @@ How the UserPromptSubmit hook surfaces wiki context — the hybrid FTS5 + vector
 > SUBSTITUTION, not silence: in 10 of 12 sampled queries it still
 > returned three hits, just materially worse ones.
 >
-> `memory_tier` is unchanged in every other respect — still resolved at
-> index-build time, still stored in the index, still in frontmatter, and
-> still recorded per pushed item in the sidecar telemetry ledger, which
-> is what makes the mix shifting off 3.5% hot observable. It is recorded,
-> never enforced. The invariant is pinned by
-> `tests/test_shell_hooks.py` (`test_gate_removal_returns_the_true_bm25_top3`,
-> `test_swapping_two_pages_memory_tier_does_not_change_the_push`,
+> `memory_tier` survived the gate's removal as a recorded-but-unenforced
+> field, specifically so the mix shifting off 3.5% hot would be
+> observable. **It was observed** (athenaeum#1560: on the gated
+> `sidecar` path, 98 hot / 0 warm before the fix's deploy instant, 66 hot
+> / 1824 warm after), **and issue athenaeum#1514 then retired the whole
+> tier vocabulary** — the index column (schema v5), the envelope field
+> (sidecar schema v2), the telemetry field, the `**Tier:**` recall
+> header, and the `athenaeum.memory_tiers` module itself. The
+> frontmatter key is left on disk, orphaned and unread; see
+> [retention](../modules/retention.md#retired-memory-tiers-athenaeummemory_tiers).
+> The invariant is pinned by `tests/test_shell_hooks.py`
+> (`test_gate_removal_returns_the_true_bm25_top3`,
+> `test_index_carries_no_tier_column_so_no_gate_is_expressible`,
 > `test_no_tier_predicate_survives_on_either_surface`) and, on the
 > converged core, by `tests/test_context_core.py`.
 >
@@ -83,16 +89,17 @@ documented `<50ms` FTS5-only contract. Rejected on that measurement.
 **Duplication is minimized deliberately, and stated plainly rather than
 hidden:**
 
-- The tier model is NOT reimplemented in shell. `athenaeum.memory_tiers.resolve_tier`
-  runs once, at index-build time (`athenaeum.search.FTS5Backend._row_for`),
-  and its verdict is stored in the FTS5 index (`memory_tier UNINDEXED`
-  column, schema version bumped 3 -> 4); the hook just reads that column.
-  This is the SAME established pattern `audience` (athenaeum#312, schema
-  v2) and `type` (athenaeum#964, schema v3) already use so shell/SQL can
-  read a Python-resolved verdict without starting Python. **The hook read
-  that column with `WHERE memory_tier = 'hot'` until athenaeum#1513; it
-  now reads it into the SELECT list only, for the render and the
-  telemetry row.**
+- The tier model was NOT reimplemented in shell.
+  `memory_tiers.resolve_tier` ran once, at index-build time
+  (`athenaeum.search.FTS5Backend._row_for`), and its verdict was stored in
+  the FTS5 index (`memory_tier UNINDEXED` column, schema 3 -> 4); the hook
+  just read that column. That is the SAME established pattern `audience`
+  (athenaeum#312, schema v2) and `type` (athenaeum#964, schema v3 — both
+  still current) use, so shell/SQL can read a Python-resolved verdict
+  without starting Python. **The hook read the tier column with `WHERE
+  memory_tier = 'hot'` until athenaeum#1513, then into the SELECT list
+  only; issue athenaeum#1514 dropped the column (schema v5) and the hook
+  no longer names it at all.**
 - The ONLY duplicated surface is (a) the greedy budget-accumulation loop
   and (b) the token estimator, `athenaeum.push_metrics.estimate_tokens` =
   `max(0, len(text) // 4)` — a single arithmetic expression, expressed in
@@ -100,29 +107,35 @@ hidden:**
 - **There is no tier or coordinate-fit weighting anywhere in push
   selection (issue athenaeum#1353).** `athenaeum.memory_tiers` used to carry
   a tier-weighted `push_score` formula and a `select_for_push` function,
-  but neither had a production caller and both were deleted; push
+  but neither had a production caller and both were deleted (the module
+  itself followed in athenaeum#1514); push
   selection is plain relevance order, budget-packed, everywhere it
   happens — `athenaeum.context._apply_budget` for the agent-neutral
   sidecar core, and this hook's own greedy budget loop below, which
   mirrors that packing behavior directly (not a tier/coordinate-fit
   formula, so there was never anything to reimplement on that axis).
 
-**Legacy-DB safety.** A DB built by an older athenaeum predates the
-`memory_tier` column; selecting it would raise `sqlite3.OperationalError`,
-which the hook's own `2>/dev/null || echo ""` would otherwise swallow into
-a silent zero-recall until the index happens to be rebuilt. The hook
-probes `PRAGMA table_info(wiki)` for the column first and falls back to a
-query naming a literal `''` in its place when it's absent, so an
-un-rebuilt index degrades to a name-only telemetry tier instead of to
-nothing. Since athenaeum#1513 this probe no longer selects between a
-gated and an ungated query — neither branch filters — only between one
-that can name the column and one that cannot.
+**Legacy-DB safety.** A DB built by an older athenaeum can predate a
+column the hook names; selecting it would raise
+`sqlite3.OperationalError`, which the hook's own `2>/dev/null || echo ""`
+would otherwise swallow into a silent zero-recall until the index happens
+to be rebuilt. The hook probes `PRAGMA table_info(wiki)` for such a column
+first and falls back to a query naming a literal `''` in its place — today
+that applies to `description` (athenaeum#1344).
+
+The `memory_tier` column had the same guard until athenaeum#1514 removed
+the column itself. Note the asymmetry that made removal the simpler
+direction: a SELECT that does not name a column works against a DB that
+has it AND one that does not, so a REMOVAL needs no probe — only an
+ADDITION ever did. The schema-version bump (4 -> 5) still force-rebuilds a
+stale index, because an existing v4 table has one more column than the
+build path now inserts.
 
 **`session-start-recall.sh` was also checked for this gap and is
 unaffected (AC2).** It writes stderr diagnostics only and emits no
 `hookSpecificOutput`/`additionalContext` at all, so it is not an
-unprompted-push path — it is the writer for the `memory_tier`-carrying
-index and for `PUSH_TOKEN_BUDGET` in `config.env`, both of which
+unprompted-push path — it is the writer for the FTS5 index and for
+`PUSH_TOKEN_BUDGET` in `config.env`, both of which
 `user-prompt-recall.sh` reads.
 
 ## Why hybrid — and why both layers are load-bearing

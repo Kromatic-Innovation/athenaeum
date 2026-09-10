@@ -21,6 +21,7 @@ from athenaeum.config import (
     resolve_push_after_run,
     resolve_push_branch,
     resolve_push_remote,
+    resolve_push_token_budget,
     resolve_reasoning_tier_any_screen_enabled,
     resolve_reasoning_tier_auditing_enabled,
     resolve_reasoning_tier_t2_auto_apply_enabled,
@@ -1195,3 +1196,28 @@ class TestMalformedNumericEnvWarns:
         assert any(
             "ATHENAEUM_PAGE_WARN_BYTES" in r.message for r in caplog.records
         ), caplog.text
+
+
+class TestResolvePushTokenBudget:
+    """Issue athenaeum#718's push-token budget. Moved here from the deleted
+    `tests/test_memory_tiers.py` (issue athenaeum#1514) — the budget is a
+    push-selection knob, not a tier one, and it outlived the tier
+    vocabulary that shipped alongside it.
+    """
+
+    def test_default(self) -> None:
+        assert resolve_push_token_budget(None) == 1200
+
+    def test_yaml(self) -> None:
+        assert resolve_push_token_budget({"push_budget": {"tokens_per_turn": 500}}) == 500
+
+    def test_env_overrides_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_PUSH_TOKEN_BUDGET", "42")
+        assert resolve_push_token_budget({"push_budget": {"tokens_per_turn": 500}}) == 42
+
+    def test_non_positive_yaml_falls_through(self) -> None:
+        assert resolve_push_token_budget({"push_budget": {"tokens_per_turn": -5}}) == 1200
+
+    def test_bool_yaml_falls_through(self) -> None:
+        assert resolve_push_token_budget({"push_budget": {"tokens_per_turn": True}}) == 1200
+

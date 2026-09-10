@@ -1129,29 +1129,6 @@ this default; ``0`` (or negative) disables the cap. No seed in ``_DEFAULTS``
  so the code default stays reachable. ``bool`` and non-numeric yaml
 values fall through to the default.
 
-### `resolve_memory_tier_sweep_enabled`
-
-- **YAML path:** `librarian.memory_tier_sweep_enabled`
-- **Environment variable:** `ATHENAEUM_MEMORY_TIER_SWEEP_ENABLED`
-- **CLI flag:** —
-- **Default:** `False`
-- **Precedence:** environment variable > `athenaeum.yaml` > code default
-
-Resolve whether the automatic memory-tier sweep runs.
-
-OFF by default — a new, additive librarian phase
-(`athenaeum.librarian._run_memory_tier_sweep_phase`) that can
-rewrite a page's ``memory_tier:`` frontmatter field (demote hot -> warm,
-promote warm -> hot; see `athenaeum.memory_tiers`), so it must not
-change the nightly run's behavior for any existing operator until they
-opt in (DoD: "lands dark behind a documented config key defaulting to
-off"). Precedence: ``ATHENAEUM_MEMORY_TIER_SWEEP_ENABLED`` env >
-``librarian.memory_tier_sweep_enabled`` yaml > ``False``. Any env value
-other than a falsey token (``0`` / ``false`` / ``no`` / ``off``,
-case-insensitive) is truthy; a non-bool yaml value falls through to the
-default. No seed in ``_DEFAULTS`` — mirrors
-`resolve_ingestion_gate_enabled`'s shape.
-
 ### `resolve_merge_body_preview_chars`
 
 - **YAML path:** `librarian.merge_body_preview_chars`
@@ -2330,30 +2307,6 @@ machinery via the merge approve/reject decisions the pipeline already
 makes. Non-bool yaml values and unrecognized env strings fall through to
 off.
 
-## `memory_tiers`
-
-### `resolve_memory_tier_demote_after_days`
-
-- **YAML path:** `memory_tiers.demote_after_days`
-- **Environment variable:** `ATHENAEUM_MEMORY_TIER_DEMOTE_AFTER_DAYS`
-- **CLI flag:** —
-- **Default:** `60`
-- **Precedence:** environment variable > `athenaeum.yaml` > code default
-
-Resolve the age-without-use / precision-grace window in days.
-
-Shared threshold `athenaeum.memory_tiers.evaluate_tier_movement`
-uses for two of its three automatic hot -> warm demotion triggers: a hot
-claim with no usage record at all after this many days, or a hot claim
-that HAS been pushed but never referenced and whose last push is older
-than this many days. The third trigger (class-default: superseded/
-deprecated) is unconditional and ignores this knob.
-
-Precedence: ``ATHENAEUM_MEMORY_TIER_DEMOTE_AFTER_DAYS`` env >
-``memory_tiers.demote_after_days`` yaml > ``60``. A malformed env value
-WARNs and falls through (see `_env_number`); a non-int / ``<= 0``
-yaml value falls through to the default. No seed in ``_DEFAULTS``
-
 ## `models`
 
 ### `resolve_model`
@@ -2472,8 +2425,9 @@ while the running token total (`athenaeum.push_metrics.estimate_tokens`)
 stays within this budget — a hit that would exceed it is skipped, never
 truncated. (removed the retrieval-cost-tier
 restriction and coordinate-fit re-ranking that used to sit in front of
-this budget check — see `athenaeum.memory_tiers`'s module
-docstring for where selection actually lives now.)
+this budget check, and retired the tier vocabulary
+itself — selection lives in `athenaeum.context._apply_budget` and
+in the per-turn recall hook.)
 
 Precedence: ``ATHENAEUM_PUSH_TOKEN_BUDGET`` env > ``push_budget.tokens_per_turn``
 yaml > ``1200``. A malformed env value WARNs and falls through (see

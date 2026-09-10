@@ -609,20 +609,24 @@ class PushedItem:
     Every field is an id, a classification token, or a count — never content.
 
     ``tier`` is the ACCESS tier (frontmatter ``access:`` -> ``open``/
-    ``internal``), not the retrieval-cost tier — kept as-is for backward
-    compatibility with every existing reader of this field. ``memory_tier``
-    (issue athenaeum#1345 AC7) is the separate retrieval-cost classification
-    (:func:`athenaeum.memory_tiers.resolve_tier` -> ``hot``/``warm``/
-    ``cold``/``refused``); additive, defaulted to ``""`` so a pre-existing
-    direct construction (e.g. a test fixture) that doesn't pass it keeps
-    working unchanged.
+    ``internal``), not a retrieval-cost tier — kept as-is for backward
+    compatibility with every existing reader of this field.
+
+    A separate ``memory_tier`` field (issue athenaeum#1345 AC7) used to carry
+    the retrieval-cost classification ``hot``/``warm``/``cold``/``refused``
+    alongside it. Issue athenaeum#1514 retired that vocabulary, so this
+    writer no longer emits the key — see :meth:`PushRecord.to_dict`.
+    **Historical rows keep it**, and every reader of the ledger must keep
+    tolerating both shapes: the key's ABSENCE means "written after the
+    vocabulary was retired", not "unknown tier". The push-tail CLI contract
+    (:data:`_TAIL_PUSH_ITEM_FIELDS`) still projects it, so an audit of
+    pre-athenaeum#1514 traffic stays reproducible.
     """
 
     id: str
     tier: str
     scope: str
     token_cost: int
-    memory_tier: str = ""
 
 
 @dataclass
@@ -635,8 +639,8 @@ class PushRecord:
     carry PII) so a later reproducibility check can correlate two pushes of
     the same query without storing content.
 
-    ``source`` (issue athenaeum#1362, additive, SCHEMA_VERSION unchanged —
-    same precedent as ``PushedItem.memory_tier``): ``"sidecar"`` for a row
+    ``source`` (issue athenaeum#1362, additive, SCHEMA_VERSION unchanged):
+    ``"sidecar"`` for a row
     written by :func:`athenaeum.context.record_context_push` (the
     ``athenaeum context`` CLI adapter's unprompted push path); :data:`SOURCE_HOOK`
     (issue athenaeum#1478) for a row written by :func:`record_hook_push` (the
@@ -652,8 +656,8 @@ class PushRecord:
     either every historical row or every future third-source row.
 
     ``session_attribution`` (issue athenaeum#1541, additive, SCHEMA_VERSION
-    unchanged — same precedent as ``source`` and ``PushedItem.memory_tier``)
-    records HOW ``session_id`` was determined:
+    unchanged — same precedent as ``source``) records HOW ``session_id`` was
+    determined:
     :data:`ATTRIBUTION_TRANSCRIPT` when it was joined from the transcript
     carrying this call's ``toolUseId``, :data:`ATTRIBUTION_ENV_UNRESOLVED`
     when that join failed and the row fell back to the process environment's
@@ -688,13 +692,19 @@ class PushRecord:
             "ts": self.ts,
             "query_hash": self.query_hash,
             "backend": self.backend,
+            # ``memory_tier`` was emitted here until issue athenaeum#1514
+            # retired the retrieval-cost vocabulary; SCHEMA_VERSION is
+            # deliberately NOT bumped, for the same reason its addition did
+            # not bump it — this is a per-item optional key, and every
+            # documented reader rule for the ledger is already
+            # "check for the specific value; an absent key means the writer
+            # did not have one." Rows written before the removal keep theirs.
             "items": [
                 {
                     "id": it.id,
                     "tier": it.tier,
                     "scope": it.scope,
                     "token_cost": it.token_cost,
-                    "memory_tier": it.memory_tier,
                 }
                 for it in self.items
             ],
@@ -722,7 +732,6 @@ def build_push_record(
     query: str,
     backend: str,
     hits: list[tuple[str, dict[str, object], str]],
-    memory_tier_by_filename: dict[str, str] | None = None,
     session_attribution: str = "",
 ) -> PushRecord:
     """Build a :class:`PushRecord` from rendered recall hits.
@@ -740,31 +749,6 @@ def build_push_record(
             filtering — a hit dropped before rendering was never pushed).
             ``snippet_text`` is used ONLY to size the token-cost estimate; it
             is never retained on the record.
-        memory_tier_by_filename: optional ``{filename: resolved memory_tier}``
-            map (issue athenaeum#1345 AC7) — the retrieval-cost classification
-            (``hot``/``warm``/``cold``/``refused``), distinct from ``tier``
-            below (the ACCESS tier). A filename absent from the map (or the
-            map itself being ``None``) records ``""`` (additive default,
-            never a fabricated guess).
-
-            **Deliberately a caller-supplied map, not a same-module
-            :func:`athenaeum.memory_tiers.resolve_tier` call**, even though
-            that would read more directly as "populate from frontmatter
-            here": :mod:`athenaeum.memory_tiers` already imports FROM this
-            module (``opaque_push_id``, used by ``run_tier_sweep``) and from
-            :mod:`athenaeum.usage_report` (which itself imports FROM this
-            module) — so a same-module import of ``athenaeum.memory_tiers``
-            would close a 3-node cycle ``{memory_tiers, push_metrics,
-            usage_report}`` that ``tests/test_import_graph_acyclic.py``
-            hard-fails on (the allowed-SCC baseline has been pinned empty
-            since issue athenaeum#640; ANY new cycle is a regression).
-            Verified empirically while implementing this issue. The one
-            production caller (``athenaeum.mcp_server._recall_via_backend``)
-            already computes ``memory_tiers.resolve_tier(fm, config=config)``
-            per hit (issue athenaeum#718, unconditionally, before this
-            function is ever called) — reusing that already-resolved value
-            here is strictly cheaper than a second call, not just
-            cycle-avoiding.
         session_attribution: issue athenaeum#1541 — how *session_id* was
             determined (:data:`ATTRIBUTION_TRANSCRIPT` /
             :data:`ATTRIBUTION_ENV_UNRESOLVED`), normally
@@ -773,7 +757,6 @@ def build_push_record(
             key entirely, which is what a caller that did not resolve
             attribution must write — never a guessed value.
     """
-    tier_map = memory_tier_by_filename or {}
     items: list[PushedItem] = []
     for filename, fm, snippet_text in hits:
         pid = opaque_push_id(filename, fm)
@@ -791,7 +774,6 @@ def build_push_record(
                 tier=tier,
                 scope=scope,
                 token_cost=estimate_tokens(snippet_text),
-                memory_tier=tier_map.get(filename, ""),
             )
         )
     return PushRecord(
@@ -1140,7 +1122,39 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 #: promoted into the documented CLI-output contract. See
 #: docs/reference/configuration.md ("push-metrics tail — the public NDJSON
 #: contract") for the authoritative shape.
-_TAIL_PUSH_ITEM_FIELDS = ("id", "tier", "scope", "token_cost", "memory_tier")
+#:
+_TAIL_PUSH_ITEM_FIELDS = ("id", "tier", "scope", "token_cost")
+
+#: Per-item fields projected ONLY when the raw row actually carries them —
+#: the same include-when-present rule ``source`` and ``session_attribution``
+#: already follow at the record level, applied per item.
+#:
+#: ``memory_tier`` is RETAINED as a projectable field even though issue
+#: athenaeum#1514 stopped WRITING it: this allowlist is a projection over the
+#: RAW on-disk row, and the ledger's pre-athenaeum#1514 history still carries
+#: the field. Dropping it outright would make that history unreadable through
+#: the documented CLI surface — including the exact bucketed audit that
+#: discharged athenaeum#1514's own evidence gate (athenaeum#1560). Moving it
+#: here rather than leaving it in the tuple above is what keeps a
+#: post-retirement row from being shaped as ``"memory_tier": null``, which
+#: would break the documented string type for a field whose real answer is
+#: "this writer had no tier to record".
+_TAIL_PUSH_ITEM_OPTIONAL_FIELDS = ("memory_tier",)
+
+
+def _shape_tail_push_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Project one raw ledger ``items[]`` entry onto the public tail shape.
+
+    :data:`_TAIL_PUSH_ITEM_FIELDS` is always projected; each field in
+    :data:`_TAIL_PUSH_ITEM_OPTIONAL_FIELDS` appears only when the raw entry
+    actually carries it, so a post-athenaeum#1514 row (no ``memory_tier``)
+    omits the key rather than reporting a ``null`` for it.
+    """
+    shaped = {name: item.get(name) for name in _TAIL_PUSH_ITEM_FIELDS}
+    for name in _TAIL_PUSH_ITEM_OPTIONAL_FIELDS:
+        if name in item:
+            shaped[name] = item[name]
+    return shaped
 
 
 def _shape_tail_push_record(raw: dict[str, Any]) -> dict[str, Any]:
@@ -1155,6 +1169,12 @@ def _shape_tail_push_record(raw: dict[str, Any]) -> dict[str, Any]:
     include-only-when-present rule, for the identical reason: every row
     written before the field existed has no such key, and an absent key means
     "provenance unknown", never either of its two values.
+
+    Per-item ``memory_tier`` follows the same rule from the other direction
+    (issue athenaeum#1514): rows written BEFORE the retrieval-cost vocabulary
+    was retired carry it and still project it; rows written after do not have
+    the key and must not be shaped as though they did. See
+    :func:`_shape_tail_push_item`.
     """
     shaped: dict[str, Any] = {
         "record_type": "push",
@@ -1164,9 +1184,7 @@ def _shape_tail_push_record(raw: dict[str, Any]) -> dict[str, Any]:
         "query_hash": raw.get("query_hash", ""),
         "backend": raw.get("backend", ""),
         "items": [
-            {field: item.get(field) for field in _TAIL_PUSH_ITEM_FIELDS}
-            for item in raw.get("items", [])
-            if isinstance(item, dict)
+            _shape_tail_push_item(item) for item in raw.get("items", []) if isinstance(item, dict)
         ],
         "pushed_count": raw.get("pushed_count", 0),
         "token_cost": raw.get("token_cost", 0),
@@ -1325,9 +1343,7 @@ class ReferenceResult:
         }
 
 
-def _find_session_transcript(
-    session_id: str, projects_root: Path
-) -> tuple[Path, str] | None:
+def _find_session_transcript(session_id: str, projects_root: Path) -> tuple[Path, str] | None:
     """Locate ``<projects_root>/<scope>/<session_id>.jsonl`` by scanning scopes.
 
     Push records carry only a session id (mirroring ``CLAUDE_CODE_SESSION_ID``,
@@ -2138,9 +2154,7 @@ def build_coverage_worksheet(
                     after_filter.add(pid)
         pushed_ids = sorted(own_pushed)
         candidate_ids = sorted(after_filter)
-        removed_fraction = (
-            1 - (len(after_filter) / len(before_filter)) if before_filter else None
-        )
+        removed_fraction = 1 - (len(after_filter) / len(before_filter)) if before_filter else None
         if removed_fraction is not None:
             per_session_removed_fractions.append(removed_fraction)
         total_before_filter += len(before_filter)
@@ -2201,7 +2215,5 @@ def write_coverage_worksheet(worksheet: dict[str, Any], *, output_path: Path) ->
     """Write the worksheet as a durable JSON file (never console-only)."""
     from athenaeum.atomic_io import atomic_write_text
 
-    atomic_write_text(
-        output_path, json.dumps(worksheet, indent=2, sort_keys=False) + "\n"
-    )
+    atomic_write_text(output_path, json.dumps(worksheet, indent=2, sort_keys=False) + "\n")
     return output_path

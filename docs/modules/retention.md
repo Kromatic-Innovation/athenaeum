@@ -6,7 +6,7 @@
 
 ## What it does
 
-Retention is four separate, independently-configured mechanisms that decide
+Retention is three separate, independently-configured mechanisms that decide
 how long a piece of memory stays live, where it lives, and what happens to it
 once it stops being current:
 
@@ -17,15 +17,6 @@ once it stops being current:
   not yet passed) is retained. Removal is a two-commit `git rm` (a provenance
   snapshot, then the removal), never a bare `unlink` — the module refuses
   outright when `knowledge_root` is not a git repository.
-- **Memory tiers** (`athenaeum.memory_tiers`) — a retrieval-cost
-  classification (`hot`/`warm`/`cold`/`refused`) layered on top of every
-  compiled page, independent of storage location. This classification does
-  not itself gate unprompted-push eligibility — push selection lives in
-  `examples/claude-code/user-prompt-recall.sh` and `athenaeum.context`
-  instead. An automatic sweep
-  (`librarian.memory_tier_sweep_enabled`, run inside `athenaeum run`) moves
-  pages between `hot` and `warm` on class default, age without use,
-  measured recall precision, and promote-on-use signals.
 - **Auto-memory prune** (`athenaeum auto-memory prune`,
   `athenaeum.auto_memory_prune`) — retires already-compiled
   `wiki/auto-*.md` pages that `athenaeum.ephemeral.classify_ephemeral_page`
@@ -45,12 +36,50 @@ once it stops being current:
   discovery — moving it makes it *not discoverable*, since
   `intake.discover_raw_files` only ever walks `raw/`.
 
-Retention-pack classification (`athenaeum.erasure`) sits above all four as an
+Retention-pack classification (`athenaeum.erasure`) sits above all three as an
 optional authority: when a page's frontmatter carries both `memory_class` and
 `data_class`, the active retention pack can override the decay sweep's
 `bucket: daily` handling and route a page off-corpus instead of archiving it
 in git. No shipped write path stamps `data_class` today, so this gate is
 dormant on any corpus produced by shipped code — see "What it refuses" below.
+
+### Retired: memory tiers (`athenaeum.memory_tiers`)
+
+A fourth mechanism used to sit here — a **retrieval-cost tier** vocabulary
+(`hot` / `warm` / `cold` / `refused`) stamped on every compiled page, plus an
+automatic `hot`<->`warm` sweep gated by `librarian.memory_tier_sweep_enabled`.
+Both are now retired. The short version of why: one four-valued word spanned
+three unrelated mechanisms, and only one of them was a preference.
+
+| Old tier value | What actually enforced it | Where it lives now |
+|---|---|---|
+| `hot` / `warm` | a push-preference gate | **Gone.** The gate was removed; selection is relevance alone (`athenaeum.context._apply_budget` and the per-turn recall hook). |
+| `cold` | **storage-surface policy** — `storage.is_embedded(entity_class, config)`, class+config, never per-page | Unchanged. A class mapped to a non-embedded surface produces no index row at all. |
+| `refused` | **the never-ingest gate** — `athenaeum.never_ingest`, upstream of storage entirely | Unchanged. Refused content is never written, so there is nothing downstream to exclude. |
+
+Both boundaries are preserved; only their naming changed. Neither ever needed
+the tier value to do its work — `memory_tiers.is_refused` was documented as
+"a thin, read-only bridge," and an excluded storage surface is fail-closed by
+path.
+
+**The sweep is retired outright**, not left inert: the librarian phase, its
+`librarian.memory_tier_sweep_enabled` and `memory_tiers.demote_after_days`
+config keys, and the `_tier_sweep_records.jsonl` ledger are all gone.
+Measured before removal: that ledger had never been created, so promote-on-use
+had never run and no page had ever moved tier automatically.
+
+#### The frontmatter key: what happened to `memory_tier:` on disk
+
+**Nothing. That is the migration, and it is deliberate.** Pages that carry a
+`memory_tier:` frontmatter scalar keep it; no page was rewritten. The key is
+**orphaned** — no code reads it, no code writes it, and no schema validates
+frontmatter against a closed key set, so it produces no warnings.
+
+Chosen over deleting the key because it is the only fully reversible option.
+Reverting this change is `git revert` plus one index rebuild: no page content
+has to be reconstructed, because none was destroyed. Rewriting the key out of
+a ~25k-page corpus would not have been reversible in the same sense, and the
+corpus is not in this repository.
 
 ## What it reads
 
@@ -58,12 +87,6 @@ dormant on any corpus produced by shipped code — see "What it refuses" below.
   non-underscore `wiki/*.md` page (shallow scan), plus, when a page also
   carries `data_class`, the active retention pack
   (`erasure.retention_pack` / `erasure.retention_packs.<name>`).
-- **Memory tiers** reads `memory_tier:`, `memory_class:`, `type:`,
-  `superseded_by`/`deprecated`, and `updated`/`created` frontmatter, plus
-  push/reference usage via `athenaeum.usage_report.get_claim_usage`.
-  `librarian.memory_tier_sweep_enabled` (default `false`) gates whether the
-  sweep runs at all; `memory_tiers.demote_after_days` (default `60`) is the
-  shared age/precision threshold.
 - **Auto-memory prune** reads every `wiki/auto-*.md` page's frontmatter and
   body, plus `librarian.ephemeral_scopes` and `librarian.operational_markers`
   (both default `[]` — off until an operator opts in).
@@ -143,11 +166,6 @@ restore the old one automatically.
   why (bucket + `valid_until`), when, and the recovering commit SHA — written
   *before* the archival commit, and a ledger-write failure aborts the sweep
   rather than being swallowed. Then a two-commit `git rm` of the kill-list.
-- **Memory tiers**, on a live sweep: an updated `memory_tier:` frontmatter
-  scalar per changed page (via `atomic_write_text`), and a best-effort
-  ledger append (`_tier_sweep_records.jsonl`) — unlike the decay sweep's
-  ledger, a write failure here is logged and the sweep continues, since tier
-  movement is non-destructive metadata rather than a `git rm`.
 - **Auto-memory prune**, on `--apply`: a `git rm` of the kill-list in one
   labeled commit. Refuses against a non-versioned store.
 - **The `preserve` disposition**: moves the raw file to
@@ -164,8 +182,6 @@ restore the old one automatically.
 | Decay sweep aborts before `git rm` | The sweep ledger write fails — a page can never be archived without a durable record of why. |
 | A page is retained, not archived | `bucket: daily` with no `valid_until`, or one not yet passed (fail-open: absent `valid_until` means "currently valid"). |
 | A page is retained, not archived | Unreadable page content — retained for safety rather than assumed expired. |
-| `axiom`-class page never auto-demotes or auto-promotes | `memory_tiers.run_tier_sweep` skips it outright (`skipped_axiom` counter); the only path to move an axiom's tier is `demote_axiom_tier`, which requires a human-supplied reason/by and a matching `_axiom_governance.jsonl` ledger row written first. |
-| Automatic tier sweep is a no-op | `librarian.memory_tier_sweep_enabled` is `false` (the default) — no page is scanned or written. |
 | Auto-memory prune leaves a page in place | It is not `type: auto-memory`, or `classify_ephemeral_page` finds no ephemeral/operational signal — a page mixing one throwaway origin scope with one real one is retained, not pruned. |
 | Auto-memory prune refuses to remove anything | The target store's `capabilities.versioned` is `False` — removal is git-only for recoverability. |
 | `preserve` disposition tallies `preserve-unconfigured`, raw file untouched | Neither `preserved_log_dir` nor `preserved_log_adapter` is configured — the feature is opt-in twice over (the area AND a matching rule). |

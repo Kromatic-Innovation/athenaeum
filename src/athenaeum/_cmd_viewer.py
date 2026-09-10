@@ -331,7 +331,6 @@ def _row(
         "id": meta.get("id", ""),
         "tier": meta.get("tier", ""),
         "scope": meta.get("scope", ""),
-        "memory_tier": meta.get("memory_tier", ""),
         "token_cost": meta.get("token_cost", 0),
         "referenced": _referenced_flag(
             meta.get("id", ""),

@@ -373,8 +373,10 @@ class TestRecallHeaderRendering:
         # Tags-then-blank-then-snippet shape (no blank athenaeum#325 metadata line
         # inserted) -- with the issue athenaeum#964 Uid/Type lines (always
         # rendered, unlike the omit-at-default athenaeum#325 header) directly
-        # after Tags, and the issue athenaeum#718 Tier line (also always
-        # rendered) directly after Type.
+        # after Tags. Issue athenaeum#718's always-rendered Tier line used to
+        # follow Type; issue athenaeum#1514 removed it with the tier
+        # vocabulary, so Type is now the last header on a bare page (the
+        # Scope segment that shared its line stays omit-at-default).
         wiki = self._wiki(tmp_path)
         (wiki / "terse.md").write_text(
             "---\n"
@@ -384,7 +386,8 @@ class TestRecallHeaderRendering:
             "A terse page about migrations.\n"
         )
         result = recall_search(wiki, "migrations terse")
-        assert "**Tags:** plain\n**Uid:** —\n**Type:** —\n**Tier:** warm\n\n" in result
+        assert "**Tags:** plain\n**Uid:** —\n**Type:** —\n\n" in result
+        assert "**Tier:**" not in result
 
     def test_withheld_contested_page_leaks_no_status(self, tmp_path: Path) -> None:
         # Safety lock (athenaeum#325 raison d'etre): a restricted caller must not see a
@@ -421,22 +424,30 @@ class TestRecallTierAndPushBudget:
         wiki.mkdir()
         return wiki
 
-    def test_tier_segment_shows_hot_for_guideline(self, tmp_path: Path) -> None:
+    def test_no_tier_segment_for_a_guideline(self, tmp_path: Path) -> None:
+        """Issue athenaeum#718 rendered `**Tier:** hot` on a guideline-class
+        page; issue athenaeum#1514 retired the vocabulary, so the segment is
+        gone. Both former values are asserted absent (here and below) rather
+        than just one, because the removal must not leave the header
+        rendering one tier and suppressing the other.
+        """
         wiki = self._wiki(tmp_path)
         (wiki / "rule.md").write_text(
             "---\nname: A rule\ntype: principle\nmemory_class: guideline\n---\n\n"
             "Always validate input.\n"
         )
         result = recall_search(wiki, "validate input")
-        assert "**Tier:** hot" in result
+        assert "A rule" in result, "the page must still be found"
+        assert "**Tier:**" not in result
 
-    def test_tier_segment_shows_warm_for_entity(self, tmp_path: Path) -> None:
+    def test_no_tier_segment_for_an_entity(self, tmp_path: Path) -> None:
         wiki = self._wiki(tmp_path)
         (wiki / "p.md").write_text(
             "---\nuid: u1\nname: Alice\ntype: person\n---\n\nAlice works here.\n"
         )
         result = recall_search(wiki, "Alice works")
-        assert "**Tier:** warm" in result
+        assert "Alice" in result, "the page must still be found"
+        assert "**Tier:**" not in result
 
     def test_scope_segment_appears_only_with_session_scope(self, tmp_path: Path) -> None:
         wiki = self._wiki(tmp_path)
@@ -1250,12 +1261,11 @@ class TestRecallPushMetricsInstrumentation:
         assert "a1b2c3d4" in ids
         # Records still carry NO claim content and NO personal data — ids,
         # tiers, scopes, counts only (athenaeum#711's criterion, unchanged).
-        # `memory_tier` (issue athenaeum#1345 AC7) is an additive closed-
-        # vocabulary classification token (hot/warm/cold/refused/""), the
-        # same content-free shape as the pre-existing `tier`/`scope` fields.
+        # athenaeum#1345 AC7's additive `memory_tier` was retired by issue
+        # athenaeum#1514 and is no longer written; `tier` here is the
+        # unrelated ACCESS tier.
         for item in rows[0]["items"]:
-            assert set(item) <= {"id", "tier", "scope", "token_cost", "memory_tier"}
-            assert item["memory_tier"] in ("hot", "warm", "cold", "refused", "")
+            assert set(item) <= {"id", "tier", "scope", "token_cost"}
 
     def test_code_session_id_wins_over_legacy(
         self, wiki_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Field contract, v1
@@ -31,10 +31,12 @@ SCHEMA_VERSION = 1
 #
 # `required` fields are the ones a caller may depend on being present, typed,
 # and stable across a schema VERSION (not across every value — `candidates`
-# is naturally empty on a no-hit turn). Adding a field here is a public
-# contract change: bump SCHEMA_VERSION and add a row to MIGRATIONS below,
-# even for an additive change — issue athenaeum#1359's own counter-example
-# is "adding a required field without bumping v".
+# is naturally empty on a no-hit turn). Adding OR REMOVING a field here is a
+# public contract change: bump SCHEMA_VERSION and add a row to MIGRATIONS
+# below, even for an additive change — issue athenaeum#1359's own
+# counter-example is "adding a required field without bumping v", and a
+# removal is strictly the more visible half of that (v2 removed
+# `candidates[].memory_tier`, issue athenaeum#1514).
 #
 # `diagnostic` fields (currently just `elapsed_ms`) are real output, but are
 # explicitly OUTSIDE the versioned contract: their value is non-reproducible
@@ -67,7 +69,6 @@ CANDIDATE_REQUIRED_FIELDS: dict[str, type] = {
     # athenaeum.context.Candidate's own docstring on why a vector
     # similarity score is never recorded as `relevance`) — checked
     # separately below rather than via this type map.
-    "memory_tier": str,
     "audience": str,
     "token_cost": int,
 }
@@ -89,6 +90,14 @@ RENDER_REQUIRED_FIELDS: dict[str, type] = {
 MIGRATIONS: dict[int, str] = {
     1: "Initial version. Fields: v, query, session_id, candidates[], budget, "
     "render, backend (required); elapsed_ms (diagnostic, unversioned).",
+    2: "Removed candidates[].memory_tier (issue athenaeum#1514). The "
+    "retrieval-cost tier vocabulary (hot/warm) it carried was retired along "
+    "with the index column that populated it, so the field could only ever "
+    "have reported the empty string from v2 on. It was metadata only — "
+    "issue athenaeum#1345 already forbade it from affecting selection or "
+    "order — so no adapter that respected the contract can have branched on "
+    "it. An adapter that still reads it must treat its absence as "
+    "'no tier information', which is what an empty value already meant.",
 }
 
 # A hand-maintained SNAPSHOT of each version's required field sets —
@@ -117,6 +126,24 @@ SCHEMA_HISTORY: dict[int, dict[str, frozenset[str]]] = {
                 "backend",
                 "relevance",
                 "memory_tier",
+                "audience",
+                "token_cost",
+            }
+        ),
+        "budget": frozenset({"tokens", "used"}),
+        "render": frozenset({"text", "preamble"}),
+    },
+    2: {
+        "envelope": frozenset(
+            {"v", "query", "session_id", "candidates", "budget", "render", "backend"}
+        ),
+        "candidate": frozenset(
+            {
+                "filename",
+                "name",
+                "description",
+                "backend",
+                "relevance",
                 "audience",
                 "token_cost",
             }

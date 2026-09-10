@@ -143,9 +143,9 @@ def _reference_record(session_id: str, *, pushed_count: int, referenced_ids: lis
     }
 
 
-_ITEM_A = {"id": "a", "tier": "internal", "scope": "owner", "token_cost": 10, "memory_tier": "warm"}
-_ITEM_B = {"id": "b", "tier": "open", "scope": "open", "token_cost": 20, "memory_tier": "hot"}
-_ITEM_C = {"id": "c", "tier": "internal", "scope": "owner", "token_cost": 30, "memory_tier": "cold"}
+_ITEM_A = {"id": "a", "tier": "internal", "scope": "owner", "token_cost": 10}
+_ITEM_B = {"id": "b", "tier": "open", "scope": "open", "token_cost": 20}
+_ITEM_C = {"id": "c", "tier": "internal", "scope": "owner", "token_cost": 30}
 
 
 def test_shape_viewer_payload_splits_pushed_pulled_overlap() -> None:
@@ -173,7 +173,12 @@ def test_shape_viewer_payload_sidecar_source_counts_as_unbidden() -> None:
 
 
 def test_shape_viewer_payload_row_carries_all_required_fields() -> None:
-    """AC2: id, tier, scope, memory tier, estimated token cost, referenced."""
+    """AC2: id, tier, scope, estimated token cost, referenced.
+
+    The `memory tier` column AC2 originally named went with the
+    retrieval-cost vocabulary (issue athenaeum#1514) — the viewer stopped
+    displaying it, so a row no longer carries it.
+    """
     records = [
         _push_record("s1", [_ITEM_A]),
         _reference_record("s1", pushed_count=1, referenced_ids=["a"]),
@@ -184,7 +189,6 @@ def test_shape_viewer_payload_row_carries_all_required_fields() -> None:
         "id": "a",
         "tier": "internal",
         "scope": "owner",
-        "memory_tier": "warm",
         "token_cost": 10,
         "referenced": True,
     }
@@ -280,7 +284,6 @@ def test_unknown_rows_carry_the_same_shape_as_every_other_row() -> None:
             "id": "a",
             "tier": "internal",
             "scope": "owner",
-            "memory_tier": "warm",
             "token_cost": 10,
             "referenced": None,
         }
