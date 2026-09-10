@@ -22,7 +22,7 @@ once it stops being current:
   compiled page, independent of storage location. This classification does
   not itself gate unprompted-push eligibility — push selection lives in
   `examples/claude-code/user-prompt-recall.sh` and `athenaeum.context`
-  instead (issue athenaeum#1353). An automatic sweep
+  instead. An automatic sweep
   (`librarian.memory_tier_sweep_enabled`, run inside `athenaeum run`) moves
   pages between `hot` and `warm` on class default, age without use,
   measured recall precision, and promote-on-use signals.
