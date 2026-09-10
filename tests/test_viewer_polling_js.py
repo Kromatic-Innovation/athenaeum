@@ -265,7 +265,7 @@ def test_ac2_new_record_appears_via_poll_and_fails_when_polling_disabled() -> No
     open and assert it appears (polling ENABLED) -- and assert the identical
     scenario does NOT show that record (i.e. this same check FAILS) when
     polling is disabled. Confirmed red manually: running only the
-    poll_interval_ms=0 half of this scenario with the pre-#1539 assertion
+    poll_interval_ms=0 half of this scenario with the pre-athenaeum#1539 assertion
     (`assert result["sawNewRecord"]`) fails, because the disabled page never
     issues a second fetch at all (`fetchCallCount` stays 1)."""
     enabled = _scenario(poll_interval_ms=30)

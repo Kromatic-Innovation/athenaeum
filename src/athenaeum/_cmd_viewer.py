@@ -108,7 +108,7 @@ DEFAULT_PORT = 8756
 #: ``push-metrics tail --json`` subprocess drain, so this trades freshness
 #: against real cost -- 3s is a "modest" default per the issue's own framing,
 #: not a measured optimum. ``--poll-interval 0`` disables polling (AC6):
-#: the page falls back to the pre-#1539 manual-reload-only behaviour.
+#: the page falls back to the pre-athenaeum#1539 manual-reload-only behaviour.
 DEFAULT_POLL_INTERVAL = 3.0
 
 #: ``PushRecord.source`` values that mean "pushed unbidden" (issue
