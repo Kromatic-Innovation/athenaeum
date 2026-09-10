@@ -76,13 +76,19 @@ Three constraints keep the edge count near one per page rather than near N:
   :data:`DEFAULT_MIN_INDEX_PAGES` for the three-page corpus that demonstrates
   it becoming a complete graph on the word "facts".
 
-Measured edge density with the shipped defaults: 1.60 edges/page at the
-``core`` scale (96 pages), 1.80 at ``small`` (200), 2.51 at ``medium``
-(1000). It does grow with corpus size, and that is stated rather than
-glossed -- but it grows toward the ``max_edges`` cap of 4, not toward N.
-The adversary the one-hop caution is about scores N-1 edges per page (999 at
-``medium``); the gap is three orders of magnitude, and it is the CAP, not
-the corpus, that bounds the ceiling.
+Measured edge density with the shipped defaults, replaying a whole corpus as
+one run: 0.84 edges/page at the ``core`` scale (96 pages), 1.20 at ``small``
+(200), 2.39 at ``medium`` (1000). Two things those numbers understate and one
+they do not:
+
+* The replay starts from an EMPTY index, so its first
+  :data:`DEFAULT_MIN_INDEX_PAGES` pages write nothing by construction. A real
+  wiki is above the floor before the first page of a run is compiled.
+* Density does grow with corpus size, stated rather than glossed -- but it
+  grows toward the ``max_edges`` cap of 4, not toward N. The adversary the
+  one-hop caution is about scores N-1 per page (999 at ``medium``); the gap
+  is three orders of magnitude, and it is the CAP, not the corpus, that
+  bounds the ceiling.
 
 Why not reuse an existing similarity mechanism
 ----------------------------------------------
