@@ -1,0 +1,254 @@
+# Intake-attachment golden set (issue athenaeum#1580)
+#
+# The question no other layer asks: given a wiki that ALREADY HAS a page for
+# X, and a new raw source that is about X, does the librarian land the source
+# on X's page -- or mint a second page?
+#
+# `classify/cases.yaml` has one adjacent case (`skip_already_matched_entity`)
+# and it grades a different thing: whether an entity the matcher ALREADY
+# resolved is re-extracted. `merge/cases.yaml` grades the SHAPE of a merge
+# once a merge has been decided. Neither runs against a materialized wiki, so
+# neither can grade the routing decision itself. This set does: every case
+# runs `athenaeum.librarian.process_one` against a real corpus tree
+# (`tests/evals/corpus.build_corpus("core")`) with the `wiki_pages` below
+# overlaid, and grades the wiki DELTA (see `tests/evals/attachment.py`).
+#
+# --- Content policy (data/corpus/README.md, a review blocker) --------------
+#
+# Every name below is INVENTED. Nothing is copied, paraphrased, sampled or
+# LLM-rewritten from a live knowledge tree; only the SHAPES are taken from
+# operator-observed failures -- a board compiled as a standalone page rather
+# than attached to the thing it documents, and a programme with several pages
+# each created from a different source. Describing a failure structurally is
+# the line; naming the real entities is not.
+# `tests/test_eval_corpus_leakage.py` is the bar and it scans this file.
+#
+# --- Why the overlay pages are here and not in corpus/core/*.yaml ----------
+#
+# `core/*.yaml` is shared ground truth for the recall floor, the relatedness
+# measure, and the athenaeum#1576 writer's 50-page index floor. Adding pages
+# there would move other evals' ground under them for a benefit local to this
+# layer. These pages are overlaid onto a materialized copy of the corpus at
+# run time instead, so this layer's blast radius stops at this layer.
+#
+# --- `outcome_class` values ------------------------------------------------
+#
+#   attach_same_name     : the source names an entity that already has a page,
+#                          by its exact name -> attach, do not mint
+#   attach_name_variant  : the source names it by a QUALIFIED variant that
+#                          misses the deterministic alias match -> still
+#                          attach. The live "name / name (qualifier)" shape.
+#   attach_source_document : the source is a DOCUMENT (a board export), not an
+#                          entity -> it is evidence FOR an entity, so it
+#                          attaches to the entity it evidences rather than
+#                          compiling as a page of its own
+#                          (docs/north-star.md 2.3)
+#   mint_new_entity      : NEGATIVE CONTROL -- a genuinely new entity -> mint.
+#                          Without it, "attach everything" scores perfectly,
+#                          which is the attachment analogue of merge-everything
+#   attach_two_entities  : the source is about TWO entities that both already
+#                          have pages -> both are reached, and no third page
+#                          is minted for the event that involved them
+#
+# Scoring is structural only (page counts, which uids moved, whether a
+# pending-decision surface grew). No check reads prose -- that is the `merge`
+# and `underdetermined` layers' business.
+
+# Pages overlaid onto the materialized corpus before every case runs. These
+# are the "entity already has a page" half of the question; without them
+# there is nothing for a source to attach TO.
+wiki_pages:
+  - uid: attach-project-quarrowfield
+    type: project
+    name: Quarrowfield Uplift
+    aliases: [Quarrowfield]
+    tags: [active, client]
+    access: internal
+    source_ref: "sessions/2026-03-04.md"
+    created: "2026-03-04"
+    body: |
+      # Quarrowfield Uplift
+
+      The programme replacing the kiln-scheduling spreadsheets at the
+      Quarrowfield works with a single booking system. Three phases: the
+      booking engine, the floor tablets, and the weekly utilisation report
+      the works manager reads.
+
+      Reviewed monthly by the delivery practice. The standing budget line is
+      90 thousand GBP per year.
+
+  - uid: attach-project-bracklemoor
+    type: project
+    name: Bracklemoor Transit Study
+    tags: [active, client]
+    access: internal
+    source_ref: "sessions/2026-04-18.md"
+    created: "2026-04-18"
+    body: |
+      # Bracklemoor Transit Study
+
+      A commissioned study of how goods move between the Bracklemoor depot
+      and the four outlying yards it serves. Deliverables are a movement
+      survey, a costed options paper, and a recommendation to the depot
+      board.
+
+      The survey window ran for six weeks. The options paper is drafted and
+      awaiting the board's reading.
+
+  - uid: attach-company-steepgate
+    type: company
+    name: Steepgate Ceramics
+    tags: [client]
+    access: internal
+    source_ref: "sessions/2026-02-09.md"
+    created: "2026-02-09"
+    body: |
+      # Steepgate Ceramics
+
+      A tableware manufacturer running two works and a glaze studio. Engaged
+      the firm for the kiln-booking work and, separately, for a review of how
+      its glaze recipes are recorded.
+
+      The main contact is the works manager; commercial questions go through
+      the finance lead.
+
+cases:
+  # --- Case A ---------------------------------------------------------------
+  - id: same_name_source_attaches
+    case: A
+    outcome_class: attach_same_name
+    source_ref: "sessions/2026-06-12.md"
+    source: |
+      Quarrowfield Uplift check-in, 2026-06-12.
+
+      The floor tablets phase slipped by a fortnight after the works manager
+      asked for the booking screen to show the kiln number rather than the
+      bay number. The change is small but it touches the weekly utilisation
+      report as well, so both were re-planned together.
+
+      The booking engine phase is unchanged and still signed off.
+    expected:
+      max_new_pages: 0
+      touch_or_proposal_uids: [attach-project-quarrowfield]
+      must_not_mint_name_substrings: ["Quarrowfield"]
+
+  # --- Case B ---------------------------------------------------------------
+  # The live "name / name (qualifier)" shape, on the INTAKE side. athenaeum#1577
+  # already scans a compiled wiki for `name` / `name (qualifier)` splits and
+  # proposes a consolidation; this case is deliberately upstream of that -- a
+  # new source ARRIVES naming the entity by a qualified variant that the
+  # deterministic alias match misses. Grading the routing decision here rather
+  # than re-testing athenaeum#1577's scan is the whole point: a librarian that
+  # mints "Bracklemoor Transit Study (phase two)" and then has athenaeum#1577
+  # propose folding it back has still put a second page in the wiki, and this
+  # case must score that as the failure it is.
+  - id: name_variant_source_attaches
+    case: B
+    outcome_class: attach_name_variant
+    source_ref: "sessions/2026-06-20.md"
+    source: |
+      Notes from the Bracklemoor transit study (phase two) kickoff.
+
+      Phase two extends the movement survey to the two seasonal yards that
+      were out of scope first time round, and re-runs the costed options
+      against the fuller picture. Same survey method, same depot board as
+      the audience.
+
+      The depot board asked that phase two report alongside the original
+      options paper rather than as a separate document.
+    expected:
+      max_new_pages: 0
+      touch_or_proposal_uids: [attach-project-bracklemoor]
+      must_not_mint_name_substrings: ["Bracklemoor"]
+
+  # --- Case C ---------------------------------------------------------------
+  # A collaborative-whiteboard board export. AC6: there is no board-specific
+  # parser and this case must not motivate one. The source is an ordinary raw
+  # markdown file whose CONTENT happens to be a board; the librarian sees the
+  # same bytes it would see for any other note. A board is a source document
+  # (docs/north-star.md 2.3) -- evidence FOR the entity it documents, not an
+  # entity -- so the correct outcome is that it reaches Steepgate Ceramics,
+  # not that a page appears named after the board. Demotion to an uncompiled
+  # source document is irreversible, so AC4 requires it be PROPOSED: the
+  # scorer accepts either an attachment or a pending-queue proposal, and
+  # never accepts a page having vanished.
+  - id: board_source_attaches_to_entity
+    case: C
+    outcome_class: attach_source_document
+    source_ref: "sessions/2026-07-02.md"
+    source: |
+      Steepgate onboarding discovery board - export, 2026-07-02.
+
+      Column: what works today
+        - glaze recipes live in one book, one copy, kept in the studio
+        - the works manager knows every kiln's quirks by heart
+        - finance signs off orders same day
+
+      Column: what hurts
+        - the recipe book cannot leave the studio
+        - kiln quirks are not written down anywhere
+        - the second works has no visibility of the first works' bookings
+
+      Column: parking lot
+        - whether to photograph the recipe book
+        - who owns the glaze review after handover
+
+      Dots: 4 on the recipe book, 3 on kiln quirks, 1 on booking visibility.
+    expected:
+      max_new_pages: 0
+      touch_or_proposal_uids: [attach-company-steepgate]
+      must_not_mint_name_substrings: ["board", "discovery", "parking lot"]
+
+  # --- Case D ---------------------------------------------------------------
+  # NEGATIVE CONTROL. Nothing in the wiki is about this, so the correct answer
+  # is a new page. A system that attaches everything -- the failure mode the
+  # other four cases push toward -- fails here, which is what stops this layer
+  # from licensing over-attachment.
+  #
+  # `max_new_pages: 2` rather than 1: Tier 2 legitimately extracts more than
+  # one entity from prose naming a counterparty as well as the engagement, and
+  # this case grades "did a new entity get a page", not "did the classifier
+  # extract exactly one thing" (that is the `classify` layer's job).
+  - id: new_entity_mints_page
+    case: D
+    outcome_class: mint_new_entity
+    source_ref: "sessions/2026-07-14.md"
+    source: |
+      First call about the Fallowdyke Freight Audit, 2026-07-14.
+
+      A new piece of work, unrelated to anything running: auditing the
+      haulage invoices a distribution yard has paid over the last two years
+      against the rates it actually contracted for. Fixed fee, six weeks,
+      starting once the yard sends the invoice archive.
+
+      No overlap with the existing engagements; a different sponsor and a
+      different commercial route.
+    expected:
+      min_new_pages: 1
+      max_new_pages: 2
+
+  # --- Case E ---------------------------------------------------------------
+  # A source about TWO entities that both already have pages. The failure this
+  # catches is minting a third page for the EVENT (a joint session) rather
+  # than routing it to the two entities it is evidence about.
+  - id: two_existing_entities_both_touched
+    case: E
+    outcome_class: attach_two_entities
+    source_ref: "sessions/2026-07-21.md"
+    source: |
+      Joint session, 2026-07-21: Steepgate Ceramics and the Quarrowfield
+      Uplift delivery team.
+
+      Steepgate's works manager walked the delivery team through how kiln
+      bookings are made today, bay by bay. The team confirmed the booking
+      engine already models the constraint she described, and agreed the
+      floor tablets will show kiln numbers.
+
+      Steepgate asked for the weekly utilisation report to be split by works
+      rather than aggregated. That is now in scope for the reporting phase.
+    expected:
+      max_new_pages: 0
+      touch_or_proposal_uids:
+        - attach-company-steepgate
+        - attach-project-quarrowfield
+      must_not_mint_name_substrings: ["Joint session", "Steepgate", "Quarrowfield"]
