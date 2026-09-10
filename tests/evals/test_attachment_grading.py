@@ -266,6 +266,27 @@ class TestIrreversibleOutcomesMustBeProposals:
         assert not passed
         assert "proposal" in detail
 
+    def test_a_type_rejected_park_is_not_a_proposal(self, tmp_path: Path) -> None:
+        """Observed for real in this layer's own baseline run: the
+        athenaeum#1196 type guard parks a page the librarian could not write
+        and records it in the wiki root under a leading underscore. That is a
+        FAILED write, not a proposal. A grader treating every growing
+        ``_*.md`` as a pending-decision surface would let ``requires_proposal``
+        be satisfied by the librarian giving up."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, uid="proj-a", name="Bracklemoor Transit Study", body="Body.")
+        before = snapshot_wiki(wiki)
+
+        (wiki / "_type_rejected.md").write_text("parked: booking-engine\n", encoding="utf-8")
+        delta = diff_wiki(before, snapshot_wiki(wiki))
+
+        assert not delta.proposed
+        assert delta.minted == frozenset(), "a parked page is not a minted page either"
+        passed, detail = score_case({"expected": {"requires_proposal": True}}, delta)
+        assert not passed
+        assert "proposal" in detail
+
 
 # ---------------------------------------------------------------------------
 # The negative control must be able to pass (case D)
@@ -378,7 +399,7 @@ class TestCasesFile:
             for uid in case["expected"].get("touch_or_proposal_uids", []) or []:
                 assert uid in known, f"case {case['id']}: unknown uid {uid!r}"
 
-    def test_the_layer_is_absent_from_the_seeded_manifest(self) -> None:
+    def test_seeded_manifest_agrees_with_recorded_fixtures(self) -> None:
         """AC5: the layer stays OUT of ``seeded-layers.yml`` until an
         ``evals.yml record=true`` run has actually seeded its fixtures. Listing
         it early would make ``test_seeded_manifest_layers_are_populated``

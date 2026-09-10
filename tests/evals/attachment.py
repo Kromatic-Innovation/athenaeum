@@ -61,7 +61,19 @@ from typing import Any, Mapping
 
 from athenaeum.relatedness import ROLE_TERM_OVERLAP
 
+#: The pending-decision surfaces a PROPOSAL can land on, and the only ones.
+#:
+#: Not "every ``wiki/_*.md``". A compile writes other underscore-prefixed
+#: bookkeeping into the wiki root -- the athenaeum#1196 type guard parks
+#: rejected pages under ``_type_rejected/`` and appends
+#: ``_type_rejected.jsonl``, and that fired for real during this layer's own
+#: baseline run. A rejected write is not a proposal, and a grader that
+#: accepted any growing underscore file as one would let ``requires_proposal``
+#: be satisfied by a page the librarian FAILED to write.
+PENDING_SURFACES = ("_pending_merges.md", "_pending_questions.md")
+
 __all__ = [
+    "PENDING_SURFACES",
     "PageState",
     "WikiSnapshot",
     "WikiDelta",
@@ -166,11 +178,10 @@ class PageState:
 class WikiSnapshot:
     """Every compiled page plus every pending-decision surface.
 
-    The queue surfaces (``wiki/_*.md`` -- ``_pending_merges.md``,
-    ``_pending_questions.md``) are snapshotted alongside the pages precisely
-    because AC4 grades irreversible outcomes as PROPOSALS: without the queue
-    in the same picture, "proposed a merge" and "did nothing" are the same
-    observation.
+    The queue surfaces (:data:`PENDING_SURFACES`) are snapshotted alongside
+    the pages precisely because AC4 grades irreversible outcomes as
+    PROPOSALS: without the queue in the same picture, "proposed a merge" and
+    "did nothing" are the same observation.
     """
 
     pages: Mapping[str, PageState]
@@ -197,7 +208,8 @@ def snapshot_wiki(wiki_root: Path) -> WikiSnapshot:
     for path in sorted(wiki_root.glob("*.md")):
         text = path.read_text(encoding="utf-8")
         if path.name.startswith("_"):
-            queues[path.name] = _digest(text)
+            if path.name in PENDING_SURFACES:
+                queues[path.name] = _digest(text)
             continue
         meta, body = _parse_page(text)
         uid = str(meta.get("uid") or "").strip() or path.stem
