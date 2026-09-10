@@ -328,6 +328,56 @@ def test_run_probe_all_arms_dispatches_all_four_arms_offline(tmp_path: Path) -> 
     assert records["pull"].recall_called is False  # a legitimate, recorded choice
 
 
+def test_pull_arm_receives_the_knowledge_root_not_the_wiki_root(tmp_path: Path) -> None:
+    """PULL and PUSH take DIFFERENT roots, and that asymmetry is load-bearing.
+
+    ``recall_search`` (PUSH) takes the wiki root directly, whereas PULL drives
+    ``athenaeum serve --path``, which takes the KNOWLEDGE root and derives
+    ``<path>/wiki`` and ``<path>/raw`` from it. An automated reviewer read the
+    difference as a bug on issue athenaeum#1522's PR; it is not, and this test
+    pins it so the "fix" that would actually break it -- handing ``serve`` the
+    wiki root, leaving it looking for ``<root>/wiki/wiki`` and serving an empty
+    corpus -- fails loudly instead of shipping.
+    """
+    session = EvalSession()
+    client = FakeLLMClient(
+        response=make_llm_response(
+            "stub answer", usage=make_llm_usage(input_tokens=10, output_tokens=5)
+        )
+    )
+    seen: dict[str, Path] = {}
+
+    def _capturing_pull_runner(
+        probe, knowledge_root, cache_dir, corpus_scale, **kwargs
+    ) -> RolloutRecord:
+        seen["knowledge_root"] = knowledge_root
+        return RolloutRecord(
+            arm=Arm.PULL,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub pull answer",
+        )
+
+    run_probe_all_arms(
+        "pto_allowance",
+        "core",
+        session=session,
+        materialize_root=tmp_path,
+        search_backend="keyword",
+        client=client,
+        pull_runner=_capturing_pull_runner,
+    )
+
+    # The knowledge root is the PARENT of the materialized wiki tree, and the
+    # wiki tree really is where the corpus landed -- asserting both directions
+    # so this cannot pass by both sides being wrong in the same way.
+    assert seen["knowledge_root"] == tmp_path
+    assert (seen["knowledge_root"] / "wiki").is_dir()
+    assert any((seen["knowledge_root"] / "wiki").glob("*.md"))
+    assert not (seen["knowledge_root"] / "wiki" / "wiki").exists()
+
+
 # ---------------------------------------------------------------------------
 # Token ceiling separation — complements test_rollout_ceiling_separation.py
 # by exercising the SEPARATION through rollout.py's own call path (run_none),

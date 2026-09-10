@@ -630,6 +630,16 @@ def run_probe_all_arms(
                 probe, corpus, corpus_scale, client=resolved_client, session=session, model=model
             )
         else:
+            # PULL gets ``materialize_root``, NOT ``wiki_root``, and the two
+            # arms differing here is deliberate rather than a slip: PUSH
+            # calls ``recall_search(wiki_root, ...)``, which takes the WIKI
+            # root directly, while PULL drives ``athenaeum serve --path``,
+            # which takes the KNOWLEDGE root and derives ``<path>/wiki`` and
+            # ``<path>/raw`` from it itself (see ``_cmd_serve``'s ``--path``
+            # help and ``_resolve_serve_roots``). Handing ``serve`` the wiki
+            # root would make it look for ``<materialize_root>/wiki/wiki``
+            # and serve an empty corpus. Pinned by
+            # ``test_rollout.py::test_pull_arm_receives_the_knowledge_root_not_the_wiki_root``.
             record = resolved_pull_runner(
                 probe,
                 materialize_root,
