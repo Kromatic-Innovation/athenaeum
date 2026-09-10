@@ -313,6 +313,33 @@ class TestTheProposalIsQueuedAndNeverAutoApplied:
         assert counts["queued"] == 0
         assert not (core_wiki / "_pending_merges.md").exists()
 
+    def test_an_unfoldable_target_is_reported_not_queued(self, core_wiki: Path) -> None:
+        """A proposal that could only fail at approve is not written.
+
+        ``slugify`` caps at 60 characters, so a bare page with a longer
+        filename stem slugifies to a path no file owns; ``write_kind`` then
+        derives ``create-merged`` and the fold fails ``target_exists``. Built
+        here by renaming the fixture's own pages, so the assertion is about
+        the real ``classify_write_kind`` round trip rather than a mock.
+        """
+        from athenaeum.models import slugify
+
+        long_stem = "project-keelbridge-" + ("x" * 60)
+        assert slugify(long_stem) != long_stem, "precondition: stem exceeds the cap"
+        (core_wiki / f"{BARE}.md").rename(core_wiki / f"{long_stem}.md")
+        (core_wiki / f"{QUALIFIED}.md").rename(core_wiki / f"{long_stem}-rollout.md")
+
+        counts = propose_qualified_name_merges(core_wiki)
+        assert counts["splits"] >= 1
+        assert counts["unfoldable"] >= 1
+        assert counts["splits"] == counts["queued"] + counts["unfoldable"]
+        queued_sources = [
+            s
+            for m in list_pending_merges(core_wiki / "_pending_merges.md")
+            for s in m.get("sources", [])
+        ]
+        assert not [s for s in queued_sources if long_stem in str(s)]
+
     def test_the_confidence_is_below_certain(self) -> None:
         """An exact name collision is certain; a parenthetical is not.
 

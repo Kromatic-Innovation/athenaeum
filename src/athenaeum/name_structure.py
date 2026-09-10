@@ -398,6 +398,40 @@ def build_draft_body(bare_text: str, qualified_name: str, qualified_body: str) -
     )
 
 
+def fold_target_resolves(wiki_root: Path, bare_path: Path) -> bool:
+    """Would the derived fold target actually be *bare_path*'s own file?
+
+    :func:`athenaeum.pending_merges.classify_write_kind` and
+    :func:`~athenaeum.pending_merges.resolve_merge` both derive the fold
+    target as ``wiki_root / f"{slugify(merge_target_name)}.md"``, and
+    :func:`athenaeum.models.slugify` **caps its output at 60 characters**.
+    A bare page whose filename stem is longer than that — or whose stem is
+    not already a valid slug (mixed case, spaces, punctuation) — therefore
+    slugifies to something no file owns. ``write_kind`` is then derived as
+    ``create-merged``, and the proposal can only fail ``target_exists`` at
+    approve time: a queue entry that wastes a reviewer's decision and can
+    never be enacted.
+
+    This is the same trap :func:`athenaeum.name_collisions._fold_target_matches_canonical`
+    was added for (issue athenaeum#1170 code review); it is re-checked here
+    rather than assumed, because passing a filename stem makes the round trip
+    *usually* idempotent, and "usually" is exactly the shape that survives
+    review and fails in production. Measured on the live corpus at the time
+    of writing: 0 of 35 hits trip this, but the longest participating stem is
+    60 characters — precisely at the cap.
+
+    Nothing is enacted either way. A page that fails here is logged and left
+    unqueued, which is strictly better than queuing a decision that cannot be
+    carried out.
+    """
+    from athenaeum.models import slugify
+
+    try:
+        return (wiki_root / f"{slugify(bare_path.stem)}.md").resolve() == bare_path.resolve()
+    except OSError:  # pragma: no cover - defensive, mirrors name_collisions
+        return False
+
+
 def propose_qualified_name_merges(
     wiki_root: Path,
     *,
@@ -426,21 +460,39 @@ def propose_qualified_name_merges(
 
     *dry_run* short-circuits before any write, returning accurate counts.
 
-    Returns ``{"splits": n, "queued": n}`` — ``queued`` is 0 on a dry run.
+    A split whose fold target would not resolve to the bare page's own file
+    (:func:`fold_target_resolves`) is counted and logged but NOT queued —
+    see that function for why such a proposal could only fail at approve.
+
+    Returns ``{"splits": n, "queued": n, "unfoldable": n}`` — ``queued`` is 0
+    on a dry run, and ``splits == queued + unfoldable`` on a real one.
     """
     from athenaeum.pending_merges import write_pending_merge
 
     splits = scan_qualified_name_splits(wiki_root, config=config)
     if dry_run or not splits:
-        return {"splits": len(splits), "queued": 0}
+        return {"splits": len(splits), "queued": 0, "unfoldable": 0}
 
     merges_path = wiki_root / "_pending_merges.md"
     by_path = {page.path: page for page in _load_candidates(wiki_root, config=config)}
     queued = 0
+    unfoldable = 0
     for split in splits:
         bare = by_path.get(split.bare_path)
         qualified = by_path.get(split.qualified_path)
         if bare is None or qualified is None:  # pragma: no cover - raced deletion
+            continue
+        if not fold_target_resolves(wiki_root, split.bare_path):
+            unfoldable += 1
+            log.warning(
+                "qualified-name scan: %s / %s is a split, but the fold target "
+                "derived from the bare page's stem %r does not resolve to that "
+                "page (slugify caps at 60 chars) — not queued, since the "
+                "proposal could only fail target_exists at approve",
+                split.bare_path.name,
+                split.qualified_path.name,
+                split.bare_path.stem,
+            )
             continue
         rationale = (
             f"athenaeum#1577 qualified-name scan: {split.qualified_name!r} is "
@@ -464,12 +516,14 @@ def propose_qualified_name_merges(
         queued += 1
 
     log.info(
-        "qualified-name scan: %d split(s) found, %d queued to %s (never auto-applied)",
+        "qualified-name scan: %d split(s) found, %d queued to %s, %d unfoldable "
+        "(never auto-applied)",
         len(splits),
         queued,
         merges_path,
+        unfoldable,
     )
-    return {"splits": len(splits), "queued": queued}
+    return {"splits": len(splits), "queued": queued, "unfoldable": unfoldable}
 
 
 def summarize(splits: list[QualifiedNameSplit]) -> dict[str, Any]:
