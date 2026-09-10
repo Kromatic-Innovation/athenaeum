@@ -289,6 +289,30 @@ class TestTheProposalIsQueuedAndNeverAutoApplied:
         assert "auto_merge" not in params
         assert "auto_applied" not in params
 
+    def test_a_class_routed_off_corpus_is_never_proposed(self, core_wiki: Path) -> None:
+        """athenaeum#429's fail-closed policy, honoured on this path too.
+
+        This phase is default-ON, so a class an operator routed to an
+        excluded surface (issues athenaeum#864, athenaeum#883,
+        athenaeum#885, athenaeum#886) would otherwise reach
+        ``_pending_merges.md`` on the very next nightly run. ``config=None``
+        skips the consult entirely -- same semantics as
+        ``discover_wiki_dedupe_candidates`` -- which is why the two
+        assertions below differ only in whether config is threaded.
+        """
+        assert frozenset({BARE, QUALIFIED}) in _pairs(core_wiki)
+
+        config = {"storage": {"mapping": {"project": "excluded"}}}
+        with_policy = {
+            frozenset({s.bare_path.stem, s.qualified_path.stem})
+            for s in scan_qualified_name_splits(core_wiki, config=config)
+        }
+        assert frozenset({BARE, QUALIFIED}) not in with_policy
+
+        counts = propose_qualified_name_merges(core_wiki, config=config)
+        assert counts["queued"] == 0
+        assert not (core_wiki / "_pending_merges.md").exists()
+
     def test_the_confidence_is_below_certain(self) -> None:
         """An exact name collision is certain; a parenthetical is not.
 

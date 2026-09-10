@@ -241,21 +241,44 @@ class _CandidatePage:
     body: str
 
 
-def _load_candidates(wiki_root: Path) -> list[_CandidatePage]:
+def _load_candidates(
+    wiki_root: Path, *, config: dict[str, Any] | None = None
+) -> list[_CandidatePage]:
     """Every ``wiki/<slug>.md`` page eligible for this scan.
 
     Mirrors :meth:`athenaeum.models.EntityIndex._load`'s traversal — a flat
     (non-recursive) glob skipping ``_``-prefixed sidecars — plus the
-    merge-eligibility exclusions
-    :func:`athenaeum.wiki_dedupe.discover_wiki_dedupe_candidates` already
+    exclusions :func:`athenaeum.wiki_dedupe.discover_wiki_dedupe_candidates`
     applies, so a page an operator archived, superseded, hand-flagged
     ``pii``, or marked a ``pointer_stub`` is never proposed here either.
-    Those predicates are IMPORTED from their existing homes rather than
-    re-implemented: a new exclusion added there must not silently fail to
-    apply here.
+
+    :func:`~athenaeum.pii.is_pii_flagged` and
+    :func:`~athenaeum.authority.is_pointer_stub` are IMPORTED from their
+    existing homes rather than re-implemented, so a change there applies
+    here. The ``archived`` tag and ``superseded_by`` tests have no shared
+    home to import — they are inline predicates at both call sites.
+
+    When *config* is supplied, the storage-adapter corpus policy
+    (issue athenaeum#429) is also consulted: a page whose class routes to a
+    surface with ``merge_eligible=False`` is dropped even though it sits in
+    ``wiki/``. That is fail-closed defense-in-depth for the excluded
+    surfaces (issues athenaeum#864, athenaeum#883, athenaeum#885,
+    athenaeum#886) — a class an operator routed off-corpus must never reach
+    ``_pending_merges.md``, and this scan is default-ON so it would
+    otherwise get there on the next nightly run. ``config=None`` skips the
+    consult entirely, exactly as ``discover_wiki_dedupe_candidates`` does,
+    so a test calling this with no config is unaffected.
+
+    The one exclusion deliberately NOT carried over is athenaeum#1252's
+    body-length floor. That floor exists to keep near-empty pages out of an
+    EMBEDDING comparison, where a short body produces a meaningless vector.
+    A short qualified page is still a real entity split — a one-line
+    ``X (rollout)`` stub is arguably the clearest case — and the signal here
+    reads names, not bodies.
     """
     from athenaeum.authority import is_pointer_stub
     from athenaeum.pii import is_pii_flagged
+    from athenaeum.storage import is_merge_eligible
 
     pages: list[_CandidatePage] = []
     for path in sorted(wiki_root.glob("*.md")):
@@ -270,6 +293,8 @@ def _load_candidates(wiki_root: Path) -> list[_CandidatePage]:
             continue
         page_type = str(meta.get("type") or "")
         if page_type not in NAME_STRUCTURE_CANDIDATE_TYPES:
+            continue
+        if config is not None and not is_merge_eligible(page_type, config):
             continue
         if is_pii_flagged(meta) or is_pointer_stub(meta):
             continue
@@ -288,7 +313,9 @@ def _load_candidates(wiki_root: Path) -> list[_CandidatePage]:
     return pages
 
 
-def scan_qualified_name_splits(wiki_root: Path) -> list[QualifiedNameSplit]:
+def scan_qualified_name_splits(
+    wiki_root: Path, *, config: dict[str, Any] | None = None
+) -> list[QualifiedNameSplit]:
     """Every ``bare`` / ``bare (qualifier)`` same-type pair under *wiki_root*.
 
     Both sides must share a ``type``. That requirement is what keeps the
@@ -300,9 +327,19 @@ def scan_qualified_name_splits(wiki_root: Path) -> list[QualifiedNameSplit]:
     independent guard, not the only one.
 
     A qualified page with SEVERAL same-type bare twins (the live corpus has
-    three ``ORCA`` pages) yields one pair per twin: each is an independent
+    seven ``ORCA`` pages) yields one pair per twin: each is an independent
     decision for a reviewer, and collapsing them would silently pick a
     canonical side on the reviewer's behalf.
+
+    That has a consequence a reviewer of such a set must know. The proposals
+    in a multi-twin set are ALTERNATIVES, not a batch: approving one folds
+    the qualified page away, so the remaining blocks in the set name a source
+    that no longer exists. Resolve one, then run ``athenaeum merges
+    revalidate`` (:func:`athenaeum.pending_merges.revalidate_pending_merges`)
+    to retire the rest, rather than approving several in a row. The bare
+    twins in such a set are themselves an EXACT name collision, which is
+    :mod:`athenaeum.name_collisions`'s job and usually the thing to resolve
+    first.
 
     Deterministic ordering (by qualified path, then bare path) so a re-run
     over an unchanged corpus proposes in the same order.
@@ -310,7 +347,7 @@ def scan_qualified_name_splits(wiki_root: Path) -> list[QualifiedNameSplit]:
     if not wiki_root.is_dir():
         return []
 
-    pages = _load_candidates(wiki_root)
+    pages = _load_candidates(wiki_root, config=config)
     by_key: dict[tuple[str, str], list[_CandidatePage]] = {}
     for page in pages:
         by_key.setdefault((normalize_name(page.name), page.page_type), []).append(page)
@@ -364,6 +401,7 @@ def build_draft_body(bare_text: str, qualified_name: str, qualified_body: str) -
 def propose_qualified_name_merges(
     wiki_root: Path,
     *,
+    config: dict[str, Any] | None = None,
     dry_run: bool = False,
 ) -> dict[str, int]:
     """Scan for qualified-name splits and QUEUE each as a pending merge.
@@ -392,12 +430,12 @@ def propose_qualified_name_merges(
     """
     from athenaeum.pending_merges import write_pending_merge
 
-    splits = scan_qualified_name_splits(wiki_root)
+    splits = scan_qualified_name_splits(wiki_root, config=config)
     if dry_run or not splits:
         return {"splits": len(splits), "queued": 0}
 
     merges_path = wiki_root / "_pending_merges.md"
-    by_path = {page.path: page for page in _load_candidates(wiki_root)}
+    by_path = {page.path: page for page in _load_candidates(wiki_root, config=config)}
     queued = 0
     for split in splits:
         bare = by_path.get(split.bare_path)

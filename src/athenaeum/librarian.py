@@ -6031,7 +6031,9 @@ def _run_qualified_name_phase(ctx: RunContext) -> None:
         if not resolve_qualified_name_scan_enabled(ctx.config):
             _fields = {"reason": "disabled"}
         else:
-            counts = propose_qualified_name_merges(ctx.wiki_root, dry_run=ctx.dry_run)
+            counts = propose_qualified_name_merges(
+                ctx.wiki_root, config=ctx.config, dry_run=ctx.dry_run
+            )
             _fields = {"reason": "completed", **counts}
     except Exception:
         log.exception("qualified-name scan failed; continuing run")

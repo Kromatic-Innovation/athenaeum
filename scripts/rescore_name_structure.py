@@ -12,7 +12,7 @@ Issue athenaeum#1582's lane searched ``src/``, ``tests/``, ``scripts/``,
 ``docs/`` and ``git log --all --grep=1251`` and found no replay artifact, so
 the next signal change had nothing to re-run and the number could not be
 reproduced. AC3 was corrected on 2026-09-10 to make building this script part
-of the work rather than a precondition inherited from #1251.
+of the work rather than a precondition inherited from athenaeum#1251.
 
 The whole lesson is that an uncommitted harness cannot be reused. So: keep
 this committed, and re-run it whenever the signal in
@@ -55,6 +55,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from athenaeum.config import load_config  # noqa: E402
 from athenaeum.name_structure import (  # noqa: E402
     NAME_STRUCTURE_CANDIDATE_TYPES,
     scan_qualified_name_splits,
@@ -101,7 +102,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"not a directory: {wiki_root}")
 
     total_pages = sum(1 for p in wiki_root.glob("*.md") if not p.name.startswith(("_", "auto-")))
-    splits = scan_qualified_name_splits(wiki_root)
+
+    # Load the corpus's own config so the count matches what the librarian
+    # phase would actually queue -- the storage-adapter merge-eligibility
+    # policy (issue athenaeum#429) drops classes an operator routed to an
+    # excluded surface, and a measurement taken WITHOUT it would over-report
+    # against a corpus that has any. Read-only: load_config only reads.
+    config = load_config(wiki_root.parent)
+    splits = scan_qualified_name_splits(wiki_root, config=config)
     stats = summarize(splits)
 
     sample_n = len(splits) if args.sample == -1 else args.sample
