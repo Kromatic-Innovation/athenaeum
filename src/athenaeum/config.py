@@ -175,6 +175,24 @@ _DEFAULTS: dict[str, Any] = {
 }
 
 
+# Librarian-section yaml keys that USED TO resolve to real behavior and no
+# longer do -- a stale ``athenaeum.yaml`` left over from before the key's
+# removal must not silently change meaning (it can't anymore: nothing reads
+# it), and it must not silently look ignored either. Map each removed key to
+# the issue that removed it so a stale operator config gets a loud, specific
+# WARNING instead of quietly doing nothing. Mirrors the WARN-and-fall-back
+# convention :func:`_env_number` established for malformed values -- same
+# "same typo/same stale-key, same visible outcome" goal, applied to keys
+# instead of values.
+_REMOVED_LIBRARIAN_KEYS: dict[str, str] = {
+    "merge_worthiness_gate_enabled": (
+        "removed in athenaeum#1582 per the athenaeum#1251 measurement decision "
+        "(the containment gate suppressed 0 of 28,951 candidate pairs); this "
+        "key is no longer read and has no effect on merge behavior"
+    ),
+}
+
+
 def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
     """Load athenaeum config from *knowledge_root*/athenaeum.yaml.
 
@@ -209,6 +227,17 @@ def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
             result[key] = {**default_val, **user_val}
         else:
             result[key] = user_val
+
+    librarian_cfg = result.get("librarian")
+    if isinstance(librarian_cfg, dict):
+        for removed_key, reason in _REMOVED_LIBRARIAN_KEYS.items():
+            if removed_key in librarian_cfg:
+                logger.warning(
+                    "Ignoring removed config key librarian.%s in %s: %s.",
+                    removed_key,
+                    config_path,
+                    reason,
+                )
 
     return result
 
@@ -1051,40 +1080,6 @@ def resolve_reasoning_tier_auditing_enabled(config: dict[str, Any] | None) -> bo
         cfg = config.get("librarian")
         if isinstance(cfg, dict):
             raw = cfg.get("reasoning_tier_auditing_enabled")
-            if isinstance(raw, bool):
-                return raw
-    return False
-
-
-def resolve_merge_worthiness_gate_enabled(config: dict[str, Any] | None) -> bool:
-    """Resolve ``librarian.merge_worthiness_gate_enabled`` (issue athenaeum#1172). DEFAULT OFF.
-
-    Gates the deterministic, zero-LLM merge-worthiness containment check in
-    :func:`athenaeum.tiers.check_merge_worthiness_gate`: when armed, a
-    Tier-3 update whose raw file offers no fact absent from the target
-    entity's existing page is suppressed before the merge prompt is built
-    or any model call is made. Checked at the call site in
-    :func:`athenaeum.tiers.tier3_derive_actions` (mirroring how
-    :func:`athenaeum.merge.merge_clusters_to_wiki` gates the reasoning-tier
-    screen) so a disabled knob costs one bool call and nothing else.
-
-    Mirrors :func:`resolve_reasoning_tier_auditing_enabled`'s precedence
-    contract exactly: env ``ATHENAEUM_MERGE_WORTHINESS_GATE_ENABLED``
-    (``1``/``true``/``yes``/``on``, case-insensitive) > yaml
-    ``librarian.merge_worthiness_gate_enabled`` (bool only; non-bool falls
-    through) > default ``False``. No seed in ``_DEFAULTS``. Default OFF is
-    deliberate: a false suppression permanently destroys a fact (raw files
-    are unlinked after processing, with no re-derivation path), so the gate
-    stays opt-in until an operator turns it on — production merge behavior
-    is byte-identical to today until then.
-    """
-    env = os.environ.get("ATHENAEUM_MERGE_WORTHINESS_GATE_ENABLED")
-    if env is not None:
-        return env.strip().lower() in ("1", "true", "yes", "on")
-    if isinstance(config, dict):
-        cfg = config.get("librarian")
-        if isinstance(cfg, dict):
-            raw = cfg.get("merge_worthiness_gate_enabled")
             if isinstance(raw, bool):
                 return raw
     return False
