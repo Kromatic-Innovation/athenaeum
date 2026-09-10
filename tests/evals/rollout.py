@@ -173,6 +173,55 @@ class RolloutRecord:
     def total_output_tokens(self) -> int:
         return sum(t.output_tokens for t in self.turn_tokens)
 
+    def to_payload(self) -> dict[str, Any]:
+        """Serialize to a JSON-safe dict for ``tests.evals.containment.ResultStore``
+        (issue athenaeum#1523's persistence bridge).
+
+        Every field the north-star report reads round-trips losslessly
+        through :meth:`from_payload`: ``arm`` becomes its plain ``.value``
+        string (``Arm`` is itself a ``str`` subclass, but ``json.dumps``
+        would otherwise emit ``"Arm.PULL"``-style reprs for a raw enum
+        member rather than the bare value -- explicit ``.value`` avoids
+        relying on that), and the two nested dataclass lists become lists
+        of plain dicts via :func:`dataclasses.asdict`. ``transcript`` is
+        already JSON-safe (built from parsed ``stream-json`` events or
+        plain string literals in :mod:`tests.evals.rollout` itself), so it
+        passes through unchanged.
+        """
+        return {
+            "arm": self.arm.value,
+            "probe_id": self.probe_id,
+            "probe_class": self.probe_class,
+            "corpus_scale": self.corpus_scale,
+            "answer": self.answer,
+            "turn_tokens": [dataclasses.asdict(t) for t in self.turn_tokens],
+            "tool_calls": [dataclasses.asdict(t) for t in self.tool_calls],
+            "recall_called": self.recall_called,
+            "injected_context_tokens": self.injected_context_tokens,
+            "turn_count": self.turn_count,
+            "transcript": self.transcript,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> RolloutRecord:
+        """Inverse of :meth:`to_payload`. Ignores unknown keys (for example
+        a ``cell_key``/``replicate`` a caller merged into the same stored
+        row) rather than raising, so a wider persisted row shape never
+        breaks the read side."""
+        return cls(
+            arm=Arm(payload["arm"]),
+            probe_id=payload["probe_id"],
+            probe_class=payload["probe_class"],
+            corpus_scale=payload["corpus_scale"],
+            answer=payload["answer"],
+            turn_tokens=[TurnTokenUsage(**t) for t in payload.get("turn_tokens", [])],
+            tool_calls=[ToolCall(**t) for t in payload.get("tool_calls", [])],
+            recall_called=payload.get("recall_called", False),
+            injected_context_tokens=payload.get("injected_context_tokens"),
+            turn_count=payload.get("turn_count", 0),
+            transcript=payload.get("transcript", []),
+        )
+
 
 def _observe_turn(session: EvalSession, model: str, response: Any, turn: int) -> TurnTokenUsage:
     """Record *response* on *session* and return exactly the DELTA it added.
