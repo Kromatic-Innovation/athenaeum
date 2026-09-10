@@ -41,6 +41,16 @@ The HTTP server always binds ``127.0.0.1`` explicitly (never ``0.0.0.0`` or the
 empty-string wildcard). Two ``GET`` routes serve the static page and its JSON
 data feed.
 
+Since issue athenaeum#1539 the served page also polls ``/data.json`` on a
+configurable interval (``--poll-interval``, default
+:data:`DEFAULT_POLL_INTERVAL` seconds; ``0`` disables it) and re-renders in
+place so a live session updates without a manual reload. Each poll is still
+just another ``GET /data.json`` -- i.e. another full drain per
+:func:`_run_tail_contract` -- so the data-freshness story is unchanged; only
+the served HTML gained the loop that asks again. See that module-level
+docstring's own note on why a single-drain-per-request design made this a
+cheap addition rather than a rearchitecture.
+
 Since issue athenaeum#1528 there is also ONE ``POST`` route, ``/open``, which
 launches the operator's editor on a page they clicked. This module used to
 promise "no route that accepts a body or mutates anything"; that sentence is
@@ -88,10 +98,18 @@ from typing import Any
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, resolve_cache_dir
 from athenaeum.viewer_corpus import build_uid_index, load_page_info, resolve_path
 
-#: Default TCP port. Arbitrary but fixed, purely a convenience default —
+#: Default TCP port. Arbitrary but fixed, purely a convenience default --
 #: `--port 0` (OS-assigned, read back via the bound socket) is what tests use
 #: to avoid ever colliding with a real listener.
 DEFAULT_PORT = 8756
+
+#: Default poll interval, in seconds, the served page uses to re-fetch
+#: ``/data.json`` in place (issue athenaeum#1539). Each poll is a full
+#: ``push-metrics tail --json`` subprocess drain, so this trades freshness
+#: against real cost -- 3s is a "modest" default per the issue's own framing,
+#: not a measured optimum. ``--poll-interval 0`` disables polling (AC6):
+#: the page falls back to the pre-#1539 manual-reload-only behaviour.
+DEFAULT_POLL_INTERVAL = 3.0
 
 #: ``PushRecord.source`` values that mean "pushed unbidden" (issue
 #: athenaeum#1479's documented reader rule, reproduced here rather than
@@ -118,6 +136,13 @@ DEFAULT_EDITOR_COMMAND: tuple[str, ...] = ("subl",)
 #: the wrong one, and because writing the bad spelling out even inside a
 #: comment is enough to trip the same scanner.
 NONCE_PLACEHOLDER = b"__VIEWER_NONCE_PLACEHOLDER__"
+
+#: Token in the static page that :meth:`_ViewerRequestHandler._serve_html`
+#: swaps for the configured poll interval, in milliseconds, as a bare
+#: integer literal (``0`` means "polling disabled"). Same env-var-scanner
+#: rationale as :data:`NONCE_PLACEHOLDER` above -- kept off the project's own
+#: name for the same reason.
+POLL_INTERVAL_MS_PLACEHOLDER = b"__VIEWER_POLL_INTERVAL_MS_PLACEHOLDER__"
 
 
 def _allowed_origins(server_address: Any) -> frozenset[str]:
@@ -177,9 +202,14 @@ def _run_tail_contract(
 
     Read-only, single drain (no ``--follow``): one HTTP request maps to one
     subprocess invocation, so the page always reflects the ledgers as of the
-    moment it was loaded/refreshed — good enough for a manual "reload to see
-    what's new" viewer, and simpler than holding a long-lived streaming
-    connection open per browser tab.
+    moment it was loaded/refreshed. Originally scoped (issue athenaeum#1480)
+    as "good enough for a manual 'reload to see what's new' viewer, and
+    simpler than holding a long-lived streaming connection open per browser
+    tab" -- that reload is no longer manual (issue athenaeum#1539): the
+    served page polls ``/data.json`` on an interval and re-renders in place.
+    The single-drain-per-request shape is still exactly right for that,
+    though -- a poll is just another ordinary request through this same
+    function, not a long-lived connection.
     """
     argv = _tail_argv(session_id=session_id, path=path, cache_dir=cache_dir)
     result = subprocess.run(argv, capture_output=True, text=True, check=False)
@@ -537,6 +567,7 @@ class _ViewerRequestHandler(BaseHTTPRequestHandler):
     cache_dir: Path | None = None
     nonce: str = ""
     editor_command: tuple[str, ...] = DEFAULT_EDITOR_COMMAND
+    poll_interval: float = DEFAULT_POLL_INTERVAL
 
     server_version = "athenaeum-viewer/1"
 
@@ -620,7 +651,12 @@ class _ViewerRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_html(self) -> None:
+        # 0 or negative -> 0ms, which the page's JS treats as "polling
+        # disabled" (AC6) -- never a negative or fractional-millisecond
+        # setTimeout delay.
+        poll_ms = max(0, round(self.poll_interval * 1000)) if self.poll_interval else 0
         body = _load_static_html().replace(NONCE_PLACEHOLDER, self.nonce.encode("utf-8"))
+        body = body.replace(POLL_INTERVAL_MS_PLACEHOLDER, str(poll_ms).encode("utf-8"))
         self.send_response(200)
         # The page holds the nonce; a cache would outlive the server that
         # minted it and hand a stale one to the next run.
@@ -694,6 +730,7 @@ def _make_handler_class(
     cache_dir: Path | None,
     nonce: str = "",
     editor_command: tuple[str, ...] = DEFAULT_EDITOR_COMMAND,
+    poll_interval: float = DEFAULT_POLL_INTERVAL,
 ) -> type[_ViewerRequestHandler]:
     """Bind per-server config onto a fresh handler subclass (see
     :class:`_ViewerRequestHandler`'s docstring for why)."""
@@ -706,6 +743,7 @@ def _make_handler_class(
     _BoundHandler.cache_dir = cache_dir
     _BoundHandler.nonce = nonce
     _BoundHandler.editor_command = editor_command
+    _BoundHandler.poll_interval = poll_interval
     return _BoundHandler
 
 
@@ -717,6 +755,7 @@ def make_server(
     port: int = DEFAULT_PORT,
     nonce: str | None = None,
     editor_command: tuple[str, ...] = DEFAULT_EDITOR_COMMAND,
+    poll_interval: float = DEFAULT_POLL_INTERVAL,
 ) -> HTTPServer:
     """Build (but do not start) the localhost-only viewer server.
 
@@ -728,6 +767,11 @@ def make_server(
     *nonce* defaults to a fresh 256-bit token per server, which is what makes
     the ``/open`` route safe to expose: it is embedded in the served page, and
     the same-origin policy prevents any other site from reading it back out.
+
+    *poll_interval* (issue athenaeum#1539) is embedded in the served page as
+    the interval, in seconds, its JS re-fetches ``/data.json`` on. ``0`` (or
+    a falsy value) disables that polling loop entirely -- AC6's "leave a way
+    to turn it off".
     """
     handler_cls = _make_handler_class(
         session_id=session_id,
@@ -735,6 +779,7 @@ def make_server(
         cache_dir=cache_dir,
         nonce=secrets.token_urlsafe(32) if nonce is None else nonce,
         editor_command=editor_command,
+        poll_interval=poll_interval,
     )
     return HTTPServer(("127.0.0.1", port), handler_cls)
 
@@ -749,6 +794,7 @@ def cmd_viewer(args: argparse.Namespace) -> int:
         cache_dir=args.cache_dir,
         port=args.port,
         editor_command=editor,
+        poll_interval=args.poll_interval,
     )
     warn_if_editor_missing(editor)
     host, port = str(server.server_address[0]), server.server_address[1]
@@ -813,5 +859,16 @@ def add_viewer_subparser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help="Command used to open a clicked page (default: subl). Split with "
         "shell-like quoting and executed as an argv list, never via a shell.",
+    )
+    viewer_p.add_argument(
+        "--poll-interval",
+        type=float,
+        default=DEFAULT_POLL_INTERVAL,
+        help="Seconds between the served page's automatic /data.json polls, "
+        f"so a live session updates without a manual reload (default: "
+        f"{DEFAULT_POLL_INTERVAL}s). Each poll is a full ledger drain, so "
+        "lower this with care. Pass 0 to disable polling (manual reload "
+        "only, the pre-athenaeum#1539 behaviour); an operator can also "
+        "pause/resume live updates from the page itself.",
     )
     viewer_p.set_defaults(func=cmd_viewer)

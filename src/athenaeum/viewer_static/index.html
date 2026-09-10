@@ -78,11 +78,22 @@
   #toast { position: fixed; bottom: 1rem; right: 1rem; padding: 0.5rem 0.8rem;
            background: rgb(40, 40, 44); color: white; border-radius: 5px;
            font-size: 0.8rem; display: none; }
+
+  /* Live-poll status bar (issue athenaeum#1539). */
+  .poll-status { display: flex; align-items: center; gap: 0.6rem;
+                 font-size: 0.78rem; color: var(--muted); margin-bottom: 0.9rem; }
+  .poll-status label { display: flex; align-items: center; gap: 0.3rem; cursor: pointer; }
+  .poll-status label.disabled { cursor: default; opacity: 0.6; }
+  #poll-freshness.stale { color: rgb(160, 60, 30); font-weight: 600; }
 </style>
 </head>
 <body>
   <h1>athenaeum viewer</h1>
   <div class="meta" id="session-meta">loading...</div>
+  <div class="poll-status" id="poll-status">
+    <label id="poll-toggle-label"><input type="checkbox" id="poll-toggle"> live updates</label>
+    <span id="poll-freshness"></span>
+  </div>
   <div id="notice-area"></div>
 
   <section id="last-turn">
@@ -118,12 +129,38 @@
   <script>
     var NONCE = "__VIEWER_NONCE_PLACEHOLDER__";
 
+    // Milliseconds between automatic /data.json polls; 0 means disabled
+    // (issue athenaeum#1539, AC3/AC6). Substituted server-side alongside the
+    // nonce -- see _cmd_viewer.py's POLL_INTERVAL_MS_PLACEHOLDER.
+    var POLL_INTERVAL_MS = Number("__VIEWER_POLL_INTERVAL_MS_PLACEHOLDER__") || 0;
+
     var STATE_LABEL = {
       "pushed": "pushed",
       "pushed-recalled": "pushed → pulled",
       "breadcrumb": "breadcrumb",
       "pulled-cold": "pulled cold"
     };
+
+    // Classes this script itself assigns to a page-row <tr> based on payload
+    // data. Every OTHER class a row ever picks up (e.g. a future "expanded"
+    // affordance, or anything an operator toggles by hand) is left alone by
+    // applyManagedClasses() below -- see morphRows()'s docstring for why rows
+    // are mutated in place rather than torn down and rebuilt on every poll.
+    var MANAGED_ROW_CLASSES = [
+      "page-row", "pushed", "pushed-recalled", "breadcrumb", "pulled-cold", "in-last-turn"
+    ];
+
+    var lastGoodPayload = null;
+    var lastGoodAt = null;
+    var pollFailureMessage = null;
+    var pollEnabled = POLL_INTERVAL_MS > 0;
+    var pollTimer = null;
+
+    // id -> <tr> caches so a poll's re-render mutates existing row elements
+    // in place (AC4: scroll position and any expanded-row state survive a
+    // poll) instead of tearing the tables down and rebuilding them.
+    var pageRowElements = {};
+    var turnRowElements = {};
 
     function toast(message) {
       var el = document.getElementById("toast");
@@ -183,43 +220,118 @@
         .catch(function (err) { toast("Could not open: " + err.message); });
     }
 
-    function renderPages(rows, lastTurnIds) {
-      var tbody = document.getElementById("rows-pages");
-      tbody.innerHTML = "";
+    // Applies exactly the MANAGED_ROW_CLASSES membership `classes` describes,
+    // leaving any other class already on `tr` (unmanaged by this script)
+    // untouched -- see MANAGED_ROW_CLASSES' comment above.
+    function applyManagedClasses(tr, classes) {
+      MANAGED_ROW_CLASSES.forEach(function (c) {
+        if (classes.indexOf(c) === -1) { tr.classList.remove(c); }
+      });
+      classes.forEach(function (c) { tr.classList.add(c); });
+    }
+
+    function fillRowCells(tr, cells) {
+      while (tr.firstChild) { tr.removeChild(tr.firstChild); }
+      cells.forEach(function (cell) { tr.appendChild(cell); });
+    }
+
+    // Keeps `tbody` in sync with `rows` by mutating cached <tr> elements
+    // (keyed by `keyFn(row)`) in place rather than clearing and rebuilding
+    // the table on every call. This is what makes a poll-triggered re-render
+    // non-destructive (AC4): any state a <tr> carries that this script does
+    // not itself manage -- an operator- or future-feature-added class,
+    // scroll position implied by unchanged page height, etc. -- survives
+    // because the element itself is never torn down, only updated or moved.
+    // `emptyMessage` of null/"" means "just clear, no placeholder row" (used
+    // for the last-turn table, which never showed one).
+    function morphRows(tbody, cache, rows, buildFn, updateFn, keyFn, emptyMessage, colSpan) {
       if (!rows || rows.length === 0) {
-        var empty = document.createElement("tr");
-        empty.className = "empty-row";
-        var cell = document.createElement("td");
-        cell.colSpan = 4;
-        cell.textContent = "(nothing recalled yet this session)";
-        empty.appendChild(cell);
-        tbody.appendChild(empty);
+        Object.keys(cache).forEach(function (k) { delete cache[k]; });
+        tbody.innerHTML = "";
+        tbody.__placeholder = false;
+        if (emptyMessage) {
+          tbody.__placeholder = true;
+          var empty = document.createElement("tr");
+          empty.className = "empty-row";
+          var cell = document.createElement("td");
+          cell.colSpan = colSpan;
+          cell.textContent = emptyMessage;
+          empty.appendChild(cell);
+          tbody.appendChild(empty);
+        }
         return;
       }
+      if (tbody.__placeholder) {
+        tbody.innerHTML = "";
+        tbody.__placeholder = false;
+      }
+      var seen = {};
       rows.forEach(function (row) {
-        var tr = document.createElement("tr");
-        tr.className = "page-row " + (row.classification || "");
-        if (lastTurnIds[row.id]) { tr.className += " in-last-turn"; }
-        tr.appendChild(pageCell(row));
-        tr.appendChild(textCell(STATE_LABEL[row.classification] || row.classification));
-        tr.appendChild(textCell(row.memory_tier));
-        tr.appendChild(textCell(row.token_cost));
-        if (row.resolved) {
-          tr.addEventListener("click", function () { openPage(row.id); });
+        var key = keyFn(row);
+        seen[key] = true;
+        var tr = cache[key];
+        if (!tr) {
+          tr = buildFn(row);
+          cache[key] = tr;
         }
+        updateFn(tr, row);
+        // appendChild on a node already in this tbody MOVES it to the new
+        // position rather than cloning -- exactly what keeps its identity
+        // (and any state riding on it) intact across a reorder.
         tbody.appendChild(tr);
       });
+      Object.keys(cache).forEach(function (key) {
+        if (!seen[key]) {
+          var stale = cache[key];
+          if (stale.parentNode) { stale.parentNode.removeChild(stale); }
+          delete cache[key];
+        }
+      });
+    }
+
+    function buildClickableRow() {
+      var tr = document.createElement("tr");
+      tr._resolved = false;
+      tr.addEventListener("click", function () {
+        if (tr._resolved) { openPage(tr.dataset.rowId); }
+      });
+      return tr;
+    }
+
+    function renderPages(rows, lastTurnIds) {
+      morphRows(
+        document.getElementById("rows-pages"),
+        pageRowElements,
+        rows,
+        buildClickableRow,
+        function (tr, row) {
+          tr.dataset.rowId = row.id;
+          tr._resolved = !!row.resolved;
+          var classes = ["page-row"];
+          if (row.classification) { classes.push(row.classification); }
+          if (lastTurnIds[row.id]) { classes.push("in-last-turn"); }
+          applyManagedClasses(tr, classes);
+          fillRowCells(tr, [
+            pageCell(row),
+            textCell(STATE_LABEL[row.classification] || row.classification),
+            textCell(row.memory_tier),
+            textCell(row.token_cost)
+          ]);
+        },
+        function (row) { return row.id; },
+        "(nothing recalled yet this session)",
+        4
+      );
     }
 
     function renderLastTurn(turn) {
       var meta = document.getElementById("turn-meta");
-      var tbody = document.getElementById("rows-turn");
-      tbody.innerHTML = "";
       meta.innerHTML = "";
 
       if (!turn || !turn.present) {
         meta.textContent = "No unprompted push recorded for this session yet.";
         document.getElementById("turn-count").textContent = "";
+        morphRows(document.getElementById("rows-turn"), turnRowElements, [], null, null, null, null, 3);
         return;
       }
 
@@ -246,17 +358,21 @@
       document.getElementById("turn-count").textContent =
         "(" + (turn.items || []).length + ")";
 
-      (turn.items || []).forEach(function (row) {
-        var tr = document.createElement("tr");
-        tr.className = "page-row " + (row.classification || "");
-        tr.appendChild(pageCell(row));
-        tr.appendChild(textCell(row.memory_tier));
-        tr.appendChild(textCell(row.token_cost));
-        if (row.resolved) {
-          tr.addEventListener("click", function () { openPage(row.id); });
-        }
-        tbody.appendChild(tr);
-      });
+      morphRows(
+        document.getElementById("rows-turn"),
+        turnRowElements,
+        turn.items || [],
+        buildClickableRow,
+        function (tr, row) {
+          tr.dataset.rowId = row.id;
+          tr._resolved = !!row.resolved;
+          applyManagedClasses(tr, row.classification ? ["page-row", row.classification] : ["page-row"]);
+          fillRowCells(tr, [pageCell(row), textCell(row.memory_tier), textCell(row.token_cost)]);
+        },
+        function (row) { return row.id; },
+        null,
+        3
+      );
     }
 
     function renderNotice(payload) {
@@ -299,18 +415,102 @@
         "(" + (payload.pages || []).length + ")";
     }
 
-    fetch("data.json")
-      .then(function (response) {
-        if (!response.ok) {
-          throw new Error("data.json responded with status " + response.status);
-        }
-        return response.json();
-      })
-      .then(render)
-      .catch(function (err) {
-        document.getElementById("session-meta").textContent = "";
-        renderError("Could not load recall data: " + err.message);
+    function formatAge(ts) {
+      var s = Math.round((Date.now() - ts) / 1000);
+      if (s < 1) { return "just now"; }
+      return s + "s ago";
+    }
+
+    // Reflects poll health -- AC5: a failed poll must make staleness VISIBLE,
+    // never silently keep painting the last good data as if it were current.
+    function updateFreshness() {
+      var el = document.getElementById("poll-freshness");
+      if (!el) { return; }
+      el.className = "";
+      if (POLL_INTERVAL_MS <= 0) {
+        el.textContent = "live updates disabled (--poll-interval 0)";
+        return;
+      }
+      if (!pollEnabled) {
+        el.textContent = "live updates paused" +
+          (lastGoodAt ? (" — showing data from " + formatAge(lastGoodAt)) : "");
+        return;
+      }
+      if (pollFailureMessage) {
+        el.className = "stale";
+        el.textContent = "update failed (" + pollFailureMessage + ") — showing data from " +
+          (lastGoodAt ? formatAge(lastGoodAt) : "the initial load") + ", retrying…";
+        return;
+      }
+      el.textContent = lastGoodAt ? ("updated " + formatAge(lastGoodAt)) : "";
+    }
+
+    // One /data.json attempt. Always RESOLVES (never rejects), success or
+    // failure alike, so `.then(schedulePoll)` keeps the retry loop alive
+    // through failures (AC5: keep polling, never give up silently).
+    function pollOnce(isInitial) {
+      return fetch("data.json")
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("data.json responded with status " + response.status);
+          }
+          return response.json();
+        })
+        .then(function (payload) {
+          // Captured BEFORE render() touches the DOM, restored after -- a poll
+          // must never yank the operator's place on a busy view (AC4). Skipped
+          // on the very first load: there is nothing yet to preserve.
+          var savedScroll = isInitial ? null : window.scrollY;
+          lastGoodPayload = payload;
+          lastGoodAt = Date.now();
+          pollFailureMessage = null;
+          render(payload);
+          if (savedScroll !== null) { window.scrollTo(0, savedScroll); }
+        })
+        .catch(function (err) {
+          pollFailureMessage = err.message;
+          // Only the very first load, with nothing good on screen yet, gets the
+          // full-page error treatment. Once we have a good payload, a failed
+          // poll must leave it exactly as it was (AC5) -- the freshness line
+          // is the only thing allowed to change.
+          if (!lastGoodPayload) {
+            document.getElementById("session-meta").textContent = "";
+            renderError("Could not load recall data: " + err.message);
+          }
+        })
+        .then(function () { updateFreshness(); });
+    }
+
+    function schedulePoll() {
+      if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
+      if (!pollEnabled || POLL_INTERVAL_MS <= 0) { return; }
+      // A timeout CHAIN (schedule the next poll only after this one settles),
+      // not setInterval -- each poll is a real subprocess drain and can take
+      // longer than the interval; setInterval would pile up overlapping
+      // requests instead of simply running back-to-back.
+      pollTimer = window.setTimeout(function () {
+        pollOnce(false).then(schedulePoll);
+      }, POLL_INTERVAL_MS);
+    }
+
+    var pollToggle = document.getElementById("poll-toggle");
+    if (POLL_INTERVAL_MS <= 0) {
+      pollToggle.checked = false;
+      pollToggle.disabled = true;
+      document.getElementById("poll-toggle-label").className = "disabled";
+    } else {
+      pollToggle.checked = pollEnabled;
+      pollToggle.addEventListener("change", function () {
+        // AC6: an operator can freeze the view (e.g. mid-presentation) without
+        // restarting the server with --poll-interval 0.
+        pollEnabled = pollToggle.checked;
+        if (pollEnabled) { schedulePoll(); }
+        else if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
+        updateFreshness();
       });
+    }
+
+    pollOnce(true).then(schedulePoll);
   </script>
 </body>
 </html>
