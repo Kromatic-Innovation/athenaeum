@@ -39,6 +39,7 @@ import pytest
 
 from athenaeum.name_structure import (
     merged_body_within_page_size_threshold,
+    propose_qualified_name_merges,
     scan_qualified_name_splits,
 )
 from athenaeum.tiers import DEFAULT_PAGE_SIZE_THRESHOLD_CHARS, resolve_page_size_threshold_chars
@@ -356,4 +357,14 @@ def test_the_shipped_scan_over_proposes_on_the_long_family(tmp_path):
         "learned the size boundary, update the baseline doc and retire this "
         "assertion rather than loosening it."
     )
+
+    # The scan FINDING a pair and the queue HOLDING it are two different
+    # claims: `propose_qualified_name_merges` drops a split whose fold target
+    # would not resolve back to the bare page's own file
+    # (`fold_target_resolves`, the slugify 60-char cap). Asserting only the
+    # scan would let the contradiction be reported as reaching a reviewer
+    # when it might never have. It does reach one.
+    assert propose_qualified_name_merges(wiki) == {"splits": 1, "queued": 1, "unfoldable": 0}
+    assert qualified.name in (wiki / "_pending_merges.md").read_text(encoding="utf-8")
+
     assert boundary_verdict("long", [bare.body(), qualified.body()]).verdict == "decompose"

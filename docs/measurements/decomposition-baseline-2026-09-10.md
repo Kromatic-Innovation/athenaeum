@@ -109,6 +109,12 @@ a fold into `Halstow Junction` — the exact merge the boundary above says is
 wrong, on the exact page pair. Recorded as an assertion
 (`test_the_shipped_scan_over_proposes_on_the_long_family`), not as prose.
 
+And it reaches a reviewer, not just the scanner:
+`propose_qualified_name_merges` returns `{"splits": 1, "queued": 1,
+"unfoldable": 0}` and the block lands in `_pending_merges.md`. Worth
+separating, because a split whose fold target fails the slugify round-trip
+(`fold_target_resolves`) is found and then dropped — this one is not.
+
 `merged_body_within_page_size_threshold` therefore ships **deliberately
 unwired**: this issue is an eval, it states and grades the boundary, and it
 does not change what a default-ON scan proposes. Wiring it is a behaviour
