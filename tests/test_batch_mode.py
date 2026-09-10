@@ -3764,7 +3764,13 @@ class TestBatchSpendReservation:
             root / "wiki", cache_dir=cache_dir
         ) == root / "wiki" / spend.RESERVATION_LEDGER_FILENAME
         # Legacy store with records and nothing migrated: stays put.
-        (cache_dir / spend.RESERVATION_LEDGER_FILENAME).write_text("", encoding="utf-8")
+        # The fixture writes an actual RECORD, not a zero-byte file: issue
+        # athenaeum#1512 made "populated"/"migrated" a content check rather
+        # than bare existence, so an empty file no longer stands in for "has
+        # records" -- it now reads as the fresh-store case it literally is.
+        (cache_dir / spend.RESERVATION_LEDGER_FILENAME).write_text(
+            '{"batch_id":"msgbatch_legacy"}\n', encoding="utf-8"
+        )
         assert spend.reservation_ledger_path(
             root / "wiki", cache_dir=cache_dir
         ) == cache_dir / spend.RESERVATION_LEDGER_FILENAME
