@@ -73,6 +73,22 @@ def test_add_viewer_subparser_registers_with_cli() -> None:
     args = viewer_parser.parse_args([])
     assert args.port == _cmd_viewer.DEFAULT_PORT
     assert args.session is None
+    # AC3: poll interval is a configurable flag with a sensible default.
+    assert args.poll_interval == _cmd_viewer.DEFAULT_POLL_INTERVAL
+
+
+def test_poll_interval_flag_parses_zero_to_disable() -> None:
+    """AC6: 0 is how an operator disables polling from the CLI."""
+    import argparse
+
+    from athenaeum.cli import build_parser
+
+    parser = build_parser()
+    subparsers_action = next(
+        a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
+    )
+    args = subparsers_action.choices["viewer"].parse_args(["--poll-interval", "0"])
+    assert args.poll_interval == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +405,41 @@ def test_serve_html_and_data_json_end_to_end_no_reference_determination(tmp_path
     assert {r["id"] for r in payload["pushed_unbidden"]} == {"hook1"}
     assert {r["id"] for r in payload["pulled_deliberately"]} == {"pull1"}
     assert all(r["referenced"] is None for r in payload["pushed_unbidden"])
+
+
+def test_served_html_embeds_configured_poll_interval_in_milliseconds(tmp_path: Path) -> None:
+    """AC3: the interval the CLI was given reaches the served page's JS, as
+    milliseconds -- and the placeholder token itself never leaks through."""
+    server = _cmd_viewer.make_server(
+        session_id="s1", path=tmp_path, cache_dir=tmp_path, port=0, poll_interval=1.5
+    )
+    with _RunningServer(server) as running:
+        port = running.server_address[1]
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as resp:
+            html = resp.read().decode("utf-8")
+    assert 'POLL_INTERVAL_MS = Number("1500")' in html
+    assert "__VIEWER_POLL_INTERVAL_MS_PLACEHOLDER__" not in html
+
+
+def test_served_html_poll_interval_zero_disables(tmp_path: Path) -> None:
+    """AC6: --poll-interval 0 reaches the page as a literal 0, which its JS
+    treats as "polling disabled" -- never a falsy-but-nonzero surprise."""
+    server = _cmd_viewer.make_server(
+        session_id="s1", path=tmp_path, cache_dir=tmp_path, port=0, poll_interval=0
+    )
+    with _RunningServer(server) as running:
+        port = running.server_address[1]
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as resp:
+            html = resp.read().decode("utf-8")
+    assert 'POLL_INTERVAL_MS = Number("0")' in html
+
+
+def test_make_server_defaults_poll_interval(tmp_path: Path) -> None:
+    server = _cmd_viewer.make_server(session_id="s1", path=tmp_path, cache_dir=tmp_path, port=0)
+    try:
+        assert server.RequestHandlerClass.poll_interval == _cmd_viewer.DEFAULT_POLL_INTERVAL
+    finally:
+        server.server_close()
 
 
 def test_data_json_scopes_to_one_session(tmp_path: Path) -> None:

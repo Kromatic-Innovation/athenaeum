@@ -1392,5 +1392,6 @@ Serve a localhost-only, read-only page showing pushed-unbidden vs. pulled-delibe
 | `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
 | `--editor` | — | — | Command used to open a clicked page (default: subl). Split with shell-like quoting and executed as an argv list, never via a shell. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--poll-interval` | `3.0` | — | Seconds between the served page's automatic /data.json polls, so a live session updates without a manual reload (default: 3.0s). Each poll is a full ledger drain, so lower this with care. Pass 0 to disable polling (manual reload only, the pre- behaviour); an operator can also pause/resume live updates from the page itself. |
 | `--port` | `8756` | — | TCP port to bind on localhost (default: 8756). Pass 0 to let the OS assign a free port. |
 | `--session` | — | — | Scope the view to one consuming session id. Strongly recommended: without it, the view includes every session in the ledger, and if the viewer's own process ever triggers a recall call its own activity would appear mixed in. |
