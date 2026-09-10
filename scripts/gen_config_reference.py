@@ -411,6 +411,21 @@ _CURATED: dict[str, dict[str, str]] = {
         "default": "`<knowledge_root>/wiki`",
         "precedence": "`athenaeum.yaml` (relative to `knowledge_root`) > code default",
     },
+    "resolve_spend_accounting_timezone": {
+        "yaml_path": "`spend.accounting_timezone`",
+        "env_var": "`ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE`",
+        "cli_flag": "—",
+        "default": "the host's system-local timezone (see `_system_local_timezone`)",
+        "precedence": "environment variable > `athenaeum.yaml` > code default",
+        # Generic invocation would call `_system_local_timezone()` and bake
+        # THIS generator's own machine's zone into a committed file (athenaeum#1527)
+        # -- exactly the `resolve_cache_dir` class of problem above, just for a
+        # tzinfo instead of a path. The default genuinely IS "the system
+        # timezone"; that sentence is true on every machine, so it's what gets
+        # rendered instead of any one resolved value. Rendering `Etc/UTC` would
+        # not be a neutral placeholder either -- it would document one
+        # specific zone that merely happens to be CI's.
+    },
     "resolve_index_globs": {
         # Bundles two independent leaf keys under one function; documented
         # as two rows rather than shoehorned into one.

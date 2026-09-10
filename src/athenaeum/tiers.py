@@ -2746,6 +2746,13 @@ Write a clean, factual entity page in markdown. Follow these rules:
   entity is and why it matters — a search-index summary. Then a blank line.
 - Then start the page with `# Entity Name`
 - Include only facts supported by the raw observation
+- A field the observation is SILENT on stays absent — silence is not the
+  same as "nothing contradicts it". Do not infer a fact (e.g. an
+  affiliation) from context such as who authored the source document.
+  Extends the same rule athenaeum already applies to artifact
+  classification: do not invent a classification the note does not
+  state. If an absent field matters to this page, raise it in
+  `## Open Questions` instead of guessing.
 - Use footnotes to cite the source: [^1]: source reference
 - Keep it concise — 3-10 lines of content is typical for a new entity
 - Do NOT include YAML frontmatter — that is handled separately

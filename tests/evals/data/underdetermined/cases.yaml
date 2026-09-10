@@ -1,0 +1,117 @@
+# Underdetermined-source golden set (issue athenaeum#1518)
+#
+# Synthetic scenario: the same fictional "Thornhollow Advisory" 12-person
+# consultancy the detector/resolver/classify/merge golden sets use, plus two
+# new invented counterparties ("Larkspur Site Audits", "Fernbridge
+# Analytics") for this layer only. Every case is invented — nothing here is
+# drawn from a live knowledge tree.
+#
+# Unlike ``merge/cases.yaml`` (all four cases conflict-shaped: two or more
+# claims competing), every case here feeds ONE raw observation into
+# tiers.tier3_create() with NOTHING to reconcile — the gap is the point.
+# Each case asserts what the composed entity page does (or does not) do with
+# a field the source underdetermines. Real Anthropic call, default WRITE
+# model (tiers.DEFAULT_WRITE_MODEL) — see tests/evals/test_underdetermined_eval.py.
+#
+# ``outcome_class`` values:
+#   - silent_field_absent : the source names a person once with no stated
+#                       affiliation, authored by a DIFFERENT organization ->
+#                       expect the person's action attributed, no
+#                       affiliation invented, and specifically not the
+#                       authoring org (the plausible wrong inference)
+#   - adjacent_fact_not_folded : the source names a person performing one
+#                       action; a nearby passage in the AUTHOR's own
+#                       first-person voice describes a second, different
+#                       action -> expect action 1 attributed to the named
+#                       person, action 2 NOT folded into their role
+#   - material_gap_escalates : the gap is material to the page's own
+#                       purpose -> expect the existing `## Open Questions`
+#                       mechanism to fire (CREATE_SYSTEM already asks for
+#                       this section; no new escalation path is added)
+#   - stated_field_populates : NEGATIVE CONTROL — the affiliation IS stated
+#                       plainly -> expect it populated correctly, proving
+#                       the fix is not blanket suppression (without this
+#                       case, A-C would pass trivially under a librarian
+#                       that never fills any field)
+#
+# Scoring (see test_underdetermined_eval.py): shape/keyword-presence checks
+# over the resulting page body, plus a same-sentence co-occurrence check for
+# "is fact X attributed to person Y" — never exact prose.
+
+- id: silent_affiliation_not_inferred
+  outcome_class: silent_field_absent
+  entity:
+    name: Cedarline Retail Buildout
+    entity_type: project
+    tags: [active, client]
+    access: internal
+  observation: >-
+    Larkspur Site Audits — Walkthrough Log, 2026-04-02.
+    During the pre-buildout walkthrough for the Cedarline Retail space,
+    Devon Achebe flagged a load-bearing wall near the east entrance that
+    will need an engineer's sign-off before the framing crew proceeds.
+    No further detail on Devon's role was recorded in the log.
+  source_ref: "sessions/2026-04-02.md"
+  expected:
+    must_include_substrings: ["Devon Achebe"]
+    # The authoring org's name has no reason to appear in the composed body
+    # at all — the footnote cites via source_ref, not by restating the
+    # author's name — so its presence here is the signature of the
+    # wrong inference the case is built to tempt (Devon Achebe (Larkspur
+    # Site Audits) ...).
+    must_not_include_substrings: ["Larkspur"]
+
+- id: adjacent_action_not_folded_into_role
+  outcome_class: adjacent_fact_not_folded
+  entity:
+    name: Windrow Dashboard Rollout
+    entity_type: project
+    tags: [active, client]
+    access: internal
+  observation: >-
+    I sat in on today's design review for Windrow's dashboard rollout.
+    Priya Anand presented the revised chart layouts to the client
+    stakeholders, and they signed off on all three. Afterward I circled
+    back separately with our print vendor about proofing the updated user
+    guide before next week's training session.
+  source_ref: "sessions/2026-04-15.md"
+  expected:
+    must_include_substrings: ["Priya Anand", "chart layouts"]
+    # Action 2 (the vendor/proofing follow-up) belongs to the note's own
+    # first-person author, a demonstrably different party (they refer to
+    # Priya in the third person) — it must not read as something Priya did.
+    forbidden_co_occurrence:
+      - ["Priya Anand", "proofing"]
+      - ["Priya Anand", "vendor"]
+
+- id: material_gap_raises_open_question
+  outcome_class: material_gap_escalates
+  entity:
+    name: Fenwick Retainer Renewal
+    entity_type: project
+    tags: [active, client]
+    access: internal
+  observation: >-
+    The Fenwick retainer renewal call covered fee structure and confirmed
+    the standard two-week onboarding cadence carries over unchanged.
+    Whether to add the expanded compliance-audit scope to the renewed
+    contract was left open pending the client's board sign-off, with no
+    date given for when that decision will land.
+  source_ref: "sessions/2026-05-01.md"
+  expected:
+    must_include_substrings: ["## Open Questions", "compliance-audit"]
+
+- id: stated_affiliation_populates
+  outcome_class: stated_field_populates
+  entity:
+    name: Bellcroft Onboarding
+    entity_type: project
+    tags: [active, client]
+    access: internal
+  observation: >-
+    Renata Solis, senior consultant at Fernbridge Analytics, led the
+    data-migration workstream for the Bellcroft onboarding, coordinating
+    directly with Thornhollow's project lead throughout.
+  source_ref: "sessions/2026-05-10.md"
+  expected:
+    must_include_substrings: ["Renata Solis", "Fernbridge Analytics"]
