@@ -31,7 +31,7 @@ from athenaeum import mcp_server, push_metrics
 STALE_ENV_ID = "848ad5c9-a056-4d0d-b1a7-60c462111b01"
 # The id the conversation rotated to and is calling under — the RIGHT answer.
 CURRENT_ID = "85134494-83a9-4f90-8d44-1f06c8c75dbd"
-SCOPE = "-Users-someone-Code-athenaeum"
+SCOPE = "-srv-proj-athenaeum"
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +267,7 @@ class TestLoudFallback:
         search. The answer is the stamped fallback — NOT an unbounded hunt
         across every scope for something that looks plausible."""
         empty = tmp_path / "projects"
-        (empty / "-Users-someone-Code-other").mkdir(parents=True)
+        (empty / "-srv-proj-other").mkdir(parents=True)
 
         result = push_metrics.ToolUseSessionResolver(projects_root=empty, attempts=1).resolve(
             "toolu_JOINME"
@@ -290,7 +290,7 @@ class TestLoudFallback:
         directly and does not decay.
         """
         (projects_root / SCOPE / f"{STALE_ENV_ID}.jsonl").unlink()
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/someone/Code/athenaeum")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/srv/proj/athenaeum")
 
         result = push_metrics.ToolUseSessionResolver(projects_root=projects_root).resolve(
             "toolu_JOINME"
@@ -305,7 +305,7 @@ class TestLoudFallback:
         """Backstop for the same failure, for a client that exports no
         `CLAUDE_PROJECT_DIR`: the server's cwd is the project directory."""
         (projects_root / SCOPE / f"{STALE_ENV_ID}.jsonl").unlink()
-        monkeypatch.setattr(push_metrics.os, "getcwd", lambda: "/Users/someone/Code/athenaeum")
+        monkeypatch.setattr(push_metrics.os, "getcwd", lambda: "/srv/proj/athenaeum")
 
         result = push_metrics.ToolUseSessionResolver(projects_root=projects_root).resolve(
             "toolu_JOINME"
@@ -336,10 +336,10 @@ class TestLoudFallback:
     def test_scope_dir_name_matches_claude_codes_own_mangling(self) -> None:
         """Read off the real transcript tree, not from documentation: every
         character that is not a letter, digit, or hyphen becomes a hyphen."""
-        assert push_metrics._scope_dir_name("/Users/x/Code/athenaeum") == "-Users-x-Code-athenaeum"
+        assert push_metrics._scope_dir_name("/srv/proj/athenaeum") == "-srv-proj-athenaeum"
         assert (
-            push_metrics._scope_dir_name("/Users/x/Code/hestia/.claude/worktrees/agent-1")
-            == "-Users-x-Code-hestia--claude-worktrees-agent-1"
+            push_metrics._scope_dir_name("/srv/proj/hestia/.claude/worktrees/agent-1")
+            == "-srv-proj-hestia--claude-worktrees-agent-1"
         )
 
     def test_no_env_id_and_no_join_yields_no_record_at_all(

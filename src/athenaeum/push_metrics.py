@@ -210,9 +210,9 @@ def _scope_dir_name(project_dir: str) -> str:
 
     The mangling is "every character that is not a letter, digit, or hyphen
     becomes a hyphen" — read off the real tree rather than from documentation:
-    ``/Users/x/Code/athenaeum`` -> ``-Users-x-Code-athenaeum``, and
-    ``/Users/x/Code/hestia/.claude/worktrees/agent-1`` ->
-    ``-Users-x-Code-hestia--claude-worktrees-agent-1`` (the ``/.`` pair
+    ``/srv/proj/athenaeum`` -> ``-srv-proj-athenaeum``, and
+    ``/srv/proj/hestia/.claude/worktrees/agent-1`` ->
+    ``-srv-proj-hestia--claude-worktrees-agent-1`` (the ``/.`` pair
     yielding two hyphens, an existing hyphen surviving).
 
     Used only to name ONE candidate directory, which must already exist to be
