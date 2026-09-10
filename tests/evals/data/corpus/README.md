@@ -73,6 +73,42 @@ the real entities**, in fixtures, issues, commit messages, or code comments.
 Authored as a handful of world files rather than a hundred loose markdown
 pages so the whole corpus can be audited by reading top to bottom.
 
+## Relatedness and redundancy (issue athenaeum#1570)
+
+Two clusters live in `core/08-relatedness.yaml`, and they want **opposite
+verdicts**. That is the point: a fixture conflating them would license a change
+that papers over one while appearing to fix the other.
+
+| cluster | shape | ground truth |
+|---|---|---|
+| **A — related, unlinked** | a concept, a model *of* it, a process *embodying* it, with zero edges between them | the three edges that **should** exist |
+| **B — redundant** | a bare name, the same name with a parenthetical qualifier, and an associated team page | the first two **merge**; the team page **does not** |
+
+Cluster B's team page is the **negative control**. Without it, "merge
+everything sharing this name" scores perfectly — the redundancy analogue of
+linking everything. The merge *verdict* is graded in athenaeum#1577; what is
+graded here is the **retrieval cost** of the split, via the `redundancy` probe
+`keelbridge_programme_scope`: a complete answer needs both halves and retrieval
+delivers one.
+
+**Not a fourth tier, and the edges are not in the pages.** `core` is defined as
+the tier carrying every ground-truth assertion, and these clusters are ground
+truth; `distractor` and `ballast` are held apart because each is a *generated*
+axis a regression can be attributed to, and relatedness generates nothing. The
+edges themselves live in `ground_truth/relatedness.yaml` rather than on the
+pages, because the fixture's entire value is that they are **absent** — a
+corpus that already carries them cannot tell a librarian that writes edges from
+one that does not.
+
+The measure (`tests/evals/relatedness.py`) counts spurious edges against the
+**whole corpus**, not just the other members of the cluster. A measure that
+only rewards more edges is maximised by linking every page to every other page,
+which is the failure the viewer already documents at `_cmd_viewer.py:577-580`:
+breadcrumb colour stops carrying information once everything is a breadcrumb.
+`tests/test_eval_corpus_relatedness.py` pins both directions — link-nothing
+fails on recall, link-everything fails on precision — plus a positive control,
+and asserts their *ordering* rather than a tuned constant.
+
 ## Two axes, deliberately independent
 
 Size and confusability are separate knobs (`tests/evals/corpus.py`, `SCALES`).
