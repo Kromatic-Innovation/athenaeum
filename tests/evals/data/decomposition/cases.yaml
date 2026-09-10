@@ -1,0 +1,292 @@
+# Decomposition golden set (issue athenaeum#1581)
+#
+# The question this layer asks: when a page has grown to cover several
+# FACETS, does the librarian decompose it into a hub plus linked facet
+# sub-pages -- and does it leave alone a page that is merely LONG?
+#
+# Content policy (tests/evals/data/corpus/README.md): every name, term and
+# fact below is invented outright. Nothing is copied, paraphrased or sampled
+# from any live knowledge tree. `tests/test_eval_corpus_leakage.py` walks the
+# whole of `tests/evals/data/` -- this file included -- and is the bar.
+#
+# WHY THIS FIXTURE IS NOT IN `corpus/core/*.yaml`
+# ------------------------------------------------
+# The relatedness corpus (athenaeum#1570) carries pages that exist to be
+# RETRIEVED, and every eval that reads it grades an assertion about the
+# corpus as a whole -- athenaeum#1577's consolidation verdict, for one,
+# asserts an EXACT proposal set over it. The families below are `name` /
+# `name (qualifier)` pairs by design, so adding them to that corpus would
+# change that exact set and make this layer's fixture an edit to another
+# lane's ground truth. They are per-case librarian inputs, not probe
+# targets, so they live in this layer's own directory like every other
+# layer's `cases.yaml`. `oversize_family` below reaches ACROSS to Cluster B
+# read-only, which is how the boundary is demonstrated without re-authoring
+# it.
+#
+# SIZE IS AN EXPLICIT KNOB, AND THE PADDING IS DECLARED
+# -----------------------------------------------------
+# Cases B and C have to sit ABOVE `tiers.DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`
+# (10,000). Ten thousand characters of invented prose per case would be
+# unreadable and unauditable, and an auditor could no longer check the
+# content policy by reading this file top to bottom -- which is the property
+# `corpus/README.md` insists on. So each section carries its real,
+# fact-bearing text and a `pad_to_chars` target; `tests/evals/decomposition.py`
+# expands it with a deterministic, content-free filler line until the section
+# reaches that size. The filler carries no facts and no names, so no ground
+# truth ever hides inside it, and the page size is a number in this file
+# rather than an accident of how much prose someone felt like writing.
+#
+# GROUND TRUTH is `facets:` -- per case, the facets the page covers and, per
+# facet, the fact keys a correct decomposition must land on THAT facet's
+# sub-page and no other. Fact keys are matched as substrings of a page body
+# (`decomposition.facet_alignment`), never as exact prose.
+
+cases:
+  - id: multifacet_under_threshold
+    # CASE A -- the anti-vacuity gate (athenaeum#1581 AC3).
+    #
+    # Three facets, one page, comfortably UNDER the size threshold. A reader
+    # would draw a hub plus three sub-pages here; today's only split trigger is
+    # `len(existing_body) > threshold`, so nothing fires and the new intake
+    # merges into the single growing page. This case is EXPECTED TO FAIL on the
+    # shipped librarian, and the baseline is recorded in
+    # docs/measurements/decomposition-baseline-2026-09-10.md.
+    expected_verdict: decompose
+    deciding_tier: deterministic_size_gate
+    page:
+      uid: project-draymoor-interchange
+      type: project
+      name: Draymoor Interchange
+      access: internal
+      tags: [programme, active]
+      sections:
+        - facet: financials
+          heading: Financials
+          text: |
+            The standing budget line is 310 thousand GBP per year, reviewed at
+            the half-year point. Capital spend on the platform canopies is
+            carried separately and does not draw on that line.
+        - facet: people
+          heading: People
+          text: |
+            The programme is led from the delivery practice, with a named
+            engineering lead per workstream and a single point of contact for
+            each participating transport authority.
+        - facet: timeline
+          heading: Timeline
+          text: |
+            Design sign-off closed in March 2026. Construction runs to the
+            spring of 2027, with the concourse handed over ahead of the
+            platform works rather than alongside them.
+    # New intake arriving on ONE facet. A librarian that decomposed would put
+    # this on the financials sub-page; today it lands on the single hub.
+    intake:
+      facet: financials
+      text: |
+        The Draymoor Interchange half-year budget review moved 40 thousand GBP
+        from the contingency line to the canopy capital spend, leaving the
+        standing annual line unchanged.
+    facets:
+      financials:
+        - "310 thousand GBP"
+        - "canopy"
+      people:
+        - "engineering lead"
+      timeline:
+        - "spring of 2027"
+
+  - id: multifacet_oversize
+    # CASE B -- the same shape, ABOVE the threshold.
+    #
+    # The existing byte-size trigger fires here. What is graded is not THAT it
+    # fired but WHERE it cut: `_split_into_atomic_sections` splits at the
+    # shallowest heading depth present, which is a typographic boundary, not a
+    # facet boundary. The facets and the top-level headings are deliberately
+    # aligned one-to-one here, which is the FAVOURABLE arrangement for the
+    # shipped mechanism -- so a passing score is a statement about this
+    # fixture, not a claim that section splitting finds facets in general.
+    expected_verdict: decompose
+    deciding_tier: deterministic_size_gate
+    page:
+      uid: project-tarnwick-survey
+      type: project
+      name: Tarnwick Survey
+      access: internal
+      tags: [programme, active]
+      sections:
+        - facet: financials
+          heading: Financials
+          pad_to_chars: 3600
+          text: |
+            The survey is funded from the practice's own research line at 88
+            thousand GBP for the year, with no client contribution and no
+            capital component.
+        - facet: people
+          heading: People
+          pad_to_chars: 3600
+          text: |
+            Four surveyors rotate through the field weeks, paired so that no
+            site is ever attended by one person alone, with an analyst holding
+            the schedule.
+        - facet: timeline
+          heading: Timeline
+          pad_to_chars: 3600
+          text: |
+            Field weeks run from April to October 2026. The written report is
+            due six weeks after the last field week, and the dataset is frozen
+            on the day the last site closes.
+    intake:
+      facet: people
+      text: |
+        A fifth surveyor joined the Tarnwick Survey rota in August 2026, which
+        shortens each pairing's field week from five days to four.
+    facets:
+      financials:
+        - "88 thousand GBP"
+        - "research line"
+      people:
+        - "Four surveyors"
+        - "analyst holding the schedule"
+      timeline:
+        - "April to October 2026"
+        - "six weeks after the last field week"
+
+  - id: singlefacet_oversize
+    # CASE C -- the negative control (athenaeum#1581 AC3's other half).
+    #
+    # Long. Genuinely long -- over the same threshold Case B clears. But it
+    # covers ONE facet, so decomposing it would produce sub-pages no reader
+    # would draw. A system that splits on size alone, or on length alone, fails
+    # here. This case is EXPECTED TO PASS on the shipped librarian, and it is
+    # what stops Case A's failure from being satisfiable by "always split".
+    #
+    # It carries no top-level heading structure on purpose: a single-facet
+    # narrative is exactly the shape that has nothing to cut along, and it is
+    # also the no-heading cohort `_perform_oversize_page_split` documents
+    # itself as declining to split (athenaeum#1248, the cohort athenaeum#1282
+    # owns). Both readings agree on the verdict here, which is the point.
+    expected_verdict: no_decompose
+    deciding_tier: deterministic_size_gate
+    page:
+      uid: reference-quillhaven-moorings-narrative
+      type: reference
+      name: Quillhaven Moorings Narrative
+      access: internal
+      tags: [reference]
+      sections:
+        - facet: narrative
+          heading: ""
+          pad_to_chars: 11000
+          text: |
+            A continuous account of how the mooring allocation at Quillhaven
+            came to be arranged the way it is, written as one narrative because
+            the sequence is the substance: each arrangement was made in answer
+            to the previous one, and pulling any stretch of it out leaves the
+            rest unreadable.
+    intake:
+      facet: narrative
+      text: |
+        A further paragraph of the Quillhaven Moorings account, continuing the
+        same narrative rather than opening a new subject.
+    facets:
+      narrative:
+        - "mooring allocation"
+
+  - id: decomposed_hub_new_intake
+    # CASE D -- an ALREADY-decomposed hub, and new intake on one facet.
+    #
+    # Deliberately overlaps the attachment eval's Case B: the two layers must
+    # agree that intake belongs on the existing sub-page, not on the hub and
+    # not on a newly minted page. This is the one case whose verdict is not
+    # reached by a deterministic gate -- the hub and its sub-pages are all
+    # already in the index, so what decides is whether the classify tier mints
+    # a NEW entity for facet intake that an existing sub-page already covers.
+    # That is why this layer records fixtures at all (AC5).
+    expected_verdict: attach_to_existing_facet
+    deciding_tier: classify
+    expected_target_uid: project-pelbridge-relay-costs
+    page:
+      uid: project-pelbridge-relay
+      type: project
+      name: Pelbridge Relay
+      access: internal
+      tags: [programme, active]
+      sections:
+        - facet: hub
+          heading: ""
+          text: |
+            The Pelbridge Relay replaces the overnight message-relay service
+            between the two operating regions. Detail is held on the linked
+            pages below rather than here.
+    # The sub-pages that already exist. `related:` edges hub <-> sub-page are
+    # authored here because in THIS case they are the starting state, not the
+    # thing being measured -- Cases A and B are where their absence is the
+    # assertion.
+    existing_subpages:
+      - uid: project-pelbridge-relay-costs
+        name: Pelbridge Relay (costs)
+        facet: financials
+        text: |
+          The relay runs at 12 thousand GBP a quarter against the operations
+          line, with the decommissioning of the old service credited back in
+          the quarter it completes.
+      - uid: project-pelbridge-relay-rota
+        name: Pelbridge Relay (rota)
+        facet: people
+        text: |
+          Two operators cover the overnight window on a fortnightly rotation,
+          with the escalation contact drawn from the daytime desk.
+    intake:
+      facet: financials
+      text: |
+        The Pelbridge Relay quarterly cost fell to 9 thousand GBP once the old
+        overnight service was decommissioned and its line credited back.
+    facets:
+      financials:
+        - "12 thousand GBP"
+      people:
+        - "Two operators"
+
+# ---------------------------------------------------------------------------
+# The consolidate / decompose BOUNDARY (operator design input, 2026-09-10)
+# ---------------------------------------------------------------------------
+#
+# Not a case: a second family, used by `test_eval_decomposition.py` to
+# demonstrate that one size threshold separates athenaeum#1570 Cluster B --
+# where `Keelbridge` / `Keelbridge (rollout)` SHOULD merge -- from a family
+# of the identical NAME SHAPE where the sub-pages are the correct outcome and
+# a merge would be wrong.
+#
+# Both families are `name` / `name (qualifier)` with a phase-or-facet
+# qualifier. No rule reading the STRING can tell them apart, which is the
+# finding athenaeum#1577's lane could not resolve. What separates them is how
+# much page there would be after the fold.
+oversize_family:
+  bare:
+    uid: project-halstow-junction
+    type: project
+    name: Halstow Junction
+    access: internal
+    tags: [programme, active]
+    sections:
+      - facet: overview
+        heading: Overview
+        pad_to_chars: 6000
+        text: |
+          The Halstow Junction programme rebuilds the signalling interlock
+          shared by three routes, in four phases that were let separately and
+          run to their own schedules.
+  qualified:
+    uid: project-halstow-junction-resignalling
+    type: project
+    name: Halstow Junction (resignalling)
+    access: internal
+    tags: [phase, active]
+    sections:
+      - facet: resignalling
+        heading: Resignalling
+        pad_to_chars: 6000
+        text: |
+          The resignalling phase, let as its own contract with its own
+          acceptance regime. It has a distinct budget, a distinct supplier and
+          a distinct completion date from the other three phases.

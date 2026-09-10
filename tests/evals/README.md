@@ -18,7 +18,17 @@ Layers exercised end-to-end against a real Claude API call:
 | Recall    | Haiku (`ATHENAEUM_TOPIC_MODEL`)    | 6 prompts       | ≥ 5/6  |
 | Classify  | Haiku (`ATHENAEUM_CLASSIFY_MODEL`) | 6 raw intakes   | ≥ 4/6  |
 | Merge     | Sonnet (`ATHENAEUM_WRITE_MODEL`)   | 4 merge cases   | ≥ 3/4  |
+| Attachment | the whole chain (Haiku + Sonnet)  | 5 routing cases | ≥ 4/5 **(expected RED)** |
 | Backfill  | deferred until athenaeum#328                | —               | —      |
+
+Attachment (issue athenaeum#1580) is the one layer whose floor is
+**aspirational rather than descriptive**. Every other floor above describes
+what the shipped librarian already scores; that layer's floor describes what a
+CORRECT librarian would score, and it is red today by design — see its module
+docstring and issue athenaeum#1580 AC3. Tuning it down to observed behaviour
+would make it a rubber stamp. It is also the only layer that runs the WHOLE
+tier chain (`librarian.process_one`) against a materialized wiki rather than
+one tier in isolation, which is why it has no single model in the table.
 
 Classify and Merge (issue athenaeum#552) cover `tiers.py`'s Tier-2 CLASSIFY and
 Tier-3 WRITE/MERGE stages — see `docs/measurements/evals-inventory.md` for the full
@@ -106,6 +116,37 @@ pytest -m eval tests/evals/ --record
 git add tests/fixtures/recorded/
 git commit -m "evals: re-record fixtures after prompt edit"
 ```
+
+### Seeding the `decomposition` layer (issue athenaeum#1581, not yet seeded)
+
+The layer ships with its fixture directory empty and **absent from
+`tests/fixtures/recorded/seeded-layers.yml`** — the never-seeded state, which
+the replay suite passes trivially (athenaeum#551). It has exactly one metered
+case, `decomposed_hub_new_intake`; the layer's other three cases are
+deterministic and are graded with no key in
+`tests/test_eval_decomposition.py`.
+
+Seeding it is a metered operator action. The command:
+
+```bash
+gh workflow run evals.yml -f record=true --repo Kromatic-Innovation/athenaeum
+```
+
+Then download the `recorded-fixtures` artifact from that run, commit
+`tests/fixtures/recorded/decomposition/decomposed_hub_new_intake.json`, and
+append to `seeded-layers.yml` in the same PR:
+
+```yaml
+  decomposition:
+    date: <ISO date of the run>
+    run: https://github.com/Kromatic-Innovation/athenaeum/actions/runs/<id>
+```
+
+A layer added to that manifest MUST keep a non-empty fixture directory, so
+append the key only once the fixture is committed alongside it. Update
+`docs/measurements/decomposition-baseline-2026-09-10.md` with Case D's
+observed result at the same time — the baseline's Case D row currently reads
+"not yet measured".
 
 ### Re-deriving instead of re-recording (no live key available)
 

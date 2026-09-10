@@ -114,6 +114,7 @@ Evidence, kept out of the reading path.
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)
 - [Recall relevance floor sweep](measurements/recall-relevance-floor-sweep.md)
 - [`used` column heuristic accuracy (synthetic)](measurements/used-column-heuristic-accuracy-2026-09-10.md)
+- [Decomposition baseline](measurements/decomposition-baseline-2026-09-10.md)
 - [Deploy SHA stamp](measurements/deploy-sha-stamp.md)
 - [LLM provider cost audit](measurements/audits/2026-08-06-llm-provider-cost-audit.md)
 

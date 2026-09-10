@@ -526,6 +526,55 @@ def propose_qualified_name_merges(
     return {"splits": len(splits), "queued": queued, "unfoldable": unfoldable}
 
 
+def merged_body_within_page_size_threshold(
+    bodies: list[str], *, config: dict[str, Any] | None = None
+) -> bool:
+    """Would folding *bodies* into one page leave it under the size threshold?
+
+    **The consolidate / decompose boundary** (issue athenaeum#1581, from the
+    operator design input recorded on that issue on 2026-09-10). A bare page
+    and its ``name (qualifier)`` sibling are the SAME string shape whether
+    they are one entity written down twice or a hub with a legitimate facet
+    sub-page. No rule reading the name can separate them --
+    :func:`split_qualifier` deliberately does not try, and this module's
+    docstring records the two populations it cannot tell apart. What
+    separates them is SIZE:
+
+    * a short bare page plus a short qualified page is one entity split in
+      two, and wants a merge;
+    * a long bare page that has grown several phases or facets SHOULD have
+      sub-pages, and the qualified page is the correct outcome rather than a
+      duplicate.
+
+    The threshold is not a new number. It is
+    :func:`athenaeum.tiers.resolve_page_size_threshold_chars` -- the same
+    constant, in the same unit (CHARACTERS of the frontmatter-stripped body,
+    ``DEFAULT_PAGE_SIZE_THRESHOLD_CHARS``), that the oversize disposition
+    already gates on. Reusing it is what makes consolidation and
+    decomposition exact inverses instead of two independently-tuned rules
+    that can contradict each other on one page pair.
+
+    The APPLICATION POINT differs, and the difference is the whole content of
+    this function. :func:`athenaeum.tiers.check_page_size_gate` measures
+    ``len(existing_body)`` -- ONE page, as it stands now. This measures the
+    PROSPECTIVE SUM over every member of the fold. That is what makes the
+    pair a fixed point: a merge this predicate rejects would immediately
+    produce a page the oversize gate wants to split back apart, so the system
+    would oscillate rather than settle.
+
+    **Deliberately not wired into** :func:`scan_qualified_name_splits`.
+    Issue athenaeum#1581 is an EVAL: it states and grades the boundary, it
+    does not change what athenaeum#1577's default-ON scan proposes. Wiring it
+    is a separate, behaviour-changing decision -- and the eval that would
+    grade it (``tests/test_eval_decomposition.py``) is what should justify
+    it. Until then the scan over-proposes on long families, which that eval
+    records as an observed baseline rather than a passing assertion.
+    """
+    from athenaeum.tiers import resolve_page_size_threshold_chars
+
+    return sum(len(body) for body in bodies) <= resolve_page_size_threshold_chars(config)
+
+
 def summarize(splits: list[QualifiedNameSplit]) -> dict[str, Any]:
     """Counts by page type, for the re-scoring script and the run profile."""
     by_type: dict[str, int] = {}
