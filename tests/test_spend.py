@@ -2849,6 +2849,45 @@ class TestDurableLedgerPath:
         resolved = spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
         assert resolved == legacy
 
+    def test_empty_new_path_is_not_treated_as_already_migrated(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1512 audit finding: this module's two-branch rule
+        carried the same defect as ``push_metrics.durable_push_records_path``
+        — an EMPTY ``<wiki_root>/spend.jsonl`` (a stray ``touch``, a
+        partially-written file from a crashed run) must not look "already
+        migrated" and silently strand a populated legacy ledger."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        legacy = cache_dir / spend.LEDGER_FILENAME
+        legacy.write_text('{"v":1}\n', encoding="utf-8")
+
+        new_path = wiki_root / spend.LEDGER_FILENAME
+        new_path.touch()
+        assert new_path.exists() and new_path.stat().st_size == 0
+
+        resolved = spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
+
+        assert resolved == legacy
+
+    def test_explicit_cache_dir_alone_does_not_isolate_this_function(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1512 audit finding, direct function level: same
+        boundary as ``push_metrics.durable_push_records_path`` — a non-``None``
+        ``cache_dir`` is not treated as an isolation signal here, because
+        production call sites resolve it eagerly as routine plumbing, not as
+        an "isolate me" flag. There is no ``spend`` CLI equivalent of
+        ``push-metrics record`` in this issue's scope, so no CLI-layer
+        companion fix was needed on this side."""
+        would_be_live_wiki_root = tmp_path / "wiki"
+        would_be_live_wiki_root.mkdir()
+        scratch_cache_dir = tmp_path / "scratch-cache"  # deliberately not created
+
+        resolved = spend.durable_ledger_path(would_be_live_wiki_root, cache_dir=scratch_cache_dir)
+
+        assert resolved == would_be_live_wiki_root / spend.LEDGER_FILENAME
+
     def test_resolve_ledger_path_without_wiki_root_is_unchanged(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

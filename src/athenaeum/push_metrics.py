@@ -150,6 +150,23 @@ def push_records_path(cache_dir: Path | None = None) -> Path:
     return resolve_cache_dir(cache_dir) / PUSH_RECORDS_FILENAME
 
 
+def _has_migrated_content(path: Path) -> bool:
+    """``True`` only when *path* exists AND carries at least one byte.
+
+    Issue athenaeum#1512 defect 2: the prior check was bare ``path.exists()``,
+    which treats a stray ``touch``, a partially-written file from a crashed
+    run, or an empty file some other process created as proof of a completed
+    migration — permanently repointing every subsequent read/write away from
+    a populated legacy ledger with no rows actually moved. Requiring content
+    means creating an empty ``<wiki_root>/_push_records.jsonl`` can never by
+    itself flip resolution.
+    """
+    try:
+        return path.exists() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def durable_push_records_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
     """The R3 ``operational``/``store-durable`` location (design note §5.2
     table row 8; issue athenaeum#980 AC4): ``<wiki_root>/_push_records.jsonl``.
@@ -157,13 +174,31 @@ def durable_push_records_path(wiki_root: Path, *, cache_dir: Path | None = None)
     Same legacy-fallback contract as :func:`athenaeum.spend.durable_ledger_path`:
     an existing installation's populated ``<cache_dir>/_push_records.jsonl``
     keeps resolving there until migrated; a fresh or already-migrated store
-    resolves to the new, behind-the-seam location.
+    resolves to the new, behind-the-seam location. "Migrated"/"populated" is
+    judged by :func:`_has_migrated_content` (issue athenaeum#1512 AC3), not
+    bare existence — an empty new-path file is never treated as a completed
+    migration.
+
+    This function's *cache_dir*/*wiki_root* resolution is otherwise
+    UNCHANGED by issue athenaeum#1512: it has no way to tell "the caller
+    explicitly scoped cache_dir for isolation" apart from "cache_dir was
+    resolved eagerly as part of a caller's normal plumbing" — both look like
+    a concrete, non-``None`` :class:`Path` here, and production call sites do
+    the latter routinely. Treating a non-``None`` *cache_dir* as an isolation
+    signal at this layer would silently reroute those real writes. The
+    ``--cache-dir``-without-``--path`` isolation gap athenaeum#1512 reports
+    is instead closed one layer up, in ``athenaeum push-metrics record``
+    (:func:`athenaeum._cmd_push_metrics._cmd_push_metrics_record`) — the only
+    place that can actually distinguish an operator-typed ``--cache-dir`` flag
+    from an ordinary resolved value.
     """
     new_path = Path(wiki_root) / PUSH_RECORDS_FILENAME
     legacy_path = push_records_path(cache_dir)
-    if new_path.exists() or not legacy_path.exists():
+    if _has_migrated_content(new_path):
         return new_path
-    return legacy_path
+    if _has_migrated_content(legacy_path):
+        return legacy_path
+    return new_path
 
 
 def reference_records_path(cache_dir: Path | None = None) -> Path:

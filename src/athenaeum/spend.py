@@ -217,6 +217,23 @@ def default_ledger_path(cache_dir: Path | None = None) -> Path:
     return Path(base) / LEDGER_FILENAME
 
 
+def _has_migrated_content(path: Path) -> bool:
+    """``True`` only when *path* exists AND carries at least one byte.
+
+    Mirrors :func:`athenaeum.push_metrics._has_migrated_content` exactly
+    (issue athenaeum#1512 audit: this module's two-branch rule shares the
+    same defect). Bare ``path.exists()`` treats a stray ``touch``, a
+    partially-written file from a crashed run, or an empty file some other
+    process created as proof of a completed migration — permanently
+    repointing every subsequent read/write away from a populated legacy
+    ledger with no rows actually moved.
+    """
+    try:
+        return path.exists() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def durable_ledger_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
     """The R3 ``operational``/``store-durable`` location (design note §5.2
     table row 8; issue athenaeum#980 AC4): ``<wiki_root>/spend.jsonl``, alongside
@@ -225,17 +242,28 @@ def durable_ledger_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Pa
 
     Backward-compatible with an on-disk store that pre-dates this move: if
     the legacy ``<cache_dir>/spend.jsonl`` already has records and the new
-    location does not yet exist, this still resolves to the LEGACY path —
-    an existing installation keeps reading/writing exactly where it always
-    has until an explicit migration copies the file forward. A fresh store
-    (neither path populated yet) and an already-migrated store (the new path
-    already exists) both resolve to the new, behind-the-seam location.
+    location does not yet exist (or is empty — issue athenaeum#1512 AC3;
+    "populated"/"migrated" is judged by :func:`_has_migrated_content`, not
+    bare existence), this still resolves to the LEGACY path — an existing
+    installation keeps reading/writing exactly where it always has until an
+    explicit migration copies the file forward. A fresh store (neither path
+    populated yet) and an already-migrated store (the new path already has
+    content) both resolve to the new, behind-the-seam location.
+
+    Same audited caveat as :func:`athenaeum.push_metrics.durable_push_records_path`:
+    a non-``None`` *cache_dir* is not treated as an isolation signal here —
+    production call sites pass a concrete, already-resolved *cache_dir*
+    routinely, so doing so would silently reroute real writes. There is no
+    ``spend`` CLI equivalent of ``push-metrics record`` in this issue's
+    scope, so no CLI-layer companion fix was added on this side.
     """
     new_path = Path(wiki_root) / LEDGER_FILENAME
     legacy_path = default_ledger_path(cache_dir)
-    if new_path.exists() or not legacy_path.exists():
+    if _has_migrated_content(new_path):
         return new_path
-    return legacy_path
+    if _has_migrated_content(legacy_path):
+        return legacy_path
+    return new_path
 
 
 def resolve_ledger_path(
