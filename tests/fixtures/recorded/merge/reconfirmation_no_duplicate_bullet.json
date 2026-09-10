@@ -8,8 +8,14 @@
   ],
   "layer": "merge",
   "model": "claude-sonnet-5",
-  "prompt_hash": "sha256:1ec7704ad7ed45e6d128dec4e49b85e232bcf307cd13b2748caaa34dc960670d",
+  "prompt_hash": "sha256:090ed2ed2e9ebf94bb318ff36c821bc4f7cef0550b676b611b6faf63aaf8176a",
   "recorded_at": "2026-08-02T18:05:23.300444+00:00",
+  "rederived": {
+    "at": "2026-09-09T23:08:01.201478+00:00",
+    "from_prompt_hash": "sha256:1ec7704ad7ed45e6d128dec4e49b85e232bcf307cd13b2748caaa34dc960670d",
+    "rename_map_digest": "sha256:7166cc089b9aebe108b7b1f3eeeec39e91829925562f0defc92e4172dbc84625",
+    "tool": "scripts/rederive_recorded_fixture.py"
+  },
   "response_text": "{\"ops\": [{\"op\": \"replace\", \"anchor\": \"The firm's PTO policy is 25 days per year plus UK bank holidays.[^1]\", \"text\": \"The firm's PTO policy is 25 days per year plus UK bank holidays.[^1][^2]\"}, {\"op\": \"replace\", \"anchor\": \"[^1]: sessions/2026-01-05.md\", \"text\": \"[^1]: sessions/2026-01-05.md\\n[^2]: sessions/2026-04-10.md\"}]}",
   "usage": {
     "cache_creation_input_tokens": 0,

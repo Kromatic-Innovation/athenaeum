@@ -45,7 +45,7 @@ prior output, are marked accordingly rather than re-covered.
 
 ## New evals added
 
-Two new eval layers, mirroring the existing detector/resolver/recall structure exactly (synthetic "Meridian Advisory" cases, per-case tests that never fail individually, one aggregate-floor test, `@pytest.mark.eval`):
+Two new eval layers, mirroring the existing detector/resolver/recall structure exactly (synthetic "Thornhollow Advisory" cases, per-case tests that never fail individually, one aggregate-floor test, `@pytest.mark.eval`):
 
 1. **`classify` layer** (`tests/evals/test_classify_eval.py`, `tests/evals/data/classify/cases.yaml`) — exercises `tiers.tier2_classify`. Golden set spans the entity-extraction outcome classes: a clean single-entity extraction, a multi-entity file, a placeholder-label rejection (`"Member 1"`-style), a procedural/no-entity-worthy file (expects `[]`), and an already-matched entity that should be skipped.
 2. **`merge` layer** (`tests/evals/test_merge_eval.py`, `tests/evals/data/merge/cases.yaml`) — exercises `tiers.tier3_merge`. Golden set spans: a clean anchored insert, a re-confirmation that should fold into an existing footnote (not a new bullet, per athenaeum#297 dedup policy), a factual contradiction (keep-more-reliable + note discrepancy), and a principled-tension case that must produce the `ESCALATE:` branch.
