@@ -759,7 +759,9 @@ def test_cache_dir_and_path_both_scoped_leaves_the_live_ledger_byte_identical(
     )
 
     assert rc == 0
-    assert json.loads(out) == {"wrote": True}
+    payload = json.loads(out)
+    assert payload["wrote"] is True
+    assert payload["path"] == str(scratch_cache_dir / push_metrics.PUSH_RECORDS_FILENAME)
     assert live_ledger.read_bytes() == live_ledger_before, (
         "the live wiki-root ledger must be byte-identical before and after "
         "a fully-scoped --cache-dir/--path record invocation"
@@ -814,7 +816,9 @@ def test_cache_dir_alone_does_not_leak_into_the_live_wiki_root(
     )
 
     assert rc == 0
-    assert json.loads(out) == {"wrote": True}
+    payload = json.loads(out)
+    assert payload["wrote"] is True
+    assert payload["path"] == str(scratch_cache_dir / push_metrics.PUSH_RECORDS_FILENAME)
     live_ledger = live_stand_in / "wiki" / push_metrics.PUSH_RECORDS_FILENAME
     assert not live_ledger.exists(), (
         "a --cache-dir-only invocation must never create a file under the "
@@ -851,7 +855,9 @@ def test_record_argv_ids_writes_one_row(tmp_path: Path) -> None:
         ]
     )
     assert rc == 0
-    assert json.loads(out) == {"wrote": True}
+    payload = json.loads(out)
+    assert payload["wrote"] is True
+    assert payload["path"] == str(push_metrics.push_records_path(cache_dir))
     row = _read_hook_ledger_row(cache_dir, knowledge_root)
     assert row["session_id"] == "sess-argv"
     assert row["source"] == "hook"
@@ -885,7 +891,9 @@ def test_record_stdin_json_hook_input_shape(
         ]
     )
     assert rc == 0
-    assert json.loads(out) == {"wrote": True}
+    payload = json.loads(out)
+    assert payload["wrote"] is True
+    assert payload["path"] == str(push_metrics.push_records_path(cache_dir))
     row = _read_hook_ledger_row(cache_dir, knowledge_root)
     assert row["session_id"] == "sess-stdin"
     assert row["backend"] == "vector"
@@ -946,7 +954,9 @@ def test_record_falls_back_to_resolve_session_id_env_var(
         ]
     )
     assert rc == 0
-    assert json.loads(out) == {"wrote": True}
+    payload = json.loads(out)
+    assert payload["wrote"] is True
+    assert payload["path"] == str(push_metrics.push_records_path(cache_dir))
     row = _read_hook_ledger_row(cache_dir, knowledge_root)
     assert row["session_id"] == "sess-from-env"
 
@@ -975,7 +985,9 @@ def test_record_no_session_id_anywhere_is_an_honest_noop(
         ]
     )
     assert rc == 0
-    assert json.loads(out) == {"wrote": False}
+    payload = json.loads(out)
+    assert payload["wrote"] is False
+    assert payload["path"] == str(push_metrics.push_records_path(cache_dir))
     assert push_metrics.read_push_records(
         cache_dir=cache_dir, wiki_root=knowledge_root / "wiki"
     ) == []
@@ -1009,7 +1021,9 @@ def test_record_survives_an_unwritable_ledger_path(tmp_path: Path) -> None:
         ]
     )
     assert rc == 0
-    assert json.loads(out) == {"wrote": False}
+    payload = json.loads(out)
+    assert payload["wrote"] is False
+    assert payload["path"] == str(push_metrics.push_records_path(cache_dir))
 
 
 def test_record_malformed_stdin_json_is_an_honest_noop_not_a_crash(
@@ -1034,7 +1048,9 @@ def test_record_malformed_stdin_json_is_an_honest_noop_not_a_crash(
     assert rc == 0
     # No `ids` survived the malformed payload and none were on argv either
     # -> an honest no-op, not a crash.
-    assert json.loads(out) == {"wrote": False}
+    payload = json.loads(out)
+    assert payload["wrote"] is False
+    assert payload["path"] == str(push_metrics.push_records_path(cache_dir))
 
 
 def test_no_subcommand_prints_usage(tmp_path: Path) -> None:

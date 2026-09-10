@@ -10365,7 +10365,14 @@ def session_end(
     from athenaeum import push_metrics
 
     liveness = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, wiki_root=wiki_root)
-    if liveness.outcome == push_metrics.LIVENESS_FAIL:
+    # athenaeum#1592: STALE is warned exactly like FAIL — a ledger that has
+    # stopped advancing is the same "fail loud" case as one whose recent
+    # rows are untagged, just a different diagnosis. This is the automatic
+    # surface AC5 (of the parent issue athenaeum#1422) already established:
+    # every interactive session's SessionEnd hook, and the nightly-after-
+    # librarian path, both on the operator's own host where the ledger
+    # lives — see this function's docstring.
+    if liveness.outcome in (push_metrics.LIVENESS_FAIL, push_metrics.LIVENESS_STALE):
         log.warning("session-end: %s", liveness.message)
     else:
         log.debug("session-end: %s", liveness.message)

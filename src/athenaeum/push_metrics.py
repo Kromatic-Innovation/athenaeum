@@ -72,7 +72,7 @@ import re
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1037,6 +1037,40 @@ LIVENESS_WINDOW = 20
 LIVENESS_PASS = "pass"
 LIVENESS_FAIL = "fail"
 LIVENESS_INCONCLUSIVE = "inconclusive"
+#: issue athenaeum#1592 — distinct from LIVENESS_FAIL: FAIL means "the
+#: window is full of untagged rows", STALE means "the ledger has stopped
+#: advancing at all", a strictly stronger and unrelated finding.
+LIVENESS_STALE = "stale"
+
+#: Freshness threshold for the athenaeum#1592 recency predicate: the
+#: newest row in a FULL (>= window) ledger must be no older than this, or
+#: the assertion reports STALE regardless of tagging. The observed
+#: incident: the ledger froze for almost three hours (source: athenaeum#1591,
+#: the ledger had migrated to a second, unread location) while `liveness`
+#: kept reporting PASS forever, because every one of its predicates was
+#: about tagging/row-count, never time.
+#:
+#: One hour is chosen, not the incident's three, for the same reason
+#: LIVENESS_WINDOW (20) undercuts the 186-row incident it was modeled on
+#: by roughly an order of magnitude (see that constant's own comment): the
+#: goal is to catch the SAME failure meaningfully sooner than a human
+#: noticed it manually, not to reproduce the incident's own tolerance.
+#: This predicate only fires once a FULL window (>= LIVENESS_WINDOW, i.e.
+#: at least 20) of rows has already accumulated — see the INCONCLUSIVE
+#: branch below — so by construction the system was recently active enough
+#: to write 20 rows; going dark for a full hour immediately afterward is a
+#: materially different signal than an idle weekend with no rows at all.
+#: One hour is also generous enough to absorb any single ordinary gap
+#: within a live session (a meeting, a long compile, a lunch break)
+#: without alarming on it — the per-turn write cadence the hook path
+#: instruments (issue athenaeum#1478) is normally minutes, not hours.
+#:
+#: This is a ledger-only signal and cannot distinguish "the sidecar path
+#: broke" from "nobody used the system for over an hour after a burst of
+#: 20 pushes" — both look identical from the ledger alone. See
+#: :func:`check_sidecar_liveness`'s docstring for why that limitation is
+#: stated here explicitly rather than papered over.
+LIVENESS_STALE_AFTER = timedelta(hours=1)
 
 #: AC3: the FAIL message's mandated next diagnostic step, verbatim — the
 #: observed incident was a ready-time-clean, deploy-time-wrong artifact (two
@@ -1051,12 +1085,14 @@ _LIVENESS_NEXT_STEP = (
 
 @dataclass
 class LivenessResult:
-    """Outcome of one sidecar-liveness assertion run (issue athenaeum#1422).
+    """Outcome of one sidecar-liveness assertion run (issue athenaeum#1422;
+    the recency predicate is issue athenaeum#1592).
 
     ``outcome`` is one of :data:`LIVENESS_PASS`, :data:`LIVENESS_FAIL`,
-    :data:`LIVENESS_INCONCLUSIVE` — never inferred by a caller from the other
-    fields, always this field directly, so "empty ledger reads as PASS" (the
-    exact hazard AC2 rules out) cannot silently regress at a call site.
+    :data:`LIVENESS_INCONCLUSIVE`, :data:`LIVENESS_STALE` — never inferred by
+    a caller from the other fields, always this field directly, so "empty
+    ledger reads as PASS" (the exact hazard AC2 rules out) cannot silently
+    regress at a call site.
     """
 
     outcome: str
@@ -1080,9 +1116,10 @@ def check_sidecar_liveness(
     cache_dir: Path | None = None,
     wiki_root: Path | None = None,
     window: int = LIVENESS_WINDOW,
+    now: datetime | None = None,
 ) -> LivenessResult:
     """Read-only assertion: does the push-telemetry ledger show the sidecar
-    is actually running?
+    is actually running — AND actually advancing?
 
     Reads the ledger via :func:`read_push_records` (the sanctioned reader —
     never re-parses the JSONL itself) and checks the most recent *window*
@@ -1091,22 +1128,52 @@ def check_sidecar_liveness(
     writer"): ``rec.get("source") == "sidecar"`` marks a sidecar push; a
     missing key or any other value is an explicit ``recall`` push.
 
-    Three outcomes, distinguished explicitly (AC2) — an empty or absent
-    ledger NEVER reads as PASS:
+    *now* (issue athenaeum#1592) is the clock the recency predicate below
+    compares the newest row's ``ts`` against; defaults to
+    ``datetime.now(timezone.utc)``. Callers pass an explicit value only in
+    tests — see :class:`TestSidecarLivenessRecency` for the clock-injection
+    shape this enables (AC4): the same fixed ledger evaluated at two
+    different instants, PASS before the threshold and STALE after it.
+
+    Four outcomes, distinguished explicitly (AC2) — an empty or absent
+    ledger NEVER reads as PASS, and a frozen ledger NEVER reads as PASS
+    forever (the athenaeum#1592 defect: the original three-outcome version
+    of this assertion asked only about TAGGING and ROW COUNT, never TIME,
+    so a ledger frozen at any point in the past kept passing indefinitely
+    because its last rows stayed sidecar-tagged forever):
 
     - :data:`LIVENESS_INCONCLUSIVE` — fewer than *window* rows recorded
       (this also covers an absent ledger: :func:`read_push_records` returns
       ``[]`` for a missing file, and ``0 < window``). Not enough signal to
-      assert anything either way.
-    - :data:`LIVENESS_FAIL` — *window* rows exist and NONE is sidecar-tagged
-      — the observed incident's exact signature.
-    - :data:`LIVENESS_PASS` — at least one of the most recent *window* rows
-      is sidecar-tagged.
+      assert anything either way — including staleness: a system that has
+      never accumulated a full window is indistinguishable, from the ledger
+      alone, from one that is simply quiet, and must not be reported as
+      broken just because its few rows happen to be old (AC2's negative
+      case).
+    - :data:`LIVENESS_STALE` — *window* rows exist, but the NEWEST one is
+      older than :data:`LIVENESS_STALE_AFTER` as measured against *now*.
+      Checked before the tag predicate below: a ledger that has stopped
+      advancing at all is a strictly stronger, unrelated finding from
+      whether its frozen rows happen to be tagged. This is a ledger-only
+      signal and does NOT distinguish "the push path broke" from "nobody
+      used the system for over the threshold" — both look identical from
+      the ledger alone; see :data:`LIVENESS_STALE_AFTER`'s own comment for
+      why that limitation is accepted rather than papered over, and why it
+      only applies once a full window has accumulated.
+    - :data:`LIVENESS_FAIL` — *window* rows exist, the newest is fresh, and
+      NONE of the *window* is sidecar-tagged — the original observed
+      incident's exact signature.
+    - :data:`LIVENESS_PASS` — *window* rows exist, the newest is fresh, and
+      at least one of them is sidecar-tagged.
 
     Never raises: this mirrors every other reader in this module (a ledger
     read must never be able to break the caller it's embedded in — see
     :func:`record_push`'s docstring for the write-side version of the same
-    discipline).
+    discipline). An unparsable newest-row ``ts`` cannot be distinguished
+    from a frozen one, so it is reported as :data:`LIVENESS_STALE` rather
+    than silently falling through to a tag-based PASS — the same
+    "ambiguous signal never reads as PASS" discipline the INCONCLUSIVE
+    branch already applies to row count.
     """
     records = read_push_records(cache_dir, wiki_root=wiki_root)
     total = len(records)
@@ -1120,6 +1187,28 @@ def check_sidecar_liveness(
             ),
             window=window,
             rows_checked=total,
+            sidecar_rows=0,
+        )
+    current_time = now if now is not None else datetime.now(tz=timezone.utc)
+    newest_ts = _parse_ts(records[-1].get("ts"))
+    if newest_ts is None or (current_time - newest_ts) > LIVENESS_STALE_AFTER:
+        stale_hours = LIVENESS_STALE_AFTER.total_seconds() / 3600
+        if newest_ts is None:
+            age_desc = "the newest row's timestamp is unparsable"
+        else:
+            age_hours = (current_time - newest_ts).total_seconds() / 3600
+            age_desc = f"the newest row is {age_hours:.1f}h old"
+        return LivenessResult(
+            outcome=LIVENESS_STALE,
+            message=(
+                f"push-telemetry liveness: STALE — {window} rows recorded but "
+                f"{age_desc}, past the {stale_hours:g}h freshness threshold; the "
+                "ledger has stopped advancing (this does not by itself distinguish "
+                "a broken push path from a system that has simply been idle for "
+                "longer than the threshold)."
+            ),
+            window=window,
+            rows_checked=window,
             sidecar_rows=0,
         )
     recent = records[-window:]

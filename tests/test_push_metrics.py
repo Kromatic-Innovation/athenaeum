@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1683,14 +1684,21 @@ def _write_raw_row(cache_dir: Path, row: dict) -> None:
         fh.write(json.dumps(row) + "\n")
 
 
-def _recall_row(n: int) -> dict:
-    """A row with no ``source`` key — the MCP `recall` path's shape."""
-    return {"v": 1, "session_id": f"s{n}", "ts": "2026-01-01T00:00:00Z", "items": []}
+def _recall_row(n: int, *, ts: datetime | None = None) -> dict:
+    """A row with no ``source`` key — the MCP `recall` path's shape.
+
+    ``ts`` (issue athenaeum#1592) defaults to the historical fixed fixture
+    instant ("2026-01-01T00:00:00Z") every pre-existing test in this module
+    already relies on; pass an explicit ``ts`` only in tests that exercise
+    the recency predicate itself.
+    """
+    ts_str = ts.isoformat().replace("+00:00", "Z") if ts is not None else "2026-01-01T00:00:00Z"
+    return {"v": 1, "session_id": f"s{n}", "ts": ts_str, "items": []}
 
 
-def _sidecar_row(n: int) -> dict:
+def _sidecar_row(n: int, *, ts: datetime | None = None) -> dict:
     """A row carrying ``"source": "sidecar"`` — the athenaeum#1362 shape."""
-    row = _recall_row(n)
+    row = _recall_row(n, ts=ts)
     row["source"] = "sidecar"
     return row
 
@@ -1699,9 +1707,18 @@ class TestSidecarLiveness:
     """issue athenaeum#1422: read-and-assert liveness check over the
     push-telemetry ledger's `source` field — never a write, never a raise."""
 
+    #: Every fixture row in this class carries the same fixed `ts`
+    #: ("2026-01-01T00:00:00Z", see `_recall_row`/`_sidecar_row`). Tests that
+    #: exercise the TAG predicate only (not the athenaeum#1592 recency
+    #: predicate) must pin `now` to this same instant — otherwise the
+    #: default `now=None` -> wall-clock resolution would make every one of
+    #: these ancient fixture rows read as STALE regardless of tagging, which
+    #: is a different assertion than the one these tests are making.
+    _FIXTURE_NOW = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
     def test_absent_ledger_is_inconclusive_never_pass(self, tmp_path: Path) -> None:
         cache_dir = tmp_path / "cache"  # never created
-        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir)
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, now=self._FIXTURE_NOW)
         assert result.outcome == push_metrics.LIVENESS_INCONCLUSIVE
         assert result.rows_checked == 0
         assert result.sidecar_rows == 0
@@ -1710,7 +1727,9 @@ class TestSidecarLiveness:
         cache_dir = tmp_path / "cache"
         for i in range(5):
             _write_raw_row(cache_dir, _recall_row(i))
-        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20)
+        result = push_metrics.check_sidecar_liveness(
+            cache_dir=cache_dir, window=20, now=self._FIXTURE_NOW
+        )
         assert result.outcome == push_metrics.LIVENESS_INCONCLUSIVE
         assert result.rows_checked == 5
 
@@ -1720,7 +1739,9 @@ class TestSidecarLiveness:
         cache_dir = tmp_path / "cache"
         for i in range(20):
             _write_raw_row(cache_dir, _recall_row(i))
-        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20)
+        result = push_metrics.check_sidecar_liveness(
+            cache_dir=cache_dir, window=20, now=self._FIXTURE_NOW
+        )
         assert result.outcome == push_metrics.LIVENESS_FAIL
         assert result.rows_checked == 20
         assert result.sidecar_rows == 0
@@ -1732,7 +1753,9 @@ class TestSidecarLiveness:
         for i in range(19):
             _write_raw_row(cache_dir, _recall_row(i))
         _write_raw_row(cache_dir, _sidecar_row(19))
-        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20)
+        result = push_metrics.check_sidecar_liveness(
+            cache_dir=cache_dir, window=20, now=self._FIXTURE_NOW
+        )
         assert result.outcome == push_metrics.LIVENESS_PASS
         assert result.sidecar_rows == 1
 
@@ -1743,7 +1766,9 @@ class TestSidecarLiveness:
         _write_raw_row(cache_dir, _sidecar_row(0))
         for i in range(1, 21):
             _write_raw_row(cache_dir, _recall_row(i))
-        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20)
+        result = push_metrics.check_sidecar_liveness(
+            cache_dir=cache_dir, window=20, now=self._FIXTURE_NOW
+        )
         assert result.outcome == push_metrics.LIVENESS_FAIL
         assert result.rows_checked == 20
 
@@ -1754,14 +1779,16 @@ class TestSidecarLiveness:
         cache_dir = tmp_path / "cache"
         for i in range(20):
             _write_raw_row(cache_dir, _recall_row(i))
-        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20)
+        result = push_metrics.check_sidecar_liveness(
+            cache_dir=cache_dir, window=20, now=self._FIXTURE_NOW
+        )
         assert result.outcome != push_metrics.LIVENESS_INCONCLUSIVE
 
     def test_default_window_is_the_named_constant(self, tmp_path: Path) -> None:
         cache_dir = tmp_path / "cache"
         for i in range(push_metrics.LIVENESS_WINDOW):
             _write_raw_row(cache_dir, _recall_row(i))
-        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir)
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, now=self._FIXTURE_NOW)
         assert result.window == push_metrics.LIVENESS_WINDOW
         assert result.outcome == push_metrics.LIVENESS_FAIL
 
@@ -1776,8 +1803,108 @@ class TestSidecarLiveness:
             for i in range(20):
                 fh.write(json.dumps(_recall_row(i)) + "\n")
             fh.write('{"v": 1, "session_id": "torn"')  # no closing brace/newline
-        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20)
+        result = push_metrics.check_sidecar_liveness(
+            cache_dir=cache_dir, window=20, now=self._FIXTURE_NOW
+        )
         assert result.outcome == push_metrics.LIVENESS_FAIL
+
+
+class TestSidecarLivenessRecency:
+    """issue athenaeum#1592: the liveness check must also assert the ledger
+    is ADVANCING, not merely that its most recent rows are sidecar-tagged.
+
+    The observed incident: `liveness` reported PASS on a ledger frozen for
+    almost three hours — every predicate in the original check was about
+    row TAGGING and row COUNT, none about row TIME. A ledger frozen at any
+    point in the past keeps passing forever under the original logic,
+    because its last rows stay sidecar-tagged forever.
+    """
+
+    def test_full_stale_window_is_stale_not_pass(self, tmp_path: Path) -> None:
+        """AC1/AC4: same rows, same tags — PASS before the freshness
+        threshold, a distinct non-PASS state (STALE) after it. This is the
+        exact clock-injection shape AC4 requires: nothing about the ledger
+        changes between the two assertions, only `now`."""
+        cache_dir = tmp_path / "cache"
+        base = datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc)
+        for i in range(19):
+            _write_raw_row(cache_dir, _recall_row(i, ts=base))
+        _write_raw_row(cache_dir, _sidecar_row(19, ts=base))
+
+        just_inside = base + push_metrics.LIVENESS_STALE_AFTER - timedelta(seconds=1)
+        result_fresh = push_metrics.check_sidecar_liveness(
+            cache_dir=cache_dir, window=20, now=just_inside
+        )
+        assert result_fresh.outcome == push_metrics.LIVENESS_PASS
+
+        just_outside = base + push_metrics.LIVENESS_STALE_AFTER + timedelta(seconds=1)
+        result_stale = push_metrics.check_sidecar_liveness(
+            cache_dir=cache_dir, window=20, now=just_outside
+        )
+        assert result_stale.outcome != push_metrics.LIVENESS_PASS
+        assert result_stale.outcome == push_metrics.LIVENESS_STALE
+
+    def test_stale_ledger_states_the_threshold_in_the_output(self, tmp_path: Path) -> None:
+        """AC1: the threshold must be STATED in the output, not implied."""
+        cache_dir = tmp_path / "cache"
+        base = datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc)
+        for i in range(20):
+            _write_raw_row(cache_dir, _sidecar_row(i, ts=base))
+        now = base + push_metrics.LIVENESS_STALE_AFTER + timedelta(hours=1)
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20, now=now)
+        assert result.outcome == push_metrics.LIVENESS_STALE
+        threshold_hours = push_metrics.LIVENESS_STALE_AFTER.total_seconds() / 3600
+        assert str(int(threshold_hours)) in result.message
+
+    def test_stale_beats_a_tag_fail_with_its_own_state(self, tmp_path: Path) -> None:
+        """A frozen ledger that ALSO has zero sidecar tags in its trailing
+        window must still report the recency diagnosis (STALE), not the
+        unrelated tag diagnosis (FAIL) — staleness is checked first because
+        it is the strictly stronger finding (the ledger is not advancing at
+        all, so whether its frozen rows happen to be tagged is moot)."""
+        cache_dir = tmp_path / "cache"
+        base = datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc)
+        for i in range(20):
+            _write_raw_row(cache_dir, _recall_row(i, ts=base))
+        now = base + push_metrics.LIVENESS_STALE_AFTER + timedelta(hours=1)
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20, now=now)
+        assert result.outcome == push_metrics.LIVENESS_STALE
+
+    def test_quiet_ledger_under_the_window_stays_inconclusive_not_stale(
+        self, tmp_path: Path
+    ) -> None:
+        """AC2, negative case: a legitimately QUIET system — too little
+        activity to have ever filled the window — must NOT alarm just
+        because its handful of rows are old. INCONCLUSIVE ('not enough
+        signal') and STALE ('signal says it stopped') are different
+        diagnoses; collapsing 'quiet' into 'broken' is exactly the hazard
+        AC2 forbids."""
+        cache_dir = tmp_path / "cache"
+        base = datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc)
+        for i in range(3):
+            _write_raw_row(cache_dir, _sidecar_row(i, ts=base))
+        now = base + timedelta(days=2)  # long overnight/weekend gap
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20, now=now)
+        assert result.outcome == push_metrics.LIVENESS_INCONCLUSIVE
+        assert result.outcome != push_metrics.LIVENESS_STALE
+
+    def test_unparsable_newest_timestamp_does_not_raise_or_fail_open_as_pass(
+        self, tmp_path: Path
+    ) -> None:
+        """A malformed `ts` on the newest row must never crash the
+        assertion (same never-raises discipline as the rest of this
+        module) and must never silently read as PASS — the exact hazard
+        this whole issue is about."""
+        cache_dir = tmp_path / "cache"
+        base = datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc)
+        for i in range(19):
+            _write_raw_row(cache_dir, _sidecar_row(i, ts=base))
+        row = _sidecar_row(19, ts=base)
+        row["ts"] = "not-a-timestamp"
+        _write_raw_row(cache_dir, row)
+        now = base + timedelta(hours=100)
+        result = push_metrics.check_sidecar_liveness(cache_dir=cache_dir, window=20, now=now)
+        assert result.outcome == push_metrics.LIVENESS_STALE
 
 
 # ---------------------------------------------------------------------------
