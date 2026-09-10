@@ -450,6 +450,8 @@ Open the recall viewer for the current Claude session — resolves the session i
 |---|---|---|---|
 | `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
 | `--editor` | — | — | Command used to open a clicked page (default: subl). |
+| `--limit` | `20` | — | With --list-sessions, the maximum number of sessions to print (default: 20). Has no effect otherwise. |
+| `--list-sessions` | `False` | — | Print sessions with recall activity (newest last-activity first), including row counts and whether each has ended, then exit 0 without binding a port or starting a server. Use this to find a session worth demoing, then pass its id via --session. |
 | `--no-browser` | `False` | — | Serve without opening a browser (headless/CI). |
 | `--path` | — | — | Knowledge directory (default: ~/knowledge) |
 | `--port` | `8756` | — | Preferred TCP port on localhost (default: 8756). Falls back to an OS-assigned free port if this one is busy. |
