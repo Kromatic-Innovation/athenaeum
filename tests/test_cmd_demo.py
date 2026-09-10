@@ -405,6 +405,46 @@ def test_list_sessions_flag_and_limit_are_registered() -> None:
     assert args.limit == 5
 
 
+def test_limit_zero_is_rejected_at_argparse_not_silently_replaced() -> None:
+    """Review finding: ``getattr(args, "limit", None) or DEFAULT`` would
+    silently substitute the default for an explicit ``--limit 0`` because
+    ``0`` is falsy. The contract chosen here (issue athenaeum#1531 review
+    finding) is that 0 is refused outright -- never redefined as
+    "unlimited" and never silently coerced to the default.
+    """
+    from athenaeum.cli import build_parser
+
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["demo", "--list-sessions", "--limit", "0"])
+
+
+def test_limit_negative_is_rejected_at_argparse(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A negative --limit must never reach list slicing: ``seq[:-5]`` drops
+    the 5 MOST RECENT entries -- the opposite of what an operator asking
+    for a short list wants -- with no error at all if left unhandled.
+    """
+    from athenaeum.cli import build_parser
+
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["demo", "--list-sessions", "--limit", "-5"])
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_limit_positive_value_is_never_replaced() -> None:
+    """A non-default positive --limit must survive intact, including a value
+    that happens to be small -- the fix must not overcorrect into clamping
+    or otherwise mutating a legitimate explicit value."""
+    from athenaeum.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["demo", "--list-sessions", "--limit", "1"])
+    assert args.limit == 1
+
+
 # --------------------------------------------------------------------------
 # --list-sessions (issue athenaeum#1531)
 # --------------------------------------------------------------------------
@@ -742,4 +782,43 @@ def test_sessions_ordered_newest_activity_first_and_limit_applied(
     assert len(body) == 2
     assert body[0].startswith("newest")
     assert body[1].startswith("middle")
+
+
+def test_cmd_list_sessions_rejects_zero_limit_from_a_hand_built_namespace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Defense in depth: a caller that builds its own ``Namespace`` and skips
+    argparse entirely (the exact shape the review finding's ``or DEFAULT``
+    idiom was silently swallowing) must still be refused, not have its ``0``
+    quietly replaced with the default list length.
+    """
+    monkeypatch.setattr(_cmd_demo, "_run_tail_contract", lambda **_k: [{"session_id": "s"}])
+    exit_code = cmd_list_sessions(_ls_args(path=tmp_path, limit=0))
+    assert exit_code == 1
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_cmd_list_sessions_rejects_negative_limit_from_a_hand_built_namespace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A negative limit must never reach ``ordered[:limit]`` -- that would
+    silently drop the MOST RECENT sessions via Python slicing rather than the
+    oldest, the opposite of what an operator asking for a short list wants.
+    """
+    monkeypatch.setattr(_cmd_demo, "_run_tail_contract", lambda **_k: [{"session_id": "s"}])
+    exit_code = cmd_list_sessions(_ls_args(path=tmp_path, limit=-5))
+    assert exit_code == 1
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_cmd_list_sessions_absent_limit_falls_through_to_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``limit=None`` (attribute absent, or explicitly ``None``) is the ONE
+    shape that legitimately falls through to the default -- distinct from an
+    explicit ``0``, which is refused rather than silently coerced.
+    """
+    monkeypatch.setattr(_cmd_demo, "_run_tail_contract", lambda **_k: [])
+    exit_code = cmd_list_sessions(_ls_args(path=tmp_path, limit=None))
+    assert exit_code == 0
 

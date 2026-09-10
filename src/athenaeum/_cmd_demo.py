@@ -385,6 +385,38 @@ def _aggregate_sessions(records: list[dict[str, Any]]) -> dict[str, dict[str, An
     return sessions
 
 
+def _positive_limit(value: str) -> int:
+    """argparse ``type=`` for ``--limit``: a POSITIVE integer, or a clear
+    error (issue athenaeum#1531 review finding).
+
+    Two silent-failure modes this closes, neither of which argparse's plain
+    ``type=int`` catches on its own:
+
+    - ``0`` is falsy in Python, so a caller reading it back with
+      ``value or DEFAULT`` silently substitutes the default -- an explicit
+      request for zero rows would render as the full default list instead,
+      with no error. This module deliberately does not read ``--limit`` that
+      way (see :func:`cmd_list_sessions`) precisely so this type function is
+      the ONE place a bad value gets caught.
+    - A negative value passes ``int()`` fine but reaches ``list[:N]``
+      slicing downstream, where ``[:-5]`` silently drops the 5 MOST RECENT
+      entries rather than erroring -- the opposite of what an operator
+      asking for a short list wants, and worse than doing nothing.
+
+    Neither is defined as meaningful by issue athenaeum#1531's AC2 ("a
+    --limit (sensible default)"), so both are refused outright rather than
+    guessed at (e.g. treating 0 as "unlimited") -- an explicit value is
+    never silently replaced by a different one.
+    """
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"must be an integer, got {value!r}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {parsed}")
+    return parsed
+
+
 def cmd_list_sessions(args: argparse.Namespace) -> int:
     """``athenaeum demo --list-sessions`` (issue athenaeum#1531).
 
@@ -397,7 +429,34 @@ def cmd_list_sessions(args: argparse.Namespace) -> int:
     """
     path = (args.path or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     projects_root = (args.projects_root or DEFAULT_PROJECTS_ROOT).expanduser()
-    limit = getattr(args, "limit", None) or DEFAULT_LIST_SESSIONS_LIMIT
+
+    # `getattr(..., None) or DEFAULT` looks equivalent but is not: `0` is
+    # falsy, so that idiom would silently REPLACE an explicit `--limit 0`
+    # with the default -- the exact silent-substitution this command's own
+    # design principle (see _report_rows) exists to avoid elsewhere. Only a
+    # genuinely ABSENT limit (attribute missing, or None -- the shape a
+    # caller that skips argparse, e.g. a test, is expected to pass) falls
+    # through to the default; any supplied value, including 0 or negative,
+    # is validated explicitly instead of being coerced.
+    #
+    # The contract (issue athenaeum#1531 review finding): `--limit` must be a
+    # POSITIVE integer. Zero is not defined as "unlimited" -- it is refused,
+    # same as a negative value -- because a negative limit silently drops the
+    # N MOST RECENT sessions via Python's `list[:-N]` slicing, which is the
+    # opposite of what an operator asking for a short list wants, with no
+    # error at all. :func:`_positive_limit` already enforces this at argparse
+    # parse time for the normal CLI path; this is the same check applied
+    # again for a caller that builds its own ``Namespace`` and skips argparse
+    # (e.g. a unit test), so the contract holds either way.
+    limit = getattr(args, "limit", None)
+    if limit is None:
+        limit = DEFAULT_LIST_SESSIONS_LIMIT
+    elif limit <= 0:
+        print(
+            f"error: --limit must be a positive integer, got {limit}",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         records = _run_tail_contract(session_id=None, path=path, cache_dir=args.cache_dir)
@@ -566,9 +625,12 @@ def add_demo_subparser(subparsers: argparse._SubParsersAction) -> None:
     )
     demo_p.add_argument(
         "--limit",
-        type=int,
+        type=_positive_limit,
         default=DEFAULT_LIST_SESSIONS_LIMIT,
-        help="With --list-sessions, the maximum number of sessions to print "
+        help="With --list-sessions, the maximum number of sessions to print. "
+        "Must be a positive integer -- 0 and negative values are rejected "
+        "(a negative value would silently drop the N MOST RECENT sessions "
+        "via list slicing, the opposite of a short list) "
         f"(default: {DEFAULT_LIST_SESSIONS_LIMIT}). Has no effect otherwise.",
     )
     demo_p.set_defaults(func=cmd_demo)
