@@ -602,7 +602,22 @@ _pm_record_push() {
 # whole function is invoked BACKGROUNDED (`&`) after this hook has already
 # produced its stdout, so even a slow ring-buffer trim below cannot add a
 # single millisecond to the wall-clock this hook is measured against.
-PM_TOPICS_TRACE_PATH="${CACHE_DIR}/_last_turn_topics.jsonl"
+# `PM_CACHE_DIR` (D3's `ATHENAEUM_CACHE_DIR env > $HOME/.cache/athenaeum`
+# resolution, defined near the top of this file's push-telemetry setup),
+# NOT the plain `$CACHE_DIR` this hook uses for everything else. `CACHE_DIR`
+# is hardcoded to `${HOME}/.cache/athenaeum` and does not honour
+# `ATHENAEUM_CACHE_DIR` at all -- `_cmd_viewer.py`'s
+# `_load_topics_for_query_hash` resolves this SAME file via
+# `athenaeum.config.resolve_cache_dir`, whose precedence is `arg >
+# ATHENAEUM_CACHE_DIR env > default`, i.e. `PM_CACHE_DIR`'s exact shape. Any
+# deployment that sets `ATHENAEUM_CACHE_DIR` (this hook's own ledger write
+# two lines below already accounts for that split -- see `PM_CACHE_DIR`'s
+# own definition comment) would otherwise have the hook write this trace to
+# one directory while the viewer reads another -- a silent
+# `topics_status: "not_instrumented"` rather than an error, exactly the
+# "wrong result that looks like a legitimate one" failure mode issue
+# athenaeum#1530 cites athenaeum#1513 for.
+PM_TOPICS_TRACE_PATH="${PM_CACHE_DIR}/_last_turn_topics.jsonl"
 # Ring buffer bound (AC3): last N turns, never unbounded. Overridable for
 # tests; 200 short JSON lines is a few tens of KB, trimmed every write.
 PM_TOPICS_TRACE_MAX_LINES="${ATHENAEUM_TOPICS_TRACE_MAX_LINES:-200}"
@@ -652,7 +667,16 @@ _pm_write_topics_trace() {
 
   record="{\"session_id\":\"${session_id_esc}\",\"ts\":\"${ts}\",\"query_hash\":\"${PM_QUERY_HASH}\",\"topics\":${topics_json}}"
 
-  mkdir -p "$CACHE_DIR" 2>/dev/null || return 0
+  # `$PM_CACHE_DIR`, matching `$PM_TOPICS_TRACE_PATH`'s own resolution above
+  # -- NOT `$CACHE_DIR`. This write is fail-open by design (AC4), which cuts
+  # both ways: a missing directory would not error, it would just silently
+  # produce no topics -- the same invisible-failure shape this whole review
+  # finding is about, just relocated to setup instead of resolution. This
+  # `mkdir -p` is a SEPARATE call from `_pm_record_push`'s own (line ~576,
+  # on `$PM_WIKI_ROOT`/`$PM_CACHE_DIR` for the ledger) because the trace can
+  # be enabled/disabled independently of the ledger and must not depend on
+  # that other code path having already run.
+  mkdir -p "$PM_CACHE_DIR" 2>/dev/null || return 0
   printf '%s\n' "$record" >> "$PM_TOPICS_TRACE_PATH" 2>/dev/null || return 0
 
   # Ring buffer (AC3): keep only the last N lines, via a temp file + atomic

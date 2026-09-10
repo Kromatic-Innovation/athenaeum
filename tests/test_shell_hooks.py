@@ -18,6 +18,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -2687,11 +2688,22 @@ exec "$REAL_AWK" "$@"
     # for every test below.
 
     def _topics_trace_path(self, hook_env: dict[str, str]) -> Path:
-        # Mirrors the hook's own (non-overridable) `CACHE_DIR="${HOME}/.cache/athenaeum"`
-        # -- deliberately NOT `ATHENAEUM_CACHE_DIR`, even though `hook_env`
-        # happens to point both at the same directory, so this test resolves
-        # the path exactly the way the hook itself does.
-        return Path(hook_env["HOME"]) / ".cache" / "athenaeum" / "_last_turn_topics.jsonl"
+        # Mirrors the hook's `PM_CACHE_DIR="${ATHENAEUM_CACHE_DIR:-$HOME/.cache/athenaeum}"`
+        # -- NOT the hook's plain (non-overridable) `CACHE_DIR`, which is
+        # hardcoded to `${HOME}/.cache/athenaeum` and ignores
+        # `ATHENAEUM_CACHE_DIR` entirely. `_cmd_viewer.py`'s
+        # `_load_topics_for_query_hash` resolves this SAME file via
+        # `athenaeum.config.resolve_cache_dir` (`arg > ATHENAEUM_CACHE_DIR env
+        # > default`), i.e. `PM_CACHE_DIR`'s exact shape -- so this helper
+        # must match `PM_CACHE_DIR`, not `CACHE_DIR`, or these tests would
+        # pass by the two paths coincidentally being equal (as they are
+        # whenever `hook_env`'s `ATHENAEUM_CACHE_DIR` happens to already sit
+        # under `HOME`) rather than by actually exercising the resolution
+        # every deployment that sets `ATHENAEUM_CACHE_DIR` relies on.
+        cache_dir = hook_env.get("ATHENAEUM_CACHE_DIR") or str(
+            Path(hook_env["HOME"]) / ".cache" / "athenaeum"
+        )
+        return Path(cache_dir) / "_last_turn_topics.jsonl"
 
     def _wait_for_topics_row(
         self, trace_path: Path, query_hash: str, timeout: float = 5.0
@@ -2971,6 +2983,88 @@ exec "$REAL_AWK" "$@"
 
         row = self._wait_for_topics_row(self._topics_trace_path(env), query_hash)
         assert row["topics"]
+
+    def test_topics_trace_and_viewer_agree_when_athenaeum_cache_dir_diverges_from_home(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Regression for a Seer review finding on this PR: the trace path
+        was originally built from the hook's plain, hardcoded
+        `CACHE_DIR="${HOME}/.cache/athenaeum"` while `_cmd_viewer.py` reads
+        the same file via `athenaeum.config.resolve_cache_dir`, whose
+        precedence is `arg > ATHENAEUM_CACHE_DIR env > default`. Any
+        deployment that actually SETS `ATHENAEUM_CACHE_DIR` would have the
+        hook write to one directory and the viewer read from another --
+        silently, since a miss renders the pre-existing (and otherwise
+        legitimate) "not instrumented" state rather than an error. That is
+        exactly the "wrong result that looks like a legitimate one" failure
+        mode issue athenaeum#1530 cites athenaeum#1513 for.
+
+        `hook_env`'s own `ATHENAEUM_CACHE_DIR` happens to already sit under
+        `HOME`, so every OTHER test in this class would pass even with that
+        bug present -- tested by coincidence, not by the join. This test
+        points `ATHENAEUM_CACHE_DIR` at a directory that shares NO path
+        segment with `HOME`, so the two resolutions can only agree by
+        actually consulting the same env var, then asserts the join two
+        ways: the file lands where `PM_CACHE_DIR` (not `CACHE_DIR`) resolves
+        to, AND `_cmd_viewer._load_topics_for_query_hash` -- the viewer's
+        own real production function, not a hand-rolled path -- finds the
+        same row when pointed at that same directory.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        # A standalone `tempfile.mkdtemp()`, deliberately NOT nested under
+        # `tmp_path` -- `hook_env` and this test share the same `tmp_path`
+        # fixture instance, so anything built from `tmp_path` (including
+        # `hook_env["HOME"]`) shares its prefix. Only a directory rooted
+        # OUTSIDE that shared tree proves the two resolutions agree by
+        # actually consulting `ATHENAEUM_CACHE_DIR`, rather than by both
+        # happening to descend from the same fixture.
+        divergent_cache = Path(tempfile.mkdtemp(prefix="athenaeum-divergent-cache-"))
+        try:
+            env = dict(hook_env)
+            env["ATHENAEUM_CACHE_DIR"] = str(divergent_cache)
+            assert not str(divergent_cache).startswith(str(Path(hook_env["HOME"])))
+
+            probe = "tell me about customer development frameworks"
+            result = self._run_hook(env, probe)
+            assert result.returncode == 0, f"stderr: {result.stderr}"
+            assert result.stdout
+
+            wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+            records = read_push_records(wiki_root=wiki_root, cache_dir=divergent_cache)
+            assert len(records) == 1
+            query_hash = records[0]["query_hash"]
+
+            # 1. The trace file must land under the DIVERGENT
+            # `ATHENAEUM_CACHE_DIR` -- not under the hardcoded
+            # `$HOME/.cache/athenaeum` the pre-fix code used.
+            correct_trace_path = divergent_cache / "_last_turn_topics.jsonl"
+            stale_trace_path = (
+                Path(hook_env["HOME"]) / ".cache" / "athenaeum" / "_last_turn_topics.jsonl"
+            )
+            row = self._wait_for_topics_row(correct_trace_path, query_hash)
+            assert not stale_trace_path.is_file(), (
+                "the trace must not also (or instead) land at the hardcoded "
+                "$HOME-derived path when ATHENAEUM_CACHE_DIR diverges from it"
+            )
+
+            # 2. The viewer's own real lookup function, pointed at the SAME
+            # divergent cache_dir, must find the SAME row -- this is the
+            # AC1/AC6 join actually being tested, not merely a
+            # file-existence check on each side independently.
+            from athenaeum import _cmd_viewer
+
+            topics = _cmd_viewer._load_topics_for_query_hash(
+                query_hash, cache_dir=divergent_cache
+            )
+            assert topics == row["topics"]
+            assert topics, "expected a non-empty topics list to have round-tripped"
+        finally:
+            shutil.rmtree(divergent_cache, ignore_errors=True)
 
 
 class TestPreCompactSave:
