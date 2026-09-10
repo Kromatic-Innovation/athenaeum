@@ -231,7 +231,22 @@ def _report_rows(rows: int | None, session_id: str) -> None:
             file=sys.stderr,
         )
     else:
-        print(f"session {session_id}: {rows} recall rows recorded", file=sys.stderr)
+        # Labelled for what it actually computes (issue athenaeum#1543 AC1).
+        # It is |pushed_unbidden| + |pulled_deliberately| + |overlap| -- BUCKET
+        # rows, which is a third quantity again: an id present in both the
+        # pushed and pulled buckets is counted in each of them AND in the
+        # overlap bucket, and unknown-provenance pages are in none of them. So
+        # it is neither the viewer's distinct-page count nor --list-sessions'
+        # items-pushed sum. AC3 forbids silently changing what it counts, so
+        # this labels the existing arithmetic rather than correcting it; the
+        # double-count is reported on athenaeum#1543 for a follow-up issue.
+        print(
+            f"session {session_id}: {rows} recall rows across the pushed / pulled / "
+            "overlap buckets. Bucket rows, NOT distinct pages -- the viewer's "
+            '"All pages this session" header counts distinct pages, so the two '
+            "normally differ (athenaeum#1543).",
+            file=sys.stderr,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +494,20 @@ def cmd_list_sessions(args: argparse.Namespace) -> int:
         reverse=True,
     )[:limit]
 
-    header = f"{'session id':<38}{'rows':>6}  {'last activity':<22}{'ended':>6}  project"
+    # The column is named for WHAT IT COUNTS, not "rows" (issue athenaeum#1543
+    # AC1). Three surfaces report three different counts for one session; a
+    # bare "rows" is what made them unreconcilable without reading three
+    # implementations. The caption goes to stderr so stdout stays exactly
+    # header-plus-one-line-per-session for anything parsing it.
+    print(
+        'counting: "items pushed" sums pushed_count across this session\'s push records --\n'
+        "          an item pushed on N turns counts N times, so this is items INJECTED,\n"
+        "          not distinct pages. The viewer's \"All pages this session\" header counts\n"
+        "          DISTINCT PAGES; athenaeum-demo's watch-session.sh probe counts LEDGER\n"
+        "          RECORDS. Three questions, three answers (athenaeum#1543).",
+        file=sys.stderr,
+    )
+    header = f"{'session id':<38}{'items pushed':>13}  {'last activity':<22}{'ended':>6}  project"
     print(header)
     for session_id, info in ordered:
         last_ts = info["last_ts"]
@@ -487,7 +515,7 @@ def cmd_list_sessions(args: argparse.Namespace) -> int:
         ended_str = "yes" if info["ended"] else "no"
         project = _project_label(session_id, projects_root)
         print(
-            f"{session_id:<38}{info['rows']:>6}  {last_str:<22}{ended_str:>6}  {project}"
+            f"{session_id:<38}{info['rows']:>13}  {last_str:<22}{ended_str:>6}  {project}"
         )
     return 0
 
@@ -618,10 +646,13 @@ def add_demo_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--list-sessions",
         action="store_true",
         help="Print sessions with recall activity (newest last-activity "
-        "first), including row counts and whether each has ended, then exit "
-        "0 without binding a port or starting a server (issue athenaeum#1531). "
-        "Use this to find a session worth demoing, then pass its id via "
-        "--session.",
+        "first), including an items-pushed count and whether each has ended, "
+        "then exit 0 without binding a port or starting a server (issue "
+        "athenaeum#1531). The count sums pushed_count across the session's "
+        "push records, so an item pushed on N turns counts N times -- it is "
+        "not distinct pages, which is what the viewer's header counts (issue "
+        "athenaeum#1543). Use this to find a session worth demoing, then pass "
+        "its id via --session.",
     )
     demo_p.add_argument(
         "--limit",

@@ -527,6 +527,11 @@ def test_serve_html_and_data_json_end_to_end_no_reference_determination(tmp_path
         # last-turn panel (issue athenaeum#1528); assert the new structure and
         # the legend that makes the colours mean anything.
         assert "All pages this session" in html
+        # Issue athenaeum#1543 AC1: the header count says what it counts. It is
+        # one entry per page uid regardless of how many turns pushed it, which
+        # is a different quantity from `--list-sessions`' "items pushed" and
+        # from athenaeum-demo's launcher probe (ledger records).
+        assert '" distinct pages)"' in html
         assert "Last turn" in html
         assert "pushed then pulled" in html
         assert "pulled with no sidecar involvement" in html
