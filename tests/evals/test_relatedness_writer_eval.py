@@ -16,8 +16,8 @@ embedding model, so nothing here needs an Anthropic key or chromadb's ONNX
 download. Had the MiniLM neighbourhood been adopted instead, AC1 would only
 have been verified in the separate ``embedding`` job.
 
-AC1 has three halves and all three are asserted, because #1570's measure
-exists precisely to reject a result that only satisfies the first:
+AC1 has three halves and all three are asserted, because issue athenaeum#1570's
+measure exists precisely to reject a result that only satisfies the first:
 
 * Cluster A's three pages carry the ground-truth edges after compilation;
 * the linked-nothing control still fails;

@@ -71,6 +71,10 @@ Three constraints keep the edge count near one per page rather than near N:
 * **An absolute similarity floor**, so a page with no real neighbours writes
   no edges at all rather than linking to its least-bad option.
 * **A hard cap** on edges per page.
+* **A minimum index size**, because the weighting is corpus-relative and a
+  corpus too small to weight against makes every cosine large -- see
+  :data:`DEFAULT_MIN_INDEX_PAGES` for the three-page corpus that demonstrates
+  it becoming a complete graph on the word "facts".
 
 Measured edge density with the shipped defaults: 1.60 edges/page at the
 ``core`` scale (96 pages), 1.80 at ``small`` (200), 2.51 at ``medium``
@@ -164,6 +168,23 @@ DEFAULT_MAX_BODY_CHARS = 8000
 #: this on against an unexpectedly large corpus degrades to the pre-athenaeum#1576
 #: behaviour (no edges) rather than to an unbounded build.
 DEFAULT_MAX_INDEX_PAGES = 50_000
+
+#: Pages BELOW which the writer proposes nothing, for the opposite reason.
+#:
+#: The signal is corpus-weighted, and on a tiny corpus there is no corpus to
+#: weight against: every term is rare, so every cosine is large. Demonstrated,
+#: not hypothesized -- a three-page wiki whose bodies were "Facts about
+#: WidgetAlpha" and friends produced a COMPLETE graph at cosine 0.146-0.196,
+#: on the shared word "facts" alone. That is the link-everything failure, at
+#: N=3.
+#:
+#: The measured precision-1.000 evidence for this writer starts at the eval
+#: corpus's 96 pages; below that the signal is simply unevidenced. 50 is a
+#: deliberately conservative round floor under that measurement, not a tuned
+#: value: a wiki smaller than this compiles exactly as it did before
+#: athenaeum#1576, which is the status quo rather than a regression, and the
+#: knob is irrelevant at the 25k-page scale this exists for.
+DEFAULT_MIN_INDEX_PAGES = 50
 
 _TOKEN_RE = re.compile(r"[a-z][a-z\-']+")
 
@@ -358,6 +379,7 @@ def propose_related_edges(
     k: int = DEFAULT_NEIGHBOURS,
     floor: float = DEFAULT_FLOOR,
     max_edges: int = DEFAULT_MAX_EDGES,
+    min_pages: int = DEFAULT_MIN_INDEX_PAGES,
 ) -> list[dict[str, str]]:
     """The ``related:`` rows *uid* should carry, in ``WikiEntity.related`` shape.
 
@@ -371,7 +393,14 @@ def propose_related_edges(
     remember: the index holds the pages that already exist, edges point from
     the page being compiled into it, and no existing page's frontmatter is
     touched.
+
+    Returns ``[]`` outright when the index holds fewer than *min_pages*
+    pages: below that the corpus weighting has no corpus to weight against
+    and the signal degenerates into linking everything
+    (:data:`DEFAULT_MIN_INDEX_PAGES`).
     """
+    if len(index) < min_pages:
+        return []
     proposals = index.neighbours(uid, k=k, floor=floor)
     edges: list[dict[str, str]] = []
     for candidate in proposals:
@@ -455,6 +484,7 @@ def stamp_related_edges(
     k: int = DEFAULT_NEIGHBOURS,
     floor: float = DEFAULT_FLOOR,
     max_edges: int = DEFAULT_MAX_EDGES,
+    min_pages: int = DEFAULT_MIN_INDEX_PAGES,
     max_body_chars: int = DEFAULT_MAX_BODY_CHARS,
 ) -> int:
     """Add proposed edges to each newly-created entity, in place.
@@ -486,7 +516,9 @@ def stamp_related_edges(
             ),
         )
         existing = {str(row.get("uid")) for row in (entity.related or []) if isinstance(row, dict)}
-        for edge in propose_related_edges(uid, index, k=k, floor=floor, max_edges=max_edges):
+        for edge in propose_related_edges(
+            uid, index, k=k, floor=floor, max_edges=max_edges, min_pages=min_pages
+        ):
             if edge["uid"] in existing:
                 continue
             entity.related.append(edge)

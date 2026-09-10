@@ -17,6 +17,7 @@ import pytest
 from athenaeum.config import resolve_relatedness_writer_enabled
 from athenaeum.relatedness import (
     DEFAULT_MAX_INDEX_PAGES,
+    DEFAULT_MIN_INDEX_PAGES,
     ROLE_TERM_OVERLAP,
     RelatednessIndex,
     build_index_from_wiki,
@@ -43,6 +44,11 @@ def _index(pages: dict[str, str]) -> RelatednessIndex:
     for uid, text in pages.items():
         index.add(uid, text)
     return index
+
+
+# Every proposal test below passes ``min_pages=0``. The small-index floor is a
+# separate property with its own tests further down; leaving it at its default
+# here would make each of these assert nothing but "the index is small".
 
 
 # ---------------------------------------------------------------------------
@@ -124,26 +130,52 @@ def test_mutuality_refuses_a_one_sided_edge():
             "spoke-3": "berth berth berth quayside quayside dock dock harbour",
         }
     )
-    edges = propose_related_edges("spoke-1", index, k=1, floor=0.0)
+    edges = propose_related_edges("spoke-1", index, k=1, floor=0.0, min_pages=0)
     assert all(edge["uid"] != "hub" for edge in edges)
 
 
 def test_max_edges_caps_a_page_that_is_mutual_with_many():
     text = "berth scheduling quayside harbour rota manifest"
     index = _index({f"p{i}": text for i in range(8)})
-    edges = propose_related_edges("p0", index, k=8, floor=0.0, max_edges=2)
+    edges = propose_related_edges("p0", index, k=8, floor=0.0, max_edges=2, min_pages=0)
     assert len(edges) == 2
 
 
 def test_every_proposed_edge_names_the_signal():
     index = _index({"a": "berth quayside harbour", "b": "berth quayside harbour"})
-    edges = propose_related_edges("a", index, k=2, floor=0.0)
+    edges = propose_related_edges("a", index, k=2, floor=0.0, min_pages=0)
     assert edges == [{"uid": "b", "role": ROLE_TERM_OVERLAP}]
 
 
 def test_a_uid_absent_from_the_index_proposes_nothing():
     index = _index({"a": "berth quayside"})
-    assert propose_related_edges("ghost", index, k=4, floor=0.0) == []
+    assert propose_related_edges("ghost", index, k=4, floor=0.0, min_pages=0) == []
+
+
+def test_a_tiny_index_proposes_nothing_even_though_every_cosine_is_large():
+    """The degenerate-IDF regime :data:`DEFAULT_MIN_INDEX_PAGES` exists for.
+
+    These three pages share only the word "facts", and on a three-document
+    corpus that is enough to clear the floor in both directions -- the writer
+    would emit a COMPLETE graph. Asserted both ways so the test proves the
+    floor is what suppresses it, not an absence of signal.
+    """
+    pages = {
+        "a": "Acme Corp\nFacts about Acme Corp.",
+        "b": "WidgetAlpha\nFacts about WidgetAlpha.",
+        "c": "WidgetBeta\nFacts about WidgetBeta.",
+    }
+    index = _index(pages)
+    without_floor = propose_related_edges("a", index, min_pages=0)
+    assert len(without_floor) == 2, "fixture no longer demonstrates the failure"
+    assert propose_related_edges("a", index) == []
+
+
+def test_the_index_floor_is_inclusive_at_its_own_value():
+    text = "berth scheduling quayside harbour rota"
+    index = _index({f"p{i}": f"{text} variant{i}" for i in range(4)})
+    assert propose_related_edges("p0", index, min_pages=5) == []
+    assert propose_related_edges("p0", index, min_pages=4) != []
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +192,7 @@ def test_edges_point_only_at_pages_that_already_exist():
     """
     index = _index({"old": "berth scheduling quayside harbour rota"})
     new = _Entity(uid="new", name="Berth rota", body="berth scheduling quayside harbour rota")
-    added = stamp_related_edges([new], index, k=2, floor=0.0)
+    added = stamp_related_edges([new], index, k=2, floor=0.0, min_pages=0)
     assert added == 1
     assert new.related == [{"uid": "old", "role": ROLE_TERM_OVERLAP}]
 
@@ -169,7 +201,7 @@ def test_a_later_entity_in_the_same_run_can_link_to_an_earlier_one():
     index = RelatednessIndex()
     first = _Entity(uid="one", body="berth scheduling quayside harbour rota")
     second = _Entity(uid="two", body="berth scheduling quayside harbour rota")
-    stamp_related_edges([first, second], index, k=2, floor=0.0)
+    stamp_related_edges([first, second], index, k=2, floor=0.0, min_pages=0)
     assert first.related == []
     assert second.related == [{"uid": "one", "role": ROLE_TERM_OVERLAP}]
 
@@ -181,7 +213,7 @@ def test_existing_edges_are_preserved_and_never_duplicated():
         body="berth scheduling quayside harbour rota",
         related=[{"uid": "parent", "role": "split-from"}],
     )
-    added = stamp_related_edges([child], index, k=2, floor=0.0)
+    added = stamp_related_edges([child], index, k=2, floor=0.0, min_pages=0)
     assert added == 0
     assert child.related == [{"uid": "parent", "role": "split-from"}]
 
@@ -310,3 +342,11 @@ def test_env_overrides_yaml(monkeypatch):
 
 def test_page_ceiling_default_is_not_accidentally_small():
     assert DEFAULT_MAX_INDEX_PAGES >= 25_000
+
+
+def test_page_floor_default_sits_under_the_measured_regime():
+    """96 is the eval corpus's core size -- the smallest N with a measured
+    precision for this signal. The floor must be under it (or a real corpus
+    the size of the eval's would write nothing) and well above the N=3 regime
+    where the signal demonstrably degenerates."""
+    assert 3 < DEFAULT_MIN_INDEX_PAGES < 96
