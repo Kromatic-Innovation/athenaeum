@@ -495,6 +495,12 @@ def shape_viewer_payload(
         "unknown_provenance": _rows(unknown_only),
         "pushed_ids": sorted(unbidden),
         "pulled_ids": sorted(deliberate),
+        # The ids themselves, not just the boolean above: `enrich_payload`'s
+        # unified `pages` list needs them to resolve each row's `referenced`
+        # flag the same way :func:`_row` already does for the three legacy
+        # tables. Exporting only `has_reference_determination` is what made
+        # every page render a confident, wrong "no" (issue athenaeum#1554).
+        "referenced_ids": sorted(referenced_ids),
         "unknown_ids": sorted(unknown_only),
         "all_items": {**unknown, **deliberate, **unbidden},
         "last_turn_record": last_turn_record,
@@ -563,6 +569,7 @@ def enrich_payload(
     all_items: dict[str, dict[str, Any]] = payload.pop("all_items", {})
     pushed_ids = set(payload.pop("pushed_ids", []))
     pulled_ids = set(payload.pop("pulled_ids", []))
+    referenced_ids = set(payload.pop("referenced_ids", []))
     unknown_ids = set(payload.pop("unknown_ids", []))
     last_turn_record = payload.pop("last_turn_record", None)
 
@@ -594,7 +601,7 @@ def enrich_payload(
         row["referenced"] = _referenced_flag(
             uid,
             has_reference_record=bool(payload.get("has_reference_determination")),
-            referenced_ids=set(),
+            referenced_ids=referenced_ids,
         )
         return row
 

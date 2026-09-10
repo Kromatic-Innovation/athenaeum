@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Test coverage joining a **configured** extra intake root (via
+  `athenaeum.yaml`'s `recall.extra_intake_roots`) all the way through
+  `resolve_extra_intake_roots` and a real `athenaeum reindex` build to a
+  nonzero indexed row count attributable to that root. Previously, 13 test
+  files exercised `extra_roots` only by direct injection, and
+  `resolve_extra_intake_roots` was tested only in isolation — the two paths
+  were never joined, which is why athenaeum#1457's zero-coverage regression
+  closed on observation rather than a test. Also covers the regression shape
+  directly: a configured root that resolves to an existing, empty directory
+  now has a test-verifiable, attributable zero row count, distinguishable
+  from the no-roots-configured case (an empty resolved-roots list). No
+  production behaviour changed — `resolve_extra_intake_roots` and the
+  existing injection-based tests are untouched.
+  ([#1485](https://github.com/Kromatic-Innovation/athenaeum/issues/1485))
+
 - Scope-aware read side for the `specialization` verdict. The verdict's write
   side (a `refines:` declaration on the specific claim) has had no matching
   reader since it shipped, and no query surface in the repo took a scope
