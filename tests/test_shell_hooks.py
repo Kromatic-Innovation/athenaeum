@@ -1440,6 +1440,24 @@ conn.close()
         raw_line = durable_push_records_path(wiki_root, cache_dir=cache_dir).read_text()
         assert probe not in raw_line
 
+    def test_hook_never_names_a_wiki_root_ledger_path(self) -> None:
+        """Issue athenaeum#1591, mechanical guard on the LIVE producer. This
+        hook resolves the ledger path in bash, independently of
+        `push_metrics.durable_push_records_path`, and it is what actually
+        migrated the operator's deployment into the corpus. A future edit that
+        reintroduces a wiki-root branch here would be invisible to every
+        Python-side test, so assert on the script text itself.
+        """
+        text = USER_PROMPT.read_text(encoding="utf-8")
+        offenders = [
+            line
+            for line in text.splitlines()
+            if "_push_records.jsonl" in line
+            and not line.lstrip().startswith("#")
+            and "PM_CACHE_DIR" not in line
+        ]
+        assert offenders == [], f"ledger path must resolve under the cache dir only: {offenders}"
+
     def test_ledger_path_legacy_branch_when_only_legacy_populated(
         self, hook_env: dict[str, str]
     ) -> None:
@@ -1475,13 +1493,15 @@ conn.close()
         # And the resolution rule still agrees after the write.
         assert durable_push_records_path(wiki_root, cache_dir=cache_dir) == legacy_path
 
-    def test_ledger_path_new_branch_when_neither_file_present(
+    def test_ledger_path_cache_dir_when_neither_file_present(
         self, hook_env: dict[str, str]
     ) -> None:
-        """AC (post-edit): a tmpdir with NEITHER file present -- both the
-        hook and `durable_push_records_path` resolve to the *new*
-        `<wiki_root>` path. (Paired with the legacy-branch test above --
-        this case alone would pass vacuously and prove nothing.)
+        """AC (issue athenaeum#1591): a tmpdir with NEITHER file present --
+        both the hook and `durable_push_records_path` resolve to the CACHE
+        DIR, and nothing appears under `<wiki_root>`. This previously
+        asserted the opposite (the wiki-root "new" branch); the relocation it
+        encoded is withdrawn. Paired with the legacy-branch test above --
+        that case alone would pass vacuously and prove nothing.
         """
         _require("bash")
         _require("jq")
@@ -1496,15 +1516,15 @@ conn.close()
         assert not new_path.exists()
         assert not legacy_path.exists()
 
-        assert durable_push_records_path(wiki_root, cache_dir=cache_dir) == new_path
+        assert durable_push_records_path(wiki_root, cache_dir=cache_dir) == legacy_path
 
         result = self._run_hook(hook_env, "tell me about customer development frameworks")
         assert result.returncode == 0, f"stderr: {result.stderr}"
         assert result.stdout
 
-        assert new_path.is_file()
-        assert not legacy_path.exists(), "must not also write the legacy ledger"
-        assert durable_push_records_path(wiki_root, cache_dir=cache_dir) == new_path
+        assert legacy_path.is_file()
+        assert not new_path.exists(), "must not write telemetry into the wiki corpus"
+        assert durable_push_records_path(wiki_root, cache_dir=cache_dir) == legacy_path
 
     def test_push_metrics_enabled_gate_honoured(self, hook_env: dict[str, str]) -> None:
         """AC: honours `ATHENAEUM_PUSH_METRICS_ENABLED` with the SAME
@@ -1523,7 +1543,9 @@ conn.close()
         self._seed_index(hook_env)
 
         wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
-        ledger_path = wiki_root / "_push_records.jsonl"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        # Issue athenaeum#1591: cache dir, not wiki root.
+        ledger_path = durable_push_records_path(wiki_root, cache_dir=cache_dir)
 
         off_env = dict(hook_env)
         off_env["ATHENAEUM_PUSH_METRICS_ENABLED"] = "false"

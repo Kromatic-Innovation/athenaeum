@@ -188,27 +188,27 @@ elif [ "${PUSH_METRICS_ENABLED:-true}" = "false" ]; then
   PM_ENABLED=false
 fi
 
-# Ledger path (D3): reproduces `push_metrics.durable_push_records_path`'s
-# two-branch rule exactly — new (`<wiki_root>/_push_records.jsonl`) when
-# it exists or the legacy cache-dir file does not, else legacy
-# (`<cache_dir>/_push_records.jsonl`). Deliberately a SEPARATE resolution
-# from this hook's own `$CACHE_DIR` above (which is pinned to `$HOME` and
-# does not honour `ATHENAEUM_CACHE_DIR`) — the ledger must resolve to
-# exactly where `push_metrics.push_records_path`/`durable_push_records_path`
-# would, or a hook-written row and a Python-written row could split
-# across two different files. `wiki_root` mirrors
-# `session-start-recall.sh:59-60`'s identical expression
-# (`mcp_server.py:423` confirms `wiki_root = knowledge_root / "wiki"`).
-PM_KNOWLEDGE_ROOT="${KNOWLEDGE_ROOT:-$HOME/knowledge}"
-PM_WIKI_ROOT="${KNOWLEDGE_WIKI_PATH:-${PM_KNOWLEDGE_ROOT}/wiki}"
+# Ledger path (D3): mirrors `push_metrics.durable_push_records_path`
+# exactly — ALWAYS `<cache_dir>/_push_records.jsonl`, NEVER
+# `<wiki_root>/_push_records.jsonl`.
+#
+# Issue athenaeum#1591: this block used to reproduce that function's
+# two-branch rule ("new wiki-root path when it exists or the legacy
+# cache-dir file does not"). This hook is the live deployment's highest-
+# frequency producer, so it is what actually drove the observed migration:
+# 112 telemetry rows accrued at `~/knowledge/wiki/_push_records.jsonl` and a
+# librarian run committed them into the corpus. Issue athenaeum#749's
+# acceptance — push records live "outside the wiki corpus (so they never
+# become claims and never enter the embedded index)" — governs, and the
+# relocation athenaeum#980 AC4 applied to this one artifact is withdrawn.
+#
+# Still deliberately a SEPARATE resolution from this hook's own `$CACHE_DIR`
+# above (which is pinned to `$HOME` and does not honour
+# `ATHENAEUM_CACHE_DIR`) — the ledger must resolve to exactly where
+# `push_metrics.push_records_path` would, or a hook-written row and a
+# Python-written row could split across two different files.
 PM_CACHE_DIR="${ATHENAEUM_CACHE_DIR:-$HOME/.cache/athenaeum}"
-PM_LEDGER_NEW="${PM_WIKI_ROOT}/_push_records.jsonl"
-PM_LEDGER_LEGACY="${PM_CACHE_DIR}/_push_records.jsonl"
-if [ -f "$PM_LEDGER_NEW" ] || [ ! -f "$PM_LEDGER_LEGACY" ]; then
-  PM_LEDGER_PATH="$PM_LEDGER_NEW"
-else
-  PM_LEDGER_PATH="$PM_LEDGER_LEGACY"
-fi
+PM_LEDGER_PATH="${PM_CACHE_DIR}/_push_records.jsonl"
 
 # ── Push telemetry helpers (pure bash — no subprocess on the hot path) ──
 #
@@ -572,12 +572,9 @@ _pm_record_push() {
   # alongside the caller's `_pm_record_push || true`, since an unbound-
   # variable abort (unlike an ordinary failure) is not caught by the
   # caller's guard, and every value reaching this point has already been
-  # through the numeric guards above.
-  if [ "$PM_LEDGER_PATH" = "$PM_LEDGER_NEW" ]; then
-    mkdir -p "$PM_WIKI_ROOT" 2>/dev/null || true
-  else
-    mkdir -p "$PM_CACHE_DIR" 2>/dev/null || true
-  fi
+  # through the numeric guards above. One `mkdir` branch, not two, since
+  # issue athenaeum#1591 left the ledger exactly one home.
+  mkdir -p "$PM_CACHE_DIR" 2>/dev/null || true
   printf '%s\n' "$pm_record" >> "$PM_LEDGER_PATH" 2>/dev/null || true
   return 0
 }
@@ -675,8 +672,8 @@ _pm_write_topics_trace() {
   # both ways: a missing directory would not error, it would just silently
   # produce no topics -- the same invisible-failure shape this whole review
   # finding is about, just relocated to setup instead of resolution. This
-  # `mkdir -p` is a SEPARATE call from `_pm_record_push`'s own (line ~576,
-  # on `$PM_WIKI_ROOT`/`$PM_CACHE_DIR` for the ledger) because the trace can
+  # `mkdir -p` is a SEPARATE call from `_pm_record_push`'s own (on
+  # `$PM_CACHE_DIR` for the ledger too, since athenaeum#1591) because the trace can
   # be enabled/disabled independently of the ledger and must not depend on
   # that other code path having already run.
   mkdir -p "$PM_CACHE_DIR" 2>/dev/null || return 0

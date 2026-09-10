@@ -988,7 +988,11 @@ def test_record_survives_an_unwritable_ledger_path(tmp_path: Path) -> None:
     was never going to check)."""
     cache_dir, knowledge_root = _isolated_cache_and_path(tmp_path)
     (knowledge_root / "wiki").mkdir(parents=True)
-    (knowledge_root / "wiki" / "_push_records.jsonl").mkdir()
+    # Issue athenaeum#1591: the ledger resolves to the CACHE dir, so the
+    # unwritable-path fixture has to be planted there. (It used to be planted
+    # at `<wiki_root>/_push_records.jsonl`, which is no longer a write target.)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "_push_records.jsonl").mkdir()
     rc, out = _run(
         [
             "push-metrics",

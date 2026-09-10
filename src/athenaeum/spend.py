@@ -250,12 +250,23 @@ def durable_ledger_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Pa
     populated yet) and an already-migrated store (the new path already has
     content) both resolve to the new, behind-the-seam location.
 
-    Same audited caveat as :func:`athenaeum.push_metrics.durable_push_records_path`:
-    a non-``None`` *cache_dir* is not treated as an isolation signal here —
-    production call sites pass a concrete, already-resolved *cache_dir*
-    routinely, so doing so would silently reroute real writes. There is no
-    ``spend`` CLI equivalent of ``push-metrics record`` in this issue's
-    scope, so no CLI-layer companion fix was added on this side.
+    Audited caveat (issue athenaeum#1512): a non-``None`` *cache_dir* is not
+    treated as an isolation signal here — production call sites pass a
+    concrete, already-resolved *cache_dir* routinely, so doing so would
+    silently reroute real writes. There is no ``spend`` CLI equivalent of
+    ``push-metrics record`` in that issue's scope, so no CLI-layer companion
+    fix was added on this side.
+
+    **This function no longer shares its contract with
+    :func:`athenaeum.push_metrics.durable_push_records_path`,** which it used
+    to cite as the matching implementation. Issue athenaeum#1591 withdrew the
+    push-records ledger's relocation to ``wiki_root``: that ledger has an
+    explicit "outside the wiki corpus" acceptance of its own (athenaeum#749)
+    which athenaeum#980 AC4 overrode without noticing. No equivalent
+    acceptance was found for ``spend.jsonl``, so THIS ledger stays at
+    ``wiki_root`` under athenaeum#980 AC4 as built. The two-branch rule below
+    is now specific to this artifact rather than a shared idiom; do not
+    "restore symmetry" by copying it back into ``push_metrics``.
     """
     new_path = Path(wiki_root) / LEDGER_FILENAME
     legacy_path = default_ledger_path(cache_dir)
