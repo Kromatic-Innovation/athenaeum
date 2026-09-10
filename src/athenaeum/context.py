@@ -452,8 +452,7 @@ def render_text(candidates: list[Candidate]) -> str:
 
 
 def _apply_budget(candidates: list[Candidate], budget: int, preamble: str) -> list[Candidate]:
-    """Greedy pack, mirroring :func:`athenaeum.memory_tiers.select_for_push`'s
-    behaviour over already relevance-ordered, deduped candidates: a
+    """Greedy pack over already relevance-ordered, deduped candidates: a
     candidate is included, and its cost added to the running total, ONLY if
     doing so keeps the total within budget. A candidate that would exceed
     it is SKIPPED (never truncated) — later, smaller candidates are still

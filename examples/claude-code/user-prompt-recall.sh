@@ -69,14 +69,15 @@
 # Python. The ONLY duplicated surface is the greedy budget-accumulation
 # loop and the token estimator (`athenaeum.push_metrics.estimate_tokens`
 # = `max(0, len(text) // 4)`, a single arithmetic expression, faithfully
-# expressed in awk as `int(length(s)/4)`). Coordinate fit is a no-op for
-# this surface: this hook has a `session_id`, not a scope coordinate, so
-# `scope_relation` is `None` for every candidate — neutral weight for
-# all — which means `push_score` ranking degenerates exactly to
-# relevance order, i.e. the FTS5 `rank` ordering this hook already uses.
-# That is why this hook needs NO `push_score` reimplementation, and it is
-# the load-bearing reason the shell-native seam is safe rather than a
-# silent behavioural drift from the Python path.
+# expressed in awk as `int(length(s)/4)`). Coordinate fit and tier
+# weighting are no longer part of push selection anywhere (issue
+# athenaeum#1353 deleted `athenaeum.memory_tiers`'s tier-weighted
+# `push_score` formula and `select_for_push`, which had no production
+# caller): selection is plain relevance order, budget-packed, everywhere
+# it happens — i.e. the FTS5 `rank` ordering this hook already uses. That
+# is why this hook needs NO push-selection-formula reimplementation, and
+# it is the load-bearing reason the shell-native seam is safe rather than
+# a silent behavioural drift from the Python path.
 #
 # Optional LLM query-rewriting. If `athenaeum query-topics` is available,
 # the raw prompt is first run through the configured LLM provider (Haiku
@@ -1103,14 +1104,17 @@ RESULTS=$(printf '%s\n%s\n' "$FTS_RESULTS" "$VECTOR_RESULTS" \
   | head -3)
 
 # ── Enforce the push-token budget (issue athenaeum#1120) ────────────────
-# Mirrors athenaeum.memory_tiers.select_for_push's greedy-pack behaviour
-# over the merged, deduped, rank-ordered candidates above: a candidate is
-# included and its token cost added to the running total ONLY if doing so
-# keeps the total <= budget. A candidate that would exceed the budget is
-# SKIPPED (never truncated) — later, smaller candidates are still
-# considered, so the budget is packed rather than cut off at the first
-# miss (see select_for_push's docstring for the reference behaviour this
-# loop reproduces).
+# Mirrors athenaeum.context._apply_budget's greedy-pack behaviour over the
+# merged, deduped, rank-ordered candidates above: a candidate is included
+# and its token cost added to the running total ONLY if doing so keeps the
+# total <= budget. A candidate that would exceed the budget is SKIPPED
+# (never truncated) — later, smaller candidates are still considered, so
+# the budget is packed rather than cut off at the first miss (see
+# `_apply_budget`'s docstring for the reference behaviour this loop
+# reproduces; issue athenaeum#1353 retired the older
+# `athenaeum.memory_tiers.select_for_push` reference this comment used to
+# cite — that function had no production caller and duplicated this same
+# behaviour).
 #
 # What is metered: the literal text this hook actually emits. Each
 # candidate's own cost is its "  - ${bullet}\n" line — the exact text
