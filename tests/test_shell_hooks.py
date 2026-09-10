@@ -18,8 +18,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -2673,6 +2676,395 @@ exec "$REAL_AWK" "$@"
             "the vector post-filter's derived 'kept' set must be removed "
             "along with the hot-only VECTOR_META restriction"
         )
+
+    # -- issue athenaeum#1530: local topics trace ---------------------------
+    #
+    # athenaeum#711 decided the ledger stores a query HASH, never raw text or
+    # topics -- a deliberate privacy property this issue must not weaken.
+    # Topics instead go to a SEPARATE, local, ring-buffered file the viewer
+    # joins to a push record by `query_hash`. See that file's own docstring
+    # for the two 2026-09-09 incidents (athenaeum#1513, athenaeum#1516) that
+    # make "verify by running the hook, not by reading the diff" load-bearing
+    # for every test below.
+
+    def _topics_trace_path(self, hook_env: dict[str, str]) -> Path:
+        # Mirrors the hook's `PM_CACHE_DIR="${ATHENAEUM_CACHE_DIR:-$HOME/.cache/athenaeum}"`
+        # -- NOT the hook's plain (non-overridable) `CACHE_DIR`, which is
+        # hardcoded to `${HOME}/.cache/athenaeum` and ignores
+        # `ATHENAEUM_CACHE_DIR` entirely. `_cmd_viewer.py`'s
+        # `_load_topics_for_query_hash` resolves this SAME file via
+        # `athenaeum.config.resolve_cache_dir` (`arg > ATHENAEUM_CACHE_DIR env
+        # > default`), i.e. `PM_CACHE_DIR`'s exact shape -- so this helper
+        # must match `PM_CACHE_DIR`, not `CACHE_DIR`, or these tests would
+        # pass by the two paths coincidentally being equal (as they are
+        # whenever `hook_env`'s `ATHENAEUM_CACHE_DIR` happens to already sit
+        # under `HOME`) rather than by actually exercising the resolution
+        # every deployment that sets `ATHENAEUM_CACHE_DIR` relies on.
+        cache_dir = hook_env.get("ATHENAEUM_CACHE_DIR") or str(
+            Path(hook_env["HOME"]) / ".cache" / "athenaeum"
+        )
+        return Path(cache_dir) / "_last_turn_topics.jsonl"
+
+    def _wait_for_topics_row(
+        self, trace_path: Path, query_hash: str, timeout: float = 5.0
+    ) -> dict[str, Any]:
+        """Poll for the backgrounded trace write (AC4's fire-and-forget
+        design means it can still be in flight when the hook process, and
+        therefore `subprocess.run`, has already returned)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if trace_path.is_file():
+                for line in reversed(trace_path.read_text().splitlines()):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(row, dict) and row.get("query_hash") == query_hash:
+                        return row
+            time.sleep(0.05)
+        pytest.fail(
+            f"topics trace at {trace_path} never recorded query_hash={query_hash!r} "
+            f"within {timeout}s"
+        )
+
+    def test_topics_trace_keyed_by_same_query_hash_as_push_record(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC1: after a turn, the trace holds that turn's topics keyed by
+        the SAME `query_hash` the push record carries -- asserted by
+        joining the two artifacts on that value, not by reading the diff.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        probe = "tell me about customer development frameworks"
+        result = self._run_hook(hook_env, probe)
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout
+
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        assert len(records) == 1
+        query_hash = records[0]["query_hash"]
+        assert query_hash == _query_hash(probe)
+
+        row = self._wait_for_topics_row(self._topics_trace_path(hook_env), query_hash)
+        assert row["query_hash"] == query_hash
+        assert isinstance(row["topics"], list) and row["topics"]
+        # The regex fallback extractor (ATHENAEUM_CLI is stubbed to a
+        # nonexistent path in `hook_env`) tokenizes the probe itself, so the
+        # recorded topics must actually reflect it -- not an empty or
+        # unrelated placeholder.
+        assert any(t in row["topics"] for t in ("customer", "development", "frameworks"))
+        assert probe not in json.dumps(row), (
+            "the trace holds extracted topic TOKENS, never the raw prompt text"
+        )
+
+    def test_push_record_shape_unchanged_no_topics_key(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC2 (hard gate): push records stay byte-identical in shape --
+        pinned by an explicit key-set assertion, not a spot-check, so this
+        cannot regress by a future edit adding `topics` (or anything else)
+        to the ledger row. athenaeum#711 stays intact: the ledger keeps a
+        query HASH only.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        result = self._run_hook(
+            hook_env, "tell me about customer development frameworks"
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout
+
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        assert len(records) == 1
+        rec = records[0]
+
+        assert set(rec) == {
+            "v",
+            "session_id",
+            "ts",
+            "query_hash",
+            "backend",
+            "items",
+            "pushed_count",
+            "token_cost",
+            "token_cost_estimated",
+            "source",
+        }, f"push record shape changed: {sorted(rec)}"
+        assert "topics" not in rec
+
+        for item in rec["items"]:
+            assert set(item) == {
+                "id",
+                "tier",
+                "scope",
+                "token_cost",
+                "relevance",
+                "backend",
+                "memory_tier",
+            }, f"push record item shape changed: {sorted(item)}"
+            assert "topics" not in item
+
+        raw_line = durable_push_records_path(wiki_root, cache_dir=cache_dir).read_text()
+        assert "topics" not in raw_line
+
+    def test_topics_trace_is_ring_buffered_and_bounded(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC3: the trace is bounded (last N turns) and never grows without
+        limit. Pre-seeds the file well past a small test-only cap, runs one
+        more turn, and asserts the file settles back at the cap rather than
+        accumulating unboundedly.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        trace_path = self._topics_trace_path(hook_env)
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        max_lines = 5
+        with trace_path.open("w") as f:
+            for i in range(50):
+                f.write(
+                    json.dumps(
+                        {
+                            "session_id": "pre-existing",
+                            "ts": "2026-01-01T00:00:00Z",
+                            "query_hash": f"deadbeef0000{i:04d}"[:16],
+                            "topics": ["filler"],
+                        }
+                    )
+                    + "\n"
+                )
+
+        env = dict(hook_env)
+        env["ATHENAEUM_TOPICS_TRACE_MAX_LINES"] = str(max_lines)
+        probe = "tell me about customer development frameworks"
+        result = self._run_hook(env, probe)
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout
+
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        query_hash = records[0]["query_hash"]
+        self._wait_for_topics_row(trace_path, query_hash)
+
+        deadline = time.time() + 5.0
+        line_count = None
+        while time.time() < deadline:
+            line_count = len(
+                [ln for ln in trace_path.read_text().splitlines() if ln.strip()]
+            )
+            if line_count <= max_lines:
+                break
+            time.sleep(0.05)
+        assert line_count == max_lines, (
+            f"expected the ring buffer to settle at {max_lines} lines after "
+            f"trimming, got {line_count}"
+        )
+        # And the newest row (this turn's) must have survived the trim --
+        # a correct ring buffer keeps the TAIL, not an arbitrary N lines.
+        kept_hashes = {
+            json.loads(ln)["query_hash"]
+            for ln in trace_path.read_text().splitlines()
+            if ln.strip()
+        }
+        assert query_hash in kept_hashes
+
+    def test_topics_trace_write_failure_never_affects_injection(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """AC4 (hard gate): a failed trace write degrades to "no topics
+        recorded", NEVER to "no context injected" and never to a slower
+        turn. The write is forced to fail for real (the trace path is a
+        DIRECTORY, so the hook's own `>>` append cannot succeed) rather
+        than asserted only by reading the diff.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        trace_path = self._topics_trace_path(hook_env)
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        # A directory where the hook expects to append a file: every write
+        # attempt (`printf ... >> "$PM_TOPICS_TRACE_PATH"`) fails with
+        # "Is a directory", exercising the REAL failure path rather than a
+        # simulated one.
+        trace_path.mkdir()
+
+        start = time.monotonic()
+        result = self._run_hook(
+            hook_env, "tell me about customer development frameworks"
+        )
+        elapsed = time.monotonic() - start
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, (
+            "a trace-write failure must never suppress the injected context"
+        )
+        payload = json.loads(result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        assert "Customer Development" in context
+
+        # The synchronous portion of the hook (everything up to and
+        # including its stdout) must not be slowed by a doomed trace write
+        # -- the write is backgrounded specifically so this holds even if
+        # the background attempt itself is slow to fail.
+        assert elapsed < 5.0, (
+            f"hook took {elapsed:.2f}s; a failing trace write must not slow "
+            "the synchronous turn"
+        )
+
+        # The push record ledger -- an entirely separate write -- must be
+        # completely unaffected by the topics-trace failure.
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        assert len(records) == 1
+
+        assert trace_path.is_dir(), "the forced-failure fixture itself must be untouched"
+
+    def test_topics_trace_survives_bwk_awk_semantics(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC5: this issue's regression test runs under BWK-semantics awk,
+        not gawk. `user-prompt-recall.sh` has the worst incident history in
+        the repo precisely because a gawk-green CI result proved nothing
+        for athenaeum#1516 -- a multi-line `awk -v` value that GNU awk
+        accepts outright crashes the deployed BWK awk. This issue's own new
+        code (`_pm_topics_json_array`, `_pm_write_topics_trace`) adds no new
+        `awk` invocation at all -- it is pure bash -- but the surrounding
+        hook still runs several existing `awk` passes on the same turn, and
+        this test is the guard that the topics-trace addition did not
+        perturb any of them under the DEPLOYED interpreter's semantics.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        shim_dir = self._awk_shim_dir(tmp_path)
+        env = dict(hook_env)
+        env["PATH"] = f"{shim_dir}{os.pathsep}{env['PATH']}"
+
+        probe = "tell me about customer development frameworks"
+        result = self._run_hook(env, probe)
+        assert "newline in string" not in result.stderr, (
+            f"BWK awk semantics broke under this issue's change: {result.stderr!r}"
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout
+
+        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
+        assert len(records) == 1
+        query_hash = records[0]["query_hash"]
+
+        row = self._wait_for_topics_row(self._topics_trace_path(env), query_hash)
+        assert row["topics"]
+
+    def test_topics_trace_and_viewer_agree_when_athenaeum_cache_dir_diverges_from_home(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Regression for a Seer review finding on this PR: the trace path
+        was originally built from the hook's plain, hardcoded
+        `CACHE_DIR="${HOME}/.cache/athenaeum"` while `_cmd_viewer.py` reads
+        the same file via `athenaeum.config.resolve_cache_dir`, whose
+        precedence is `arg > ATHENAEUM_CACHE_DIR env > default`. Any
+        deployment that actually SETS `ATHENAEUM_CACHE_DIR` would have the
+        hook write to one directory and the viewer read from another --
+        silently, since a miss renders the pre-existing (and otherwise
+        legitimate) "not instrumented" state rather than an error. That is
+        exactly the "wrong result that looks like a legitimate one" failure
+        mode issue athenaeum#1530 cites athenaeum#1513 for.
+
+        `hook_env`'s own `ATHENAEUM_CACHE_DIR` happens to already sit under
+        `HOME`, so every OTHER test in this class would pass even with that
+        bug present -- tested by coincidence, not by the join. This test
+        points `ATHENAEUM_CACHE_DIR` at a directory that shares NO path
+        segment with `HOME`, so the two resolutions can only agree by
+        actually consulting the same env var, then asserts the join two
+        ways: the file lands where `PM_CACHE_DIR` (not `CACHE_DIR`) resolves
+        to, AND `_cmd_viewer._load_topics_for_query_hash` -- the viewer's
+        own real production function, not a hand-rolled path -- finds the
+        same row when pointed at that same directory.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed_index(hook_env)
+
+        # A standalone `tempfile.mkdtemp()`, deliberately NOT nested under
+        # `tmp_path` -- `hook_env` and this test share the same `tmp_path`
+        # fixture instance, so anything built from `tmp_path` (including
+        # `hook_env["HOME"]`) shares its prefix. Only a directory rooted
+        # OUTSIDE that shared tree proves the two resolutions agree by
+        # actually consulting `ATHENAEUM_CACHE_DIR`, rather than by both
+        # happening to descend from the same fixture.
+        divergent_cache = Path(tempfile.mkdtemp(prefix="athenaeum-divergent-cache-"))
+        try:
+            env = dict(hook_env)
+            env["ATHENAEUM_CACHE_DIR"] = str(divergent_cache)
+            assert not str(divergent_cache).startswith(str(Path(hook_env["HOME"])))
+
+            probe = "tell me about customer development frameworks"
+            result = self._run_hook(env, probe)
+            assert result.returncode == 0, f"stderr: {result.stderr}"
+            assert result.stdout
+
+            wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+            records = read_push_records(wiki_root=wiki_root, cache_dir=divergent_cache)
+            assert len(records) == 1
+            query_hash = records[0]["query_hash"]
+
+            # 1. The trace file must land under the DIVERGENT
+            # `ATHENAEUM_CACHE_DIR` -- not under the hardcoded
+            # `$HOME/.cache/athenaeum` the pre-fix code used.
+            correct_trace_path = divergent_cache / "_last_turn_topics.jsonl"
+            stale_trace_path = (
+                Path(hook_env["HOME"]) / ".cache" / "athenaeum" / "_last_turn_topics.jsonl"
+            )
+            row = self._wait_for_topics_row(correct_trace_path, query_hash)
+            assert not stale_trace_path.is_file(), (
+                "the trace must not also (or instead) land at the hardcoded "
+                "$HOME-derived path when ATHENAEUM_CACHE_DIR diverges from it"
+            )
+
+            # 2. The viewer's own real lookup function, pointed at the SAME
+            # divergent cache_dir, must find the SAME row -- this is the
+            # AC1/AC6 join actually being tested, not merely a
+            # file-existence check on each side independently.
+            from athenaeum import _cmd_viewer
+
+            topics = _cmd_viewer._load_topics_for_query_hash(
+                query_hash, cache_dir=divergent_cache
+            )
+            assert topics == row["topics"]
+            assert topics, "expected a non-empty topics list to have round-tripped"
+        finally:
+            shutil.rmtree(divergent_cache, ignore_errors=True)
 
 
 class TestPreCompactSave:
