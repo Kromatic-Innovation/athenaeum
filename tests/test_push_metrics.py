@@ -1552,6 +1552,81 @@ class TestDurablePushRecordsPath:
         assert (wiki_root / push_metrics.PUSH_RECORDS_FILENAME).exists()
         assert not (cache_dir / push_metrics.PUSH_RECORDS_FILENAME).exists()
 
+    def test_empty_new_path_is_not_treated_as_already_migrated(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1512 AC3 / defect 2, direct function level (AC4):
+        an EMPTY ``<wiki_root>/_push_records.jsonl`` — the exact shape of a
+        stray ``touch``, a partially-written file from a crashed run, or (as
+        actually happened) a scratch-dir test invocation — must not look
+        "already migrated" and silently strand a populated legacy ledger.
+        """
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        legacy = cache_dir / push_metrics.PUSH_RECORDS_FILENAME
+        legacy.write_text('{"session_id":"populated-legacy-row"}\n', encoding="utf-8")
+
+        new_path = wiki_root / push_metrics.PUSH_RECORDS_FILENAME
+        new_path.touch()
+        assert new_path.exists() and new_path.stat().st_size == 0
+
+        resolved = push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir)
+
+        assert resolved == legacy
+
+    def test_non_empty_new_path_is_treated_as_migrated(self, tmp_path: Path) -> None:
+        """Complement of the above: once the new location genuinely carries a
+        row, resolution stays there even though the legacy ledger is also
+        still populated — a real migration is a one-way, sticky switch, only
+        an EMPTY file must not trigger one."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        legacy = cache_dir / push_metrics.PUSH_RECORDS_FILENAME
+        legacy.write_text('{"session_id":"populated-legacy-row"}\n', encoding="utf-8")
+        new_path = wiki_root / push_metrics.PUSH_RECORDS_FILENAME
+        new_path.write_text('{"session_id":"migrated-row"}\n', encoding="utf-8")
+
+        resolved = push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir)
+
+        assert resolved == new_path
+
+    def test_explicit_cache_dir_alone_does_not_isolate_this_function(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1512 defect 1, direct function level (AC4) —
+        documents the boundary of what this function's fix does and does NOT
+        cover, so a future edit does not "simplify away" the CLI-side fix
+        believing this function already isolates ``cache_dir``.
+
+        This function has no way to distinguish "the operator explicitly
+        typed ``--cache-dir`` to isolate a scratch run" from "a caller
+        resolved ``cache_dir`` eagerly as part of its own normal plumbing" —
+        both arrive as a concrete, non-``None`` :class:`Path`. Production
+        call sites (``mcp_server.py``, ``librarian.py``, ...) routinely do
+        the latter, passing a real, non-``None`` cache_dir alongside a real
+        wiki_root — so treating "cache_dir is not None" as an isolation
+        signal HERE would silently reroute those real writes into the cache
+        dir once the wiki-root ledger happened to be fresh.
+
+        The actual ``--cache-dir``-without-``--path`` isolation gap is
+        closed one layer up, in the CLI's own ``record`` subcommand — see
+        ``test_push_metrics_cli.py::
+        test_cache_dir_alone_does_not_leak_into_the_live_wiki_root`` — which
+        is the only place that can tell an operator-typed flag apart from an
+        ordinarily-resolved value.
+        """
+        would_be_live_wiki_root = tmp_path / "wiki"
+        would_be_live_wiki_root.mkdir()
+        scratch_cache_dir = tmp_path / "scratch-cache"  # deliberately not created
+
+        resolved = push_metrics.durable_push_records_path(
+            would_be_live_wiki_root, cache_dir=scratch_cache_dir
+        )
+
+        assert resolved == would_be_live_wiki_root / push_metrics.PUSH_RECORDS_FILENAME
+
     def test_no_split_brain_on_a_fresh_store(self, tmp_path: Path) -> None:
         """The production WRITE path (record_push, as mcp_server.py calls it)
         and the production READ path (read_push_records, as

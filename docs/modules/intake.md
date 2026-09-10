@@ -70,16 +70,15 @@ Each `librarian-run-summary` log line reports
 log alone whether the live file still matches the shipped default or has been edited (and to
 what byte-state), without diffing the file by hand.
 
-**What this is not.** The shipped file's own "Pattern Detection" and "Decay Rules" sections
-describe a self-tuning filter — the librarian never implements either. `librarian.py` never
-reads or writes this fragment at all outside the one `tiers.py` read above: it does not
-analyze raw intake for patterns, does not propose additions, and does not decay or promote
-filter entries. The file is also not a wiki page — it lives under `wiki/_schema/`, outside
-the compiled corpus `recall` searches. Editing it is a manual, human (or Claude-Edit-tool)
-action; nothing enforces that an agent keep it in sync with user feedback, and nothing
-audit-trails an edit to `raw/` automatically — the shipped file's "Tuning" section asks the
-editor to also call `remember`, but that is a convention an operator's own
-`CLAUDE.md`/agent instructions must adopt, not a guarantee this codebase provides.
+**What this is not.** The librarian never self-tunes this filter. `librarian.py` never reads
+or writes this fragment at all outside the one `tiers.py` read above: it does not analyze raw
+intake for patterns, does not propose additions, and does not decay or promote filter
+entries. The file is also not a wiki page — it lives under `wiki/_schema/`, outside the
+compiled corpus `recall` searches. Editing it is a manual, human (or Claude-Edit-tool) action;
+nothing enforces that an agent keep it in sync with user feedback, and nothing audit-trails an
+edit to `raw/` automatically — the shipped file's "Tuning" section asks the editor to also
+call `remember`, but that is a convention an operator's own `CLAUDE.md`/agent instructions
+must adopt, not a guarantee this codebase provides.
 
 ## What it refuses
 

@@ -717,6 +717,116 @@ def _read_hook_ledger_row(cache_dir: Path, knowledge_root: Path) -> dict:
     return rows[0]
 
 
+def test_cache_dir_and_path_both_scoped_leaves_the_live_ledger_byte_identical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue athenaeum#1512 AC1, exactly as worded: ``record --cache-dir
+    <scratch> --path <scratch-wiki>`` writes only under those scratch paths,
+    and the live ``<wiki_root>`` ledger is byte-identical before and after.
+
+    ``DEFAULT_KNOWLEDGE_ROOT`` is monkeypatched to a tmp_path stand-in so
+    "the live wiki root" can be given real, pre-existing content to compare
+    byte-for-byte — this suite must never touch a real ``~/knowledge``
+    (see tests/conftest.py; there is no autouse fixture that neutralizes it,
+    unlike ``ATHENAEUM_CACHE_DIR``), so the stand-in plays that role instead
+    of the actual host default.
+    """
+    live_stand_in = tmp_path / "live-knowledge-stand-in"
+    monkeypatch.setattr("athenaeum._cmd_push_metrics.DEFAULT_KNOWLEDGE_ROOT", live_stand_in)
+    live_wiki_root = live_stand_in / "wiki"
+    live_wiki_root.mkdir(parents=True)
+    live_ledger = live_wiki_root / push_metrics.PUSH_RECORDS_FILENAME
+    live_ledger.write_text('{"session_id":"pre-existing-real-row"}\n', encoding="utf-8")
+    live_ledger_before = live_ledger.read_bytes()
+
+    scratch_cache_dir = tmp_path / "scratch-cache"
+    scratch_knowledge_root = tmp_path / "scratch-knowledge"
+
+    rc, out = _run(
+        [
+            "push-metrics",
+            "record",
+            "--session-id",
+            "sess-both-scoped",
+            "--id",
+            "abc12345",
+            "--cache-dir",
+            str(scratch_cache_dir),
+            "--path",
+            str(scratch_knowledge_root),
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    assert json.loads(out) == {"wrote": True}
+    assert live_ledger.read_bytes() == live_ledger_before, (
+        "the live wiki-root ledger must be byte-identical before and after "
+        "a fully-scoped --cache-dir/--path record invocation"
+    )
+    # The write landed under one of the two scratch paths this invocation
+    # named — never under the live stand-in.
+    written_under_cache = (scratch_cache_dir / push_metrics.PUSH_RECORDS_FILENAME).exists()
+    written_under_wiki = (
+        scratch_knowledge_root / "wiki" / push_metrics.PUSH_RECORDS_FILENAME
+    ).exists()
+    assert written_under_cache or written_under_wiki
+    assert not (live_stand_in / push_metrics.PUSH_RECORDS_FILENAME).exists()
+
+
+def test_cache_dir_alone_does_not_leak_into_the_live_wiki_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue athenaeum#1512 AC1 (the ``--cache-dir``-only shape of the ACTUAL
+    reported incident: "a scratch-dir invocation created
+    ``~/knowledge/wiki/_push_records.jsonl`` and orphaned 399 rows") plus the
+    AC2-mandated counter-example.
+
+    ``_resolve_wiki_root`` falls back to ``DEFAULT_KNOWLEDGE_ROOT`` whenever
+    ``--path`` is omitted; monkeypatching that constant to a tmp_path
+    stand-in reproduces "the operator only passed --cache-dir" without ever
+    touching a real ``~/knowledge``.
+
+    AC2, observed verbatim (see PR description for the actual transcript):
+    with the athenaeum#1512 CLI-side fix reverted (``_resolve_record_wiki_root``
+    deleted, ``record`` calling the shared ``_resolve_wiki_root(args)``
+    directly like every other subcommand), this exact test FAILS — the
+    write lands at ``<live_stand_in>/wiki/_push_records.jsonl``, outside the
+    scratch tree, and ``live_ledger.exists()`` is ``True``. With the fix
+    restored, it passes.
+    """
+    live_stand_in = tmp_path / "live-knowledge-stand-in"
+    monkeypatch.setattr("athenaeum._cmd_push_metrics.DEFAULT_KNOWLEDGE_ROOT", live_stand_in)
+    scratch_cache_dir = tmp_path / "scratch-cache"
+
+    rc, out = _run(
+        [
+            "push-metrics",
+            "record",
+            "--session-id",
+            "sess-cache-dir-only",
+            "--id",
+            "abc12345",
+            "--cache-dir",
+            str(scratch_cache_dir),
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    assert json.loads(out) == {"wrote": True}
+    live_ledger = live_stand_in / "wiki" / push_metrics.PUSH_RECORDS_FILENAME
+    assert not live_ledger.exists(), (
+        "a --cache-dir-only invocation must never create a file under the "
+        "live wiki root — this is the exact incident issue athenaeum#1512 reports"
+    )
+    scratch_ledger = scratch_cache_dir / push_metrics.PUSH_RECORDS_FILENAME
+    assert scratch_ledger.exists()
+    rows = push_metrics.read_push_records(cache_dir=scratch_cache_dir)
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == "sess-cache-dir-only"
+
+
 def test_record_argv_ids_writes_one_row(tmp_path: Path) -> None:
     """AC1: an external caller (here, argv flags) can invoke this with a
     session id and a list of injected ids and get a written push record."""

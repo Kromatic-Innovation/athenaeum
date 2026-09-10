@@ -98,6 +98,42 @@ disposition (`src/athenaeum/tiers.py` around line 4571, which calls
 `None`). Neither key is config-only or dark: both have a real consumer that
 reads the value and acts on it.
 
+### The `log_demote` disposition's retired-name guard, and undoing one
+
+`log_demote` does not leave a stub or hub behind in `wiki/` — the page is
+moved to `<preserved_log_dir>/oversize-wiki-pages/<original filename>` in
+full, and nothing with that name remains in the wiki index. To keep that
+name from being silently re-minted the next time a raw file mentions it,
+the move also writes a small record — the demoted page's `uid`, `name`,
+`aliases`, the destination path, and the date — to a sidecar file at
+`<wiki_root>/_retired_names.yaml`. Its leading underscore keeps it out of
+the normal page-matching walk, so it can only ever be consulted by the
+create-path check described next, never re-entered as an ordinary page.
+
+**What happens to a later mention.** When intake next classifies a name (or
+one of its aliases) that resolves to an entry in `_retired_names.yaml`, the
+create is refused rather than diverted or silently allowed — no new page is
+minted under that name. The observation is not dropped: it is escalated to
+`wiki/_pending_questions.md`, with the demoted page's preserved-log location
+named in the description, so an operator can still find the original
+content and decide by hand whether it belongs somewhere. This refusal is
+scoped to the exact identity that was demoted (by `uid`, keyed off its name
+and aliases) — an unrelated name is never affected by another name's
+retirement record.
+
+**Undoing a demotion.** If a page was demoted in error (or an operator
+decides a persona/session-log page should become a real entity again after
+all), remove that page's entry from `<wiki_root>/_retired_names.yaml` — or
+delete the whole file if every entry in it should be reinstated — and
+commit the change. With no matching record left, the create-path check has
+nothing to refuse, and the name mints normally on its next mention. The
+demoted content itself is untouched by this: it is still sitting wherever
+`log_demote` moved it (`<preserved_log_dir>/oversize-wiki-pages/...`, per
+the record's own `demoted_to` field, or the vault path an adapter reported),
+and copying it back into `wiki/` is a manual, separate step — removing the
+retired-name record only re-opens the name for a *new* page, it does not
+restore the old one automatically.
+
 ## What it writes
 
 - **Decay sweep**, on `--apply`: a durable, append-only sweep ledger
@@ -140,6 +176,6 @@ reads the value and acts on it.
 ## See also
 
 - Guides — [Daily operation](../guides/daily-operation.md) · [Decisions](../guides/decisions.md)
-- Modules — [corrections](corrections.md) · [shape](shape.md) · [MCP surface](mcp.md)
+- Modules — [corrections](corrections.md) · [shape](shape.md) · [routing](routing.md) · [MCP surface](mcp.md)
 - Design — [shape rules](../design/shape-rules.md) · [provenance shape](../design/provenance-shape.md) · [security posture](../design/security-posture.md) · [memory taxonomy](../design/memory-taxonomy.md)
 - Reference — [configuration](../reference/configuration.md)

@@ -44,13 +44,15 @@ import yaml
 from athenaeum import rules as rules_module
 from athenaeum import tiers as tiers_module
 from athenaeum.answers import ingest_answers
-from athenaeum.librarian import _apply_tier3_results
+from athenaeum.librarian import _apply_tier3_results, process_one
 from athenaeum.models import (
+    ClassifiedEntity,
     EntityAction,
     EntityIndex,
     EscalationItem,
     ProcessingResult,
     RawFile,
+    TokenUsage,
     parse_frontmatter,
 )
 from athenaeum.tiers import (
@@ -1518,3 +1520,172 @@ class TestCollapseOversizeEscalationDuplicates:
         assert archive_text.index("sessions/0.md") < archive_text.index(
             "SOME OLDER ARCHIVED ENTRY"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1488 AC3/AC4 — full raw-file pipeline coverage for the
+# retired-name guard athenaeum#1406 built (CreateNameDemotedError /
+# _retired_names.yaml, see athenaeum.tiers.validate_create_name and
+# gate_create_name_classifications). tests/test_create_name_gate_1173.py
+# already proves the guard at the validate_create_name()/
+# gate_create_name_classifications() unit level (TestValidateCreateNameRetiredGuard,
+# TestGateCreateNameClassificationsDemoted). This class closes the same
+# claim one layer up, through athenaeum.librarian.process_one end to end,
+# exactly matching athenaeum#1488 AC3's literal wording: a demoted name
+# followed by a fresh raw file mentioning it must not produce a new
+# ``type: person`` entity page, and (AC4) an unrelated, never-demoted name
+# must still mint normally in the SAME wiki (proving the guard does not
+# over-suppress).
+# ---------------------------------------------------------------------------
+
+
+class TestDemotedNameFullPipelineReMint:
+    def test_demoted_name_mention_does_not_mint_a_new_person_page(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        target = wiki / "aaaa1111-dijkstra.md"
+        target.write_text(
+            "---\nuid: aaaa1111\ntype: person\nname: dijkstra\n---\n\n"
+            "Some persona/session-log content mistyped as person.\n"
+        )
+        config = {"librarian": {"preserved_log_dir": "logs"}}
+        demoted = demote_oversize_pages([target], wiki, config)
+        assert demoted[0].demoted is True
+        # The demoted page is gone -- nothing left in the wiki under that name.
+        assert list(wiki.glob("*.md")) == []
+
+        raw_dir = knowledge / "raw" / "sessions"
+        raw_dir.mkdir(parents=True)
+        raw_path = raw_dir / "note.md"
+        raw_path.write_text("dijkstra reviewed the PR today.\n", encoding="utf-8")
+        raw = RawFile(path=raw_path, source="sessions", timestamp="", uuid8="")
+
+        def _fake_tier2_classify(*_a: object, **_kw: object) -> list[ClassifiedEntity]:
+            return [
+                ClassifiedEntity(
+                    name="dijkstra",
+                    entity_type="person",
+                    tags=[],
+                    access="internal",
+                    is_new=True,
+                    existing_uid=None,
+                    observations="dijkstra reviewed the PR today.",
+                )
+            ]
+
+        monkeypatch.setattr("athenaeum.librarian.tier2_classify", _fake_tier2_classify)
+
+        classify_client = MagicMock()
+        classify_client.messages.create.side_effect = AssertionError(
+            "tier2_classify is monkeypatched -- the real classify client must never be called"
+        )
+        write_client = MagicMock()
+        write_client.messages.create.side_effect = AssertionError(
+            "a demoted name must escalate before tier-3 write is ever called"
+        )
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            classify_client,
+            valid_types=["person", "company", "concept"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+            usage=TokenUsage(),
+            write_client=write_client,
+            config=config,
+        )
+
+        assert result.created == []
+        assert len(result.escalated) == 1
+        assert result.escalated[0].entity_name == "dijkstra"
+        # Still no page in the wiki -- the mention did not re-mint "dijkstra"
+        # (the escalation writes only "_pending_questions.md", which the
+        # leading-underscore filter here excludes, same convention as the
+        # rest of this suite).
+        assert [p for p in wiki.glob("*.md") if not p.name.startswith("_")] == []
+
+    def test_never_demoted_name_mention_still_mints_normally(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4 (negative case, and the over-suppression counter-example): a
+        wiki carrying a retired-name record for a DIFFERENT identity
+        (``cicero``) must still mint an unrelated, never-demoted name
+        (``Widget Inc``) normally.
+
+        Uses ``entity_type="company"`` rather than ``"person"`` for the
+        surviving create: ``type: person`` pages are UNCONDITIONALLY refused
+        a tier-3 LLM-authored create by ``PersonNeverLLMRewriteError``
+        (issue athenaeum#1183 AC4, ``_refuse_person_rewrite`` in
+        ``athenaeum.tiers``) — a restriction that applies to every person
+        create regardless of this guard, demoted or not, so it is orthogonal
+        to what this test proves. The retired-name guard's own over-
+        suppression risk is about NAME identity, not entity TYPE, so a
+        same-run, different-type create is the faithful negative case.
+        """
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        other_target = wiki / "bbbb2222-cicero.md"
+        other_target.write_text(
+            "---\nuid: bbbb2222\ntype: person\nname: cicero\n---\n\nPersona content.\n"
+        )
+        config = {"librarian": {"preserved_log_dir": "logs"}}
+        demoted = demote_oversize_pages([other_target], wiki, config)
+        assert demoted[0].demoted is True
+
+        raw_dir = knowledge / "raw" / "sessions"
+        raw_dir.mkdir(parents=True)
+        raw_path = raw_dir / "note.md"
+        raw_path.write_text("Widget Inc shipped a new release today.\n", encoding="utf-8")
+        raw = RawFile(path=raw_path, source="sessions", timestamp="", uuid8="")
+
+        def _fake_tier2_classify(*_a: object, **_kw: object) -> list[ClassifiedEntity]:
+            return [
+                ClassifiedEntity(
+                    name="Widget Inc",
+                    entity_type="company",
+                    tags=[],
+                    access="internal",
+                    is_new=True,
+                    existing_uid=None,
+                    observations="Widget Inc shipped a new release today.",
+                )
+            ]
+
+        monkeypatch.setattr("athenaeum.librarian.tier2_classify", _fake_tier2_classify)
+
+        classify_client = MagicMock()
+        classify_client.messages.create.side_effect = AssertionError(
+            "tier2_classify is monkeypatched -- the real classify client must never be called"
+        )
+        write_response = MagicMock()
+        write_response.content = [
+            MagicMock(
+                text="# Widget Inc\n\nShipped a new release today.[^1]\n\n[^1]: sessions/note.md"
+            )
+        ]
+        write_client = MagicMock()
+        write_client.messages.create.return_value = write_response
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki),
+            wiki,
+            classify_client,
+            valid_types=["person", "company", "concept"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+            usage=TokenUsage(),
+            write_client=write_client,
+            config=config,
+        )
+
+        assert [e.name for e in result.created] == ["Widget Inc"]
+        assert result.escalated == []
+        page_names = sorted(p.stem for p in wiki.glob("*.md") if not p.name.startswith("_"))
+        assert any("widget" in n.lower() for n in page_names)
