@@ -37,7 +37,9 @@ from athenaeum._cmd_demo import (
 from athenaeum._cmd_viewer import ViewerContractError
 
 
-def _seed_push(cache_dir: Path, *, session_id: str, uid: str, ts: str = "2026-01-01T00:00:00Z") -> None:
+def _seed_push(
+    cache_dir: Path, *, session_id: str, uid: str, ts: str = "2026-01-01T00:00:00Z"
+) -> None:
     """Mirrors ``tests/test_cmd_viewer.py``'s helper of the same name."""
     record = push_metrics.build_push_record(
         session_id=session_id,
@@ -482,8 +484,8 @@ def test_project_label_uses_transcript_cwd_not_dash_unmangling(tmp_path: Path) -
     cwd-based derivation succeeds.
     """
     session_id = "cwd-session"
-    real_cwd = "/Users/tristankromer/local-deploys/hestia"
-    mangled_scope = "-Users-tristankromer-local-deploys-hestia"
+    real_cwd = "/srv/operator/local-deploys/hestia"
+    mangled_scope = "-srv-operator-local-deploys-hestia"
     projects_root = tmp_path / "projects"
 
     # cwd is NOT on the first few header-shaped records -- the scan must not
@@ -563,8 +565,18 @@ def test_project_label_placeholder_when_cwd_never_found(tmp_path: Path) -> None:
 
 def test_aggregate_sessions_ended_reflects_reference_record() -> None:
     records = [
-        {"record_type": "push", "session_id": "s1", "ts": "2026-01-01T00:00:00Z", "pushed_count": 3},
-        {"record_type": "push", "session_id": "s2", "ts": "2026-01-01T00:00:01Z", "pushed_count": 2},
+        {
+            "record_type": "push",
+            "session_id": "s1",
+            "ts": "2026-01-01T00:00:00Z",
+            "pushed_count": 3,
+        },
+        {
+            "record_type": "push",
+            "session_id": "s2",
+            "ts": "2026-01-01T00:00:01Z",
+            "pushed_count": 2,
+        },
         {
             "record_type": "reference",
             "session_id": "s1",
@@ -699,9 +711,24 @@ def test_sessions_ordered_newest_activity_first_and_limit_applied(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     records = [
-        {"record_type": "push", "session_id": "old", "ts": "2026-01-01T00:00:00Z", "pushed_count": 1},
-        {"record_type": "push", "session_id": "newest", "ts": "2026-01-03T00:00:00Z", "pushed_count": 1},
-        {"record_type": "push", "session_id": "middle", "ts": "2026-01-02T00:00:00Z", "pushed_count": 1},
+        {
+            "record_type": "push",
+            "session_id": "old",
+            "ts": "2026-01-01T00:00:00Z",
+            "pushed_count": 1,
+        },
+        {
+            "record_type": "push",
+            "session_id": "newest",
+            "ts": "2026-01-03T00:00:00Z",
+            "pushed_count": 1,
+        },
+        {
+            "record_type": "push",
+            "session_id": "middle",
+            "ts": "2026-01-02T00:00:00Z",
+            "pushed_count": 1,
+        },
     ]
     monkeypatch.setattr(_cmd_demo, "_run_tail_contract", lambda **_k: records)
     monkeypatch.setattr(_cmd_demo, "_project_label", lambda *_a, **_k: "~/proj")
