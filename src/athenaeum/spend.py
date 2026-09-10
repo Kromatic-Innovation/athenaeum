@@ -1803,15 +1803,21 @@ def reservation_ledger_path(wiki_root: Path, *, cache_dir: Path | None = None) -
 
     Mirrors :func:`durable_ledger_path` exactly (AC1), including its migration
     rule: an installation with records already at the legacy ``<cache_dir>``
-    path keeps using it until something copies the file forward.
+    path keeps using it until something copies the file forward. That mirror
+    is why this function moved with issue athenaeum#1512 too: "populated"/
+    "migrated" is judged by :func:`_has_migrated_content`, not bare existence,
+    so an empty new-path file cannot by itself repoint a populated legacy
+    reservation ledger.
     """
     new_path = Path(wiki_root) / RESERVATION_LEDGER_FILENAME
     legacy_path = Path(
         cache_dir if cache_dir is not None else default_cache_dir()
     ) / RESERVATION_LEDGER_FILENAME
-    if new_path.exists() or not legacy_path.exists():
+    if _has_migrated_content(new_path):
         return new_path
-    return legacy_path
+    if _has_migrated_content(legacy_path):
+        return legacy_path
+    return new_path
 
 
 def _append_reservation_record(

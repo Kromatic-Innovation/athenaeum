@@ -2870,6 +2870,31 @@ class TestDurableLedgerPath:
 
         assert resolved == legacy
 
+    def test_reservation_ledger_path_mirrors_the_same_migration_rule(
+        self, tmp_path: Path
+    ) -> None:
+        """``reservation_ledger_path``'s own docstring promises it "mirrors
+        :func:`durable_ledger_path` exactly ... including its migration
+        rule", so issue athenaeum#1512's content-based rule has to move with
+        it or that promise silently becomes false: an EMPTY new-path
+        reservation ledger must not strand a populated legacy one either."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        legacy = cache_dir / spend.RESERVATION_LEDGER_FILENAME
+        legacy.write_text('{"v":1}\n', encoding="utf-8")
+
+        new_path = wiki_root / spend.RESERVATION_LEDGER_FILENAME
+        new_path.touch()
+        assert new_path.exists() and new_path.stat().st_size == 0
+
+        assert spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir) == legacy
+
+        # ...and a populated new path still wins, unchanged.
+        new_path.write_text('{"v":1}\n', encoding="utf-8")
+        assert spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir) == new_path
+
     def test_explicit_cache_dir_alone_does_not_isolate_this_function(
         self, tmp_path: Path
     ) -> None:
