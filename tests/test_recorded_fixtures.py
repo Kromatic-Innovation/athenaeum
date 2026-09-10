@@ -44,19 +44,21 @@ import yaml
 
 from athenaeum.contradictions import ContradictionResult, detect_contradictions
 from athenaeum.mcp_server import recall_search
-from athenaeum.models import AutoMemoryFile
+from athenaeum.models import AutoMemoryFile, EntityAction
 from athenaeum.query_topics import extract_topics
 from athenaeum.resolutions import (
     MergeProposal,
     ResolutionProposal,
     propose_resolution,
 )
+from athenaeum.tiers import tier3_create
 from tests.evals.harness import (
     EVAL_DATA_ROOT,
     LAYER_BACKFILL,
     LAYER_DETECTOR,
     LAYER_RECALL,
     LAYER_RESOLVER,
+    LAYER_UNDERDETERMINED,
     RECORDED_ROOT,
     FixtureStaleError,
     RecordedResponse,
@@ -83,6 +85,13 @@ def _recorded_case_ids(layer: str) -> list[str]:
 _DETECTOR_IDS = _recorded_case_ids(LAYER_DETECTOR)
 _RESOLVER_IDS = _recorded_case_ids(LAYER_RESOLVER)
 _RECALL_IDS = _recorded_case_ids(LAYER_RECALL)
+# Issue athenaeum#1518: never seeded by this change (no live backend was
+# available to record from) — per the empty-fixture policy above, an
+# unlisted-in-the-manifest, empty layer directory is the correct
+# never-seeded state and every test below skips cleanly via
+# _EMPTY_LAYER_REASON rather than erroring the suite. Seeding it is a
+# tracked follow-up (an evals.yml record=true run with a live key).
+_UNDERDETERMINED_IDS = _recorded_case_ids(LAYER_UNDERDETERMINED)
 
 _EMPTY_LAYER_REASON = (
     "no recorded fixtures — run evals.yml with record=true (or "
@@ -357,6 +366,81 @@ def test_recall_replay(
     # FixtureStaleError before we got this far.
     assert isinstance(output, str)
     assert output  # non-empty
+
+
+# ---------------------------------------------------------------------------
+# Underdetermined-source (Tier-3 CREATE) replay (issue athenaeum#1518)
+#
+# Same skip-cleanly-on-empty-fixture posture as every layer above: this
+# lane had no live backend to record from, so ``_UNDERDETERMINED_IDS`` is
+# empty, the layer is unlisted in seeded-layers.yml, and the
+# ``skipif``/parametrize-with-placeholder pattern below makes both tests
+# skip with an explicit reason rather than error — regular CI stays green
+# exactly as it does for every never-seeded layer. Once a live evals.yml
+# run seeds ``tests/fixtures/recorded/underdetermined/``, these replay for
+# real using the same substring/co-occurrence scoring the live eval uses
+# (tests/evals/test_underdetermined_eval.py), against the SAME prompt-hash
+# staleness contract as every other replay test.
+# ---------------------------------------------------------------------------
+
+
+def _underdetermined_action(case: dict[str, Any]) -> EntityAction:
+    entity = case["entity"]
+    return EntityAction(
+        kind="create",
+        name=str(entity["name"]),
+        entity_type=str(entity["entity_type"]),
+        tags=list(entity.get("tags") or []),
+        access=str(entity.get("access", "internal")),
+        existing_uid=None,
+        observations=str(case["observation"]),
+    )
+
+
+def _underdetermined_score(case: dict[str, Any], body: str | None) -> tuple[bool, str]:
+    expected = case["expected"]
+    reasons: list[str] = []
+    haystack = (body or "").lower()
+
+    for substr in expected.get("must_include_substrings", []):
+        if substr.lower() not in haystack:
+            reasons.append(f"missing expected substring {substr!r}")
+
+    for substr in expected.get("must_not_include_substrings", []):
+        if substr.lower() in haystack:
+            reasons.append(f"unexpected substring {substr!r} present (invented fact?)")
+
+    for pair in expected.get("forbidden_co_occurrence", []):
+        a, b = pair[0].lower(), pair[1].lower()
+        sentences = [s for s in (body or "").replace("\n", " ").split(". ")]
+        if any(a in s.lower() and b in s.lower() for s in sentences):
+            reasons.append(f"{pair[0]!r} and {pair[1]!r} co-occur in one sentence")
+
+    passed = not reasons
+    return passed, "; ".join(reasons) if reasons else "ok"
+
+
+@pytest.mark.skipif(not _UNDERDETERMINED_IDS, reason=_EMPTY_LAYER_REASON)
+@pytest.mark.parametrize("case_id", _params(_UNDERDETERMINED_IDS) or ["_placeholder_"])
+def test_underdetermined_replay(case_id: str) -> None:
+    golden = _load_golden(LAYER_UNDERDETERMINED)
+    assert case_id in golden, (
+        f"recorded fixture {case_id!r} has no matching golden-set case "
+        f"in {LAYER_UNDERDETERMINED}/cases.yaml — delete the stray fixture "
+        "or add the case."
+    )
+    case = golden[case_id]
+    action = _underdetermined_action(case)
+
+    # replay_client enforces the staleness contract on messages.create —
+    # a CREATE_SYSTEM edit (like the athenaeum#1518 silence-rule addition
+    # itself) without a re-record fails here with the "re-run evals with
+    # --record" message, exactly as it would for detector/resolver.
+    client = replay_client(LAYER_UNDERDETERMINED, case_id)
+    entity = tier3_create(action, str(case["source_ref"]), client)
+
+    passed, detail = _underdetermined_score(case, entity.body)
+    assert passed, f"underdetermined replay {case_id}: {detail}"
 
 
 # ---------------------------------------------------------------------------
