@@ -90,6 +90,7 @@
   .unresolved { font-style: italic; color: rgb(150, 60, 60); }
   .empty-row td { color: rgb(150, 150, 150); font-style: italic; }
   .topics-missing { color: var(--muted); font-style: italic; }
+  td.pending { color: var(--muted); font-style: italic; }
   .turn-meta { padding: 0.5rem 0.75rem; font-size: 0.8rem; color: var(--muted);
                border-bottom: 1px solid var(--line); }
   #toast { position: fixed; bottom: 1rem; right: 1rem; padding: 0.5rem 0.8rem;
@@ -137,7 +138,7 @@
     </div>
     <table>
       <thead>
-        <tr><th>page</th><th>state</th><th>memory tier</th><th>tokens</th></tr>
+        <tr><th>page</th><th>state</th><th>used</th><th>memory tier</th><th>tokens</th></tr>
       </thead>
       <tbody id="rows-pages"></tbody>
     </table>
@@ -321,6 +322,18 @@
       return tr;
     }
 
+    // Three states, never two (issue athenaeum#1554). `null`/undefined means no
+    // reference-determination record has landed for this session yet, which is
+    // NOT the same claim as "checked, and not referenced" -- collapsing it into
+    // a blank or a "no" is exactly the misreport this column exists to avoid.
+    function referencedCell(referenced) {
+      if (referenced === true) { return textCell("yes"); }
+      if (referenced === false) { return textCell("no"); }
+      var td = textCell("pending");
+      td.className = "pending";
+      return td;
+    }
+
     function renderPages(rows, lastTurnIds) {
       morphRows(
         document.getElementById("rows-pages"),
@@ -337,13 +350,14 @@
           fillRowCells(tr, [
             pageCell(row),
             textCell(STATE_LABEL[row.classification] || row.classification),
+            referencedCell(row.referenced),
             textCell(row.memory_tier),
             textCell(row.token_cost)
           ]);
         },
         function (row) { return row.id; },
         "(nothing recalled yet this session)",
-        4
+        5
       );
     }
 

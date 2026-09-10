@@ -338,6 +338,126 @@ def test_enriched_rows_carry_name_and_description(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
+# The `used` column on the unified `pages` list (issue athenaeum#1554)
+# --------------------------------------------------------------------------
+
+
+def _pages_payload(wiki: Path, *, referenced_ids: list[str] | None) -> dict[str, bool | None]:
+    """Shape+enrich a two-page session and return ``{uid: referenced}``.
+
+    ``referenced_ids=None`` means no ``reference`` record at all landed --
+    the pending third state -- as distinct from a record that landed and
+    named nothing.
+    """
+    records: list[dict] = [
+        {
+            "record_type": "push",
+            "source": "sidecar",
+            "ts": "2026-09-09T10:00:00Z",
+            "items": [{"id": "aaaaaaaa", "memory_tier": "warm"}, {"id": "bbbbbbbb"}],
+        }
+    ]
+    if referenced_ids is not None:
+        records.append(
+            {
+                "record_type": "reference",
+                "ts": "2026-09-09T11:00:00Z",
+                "referenced_ids": referenced_ids,
+            }
+        )
+    payload = _cmd_viewer.shape_viewer_payload(session_id="s", records=records)
+    enriched = _cmd_viewer.enrich_payload(payload, wiki_root=wiki)
+    return {row["id"]: row["referenced"] for row in enriched["pages"]}
+
+
+def test_pages_referenced_pins_yes_and_no_together(tmp_path: Path) -> None:
+    """AC1/AC3: with a reference record naming ONE of two pushed pages, the
+    named page renders `yes` and the other `no`.
+
+    The fixture deliberately contains a genuinely referenced page: a fixture
+    where nothing is referenced passes both against the fixed code and against
+    the athenaeum#1554 bug (which computed membership in a literal empty set,
+    so every page read a confident, wrong `no`).
+    """
+    wiki = tmp_path / "knowledge" / "wiki"
+    _page(wiki, "aaaaaaaa", "used", name="Used Page")
+    _page(wiki, "bbbbbbbb", "unused", name="Unused Page")
+    assert _pages_payload(wiki, referenced_ids=["aaaaaaaa"]) == {
+        "aaaaaaaa": True,
+        "bbbbbbbb": False,
+    }
+
+
+def test_pages_referenced_is_pending_before_any_reference_record(tmp_path: Path) -> None:
+    """AC2/AC3: pending is a real third state on the `pages` path too -- it
+    must render as `None`, never collapse into `False`."""
+    wiki = tmp_path / "knowledge" / "wiki"
+    _page(wiki, "aaaaaaaa", "one", name="One")
+    _page(wiki, "bbbbbbbb", "two", name="Two")
+    assert _pages_payload(wiki, referenced_ids=None) == {
+        "aaaaaaaa": None,
+        "bbbbbbbb": None,
+    }
+
+
+def test_pages_referenced_matches_the_legacy_tables(tmp_path: Path) -> None:
+    """The `pages` path and `_row()`'s three legacy tables must agree. They
+    read the same ledger records; disagreeing means one of them is lying."""
+    wiki = tmp_path / "knowledge" / "wiki"
+    _page(wiki, "aaaaaaaa", "used", name="Used Page")
+    _page(wiki, "bbbbbbbb", "unused", name="Unused Page")
+    payload = _cmd_viewer.shape_viewer_payload(
+        session_id="s",
+        records=[
+            {
+                "record_type": "push",
+                "source": "sidecar",
+                "ts": "2026-09-09T10:00:00Z",
+                "items": [{"id": "aaaaaaaa"}, {"id": "bbbbbbbb"}],
+            },
+            {
+                "record_type": "reference",
+                "ts": "2026-09-09T11:00:00Z",
+                "referenced_ids": ["aaaaaaaa"],
+            },
+        ],
+    )
+    legacy = {row["id"]: row["referenced"] for row in payload["pushed_unbidden"]}
+    enriched = _cmd_viewer.enrich_payload(payload, wiki_root=wiki)
+    pages = {row["id"]: row["referenced"] for row in enriched["pages"]}
+    assert pages == legacy == {"aaaaaaaa": True, "bbbbbbbb": False}
+
+
+def test_enrich_payload_does_not_leak_referenced_ids_into_the_served_json(
+    tmp_path: Path,
+) -> None:
+    """`referenced_ids` is an internal hand-off between the two functions,
+    consumed exactly like `pushed_ids`/`pulled_ids` -- the served payload is
+    unchanged by athenaeum#1554."""
+    wiki = tmp_path / "knowledge" / "wiki"
+    _page(wiki, "aaaaaaaa", "used", name="Used Page")
+    payload = _cmd_viewer.shape_viewer_payload(
+        session_id="s",
+        records=[
+            {
+                "record_type": "push",
+                "source": "sidecar",
+                "ts": "2026-09-09T10:00:00Z",
+                "items": [{"id": "aaaaaaaa"}],
+            },
+            {
+                "record_type": "reference",
+                "ts": "2026-09-09T11:00:00Z",
+                "referenced_ids": ["aaaaaaaa"],
+            },
+        ],
+    )
+    assert payload["referenced_ids"] == ["aaaaaaaa"]
+    enriched = _cmd_viewer.enrich_payload(payload, wiki_root=wiki)
+    assert "referenced_ids" not in enriched
+
+
+# --------------------------------------------------------------------------
 # Last-turn panel (AC4)
 # --------------------------------------------------------------------------
 
