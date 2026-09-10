@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The push-records ledger returns to the cache dir; it is never written under
+  `wiki_root` again.** `push_metrics.py` carried two contradictory contracts — a
+  header forbidding the wiki/raw corpus and a `durable_push_records_path` that
+  deliberately resolved into it — and on the operator's deployment the
+  contradiction resolved in favour of the corpus: 112 telemetry rows accrued at
+  `~/knowledge/wiki/_push_records.jsonl` and a librarian run committed them.
+  athenaeum#749's acceptance ("a durable, machine-readable location **outside
+  the wiki corpus**, so they never become claims and never enter the embedded
+  index") governs and was never retired — the athenaeum#911 design lock never
+  cites it, and PR #1080 honoured the identical constraint for
+  `_decay_sweep_records.jsonl` (athenaeum#969) and `_push_references.jsonl`
+  while relocating this one by a mechanical "is it named in §5.2's table?"
+  rule. The R3 class/scope declaration is unchanged (`operational` /
+  `store-durable`); only the location is corrected, because "store-durable"
+  never implied "wiki root" — `push-references-ledger`, the sibling precision is
+  computed against, has been store-durable in the cache dir since athenaeum#980
+  itself. `durable_push_records_path` now always resolves to the cache dir and
+  uses its `wiki_root` argument only to WARN, once per path per process, about a
+  ledger stranded at the withdrawn location; nothing is migrated or deleted
+  automatically. `examples/claude-code/user-prompt-recall.sh` — the live
+  deployment's highest-frequency producer, which reimplements the resolution in
+  bash — is corrected the same way and pinned by a mechanical test.
+  ([#1591](https://github.com/Kromatic-Innovation/athenaeum/issues/1591))
+
 ### Removed
 
 - **The deterministic merge-worthiness pre-check (athenaeum#1172) is deleted, not

@@ -10,6 +10,7 @@ that instrumentation ON does not change what ``recall`` returns.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -1467,30 +1468,108 @@ class TestEstimateTokens:
 
 
 # ---------------------------------------------------------------------------
-# durable_push_records_path — issue athenaeum#980 AC4: the R3
-# operational/store-durable relocation seam. NOT wired to the live
-# mcp_server.py caller in this slice (see athenaeum.store.ARTIFACT_REGISTRY's
-# "push-records-ledger" entry) — these tests cover the resolver capability.
+# durable_push_records_path — issue athenaeum#1591: the ledger resolves to the
+# cache dir, ALWAYS, and never into wiki_root. This withdraws issue
+# athenaeum#980 AC4's relocation of this one artifact; see the function's own
+# docstring for the archaeology, and athenaeum.store.ARTIFACT_REGISTRY's
+# "push-records-ledger" entry for the (unchanged) R3 class/scope declaration.
+#
+# The four-way resolution matrix below is exhaustive over the two files'
+# populated/absent states — the point being that the answer is now the same in
+# every cell, so no state of the disk can migrate a deployment.
 # ---------------------------------------------------------------------------
 
 
 class TestDurablePushRecordsPath:
-    def test_fresh_store_resolves_to_wiki_root(self, tmp_path: Path) -> None:
-        wiki_root = tmp_path / "wiki"
-        wiki_root.mkdir()
-        cache_dir = tmp_path / "cache"
-        resolved = push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir)
-        assert resolved == wiki_root / push_metrics.PUSH_RECORDS_FILENAME
-
-    def test_legacy_store_falls_back_to_cache_dir(self, tmp_path: Path) -> None:
+    @staticmethod
+    def _roots(tmp_path: Path) -> tuple[Path, Path]:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
+        return wiki_root, cache_dir
+
+    def test_matrix_neither_populated(self, tmp_path: Path) -> None:
+        wiki_root, cache_dir = self._roots(tmp_path)
+        assert push_metrics.durable_push_records_path(
+            wiki_root, cache_dir=cache_dir
+        ) == cache_dir / push_metrics.PUSH_RECORDS_FILENAME
+
+    def test_matrix_legacy_populated(self, tmp_path: Path) -> None:
+        wiki_root, cache_dir = self._roots(tmp_path)
         legacy = cache_dir / push_metrics.PUSH_RECORDS_FILENAME
-        legacy.write_text('{"session_id":"s"}\n', encoding="utf-8")
-        resolved = push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir)
-        assert resolved == legacy
+        legacy.write_text('{"session_id":"legacy"}\n', encoding="utf-8")
+        assert push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir) == legacy
+
+    def test_matrix_wiki_path_populated(self, tmp_path: Path) -> None:
+        """The cell that used to migrate a deployment. A populated
+        ``<wiki_root>/_push_records.jsonl`` — exactly what the live host grew on
+        2026-09-10 — no longer captures resolution."""
+        wiki_root, cache_dir = self._roots(tmp_path)
+        (wiki_root / push_metrics.PUSH_RECORDS_FILENAME).write_text(
+            '{"session_id":"misrouted"}\n', encoding="utf-8"
+        )
+        assert push_metrics.durable_push_records_path(
+            wiki_root, cache_dir=cache_dir
+        ) == cache_dir / push_metrics.PUSH_RECORDS_FILENAME
+
+    def test_matrix_both_populated(self, tmp_path: Path) -> None:
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = cache_dir / push_metrics.PUSH_RECORDS_FILENAME
+        legacy.write_text('{"session_id":"legacy"}\n', encoding="utf-8")
+        (wiki_root / push_metrics.PUSH_RECORDS_FILENAME).write_text(
+            '{"session_id":"misrouted"}\n', encoding="utf-8"
+        )
+        assert push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir) == legacy
+
+    def test_populated_wiki_path_warns_once_naming_both_paths(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """AC3: a deployment already carrying the misrouted file is left in a
+        DELIBERATE state — nothing is auto-migrated or auto-deleted, and the
+        operator is told the rows are stranded rather than silently losing
+        them from precision. Warned once per path per process, because
+        ``record_push`` calls this on every recall push."""
+        wiki_root, cache_dir = self._roots(tmp_path)
+        misrouted = wiki_root / push_metrics.PUSH_RECORDS_FILENAME
+        misrouted.write_text('{"session_id":"misrouted"}\n', encoding="utf-8")
+        push_metrics._MISROUTED_WARNED.discard(str(misrouted))
+
+        with caplog.at_level(logging.WARNING, logger=push_metrics.log.name):
+            push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir)
+            push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, "must warn once per path, not once per push"
+        message = warnings[0].getMessage()
+        assert str(misrouted) in message
+        assert str(cache_dir / push_metrics.PUSH_RECORDS_FILENAME) in message
+
+    def test_artifact_registry_declares_the_cache_dir(self) -> None:
+        """Issue athenaeum#1591 AC1: the file must say ONE thing. The R3
+        declaration and the resolver have to agree, or the contradiction this
+        issue was filed about simply moves to a different pair of files."""
+        from athenaeum.store import ARTIFACT_REGISTRY
+
+        decl = next(a for a in ARTIFACT_REGISTRY if a.name == "push-records-ledger")
+        assert decl.persistence_class == "operational"
+        assert decl.operational_scope == "store-durable"
+        assert decl.location == "cache dir"
+        # The sibling ledger precision is computed against has always been
+        # store-durable in the cache dir — which is why "store-durable" never
+        # implied "wiki root", and why these two must not diverge again.
+        sibling = next(a for a in ARTIFACT_REGISTRY if a.name == "push-references-ledger")
+        assert sibling.location == decl.location
+
+    def test_absent_wiki_path_is_silent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Counter-example for the test above: the healthy case must not warn,
+        or the warning is noise every deployment learns to ignore."""
+        wiki_root, cache_dir = self._roots(tmp_path)
+        with caplog.at_level(logging.WARNING, logger=push_metrics.log.name):
+            push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir)
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
     def test_record_push_without_wiki_root_is_unchanged(self, tmp_path: Path) -> None:
         cache_dir = tmp_path / "cache"
@@ -1500,7 +1579,14 @@ class TestDurablePushRecordsPath:
         assert push_metrics.record_push(record, cache_dir=cache_dir) is True
         assert (cache_dir / push_metrics.PUSH_RECORDS_FILENAME).exists()
 
-    def test_record_push_with_wiki_root_writes_behind_the_seam(self, tmp_path: Path) -> None:
+    def test_record_push_with_wiki_root_never_writes_into_the_corpus(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1591 AC1, at the production WRITE path: passing
+        ``wiki_root=`` — which every production caller does — must put nothing
+        under it. This is the test the observed incident would have failed:
+        112 telemetry rows accrued at ``<wiki_root>/_push_records.jsonl`` and a
+        librarian run committed them into the knowledge corpus."""
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         cache_dir = tmp_path / "cache"
@@ -1508,73 +1594,40 @@ class TestDurablePushRecordsPath:
             session_id="s1", query="q", backend="fts5", hits=[("p.md", {}, "snip")]
         )
         assert push_metrics.record_push(record, cache_dir=cache_dir, wiki_root=wiki_root) is True
-        assert (wiki_root / push_metrics.PUSH_RECORDS_FILENAME).exists()
-        assert not (cache_dir / push_metrics.PUSH_RECORDS_FILENAME).exists()
+        assert (cache_dir / push_metrics.PUSH_RECORDS_FILENAME).exists()
+        assert list(wiki_root.iterdir()) == [], "nothing may be written under wiki_root"
 
-    def test_empty_new_path_is_not_treated_as_already_migrated(self, tmp_path: Path) -> None:
-        """Issue athenaeum#1512 AC3 / defect 2, direct function level (AC4):
-        an EMPTY ``<wiki_root>/_push_records.jsonl`` — the exact shape of a
-        stray ``touch``, a partially-written file from a crashed run, or (as
-        actually happened) a scratch-dir test invocation — must not look
-        "already migrated" and silently strand a populated legacy ledger.
+    def test_empty_wiki_path_never_captures_resolution(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1512 AC3 held that an EMPTY
+        ``<wiki_root>/_push_records.jsonl`` — a stray ``touch``, a partially
+        written file from a crashed run, a scratch-dir test invocation — must
+        not look "already migrated". Kept as a regression guard: under
+        athenaeum#1591 NO wiki-path file, empty or populated, can capture
+        resolution, so #1512's hazard is now closed by construction rather
+        than by a content check. This test fails if a future edit reinstates
+        any wiki-root branch.
         """
-        wiki_root = tmp_path / "wiki"
-        wiki_root.mkdir()
-        cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
+        wiki_root, cache_dir = self._roots(tmp_path)
         legacy = cache_dir / push_metrics.PUSH_RECORDS_FILENAME
         legacy.write_text('{"session_id":"populated-legacy-row"}\n', encoding="utf-8")
+        (wiki_root / push_metrics.PUSH_RECORDS_FILENAME).touch()
 
-        new_path = wiki_root / push_metrics.PUSH_RECORDS_FILENAME
-        new_path.touch()
-        assert new_path.exists() and new_path.stat().st_size == 0
+        assert push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir) == legacy
 
-        resolved = push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir)
+    def test_explicit_cache_dir_now_does_isolate_this_function(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1512 defect 1 at the function level. Before
+        athenaeum#1591 this function could not isolate ``cache_dir``: an empty
+        scratch cache dir sent the write to the LIVE ``wiki_root``, which is
+        how one scratch invocation orphaned 399 rows. It is now isolated by
+        construction — ``cache_dir`` is the only input that can affect the
+        answer.
 
-        assert resolved == legacy
-
-    def test_non_empty_new_path_is_treated_as_migrated(self, tmp_path: Path) -> None:
-        """Complement of the above: once the new location genuinely carries a
-        row, resolution stays there even though the legacy ledger is also
-        still populated — a real migration is a one-way, sticky switch, only
-        an EMPTY file must not trigger one."""
-        wiki_root = tmp_path / "wiki"
-        wiki_root.mkdir()
-        cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
-        legacy = cache_dir / push_metrics.PUSH_RECORDS_FILENAME
-        legacy.write_text('{"session_id":"populated-legacy-row"}\n', encoding="utf-8")
-        new_path = wiki_root / push_metrics.PUSH_RECORDS_FILENAME
-        new_path.write_text('{"session_id":"migrated-row"}\n', encoding="utf-8")
-
-        resolved = push_metrics.durable_push_records_path(wiki_root, cache_dir=cache_dir)
-
-        assert resolved == new_path
-
-    def test_explicit_cache_dir_alone_does_not_isolate_this_function(
-        self, tmp_path: Path
-    ) -> None:
-        """Issue athenaeum#1512 defect 1, direct function level (AC4) —
-        documents the boundary of what this function's fix does and does NOT
-        cover, so a future edit does not "simplify away" the CLI-side fix
-        believing this function already isolates ``cache_dir``.
-
-        This function has no way to distinguish "the operator explicitly
-        typed ``--cache-dir`` to isolate a scratch run" from "a caller
-        resolved ``cache_dir`` eagerly as part of its own normal plumbing" —
-        both arrive as a concrete, non-``None`` :class:`Path`. Production
-        call sites (``mcp_server.py``, ``librarian.py``, ...) routinely do
-        the latter, passing a real, non-``None`` cache_dir alongside a real
-        wiki_root — so treating "cache_dir is not None" as an isolation
-        signal HERE would silently reroute those real writes into the cache
-        dir once the wiki-root ledger happened to be fresh.
-
-        The actual ``--cache-dir``-without-``--path`` isolation gap is
-        closed one layer up, in the CLI's own ``record`` subcommand — see
-        ``test_push_metrics_cli.py::
-        test_cache_dir_alone_does_not_leak_into_the_live_wiki_root`` — which
-        is the only place that can tell an operator-typed flag apart from an
-        ordinarily-resolved value.
+        The CLI-layer fix in ``_resolve_record_wiki_root`` is deliberately
+        retained (see ``test_push_metrics_cli.py::
+        test_cache_dir_alone_does_not_leak_into_the_live_wiki_root``): it
+        scopes ``--cache-dir`` for every push-metrics surface, and this
+        function should not be the only thing standing between a scratch run
+        and the live store.
         """
         would_be_live_wiki_root = tmp_path / "wiki"
         would_be_live_wiki_root.mkdir()
@@ -1584,14 +1637,15 @@ class TestDurablePushRecordsPath:
             would_be_live_wiki_root, cache_dir=scratch_cache_dir
         )
 
-        assert resolved == would_be_live_wiki_root / push_metrics.PUSH_RECORDS_FILENAME
+        assert resolved == scratch_cache_dir / push_metrics.PUSH_RECORDS_FILENAME
 
     def test_no_split_brain_on_a_fresh_store(self, tmp_path: Path) -> None:
         """The production WRITE path (record_push, as mcp_server.py calls it)
         and the production READ path (read_push_records, as
         build_coverage_worksheet/compute_baseline/determine_references call
         it) must agree on where a fresh store's ledger lives — issue
-        athenaeum#980 AC4."""
+        athenaeum#980 AC4, now trivially true in both directions because
+        athenaeum#1591 left exactly one location."""
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         cache_dir = tmp_path / "cache"
@@ -1606,10 +1660,10 @@ class TestDurablePushRecordsPath:
         records = push_metrics.read_push_records(cache_dir, wiki_root=wiki_root)
         assert any(r.get("session_id") == "split-brain-probe-session" for r in records)
 
-        # A read that forgets wiki_root= must not silently see the same
-        # records via the old cache-dir default.
-        stale = push_metrics.read_push_records(cache_dir)
-        assert stale == []
+        # And a reader that forgets wiki_root= now sees the SAME rows rather
+        # than an empty ledger — the split-brain shape is gone, not merely
+        # avoided by every caller remembering to pass the same argument.
+        assert push_metrics.read_push_records(cache_dir) == records
 
 
 # ---------------------------------------------------------------------------

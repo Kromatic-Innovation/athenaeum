@@ -487,7 +487,11 @@ class TestLedgerRow:
             "token_cost": 9,
             "token_cost_estimated": True,
         }
-        ledger = push_metrics.durable_push_records_path(wiki)
+        # Issue athenaeum#1591: the ledger lives in the cache dir, so the
+        # historical row has to be seeded there — the same path the read below
+        # resolves. (It used to be seeded under `wiki/`.)
+        ledger = push_metrics.durable_push_records_path(wiki, cache_dir=tmp_path / "cache")
+        ledger.parent.mkdir(parents=True, exist_ok=True)
         ledger.write_text(json.dumps(historical) + "\n", encoding="utf-8")
 
         _recall(tmp_path, projects_root, "toolu_JOINME")

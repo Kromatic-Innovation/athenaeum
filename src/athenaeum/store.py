@@ -914,18 +914,22 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         name="push-records-ledger",
         persistence_class="operational",
         operational_scope="store-durable",
-        location="wiki root, with a legacy-store cache-dir fallback (see source_ref)",
+        location="cache dir",
         source_ref=(
-            "push_metrics.py:80 PUSH_RECORDS_FILENAME (design note §5.2 table row 8 "
-            "'_push_records.jsonl'). Issue athenaeum#980 AC4: "
-            "push_metrics.durable_push_records_path() resolves behind the seam with the "
-            "same legacy-store fallback as the spend ledger. Every production write AND "
-            "read call site now passes wiki_root= (mcp_server.py's record_push, "
-            "compute_baseline/sample_sessions/build_coverage_worksheet/"
-            "determine_references/run_reference_determination and their "
-            "_cmd_push_metrics.py/librarian.py callers, usage_report.py + a new "
-            "--path/--knowledge-root flag on `athenaeum usage-report`) — see "
-            "tests/test_push_metrics.py::TestDurablePushRecordsPath::test_no_split_brain_on_a_fresh_store"
+            "push_metrics.py PUSH_RECORDS_FILENAME (design note §5.2 table row 8 "
+            "'_push_records.jsonl'). Issue athenaeum#980 AC4 relocated this ledger to "
+            "wiki root; issue athenaeum#1591 WITHDREW that relocation and returned it "
+            "to the cache dir. R3's class/scope declaration is unchanged — what changed "
+            "is that 'store-durable' never implied 'wiki root' (see "
+            "push-references-ledger below, store-durable in the cache dir since #980 "
+            "itself), and issue athenaeum#749's acceptance ('outside the wiki corpus, "
+            "so they never become claims and never enter the embedded index') was "
+            "never retired — PR #1080's own 'Ambiguities I resolved' §3 honoured the "
+            "identical constraint for _decay_sweep_records.jsonl (athenaeum#969) and "
+            "_push_references.jsonl. push_metrics.durable_push_records_path() now "
+            "always resolves to the cache dir and uses its wiki_root argument only to "
+            "warn about a ledger stranded at the withdrawn location — see "
+            "tests/test_push_metrics.py::TestDurablePushRecordsPath"
         ),
     ),
     ArtifactDeclaration(

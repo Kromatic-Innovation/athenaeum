@@ -630,6 +630,22 @@ made concrete.
 >   principle — *"Rules are data; humans adopt them"* — R3 gives it a
 >   persistence class.
 
+> **Correction, issue athenaeum#1591 (2026-09-10) — table row 8,
+> `_push_records.jsonl`.** Implementing R3 (athenaeum#980, PR #1080) read "move
+> store-durable state behind the seam" as "move it to `wiki_root`" and
+> relocated this ledger there. That overrode issue athenaeum#749's acceptance
+> — push records live "outside the wiki corpus (so they never become claims and
+> never enter the embedded index)" — which this note never cites and never
+> retired. On the operator's deployment the relocation put telemetry inside the
+> corpus and a librarian run committed it. **The ledger is back in the cache
+> dir. Its R3 class and scope are unchanged** (`operational` /
+> `store-durable`): R3 requires a *declaration*, and §5.3 requires only a shared
+> restore point — neither requires `wiki_root`, as the same PR's own treatment
+> of `_decay_sweep_records.jsonl` (athenaeum#969) and `_push_references.jsonl`
+> already showed. Read this table as classifying artifacts, not as prescribing
+> a path for each: where an artifact's own issue fixes its location, that
+> location wins.
+
 The `operational` scope split answers the question the cache dir raises
 directly: **machine-local state stays machine-local and outside the adapter;
 store-durable state moves behind it.** That is why a spend ledger and an FTS5

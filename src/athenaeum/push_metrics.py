@@ -84,10 +84,19 @@ log = logging.getLogger(__name__)
 #: Schema version stamped on every push / reference record.
 SCHEMA_VERSION = 1
 
-#: Filenames under the cache dir. Never under the wiki/raw corpus (issue
-#: athenaeum#711 acceptance: "written to a durable, machine-readable location outside
-#: the wiki corpus, so they never become claims and never enter the embedded
-#: index") — same discipline as ``spend.jsonl`` / ``detection_incomplete.json``.
+#: Filenames under the cache dir. Never under the wiki/raw corpus — the
+#: acceptance criterion is issue athenaeum#749's (the build half of the
+#: athenaeum#711 split, whose own ACs cover only the live-corpus baseline run):
+#: records are "written to a durable, machine-readable location **outside the
+#: wiki corpus** (so they never become claims and never enter the embedded
+#: index)". Same discipline as ``detection_incomplete.json``, and the named
+#: precedent issue athenaeum#969 cites verbatim for the decay-sweep ledger
+#: ("a durable, machine-readable location outside the wiki corpus (same
+#: discipline as ``_push_records.jsonl``)").
+#:
+#: **This constraint governs, and it was never retired** — see
+#: :func:`durable_push_records_path` for the athenaeum#1591 ruling and the
+#: evidence that athenaeum#980's R3 relocation overrode it without noticing it.
 PUSH_RECORDS_FILENAME = "_push_records.jsonl"
 REFERENCE_RECORDS_FILENAME = "_push_references.jsonl"
 
@@ -486,45 +495,101 @@ def _has_migrated_content(path: Path) -> bool:
     a populated legacy ledger with no rows actually moved. Requiring content
     means creating an empty ``<wiki_root>/_push_records.jsonl`` can never by
     itself flip resolution.
+
+    Since issue athenaeum#1591 this no longer gates resolution at all — the
+    ledger always resolves to the cache dir — and it survives as the
+    "is there a real, non-empty ledger stranded here?" predicate behind
+    :func:`durable_push_records_path`'s operator warning. ``is_file()`` (not
+    ``exists()``) so a *directory* at the path, which ``stat().st_size``
+    reports as non-zero on most filesystems, is not mistaken for rows.
     """
     try:
-        return path.exists() and path.stat().st_size > 0
+        return path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
 
 
+#: ``<wiki_root>/_push_records.jsonl`` paths already warned about, so the
+#: stranded-ledger warning in :func:`durable_push_records_path` fires once per
+#: path per process rather than once per recall push.
+_MISROUTED_WARNED: set[str] = set()
+
+
 def durable_push_records_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
-    """The R3 ``operational``/``store-durable`` location (design note §5.2
-    table row 8; issue athenaeum#980 AC4): ``<wiki_root>/_push_records.jsonl``.
+    """Always ``<cache_dir>/_push_records.jsonl`` — NEVER ``<wiki_root>/``.
 
-    Same legacy-fallback contract as :func:`athenaeum.spend.durable_ledger_path`:
-    an existing installation's populated ``<cache_dir>/_push_records.jsonl``
-    keeps resolving there until migrated; a fresh or already-migrated store
-    resolves to the new, behind-the-seam location. "Migrated"/"populated" is
-    judged by :func:`_has_migrated_content` (issue athenaeum#1512 AC3), not
-    bare existence — an empty new-path file is never treated as a completed
-    migration.
+    *wiki_root* is retained (every caller passes it) but is **never a write
+    target**: it is read only to detect a ledger stranded at the withdrawn
+    location and warn about it. Passing it can no longer route a push record
+    into the corpus.
 
-    This function's *cache_dir*/*wiki_root* resolution is otherwise
-    UNCHANGED by issue athenaeum#1512: it has no way to tell "the caller
-    explicitly scoped cache_dir for isolation" apart from "cache_dir was
-    resolved eagerly as part of a caller's normal plumbing" — both look like
-    a concrete, non-``None`` :class:`Path` here, and production call sites do
-    the latter routinely. Treating a non-``None`` *cache_dir* as an isolation
-    signal at this layer would silently reroute those real writes. The
-    ``--cache-dir``-without-``--path`` isolation gap athenaeum#1512 reports
-    is instead closed one layer up, in ``athenaeum push-metrics record``
-    (:func:`athenaeum._cmd_push_metrics._cmd_push_metrics_record`) — the only
-    place that can actually distinguish an operator-typed ``--cache-dir`` flag
-    from an ordinary resolved value.
+    **Issue athenaeum#1591 ruling — which of the two contracts governs.**
+    This module's header forbade the wiki corpus while this function resolved
+    into it. The archaeology settles it in the header's favour:
+
+    - The location constraint is issue athenaeum#749 AC ("outside the wiki
+      corpus (so they never become claims and never enter the embedded
+      index)"). It was never retired. The athenaeum#911 design lock
+      (``docs/extending/whole-store-adapter-design.md``) cites athenaeum#711
+      only in §8, as a scheduling gate on athenaeum#718 — never the ledger
+      location — and never cites athenaeum#749, "become claims", or the
+      embedded index at all.
+    - athenaeum#980 relocated this file by a purely mechanical rule ("is it
+      named in §5.2's table?"), and neither R3 commit (``338cc0f3``,
+      ``a3198878``) touched the header comment three lines above
+      :data:`PUSH_RECORDS_FILENAME`. That is an override that did not notice
+      the constraint, not a supersession that retired it.
+    - PR #1080's own "Ambiguities I resolved" §3 proves the R3 lane *honoured*
+      this exact constraint wherever it saw it: ``_decay_sweep_records.jsonl``
+      and ``_push_references.jsonl`` were classified ``operational``/
+      ``store-durable`` and deliberately **not** relocated, because moving one
+      into ``wiki_root`` "would directly conflict with that issue's own AC"
+      (athenaeum#969 — which words its AC as "outside the wiki corpus (same
+      discipline as ``_push_records.jsonl``)", making THIS ledger the cited
+      precedent). Applied consistently, that same reasoning keeps this file in
+      the cache dir.
+    - R3 is therefore satisfied without ``wiki_root``: R3 requires a *class
+      declaration*, and §5.3 requires only that an ``operational`` artifact
+      share a restore point with the ``source`` it attests to. The registry
+      already carries ``push-references-ledger`` as ``operational``/
+      ``store-durable`` at ``location="cache dir"``, so "store-durable implies
+      wiki root" is false on R3's own terms. Co-locating both halves also
+      un-splits ``precision = referenced / pushed``, which athenaeum#1512
+      flagged as a split-brain metric when the two ledgers diverge.
+
+    Observed harm that forced the question (athenaeum#1591): on the live
+    deployment a librarian run committed ``wiki/_push_records.jsonl`` into the
+    knowledge corpus. Note that the commit itself is NOT what a relocation
+    fixes — :meth:`athenaeum.store.FilesystemStore.snapshot` is ``git add -A``
+    over ``knowledge_root``, so telemetry anywhere inside the knowledge root
+    gets committed either way. What the cache dir buys is that the ledger sits
+    outside ``knowledge_root`` entirely, which is what athenaeum#749's AC
+    actually asks for.
+
+    The athenaeum#1512 *cache_dir*-is-not-an-isolation-signal caveat is now
+    moot here — there is only one branch — but the CLI-layer fix in
+    :func:`athenaeum._cmd_push_metrics._resolve_record_wiki_root` is kept: it
+    is the surface that scopes ``--cache-dir`` for the operator, and this
+    function is no longer the only thing standing between a scratch run and
+    the live store.
     """
-    new_path = Path(wiki_root) / PUSH_RECORDS_FILENAME
     legacy_path = push_records_path(cache_dir)
-    if _has_migrated_content(new_path):
-        return new_path
-    if _has_migrated_content(legacy_path):
-        return legacy_path
-    return new_path
+    misrouted = Path(wiki_root) / PUSH_RECORDS_FILENAME
+    if _has_migrated_content(misrouted) and str(misrouted) not in _MISROUTED_WARNED:
+        _MISROUTED_WARNED.add(str(misrouted))
+        log.warning(
+            "push-records ledger found at the withdrawn wiki-root location %s "
+            "(issue athenaeum#1591: that location is no longer written or read). "
+            "Its rows are stranded — they are NOT counted in push precision, and "
+            "they sit inside the corpus the athenaeum#749 acceptance excludes. "
+            "Merge them into %s (deduplicated, re-sorted by 'ts'), then move the "
+            "file out of the knowledge root and commit its removal. Nothing is "
+            "migrated automatically: this is operator-decided, one-way data "
+            "movement over a git-tracked corpus.",
+            misrouted,
+            legacy_path,
+        )
+    return legacy_path
 
 
 def reference_records_path(cache_dir: Path | None = None) -> Path:
@@ -802,9 +867,10 @@ def record_push(
     or slow the live recall path, but a silent failure here would produce the
     same "reads as zero forever" hazard athenaeum#568 fixed for the spend ledger.
 
-    *wiki_root*, when supplied, resolves the ledger behind the seam (issue
-    athenaeum#980 AC4) via :func:`durable_push_records_path`; omitted,
-    resolution is unchanged from before that issue.
+    *wiki_root*, when supplied, routes through
+    :func:`durable_push_records_path`. Since issue athenaeum#1591 that
+    resolves to the cache dir either way — both branches below now yield the
+    same path, and *wiki_root* only enables the stranded-ledger warning.
     """
     try:
         from athenaeum.config import resolve_push_metrics_enabled
@@ -937,10 +1003,11 @@ def read_push_records(
     """Read every push record. Tolerates a torn trailing line; never raises.
 
     *wiki_root*, when supplied, resolves via :func:`durable_push_records_path`
-    (issue athenaeum#980 AC4) — the SAME resolution :func:`record_push` uses, so a
-    read against a given store always finds exactly what the matching write
-    produced (never split across two locations). Omitted, resolution is
-    unchanged from before that issue.
+    — the SAME resolution :func:`record_push` uses, so a read against a given
+    store always finds exactly what the matching write produced (never split
+    across two locations). Since issue athenaeum#1591 both branches resolve to
+    the cache dir, so this is now unconditionally true rather than true by
+    matching-resolver construction.
     """
     path = (
         durable_push_records_path(wiki_root, cache_dir=cache_dir)
@@ -1391,7 +1458,7 @@ def determine_references(
     to determine) or the transcript cannot be located (rolled off / never
     existed — an honest "cannot determine", never a fabricated 0 or 1).
 
-    *wiki_root* (issue athenaeum#980 AC4): forwarded to :func:`read_push_records`.
+    *wiki_root* (issue athenaeum#1591): forwarded to :func:`read_push_records`.
     """
     from athenaeum.transcript_verify import _iter_session_records, default_projects_root
 
@@ -1499,7 +1566,7 @@ def run_reference_determination(
     returns ``None``. Never raises — a reference-determination failure must
     not break ``session_end``.
 
-    *wiki_root* (issue athenaeum#980 AC4): forwarded to :func:`determine_references`
+    *wiki_root* (issue athenaeum#1591): forwarded to :func:`determine_references`
     for the push-records read half only — the reference-determination WRITE
     below stays under *cache_dir* (``_push_references.jsonl`` is not one of
     the artifacts §5.2's table names for relocation).
@@ -1700,7 +1767,7 @@ def compute_baseline(
     (issue athenaeum#987); a value matching zero or more-than-one known
     session ids raises ``ValueError`` rather than silently excluding nothing.
 
-    *wiki_root* (issue athenaeum#980 AC4): forwarded to :func:`read_push_records`
+    *wiki_root* (issue athenaeum#1591): forwarded to :func:`read_push_records`
     for the push-records half of this window. The reference-determination
     ledger (``_push_references.jsonl``) is a separate artifact §5.2's table
     does not name, so it keeps resolving under *cache_dir* unchanged.
@@ -1926,7 +1993,7 @@ def sample_sessions(
     synthetic session ids are removed from the sampling pool entirely, so an
     excluded session can never be drawn into the sample.
 
-    *wiki_root* (issue athenaeum#980 AC4): forwarded to :func:`read_push_records`.
+    *wiki_root* (issue athenaeum#1591): forwarded to :func:`read_push_records`.
     """
     exclude_set = {s for s in (exclude_sessions or ()) if s}
     records = read_push_records(cache_dir, wiki_root=wiki_root)
