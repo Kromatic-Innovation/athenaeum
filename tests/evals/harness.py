@@ -62,6 +62,14 @@ LAYER_WRITE_TIER_COMPARE = "write_tier_compare"
 # competing claims); this layer's cases give tier3_create a source with
 # nothing to reconcile, only a gap.
 LAYER_UNDERDETERMINED = "underdetermined"
+# Issue athenaeum#1580: the INTAKE-ROUTING layer. Every layer above grades one
+# tier's output in isolation; this one grades where a whole raw source LANDS
+# once ``librarian.process_one`` has run it against a materialized wiki --
+# attached to the page for an entity that already exists, or minted as a new
+# page. Neither ``LAYER_CLASSIFY`` (which never sees a wiki tree) nor
+# ``LAYER_MERGE`` (which grades merge SHAPE once a merge is already decided)
+# covers the decision itself.
+LAYER_ATTACHMENT = "attachment"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EVAL_DATA_ROOT = REPO_ROOT / "tests" / "evals" / "data"
@@ -548,6 +556,7 @@ class EvalSession:
                         LAYER_MERGE,
                         LAYER_WRITE_TIER_COMPARE,
                         LAYER_UNDERDETERMINED,
+                        LAYER_ATTACHMENT,
                     )
                 )
                 if total

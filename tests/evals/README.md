@@ -18,7 +18,17 @@ Layers exercised end-to-end against a real Claude API call:
 | Recall    | Haiku (`ATHENAEUM_TOPIC_MODEL`)    | 6 prompts       | ≥ 5/6  |
 | Classify  | Haiku (`ATHENAEUM_CLASSIFY_MODEL`) | 6 raw intakes   | ≥ 4/6  |
 | Merge     | Sonnet (`ATHENAEUM_WRITE_MODEL`)   | 4 merge cases   | ≥ 3/4  |
+| Attachment | the whole chain (Haiku + Sonnet)  | 5 routing cases | ≥ 4/5 **(expected RED)** |
 | Backfill  | deferred until athenaeum#328                | —               | —      |
+
+Attachment (issue athenaeum#1580) is the one layer whose floor is
+**aspirational rather than descriptive**. Every other floor above describes
+what the shipped librarian already scores; that layer's floor describes what a
+CORRECT librarian would score, and it is red today by design — see its module
+docstring and issue athenaeum#1580 AC3. Tuning it down to observed behaviour
+would make it a rubber stamp. It is also the only layer that runs the WHOLE
+tier chain (`librarian.process_one`) against a materialized wiki rather than
+one tier in isolation, which is why it has no single model in the table.
 
 Classify and Merge (issue athenaeum#552) cover `tiers.py`'s Tier-2 CLASSIFY and
 Tier-3 WRITE/MERGE stages — see `docs/measurements/evals-inventory.md` for the full
