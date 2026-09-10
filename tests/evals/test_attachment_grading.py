@@ -304,6 +304,190 @@ class TestProposalScopingIsPerUid:
 
 
 # ---------------------------------------------------------------------------
+# athenaeum#1595 — a thin type:source page is the design, not a failure
+# ---------------------------------------------------------------------------
+
+
+class TestSourcePageMintIsNotADuplicateEntityFailure:
+    """A thin ``type: source`` page minted for a new source is CORRECT
+    (operator ruling, 2026-09-10) -- the failure shapes are a second ENTITY
+    page, or a source page nothing links to (orphaned)."""
+
+    def test_a_thin_linked_source_page_passes(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(
+            wiki,
+            uid="attach-company-steepgate",
+            name="Steepgate Ceramics",
+            body="Body.",
+            page_type="company",
+        )
+        before = snapshot_wiki(wiki)
+
+        # A new thin source page, linked back to the entity it evidences.
+        _page(
+            wiki,
+            uid="src-steepgate-board",
+            name="Steepgate onboarding discovery board",
+            body="A board export about Steepgate Ceramics.",
+            page_type="source",
+            related=[{"uid": "attach-company-steepgate", "role": "evidences"}],
+        )
+        delta = diff_wiki(before, snapshot_wiki(wiki))
+
+        case = {
+            "expected": {
+                "max_new_pages": 1,
+                "mint_types_must_be": ["source"],
+                "source_mint_link_uid": "attach-company-steepgate",
+                "max_source_body_bytes": 2000,
+            }
+        }
+        passed, detail = score_case(case, delta)
+        assert passed, detail
+
+    def test_a_duplicate_entity_page_still_fails_on_type(self, tmp_path: Path) -> None:
+        """The actual observed athenaeum#1595 failure shape: a page named for
+        the entity is minted, but as a duplicate ENTITY page, not a source
+        page. ``mint_types_must_be`` catches this by TYPE, not by name, so it
+        cannot be dodged by a name this layer's substring list didn't
+        anticipate."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(
+            wiki,
+            uid="attach-company-steepgate",
+            name="Steepgate Ceramics",
+            body="Body.",
+            page_type="company",
+        )
+        before = snapshot_wiki(wiki)
+
+        _page(wiki, uid="dup-steepgate", name="Steepgate", body="Duplicate.", page_type="company")
+        delta = diff_wiki(before, snapshot_wiki(wiki))
+
+        case = {
+            "expected": {
+                "max_new_pages": 1,
+                "mint_types_must_be": ["source"],
+                "source_mint_link_uid": "attach-company-steepgate",
+            }
+        }
+        passed, detail = score_case(case, delta)
+        assert not passed
+        assert "dup-steepgate" in detail
+
+    def test_an_orphaned_source_page_fails_even_though_the_type_is_correct(
+        self, tmp_path: Path
+    ) -> None:
+        """AC2's other half: the page itself is legitimate (type: source),
+        but nothing links it to the entity it is supposed to evidence."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(
+            wiki,
+            uid="attach-company-steepgate",
+            name="Steepgate Ceramics",
+            body="Body.",
+            page_type="company",
+        )
+        before = snapshot_wiki(wiki)
+
+        # A thin source page with NO edge, source_ref, or proposal connecting
+        # it back to the entity it is about.
+        _page(
+            wiki,
+            uid="src-steepgate-board",
+            name="Steepgate onboarding discovery board",
+            body="A board export.",
+            page_type="source",
+        )
+        delta = diff_wiki(before, snapshot_wiki(wiki))
+
+        case = {
+            "expected": {
+                "max_new_pages": 1,
+                "mint_types_must_be": ["source"],
+                "source_mint_link_uid": "attach-company-steepgate",
+            }
+        }
+        passed, detail = score_case(case, delta)
+        assert not passed
+        assert "orphaned" in detail
+
+    def test_an_oversize_source_page_fails_thinness(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(
+            wiki,
+            uid="attach-company-steepgate",
+            name="Steepgate Ceramics",
+            body="Body.",
+            page_type="company",
+        )
+        before = snapshot_wiki(wiki)
+
+        _page(
+            wiki,
+            uid="src-steepgate-board",
+            name="Steepgate onboarding discovery board",
+            body="x" * 3000,
+            page_type="source",
+            related=[{"uid": "attach-company-steepgate", "role": "evidences"}],
+        )
+        delta = diff_wiki(before, snapshot_wiki(wiki))
+
+        case = {
+            "expected": {
+                "max_new_pages": 1,
+                "mint_types_must_be": ["source"],
+                "source_mint_link_uid": "attach-company-steepgate",
+                "max_source_body_bytes": 2000,
+            }
+        }
+        passed, detail = score_case(case, delta)
+        assert not passed
+        assert "thinness" in detail
+
+    def test_a_source_page_name_is_exempt_from_the_duplicate_name_check(
+        self, tmp_path: Path
+    ) -> None:
+        """A thin source page carrying the subject's name in its own title
+        (the live shape -- "Steepgate onboarding discovery board") must NOT
+        trip ``must_not_mint_name_substrings``; only a non-source mint may."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(
+            wiki,
+            uid="attach-company-steepgate",
+            name="Steepgate Ceramics",
+            body="Body.",
+            page_type="company",
+        )
+        before = snapshot_wiki(wiki)
+
+        _page(
+            wiki,
+            uid="src-steepgate-board",
+            name="Steepgate onboarding discovery board",
+            body="A board export.",
+            page_type="source",
+            related=[{"uid": "attach-company-steepgate", "role": "evidences"}],
+        )
+        delta = diff_wiki(before, snapshot_wiki(wiki))
+
+        case = {
+            "expected": {
+                "max_new_pages": 1,
+                "must_not_mint_name_substrings": ["Steepgate"],
+            }
+        }
+        passed, detail = score_case(case, delta)
+        assert passed, detail
+
+
+# ---------------------------------------------------------------------------
 # AC4 — irreversibility is a proposal, never an applied change
 # ---------------------------------------------------------------------------
 

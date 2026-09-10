@@ -167,6 +167,7 @@ class PageState:
     edges: frozenset[tuple[str, str]]
     source_refs: frozenset[str]
     body_digest: str
+    body_bytes: int = 0
 
     @property
     def attachment_edges(self) -> frozenset[tuple[str, str]]:
@@ -228,6 +229,7 @@ def snapshot_wiki(wiki_root: Path) -> WikiSnapshot:
             edges=_edges_of(meta),
             source_refs=_source_refs_of(meta),
             body_digest=_digest(body),
+            body_bytes=len(body.encode("utf-8")),
         )
     return WikiSnapshot(pages=pages, queues=queues)
 
@@ -258,6 +260,13 @@ class WikiDelta:
     grown_queues: frozenset[str]
     minted_names: Mapping[str, str] = field(default_factory=dict)
     proposed_uids: frozenset[str] = frozenset()
+    #: athenaeum#1595 (Case C): a mint's TYPE is what tells a legitimate thin
+    #: ``type: source`` page apart from a duplicate entity page -- a check
+    #: that reads only ``minted_names`` cannot make that distinction.
+    minted_types: Mapping[str, str] = field(default_factory=dict)
+    #: athenaeum#1595 AC3: body size of each minted page, so a case can pin
+    #: a source page's thinness without reading prose.
+    minted_body_bytes: Mapping[str, int] = field(default_factory=dict)
 
     @property
     def proposed(self) -> bool:
@@ -354,6 +363,8 @@ def diff_wiki(before: WikiSnapshot, after: WikiSnapshot) -> WikiDelta:
         grown_queues=frozenset(grown),
         proposed_uids=frozenset(proposed_uids),
         minted_names={uid: after.pages[uid].name for uid in minted},
+        minted_types={uid: after.pages[uid].type for uid in minted},
+        minted_body_bytes={uid: after.pages[uid].body_bytes for uid in minted},
     )
 
 
@@ -483,7 +494,34 @@ def score_case(case: Mapping[str, Any], delta: WikiDelta) -> tuple[bool, str]:
         A mint whose ``name`` carries one of these is the specific failure
         the case is built to catch (a second page for an entity that has
         one), reported by name rather than as a bare count so the failure
-        detail names the page.
+        detail names the page. Exempts ``type: source`` mints (athenaeum#1595):
+        a thin source page is BY DESIGN and may legitimately carry the
+        subject's name (e.g. "Steepgate onboarding discovery board") without
+        being the duplicate-entity-page failure this check exists to catch --
+        that failure is a second page of an ENTITY type, never a source page.
+    ``mint_types_must_be``
+        athenaeum#1595 AC1: every minted page's ``type`` must be in this list,
+        or the mint is a failure -- named by type rather than inferred from
+        its name, so a duplicate entity page cannot hide behind a name this
+        layer's substring list didn't anticipate. Case C's ground truth is
+        exactly this: minting a ``type: source`` page is correct; minting any
+        other type for an entity that already has a page is not.
+    ``source_mint_link_uid``
+        athenaeum#1595 AC2: if a ``type: source`` page was minted, it must be
+        REACHABLE from this uid -- via a non-term-overlap edge either
+        direction, a ``sources:``/``source_ref`` entry this uid GAINED naming
+        the minted page, or a pending proposal naming the minted page
+        (``delta.proposed_uids``). Deliberately NOT the minted page's own
+        ``source_ref``: every page (the mint included) carries one to its raw
+        intake file, which is provenance, not a link to the entity it
+        evidences -- reading that would make every mint pass this check
+        vacuously. A thin source page that nothing links to is an orphan, and
+        is a failure even though minting it was legitimate. A no-op when no
+        ``type: source`` page was minted.
+    ``max_source_body_bytes``
+        athenaeum#1595 AC3: caps the body size of any minted ``type: source``
+        page. Thinness is the design intent (the trustworthiness-marking,
+        progressive-disclosure page shape), not an incidental property.
     ``requires_proposal``
         AC4: the outcome is irreversible, so a pending-decision surface must
         have grown NAMING one of ``touch_or_proposal_uids`` (athenaeum#1598)
@@ -519,10 +557,61 @@ def score_case(case: Mapping[str, Any], delta: WikiDelta) -> tuple[bool, str]:
         hits = sorted(
             f"{uid}={name!r}"
             for uid, name in delta.minted_names.items()
-            if substr.lower() in (name or "").lower()
+            if delta.minted_types.get(uid) != "source" and substr.lower() in (name or "").lower()
         )
         if hits:
             reasons.append(f"minted a page named for {substr!r}: {', '.join(hits)}")
+
+    allowed_mint_types = expected.get("mint_types_must_be")
+    if allowed_mint_types is not None:
+        bad = sorted(
+            f"{uid}={delta.minted_names.get(uid, '')!r} (type={mtype!r})"
+            for uid, mtype in delta.minted_types.items()
+            if mtype not in allowed_mint_types
+        )
+        if bad:
+            reasons.append(
+                f"minted page(s) not of an allowed type {list(allowed_mint_types)!r}: "
+                f"{', '.join(bad)}"
+            )
+
+    link_target = expected.get("source_mint_link_uid")
+    if link_target:
+        source_mints = [uid for uid, mtype in delta.minted_types.items() if mtype == "source"]
+        for uid in source_mints:
+            # NOT ``delta.gained_source_refs.get(uid)`` -- every page (the
+            # minted source page included) carries its OWN ``source_ref`` to
+            # the raw intake file it was compiled from, which is provenance,
+            # not a link to the entity it evidences. What must gain a
+            # ``sources:``/``source_ref`` entry NAMING the minted page is the
+            # ENTITY side, mirroring the edge direction below.
+            reachable = (
+                any(target == link_target for target, _role in delta.attachment_edges.get(uid, ()))
+                or any(
+                    target == uid for target, _role in delta.attachment_edges.get(link_target, ())
+                )
+                or any(uid in ref for ref in delta.gained_source_refs.get(link_target, ()))
+                or uid in delta.proposed_uids
+            )
+            if not reachable:
+                reasons.append(
+                    f"minted source page {uid!r} is orphaned — not linked to "
+                    f"{link_target!r} by an edge, a source_ref, or a proposal"
+                )
+
+    max_source_bytes = expected.get("max_source_body_bytes")
+    if max_source_bytes is not None:
+        oversize = sorted(
+            f"{uid}={nbytes}B"
+            for uid, mtype in delta.minted_types.items()
+            if mtype == "source"
+            and (nbytes := delta.minted_body_bytes.get(uid, 0)) > int(max_source_bytes)
+        )
+        if oversize:
+            reasons.append(
+                f"minted source page(s) exceed the {max_source_bytes}B thinness "
+                f"ceiling: {', '.join(oversize)}"
+            )
 
     if expected.get("requires_proposal"):
         # athenaeum#1598 AC2: scoped to the uid(s) the case actually names,
