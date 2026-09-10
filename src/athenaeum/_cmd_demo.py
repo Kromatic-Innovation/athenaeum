@@ -34,12 +34,38 @@ of those failure modes:
   :func:`_probe_rows`. Collapsing those two is how an operator gets confident
   advice about a session id that was never actually in question.
 
+- **``--list-sessions`` finds a session worth demoing (issue athenaeum#1531).**
+  ``athenaeum demo`` self-scopes to the session it is launched from, which is
+  fine for the common case but wrong for two real ones: showing a session with
+  actual traffic (the one you are sitting in may have a handful of rows; the
+  operator needs to know another has hundreds), and showing the ``referenced``
+  column at all (it only populates once reference determination runs at
+  session END, so demonstrating it needs an already-finished session).
+  ``--list-sessions`` prints every session with recall activity, newest
+  activity first, with row counts and whether each has ended, then exits 0
+  without binding a port or starting a server — the picking stays a manual
+  ``--session <id>`` paste; see the module docstring's "Out of scope" note in
+  the issue for why interactive selection is deliberately not built.
+
+  The project column comes from the transcript's own ``cwd`` field — NEVER
+  from un-mangling the ``~/.claude/projects/<mangled-path>/`` directory name.
+  That un-mangling is lossy: a real directory name can itself contain dashes
+  (``~/local-deploys/hestia`` mangles to
+  ``-Users-x-local-deploys-hestia``, which a naive dash-to-slash reversal
+  turns into the wrong path, ``~/local/deploys/hestia``). See
+  :func:`_transcript_cwd`.
+
 This module consumes :mod:`athenaeum._cmd_viewer`'s public helpers
 (:func:`~athenaeum._cmd_viewer.make_server`,
-:func:`~athenaeum._cmd_viewer.build_viewer_data`) and, through them, the
-documented ``push-metrics tail --json`` NDJSON contract (issue athenaeum#1479).
-It never opens a ledger file and never imports :mod:`athenaeum.push_metrics` —
-the same contract-boundary rule the viewer holds itself to.
+:func:`~athenaeum._cmd_viewer.build_viewer_data`) and its
+``push-metrics tail --json`` subprocess runner
+(:func:`~athenaeum._cmd_viewer._run_tail_contract`) and, through them, the
+documented NDJSON contract (issue athenaeum#1479). It never opens a ledger
+file and never imports :mod:`athenaeum.push_metrics` — the same
+contract-boundary rule the viewer holds itself to. (``--list-sessions`` does
+open ONE file per session directly: the Claude Code transcript itself, to read
+its ``cwd`` field — that is not a ledger and is outside the push-metrics
+contract entirely.)
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in its
 own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser``.
@@ -48,22 +74,31 @@ own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser``.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import webbrowser
+from datetime import datetime, timezone
 from http.server import HTTPServer
 from pathlib import Path
+from typing import Any
 
 from athenaeum._cmd_viewer import (
     DEFAULT_EDITOR_COMMAND,
     DEFAULT_PORT,
     ViewerContractError,
+    _run_tail_contract,
     build_viewer_data,
     make_server,
     resolve_editor_command,
     warn_if_editor_missing,
 )
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
+
+#: Default number of sessions ``--list-sessions`` prints (AC2). A sensible
+#: bound rather than the whole ledger — an operator picking a demo session
+#: cares about recent activity, not every session ever recorded.
+DEFAULT_LIST_SESSIONS_LIMIT = 20
 
 #: Default Claude Code transcript root. Overridable via the ``--projects-root``
 #: flag so the test suite never has to read the operator's real transcripts.
@@ -199,8 +234,269 @@ def _report_rows(rows: int | None, session_id: str) -> None:
         print(f"session {session_id}: {rows} recall rows recorded", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# --list-sessions (issue athenaeum#1531)
+# ---------------------------------------------------------------------------
+
+
+def _parse_tail_ts(ts: object) -> datetime | None:
+    """Parse one tail record's ``ts`` into a timezone-AWARE UTC datetime.
+
+    The live ledger holds a mix of shapes right now: second-precision
+    ``Z``-suffixed (``2026-09-09T22:21:04Z``), microsecond-precision
+    ``Z``-suffixed (``2026-08-27T17:36:16.292160Z``), and older records with
+    no ``Z`` at all (naive). ``datetime.fromisoformat`` alone yields a mix of
+    aware and naive datetimes across those, and comparing an aware value to a
+    naive one raises ``TypeError`` — which would crash exactly the "order by
+    last activity" sort this feeds (AC2), and only on a ledger old enough to
+    hold both shapes. Every value returned here is aware and normalized to
+    UTC so sorting is always safe. Returns ``None`` for a missing/unparsable
+    timestamp — the caller sorts those first (oldest), never dropping the
+    record.
+    """
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    text = ts.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _find_transcript(session_id: str, projects_root: Path) -> Path | None:
+    """Locate ``<projects_root>/*/<session_id>.jsonl``, or ``None``.
+
+    A session's scope directory name is not known up front (that is exactly
+    the un-mangling trap this feature exists to avoid — see module
+    docstring), so this globs for the session id's own filename rather than
+    trying to derive the directory. The session id is a UUID minted by
+    Claude Code, so more than one match is not expected; the first is used.
+    """
+    try:
+        candidates = sorted(projects_root.glob(f"*/{session_id}.jsonl"))
+    except OSError:
+        return None
+    return candidates[0] if candidates else None
+
+
+def _transcript_cwd(transcript_path: Path) -> str | None:
+    """Best-effort ``cwd`` for a transcript, or ``None`` if never found.
+
+    THE load-bearing rule (issue athenaeum#1531 AC4): this reads the
+    transcript's own ``cwd`` field. It never derives a project path by
+    un-mangling the ``~/.claude/projects/<mangled-path>/`` directory name —
+    that reversal is lossy, because a real directory name can itself contain
+    dashes (``~/local-deploys/hestia`` mangles to
+    ``-Users-x-local-deploys-hestia``; naive dash-to-slash reversal produces
+    the wrong path, ``~/local/deploys/hestia``).
+
+    ``cwd`` is NOT on the first few header records (which carry only
+    ``sessionId``/``type``/``mode``) — this scans line by line until it finds
+    one, then stops; it does not read the whole file into memory first, and
+    it does not give up after the first line. Malformed lines are skipped
+    rather than aborting the scan.
+    """
+    try:
+        with transcript_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                cwd = record.get("cwd")
+                if isinstance(cwd, str) and cwd.strip():
+                    return cwd.strip()
+    except OSError:
+        return None
+    return None
+
+
+def _shorten_home(path_str: str) -> str:
+    """Render an absolute path with the operator's home directory as ``~``.
+
+    Purely cosmetic (matches the issue's own example table); a path outside
+    the home directory is returned unchanged.
+    """
+    home = str(Path.home())
+    if home and (path_str == home or path_str.startswith(home + os.sep)):
+        return "~" + path_str[len(home) :]
+    return path_str
+
+
+#: Visible placeholder for a session whose transcript cannot be found at all
+#: (AC5) — never a blank/empty project column, which would be indistinguishable
+#: from a project genuinely named the empty string.
+_NO_TRANSCRIPT_PLACEHOLDER = "(no transcript found)"
+
+#: Visible placeholder for a session whose transcript WAS found but carries no
+#: ``cwd`` on any record (e.g. an unusually short or truncated transcript).
+#: Kept distinct from :data:`_NO_TRANSCRIPT_PLACEHOLDER` so the two failure
+#: modes are not conflated in the output.
+_NO_CWD_PLACEHOLDER = "(cwd not found in transcript)"
+
+
+def _project_label(session_id: str, projects_root: Path) -> str:
+    """Resolve the project column for one session id (AC4, AC5)."""
+    transcript = _find_transcript(session_id, projects_root)
+    if transcript is None:
+        return _NO_TRANSCRIPT_PLACEHOLDER
+    cwd = _transcript_cwd(transcript)
+    if cwd is None:
+        return _NO_CWD_PLACEHOLDER
+    return _shorten_home(cwd)
+
+
+def _aggregate_sessions(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Group shaped tail records (push + reference) by ``session_id``.
+
+    Returns ``{session_id: {"rows": int, "last_ts": datetime | None, "ended":
+    bool}}``. ``rows`` sums ``pushed_count`` across that session's PUSH
+    records only ("injected items across the session", per the issue) —
+    reference records carry no comparable count and are excluded from it.
+    ``ended`` is ``True`` iff at least one reference-determination record
+    exists for the session (AC3) — the whole point of this column, and the
+    precondition for the viewer's ``referenced`` column.
+    """
+    sessions: dict[str, dict[str, Any]] = {}
+    for rec in records:
+        session_id = rec.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        entry = sessions.setdefault(session_id, {"rows": 0, "last_ts": None, "ended": False})
+        ts = _parse_tail_ts(rec.get("ts"))
+        if ts is not None and (entry["last_ts"] is None or ts > entry["last_ts"]):
+            entry["last_ts"] = ts
+        if rec.get("record_type") == "push":
+            pushed_count = rec.get("pushed_count")
+            if isinstance(pushed_count, int):
+                entry["rows"] += pushed_count
+        elif rec.get("record_type") == "reference":
+            entry["ended"] = True
+    return sessions
+
+
+def _positive_limit(value: str) -> int:
+    """argparse ``type=`` for ``--limit``: a POSITIVE integer, or a clear
+    error (issue athenaeum#1531 review finding).
+
+    Two silent-failure modes this closes, neither of which argparse's plain
+    ``type=int`` catches on its own:
+
+    - ``0`` is falsy in Python, so a caller reading it back with
+      ``value or DEFAULT`` silently substitutes the default -- an explicit
+      request for zero rows would render as the full default list instead,
+      with no error. This module deliberately does not read ``--limit`` that
+      way (see :func:`cmd_list_sessions`) precisely so this type function is
+      the ONE place a bad value gets caught.
+    - A negative value passes ``int()`` fine but reaches ``list[:N]``
+      slicing downstream, where ``[:-5]`` silently drops the 5 MOST RECENT
+      entries rather than erroring -- the opposite of what an operator
+      asking for a short list wants, and worse than doing nothing.
+
+    Neither is defined as meaningful by issue athenaeum#1531's AC2 ("a
+    --limit (sensible default)"), so both are refused outright rather than
+    guessed at (e.g. treating 0 as "unlimited") -- an explicit value is
+    never silently replaced by a different one.
+    """
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"must be an integer, got {value!r}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {parsed}")
+    return parsed
+
+
+def cmd_list_sessions(args: argparse.Namespace) -> int:
+    """``athenaeum demo --list-sessions`` (issue athenaeum#1531).
+
+    Prints every session with recall activity, newest last-activity first,
+    then exits 0 WITHOUT binding a port or starting a server (AC1). Sourced
+    exclusively from ``push-metrics tail --json`` (AC7) via
+    :func:`athenaeum._cmd_viewer._run_tail_contract` — the same subprocess
+    contract runner the viewer itself uses; no ledger file is ever opened
+    in-process.
+    """
+    path = (args.path or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    projects_root = (args.projects_root or DEFAULT_PROJECTS_ROOT).expanduser()
+
+    # `getattr(..., None) or DEFAULT` looks equivalent but is not: `0` is
+    # falsy, so that idiom would silently REPLACE an explicit `--limit 0`
+    # with the default -- the exact silent-substitution this command's own
+    # design principle (see _report_rows) exists to avoid elsewhere. Only a
+    # genuinely ABSENT limit (attribute missing, or None -- the shape a
+    # caller that skips argparse, e.g. a test, is expected to pass) falls
+    # through to the default; any supplied value, including 0 or negative,
+    # is validated explicitly instead of being coerced.
+    #
+    # The contract (issue athenaeum#1531 review finding): `--limit` must be a
+    # POSITIVE integer. Zero is not defined as "unlimited" -- it is refused,
+    # same as a negative value -- because a negative limit silently drops the
+    # N MOST RECENT sessions via Python's `list[:-N]` slicing, which is the
+    # opposite of what an operator asking for a short list wants, with no
+    # error at all. :func:`_positive_limit` already enforces this at argparse
+    # parse time for the normal CLI path; this is the same check applied
+    # again for a caller that builds its own ``Namespace`` and skips argparse
+    # (e.g. a unit test), so the contract holds either way.
+    limit = getattr(args, "limit", None)
+    if limit is None:
+        limit = DEFAULT_LIST_SESSIONS_LIMIT
+    elif limit <= 0:
+        print(
+            f"error: --limit must be a positive integer, got {limit}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        records = _run_tail_contract(session_id=None, path=path, cache_dir=args.cache_dir)
+    except ViewerContractError as exc:
+        # Distinct from the empty-ledger case below (AC6): a probe FAILURE
+        # says nothing about whether sessions exist, so it must not render
+        # as "no sessions with recall activity yet" — the same None-vs-zero
+        # discipline _report_rows already applies to a single-session probe.
+        print(f"error: could not read push-metrics ledgers: {exc}", file=sys.stderr)
+        return 1
+
+    if not records:
+        print("no sessions with recall activity yet", file=sys.stderr)
+        return 0
+
+    sessions = _aggregate_sessions(records)
+    ordered = sorted(
+        sessions.items(),
+        key=lambda kv: kv[1]["last_ts"] or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )[:limit]
+
+    header = f"{'session id':<38}{'rows':>6}  {'last activity':<22}{'ended':>6}  project"
+    print(header)
+    for session_id, info in ordered:
+        last_ts = info["last_ts"]
+        last_str = last_ts.strftime("%Y-%m-%dT%H:%M:%SZ") if last_ts is not None else "unknown"
+        ended_str = "yes" if info["ended"] else "no"
+        project = _project_label(session_id, projects_root)
+        print(
+            f"{session_id:<38}{info['rows']:>6}  {last_str:<22}{ended_str:>6}  {project}"
+        )
+    return 0
+
+
 def cmd_demo(args: argparse.Namespace) -> int:
     """``athenaeum demo`` — resolve, bind, announce, open, serve."""
+    if getattr(args, "list_sessions", False):
+        return cmd_list_sessions(args)
+
     path = (args.path or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     session_id = args.session or resolve_session_id(projects_root=args.projects_root)
     if not session_id:
@@ -317,5 +613,24 @@ def add_demo_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--no-browser",
         action="store_true",
         help="Serve without opening a browser (headless/CI).",
+    )
+    demo_p.add_argument(
+        "--list-sessions",
+        action="store_true",
+        help="Print sessions with recall activity (newest last-activity "
+        "first), including row counts and whether each has ended, then exit "
+        "0 without binding a port or starting a server (issue athenaeum#1531). "
+        "Use this to find a session worth demoing, then pass its id via "
+        "--session.",
+    )
+    demo_p.add_argument(
+        "--limit",
+        type=_positive_limit,
+        default=DEFAULT_LIST_SESSIONS_LIMIT,
+        help="With --list-sessions, the maximum number of sessions to print. "
+        "Must be a positive integer -- 0 and negative values are rejected "
+        "(a negative value would silently drop the N MOST RECENT sessions "
+        "via list slicing, the opposite of a short list) "
+        f"(default: {DEFAULT_LIST_SESSIONS_LIMIT}). Has no effect otherwise.",
     )
     demo_p.set_defaults(func=cmd_demo)
