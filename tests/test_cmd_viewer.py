@@ -638,6 +638,21 @@ def test_load_static_html_reads_the_packaged_asset() -> None:
     assert b"data.json" in body
 
 
+def test_pages_table_renders_the_used_column_in_three_states() -> None:
+    """Issue athenaeum#1554. The payload has carried a `referenced` flag per
+    page all along; nothing rendered it, so the `used` third of the
+    pushed/pulled/used triple was invisible even once the flag was correct.
+
+    Pinned here rather than in a browser test because the mapping that matters
+    is the three-state one: `pending` must be its own rendered word, not a
+    blank cell that reads as `no`."""
+    body = _cmd_viewer._load_static_html().decode("utf-8")
+    assert "<th>used</th>" in body
+    assert "referencedCell(row.referenced)" in body
+    for state in ('textCell("yes")', 'textCell("no")', 'textCell("pending")'):
+        assert state in body
+
+
 def test_built_wheel_contains_viewer_static_asset() -> None:
     """Mirrors tests/test_skill_packaging.py's real-build check: pyproject.toml
     is unchanged for this issue (AC5), so this proves the asset ships via
