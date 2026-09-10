@@ -125,6 +125,7 @@ MODULE_LAYER: dict[str, int] = {
     "provider": 3,
     "push_metrics": 3,
     "query_topics": 3,
+    "relatedness": 3,
     "rules": 3,
     "screening": 3,
     "scope_resolution": 3,

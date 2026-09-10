@@ -218,6 +218,8 @@ from athenaeum.provider import (
 )
 from athenaeum.quarantine import quarantine_file as _quarantine_file
 from athenaeum.registry import assert_handles_placed, collect_handles
+from athenaeum.relatedness import run_index as relatedness_run_index
+from athenaeum.relatedness import stamp_related_edges
 from athenaeum.rule_proposals import (
     _get_rule_proposals_model,
     run_rule_proposal_detection,
@@ -1671,6 +1673,25 @@ def _apply_tier3_results(
     # ``continue``s above/below), for the adapter-provenance ledger call at
     # the end of this function.
     _written_uids: list[str] = list(_admitted_updated_uids)
+
+    # Issue athenaeum#1576: stamp compile-time ``related:`` edges onto the
+    # pages this call is about to create. Placed HERE, immediately before the
+    # write loop and after the merge writes above, for three reasons:
+    #
+    # * this is the single write boundary for newly-created entities, shared
+    #   by process_one's clean-completion and over-budget partial-progress
+    #   paths, so both get edges or neither does;
+    # * the index reflects the wiki as it stands, which is what makes every
+    #   proposed edge point at a page that already exists (athenaeum#1576 AC5:
+    #   compilation writes edges going forward, nothing is backfilled);
+    # * it runs before ``entity.render()`` below, so the edges land in the
+    #   bytes that the schema/type/field-constraint guards actually validate,
+    #   rather than being appended to a page that already passed them.
+    #
+    # Purely deterministic and offline -- no LLM call, no network, no metered
+    # spend (athenaeum#1576 AC6). Existing ``related:`` rows (the oversize-split
+    # ``split-from``/``split-into`` pairs) are preserved, never replaced.
+    stamp_related_edges(new_entities, relatedness_run_index(wiki_root, config=config))
 
     for entity in new_entities:
         page_path = wiki_root / entity.filename

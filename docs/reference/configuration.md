@@ -1808,6 +1808,40 @@ change delta incrementally — no full re-embed / FTS5 rebuild). Read from
 ``bool`` (an ``int`` subclass) and non-numeric values fall through to the
 default so ``full_rehash_max_age_days: yes`` cannot read as ``1``.
 
+### `resolve_relatedness_writer_enabled`
+
+- **YAML path:** `librarian.relatedness_writer`
+- **Environment variable:** `ATHENAEUM_RELATEDNESS_WRITER`
+- **CLI flag:** —
+- **Default:** `True`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the compile-time ``related:`` edge writer.
+
+When true, ``librarian._apply_tier3_results`` stamps ``related:`` rows
+onto each newly-created page before it is written, using
+`athenaeum.relatedness` -- mutual k-nearest-neighbour over
+corpus-weighted distinctive-term overlap. See that module's docstring for
+the signal, the measurement against 's corpus, and
+why the two cheaper deterministic signals and the MiniLM neighbourhood
+were each measured and rejected.
+
+DEFAULT True (active). Unlike the comparator master switch this does NOT
+ship dark, for three reasons that were checked rather than assumed:
+it makes no metered call and no network call at all (AC6, satisfied by construction rather than by configuration); it only ever
+APPENDS rows to pages this run is creating, so no existing page's bytes
+change and the failure mode of a bad edge is a spurious breadcrumb rather
+than lost content; and its precision was 1.000 at every parameter setting
+measured across three corpus scales. An operator who wants it off sets
+``librarian.relatedness_writer: false``, and pages then compile exactly as
+they did before.
+
+Env ``ATHENAEUM_RELATEDNESS_WRITER`` > yaml ``librarian.relatedness_writer``
+> this default. No seed in ``_DEFAULTS`` so the code
+default stays reachable. Truthiness follows the same spelling set as every
+other boolean knob here; an unrecognized value falls through to the
+default rather than silently reading as false.
+
 ### `resolve_retention_destination`
 
 - **YAML path:** `librarian.retention.families.<family>.destination` > `librarian.retention.defaults.destination`
