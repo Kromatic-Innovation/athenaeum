@@ -1,0 +1,141 @@
+# Relatedness and redundancy fixtures (issue athenaeum#1570).
+#
+# Two clusters that exist to be measured, and they want OPPOSITE verdicts.
+# Keeping them apart is the point: a fixture that conflates them would license
+# a change that papers over Cluster B while appearing to fix Cluster A.
+#
+# Cluster A -- RELATED, UNLINKED. Three pages describing one concept at three
+#   altitudes: the thing, a model OF that thing, and a process EMBODYING it.
+#   They carry ZERO edges between them, on purpose. The three edges that
+#   should exist are ground truth in ``ground_truth/relatedness.yaml``, not
+#   here -- authoring them here would make the corpus already-correct and the
+#   relatedness measure vacuous.
+#
+# Cluster B -- REDUNDANT, WANTING CONSOLIDATION. A bare name, the same name
+#   with a parenthetical qualifier, and an associated team page: the classic
+#   entity-split signature. The first two are one entity written down twice;
+#   the team page is a genuinely different entity and is the NEGATIVE CONTROL
+#   -- a consolidation pass that swallows it has over-merged.
+#
+# Content policy (data/corpus/README.md): every name, term and fact below is
+# invented outright. Only the SHAPE -- three altitudes with no edges; a
+# bare/qualified/team triple -- is taken from an observed failure.
+# ``tests/test_eval_corpus_leakage.py`` is the bar.
+
+# --- Cluster A: related, unlinked -------------------------------------------
+
+- uid: concept-quiet-handover
+  type: concept
+  name: Quiet Handover
+  aliases: [quiet handover]
+  tags: [delivery, engagement-transfer]
+  source_ref: "session-2026-05-04"
+  created: 2026-05-04
+  body: |
+    # Quiet Handover
+
+    Quiet Handover is the firm's name for moving an engagement from one lead
+    to another without a client-facing transfer meeting. The client is told
+    afterwards, in the next scheduled check-in, rather than being asked to
+    attend a session about the firm's own staffing.
+
+    The rule the practice rests on: a transfer the client has to attend a
+    meeting about has already cost them something, so the cost of the
+    transfer belongs entirely on the firm's side of the line.
+
+- uid: model-handover-ladder
+  type: model
+  name: Handover Ladder
+  aliases: [the ladder]
+  tags: [delivery, framework]
+  source_ref: "session-2026-05-19"
+  created: 2026-05-19
+  body: |
+    # Handover Ladder
+
+    Four rungs, describing how much of an engagement's context has actually
+    reached the incoming lead.
+
+    1. Filed -- the incoming lead can find the engagement's documents.
+    2. Briefed -- the incoming lead can restate the engagement's aim.
+    3. Fluent -- the incoming lead can answer a client question unprompted.
+    4. Owned -- the outgoing lead has stopped being asked anything.
+
+    A transfer is scored at its lowest satisfied rung. Rung 3 is the floor
+    below which a transfer must not be announced to the client.
+
+- uid: process-shadow-fortnight
+  type: process
+  name: Shadow Fortnight
+  aliases: [shadow fortnight]
+  tags: [delivery, staffing]
+  source_ref: "session-2026-06-02"
+  created: 2026-06-02
+  body: |
+    # Shadow Fortnight
+
+    A two-week overlap during which the outgoing and incoming leads both sit
+    on an engagement. The outgoing lead keeps the client relationship for the
+    first week and answers questions only when asked in the second.
+
+    The overlap ends when the incoming lead has answered a client question
+    without checking first, and when the outgoing lead has gone five working
+    days without being consulted. Until both hold, the fortnight is extended
+    a week at a time rather than declared complete.
+
+# --- Cluster B: redundant, wanting consolidation ----------------------------
+
+- uid: project-keelbridge
+  type: project
+  name: Keelbridge
+  aliases: [Keelbridge programme]
+  tags: [programme, active]
+  source_ref: "session-2026-02-11"
+  created: 2026-02-11
+  body: |
+    # Keelbridge
+
+    Keelbridge is the multi-year programme to replace the berth-scheduling
+    system the firm maintains for its coastal logistics clients. The
+    programme covers the scheduling engine, the quayside handheld app, and
+    the reporting layer the harbour offices read.
+
+    The programme is sponsored by the delivery practice and reviewed
+    quarterly. Its standing budget line is 240 thousand GBP per year.
+
+- uid: project-keelbridge-rollout
+  type: project
+  name: Keelbridge (rollout)
+  aliases: [Keelbridge cutover]
+  tags: [cutover, training]
+  source_ref: "session-2026-07-21"
+  created: 2026-07-21
+  body: |
+    # Keelbridge (rollout)
+
+    The cutover phase. Two harbour offices move to the new berth-scheduling
+    engine per month, oldest installation first, with the previous system
+    kept warm for thirty days after each office moves.
+
+    Training is four half-days per office, delivered on site. The final
+    office is scheduled to move in November 2026, after which the previous
+    system is switched off.
+
+- uid: team-keelbridge-desk
+  type: team
+  name: Keelbridge Desk
+  aliases: [the desk]
+  tags: [rota, support]
+  source_ref: "session-2026-08-05"
+  created: 2026-08-05
+  body: |
+    # Keelbridge Desk
+
+    The staffed support rota that answers questions from harbour offices
+    during working hours. Two people on shift at a time, rotating weekly, with
+    a named escalation contact on call outside those hours.
+
+    The rota is published a month ahead and swaps are arranged between the
+    people on it rather than through the delivery practice. The desk is a
+    standing staffing arrangement, not a phase of any programme, and it
+    continues after the last office has moved.

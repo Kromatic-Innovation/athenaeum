@@ -171,3 +171,29 @@
   must_not_rank: [client-verity, client-solent]
   distractor_terms: ["retainer", "client"]
   note: Verity is a former client and Solent only a prospect.
+
+# --- redundancy -------------------------------------------------------------
+#
+# Issue athenaeum#1570. Unlike every class above, this probe's ground truth is
+# an entity that DOES NOT EXIST as a page: the consolidated Keelbridge
+# programme is split across `project-keelbridge` (aim, scope, budget) and
+# `project-keelbridge-rollout` (phasing, training, switch-off). A complete
+# answer needs both, and that is what makes the split cost something a
+# retrieval measure can see, rather than merely being untidy.
+#
+# `must_not_rank` carries the negative control: the Keelbridge Desk is a
+# staffing rota, not a phase of the programme, and a system that returns it
+# here has matched on the shared name rather than on the question.
+
+- id: keelbridge_programme_scope
+  probe_class: redundancy
+  query: "what does the Keelbridge programme cover?"
+  expected_uids: [project-keelbridge, project-keelbridge-rollout]
+  must_not_rank: [team-keelbridge-desk]
+  distractor_terms: ["Keelbridge", "programme", "berth scheduling"]
+  note: >-
+    Redundancy probe. Both expected pages are the SAME entity written down
+    twice; retrieving only one is the measurable cost of the entity split,
+    and `tests/test_eval_corpus_relatedness.py` pins that asymmetry as the
+    corpus's current (wrong) state so a consolidation change has something to
+    move.

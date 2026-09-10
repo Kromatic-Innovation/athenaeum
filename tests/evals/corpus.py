@@ -33,6 +33,12 @@ answer. Holding the axes apart is what lets a result distinguish "the corpus
 is too big" from "the corpus is too confusable" -- different problems with
 different fixes (a better index vs better disambiguation).
 
+Relatedness and redundancy (issue athenaeum#1570) are layered onto ``core``
+rather than made a fourth tier: they carry ground-truth assertions, which is
+``core``'s definition, and they generate nothing, which is what the other two
+tiers exist to control. See :class:`UnlinkedCluster` / :class:`RedundantCluster`
+below and ``data/corpus/README.md``.
+
 Generation is DETERMINISTIC and LLM-free: a seeded PRNG slot-fills committed
 templates. The same ``(GENERATOR_VERSION, seed, scale)`` triple yields a
 byte-identical tree, so large corpora are reproduced on demand and never
@@ -61,12 +67,43 @@ import yaml
 # Bump when generation logic changes in a way that alters emitted bytes for a
 # fixed seed. Recorded alongside every result so a stored measurement names
 # the corpus it was actually taken against.
-GENERATOR_VERSION = 1
+# Bumped to 2 by issue athenaeum#1570: ``related:`` is now RENDERED into
+# frontmatter, so every page carrying an authored edge emits different bytes
+# than it did at version 1.
+GENERATOR_VERSION = 2
 
 CORPUS_ROOT = Path(__file__).parent / "data" / "corpus"
 CORE_DIR = CORPUS_ROOT / "core"
 TEMPLATE_DIR = CORPUS_ROOT / "templates"
 PROBES_PATH = CORPUS_ROOT / "probes" / "probes.yaml"
+
+
+@dataclass(frozen=True, order=True)
+class RelatedEdge:
+    """One outgoing ``related:`` edge, in the live ``{uid, role}`` shape.
+
+    A frozen dataclass rather than a ``dict`` because :class:`Page` is frozen
+    and hashable, and a tuple-of-dicts field would silently make it neither.
+    :meth:`Page.to_markdown` renders these back out as mappings, which is the
+    shape ``WikiEntity.related: list[dict[str, str]]``
+    (``src/athenaeum/models.py:1587``) actually carries and the shape
+    ``viewer_corpus._related_uids`` reads for breadcrumbs.
+    """
+
+    uid: str
+    role: str = "related"
+
+
+#: Role assigned to an edge authored through the ``links:`` shorthand.
+#:
+#: ``links:`` predates ``related:`` in this corpus and was, until athenaeum#1570,
+#: a *separate* field that ``to_markdown`` never emitted -- authored ground
+#: truth with no rendering. Rather than keep two edge concepts that can
+#: diverge, ``links:`` is now pure authoring sugar: the loader folds it into
+#: ``related`` under this role and :attr:`Page.links` is a read-only view back
+#: over ``related``. Divergence is therefore impossible by construction rather
+#: than merely tested for -- see ``test_eval_corpus_relatedness.py``.
+LINK_ROLE = "mentions"
 
 
 @dataclass(frozen=True)
@@ -85,7 +122,7 @@ class Page:
     source_ref: str = "session-2026-01-01"
     created: str = "2026-01-01"
     updated: str = "2026-01-01"
-    links: tuple[str, ...] = ()
+    related: tuple[RelatedEdge, ...] = ()
     # Issue athenaeum#1493: the DECLARED supersession pointer (a page ``name:``
     # value, matching the real ``resolutions.py`` enactment convention — see
     # ``athenaeum.models.parse_superseded_by``'s docstring). "" (default)
@@ -119,6 +156,16 @@ class Page:
         if self.tags:
             fm.append("tags:")
             fm.extend(f"  - {q(t)}" for t in self.tags)
+        # Emitted between ``tags`` and ``created``, matching where the live
+        # ``WikiEntity.render()`` puts it (``models.py:1727``) -- the fixture
+        # is only useful as a stand-in for a real wiki if it renders in the
+        # real order. Block style, quoted scalars: same YAML 1.1 reasoning as
+        # every other value here.
+        if self.related:
+            fm.append("related:")
+            for edge in self.related:
+                fm.append(f"  - uid: {q(edge.uid)}")
+                fm.append(f"    role: {q(edge.role)}")
         fm.append(f"source_type: {self.source_type}")
         fm.append(f"source_ref: {q(self.source_ref)}")
         fm.append(f"created: {self.created}")
@@ -127,6 +174,16 @@ class Page:
             fm.append(f"superseded_by: {q(self.superseded_by)}")
         fm.append("---")
         return "\n".join(fm) + "\n\n" + self.body.rstrip() + "\n"
+
+    @property
+    def links(self) -> tuple[str, ...]:
+        """Targets authored through the ``links:`` shorthand.
+
+        A VIEW over :attr:`related`, never a second stored field. Issue
+        athenaeum#1570 folded the two together precisely so a page cannot
+        declare a body link the rendered ``related:`` block does not carry.
+        """
+        return tuple(edge.uid for edge in self.related if edge.role == LINK_ROLE)
 
     @property
     def filename(self) -> str:
@@ -204,6 +261,45 @@ def _load_yaml(path: Path) -> Any:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or []
 
 
+def _parse_related(raw: dict, path: Path) -> tuple[RelatedEdge, ...]:
+    """Build one page's edge tuple from ``related:`` and/or ``links:``.
+
+    Both spellings are accepted at authoring time and both land in the SAME
+    field, so there is no second edge concept to keep in step:
+
+    * ``related: [{uid: ..., role: ...}]`` -- the live shape, used where the
+      role carries meaning (``models``, ``embodies``, ``implements``).
+    * ``links: [uid, ...]`` -- the older shorthand, folded in under
+      :data:`LINK_ROLE`.
+
+    Order is preserved and duplicates by ``uid`` collapse to the first
+    spelling seen, so authoring a uid in both blocks cannot emit it twice.
+    """
+    edges: list[RelatedEdge] = []
+    seen: set[str] = set()
+
+    for entry in raw.get("related", ()) or ():
+        if not isinstance(entry, dict) or "uid" not in entry:
+            raise ValueError(
+                f"page {raw.get('uid')!r} in {path.name}: every `related:` entry "
+                f"must be a mapping with a `uid:` key; got {entry!r}"
+            )
+        uid = str(entry["uid"])
+        if uid in seen:
+            continue
+        seen.add(uid)
+        edges.append(RelatedEdge(uid=uid, role=str(entry.get("role", "related"))))
+
+    for target in raw.get("links", ()) or ():
+        uid = str(target)
+        if uid in seen:
+            continue
+        seen.add(uid)
+        edges.append(RelatedEdge(uid=uid, role=LINK_ROLE))
+
+    return tuple(edges)
+
+
 def load_core_pages() -> list[Page]:
     """Load every hand-authored page from ``data/corpus/core/*.yaml``.
 
@@ -235,7 +331,7 @@ def load_core_pages() -> list[Page]:
                     source_ref=raw.get("source_ref", "session-2026-01-01"),
                     created=raw.get("created", "2026-01-01"),
                     updated=raw.get("updated", raw.get("created", "2026-01-01")),
-                    links=tuple(raw.get("links", ())),
+                    related=_parse_related(raw, path),
                     superseded_by=raw.get("superseded_by", ""),
                 )
             )
@@ -280,9 +376,143 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
         if probe.probe_class != "abstention" and not probe.expected_uids:
             problems.append(f"probe {probe.id!r}: no expected_uids and not abstention")
     for page in pages:
-        for target in page.links:
-            if target not in uids:
-                problems.append(f"page {page.uid!r}: links to unknown page {target!r}")
+        for edge in page.related:
+            if edge.uid not in uids:
+                problems.append(f"page {page.uid!r}: related edge names unknown page {edge.uid!r}")
+    problems.extend(_validate_relatedness_ground_truth(uids, {p.id for p in probes}))
+    return problems
+
+
+# --------------------------------------------------------------------------
+# Relatedness / redundancy ground truth (issue athenaeum#1570)
+# --------------------------------------------------------------------------
+#
+# Held in ``data/corpus/ground_truth/relatedness.yaml`` rather than in the
+# pages themselves, and layered onto ``core`` rather than made a fourth tier.
+# Both choices follow the tier reasoning in this module's docstring:
+#
+# * ``core`` is defined as the tier carrying every ground-truth assertion, and
+#   these clusters are ground truth. ``distractor`` and ``ballast`` are held
+#   apart because each is a GENERATED axis a regression can be attributed to;
+#   relatedness is not a generated axis, it is an assertion about specific
+#   hand-authored pages. A fourth generated tier would have nothing to
+#   generate.
+# * The edges live outside the pages because the fixture's whole value is that
+#   the edges are ABSENT from the pages. Authoring them into the pages would
+#   make every corpus already-correct.
+
+
+@dataclass(frozen=True)
+class UnlinkedCluster:
+    """Pages that BELONG together and carry no edges between them.
+
+    ``expected_edges`` is the assertion: those edges SHOULD exist and, in the
+    fixture as committed, do not.
+    """
+
+    id: str
+    members: tuple[str, ...]
+    expected_edges: tuple[tuple[str, str, str], ...]  # (source, target, role)
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class RedundantCluster:
+    """Pages that are ONE entity written down more than once, plus a control.
+
+    ``merge`` names the pages a consolidation pass should fold together.
+    ``negative_control`` names pages that share the cluster's vocabulary and
+    must NOT be folded in -- without it, "merge everything sharing a name"
+    would score perfectly, which is the redundancy analogue of linking
+    everything.
+
+    The merge VERDICT is graded in issue athenaeum#1577, not here. What this
+    issue grades is the RETRIEVAL cost of the split, via ``probe``.
+    """
+
+    id: str
+    merge: tuple[str, ...]
+    negative_control: tuple[str, ...]
+    probe: str = ""
+    note: str = ""
+
+
+GROUND_TRUTH_DIR = CORPUS_ROOT / "ground_truth"
+RELATEDNESS_PATH = GROUND_TRUTH_DIR / "relatedness.yaml"
+
+
+def load_unlinked_clusters() -> list[UnlinkedCluster]:
+    raw = _load_yaml(RELATEDNESS_PATH) or {}
+    return [
+        UnlinkedCluster(
+            id=entry["id"],
+            members=tuple(entry["members"]),
+            expected_edges=tuple(
+                (e["source"], e["target"], e.get("role", "related"))
+                for e in entry.get("expected_edges", ())
+            ),
+            note=entry.get("note", ""),
+        )
+        for entry in raw.get("unlinked_clusters", ())
+    ]
+
+
+def load_redundant_clusters() -> list[RedundantCluster]:
+    raw = _load_yaml(RELATEDNESS_PATH) or {}
+    return [
+        RedundantCluster(
+            id=entry["id"],
+            merge=tuple(entry["merge"]),
+            negative_control=tuple(entry.get("negative_control", ())),
+            probe=entry.get("probe", ""),
+            note=entry.get("note", ""),
+        )
+        for entry in raw.get("redundant_clusters", ())
+    ]
+
+
+def _validate_relatedness_ground_truth(uids: set[str], probe_ids: set[str]) -> list[str]:
+    """Same reasoning as the rest of :func:`validate_core`.
+
+    A ground-truth edge naming a page that does not exist scores as a MISSING
+    edge -- indistinguishable from a librarian that failed to write it. A
+    corpus error must never be able to masquerade as an eval result.
+    """
+    problems: list[str] = []
+    for unlinked in load_unlinked_clusters():
+        for uid in unlinked.members:
+            if uid not in uids:
+                problems.append(f"unlinked cluster {unlinked.id!r}: unknown member {uid!r}")
+        for source, target, _role in unlinked.expected_edges:
+            for uid in (source, target):
+                if uid not in unlinked.members:
+                    problems.append(
+                        f"unlinked cluster {unlinked.id!r}: expected edge names {uid!r}, "
+                        "which is not a member of the cluster"
+                    )
+            if source == target:
+                problems.append(f"unlinked cluster {unlinked.id!r}: self-edge on {source!r}")
+    for redundant in load_redundant_clusters():
+        for uid in (*redundant.merge, *redundant.negative_control):
+            if uid not in uids:
+                problems.append(f"redundant cluster {redundant.id!r}: unknown member {uid!r}")
+        overlap = set(redundant.merge) & set(redundant.negative_control)
+        if overlap:
+            problems.append(
+                f"redundant cluster {redundant.id!r}: {sorted(overlap)} is both a merge "
+                "target and a negative control -- the control must be a page the merge "
+                "must NOT swallow"
+            )
+        if not redundant.negative_control:
+            problems.append(
+                f"redundant cluster {redundant.id!r}: no negative control. A redundancy "
+                "cluster without one licenses merge-everything."
+            )
+        if redundant.probe and redundant.probe not in probe_ids:
+            problems.append(
+                f"redundant cluster {redundant.id!r}: probe {redundant.probe!r} "
+                "is not in probes.yaml"
+            )
     return problems
 
 
