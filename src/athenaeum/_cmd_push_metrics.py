@@ -105,7 +105,16 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
             sys.stdout.write(json.dumps(result.to_dict()) + "\n")
         else:
             print(result.message)
-        return 1 if result.outcome == push_metrics.LIVENESS_FAIL else 0
+        # athenaeum#1592: STALE is a non-PASS state exactly like FAIL — a
+        # frozen ledger must exit nonzero for CI/manual invocation the same
+        # way an untagged one does, per this issue's AC1 ("FAILS, or reports
+        # a distinct non-PASS state"). INCONCLUSIVE keeps exiting 0: not
+        # enough signal to assert anything is broken (AC2).
+        return (
+            1
+            if result.outcome in (push_metrics.LIVENESS_FAIL, push_metrics.LIVENESS_STALE)
+            else 0
+        )
 
     if sub == "baseline":
         since = None
@@ -253,16 +262,27 @@ def _cmd_push_metrics_record(args: argparse.Namespace) -> int:
     if not session_id:
         session_id = push_metrics.resolve_session_id()
 
+    record_wiki_root = _resolve_record_wiki_root(args)
     wrote = push_metrics.record_hook_push(
         session_id,
         ids,
         query=query,
         backend=backend,
         cache_dir=args.cache_dir,
-        wiki_root=_resolve_record_wiki_root(args),
+        wiki_root=record_wiki_root,
     )
     if args.json:
-        sys.stdout.write(json.dumps({"wrote": wrote}) + "\n")
+        # athenaeum#1592 AC3: report the resolved destination path so
+        # `wrote: true` is verifiable by the caller — same resolution
+        # `record_hook_push`/`record_push` actually wrote through
+        # (`durable_push_records_path`, issue athenaeum#1591), computed here
+        # rather than threaded back out of the write call so a read-only
+        # resolution failure can never turn a successful write into a
+        # reported failure.
+        path = str(
+            push_metrics.durable_push_records_path(record_wiki_root, cache_dir=args.cache_dir)
+        )
+        sys.stdout.write(json.dumps({"wrote": wrote, "path": path}) + "\n")
     return 0
 
 
