@@ -271,15 +271,61 @@ def content_hash_for_path(path: Path) -> str | None:
     return content_hash(text)
 
 
-def page_id_for_path(path: Path) -> str:
+def page_id_for_path(path: Path, *, root: Path | None = None) -> str:
     """Canonical pair-member id for a wiki page path: its slug.
 
     Slugs are the durable identity handle this repo already keys aliases,
     wikilinks, and fold targets on (see
     :func:`athenaeum.pending_merges._source_slugs`) — reused here rather
     than inventing a second id space.
+
+    **Corpus-wide uniqueness (issue athenaeum#1484).** With *root* omitted
+    (the default), the id is just the bare filename stem's slug, byte-
+    identical to this function's behavior before that issue. That default
+    is deliberate, not an oversight: :mod:`athenaeum.cluster_comparator`
+    and the ``refines:`` frontmatter edges :mod:`athenaeum.scope_resolution`
+    reads both pin this exact bare-stem shape for cross-domain slug
+    alignment (see ``tests/test_cluster_comparator.py::TestPageFromAutoMemoryFile
+    ::test_id_matches_verdict_ledger_slug_space`` and
+    ``tests/test_scope_resolution.py::TestRefinesEdgeThroughRecall``), so
+    this function must never change their id space out from under them.
+
+    Pass *root* — the corpus/wiki root the page lives under — to fold the
+    page's root-relative path into the id instead of just its stem, so two
+    pages that share a stem in different directories under the same *root*
+    get DIFFERENT ids and therefore different :func:`make_pair_key` pair
+    keys — the collision athenaeum#1484 reports. A page that sits directly
+    in *root* (no intermediate directory) still gets the plain bare-stem
+    id: the disambiguation only changes the output when there is actually
+    something to disambiguate, so a caller whose pages live flat under
+    *root* — true of every :func:`record_pair_decision` fixture and, per
+    the issue's own corpus measurement, the live corpus today — keeps
+    reading and writing the identical id it always has. That is this
+    module's AC2 answer: existing ledger rows remain readable, because no
+    row's id actually moves unless it was genuinely ambiguous.
+
+    *root* is best-effort: a *path* that resolves outside *root* falls back
+    to the bare-stem id rather than raising — a resolution edge case must
+    never take down a merge-decision recording.
+
+    :func:`record_pair_decision` — the current production caller writing
+    real ledger rows — passes ``root=wiki_root``, so a same-stem collision
+    across two directories under one wiki root is fixed today.
+    :mod:`athenaeum.cluster_comparator` and :mod:`athenaeum.comparator`
+    intentionally do not pass *root* (see the cross-domain pin above); their
+    residual collision risk is unchanged by this fix and stays gated by the
+    comparator's own default-off flag, per athenaeum#1484's "Out of scope"
+    section deferring the comparator itself to athenaeum#1483.
     """
-    return slugify(Path(path).stem)
+    p = Path(path)
+    if root is not None:
+        try:
+            rel = p.resolve().relative_to(Path(root).resolve()).with_suffix("")
+        except (OSError, ValueError):
+            rel = None
+        if rel is not None:
+            return slugify(str(rel))
+    return slugify(p.stem)
 
 
 def make_pair_key(id_a: str, id_b: str) -> str:
@@ -1135,8 +1181,8 @@ def record_pair_decision(
                 )
                 return {"ok": False, "error_code": "erasure_class_refused", "pair": None}
 
-        id_a = page_id_for_path(Path(source_a))
-        id_b = page_id_for_path(Path(source_b))
+        id_a = page_id_for_path(Path(source_a), root=wiki_root)
+        id_b = page_id_for_path(Path(source_b), root=wiki_root)
         hash_a = content_hash_for_path(Path(source_a))
         hash_b = content_hash_for_path(Path(source_b))
         null_reasons: dict[str, str] = {}
