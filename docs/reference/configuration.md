@@ -2464,15 +2464,16 @@ posture for the same reason.
 Resolve the unprompted push budget in tokens-per-turn.
 
 The one documented dial for how much recall pushes into a turn
-unprompted (the "hot" retrieval-cost tier only — see
-`athenaeum.memory_tiers`, deliberately "the entire expensive-and-
-noisy dial" per that issue's AC). Enforced at
+unprompted — deliberately "the entire expensive-and-noisy dial" per
+that issue's AC. Enforced at
 `athenaeum.mcp_server._recall_via_backend`'s ``unprompted=True``
-path (`athenaeum.memory_tiers.select_for_push`): hits are ranked
-by relevance x tier x coordinate-fit and greedily included, in that
-order, while the running token total (`athenaeum.push_metrics.estimate_tokens`)
+path: hits are greedily packed, in their existing relevance order,
+while the running token total (`athenaeum.push_metrics.estimate_tokens`)
 stays within this budget — a hit that would exceed it is skipped, never
-truncated.
+truncated. (removed the retrieval-cost-tier
+restriction and coordinate-fit re-ranking that used to sit in front of
+this budget check — see `athenaeum.memory_tiers`'s module
+docstring for where selection actually lives now.)
 
 Precedence: ``ATHENAEUM_PUSH_TOKEN_BUDGET`` env > ``push_budget.tokens_per_turn``
 yaml > ``1200``. A malformed env value WARNs and falls through (see

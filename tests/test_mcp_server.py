@@ -459,7 +459,13 @@ class TestRecallTierAndPushBudget:
         explicit_false = recall_search(wiki, "plain widgets", unprompted=False)
         assert default_call == explicit_false
 
-    def test_unprompted_excludes_warm_tier(self, tmp_path: Path) -> None:
+    def test_unprompted_includes_warm_tier(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1353: `unprompted=True` no longer restricts to the
+        `hot` retrieval-cost tier -- the tier-weighted `push_score` formula
+        that enforced that gate had no production caller and was deleted.
+        A `warm`-by-class-default page (an `entity`) is now included on
+        `unprompted=True` exactly as it is on an explicit `recall` call,
+        the opposite of this test's pre-athenaeum#1353 assertion."""
         wiki = self._wiki(tmp_path)
         # entity -> warm by class default.
         (wiki / "p.md").write_text(
@@ -469,7 +475,7 @@ class TestRecallTierAndPushBudget:
         assert "Alice" in prompted
 
         unprompted = recall_search(wiki, "Alice widgets", unprompted=True)
-        assert "No wiki pages matched" in unprompted
+        assert "Alice" in unprompted
 
     def test_unprompted_includes_hot_tier(self, tmp_path: Path) -> None:
         wiki = self._wiki(tmp_path)
@@ -510,9 +516,10 @@ class TestRecallTierAndPushBudget:
 
         # Compute the EXACT token cost of the FULLY RENDERED block --
         # path/tags/uid/type/meta/tier-scope/links headers plus the snippet,
-        # the same quantity `select_for_push` must budget against (issue
-        # athenaeum#718: metering only the snippet undercounts and lets the
-        # budget be consistently overrun -- see
+        # the same quantity the greedy budget-pack in `_recall_via_backend`
+        # must budget against (issue athenaeum#718: metering only the
+        # snippet undercounts and lets the budget be consistently
+        # overrun -- see
         # `test_unprompted_budget_meters_full_block_not_just_snippet` below
         # for the regression case that would have caught it).
         actual_block = self._extract_single_block(admitted)

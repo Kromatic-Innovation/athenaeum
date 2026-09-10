@@ -97,14 +97,15 @@ hidden:**
   and (b) the token estimator, `athenaeum.push_metrics.estimate_tokens` =
   `max(0, len(text) // 4)` — a single arithmetic expression, expressed in
   `awk` as `int(length(block) / 4)`.
-- **Coordinate fit is a no-op for this surface, which is why no
-  `push_score` reimplementation is needed.** The hook has a `session_id`,
-  not a scope coordinate, so `scope_relation` is `None` for every
-  candidate — neutral weight for all — so `push_score` ranking degenerates
-  exactly to relevance order, i.e. the FTS5 `rank` ordering the hook
-  already sorts by. The shell loop therefore only needs to replicate the
-  budget-packing behavior of `athenaeum.memory_tiers.select_for_push`, not
-  its ranking.
+- **There is no tier or coordinate-fit weighting anywhere in push
+  selection (issue athenaeum#1353).** `athenaeum.memory_tiers` used to carry
+  a tier-weighted `push_score` formula and a `select_for_push` function,
+  but neither had a production caller and both were deleted; push
+  selection is plain relevance order, budget-packed, everywhere it
+  happens — `athenaeum.context._apply_budget` for the agent-neutral
+  sidecar core, and this hook's own greedy budget loop below, which
+  mirrors that packing behavior directly (not a tier/coordinate-fit
+  formula, so there was never anything to reimplement on that axis).
 
 **Legacy-DB safety.** A DB built by an older athenaeum predates the
 `memory_tier` column; selecting it would raise `sqlite3.OperationalError`,

@@ -19,11 +19,13 @@ once it stops being current:
   outright when `knowledge_root` is not a git repository.
 - **Memory tiers** (`athenaeum.memory_tiers`) — a retrieval-cost
   classification (`hot`/`warm`/`cold`/`refused`) layered on top of every
-  compiled page, independent of storage location. Only `hot` pages are
-  eligible for unprompted push; `warm` pages are reachable by explicit recall
-  only. An automatic sweep (`librarian.memory_tier_sweep_enabled`, run inside
-  `athenaeum run`) moves pages between `hot` and `warm` on class default, age
-  without use, measured recall precision, and promote-on-use signals.
+  compiled page, independent of storage location. This classification does
+  not itself gate unprompted-push eligibility — push selection lives in
+  `examples/claude-code/user-prompt-recall.sh` and `athenaeum.context`
+  instead (issue athenaeum#1353). An automatic sweep
+  (`librarian.memory_tier_sweep_enabled`, run inside `athenaeum run`) moves
+  pages between `hot` and `warm` on class default, age without use,
+  measured recall precision, and promote-on-use signals.
 - **Auto-memory prune** (`athenaeum auto-memory prune`,
   `athenaeum.auto_memory_prune`) — retires already-compiled
   `wiki/auto-*.md` pages that `athenaeum.ephemeral.classify_ephemeral_page`
