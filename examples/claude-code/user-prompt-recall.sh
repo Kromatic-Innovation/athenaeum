@@ -406,6 +406,28 @@ _pm_json_escape() {
   _PM_RET="$out"
 }
 
+# Shared, memoized query_hash (issue athenaeum#1530). sha256 of the RAW
+# PROMPT text, truncated to 16 hex chars — the SAME digest
+# `push_metrics._query_hash` computes, and the ONE thing the ledger row
+# below and the local topics trace further down are both keyed by. The
+# prompt text itself is NEVER written anywhere. Memoized into the global
+# `PM_QUERY_HASH` (idempotent — a second call is a no-op) so this spends
+# at most ONE shasum/sha256sum subprocess per turn no matter how many
+# callers need the value, keeping the issue athenaeum#1343 "shell/awk plus
+# at most one shasum/sha256sum subprocess" contract intact even with a
+# second consumer added.
+PM_QUERY_HASH=""
+_pm_ensure_query_hash() {
+  [ -z "$PM_QUERY_HASH" ] || return 0
+  if command -v sha256sum >/dev/null 2>&1; then
+    PM_QUERY_HASH=$(printf '%s' "$PROMPT" | sha256sum); PM_QUERY_HASH="${PM_QUERY_HASH:0:16}"
+  elif command -v shasum >/dev/null 2>&1; then
+    PM_QUERY_HASH=$(printf '%s' "$PROMPT" | shasum -a 256); PM_QUERY_HASH="${PM_QUERY_HASH:0:16}"
+  else
+    PM_QUERY_HASH=""
+  fi
+}
+
 # Builds and appends the ONE telemetry row for this turn (issue
 # athenaeum#1343 review finding, defect 1). Deliberately a SEPARATE pass
 # over `$RESULTS` from the render loop below, invoked exactly once as
@@ -503,15 +525,14 @@ _pm_record_push() {
   # subprocess this path spends (the issue's "shell/awk plus at most one
   # shasum/sha256sum subprocess" contract) — everything else above is
   # pure bash/awk or a bounded sqlite3 lookup already paid for by the
-  # recall query itself.
-  local pm_query_hash pm_ts pm_session_id_esc pm_record
-  if command -v sha256sum >/dev/null 2>&1; then
-    pm_query_hash=$(printf '%s' "$PROMPT" | sha256sum); pm_query_hash="${pm_query_hash:0:16}"
-  elif command -v shasum >/dev/null 2>&1; then
-    pm_query_hash=$(printf '%s' "$PROMPT" | shasum -a 256); pm_query_hash="${pm_query_hash:0:16}"
-  else
-    pm_query_hash=""
-  fi
+  # recall query itself. Computed via `_pm_ensure_query_hash` (issue
+  # athenaeum#1530) rather than inline, memoized into the global
+  # `PM_QUERY_HASH`, so the local topics trace below can key its own row
+  # by the EXACT SAME hash this ledger row carries without spending a
+  # second sha256/shasum subprocess or risking the two ever diverging.
+  local pm_ts pm_session_id_esc pm_record
+  _pm_ensure_query_hash
+  local pm_query_hash="$PM_QUERY_HASH"
 
   # ts (D9): second-resolution, Z-suffixed — `_parse_ts`'s
   # `datetime.fromisoformat(raw.replace("Z", "+00:00"))` accepts this
@@ -555,6 +576,98 @@ _pm_record_push() {
     mkdir -p "$PM_CACHE_DIR" 2>/dev/null || true
   fi
   printf '%s\n' "$pm_record" >> "$PM_LEDGER_PATH" 2>/dev/null || true
+  return 0
+}
+
+# ── Local topics trace (issue athenaeum#1530) ────────────────────────────
+# athenaeum#711 decided the ledger stores a query HASH, never raw query
+# text or topics — a deliberate privacy property of an artifact that may
+# be aggregated or read off-machine, and this issue MUST NOT weaken it:
+# `_pm_record_push` above is byte-identical in shape to before this issue
+# (AC2, pinned by a shape test) — no `topics` key was added to it. Topics
+# instead go to a SEPARATE, purely local, ring-buffered file
+# (`_last_turn_topics.jsonl` under `$CACHE_DIR`, same directory
+# `session-start-recall.sh` already writes `stopwords.txt`/`config.env`
+# into), never written to the wiki, never compiled, never shipped past
+# this machine — the same shape of separation athenaeum#1528 used for
+# names/descriptions. `athenaeum viewer` is this file's one reader,
+# joining it to a push record by the `query_hash` value both carry.
+#
+# Fire-and-forget, fail OPEN (AC4): a trace-write problem must degrade to
+# "no topics recorded", NEVER to "no context injected" and never to a
+# slower turn. Every filesystem operation below is individually `|| true`
+# / `|| return 0`'d (belt-and-braces, matching `_pm_record_push`'s own
+# discipline — an unbound-variable abort under `set -u` is not caught by
+# the CALLER's `|| true`, only by guarding each command here), and the
+# whole function is invoked BACKGROUNDED (`&`) after this hook has already
+# produced its stdout, so even a slow ring-buffer trim below cannot add a
+# single millisecond to the wall-clock this hook is measured against.
+PM_TOPICS_TRACE_PATH="${CACHE_DIR}/_last_turn_topics.jsonl"
+# Ring buffer bound (AC3): last N turns, never unbounded. Overridable for
+# tests; 200 short JSON lines is a few tens of KB, trimmed every write.
+PM_TOPICS_TRACE_MAX_LINES="${ATHENAEUM_TOPICS_TRACE_MAX_LINES:-200}"
+
+# Renders `$TERMS` (newline-separated, already lowercase/alnum-sanitized —
+# see the extraction block below, shared verbatim with FTS_QUERY/
+# VECTOR_QUERY so the trace records exactly what the search actually ran
+# on) as a JSON array of escaped strings. Reuses `_pm_json_escape` (issue
+# athenaeum#1343) rather than a second escaper.
+_pm_topics_json_array() {
+  local line arr=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    _pm_json_escape "$line"
+    if [ -n "$arr" ]; then
+      arr="${arr},\"${_PM_RET}\""
+    else
+      arr="\"${_PM_RET}\""
+    fi
+  done <<< "$TERMS"
+  _PM_RET="[${arr}]"
+}
+
+# Writes one topics-trace row keyed by `$PM_QUERY_HASH` (memoized by
+# `_pm_ensure_query_hash`, shared with `_pm_record_push` so both rows key
+# off the identical hash — AC1) and trims the file back to the ring-buffer
+# bound. Every step degrades silently on failure; nothing here can raise
+# under `set -e`/`set -u` in a way its own caller (`_pm_write_topics_trace
+# || true`, itself backgrounded) fails to absorb.
+_pm_write_topics_trace() {
+  _pm_ensure_query_hash
+  [ -n "$PM_QUERY_HASH" ] || return 0
+  [ -n "${TERMS:-}" ] || return 0
+
+  _pm_topics_json_array
+  local topics_json="$_PM_RET"
+  local ts session_id_esc record
+  if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 2))); then
+    local _oldtz="${TZ-__unset__}"
+    TZ=UTC printf -v ts '%(%Y-%m-%dT%H:%M:%SZ)T' -1 2>/dev/null || ts=""
+    if [ "$_oldtz" = "__unset__" ]; then unset TZ; else TZ="$_oldtz"; fi
+  else
+    ts=$(TZ=UTC date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  fi
+  _pm_json_escape "${SESSION_ID:-unknown}"
+  session_id_esc="$_PM_RET"
+
+  record="{\"session_id\":\"${session_id_esc}\",\"ts\":\"${ts}\",\"query_hash\":\"${PM_QUERY_HASH}\",\"topics\":${topics_json}}"
+
+  mkdir -p "$CACHE_DIR" 2>/dev/null || return 0
+  printf '%s\n' "$record" >> "$PM_TOPICS_TRACE_PATH" 2>/dev/null || return 0
+
+  # Ring buffer (AC3): keep only the last N lines, via a temp file + atomic
+  # rename so a crash mid-trim never leaves a torn/partial trace. Cheap at
+  # N=200 short JSON lines; done here rather than skipped-and-let-it-grow
+  # because "bounded so it cannot grow without limit" is the issue's own
+  # wording for AC3, and this whole function already runs backgrounded so
+  # the trim cost is never on the interactive turn's critical path.
+  local tmp
+  tmp=$(mktemp "${PM_TOPICS_TRACE_PATH}.XXXXXX" 2>/dev/null) || return 0
+  if tail -n "$PM_TOPICS_TRACE_MAX_LINES" "$PM_TOPICS_TRACE_PATH" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$PM_TOPICS_TRACE_PATH" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  else
+    rm -f "$tmp" 2>/dev/null
+  fi
   return 0
 }
 
@@ -1110,3 +1223,12 @@ done <<< "$MATCH_LINES"
 _pm_record_push || true
 
 printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[Knowledge context] Wiki pages relevant to this message (use `recall` MCP tool for full details):\\n%s"}}' "$MATCHES"
+
+# Local topics trace (issue athenaeum#1530): backgrounded and fully
+# `|| true`-guarded (AC4) so this can never delay the hook's stdout above
+# (already produced) or fail the script — see `_pm_write_topics_trace`'s
+# header comment for why every step inside it is independently guarded
+# too. stdout/stderr are discarded: this is best-effort telemetry, not
+# something that should ever print to a hook's transcript.
+( _pm_write_topics_trace || true ) >/dev/null 2>&1 &
+disown 2>/dev/null || true

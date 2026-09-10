@@ -85,7 +85,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
+from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, resolve_cache_dir
 from athenaeum.viewer_corpus import build_uid_index, load_page_info, resolve_path
 
 #: Default TCP port. Arbitrary but fixed, purely a convenience default —
@@ -353,7 +353,58 @@ def shape_viewer_payload(
     }
 
 
-def enrich_payload(payload: dict[str, Any], *, wiki_root: Path) -> dict[str, Any]:
+#: Filename of the sidecar's local topics trace (issue athenaeum#1530): a
+#: ring-buffered, cache-dir-local file ``user-prompt-recall.sh`` appends one
+#: ``{session_id, ts, query_hash, topics}`` row to per turn. NEVER part of
+#: the push-metrics ledger contract -- athenaeum#711 decided the ledger
+#: keeps a query HASH only, never topics or raw text, and this issue must
+#: not weaken that. The trace lives entirely outside that contract (never
+#: written to the wiki, never compiled, never shipped past this machine);
+#: this viewer is its one reader, joining trace to push record by the
+#: `query_hash` value both already carry.
+TOPICS_TRACE_FILENAME = "_last_turn_topics.jsonl"
+
+
+def _load_topics_for_query_hash(query_hash: str, *, cache_dir: Path | None) -> list[str] | None:
+    """Best-effort lookup of the topics the sidecar recorded for *query_hash*.
+
+    Fails open to ``None`` (rendered as the existing "not instrumented" state)
+    on ANY problem: missing file, unreadable file, malformed JSON, an empty
+    hash, or a row shaped unexpectedly. This trace is a local, best-effort,
+    ring-buffered artifact, never a contract this reader can assume holds --
+    the viewer must degrade gracefully, exactly like the hook that writes it
+    is required to (AC4).
+
+    Scans from the end of the file backwards so a repeated ``query_hash``
+    (two turns hashing to the same text) resolves to the MOST RECENT match.
+    """
+    if not query_hash:
+        return None
+    trace_path = resolve_cache_dir(cache_dir) / TOPICS_TRACE_FILENAME
+    try:
+        lines = trace_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(row, dict) or row.get("query_hash") != query_hash:
+            continue
+        topics = row.get("topics")
+        if isinstance(topics, list) and all(isinstance(t, str) for t in topics):
+            return topics
+        return None
+    return None
+
+
+def enrich_payload(
+    payload: dict[str, Any], *, wiki_root: Path, cache_dir: Path | None = None
+) -> dict[str, Any]:
     """Join the shaped payload against the local corpus (issue athenaeum#1528).
 
     Adds the unified ``pages`` list and the ``last_turn`` panel. Kept separate
@@ -427,20 +478,26 @@ def enrich_payload(payload: dict[str, Any], *, wiki_root: Path) -> dict[str, Any
                 breadcrumb_ids=breadcrumb_ids,
             )
             turn_items.append(row)
+        query_hash = last_turn_record.get("query_hash", "")
+        # Push records carry only a query HASH (athenaeum#711 - the raw query
+        # text is deliberately never written and never will be), so the
+        # topics the sidecar extracted are not recoverable FROM THE LEDGER.
+        # They are, since athenaeum#1530, recoverable from a separate local
+        # trace the hook writes and this lookup joins on that same hash. A
+        # miss here (trace absent, rotated past, or never instrumented on
+        # this machine) renders the pre-#1530 explicit not-instrumented
+        # state rather than an empty box, which would read as "the sidecar
+        # thought nothing" -- a different and wrong claim.
+        topics = _load_topics_for_query_hash(query_hash, cache_dir=cache_dir)
         last_turn = {
             "present": True,
             "ts": last_turn_record.get("ts", ""),
             "backend": last_turn_record.get("backend", ""),
-            "query_hash": last_turn_record.get("query_hash", ""),
+            "query_hash": query_hash,
             "token_cost": last_turn_record.get("token_cost", 0),
             "items": turn_items,
-            # Push records carry only a query HASH (athenaeum#711 - the raw
-            # query text is deliberately never written), so the topics the
-            # sidecar extracted are NOT recoverable from the ledger. Rendered
-            # as an explicit not-instrumented state rather than an empty box,
-            # which would read as "the sidecar thought nothing".
-            "topics": None,
-            "topics_status": "not_instrumented",
+            "topics": topics,
+            "topics_status": "ok" if topics is not None else "not_instrumented",
         }
 
     payload["pages"] = pages
@@ -454,7 +511,7 @@ def build_viewer_data(
     """End-to-end: run the contract, shape the payload, join it to the corpus."""
     records = _run_tail_contract(session_id=session_id, path=path, cache_dir=cache_dir)
     payload = shape_viewer_payload(session_id=session_id, records=records)
-    return enrich_payload(payload, wiki_root=Path(path) / "wiki")
+    return enrich_payload(payload, wiki_root=Path(path) / "wiki", cache_dir=cache_dir)
 
 
 def _load_static_html() -> bytes:

@@ -356,6 +356,80 @@ def test_last_turn_topics_are_explicitly_not_instrumented(tmp_path: Path) -> Non
     assert turn["topics_status"] == "not_instrumented"
 
 
+def test_last_turn_topics_render_when_trace_has_them(tmp_path: Path) -> None:
+    """Issue athenaeum#1530 AC1/AC6: the sidecar hook writes the topics it
+    extracted to a SEPARATE local trace (never to the ledger -- athenaeum#711
+    stays intact), keyed by the same ``query_hash`` the push record carries.
+    When that trace holds a matching row, the last-turn panel must render the
+    real topics instead of the not-instrumented placeholder.
+    """
+    wiki = tmp_path / "knowledge" / "wiki"
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "_last_turn_topics.jsonl").write_text(
+        json.dumps(
+            {
+                "session_id": "s",
+                "ts": "2026-09-09T10:00:00Z",
+                "query_hash": "abc123abc123abc1",
+                "topics": ["customer development", "lean startup"],
+            }
+        )
+        + "\n"
+    )
+    payload = _cmd_viewer.shape_viewer_payload(
+        session_id="s",
+        records=[
+            {
+                "record_type": "push",
+                "source": "sidecar",
+                "ts": "2026-09-09T10:00:00Z",
+                "query_hash": "abc123abc123abc1",
+                "items": [{"id": "aaaaaaaa"}],
+            }
+        ],
+    )
+    turn = _cmd_viewer.enrich_payload(payload, wiki_root=wiki, cache_dir=cache_dir)["last_turn"]
+    assert turn["topics"] == ["customer development", "lean startup"]
+    assert turn["topics_status"] == "ok"
+
+
+def test_last_turn_topics_not_instrumented_when_hash_does_not_match(tmp_path: Path) -> None:
+    """A trace file that exists but holds no row for THIS push record's
+    query_hash (e.g. rotated past by the ring buffer) must still degrade to
+    the explicit not-instrumented state, never a stale or wrong topic set.
+    """
+    wiki = tmp_path / "knowledge" / "wiki"
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "_last_turn_topics.jsonl").write_text(
+        json.dumps(
+            {
+                "session_id": "s",
+                "ts": "2026-09-09T09:00:00Z",
+                "query_hash": "0000000000000000",
+                "topics": ["unrelated"],
+            }
+        )
+        + "\n"
+    )
+    payload = _cmd_viewer.shape_viewer_payload(
+        session_id="s",
+        records=[
+            {
+                "record_type": "push",
+                "source": "sidecar",
+                "ts": "2026-09-09T10:00:00Z",
+                "query_hash": "abc123abc123abc1",
+                "items": [{"id": "aaaaaaaa"}],
+            }
+        ],
+    )
+    turn = _cmd_viewer.enrich_payload(payload, wiki_root=wiki, cache_dir=cache_dir)["last_turn"]
+    assert turn["topics"] is None
+    assert turn["topics_status"] == "not_instrumented"
+
+
 def test_last_turn_absent_when_only_deliberate_pulls(tmp_path: Path) -> None:
     payload = _cmd_viewer.shape_viewer_payload(
         session_id="s",
