@@ -372,22 +372,26 @@ class TestRedundancyProbeAndRetrievalAsymmetry:
         assert bare in ranked
         assert qualified not in ranked
 
-    def test_the_negative_control_is_not_the_answer(self, redundancy_wiki: Path) -> None:
-        """The team page shares the cluster's name and is a different entity.
-        It is recorded in ``must_not_rank`` as ground truth; that the corpus
-        currently surfaces it anyway is the state a consolidation change has
-        to move, and is asserted here so the direction is on the record."""
+    def test_the_negative_control_is_ground_truth_not_a_pinned_ranking(self) -> None:
+        """The team page shares the cluster's name and is a different entity, so
+        it is recorded in ``must_not_rank`` and never in ``expected_uids``.
+
+        Deliberately NOT asserted against live rankings. The control DOES rank
+        at the moment (measured: rank 4 in the cell above), but pinning that
+        would make this test go red on a CORRECT change -- the consolidation
+        work in athenaeum#1577 stopping it from ranking is the outcome this
+        corpus exists to reward, and a test that fails when the system improves
+        is a trap for whoever lands it. The asymmetry AC6 asks for is between
+        the two MERGE members, and
+        :meth:`test_only_part_of_the_entity_is_retrieved` pins that in a form
+        (strict 0 < recall < 1) a fix moves rather than breaks.
+        """
         cluster = _redundant("keelbridge")
         (control,) = cluster.negative_control
         probe = _probe(cluster.probe)
         assert control in probe.must_not_rank
         assert control not in probe.expected_uids
-        ranked = _retrieved_uids(redundancy_wiki, probe.query, _ASYMMETRY_BACKEND, _ASYMMETRY_K)
-        assert control in ranked, (
-            "the control ranking here is the CURRENT (wrong) behaviour this "
-            "fixture records; if a change fixed it, update this assertion "
-            "rather than deleting the control"
-        )
+        assert control not in cluster.merge
 
 
 # ---------------------------------------------------------------------------
