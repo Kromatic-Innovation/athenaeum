@@ -165,7 +165,7 @@ class TestAthenaeum1322RegressionPinNotAC2Evidence:
         # 30 person-error + 5 bad-request stuck (matching the live ledger's
         # ~86/14 split) sit ahead of 4 perfectly workable files in the SAME
         # source (discovery is oldest-first) — exactly the shape that starved
-        # `mural-board-summary` in #1322's own reference incident, at
+        # `mural-board-summary` in athenaeum#1322's own reference incident, at
         # athenaeum#1597's larger ratio.
         root = _seed(tmp_path, {"relationship-stub": 39})
         all_refs = sorted(
