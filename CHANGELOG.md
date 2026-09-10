@@ -23,6 +23,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the key off, recall is byte-identical to before.
   ([#715](https://github.com/Kromatic-Innovation/athenaeum/issues/715))
 
+### Changed
+
+- `recall_search`/`_recall_via_backend`'s `unprompted=True` push path no
+  longer restricts to the `hot` retrieval-cost tier or re-ranks by
+  coordinate fit. It now packs the already relevance-ordered hits into the
+  configured token budget directly — no tier weighting, no scope-fit
+  weighting. This is a real behavior change: a `warm`-tier page that would
+  previously have been silently excluded from an unprompted push (`entity`,
+  `fact`, `reference`, `procedure` by class default) is now includable,
+  same as an explicit `recall` call, provided it fits the budget. The
+  supersession exclusion (issue athenaeum#1493 AC6) and the token-budget enforcement
+  itself are unchanged. This path has no production caller today — the live
+  push path is `examples/claude-code/user-prompt-recall.sh` /
+  `athenaeum.context`, which never had a tier gate to begin with.
+  ([#1353](https://github.com/Kromatic-Innovation/athenaeum/issues/1353))
+
+### Removed
+
+- `athenaeum.memory_tiers`'s tier-weighted push-selection machinery —
+  `TIER_WEIGHTS`, `COORDINATE_FIT_WEIGHTS`, `tier_weight`,
+  `coordinate_fit_weight`, `push_score`, `PushCandidate`, and
+  `select_for_push` — and its sole caller in `mcp_server._recall_via_backend`.
+  This formula had no production call site (only `tests/` exercised
+  `unprompted=True`) and duplicated a spec that already lives in full in
+  `athenaeum.context._apply_budget`'s own docstring, while its
+  `TIER_WEIGHTS = {"hot": 1.0, "warm": 0.0, ...}` shape read exactly like
+  the hot-tier gate athenaeum#1345 removed as an invariant violation and
+  athenaeum#1513 fixed as a live regression — keeping it around risked
+  looking like a second, resurrectable copy of a defect the project has
+  since fixed. `resolve_tier` and everything else on the index-build path,
+  the tier-movement sweep, and the `is_refused`/`never_ingest` bridge are
+  untouched. See the module's updated docstring for where push selection
+  and its token budget actually live now.
+  ([#1353](https://github.com/Kromatic-Innovation/athenaeum/issues/1353))
+
 ### Fixed
 
 - Rejecting a merge proposal recorded the rejection as a **fabricated
