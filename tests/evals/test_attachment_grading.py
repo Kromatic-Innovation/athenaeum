@@ -198,6 +198,112 @@ def test_pages_are_keyed_by_uid_not_filename(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# athenaeum#1598 — proposal scoping is per-uid, not a whole-run boolean
+# ---------------------------------------------------------------------------
+
+
+class TestProposalScopingIsPerUid:
+    """Pins the hole athenaeum#1598 found: ``delta.proposed`` was a single
+    boolean for the whole run, so ANY proposal anywhere satisfied
+    ``touch_or_proposal_uids``/``requires_proposal`` for EVERY uid in the
+    list. A librarian that proposes liberally, without the proposal naming
+    the right page, scored as correct.
+
+    AC3 (the issue's own words): "a synthetic delta carrying one proposal
+    about an UNRELATED uid must FAIL a case whose ``touch_or_proposal_uids``
+    names a different page." Asserted directly on the grader, per AC3 --
+    no live run needed to produce this shape.
+    """
+
+    def test_old_grader_shape_would_have_passed_this__new_grader_fails_it(
+        self, tmp_path: Path
+    ) -> None:
+        """Reproduces the hole with the OLD (whole-run boolean) semantics
+        inline, so the regression is visible without reverting the fix: a
+        proposal naming an entity NOT in ``touch_or_proposal_uids`` used to
+        satisfy the check for every uid in the list via ``delta.proposed``."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, uid="attach-company-steepgate", name="Steepgate Ceramics", body="Body.")
+        _page(wiki, uid="unrelated-project", name="Fallowdyke Freight Audit", body="Body.")
+        before = snapshot_wiki(wiki)
+
+        # A proposal about an ENTIRELY UNRELATED page -- the source never
+        # reached Steepgate at all.
+        (wiki / "_pending_merges.md").write_text(
+            '# Pending merges\n\n## [2026-09-10] Merge: "Fallowdyke Freight Audit"\n',
+            encoding="utf-8",
+        )
+        delta = diff_wiki(before, snapshot_wiki(wiki))
+
+        # The confound, made explicit: the OLD whole-run signal is True even
+        # though the proposal is about a different page entirely.
+        assert delta.proposed
+        assert delta.proposed_uids == {"unrelated-project"}
+        assert "attach-company-steepgate" not in delta.proposed_uids
+
+        case = {
+            "expected": {
+                "max_new_pages": 0,
+                "touch_or_proposal_uids": ["attach-company-steepgate"],
+            }
+        }
+        passed, detail = score_case(case, delta)
+        assert not passed, (
+            "AC3 regression: an unrelated proposal satisfied a case whose "
+            "touch_or_proposal_uids names a different page"
+        )
+        assert "attach-company-steepgate" in detail
+
+    def test_a_proposal_naming_the_right_uid_still_passes(self, tmp_path: Path) -> None:
+        """Positive control: the fix must not make a genuine proposal fail --
+        otherwise Case C-style cases could never be satisfied by proposing."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, uid="attach-company-steepgate", name="Steepgate Ceramics", body="Body.")
+        before = snapshot_wiki(wiki)
+
+        (wiki / "_pending_merges.md").write_text(
+            '# Pending merges\n\n## [2026-09-10] Merge: "Steepgate Ceramics"\n',
+            encoding="utf-8",
+        )
+        delta = diff_wiki(before, snapshot_wiki(wiki))
+
+        assert delta.proposed_uids == {"attach-company-steepgate"}
+
+        case = {
+            "expected": {
+                "max_new_pages": 0,
+                "touch_or_proposal_uids": ["attach-company-steepgate"],
+            }
+        }
+        passed, detail = score_case(case, delta)
+        assert passed, detail
+
+    def test_requires_proposal_without_a_uid_to_scope_against_fails_closed(
+        self, tmp_path: Path
+    ) -> None:
+        """AC2: ``requires_proposal`` alone (no ``touch_or_proposal_uids``)
+        has nothing to scope the proposal check against, so it must fail
+        rather than silently fall back to the whole-run boolean."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, uid="proj-a", name="Bracklemoor Transit Study", body="Body.")
+        before = snapshot_wiki(wiki)
+
+        (wiki / "_pending_merges.md").write_text(
+            '# Pending merges\n\n## [2026-09-10] Merge: "Bracklemoor Transit Study"\n',
+            encoding="utf-8",
+        )
+        delta = diff_wiki(before, snapshot_wiki(wiki))
+        assert delta.proposed  # the old whole-run signal is still true
+
+        passed, detail = score_case({"expected": {"requires_proposal": True}}, delta)
+        assert not passed
+        assert "scope" in detail
+
+
+# ---------------------------------------------------------------------------
 # AC4 — irreversibility is a proposal, never an applied change
 # ---------------------------------------------------------------------------
 
