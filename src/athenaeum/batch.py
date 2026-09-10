@@ -94,6 +94,8 @@ from athenaeum.models import (
     render_frontmatter,
 )
 from athenaeum.provider import AnthropicBatchClientBackend, response_text
+from athenaeum.relatedness import run_index as relatedness_run_index
+from athenaeum.relatedness import stamp_related_edges
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
@@ -1989,6 +1991,17 @@ def process_batch_run(
             # first, then creates, matching the synchronous order).
             for path, content in pending_updates:
                 atomic_write_text(path, content)
+            # Issue athenaeum#1576: the same compile-time ``related:`` stamp
+            # ``librarian._apply_tier3_results`` applies on the synchronous
+            # path, at the same point (after the merge writes, before the
+            # create loop renders). The batch and synchronous transports must
+            # produce byte-identical wiki output --
+            # ``TestBatchSyncEquivalence::test_wiki_output_identical`` is that
+            # contract -- so a write-boundary behaviour added to one belongs on
+            # both or on neither.
+            stamp_related_edges(
+                new_entities, relatedness_run_index(wiki_root, config=config)
+            )
             written_entities: list[WikiEntity] = []
             for entity in new_entities:
                 rendered = entity.render()
