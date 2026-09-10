@@ -806,6 +806,56 @@ def resolve_wiki_dedupe_min_body_chars(config: dict[str, Any] | None) -> int:
     return 0
 
 
+def resolve_relatedness_writer_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the compile-time ``related:`` edge writer (issue athenaeum#1576).
+
+    When true, ``librarian._apply_tier3_results`` stamps ``related:`` rows
+    onto each newly-created page before it is written, using
+    :mod:`athenaeum.relatedness` -- mutual k-nearest-neighbour over
+    corpus-weighted distinctive-term overlap. See that module's docstring for
+    the signal, the measurement against issue athenaeum#1570's corpus, and
+    why the two cheaper deterministic signals and the MiniLM neighbourhood
+    were each measured and rejected.
+
+    DEFAULT True (active). Unlike the comparator master switch this does NOT
+    ship dark, for three reasons that were checked rather than assumed:
+    it makes no metered call and no network call at all (issue athenaeum#1576
+    AC6, satisfied by construction rather than by configuration); it only ever
+    APPENDS rows to pages this run is creating, so no existing page's bytes
+    change and the failure mode of a bad edge is a spurious breadcrumb rather
+    than lost content; and its precision was 1.000 at every parameter setting
+    measured across three corpus scales. An operator who wants it off sets
+    ``librarian.relatedness_writer: false``, and pages then compile exactly as
+    they did before athenaeum#1576.
+
+    Env ``ATHENAEUM_RELATEDNESS_WRITER`` > yaml ``librarian.relatedness_writer``
+    > this default. No seed in ``_DEFAULTS`` (athenaeum#231) so the code
+    default stays reachable. Truthiness follows the same spelling set as every
+    other boolean knob here; an unrecognized value falls through to the
+    default rather than silently reading as false.
+    """
+    raw_env = os.environ.get("ATHENAEUM_RELATEDNESS_WRITER")
+    if raw_env is not None:
+        lowered = raw_env.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("relatedness_writer")
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, str):
+                lowered = raw.strip().lower()
+                if lowered in {"1", "true", "yes", "on"}:
+                    return True
+                if lowered in {"0", "false", "no", "off"}:
+                    return False
+    return True
+
+
 def resolve_max_merge_sources(config: dict[str, Any] | None) -> int:
     """Resolve the resolver merge-proposal source-count cap (athenaeum#400).
 
