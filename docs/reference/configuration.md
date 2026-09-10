@@ -1473,6 +1473,34 @@ Defaults to ``origin`` — the conventional name the knowledge repo's
 remote will carry on every operator we ship to. A non-string or empty
 yaml value falls through to the default.
 
+### `resolve_qualified_name_scan_enabled`
+
+- **YAML path:** `librarian.qualified_name_scan`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `True`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the qualified-name entity-split scan opt-out. DEFAULT ON.
+
+Gates `athenaeum.librarian._run_qualified_name_phase` /
+`athenaeum.name_structure.propose_qualified_name_merges` — the
+``name`` / ``name (qualifier)`` scan, which like
+`resolve_name_collision_scan_enabled`'s exact-match sibling is a
+glob plus a regex: no LLM, no vectors, no network, so there is no cost
+reason to ship it off. ``librarian.qualified_name_scan: false`` is an
+operator escape hatch, nothing more.
+
+There is deliberately NO auto-merge counterpart to
+`resolve_name_collision_automerge_enabled` here. An exact ``name:``
+collision where every non-canonical page provably adds nothing CAN be
+folded unattended; a parenthetical qualifier is a weaker signal whose
+live-corpus hits split roughly evenly between one-entity-twice and
+genuinely-narrower-scope (see `athenaeum.name_structure`'s module
+docstring for the measured populations). AC2 pins
+"queued, never auto-applied" as an invariant, so the knob that could
+break it does not exist rather than defaulting off.
+
 ### `resolve_raw_file_max_api_calls`
 
 - **YAML path:** `librarian.raw_file_max_api_calls`

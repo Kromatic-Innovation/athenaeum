@@ -4417,6 +4417,36 @@ def resolve_name_collision_scan_enabled(config: dict[str, Any] | None) -> bool:
     return True
 
 
+def resolve_qualified_name_scan_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the qualified-name entity-split scan opt-out (issue athenaeum#1577). DEFAULT ON.
+
+    Gates :func:`athenaeum.librarian._run_qualified_name_phase` /
+    :func:`athenaeum.name_structure.propose_qualified_name_merges` — the
+    ``name`` / ``name (qualifier)`` scan, which like
+    :func:`resolve_name_collision_scan_enabled`'s exact-match sibling is a
+    glob plus a regex: no LLM, no vectors, no network, so there is no cost
+    reason to ship it off. ``librarian.qualified_name_scan: false`` is an
+    operator escape hatch, nothing more.
+
+    There is deliberately NO auto-merge counterpart to
+    :func:`resolve_name_collision_automerge_enabled` here. An exact ``name:``
+    collision where every non-canonical page provably adds nothing CAN be
+    folded unattended; a parenthetical qualifier is a weaker signal whose
+    live-corpus hits split roughly evenly between one-entity-twice and
+    genuinely-narrower-scope (see :mod:`athenaeum.name_structure`'s module
+    docstring for the measured populations). Issue athenaeum#1577 AC2 pins
+    "queued, never auto-applied" as an invariant, so the knob that could
+    break it does not exist rather than defaulting off.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("qualified_name_scan")
+            if isinstance(raw, bool):
+                return raw
+    return True
+
+
 def resolve_name_collision_automerge_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve the name-collision auto-merge opt-in (issue athenaeum#1170). DEFAULT OFF.
 

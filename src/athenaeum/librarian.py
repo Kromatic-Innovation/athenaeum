@@ -5994,6 +5994,54 @@ def _run_name_collision_phase(ctx: RunContext) -> None:
         ctx.run_profile.append(("name-collisions", time.monotonic() - _start, _fields))
 
 
+def _run_qualified_name_phase(ctx: RunContext) -> None:
+    """Issue athenaeum#1577: the ``name`` / ``name (qualifier)`` entity-split scan.
+
+    Sibling of :func:`_run_name_collision_phase` above and modelled on it
+    line for line — same ``wiki_root`` guard, same log-and-swallow posture,
+    same finally-block profile append — for the same reason that phase is
+    separate from :func:`_run_wiki_dedup_phase`: this detector is
+    deterministic and free (a glob plus a regex), while wiki-dedup is
+    expensive and under repair, and neither one's failure may suppress the
+    other's metric.
+
+    Held apart from the name-collision phase rather than folded into it
+    because the two answer different questions and warrant different
+    posture. An exact ``name:`` collision can be classified
+    ``unambiguous`` and auto-folded under an operator flag; a parenthetical
+    qualifier cannot be classified at all by string shape (see
+    :mod:`athenaeum.name_structure`), so this phase only ever QUEUES.
+    :func:`~athenaeum.name_structure.propose_qualified_name_merges` takes no
+    ``auto_merge`` parameter — athenaeum#1577 AC2's invariant is enforced by
+    the absence of the switch, not by its default.
+
+    Appends a ``"qualified-names"`` :attr:`RunContext.run_profile` entry
+    carrying ``splits``/``queued`` counts (or just ``reason`` when
+    disabled/failed), which flows into the run summary and the durable
+    ledger record like every other phase's entry.
+    """
+    if not ctx.wiki_root.is_dir():
+        return
+    _start = time.monotonic()
+    _fields: dict[str, Any] = {"reason": "completed"}
+    try:
+        from athenaeum.config import resolve_qualified_name_scan_enabled
+        from athenaeum.name_structure import propose_qualified_name_merges
+
+        if not resolve_qualified_name_scan_enabled(ctx.config):
+            _fields = {"reason": "disabled"}
+        else:
+            counts = propose_qualified_name_merges(
+                ctx.wiki_root, config=ctx.config, dry_run=ctx.dry_run
+            )
+            _fields = {"reason": "completed", **counts}
+    except Exception:
+        log.exception("qualified-name scan failed; continuing run")
+        _fields = {"reason": "failed"}
+    finally:
+        ctx.run_profile.append(("qualified-names", time.monotonic() - _start, _fields))
+
+
 def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
     """Issue athenaeum#290/athenaeum#715 wiki-page dedup pass, then the post-phase deadline check.
 
@@ -9076,6 +9124,11 @@ def run(
     # (deterministic/zero-cost, never folded into the expensive vector/LLM
     # dedup pass; see _run_name_collision_phase's docstring).
     _run_name_collision_phase(ctx)
+
+    # Phase: athenaeum#1577 qualified-name entity-split scan. Runs right after
+    # its exact-match sibling and before the expensive dedup pass, for the
+    # reasons in _run_qualified_name_phase's docstring.
+    _run_qualified_name_phase(ctx)
 
     # Phase: athenaeum#290 wiki-page dedup pass (independent of the C1-C4 auto-memory
     # pipeline; runs on every mode) + the deadline check right after it.
