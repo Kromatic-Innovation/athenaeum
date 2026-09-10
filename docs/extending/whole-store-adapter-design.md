@@ -631,7 +631,7 @@ made concrete.
 >   persistence class.
 
 > **Correction, issue athenaeum#1591 (2026-09-10) — table row 8,
-> `_push_records.jsonl`.** Implementing R3 (athenaeum#980, PR #1080) read "move
+> `_push_records.jsonl`.** Implementing R3 (athenaeum#980, PR athenaeum#1080) read "move
 > store-durable state behind the seam" as "move it to `wiki_root`" and
 > relocated this ledger there. That overrode issue athenaeum#749's acceptance
 > — push records live "outside the wiki corpus (so they never become claims and

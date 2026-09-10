@@ -1603,7 +1603,7 @@ class TestDurablePushRecordsPath:
         written file from a crashed run, a scratch-dir test invocation — must
         not look "already migrated". Kept as a regression guard: under
         athenaeum#1591 NO wiki-path file, empty or populated, can capture
-        resolution, so #1512's hazard is now closed by construction rather
+        resolution, so athenaeum#1512's hazard is now closed by construction rather
         than by a content check. This test fails if a future edit reinstates
         any wiki-root branch.
         """

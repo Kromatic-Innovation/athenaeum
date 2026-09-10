@@ -539,7 +539,7 @@ def durable_push_records_path(wiki_root: Path, *, cache_dir: Path | None = None)
       ``a3198878``) touched the header comment three lines above
       :data:`PUSH_RECORDS_FILENAME`. That is an override that did not notice
       the constraint, not a supersession that retired it.
-    - PR #1080's own "Ambiguities I resolved" §3 proves the R3 lane *honoured*
+    - PR athenaeum#1080's own "Ambiguities I resolved" §3 proves the R3 lane *honoured*
       this exact constraint wherever it saw it: ``_decay_sweep_records.jsonl``
       and ``_push_references.jsonl`` were classified ``operational``/
       ``store-durable`` and deliberately **not** relocated, because moving one

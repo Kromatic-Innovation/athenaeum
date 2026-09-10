@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   athenaeum#749's acceptance ("a durable, machine-readable location **outside
   the wiki corpus**, so they never become claims and never enter the embedded
   index") governs and was never retired — the athenaeum#911 design lock never
-  cites it, and PR #1080 honoured the identical constraint for
+  cites it, and PR athenaeum#1080 honoured the identical constraint for
   `_decay_sweep_records.jsonl` (athenaeum#969) and `_push_references.jsonl`
   while relocating this one by a mechanical "is it named in §5.2's table?"
   rule. The R3 class/scope declaration is unchanged (`operational` /
