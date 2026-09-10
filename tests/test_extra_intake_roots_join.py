@@ -78,10 +78,7 @@ def _rows_for_root(cache_dir: Path, root_name: str) -> int:
     ``_iter_extra_root_entries``). Production behaviour, not a
     test-invented signal.
     """
-    db_path = cache_dir / _DB_NAME
-    if not db_path.is_file():
-        return 0
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(_require_index(cache_dir)))
     try:
         row = conn.execute(
             "SELECT COUNT(*) FROM wiki WHERE filename LIKE ?",
@@ -92,9 +89,26 @@ def _rows_for_root(cache_dir: Path, root_name: str) -> int:
         conn.close()
 
 
-def _total_pages(cache_dir: Path) -> int:
+def _require_index(cache_dir: Path) -> Path:
+    """Fail loudly when no index was built.
+
+    Both counters below go through this deliberately. Returning 0 for an
+    ABSENT database would conflate "the build produced no rows from this
+    root" with "the build never ran" -- which is precisely the
+    indistinguishable-silence class athenaeum#1457 hit and this module exists
+    to close. An assertion that expects 0 must not be satisfiable by the
+    index failing to exist at all.
+    """
     db_path = cache_dir / _DB_NAME
-    conn = sqlite3.connect(str(db_path))
+    assert db_path.is_file(), (
+        f"no index at {db_path.name} -- the reindex did not build one, so a "
+        "row count here would report absence as emptiness"
+    )
+    return db_path
+
+
+def _total_pages(cache_dir: Path) -> int:
+    conn = sqlite3.connect(str(_require_index(cache_dir)))
     try:
         row = conn.execute("SELECT COUNT(*) FROM wiki").fetchone()
         return int(row[0]) if row else 0
