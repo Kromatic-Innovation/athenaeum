@@ -179,10 +179,19 @@ class _SequencedRecorder:
     the same ids for the same call sequence.
     """
 
-    def __init__(self, inner: Any, *, record: bool, case_id: str, observed: list[str]) -> None:
+    def __init__(
+        self,
+        inner: Any,
+        *,
+        record: bool,
+        case_id: str,
+        observed: list[str],
+        session: Any,
+    ) -> None:
         self._recorder = RecordingClient(inner, record=record, layer=LAYER_ATTACHMENT)
         self._case_id = case_id
         self._observed = observed
+        self._session = session
         self._n = 0
         self.messages = self
 
@@ -193,7 +202,14 @@ class _SequencedRecorder:
             response = self._recorder.messages.create(**params)
         finally:
             self._recorder.end_case()
-        self._observed.append(str(params.get("model", "")))
+        model = str(params.get("model", ""))
+        # Fold this call into the RUN-level accumulator, same as every other
+        # layer. An intake run makes several calls per case, so a layer that
+        # skipped this would spend real budget invisibly to
+        # ``EVAL_TOKEN_CEILING`` -- the one guard that exists to stop a golden
+        # set ballooning cost unnoticed.
+        self._session.observe_response(model, response)
+        self._observed.append(model)
         return response
 
 
@@ -240,10 +256,18 @@ def test_attachment_case(
     observed_models: list[str] = []
     inner = build_live_client()
     classify_client = _SequencedRecorder(
-        inner, record=eval_record, case_id=f"{case['id']}-classify", observed=observed_models
+        inner,
+        record=eval_record,
+        case_id=f"{case['id']}-classify",
+        observed=observed_models,
+        session=eval_session,
     )
     write_client = _SequencedRecorder(
-        inner, record=eval_record, case_id=f"{case['id']}-write", observed=observed_models
+        inner,
+        record=eval_record,
+        case_id=f"{case['id']}-write",
+        observed=observed_models,
+        session=eval_session,
     )
 
     usage = TokenUsage()
