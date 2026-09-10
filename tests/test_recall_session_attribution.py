@@ -92,6 +92,11 @@ def stale_env(monkeypatch: pytest.MonkeyPatch) -> None:
     STARTED with, which it has since rotated away from."""
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", STALE_ENV_ID)
     monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    # Pinned off by default so the scope directory resolves through the env
+    # id's transcript alone. The tests that exercise the project-dir fallback
+    # set it themselves — this keeps every OTHER test from depending on
+    # whatever the surrounding runner happened to export.
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +276,72 @@ class TestLoudFallback:
         assert result.session_id == STALE_ENV_ID
         assert result.attribution == push_metrics.ATTRIBUTION_ENV_UNRESOLVED
 
+    def test_scope_still_resolves_after_the_spawn_transcript_rolls_off_disk(
+        self, projects_root: Path, stale_env: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The long-lived-server case, which is the one this issue was filed
+        from: servers here have run for days, and Claude Code rolls old
+        transcripts off disk. Once the SPAWN id's transcript is gone, a scope
+        resolved only from that id stops resolving — and every later recall on
+        that connection would fall back for the life of the process, which is
+        the stale attribution this fix exists to remove, merely stamped.
+
+        `CLAUDE_PROJECT_DIR` (exported to spawned MCP servers) names the scope
+        directly and does not decay.
+        """
+        (projects_root / SCOPE / f"{STALE_ENV_ID}.jsonl").unlink()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/someone/Code/athenaeum")
+
+        result = push_metrics.ToolUseSessionResolver(projects_root=projects_root).resolve(
+            "toolu_JOINME"
+        )
+
+        assert result.session_id == CURRENT_ID
+        assert result.attribution == push_metrics.ATTRIBUTION_TRANSCRIPT
+
+    def test_scope_falls_back_to_the_process_cwd(
+        self, projects_root: Path, stale_env: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Backstop for the same failure, for a client that exports no
+        `CLAUDE_PROJECT_DIR`: the server's cwd is the project directory."""
+        (projects_root / SCOPE / f"{STALE_ENV_ID}.jsonl").unlink()
+        monkeypatch.setattr(push_metrics.os, "getcwd", lambda: "/Users/someone/Code/athenaeum")
+
+        result = push_metrics.ToolUseSessionResolver(projects_root=projects_root).resolve(
+            "toolu_JOINME"
+        )
+
+        assert result.session_id == CURRENT_ID
+
+    def test_a_failed_scope_resolution_is_not_latched_for_the_connection(
+        self, projects_root: Path, stale_env: None
+    ) -> None:
+        """A miss must not be cached. One transient failure on a server that
+        lives for days would otherwise disable the join permanently — a
+        one-way door on the exact deployment shape this targets."""
+        scope = projects_root / SCOPE
+        stashed = scope / f"{STALE_ENV_ID}.jsonl"
+        contents = stashed.read_text(encoding="utf-8")
+        stashed.unlink()
+
+        resolver = push_metrics.ToolUseSessionResolver(projects_root=projects_root, attempts=1)
+        assert resolver.resolve("toolu_JOINME").attribution == (
+            push_metrics.ATTRIBUTION_ENV_UNRESOLVED
+        )
+
+        stashed.write_text(contents, encoding="utf-8")
+
+        assert resolver.resolve("toolu_JOINME").session_id == CURRENT_ID
+
+    def test_scope_dir_name_matches_claude_codes_own_mangling(self) -> None:
+        """Read off the real transcript tree, not from documentation: every
+        character that is not a letter, digit, or hyphen becomes a hyphen."""
+        assert push_metrics._scope_dir_name("/Users/x/Code/athenaeum") == "-Users-x-Code-athenaeum"
+        assert (
+            push_metrics._scope_dir_name("/Users/x/Code/hestia/.claude/worktrees/agent-1")
+            == "-Users-x-Code-hestia--claude-worktrees-agent-1"
+        )
+
     def test_no_env_id_and_no_join_yields_no_record_at_all(
         self, projects_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -339,6 +410,30 @@ class TestLedgerRow:
         [row] = push_metrics.read_push_records(cache_dir, wiki_root=wiki)
         assert row["session_id"] == STALE_ENV_ID
         assert row["session_attribution"] == push_metrics.ATTRIBUTION_ENV_UNRESOLVED
+
+    def test_a_non_mcp_caller_writes_no_stamp_at_all(self, tmp_path: Path, stale_env: None) -> None:
+        """The `athenaeum recall` CLI and the demo are short-lived processes
+        whose `os.environ` is fresh, so their env id is NOT suspect. Stamping
+        those rows `env-unresolved` would raise a false alarm on trustworthy
+        rows — and issue athenaeum#1542's lane is concurrently reasoning about
+        how the viewer classifies push rows. Such a caller attempts no
+        attribution and writes no key: absent already means "provenance
+        unknown"."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "deploy_target.md").write_text(
+            "---\nname: Deploy target\ntype: principle\n---\n\n"
+            "The deploy target is the staging cluster.\n",
+            encoding="utf-8",
+        )
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+
+        mcp_server.recall_search(wiki, "deploy target", cache_dir=cache_dir)
+
+        [row] = push_metrics.read_push_records(cache_dir, wiki_root=wiki)
+        assert row["session_id"] == STALE_ENV_ID
+        assert "session_attribution" not in row
 
     def test_attribution_surfaces_in_the_public_tail_contract(
         self, tmp_path: Path, projects_root: Path, stale_env: None

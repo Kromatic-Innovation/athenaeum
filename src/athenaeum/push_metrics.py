@@ -205,6 +205,23 @@ class SessionAttribution:
     attribution: str
 
 
+def _scope_dir_name(project_dir: str) -> str:
+    """Claude Code's ``~/.claude/projects/<scope>`` directory name for *project_dir*.
+
+    The mangling is "every character that is not a letter, digit, or hyphen
+    becomes a hyphen" — read off the real tree rather than from documentation:
+    ``/Users/x/Code/athenaeum`` -> ``-Users-x-Code-athenaeum``, and
+    ``/Users/x/Code/hestia/.claude/worktrees/agent-1`` ->
+    ``-Users-x-Code-hestia--claude-worktrees-agent-1`` (the ``/.`` pair
+    yielding two hyphens, an existing hyphen surviving).
+
+    Used only to name ONE candidate directory, which must already exist to be
+    accepted — a wrong guess resolves to nothing rather than to somebody
+    else's transcripts.
+    """
+    return re.sub(r"[^A-Za-z0-9-]", "-", project_dir)
+
+
 def _session_id_for_tool_use(record: dict[str, Any], tool_use_id: str) -> str | None:
     """Return the session id of *record* if it STRUCTURALLY issues *tool_use_id*.
 
@@ -284,7 +301,6 @@ class ToolUseSessionResolver:
         self._retry_delay = retry_delay
         self._sleep = sleep
         self._scope_dir: Path | None = None
-        self._scope_dir_resolved = False
         self._last_transcript: Path | None = None
         self._joined: dict[str, str] = {}
 
@@ -339,19 +355,46 @@ class ToolUseSessionResolver:
     def _scope(self, env_id: str) -> Path | None:
         """The project-scope directory this conversation's transcripts live in.
 
-        Resolved from the SPAWN-time env id's own transcript: a rotated id
-        stays in the same scope directory, so the stale id is still a perfectly
-        good pointer to the right folder even though it is a bad pointer to the
-        right session. Cached for the life of the connection.
+        Two independent sources, tried in order, because relying on either
+        alone has a failure mode that produces exactly the stale attribution
+        this class exists to prevent:
+
+        1. **The spawn-time env id's own transcript.** A rotated id keeps its
+           project scope, so the stale id is a perfectly good pointer to the
+           right FOLDER even though it is a bad pointer to the right session.
+        2. **The project directory, mangled into a scope name.** Source 1 is
+           only as durable as the spawn id's transcript, and Claude Code rolls
+           old transcripts off disk — so on a server that has outlived its
+           spawn session's transcript (this deployment has run servers for
+           days) source 1 stops resolving and every later recall would fall
+           back for the life of the process. ``CLAUDE_PROJECT_DIR`` is
+           exported to spawned MCP servers and does not decay; the process cwd
+           is the same directory in practice and backs it up.
+
+        Both sources name ONE directory, which must already exist — never a
+        sweep across scopes looking for something plausible.
+
+        Only a SUCCESSFUL resolution is cached. A miss is left uncached
+        deliberately: latching a transient failure for the life of a
+        long-lived connection is a one-way door, and re-resolving costs a
+        couple of ``stat`` calls.
         """
-        if self._scope_dir_resolved:
+        if self._scope_dir is not None:
             return self._scope_dir
-        self._scope_dir_resolved = True
+        root = self._root()
         if env_id:
-            located = _find_session_transcript(env_id, self._root())
+            located = _find_session_transcript(env_id, root)
             if located is not None:
                 self._scope_dir = located[0]
-        return self._scope_dir
+                return self._scope_dir
+        for raw in (os.environ.get("CLAUDE_PROJECT_DIR"), os.getcwd()):
+            if not raw:
+                continue
+            candidate = root / _scope_dir_name(raw)
+            if candidate.is_dir():
+                self._scope_dir = candidate
+                return self._scope_dir
+        return None
 
     def _candidates(self, scope_dir: Path) -> list[Path]:
         """Transcripts to tail, most-likely first.

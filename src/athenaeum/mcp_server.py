@@ -1598,8 +1598,19 @@ def _recall_via_backend(
         # non-MCP caller) short-circuits to the env id with zero I/O. Either
         # way the answer arrives STAMPED — a fallback is recorded as
         # unresolved rather than substituted silently (issue athenaeum#1513).
-        resolver = session_resolver or push_metrics.ToolUseSessionResolver()
-        attribution = resolver.resolve(tool_use_id)
+        #
+        # A caller that supplies NEITHER (the `athenaeum recall` CLI, the demo
+        # — every short-lived, fresh-`os.environ` process) attempts no
+        # attribution and writes no stamp. Its env id is not suspect, and
+        # marking it `env-unresolved` would raise a false alarm on a
+        # trustworthy row; an absent key already means "provenance unknown",
+        # which is the honest reading. The stamp is reserved for the writer
+        # whose environment can actually go stale.
+        if session_resolver is None and tool_use_id is None:
+            attribution = push_metrics.SessionAttribution(push_metrics.resolve_session_id(), "")
+        else:
+            resolver = session_resolver or push_metrics.ToolUseSessionResolver()
+            attribution = resolver.resolve(tool_use_id)
         session_id = attribution.session_id
         if session_id:
             record = push_metrics.build_push_record(
