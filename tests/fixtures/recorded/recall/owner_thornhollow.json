@@ -1,0 +1,26 @@
+{
+  "case_id": "owner_thornhollow",
+  "content_blocks": [
+    {
+      "text": "```json\n[\"Thornhollow\"]\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "recall",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:c01c2ef50f51c8af2af320b0d9417a0233ad6bf3b8428946db6193293a741cb5",
+  "recorded_at": "2026-08-02T18:05:28.762347+00:00",
+  "rederived": {
+    "at": "2026-09-09T23:09:49.107042+00:00",
+    "from_prompt_hash": "sha256:6b431f111c0b70638e8c291958a61dc5b690ed6bf22a1cc8208e36aac82b6e57",
+    "rename_map_digest": "sha256:7166cc089b9aebe108b7b1f3eeeec39e91829925562f0defc92e4172dbc84625",
+    "tool": "scripts/rederive_recorded_fixture.py"
+  },
+  "response_text": "```json\n[\"Thornhollow\"]\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 150,
+    "output_tokens": 13
+  }
+}

@@ -35,10 +35,27 @@ grows unnoticed cannot balloon cost silently.
 
 ### Content policy
 
-All golden-set inputs are **synthetic small-org scenarios** (the invented
-consultancy "Meridian Advisory"). Nothing here originates from a live
-knowledge tree. Adding a case that quotes real client / colleague content
-is a review-blocker.
+All golden-set inputs (`tests/evals/data/{classify,detector,merge,recall,
+resolver,write_tier_compare}/`) are **synthetic small-org scenarios** (the
+invented consultancy "Thornhollow Advisory" and its invented tools/vendors —
+e.g. Pagemoor, Hostmoor, Tallyfold). Nothing here originates from a live
+knowledge tree, and every invented name is checked absent from BOTH the
+local knowledge tree and the public web before it is adopted (issue
+athenaeum#1496 — a prior invented name, "Meridian Advisory", turned out to
+collide with a real firm because only the former was checked; several
+vendor mentions also turned out to name real products). `tests/
+test_eval_corpus_leakage.py` enforces the mechanical half of this on every
+PR — see that module's docstring for exactly what it can and cannot catch.
+Adding a case that quotes real client / colleague content is a
+review-blocker.
+
+This is a DIFFERENT set from `tests/evals/data/corpus/`, the procedurally
+generated synthetic knowledge corpus used by the retrieval/shadow-parity
+tests (`tests/test_eval_recall_floor.py`, `tests/test_supersession_recall.py`,
+and friends) — same "every entity is invented" policy, but generated from
+syllable pools rather than hand-authored, and documented separately in
+`tests/evals/data/corpus/README.md`. Both are in scope for the leakage
+guard above; neither originates from the other.
 
 Every golden set must contain at least one **pass**, one **contradict**,
 and one **escalate** case (per acceptance criteria).
@@ -89,6 +106,34 @@ pytest -m eval tests/evals/ --record
 git add tests/fixtures/recorded/
 git commit -m "evals: re-record fixtures after prompt edit"
 ```
+
+### Re-deriving instead of re-recording (no live key available)
+
+A real re-record needs a live `ANTHROPIC_API_KEY` (or the `claude-cli`
+provider). When neither is available — as in an offline/CI-only
+environment — and the prompt edit is a **pure find-and-replace rename**
+(for example: an invented name in a case turned out to collide with a real
+one, per issue athenaeum#1496), `scripts/rederive_recorded_fixture.py` can
+mechanically re-derive the affected fixtures instead:
+
+```bash
+.venv/bin/python scripts/rederive_recorded_fixture.py --apply \
+  --rename "OldName=NewName" --rename "oldname=newname"
+git add tests/fixtures/recorded/
+git commit -m "evals: re-derive fixtures after renaming OldName -> NewName"
+```
+
+This is legitimate ONLY for a pure substitution: the tool drives the same
+call path the corresponding test drives, then proves the ONLY difference
+between the old and new prompt is the declared `--rename` pairs (by
+reverting the new prompt and checking it hashes to the fixture's stored
+hash) before touching anything. A fixture whose prompt changed for any
+other reason — reworded prose, a different scenario, an unrelated prompt
+edit — is refused and stays stale; re-record it for real instead. Every
+re-derived fixture carries a `rederived` provenance block recording the
+pre-rename hash and a digest of the rename map, so it is never mistaken for
+a fresh live recording. See the script's module docstring for the full design and
+`tests/test_rederive_recorded_fixture.py` for the proof it works both ways.
 
 ## Layer 3 — containment harness (`tests/evals/containment.py`, issue athenaeum#1521)
 

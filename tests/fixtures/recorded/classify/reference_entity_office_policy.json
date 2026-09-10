@@ -2,15 +2,21 @@
   "case_id": "reference_entity_office_policy",
   "content_blocks": [
     {
-      "text": "```json\n[\n  {\n    \"name\": \"Meridian\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Organization or project with an updated expense policy as of this week. New policy requires scanned receipts in Airtable for all expenses over 25 GBP before reimbursement processing, replacing the previous verbal-approval-only process.\"\n  },\n  {\n    \"name\": \"Meridian Expense Policy\",\n    \"entity_type\": \"reference\",\n    \"tags\": [\"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Updated expense reimbursement policy requiring scanned receipt documentation in Airtable for expenses exceeding 25 GBP. Replaces prior verbal-approval-only process.\"\n  }\n]\n```",
+      "text": "```json\n[\n  {\n    \"name\": \"Thornhollow\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Organization or project with an updated expense policy as of this week. New policy requires scanned receipts in Latticebase for all expenses over 25 GBP before reimbursement processing, replacing the previous verbal-approval-only process.\"\n  },\n  {\n    \"name\": \"Thornhollow Expense Policy\",\n    \"entity_type\": \"reference\",\n    \"tags\": [\"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Updated expense reimbursement policy requiring scanned receipt documentation in Latticebase for expenses exceeding 25 GBP. Replaces prior verbal-approval-only process.\"\n  }\n]\n```",
       "type": "text"
     }
   ],
   "layer": "classify",
   "model": "claude-haiku-4-5-20251001",
-  "prompt_hash": "sha256:7140588d998fbaad84e99d862853ccb0dd5f96bd42fce12bc6b815d9e1391c0c",
+  "prompt_hash": "sha256:583aaa27c7e1307c943b64eedbe7b57c33ffbd6c498c7b280e1515736f2eb995",
   "recorded_at": "2026-08-02T18:05:04.235686+00:00",
-  "response_text": "```json\n[\n  {\n    \"name\": \"Meridian\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Organization or project with an updated expense policy as of this week. New policy requires scanned receipts in Airtable for all expenses over 25 GBP before reimbursement processing, replacing the previous verbal-approval-only process.\"\n  },\n  {\n    \"name\": \"Meridian Expense Policy\",\n    \"entity_type\": \"reference\",\n    \"tags\": [\"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Updated expense reimbursement policy requiring scanned receipt documentation in Airtable for expenses exceeding 25 GBP. Replaces prior verbal-approval-only process.\"\n  }\n]\n```",
+  "rederived": {
+    "at": "2026-09-09T23:08:01.104288+00:00",
+    "from_prompt_hash": "sha256:7140588d998fbaad84e99d862853ccb0dd5f96bd42fce12bc6b815d9e1391c0c",
+    "rename_map_digest": "sha256:7166cc089b9aebe108b7b1f3eeeec39e91829925562f0defc92e4172dbc84625",
+    "tool": "scripts/rederive_recorded_fixture.py"
+  },
+  "response_text": "```json\n[\n  {\n    \"name\": \"Thornhollow\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Organization or project with an updated expense policy as of this week. New policy requires scanned receipts in Latticebase for all expenses over 25 GBP before reimbursement processing, replacing the previous verbal-approval-only process.\"\n  },\n  {\n    \"name\": \"Thornhollow Expense Policy\",\n    \"entity_type\": \"reference\",\n    \"tags\": [\"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Updated expense reimbursement policy requiring scanned receipt documentation in Latticebase for expenses exceeding 25 GBP. Replaces prior verbal-approval-only process.\"\n  }\n]\n```",
   "usage": {
     "cache_creation_input_tokens": 0,
     "cache_read_input_tokens": 0,

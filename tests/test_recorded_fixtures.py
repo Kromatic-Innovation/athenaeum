@@ -196,7 +196,7 @@ _DISPUTED: dict[str, str] = {
     # removes the resolver. This mark is TRACKED, not an untracked failure.
     "decision_conflict_hosting_migration": (
         "athenaeum#737: golden expects action_class 'keep_pick_winner'; the model "
-        "returns 'scope_a'. The members are a Feb Heroku decision superseded by "
+        "returns 'scope_a'. The members are a Feb Hostmoor decision superseded by "
         "a May Fly.io cutover — temporal supersession, not a live contradiction "
         "with a winner to pick. Kept per athenaeum#760; removed by athenaeum#715 "
         "(needs a re-record)."

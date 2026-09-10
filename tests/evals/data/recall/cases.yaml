@@ -12,12 +12,12 @@
 #    provenance header: when true, the recall output must contain
 #    ``**Status:** contradiction-flagged`` for the expected page.
 
-- id: owner_meridian
+- id: owner_thornhollow
   outcome_class: pass
-  prompt: "who owns the Meridian account?"
+  prompt: "who owns the Thornhollow account?"
   expected:
     hits:
-      - rec-owner-meridian-account
+      - rec-owner-thornhollow-account
     contradiction_flag: false
 
 - id: pto_policy
@@ -40,7 +40,7 @@
   outcome_class: escalate
   prompt: "what's our policy?"
   # Deliberately ambiguous — the right behavior is to surface MULTIPLE
-  # candidates (Expense, PTO, Notion, Google-Sheets, Budget, Meeting-cadence
+  # candidates (Expense, PTO, Pagemoor, Tallyfold, Budget, Meeting-cadence
   # are all "policy" pages), not one confident wrong answer. We assert on
   # distinct-page count, not on a specific hit.
   expected:

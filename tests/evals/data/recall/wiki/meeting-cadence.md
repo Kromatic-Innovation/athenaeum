@@ -13,6 +13,6 @@ updated: 2026-03-10
 
 # Meeting cadence
 
-Meridian holds a weekly Wednesday sync with each active retainer client. The
+Thornhollow holds a weekly Wednesday sync with each active retainer client. The
 firm's internal all-hands runs monthly on the first Friday. Standup is a
 separate weekday meeting (see `standup.md`).

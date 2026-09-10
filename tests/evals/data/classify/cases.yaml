@@ -1,6 +1,6 @@
 # Classify (Tier-2) golden set (issue athenaeum#552)
 #
-# Synthetic scenario: "Meridian Advisory", the same fictional 12-person
+# Synthetic scenario: "Thornhollow Advisory", the same fictional 12-person
 # consultancy the detector/resolver golden sets use. Every case is invented —
 # nothing here is drawn from a live knowledge tree.
 #
@@ -27,7 +27,7 @@
   outcome_class: extract_single
   content: |
     Session note: spent an hour with Priya Shah today going over the Q3
-    roadmap for the Meridian retainer. Priya is the client lead on our side
+    roadmap for the Thornhollow retainer. Priya is the client lead on our side
     and has been with the firm for four years. She flagged that the client
     wants a mid-month check-in going forward instead of only end-of-month.
   matched_names: []
@@ -42,7 +42,7 @@
 - id: multiple_entities_project_and_person
   outcome_class: extract_multiple
   content: |
-    Kicked off the Atlas Retooling engagement for Meridian Advisory this
+    Kicked off the Atlas Retooling engagement for Thornhollow Advisory this
     week. The engagement is led by Amir Khan on our side, a senior
     consultant who joined last spring. Atlas Retooling covers a full audit
     of the client's internal tooling stack over the next two quarters.
@@ -58,7 +58,7 @@
 - id: skip_already_matched_entity
   outcome_class: skip_matched
   content: |
-    Quick update: Priya Shah confirmed the Meridian retainer renewal for
+    Quick update: Priya Shah confirmed the Thornhollow retainer renewal for
     another year. No new information otherwise — just a restatement of the
     existing arrangement.
   matched_names: ["priya shah"]
@@ -98,9 +98,9 @@
 - id: reference_entity_office_policy
   outcome_class: extract_single
   content: |
-    New reference note: Meridian's expense policy was updated this week.
+    New reference note: Thornhollow's expense policy was updated this week.
     All expenses over 25 GBP now require a scanned receipt attached in
-    Airtable before reimbursement is processed. This replaces the old
+    Latticebase before reimbursement is processed. This replaces the old
     verbal-approval-only process.
   matched_names: []
   valid_types: ["person", "project", "reference", "concept"]

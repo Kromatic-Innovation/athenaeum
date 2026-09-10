@@ -165,7 +165,7 @@ class TestLoadParityCases:
             "deploy_target_sequential_snapshot",
             "office_address_undated",
             "expense_reimbursement_receipts",
-            "client_owner_meridian_pass_1",
+            "client_owner_thornhollow_pass_1",
             "tool_choice_editor",
             "meeting_cadence_different_scenarios",
             "budget_approver_undated",
