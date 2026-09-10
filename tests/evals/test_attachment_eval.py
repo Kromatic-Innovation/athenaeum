@@ -45,17 +45,22 @@ score.
 **Observed baseline, 2026-09-10** (classify ``claude-haiku-4-5-20251001``,
 write ``claude-sonnet-5``, corpus scale ``core``) — **3/5**:
 
-===================================  ======  ============  ===============================================
-case                                 result  tier          what happened
-===================================  ======  ============  ===============================================
-A same_name_source_attaches          PASS    write_merge   attached to the existing page, nothing minted
-B name_variant_source_attaches       PASS    write_merge   Tier 1 matched the qualified variant
-C board_source_attaches_to_entity    FAIL    write_merge   minted a SECOND page named "Steepgate"; touched
-                                                           an unrelated corpus page instead of the client
-D new_entity_mints_page              PASS    write_merge   minted, correctly — the negative control holds
-E two_existing_entities_both_touched FAIL    write_merge   reached both entities, but ALSO minted a third
-                                                           page for the artifact the session discussed
-===================================  ======  ============  ===============================================
+* **A** ``same_name_source_attaches`` — PASS. Attached to the existing page;
+  nothing minted.
+* **B** ``name_variant_source_attaches`` — PASS. Tier 1 matched the qualified
+  variant outright.
+* **C** ``board_source_attaches_to_entity`` — **FAIL**. Minted a SECOND page
+  named "Steepgate", and touched an unrelated corpus page instead of the
+  client the board documents.
+* **D** ``new_entity_mints_page`` — PASS. Minted, correctly. The negative
+  control holds, so the layer does not license attach-everything.
+* **E** ``two_existing_entities_both_touched`` — **FAIL**. Reached both
+  entities, but ALSO minted a third page for an artifact the session merely
+  discussed.
+
+Every routing decision above was made at the WRITE tier. AC3's bar was "fails
+on at least one of B/C/E while passing D"; C and E fail and D passes, so the
+fixture is not too easy.
 
 C is the operator-reported failure reproduced exactly: a board that is
 evidence FOR an entity became a page competing with it. E is the same shape
@@ -63,10 +68,9 @@ one step milder. Both failures are mints, which is why
 :attr:`~tests.evals.attachment.WikiDelta.minted` and not edge-counting is the
 load-bearing signal.
 
-Every routing decision in that run was made at the WRITE tier (AC2): no case
-was settled deterministically, so today's routing costs Sonnet on every
-source. That is the second thing this layer measures and the first time it has
-been visible.
+On AC2: not one of the five was settled deterministically, so today's
+attach-vs-mint routing costs Sonnet on every source. That is the second thing
+this layer measures, and the first time it has been visible.
 
 Marker: ``pytest.mark.eval`` — deselected by default (see pyproject).
 """
