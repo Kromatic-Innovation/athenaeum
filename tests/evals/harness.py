@@ -55,6 +55,13 @@ LAYER_MERGE = "merge"
 # layer above (which exercises ONE fixed model), this one replays the same
 # corpus once per athenaeum#1139 candidate model — see tests/evals/tier_compare.py.
 LAYER_WRITE_TIER_COMPARE = "write_tier_compare"
+# Issue athenaeum#1518: exercises tiers.tier3_create's own judgment on an
+# UNDERDETERMINED source — does it leave a field the observation is silent
+# on absent (or escalate it), rather than inferring one. Distinct from
+# LAYER_MERGE, which is entirely conflict-shaped (tier3_merge, two or more
+# competing claims); this layer's cases give tier3_create a source with
+# nothing to reconcile, only a gap.
+LAYER_UNDERDETERMINED = "underdetermined"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EVAL_DATA_ROOT = REPO_ROOT / "tests" / "evals" / "data"
@@ -540,6 +547,7 @@ class EvalSession:
                         LAYER_CLASSIFY,
                         LAYER_MERGE,
                         LAYER_WRITE_TIER_COMPARE,
+                        LAYER_UNDERDETERMINED,
                     )
                 )
                 if total
