@@ -11,21 +11,63 @@ ever render the same advice.
 from __future__ import annotations
 
 import argparse
+import builtins
+import json
 import select
 import socket
 from pathlib import Path
 
 import pytest
 
-from athenaeum import _cmd_demo
+from athenaeum import _cmd_demo, push_metrics
 from athenaeum._cmd_demo import (
+    _aggregate_sessions,
+    _find_transcript,
+    _parse_tail_ts,
     _probe_rows,
+    _project_label,
     _report_rows,
+    _shorten_home,
+    _transcript_cwd,
     bind_server,
     cmd_demo,
+    cmd_list_sessions,
     resolve_session_id,
 )
 from athenaeum._cmd_viewer import ViewerContractError
+
+
+def _seed_push(
+    cache_dir: Path, *, session_id: str, uid: str, ts: str = "2026-01-01T00:00:00Z"
+) -> None:
+    """Mirrors ``tests/test_cmd_viewer.py``'s helper of the same name."""
+    record = push_metrics.build_push_record(
+        session_id=session_id,
+        query="q",
+        backend="fts5",
+        hits=[(f"{uid}.md", {"uid": uid, "access": "internal", "audience": ["owner"]}, "body")],
+    )
+    record.ts = ts
+    push_metrics.record_push(record, cache_dir=cache_dir)
+
+
+def _seed_reference(
+    cache_dir: Path,
+    *,
+    session_id: str,
+    pushed_ids: list[str],
+    referenced_ids: list[str],
+    ts: str = "2026-01-01T00:00:05Z",
+) -> None:
+    push_metrics.record_reference_result(
+        push_metrics.ReferenceResult(
+            session_id=session_id,
+            ts=ts,
+            pushed_ids=pushed_ids,
+            referenced_ids=referenced_ids,
+        ),
+        cache_dir=cache_dir,
+    )
 
 # --------------------------------------------------------------------------
 # Session id resolution (AC1)
@@ -351,3 +393,432 @@ def test_demo_is_registered_with_viewer_scoping_flags() -> None:
     assert args.port == 1234
     assert args.no_browser is True
     assert args.cache_dir == Path("/tmp/c")
+
+
+def test_list_sessions_flag_and_limit_are_registered() -> None:
+    from athenaeum.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["demo", "--list-sessions", "--limit", "5"])
+    assert args.func is cmd_demo
+    assert args.list_sessions is True
+    assert args.limit == 5
+
+
+def test_limit_zero_is_rejected_at_argparse_not_silently_replaced() -> None:
+    """Review finding: ``getattr(args, "limit", None) or DEFAULT`` would
+    silently substitute the default for an explicit ``--limit 0`` because
+    ``0`` is falsy. The contract chosen here (issue athenaeum#1531 review
+    finding) is that 0 is refused outright -- never redefined as
+    "unlimited" and never silently coerced to the default.
+    """
+    from athenaeum.cli import build_parser
+
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["demo", "--list-sessions", "--limit", "0"])
+
+
+def test_limit_negative_is_rejected_at_argparse(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A negative --limit must never reach list slicing: ``seq[:-5]`` drops
+    the 5 MOST RECENT entries -- the opposite of what an operator asking
+    for a short list wants -- with no error at all if left unhandled.
+    """
+    from athenaeum.cli import build_parser
+
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["demo", "--list-sessions", "--limit", "-5"])
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_limit_positive_value_is_never_replaced() -> None:
+    """A non-default positive --limit must survive intact, including a value
+    that happens to be small -- the fix must not overcorrect into clamping
+    or otherwise mutating a legitimate explicit value."""
+    from athenaeum.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["demo", "--list-sessions", "--limit", "1"])
+    assert args.limit == 1
+
+
+# --------------------------------------------------------------------------
+# --list-sessions (issue athenaeum#1531)
+# --------------------------------------------------------------------------
+
+
+def _ls_args(**overrides: object) -> argparse.Namespace:
+    base = {
+        "path": None,
+        "cache_dir": None,
+        "projects_root": Path("/nonexistent"),
+        "list_sessions": True,
+        "limit": None,
+    }
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def _write_transcript(path: Path, records: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+
+
+# -- AC1: exits 0 without binding a port or starting a server --------------
+
+
+def test_list_sessions_never_binds_a_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The whole point of AC1: prove no port is bound, not merely exit 0."""
+
+    def _boom(**_kwargs: object):
+        raise AssertionError("--list-sessions must never bind a server")
+
+    monkeypatch.setattr(_cmd_demo, "bind_server", _boom)
+    monkeypatch.setattr(_cmd_demo, "_run_tail_contract", lambda **_k: [])
+    assert cmd_demo(_ls_args(path=tmp_path)) == 0
+
+
+def test_list_sessions_short_circuits_before_session_resolution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """--list-sessions must not require a resolvable current-session id --
+    the early return sits ABOVE that failure path."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    monkeypatch.setattr(_cmd_demo, "_run_tail_contract", lambda **_k: [])
+    assert cmd_demo(_ls_args(path=tmp_path, projects_root=Path("/nonexistent"))) == 0
+
+
+# -- ts parsing: mixed-format ledger timestamps -----------------------------
+
+
+def test_parse_tail_ts_handles_mixed_formats_without_raising() -> None:
+    second_precision = _parse_tail_ts("2026-09-09T22:21:04Z")
+    microsecond_precision = _parse_tail_ts("2026-08-27T17:36:16.292160Z")
+    naive = _parse_tail_ts("2026-01-01T00:00:00")
+    missing = _parse_tail_ts(None)
+
+    assert missing is None
+    for dt in (second_precision, microsecond_precision, naive):
+        assert dt is not None
+        assert dt.tzinfo is not None
+    # Must be comparable/sortable without TypeError (the exact crash the
+    # mixed-format ledger produces against naive fromisoformat).
+    assert sorted([second_precision, microsecond_precision, naive]) is not None
+    assert microsecond_precision < second_precision
+
+
+# -- AC4: project column comes from transcript cwd, never dir-un-mangling --
+
+
+def test_project_label_uses_transcript_cwd_not_dash_unmangling(tmp_path: Path) -> None:
+    """The exact trap the issue calls out: a real directory name can itself
+    contain dashes, so un-mangling ``~/.claude/projects/<mangled>`` by
+    replacing dashes with slashes is lossy and silently wrong. Pin a path
+    containing a dash and assert the naive derivation FAILS while the
+    cwd-based derivation succeeds.
+    """
+    session_id = "cwd-session"
+    real_cwd = "/srv/operator/local-deploys/hestia"
+    mangled_scope = "-srv-operator-local-deploys-hestia"
+    projects_root = tmp_path / "projects"
+
+    # cwd is NOT on the first few header-shaped records -- the scan must not
+    # give up after record 1.
+    records = [
+        {"sessionId": session_id, "type": "summary"},
+        {"sessionId": session_id, "type": "user", "mode": "default"},
+        {"sessionId": session_id, "type": "user", "mode": "default"},
+        {"sessionId": session_id, "type": "assistant", "cwd": real_cwd, "gitBranch": "main"},
+    ]
+    _write_transcript(projects_root / mangled_scope / f"{session_id}.jsonl", records)
+
+    label = _project_label(session_id, projects_root)
+
+    # Naive un-mangle: dash -> slash over the SCOPE DIRECTORY NAME.
+    naive = "~" + mangled_scope.replace("-", "/")
+    assert label != naive
+    assert "local-deploys/hestia" in label
+    assert "local/deploys" not in label
+
+
+def test_transcript_cwd_scans_past_header_records(tmp_path: Path) -> None:
+    """cwd is not on the first record -- an implementation that reads record
+    1 and gives up must fail this."""
+    transcript = tmp_path / "projects" / "scope" / "sess.jsonl"
+    _write_transcript(
+        transcript,
+        [
+            {"sessionId": "sess", "type": "summary"},
+            {"sessionId": "sess", "type": "user"},
+            {"sessionId": "sess", "type": "user"},
+            {"sessionId": "sess", "type": "assistant", "cwd": "/tmp/somewhere"},
+        ],
+    )
+    assert _transcript_cwd(transcript) == "/tmp/somewhere"
+
+
+def test_find_transcript_globs_by_session_id_not_scope(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    scope_dir = projects_root / "-some-mangled-scope"
+    scope_dir.mkdir(parents=True)
+    target = scope_dir / "abc-123.jsonl"
+    target.write_text("{}\n", encoding="utf-8")
+
+    assert _find_transcript("abc-123", projects_root) == target
+    assert _find_transcript("does-not-exist", projects_root) is None
+
+
+def test_shorten_home_replaces_home_prefix_only() -> None:
+    home = str(Path.home())
+    assert _shorten_home(f"{home}/Code/athenaeum") == "~/Code/athenaeum"
+    assert _shorten_home("/opt/elsewhere") == "/opt/elsewhere"
+
+
+# -- AC5: visible placeholder for a session with no findable transcript ----
+
+
+def test_project_label_placeholder_when_transcript_missing(tmp_path: Path) -> None:
+    label = _project_label("ghost-session", tmp_path / "projects")
+    assert label.strip() != ""
+    assert "no transcript found" in label
+
+
+def test_project_label_placeholder_when_cwd_never_found(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    _write_transcript(
+        projects_root / "scope" / "sess.jsonl",
+        [{"sessionId": "sess", "type": "summary"}],
+    )
+    label = _project_label("sess", projects_root)
+    assert label.strip() != ""
+    assert "cwd not found" in label
+
+
+# -- AC3: `ended` reflects a reference-determination record ----------------
+
+
+def test_aggregate_sessions_ended_reflects_reference_record() -> None:
+    records = [
+        {
+            "record_type": "push",
+            "session_id": "s1",
+            "ts": "2026-01-01T00:00:00Z",
+            "pushed_count": 3,
+        },
+        {
+            "record_type": "push",
+            "session_id": "s2",
+            "ts": "2026-01-01T00:00:01Z",
+            "pushed_count": 2,
+        },
+        {
+            "record_type": "reference",
+            "session_id": "s1",
+            "ts": "2026-01-01T00:00:02Z",
+            "pushed_count": 3,
+            "referenced_count": 1,
+        },
+    ]
+    sessions = _aggregate_sessions(records)
+    assert sessions["s1"]["ended"] is True
+    assert sessions["s2"]["ended"] is False
+    assert sessions["s1"]["rows"] == 3
+    assert sessions["s2"]["rows"] == 2
+
+
+def test_ended_set_matches_reference_record_session_ids_on_real_ledger(
+    tmp_path: Path,
+) -> None:
+    """AC3 against real data: the discriminating, ledger-drift-proof check.
+
+    From ONE ``push-metrics tail --json`` drain, the set of session ids
+    rendered ``ended=yes`` must equal the set of session ids that actually
+    carry a reference-determination record in that SAME drain -- verified
+    internally rather than against a hardcoded snapshot of a live ledger,
+    which moves between runs.
+    """
+    cache_dir = tmp_path / "cache"
+    _seed_push(cache_dir, session_id="ended-1", uid="u1", ts="2026-01-01T00:00:00Z")
+    _seed_push(cache_dir, session_id="open-1", uid="u2", ts="2026-01-01T00:00:01Z")
+    _seed_reference(
+        cache_dir,
+        session_id="ended-1",
+        pushed_ids=["u1"],
+        referenced_ids=["u1"],
+        ts="2026-01-01T00:00:02Z",
+    )
+
+    records = list(push_metrics.tail_records(cache_dir=cache_dir))
+    expected_ended = {r["session_id"] for r in records if r["record_type"] == "reference"}
+
+    sessions = _aggregate_sessions(records)
+    actual_ended = {sid for sid, info in sessions.items() if info["ended"]}
+    assert actual_ended == expected_ended
+    assert actual_ended == {"ended-1"}
+
+
+# -- AC7: never opens a ledger file directly --------------------------------
+
+
+def test_list_sessions_never_opens_ledger_files_directly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors ``test_cmd_viewer.py::test_viewer_never_opens_ledger_file_directly``:
+    patch ``open`` in THIS process to blow up ONLY on the two ledger
+    filenames, then prove the command still produces correct output --
+    possible only if the actual ledger read happens inside the
+    ``push-metrics tail --json`` subprocess this patch cannot reach. Scoped
+    to the ledger basenames (not every ``open`` call) because this command
+    legitimately opens each session's OWN transcript file in-process to read
+    ``cwd`` -- that is not a ledger and is outside the push-metrics contract.
+    """
+    cache_dir = tmp_path / "cache"
+    _seed_push(cache_dir, session_id="s1", uid="u1")
+
+    push_path = push_metrics.push_records_path(cache_dir)
+    ref_path = push_metrics.reference_records_path(cache_dir)
+    guarded_names = {push_path.name, ref_path.name}
+    real_open = builtins.open
+
+    def guarded_open(file, *args, **kwargs):
+        name = Path(file).name if isinstance(file, (str, Path)) else ""
+        if name in guarded_names:
+            raise AssertionError(
+                f"--list-sessions opened a ledger file directly: {file!r} "
+                "-- it must go through `push-metrics tail --json` instead"
+            )
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
+
+    knowledge_path = tmp_path / "knowledge"
+    knowledge_path.mkdir()
+    exit_code = cmd_list_sessions(
+        _ls_args(path=knowledge_path, cache_dir=cache_dir, projects_root=tmp_path / "projects")
+    )
+    assert exit_code == 0
+
+
+# -- AC6: empty ledger prints an explicit line, not a blank table ----------
+
+
+def test_empty_ledger_prints_explicit_line_not_blank_table(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    monkeypatch.setattr(_cmd_demo, "_run_tail_contract", lambda **_k: [])
+    exit_code = cmd_list_sessions(_ls_args(path=tmp_path))
+    assert exit_code == 0
+    err = capsys.readouterr().err
+    assert "no sessions with recall activity yet" in err
+
+
+def test_contract_failure_is_distinct_from_empty_ledger(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A probe FAILURE must not render as AC6's empty-ledger line -- the same
+    None-vs-zero discipline ``_report_rows`` already applies to a
+    single-session probe (and the exact shape of the interpreter-trap
+    gather-agent flagged: a failing subprocess must not read as \"empty\").
+    """
+
+    def _boom(**_kwargs: object):
+        raise ViewerContractError("tail exited 1: ModuleNotFoundError")
+
+    monkeypatch.setattr(_cmd_demo, "_run_tail_contract", _boom)
+    exit_code = cmd_list_sessions(_ls_args(path=tmp_path))
+    failed_err = capsys.readouterr().err
+
+    monkeypatch.setattr(_cmd_demo, "_run_tail_contract", lambda **_k: [])
+    empty_exit_code = cmd_list_sessions(_ls_args(path=tmp_path))
+    empty_err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert empty_exit_code == 0
+    assert failed_err != empty_err
+    assert "no sessions with recall activity yet" not in failed_err
+
+
+# -- AC2: ordering (newest first) + --limit ---------------------------------
+
+
+def test_sessions_ordered_newest_activity_first_and_limit_applied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    records = [
+        {
+            "record_type": "push",
+            "session_id": "old",
+            "ts": "2026-01-01T00:00:00Z",
+            "pushed_count": 1,
+        },
+        {
+            "record_type": "push",
+            "session_id": "newest",
+            "ts": "2026-01-03T00:00:00Z",
+            "pushed_count": 1,
+        },
+        {
+            "record_type": "push",
+            "session_id": "middle",
+            "ts": "2026-01-02T00:00:00Z",
+            "pushed_count": 1,
+        },
+    ]
+    monkeypatch.setattr(_cmd_demo, "_run_tail_contract", lambda **_k: records)
+    monkeypatch.setattr(_cmd_demo, "_project_label", lambda *_a, **_k: "~/proj")
+
+    exit_code = cmd_list_sessions(_ls_args(path=tmp_path, limit=2))
+    assert exit_code == 0
+
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.strip()]
+    body = lines[1:]  # drop header
+    assert len(body) == 2
+    assert body[0].startswith("newest")
+    assert body[1].startswith("middle")
+
+
+def test_cmd_list_sessions_rejects_zero_limit_from_a_hand_built_namespace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Defense in depth: a caller that builds its own ``Namespace`` and skips
+    argparse entirely (the exact shape the review finding's ``or DEFAULT``
+    idiom was silently swallowing) must still be refused, not have its ``0``
+    quietly replaced with the default list length.
+    """
+    monkeypatch.setattr(_cmd_demo, "_run_tail_contract", lambda **_k: [{"session_id": "s"}])
+    exit_code = cmd_list_sessions(_ls_args(path=tmp_path, limit=0))
+    assert exit_code == 1
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_cmd_list_sessions_rejects_negative_limit_from_a_hand_built_namespace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A negative limit must never reach ``ordered[:limit]`` -- that would
+    silently drop the MOST RECENT sessions via Python slicing rather than the
+    oldest, the opposite of what an operator asking for a short list wants.
+    """
+    monkeypatch.setattr(_cmd_demo, "_run_tail_contract", lambda **_k: [{"session_id": "s"}])
+    exit_code = cmd_list_sessions(_ls_args(path=tmp_path, limit=-5))
+    assert exit_code == 1
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_cmd_list_sessions_absent_limit_falls_through_to_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``limit=None`` (attribute absent, or explicitly ``None``) is the ONE
+    shape that legitimately falls through to the default -- distinct from an
+    explicit ``0``, which is refused rather than silently coerced.
+    """
+    monkeypatch.setattr(_cmd_demo, "_run_tail_contract", lambda **_k: [])
+    exit_code = cmd_list_sessions(_ls_args(path=tmp_path, limit=None))
+    assert exit_code == 0
+
