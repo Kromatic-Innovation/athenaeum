@@ -1,0 +1,50 @@
+# Relatedness and redundancy ground truth (issue athenaeum#1570).
+#
+# Deliberately NOT authored into the pages themselves. The whole value of the
+# Cluster A fixture is that the edges are ABSENT from the corpus: a corpus
+# that already carries them cannot tell a librarian that writes edges from one
+# that does not, in either direction.
+#
+# Loaded by ``tests.evals.corpus.load_unlinked_clusters`` /
+# ``load_redundant_clusters``; every uid here is checked against the corpus by
+# ``validate_core``, so a typo is a corpus error rather than a silent MISS.
+
+unlinked_clusters:
+  - id: quiet-handover
+    note: >-
+      One concept at three altitudes: the thing, a model OF the thing, and a
+      process EMBODYING it. Zero edges between them in the corpus as
+      committed; the three below are what a librarian that writes relatedness
+      should produce. The roles are recorded but NOT graded -- see
+      ``tests/evals/relatedness.py`` for why.
+    members:
+      - concept-quiet-handover
+      - model-handover-ladder
+      - process-shadow-fortnight
+    expected_edges:
+      - source: model-handover-ladder
+        target: concept-quiet-handover
+        role: models
+      - source: process-shadow-fortnight
+        target: concept-quiet-handover
+        role: embodies
+      - source: process-shadow-fortnight
+        target: model-handover-ladder
+        role: implements
+
+redundant_clusters:
+  - id: keelbridge
+    note: >-
+      The classic entity-split signature: a bare name, the same name with a
+      parenthetical qualifier, and an associated team page. The first two are
+      one programme written down twice and should consolidate. The team page
+      is a standing staffing arrangement that outlives the programme -- it is
+      the NEGATIVE CONTROL, and a consolidation pass that swallows it has
+      over-merged. The merge verdict itself is graded in athenaeum#1577; what
+      is graded here is the retrieval cost of the split.
+    merge:
+      - project-keelbridge
+      - project-keelbridge-rollout
+    negative_control:
+      - team-keelbridge-desk
+    probe: keelbridge_programme_scope
