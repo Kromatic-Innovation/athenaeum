@@ -39,10 +39,13 @@
 #                          misses the deterministic alias match -> still
 #                          attach. The live "name / name (qualifier)" shape.
 #   attach_source_document : the source is a DOCUMENT (a board export), not an
-#                          entity -> it is evidence FOR an entity, so it
-#                          attaches to the entity it evidences rather than
-#                          compiling as a page of its own
-#                          (docs/north-star.md 2.3)
+#                          entity -> it is evidence FOR an entity, so it must
+#                          reach that entity. A thin `type: source` page for
+#                          the document itself is fine (BY DESIGN, athenaeum#1595
+#                          -- docs/north-star.md 2.3's progressive disclosure);
+#                          the failures are a DUPLICATE ENTITY page, or the
+#                          source page landing ORPHANED (unlinked to the
+#                          entity it evidences)
 #   mint_new_entity      : NEGATIVE CONTROL -- a genuinely new entity -> mint.
 #                          Without it, "attach everything" scores perfectly,
 #                          which is the attachment analogue of merge-everything
@@ -165,13 +168,37 @@ cases:
   # A collaborative-whiteboard board export. AC6: there is no board-specific
   # parser and this case must not motivate one. The source is an ordinary raw
   # markdown file whose CONTENT happens to be a board; the librarian sees the
-  # same bytes it would see for any other note. A board is a source document
-  # (docs/north-star.md 2.3) -- evidence FOR the entity it documents, not an
-  # entity -- so the correct outcome is that it reaches Steepgate Ceramics,
-  # not that a page appears named after the board. Demotion to an uncompiled
-  # source document is irreversible, so AC4 requires it be PROPOSED: the
-  # scorer accepts either an attachment or a pending-queue proposal, and
-  # never accepts a page having vanished.
+  # same bytes it would see for any other note.
+  #
+  # Ground truth corrected by athenaeum#1595 (operator ruling, 2026-09-10):
+  # this case used to assert `max_new_pages: 0`, encoding "minting a page for
+  # a source is a failure". That is WRONG. Thin `type: source` pages are BY
+  # DESIGN -- sources get their own pages deliberately, kept thin so the
+  # source's trustworthiness can be marked and weighted later, and so the
+  # agent can go read the original via progressive disclosure
+  # (docs/north-star.md 2.3's "retained as a source document without
+  # compilation"). The failure shapes are narrower than "a new page appeared":
+  #
+  #   1. a second ENTITY page minted for Steepgate (the observed athenaeum#1595
+  #      failure: a page literally named "Steepgate" was minted, and
+  #      `policy-onboarding` was touched instead of
+  #      `attach-company-steepgate` -- wrong under BOTH the old and the
+  #      corrected ground truth), or
+  #   2. an ORPHANED source page -- legitimately `type: source`, but nothing
+  #      links it back to the entity it evidences.
+  #
+  # `mint_types_must_be` replaces the old `must_not_mint_name_substrings`
+  # list here: a thin source page may legitimately carry the board's own
+  # words in its name ("Steepgate onboarding discovery board"), so a
+  # name-substring forbid list would fail the exact behaviour this case now
+  # exists to permit. Catching the duplicate-entity failure by TYPE rather
+  # than by name is the capability athenaeum#1595 added to the grader.
+  # `source_mint_link_uid` is AC2's other half (an orphaned source page is a
+  # failure even though the page itself is legitimate), and
+  # `max_source_body_bytes` is AC3 (thinness ceiling). The ceiling is NOT
+  # sampled fresh from the live corpus here -- it is the two thin `type:
+  # source` pages athenaeum#1595 itself cites (1,100 B and 1,413 B), rounded
+  # up with headroom (~1.4x the larger sample) rather than re-measured.
   - id: board_source_attaches_to_entity
     case: C
     outcome_class: attach_source_document
@@ -195,9 +222,15 @@ cases:
 
       Dots: 4 on the recipe book, 3 on kiln quirks, 1 on booking visibility.
     expected:
-      max_new_pages: 0
+      # A thin type:source page is allowed (max was 0; the design permits
+      # exactly one -- the board's own source page). Any OTHER type minted
+      # for Steepgate (a second entity page) still fails, via
+      # mint_types_must_be rather than a name-substring guess.
+      max_new_pages: 1
+      mint_types_must_be: [source]
       touch_or_proposal_uids: [attach-company-steepgate]
-      must_not_mint_name_substrings: ["board", "discovery", "parking lot"]
+      source_mint_link_uid: attach-company-steepgate
+      max_source_body_bytes: 2000
 
   # --- Case D ---------------------------------------------------------------
   # NEGATIVE CONTROL. Nothing in the wiki is about this, so the correct answer

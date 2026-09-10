@@ -331,7 +331,8 @@ def test_attachment_case(
         f"attachment_edges={sum(len(v) for v in delta.attachment_edges.values())} "
         f"incidental_term_overlap_edges="
         f"{sum(len(v) for v in delta.incidental_edges.values())} "
-        f"queues_grown={sorted(delta.grown_queues)}"
+        f"queues_grown={sorted(delta.grown_queues)} "
+        f"proposed_uids={sorted(delta.proposed_uids)}"
     )
     eval_session.record_case(
         LAYER_ATTACHMENT,
