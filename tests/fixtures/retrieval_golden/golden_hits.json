@@ -77,12 +77,12 @@
           "name": "Acme Corp"
         },
         {
-          "filename": "entity-vendor-01.md",
-          "name": "Vendor 01"
-        },
-        {
           "filename": "entity-vendor-00.md",
           "name": "Vendor 00"
+        },
+        {
+          "filename": "entity-vendor-01.md",
+          "name": "Vendor 01"
         }
       ],
       "Jane Doe founder biography": [
@@ -91,12 +91,12 @@
           "name": "Jane Doe"
         },
         {
-          "filename": "lean-startup-method.md",
-          "name": "Lean Startup Method"
-        },
-        {
           "filename": "principle-iterate-fast.md",
           "name": "Iterate Fast"
+        },
+        {
+          "filename": "lean-startup-method.md",
+          "name": "Lean Startup Method"
         }
       ],
       "customer development four step process Steve Blank": [
@@ -109,8 +109,8 @@
           "name": "Customer Obsession"
         },
         {
-          "filename": "principle-fail-fast.md",
-          "name": "Fail Fast"
+          "filename": "project-workflow-02.md",
+          "name": "Workflow 02"
         }
       ],
       "daily standup digest quarterly summary": [
@@ -119,12 +119,12 @@
           "name": "Standup Digest"
         },
         {
-          "filename": "project-roadmap-01.md",
-          "name": "Roadmap 01"
-        },
-        {
           "filename": "project-roadmap-02.md",
           "name": "Roadmap 02"
+        },
+        {
+          "filename": "project-roadmap-01.md",
+          "name": "Roadmap 01"
         }
       ],
       "iterate fast ship weekly build measure learn loop": [
@@ -137,8 +137,8 @@
           "name": "Lean Startup Method"
         },
         {
-          "filename": "jane-doe-founder.md",
-          "name": "Jane Doe"
+          "filename": "principle-fail-fast.md",
+          "name": "Fail Fast"
         }
       ],
       "lean startup build measure learn methodology": [
