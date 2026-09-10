@@ -42,7 +42,6 @@ anything under ``~/knowledge``.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -57,6 +56,7 @@ from athenaeum.name_structure import (
 )
 from athenaeum.pending_merges import list_pending_merges, resolve_merge
 from athenaeum.search import get_backend
+from tests.conftest import init_git_repo
 from tests.evals.corpus import build_corpus, load_redundant_clusters
 
 # The ids issue athenaeum#1570 authored. Named as constants so a fixture rename
@@ -81,29 +81,6 @@ def _assert_disposable(root: Path) -> None:
     assert forbidden not in resolved.parents and resolved != forbidden, (
         f"refusing to run a mutating consolidation test against {resolved}"
     )
-
-
-def _git_init(root: Path) -> None:
-    """A real git repo around the materialized corpus.
-
-    ``resolve_merge``'s ``fold-into-existing`` path fails closed with
-    ``no_git_repo`` unless ``wiki_root`` resolves inside a repository
-    (issue athenaeum#947) — the removal must stay recoverable through plain
-    ``git revert``. That is a guarantee worth exercising rather than
-    stubbing, so the fixture supplies the repo instead of the test
-    monkeypatching the check away.
-    """
-    env = {
-        "GIT_AUTHOR_NAME": "eval",
-        "GIT_AUTHOR_EMAIL": "eval@example.invalid",
-        "GIT_COMMITTER_NAME": "eval",
-        "GIT_COMMITTER_EMAIL": "eval@example.invalid",
-        "PATH": "/usr/bin:/bin:/usr/local/bin",
-        "HOME": str(root),
-    }
-    subprocess.run(["git", "init", "-q", str(root)], check=True, env=env)
-    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, env=env)
-    subprocess.run(["git", "-C", str(root), "commit", "-qm", "corpus"], check=True, env=env)
 
 
 def _keelbridge() -> object:
@@ -387,7 +364,13 @@ def small_wiki(tmp_path: Path) -> Path:
     root = tmp_path / "small"
     wiki = build_corpus(scale=_SCALE).materialize(root)
     _assert_disposable(wiki)
-    _git_init(root)
+    # ``resolve_merge``'s fold path fails closed with ``no_git_repo`` unless
+    # ``wiki_root`` resolves inside a repository (issue athenaeum#947) -- the
+    # removal must stay recoverable through plain ``git revert``. Worth
+    # exercising rather than stubbing, and the SHARED helper is used rather
+    # than a local one so the git identity a CI runner may not have
+    # configured is set the same way every other fold fixture sets it.
+    init_git_repo(root)
     return wiki
 
 
@@ -452,10 +435,10 @@ class TestRetrievalAfterTheVerdictIsEnacted:
             if any(QUALIFIED in str(s) for s in m.get("sources", []))
         )
         result = resolve_merge(merges_path, merge_id, "approve", wiki_root=small_wiki)
-        assert result.get("ok") or result.get("status") not in {
-            "no_git_repo",
-            "target_exists",
-        }, f"fold refused: {result}"
+        # Asserted positively. "not one of these two known refusals" would
+        # also pass for a refusal nobody anticipated, and the failure would
+        # then surface as a confusing downstream assertion instead of here.
+        assert result.get("ok") is True, f"fold refused: {result}"
 
         get_backend("fts5").build_index(small_wiki, cache)
         after = _retrieved(small_wiki, probe_query)
