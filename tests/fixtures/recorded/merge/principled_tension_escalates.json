@@ -8,8 +8,14 @@
   ],
   "layer": "merge",
   "model": "claude-sonnet-5",
-  "prompt_hash": "sha256:9bb2a852be88b559f8944c68f8df674131c24853ede2586b701aa980569ba948",
+  "prompt_hash": "sha256:c01f403d06709f78f40fa3b40cf2f94b2ca0aeb0c53e23a4a8aa96d3b560454d",
   "recorded_at": "2026-08-02T18:05:28.132874+00:00",
+  "rederived": {
+    "at": "2026-09-09T23:08:01.199294+00:00",
+    "from_prompt_hash": "sha256:9bb2a852be88b559f8944c68f8df674131c24853ede2586b701aa980569ba948",
+    "rename_map_digest": "sha256:7166cc089b9aebe108b7b1f3eeeec39e91829925562f0defc92e4172dbc84625",
+    "tool": "scripts/rederive_recorded_fixture.py"
+  },
   "response_text": "ESCALATE: A partner has proposed a policy change (sharing engagement details between joint-venture-partner clients) that directly conflicts with the firm's stated core value of never disclosing one client's engagement details to another client \"under any circumstances.\" This is a principled/values-level tension, not a factual discrepancy or contextual preference, and requires human review before the page is updated.",
   "usage": {
     "cache_creation_input_tokens": 0,

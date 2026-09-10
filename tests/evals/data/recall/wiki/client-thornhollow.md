@@ -1,9 +1,9 @@
 ---
-uid: rec-client-meridian
+uid: rec-client-thornhollow
 type: company
-name: Meridian Advisory
+name: Thornhollow Advisory
 aliases:
-  - Meridian
+  - Thornhollow
 access: public
 tags:
   - client
@@ -14,8 +14,8 @@ created: 2026-04-01
 updated: 2026-04-01
 ---
 
-# Meridian Advisory
+# Thornhollow Advisory
 
-Meridian Advisory is a 12-person strategy consultancy on a monthly retainer
+Thornhollow Advisory is a 12-person strategy consultancy on a monthly retainer
 with the firm. Client lead: Priya Shah. See also the client-portal hosting
-project and the Meridian invoice-cadence exception.
+project and the Thornhollow invoice-cadence exception.

@@ -16,6 +16,6 @@ updated: 2026-05-11
 
 # Bluewater Ltd
 
-Bluewater Ltd is a Meridian sister-firm retainer. Terms verbatim: "monthly
+Bluewater Ltd is a Thornhollow sister-firm retainer. Terms verbatim: "monthly
 retainer of 12,500 GBP, 30-day termination, exclusive on marine-logistics
 strategy work." Owner: Amir Rahman. Documents in the Bluewater workspace.

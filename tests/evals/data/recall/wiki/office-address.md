@@ -17,7 +17,7 @@ updated: 2026-04-15
 
 Two mutually-exclusive undated records name the firm's office:
 
-- 14 Kingsway, WeWork floor 3
+- 14 Kingsway, Kingsway Works floor 3
 - 220 Regent Street, suite 5B
 
 Both remain on file pending disambiguation; treat neither as authoritative
