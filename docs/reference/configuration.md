@@ -1154,35 +1154,6 @@ Precedence: ``ATHENAEUM_MERGE_BODY_PREVIEW_CHARS`` env > yaml
 `_resolve_positive_int_knob` for the coercion contract (``bool`` /
 non-int / ``<= 0`` values fall through to the default).
 
-### `resolve_merge_worthiness_gate_enabled`
-
-- **YAML path:** `librarian.merge_worthiness_gate_enabled`
-- **Environment variable:** `ATHENAEUM_MERGE_WORTHINESS_GATE_ENABLED`
-- **CLI flag:** —
-- **Default:** `False`
-- **Precedence:** environment variable > `athenaeum.yaml` > code default
-
-Resolve ``librarian.merge_worthiness_gate_enabled``. DEFAULT OFF.
-
-Gates the deterministic, zero-LLM merge-worthiness containment check in
-`athenaeum.tiers.check_merge_worthiness_gate`: when armed, a
-Tier-3 update whose raw file offers no fact absent from the target
-entity's existing page is suppressed before the merge prompt is built
-or any model call is made. Checked at the call site in
-`athenaeum.tiers.tier3_derive_actions` (mirroring how
-`athenaeum.merge.merge_clusters_to_wiki` gates the reasoning-tier
-screen) so a disabled knob costs one bool call and nothing else.
-
-Mirrors `resolve_reasoning_tier_auditing_enabled`'s precedence
-contract exactly: env ``ATHENAEUM_MERGE_WORTHINESS_GATE_ENABLED``
-(``1``/``true``/``yes``/``on``, case-insensitive) > yaml
-``librarian.merge_worthiness_gate_enabled`` (bool only; non-bool falls
-through) > default ``False``. No seed in ``_DEFAULTS``. Default OFF is
-deliberate: a false suppression permanently destroys a fact (raw files
-are unlinked after processing, with no re-derivation path), so the gate
-stays opt-in until an operator turns it on — production merge behavior
-is byte-identical to today until then.
-
 ### `resolve_min_cluster_cohesion`
 
 - **YAML path:** `librarian.min_cluster_cohesion`

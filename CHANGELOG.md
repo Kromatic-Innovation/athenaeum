@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The deterministic merge-worthiness pre-check (athenaeum#1172) is deleted, not
+  disabled.** athenaeum#1251 measured it against the live corpus: it suppressed 0 of
+  28,951 candidate merge pairs (99.6% of pairs sit at zero containment because
+  compiled pages summarise raw content in prose rather than echoing it verbatim), and
+  the batched-Haiku screen it was measured against flipped its verdict on 11.36% of
+  identical re-asks — not an acceptable basis for an irreversible skip. The operator
+  decided (athenaeum#1251, 2026-09-10) to remove the gate rather than leave it
+  default-off, on the grounds that dead code shaped like a safety mechanism is worse
+  than no code at all. Removed: `athenaeum.tiers.check_merge_worthiness_gate` and its
+  call site in `tier3_derive_actions`, `athenaeum.config.resolve_merge_worthiness_gate_enabled`,
+  the `librarian.merge_worthiness_gate_enabled` / `ATHENAEUM_MERGE_WORTHINESS_GATE_ENABLED`
+  knobs, and `tests/test_merge_worthiness_gate.py`. `load_config` now logs a WARNING if a
+  stale `athenaeum.yaml` still sets the removed key, so it fails loud rather than silent.
+  No merge behavior changes — the gate shipped default-off and never suppressed a real
+  merge. The measurement's own replay methodology is unaffected: nothing in this repo
+  imported the deleted gate outside the deleted test file. ([#1582](https://github.com/Kromatic-Innovation/athenaeum/issues/1582))
+
 ### Added
 
 - Test coverage joining a **configured** extra intake root (via
