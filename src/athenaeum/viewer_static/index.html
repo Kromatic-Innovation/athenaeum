@@ -10,12 +10,16 @@
     --muted: rgb(110, 110, 116);
     --line: rgb(224, 224, 228);
     --panel: rgb(248, 248, 250);
-    /* The four states. Light green = the sidecar offered it and the session
+    /* The states. Light green = the sidecar offered it and the session
        took it. Dark green = the session followed a thread the push started.
-       Red = the session found it with no help. Plain = offered, not taken. */
+       Red = the session found it with no help. Plain = offered, not taken.
+       Hatched grey = provenance unknown (issue athenaeum#1542): the record is
+       older than the `source` key, so it is deliberately NOT coloured like
+       any state that asserts something. */
     --pushed-recalled: rgb(214, 245, 219);
     --breadcrumb: rgb(122, 178, 134);
     --pulled-cold: rgb(255, 226, 226);
+    --unknown-provenance: rgb(238, 238, 240);
   }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -47,6 +51,11 @@
   .swatch.pushed-recalled { background: var(--pushed-recalled); }
   .swatch.breadcrumb { background: var(--breadcrumb); }
   .swatch.pulled-cold { background: var(--pulled-cold); }
+  .swatch.unknown-provenance {
+    background: repeating-linear-gradient(45deg,
+      var(--unknown-provenance), var(--unknown-provenance) 3px,
+      rgb(255, 255, 255) 3px, rgb(255, 255, 255) 6px);
+  }
 
   table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
   th, td { text-align: left; padding: 0.4rem 0.6rem;
@@ -60,6 +69,14 @@
   /* Dark green needs light text to stay readable. */
   tr.breadcrumb, tr.breadcrumb .desc, tr.breadcrumb .uid { color: rgb(255, 255, 255); }
   tr.pulled-cold { background: var(--pulled-cold); }
+  /* Hatched, not a flat fill: at a glance it reads as "this row is not a
+     claim" rather than as a fifth colour-coded verdict. */
+  tr.unknown-provenance {
+    background: repeating-linear-gradient(45deg,
+      var(--unknown-provenance), var(--unknown-provenance) 5px,
+      rgb(255, 255, 255) 5px, rgb(255, 255, 255) 10px);
+    color: var(--muted);
+  }
 
   tr.page-row { cursor: pointer; }
   tr.page-row:hover { outline: 2px solid rgb(90, 140, 220); outline-offset: -2px; }
@@ -114,6 +131,8 @@
       <span><i class="swatch pushed-recalled"></i> pushed then pulled</span>
       <span><i class="swatch breadcrumb"></i> pulled via a pushed page's link</span>
       <span><i class="swatch pulled-cold"></i> pulled with no sidecar involvement</span>
+      <span><i class="swatch unknown-provenance"></i> provenance unknown &mdash; predates the
+        <code>source</code> field, not counted as a pull</span>
       <span>&mdash; click any row to open it</span>
     </div>
     <table>
@@ -138,7 +157,10 @@
       "pushed": "pushed",
       "pushed-recalled": "pushed → pulled",
       "breadcrumb": "breadcrumb",
-      "pulled-cold": "pulled cold"
+      "pulled-cold": "pulled cold",
+      // Issue athenaeum#1542. Spelled out rather than abbreviated: the whole
+      // point is that an operator must not read this row as a finding.
+      "unknown-provenance": "provenance unknown"
     };
 
     // Classes this script itself assigns to a page-row <tr> based on payload
@@ -147,7 +169,8 @@
     // applyManagedClasses() below -- see morphRows()'s docstring for why rows
     // are mutated in place rather than torn down and rebuilt on every poll.
     var MANAGED_ROW_CLASSES = [
-      "page-row", "pushed", "pushed-recalled", "breadcrumb", "pulled-cold", "in-last-turn"
+      "page-row", "pushed", "pushed-recalled", "breadcrumb", "pulled-cold",
+      "unknown-provenance", "in-last-turn"
     ];
 
     var lastGoodPayload = null;
@@ -387,6 +410,22 @@
           "determination computes, and that runs once at session end — so it " +
           "is not reflected here mid-session.";
         area.appendChild(div);
+      }
+      // Issue athenaeum#1542. Named on screen rather than left to the legend:
+      // this viewer used to report these rows as deliberate pulls, and an
+      // operator looking at an older session needs to be told, not to have to
+      // infer it from a swatch, that part of what they are seeing is a gap in
+      // the instrumentation rather than a finding about the session.
+      var unknownCount = (payload.unknown_provenance || []).length;
+      if (unknownCount > 0) {
+        var u = document.createElement("div");
+        u.className = "notice";
+        u.textContent =
+          unknownCount + " page(s) come only from push records written before " +
+          "the ledger recorded a `source`, so whether they were pushed or " +
+          "pulled is not knowable. They are shown as “provenance " +
+          "unknown” and are NOT counted as deliberate pulls.";
+        area.appendChild(u);
       }
     }
 

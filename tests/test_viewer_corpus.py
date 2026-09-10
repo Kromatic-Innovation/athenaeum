@@ -216,27 +216,65 @@ def test_sibling_surfaces_like_excluded_are_out_of_reach(tmp_path: Path) -> None
 # --------------------------------------------------------------------------
 
 
-def test_classification_covers_the_four_states() -> None:
+def test_classification_covers_every_state() -> None:
     pushed = {"p_only", "p_and_pull"}
     pulled = {"p_and_pull", "crumb", "cold"}
     crumbs = {"crumb"}
+    unknown = {"legacy"}
 
     def c(uid: str) -> str:
         return _cmd_viewer.classify(
-            uid, pushed_ids=pushed, pulled_ids=pulled, breadcrumb_ids=crumbs
+            uid,
+            pushed_ids=pushed,
+            pulled_ids=pulled,
+            breadcrumb_ids=crumbs,
+            unknown_ids=unknown,
         )
 
     assert c("p_only") == _cmd_viewer.CLASSIFICATION_PUSHED
     assert c("p_and_pull") == _cmd_viewer.CLASSIFICATION_PUSHED_RECALLED
     assert c("crumb") == _cmd_viewer.CLASSIFICATION_BREADCRUMB
     assert c("cold") == _cmd_viewer.CLASSIFICATION_PULLED_COLD
+    assert c("legacy") == _cmd_viewer.CLASSIFICATION_UNKNOWN_PROVENANCE
 
 
 def test_pushed_beats_breadcrumb() -> None:
     """Having been pushed outright is the stronger statement about a page."""
     assert (
-        _cmd_viewer.classify("x", pushed_ids={"x"}, pulled_ids=set(), breadcrumb_ids={"x"})
+        _cmd_viewer.classify(
+            "x",
+            pushed_ids={"x"},
+            pulled_ids=set(),
+            breadcrumb_ids={"x"},
+            unknown_ids=set(),
+        )
         == _cmd_viewer.CLASSIFICATION_PUSHED
+    )
+
+
+def test_unknown_provenance_beats_breadcrumb_and_cold(issue: str = "athenaeum#1542") -> None:
+    """Breadcrumb and pulled-cold are both claims that the session PULLED the
+    page. A pre-`source` record cannot support either, so unknown wins over
+    both -- but loses to `pushed`/`pulled`, which are known facts."""
+
+    def c(uid: str, **kw: object) -> str:
+        return _cmd_viewer.classify(uid, unknown_ids={"x"}, **kw)  # type: ignore[arg-type]
+
+    assert (
+        c("x", pushed_ids=set(), pulled_ids=set(), breadcrumb_ids={"x"})
+        == _cmd_viewer.CLASSIFICATION_UNKNOWN_PROVENANCE
+    )
+    assert (
+        c("x", pushed_ids=set(), pulled_ids=set(), breadcrumb_ids=set())
+        == _cmd_viewer.CLASSIFICATION_UNKNOWN_PROVENANCE
+    )
+    assert (
+        c("x", pushed_ids={"x"}, pulled_ids=set(), breadcrumb_ids=set())
+        == _cmd_viewer.CLASSIFICATION_PUSHED
+    )
+    assert (
+        c("x", pushed_ids=set(), pulled_ids={"x"}, breadcrumb_ids=set())
+        == _cmd_viewer.CLASSIFICATION_PULLED_COLD
     )
 
 
@@ -433,7 +471,12 @@ def test_last_turn_topics_not_instrumented_when_hash_does_not_match(tmp_path: Pa
 def test_last_turn_absent_when_only_deliberate_pulls(tmp_path: Path) -> None:
     payload = _cmd_viewer.shape_viewer_payload(
         session_id="s",
-        records=[{"record_type": "push", "ts": "t", "items": [{"id": "aaaaaaaa"}]}],
+        # Post-cutover ts: since athenaeum#1542 a source-less record must be
+        # newer than SOURCE_FIELD_FIRST_SEEN to count as a deliberate pull at
+        # all, which is what this test's name asserts is happening.
+        records=[
+            {"record_type": "push", "ts": "2026-09-09T10:00:00Z", "items": [{"id": "aaaaaaaa"}]}
+        ],
     )
     turn = _cmd_viewer.enrich_payload(payload, wiki_root=tmp_path / "wiki")["last_turn"]
     assert turn["present"] is False
