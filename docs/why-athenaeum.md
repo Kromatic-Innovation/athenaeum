@@ -315,7 +315,7 @@ A convention we use ourselves — and ship as an example in
 push back on something it saved, then record the edit through `remember` so
 the tuning leaves a trail. That is a habit you opt into, not something
 athenaeum enforces: the filter changes when someone changes it. It does not
-yet tune itself.
+tune itself.
 
 Between the observation filter and the librarian, important context lands in
 memory even when the agent isn't paying attention, and it lands in a form we

@@ -2765,7 +2765,7 @@ pre- behaviour. No seed in ``_DEFAULTS``.
 - **YAML path:** `spend.accounting_timezone`
 - **Environment variable:** `ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE`
 - **CLI flag:** —
-- **Default:** `zoneinfo.ZoneInfo(key='Etc/UTC')`
+- **Default:** the host's system-local timezone (see `_system_local_timezone`)
 - **Precedence:** environment variable > `athenaeum.yaml` > code default
 
 Resolve the timezone the per-day spend ceilings account against.

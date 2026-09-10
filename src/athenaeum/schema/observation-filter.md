@@ -1,10 +1,10 @@
 # Observation Filter
 
-Meta-memory: guides what the system notices and saves. This file is both
-configuration and a living document — the librarian updates it during
-consolidation when patterns emerge in incoming data, and Claude updates it
-directly when the user gives feedback about what should or shouldn't be
-captured (see **Tuning** below).
+Meta-memory: guides what the system notices and saves. This file is loaded
+read-only into the Tier-2 classify prompt; it changes only when a human (or
+an agent, on the human's behalf) edits it directly — typically when the user
+gives feedback about what should or shouldn't be captured (see **Tuning**
+below).
 
 ## Always Capture
 
@@ -56,22 +56,3 @@ Signals to watch for and how to respond:
 After editing this file, save a brief meta-observation via the `remember` tool
 (e.g., "Updated observation-filter: added 'Never Capture: stack traces' per
 user feedback") so the tuning is audit-trailed in raw/.
-
-## Decay Rules
-
-- Short-term filter items (added by the librarian from pattern detection)
-  decay after 30 days unless reinforced by new observations.
-- Items in "Always Capture" do not decay.
-- Items promoted from "Capture When Reinforced" to "Always Capture" require
-  human approval.
-
-## Pattern Detection
-
-During consolidation, the librarian analyzes the last N raw intake files
-and proposes filter additions when:
-
-- 3+ observations in the same category arrive within 7 days
-- A user explicitly says "remember X" about a topic not yet in the filter
-- A source entity accumulates 5+ citations (signals the source is important)
-
-Proposed additions are appended to `_pending_questions.md` for human review.
