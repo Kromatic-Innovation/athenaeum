@@ -37,6 +37,7 @@ from athenaeum.merge import (
     synthesize_body,
 )
 from athenaeum.models import parse_frontmatter
+from athenaeum.search import FTS5Backend
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -741,6 +742,125 @@ class TestVoltaireFixture:
         assert meta["origin_scopes"] == ["-Users-tristankromer-Code-voltaire"]
         assert isinstance(meta["sources"], list)
         assert len(meta["sources"]) == 5
+
+
+@pytest.fixture
+def fused_unrelated_merge_root(tmp_path: Path) -> Path:
+    """Two SEMANTICALLY UNRELATED memories fused into one cluster row.
+
+    Reproduces the athenaeum#1596 worked example verbatim: a librarian design
+    thesis and an unrelated "source pages are deliberate" ruling, fused at
+    the observed centroid (0.6163) into one compiled page whose synthesized
+    ``topic_slug`` matches neither member's written ``name:``.
+    """
+    knowledge_root = tmp_path / "knowledge"
+    scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-athenaeum"
+
+    # Issue athenaeum#1596: filenames are deliberately UNRELATED to either
+    # member's own written ``name:`` (below) and use only boring/short
+    # tokens (``note``, ``alpha``, ``beta``) so ``derive_topic_slug`` cannot
+    # accidentally pick up either member's real name as a token — that
+    # would let an OR-of-terms FTS5 query resolve through ranking-token
+    # leakage rather than through the ``aliases:`` fix under test (see the
+    # FTS5 test below). Descriptions are likewise kept free of the two
+    # members' name tokens for the same reason.
+    _write_am_file(
+        scope,
+        "note_alpha.md",
+        frontmatter_name="librarian-organisation-thesis",
+        description="internal note about compilation ordering",
+        origin_session_id="s-thesis",
+        origin_turn=1,
+        sources=[{"session": "s-thesis", "turn": 1, "date": "2026-09-10"}],
+        body="The librarian should compile raw intake into durable wiki pages.",
+    )
+    _write_am_file(
+        scope,
+        "note_beta.md",
+        frontmatter_name="source-pages-are-deliberate",
+        description="policy note about a page format choice",
+        origin_session_id="s-source",
+        origin_turn=1,
+        sources=[{"session": "s-source", "turn": 1, "date": "2026-09-10"}],
+        body="A thin type: source page with no elaboration is intentional.",
+    )
+
+    _write_cluster_jsonl(
+        knowledge_root,
+        [
+            {
+                "cluster_id": "Users-tristankromer-Code-athenaeum-2a79a9d5",
+                "member_paths": [
+                    "-Users-tristankromer-Code-athenaeum/note_alpha.md",
+                    "-Users-tristankromer-Code-athenaeum/note_beta.md",
+                ],
+                "centroid_score": 0.6163,
+                "rationale": "reproduces athenaeum#1596's worked example",
+            },
+        ],
+    )
+    _write_config(knowledge_root)
+    return knowledge_root
+
+
+class TestFusedClusterAddressability:
+    """Issue athenaeum#1596 AC1/AC2/AC4: a fused page must stay addressable
+    under EVERY original member name it was written under, not just its
+    synthesized ``topic_slug``.
+
+    The eval-first shape: two unrelated raw memories fuse (as they do on
+    unmodified develop, at this cluster's real centroid), and neither
+    original name may become unreachable by exact-name lookup.
+    """
+
+    def test_fusion_actually_happens_and_slug_matches_neither_member(
+        self, fused_unrelated_merge_root: Path
+    ) -> None:
+        """Sanity check the fixture reproduces the bug's precondition."""
+        entries = merge_clusters_to_wiki(fused_unrelated_merge_root)
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.topic_slug != "librarian-organisation-thesis"
+        assert entry.topic_slug != "source-pages-are-deliberate"
+
+    def test_fused_page_frontmatter_preserves_both_member_names_as_aliases(
+        self, fused_unrelated_merge_root: Path
+    ) -> None:
+        merge_clusters_to_wiki(fused_unrelated_merge_root)
+        wiki = fused_unrelated_merge_root / "wiki"
+        entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
+        aliases = meta.get("aliases") or []
+        assert "librarian-organisation-thesis" in aliases
+        assert "source-pages-are-deliberate" in aliases
+
+    def test_both_original_names_resolve_via_fts5_search(
+        self, fused_unrelated_merge_root: Path, tmp_path: Path
+    ) -> None:
+        """The binding eval: exact-name lookup must reach the fused page.
+
+        This is the assertion that FAILS on unmodified develop (the
+        compiled page carries no ``aliases:`` at all, so an FTS5 MATCH on
+        either original name returns nothing) and PASSES once
+        ``render_merged_entry`` writes them.
+        """
+        merge_clusters_to_wiki(fused_unrelated_merge_root)
+        wiki = fused_unrelated_merge_root / "wiki"
+        cache = tmp_path / "cache"
+        backend = FTS5Backend()
+        backend.build_index(wiki, cache)
+
+        for original_name in (
+            "librarian-organisation-thesis",
+            "source-pages-are-deliberate",
+        ):
+            results = backend.query(original_name, cache)
+            filenames = {r[0] for r in results}
+            assert filenames, (
+                f"exact-name query {original_name!r} returned no hits — "
+                "the fused page is unreachable under a name its author wrote"
+            )
+            assert any(f.startswith(AUTO_WIKI_PREFIX) for f in filenames)
 
 
 class TestContradictionFixture:
