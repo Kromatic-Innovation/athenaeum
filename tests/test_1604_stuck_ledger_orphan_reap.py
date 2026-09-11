@@ -18,8 +18,17 @@ because ``ctx.raw_files`` empties out before reaching that branch).
 
 Scope: read-only structural cleanup of the ledger. Does NOT touch
 ``PersonNeverLLMRewriteError``, ``type: person`` handling, or
-``src/athenaeum/tiers.py`` — that ground belongs to the concurrent
-``dijkstra/1597-remove-person-rewrite-guard`` lane.
+``src/athenaeum/tiers.py`` — that ground belonged to the concurrent
+``dijkstra/1597-remove-person-rewrite-guard`` lane, which has since
+REMOVED ``PersonNeverLLMRewriteError`` (athenaeum#1597 AC1) and added its
+own load-time drop of any ledger entry carrying that retired error name
+(:data:`athenaeum.stuck_ledger._RETIRED_LAST_ERRORS`). This file's own
+fixtures were updated accordingly: a still-workable entry that needs to
+SURVIVE a load (as opposed to :class:`TestReapOrphanedEntriesUnit`'s calls
+straight into :func:`~athenaeum.stuck_ledger.reap_orphaned_entries`, which
+never goes through that filter) must not use the literal string
+``"PersonNeverLLMRewriteError"`` as its ``last_error``, or the two lanes'
+otherwise-independent ledger changes collide — see athenaeum#1597's PR body.
 
 See the PR body for this file's RED (pre-fix) and GREEN (post-fix) output.
 """
@@ -195,9 +204,7 @@ class TestOrphanReapedOnLibrarianRun:
         root = _seed(tmp_path, workable_names=["held.md"])
 
         ledger_path = root / "wiki" / STUCK_MANIFEST_NAME
-        live_entry = _ledger_entry_for(
-            root, "relationship-stub/held.md", error="PersonNeverLLMRewriteError"
-        )
+        live_entry = _ledger_entry_for(root, "relationship-stub/held.md", error="BadRequestError")
         orphan_ref = "drive/8cd64194-gone.md"
         ledger_path.write_text(
             json.dumps(
