@@ -3885,6 +3885,28 @@ def _hold_out_unworkable_raw(ctx: "RunContext") -> tuple[int, int]:
     ledger = _load_stuck_ledger(ctx.wiki_root)
     if not ledger:
         return (0, 0)
+    # Issue athenaeum#1604: an entry whose raw file no longer exists on disk
+    # (e.g. a `drive`-sourced import never re-materialized) can never be
+    # retried -- it will never again appear in `ctx.raw_files` for any check
+    # below to reach. Reaped HERE, at the one place this function already
+    # loads the ledger unconditionally on every non-dry-run call -- including
+    # the all-stuck case where `ctx.raw_files` empties out entirely and the
+    # entity loop's OWN `_load_stuck_ledger` / `_write_stuck_ledger` pair
+    # (inside the `if ctx.raw_files: ... else:` split further down) never
+    # runs at all this run. Persisted immediately so any later re-load THIS
+    # run reads the reaped ledger fresh off disk rather than racing a stale
+    # in-memory copy this function does not share with that loop.
+    ledger, n_reaped = stuck_ledger_mod.reap_orphaned_entries(ledger, ctx.raw_root)
+    if n_reaped:
+        log.info(
+            "librarian-stuck-ledger-reap: dropped %d orphaned stuck-ledger "
+            "entr%s (raw file no longer on disk, issue athenaeum#1604)",
+            n_reaped,
+            "y" if n_reaped == 1 else "ies",
+        )
+        _write_stuck_ledger(ctx.wiki_root, ledger)
+    if not ledger:
+        return (0, 0)
     threshold = librarian_stuck_file_threshold(ctx.config)
     backoff_base = librarian_stuck_file_backoff_base_seconds(ctx.config)
     now = ctx.now if ctx.now is not None else datetime.now(timezone.utc)
