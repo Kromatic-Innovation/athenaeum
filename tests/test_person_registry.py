@@ -1,15 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the consult-only person registry (issue athenaeum#1183).
 
-Covers the acceptance criteria that remain live (AC4 — the never-a-tier-3-
-LLM-rewrite guard, ``PersonNeverLLMRewriteError`` / ``_refuse_person_rewrite``
-in ``athenaeum.tiers`` — was withdrawn by operator ruling on athenaeum#1600 and
-removed; see athenaeum#1597 AC1):
+Covers the acceptance criteria that remain live. Two of the original four
+have since been withdrawn by operator ruling, both under athenaeum#1597 AC1:
 
-1. ``type: person`` pages are withheld from :class:`~athenaeum.models.EntityIndex`'s
-   raw-text MATCHING surface (:func:`~athenaeum.tiers.tier1_programmatic_match`),
-   while every name/uid-ADDRESSED lookup keeps finding one exactly as before
-   (backward compatible with an unmigrated corpus).
+- AC4 (the never-a-tier-3-LLM-rewrite guard, ``PersonNeverLLMRewriteError`` /
+  ``_refuse_person_rewrite`` in ``athenaeum.tiers``) was withdrawn on
+  athenaeum#1600 ("LLMs ... should be rewriting everything.") and removed.
+- AC1 (``type: person`` pages withheld from
+  :class:`~athenaeum.models.EntityIndex`'s raw-text MATCHING surface) was
+  ALSO withdrawn, on the follow-on measurement that this withholding left a
+  raw mention of an already-known person with no path back to their
+  existing page once the tier-0 registry consult also missed it — minting a
+  second page instead, the exact defect a separate operator ruling names.
+  See :data:`athenaeum.models.DEMOTED_NAME_MATCH_TYPES`'s historical-note
+  comment. ``TestAC1EntityIndexPersonMatchingRestored`` below now pins the
+  OPPOSITE of the original AC1 invariant.
+
+1. Every name/uid-ADDRESSED lookup keeps finding a ``type: person`` page
+   exactly as it always has, unaffected by either withdrawal.
 2. :func:`~athenaeum.identity_resolution.resolve_person_mention` +
    :func:`~athenaeum.intake.attribute_person_observation` resolve and
    attribute a person mention via the registry when the entity index has no
@@ -108,21 +117,37 @@ class _FakeClient:
 
 
 # ---------------------------------------------------------------------------
-# AC1 — demotion out of the entity-index MATCHING surface
+# AC1 — entity-index MATCHING surface (person demotion REMOVED, athenaeum#1597
+# AC1 follow-on)
+#
+# This class used to pin the athenaeum#1183 demotion (`type: person` withheld
+# from `EntityIndex.items()`, so `tier1_programmatic_match` could never match
+# one). That demotion is REMOVED: a duplicate-entity-page measurement against
+# the live corpus (athenaeum#1597's PR body) found real cases of a person
+# already having a wiki page under a name/alias variant that only tier1
+# (not just the tier-0 registry consult) could plausibly have matched, and a
+# separate binding operator ruling names a second entity page as THE defect
+# to avoid. These tests now pin the OPPOSITE invariant: tier1 CAN match a
+# `type: person` entry again. See :data:`athenaeum.models.DEMOTED_NAME_MATCH_TYPES`'s
+# historical-note comment for the full removal rationale, and the PR body's
+# "Duplicate entity pages" section for why restoring this alone does not
+# fully close the gap on today's corpus (the tier-0 registry consult already
+# matches everything tier1 could on an unmigrated corpus, and both share the
+# same literal-substring-match limitation).
 # ---------------------------------------------------------------------------
 
 
-class TestAC1EntityIndexDemotion:
-    def test_tier1_never_matches_a_person_name(self, tmp_path: Path) -> None:
+class TestAC1EntityIndexPersonMatchingRestored:
+    def test_tier1_can_match_a_person_name_again(self, tmp_path: Path) -> None:
         wiki = tmp_path / "wiki"
         _write_person(wiki, uid="person1a", name="Alice Zhang")
         index = EntityIndex(wiki)
 
         raw = _make_raw("Had coffee with Alice Zhang yesterday.")
         matched = tier1_programmatic_match(raw, index)
-        assert "alice zhang" not in {n for n, _, _ in matched}
+        assert "alice zhang" in {n for n, _, _ in matched}
 
-    def test_items_withholds_person_but_a_sibling_type_still_matches(
+    def test_items_includes_person_alongside_a_sibling_type(
         self, tmp_path: Path
     ) -> None:
         wiki = tmp_path / "wiki"
@@ -131,7 +156,8 @@ class TestAC1EntityIndexDemotion:
         index = EntityIndex(wiki)
 
         keys = dict(index.items())
-        assert "alice zhang" not in keys
+        assert "alice zhang" in keys
+        assert keys["alice zhang"].type == "person"
         assert "widget traders" in keys
 
     def test_lookup_still_finds_a_person_by_name(self, tmp_path: Path) -> None:

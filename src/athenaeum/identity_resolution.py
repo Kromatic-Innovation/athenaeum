@@ -812,14 +812,20 @@ def match_person_mentions(
 
     The person-specific analogue of
     :func:`athenaeum.tiers.tier1_programmatic_match`, scoped to the (much
-    smaller) person-registry key set rather than the general entity index —
-    athenaeum#1183 withholds `type: person` from that index's matching
-    surface entirely (see :data:`athenaeum.models.DEMOTED_NAME_MATCH_TYPES`),
-    so tier1 itself can never find one. Deliberately does NOT apply tier1's
-    junk-name / mention-density gates: those are tuned for the general
-    wiki's broad, sometimes-noisy vocabulary; the person registry is a
-    small, curated set of real names an operator's CRM already knows about,
-    where that tuning does not earn its keep.
+    smaller) person-registry key set rather than the general entity index.
+    Historically (issue athenaeum#1183) `type: person` was withheld from
+    that index's matching surface entirely (the since-removed
+    ``DEMOTED_NAME_MATCH_TYPES`` — athenaeum#1597 AC1 follow-on), so tier1
+    could never find one; tier1 can match a person page again now.
+    This function is still called FIRST regardless (see the call site's
+    comment in ``librarian.py``'s ``process_one``): on an unmigrated
+    corpus it and tier1 match the exact same underlying data via the same
+    literal-substring mechanism, so this being cheaper (zero LLM calls) and
+    running first costs nothing tier1 could otherwise have won. Deliberately
+    does NOT apply tier1's junk-name / mention-density gates: those are
+    tuned for the general wiki's broad, sometimes-noisy vocabulary; the
+    person registry is a small, curated set of real names an operator's CRM
+    already knows about, where that tuning does not earn its keep.
 
     Each word-boundary hit is re-verified through :func:`resolve_person_mention`
     (the single source of truth for the "a same-named non-person entity is

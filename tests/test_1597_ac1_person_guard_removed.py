@@ -15,12 +15,15 @@ recorded RED (pre-fix) and GREEN (post-fix) runs.
 Scenario, chosen deliberately (see athenaeum#1597's "UNBLOCKED" comment and
 athenaeum#1600's operator ruling comment, both of which flag this as the part
 that must be MEASURED, not assumed): an ordinary free-text raw file mentions
-a person who does NOT already have a wiki page. ``DEMOTED_NAME_MATCH_TYPES``
-withholds ``type: person`` from ``EntityIndex.items()`` (unaffected, out of
-scope for this issue), so Tier 1 cannot match this name either way. Tier 2
-then classifies it as a NEW ``type: person`` entity (no ``existing_uid``),
-and Tier 3's create path is reached — this is the one path the guard removal
-alone unblocks, as distinct from an ALREADY-KNOWN person (which the tier-0
+a person who does NOT already have a wiki page. There is no existing page
+for Tier 1 or the tier-0 registry consult to match against either way, so
+this scenario is unaffected by the separate, later removal of
+``DEMOTED_NAME_MATCH_TYPES`` (see ``tests/test_person_registry.py::
+TestAC1EntityIndexPersonMatchingRestored`` and the PR body's "Duplicate
+entity pages" section for that follow-on change). Tier 2 classifies this
+mention as a NEW ``type: person`` entity (no ``existing_uid``), and Tier 3's
+create path is reached — this is the one path the guard removal alone
+unblocks, as distinct from an ALREADY-KNOWN person (which the tier-0
 ``resolve_person_mention`` / ``attribute_person_observation`` step claims
 whole and never reaches Tier 3 at all — see ``tests/test_person_registry.py::
 TestProductionRoundTrip``, unaffected by this change and still passing).

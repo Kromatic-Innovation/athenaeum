@@ -11,9 +11,13 @@ correctness and PII-blast-radius problem this module fixes.
 This module demotes ``type: person`` pages out of the general wiki-entity
 surface into a separate, consult-only registry:
 
-- :class:`athenaeum.models.EntityIndex` no longer carries a person page's
-  name/alias keys (see ``DEMOTED_NAME_MATCH_TYPES`` in that module) — so
-  :func:`~athenaeum.tiers.tier1_programmatic_match` never matches one.
+- Historically, :class:`athenaeum.models.EntityIndex` withheld a person
+  page's name/alias keys (``DEMOTED_NAME_MATCH_TYPES`` in that module,
+  since removed — athenaeum#1597 AC1 follow-on), so
+  :func:`~athenaeum.tiers.tier1_programmatic_match` could never match one.
+  It can again; see that name's historical-note comment in
+  ``athenaeum.models`` for why the demotion came out and what still keeps
+  the tier-0 consult below running first regardless.
 - Intake can still resolve and attribute a person MENTION by consulting
   :class:`PersonRegistry` directly — see
   :func:`athenaeum.identity_resolution.resolve_person_mention` and
