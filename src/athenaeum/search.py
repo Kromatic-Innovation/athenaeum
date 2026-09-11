@@ -356,6 +356,15 @@ def _extract_frontmatter_fields(text: str) -> tuple[str, str, str, str]:
         return name, tags, aliases, description
     fm = text[4:end]
     in_description = False
+    # Issue athenaeum#1596: ``tags:``/``aliases:`` written by the entity template
+    # (and, as of this issue, by a fused auto-memory page's alias list) use
+    # YAML BLOCK-list style (``aliases:`` alone, then ``- item`` lines), not
+    # the inline ``[a, b]`` style this parser previously assumed. Without
+    # this, a block-style aliases list round-trips to the empty string and
+    # the page is unreachable by the very names ``aliases:`` exists to
+    # preserve. Mirrors ``in_description``'s continuation-line handling.
+    in_tags = False
+    in_aliases = False
     for raw_line in fm.splitlines():
         # Issue athenaeum#1324: PyYAML folds a plain scalar longer than ~80
         # columns onto indented continuation lines, so a ``description:``
@@ -365,14 +374,33 @@ def _extract_frontmatter_fields(text: str) -> tuple[str, str, str, str]:
         if in_description and raw_line[:1] in (" ", "\t") and raw_line.strip():
             description = f"{description} {raw_line.strip()}"
             continue
+        stripped = raw_line.strip()
+        if (in_tags or in_aliases) and stripped.startswith("-"):
+            item = stripped[1:].strip().strip("\"'")
+            if item:
+                if in_tags:
+                    tags = f"{tags} {item}".strip()
+                else:
+                    aliases = f"{aliases} {item}".strip()
+            continue
         in_description = False
-        line = raw_line.strip()
+        in_tags = False
+        in_aliases = False
+        line = stripped
         if line.startswith("name:"):
             name = line[5:].strip().strip("\"'")
         elif line.startswith("tags:"):
-            tags = line[5:].strip().strip("[]")
+            value = line[5:].strip()
+            if value:
+                tags = value.strip("[]")
+            else:
+                in_tags = True
         elif line.startswith("aliases:"):
-            aliases = line[8:].strip().strip("[]")
+            value = line[8:].strip()
+            if value:
+                aliases = value.strip("[]")
+            else:
+                in_aliases = True
         elif line.startswith("description:"):
             description = line[12:].strip()
             in_description = True
