@@ -1432,10 +1432,11 @@ class TestTier3MergeFullEchoNoOp:
       page — this must fire even when the model ignores AC1 entirely.
 
     Every action below uses ``entity_type="company"`` (never ``person``) so
-    these tests cannot be mistaken for coverage already provided by the
-    unrelated ``_refuse_person_rewrite`` guard (issue athenaeum#1183) —
-    per the issue, 6 of the 10 affected corpus pages were company/concept/
-    tool, not person.
+    these tests stay orthogonal to person-specific behavior — per issue
+    athenaeum#1183, 6 of the 10 affected corpus pages were company/concept/
+    tool, not person. (The once-unconditional ``_refuse_person_rewrite``
+    guard on ``type: person`` full-page rewrites was withdrawn by operator
+    ruling and removed; see athenaeum#1597 AC1.)
     """
 
     def _company_action(self, observations: str = "Irrelevant observation.") -> EntityAction:

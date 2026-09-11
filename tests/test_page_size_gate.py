@@ -1617,15 +1617,16 @@ class TestDemotedNameFullPipelineReMint:
         (``cicero``) must still mint an unrelated, never-demoted name
         (``Widget Inc``) normally.
 
-        Uses ``entity_type="company"`` rather than ``"person"`` for the
-        surviving create: ``type: person`` pages are UNCONDITIONALLY refused
-        a tier-3 LLM-authored create by ``PersonNeverLLMRewriteError``
-        (issue athenaeum#1183 AC4, ``_refuse_person_rewrite`` in
-        ``athenaeum.tiers``) — a restriction that applies to every person
-        create regardless of this guard, demoted or not, so it is orthogonal
-        to what this test proves. The retired-name guard's own over-
-        suppression risk is about NAME identity, not entity TYPE, so a
-        same-run, different-type create is the faithful negative case.
+        Uses ``entity_type="company"`` rather than ``"person"`` to keep this
+        test orthogonal to person-specific behavior: the never-tier-3-rewrite
+        guard that once refused every ``type: person`` create unconditionally
+        (``PersonNeverLLMRewriteError`` / ``_refuse_person_rewrite`` in
+        ``athenaeum.tiers``, issue athenaeum#1183 AC4) was withdrawn by
+        operator ruling and removed (athenaeum#1597 AC1) — ``type: person``
+        creates now go through the same path as any other entity type. The
+        retired-name guard's own over-suppression risk is about NAME
+        identity, not entity TYPE, so a same-run, different-type create is
+        still the faithful negative case.
         """
         knowledge = tmp_path / "knowledge"
         wiki = knowledge / "wiki"

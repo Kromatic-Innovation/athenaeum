@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the consult-only person registry (issue athenaeum#1183).
 
-Covers all four acceptance criteria:
+Covers the acceptance criteria that remain live (AC4 — the never-a-tier-3-
+LLM-rewrite guard, ``PersonNeverLLMRewriteError`` / ``_refuse_person_rewrite``
+in ``athenaeum.tiers`` — was withdrawn by operator ruling on athenaeum#1600 and
+removed; see athenaeum#1597 AC1):
 
 1. ``type: person`` pages are withheld from :class:`~athenaeum.models.EntityIndex`'s
    raw-text MATCHING surface (:func:`~athenaeum.tiers.tier1_programmatic_match`),
@@ -14,9 +17,6 @@ Covers all four acceptance criteria:
 3. :func:`~athenaeum.intake.tier0_passthrough` /
    :func:`~athenaeum.librarian.tier0_handle_upsert` apply structured field
    updates to a registry person record with ZERO LLM provider calls.
-4. :func:`~athenaeum.tiers.tier3_merge` / ``tier3_merge_full`` / ``tier3_write``
-   / ``tier3_create`` refuse a ``type: person`` target before any provider
-   call.
 
 ``TestProductionRoundTrip`` drives an ordinary free-text raw file mentioning
 an EXISTING ``type: person`` page through the real ``athenaeum.librarian.run()``
@@ -40,20 +40,13 @@ import pytest
 from athenaeum.identity_resolution import resolve_person_mention
 from athenaeum.intake import attribute_person_observation, tier0_passthrough
 from athenaeum.librarian import process_one, tier0_handle_upsert
-from athenaeum.models import EntityAction, EntityIndex, RawFile
+from athenaeum.models import EntityIndex, RawFile
 from athenaeum.person_registry import (
     PersonRegistry,
     PersonRegistryEntry,
     apply_person_field_update,
 )
-from athenaeum.tiers import (
-    PersonNeverLLMRewriteError,
-    tier1_programmatic_match,
-    tier3_create,
-    tier3_merge,
-    tier3_merge_full,
-    tier3_write,
-)
+from athenaeum.tiers import tier1_programmatic_match
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -499,71 +492,6 @@ class TestAC3TierZeroNoLLM:
 
 
 # ---------------------------------------------------------------------------
-# AC4 — never a tier-3 full-page LLM rewrite
-# ---------------------------------------------------------------------------
-
-
-def _person_action(existing_uid: str | None = "person1a") -> EntityAction:
-    return EntityAction(
-        kind="update" if existing_uid else "create",
-        name="Alice Zhang",
-        entity_type="person",
-        tags=[],
-        access="internal",
-        existing_uid=existing_uid,
-        observations="Some observation about Alice.",
-    )
-
-
-class TestAC4NeverTier3Rewrite:
-    def test_tier3_merge_refuses_before_any_provider_call(self) -> None:
-        client = _FakeClient()
-        with pytest.raises(PersonNeverLLMRewriteError):
-            tier3_merge(_person_action(), "Existing body.", "sessions/raw.md", client)
-        assert client.calls == []
-
-    def test_tier3_merge_full_refuses_before_any_provider_call(self) -> None:
-        client = _FakeClient()
-        with pytest.raises(PersonNeverLLMRewriteError):
-            tier3_merge_full(_person_action(), "Existing body.", "sessions/raw.md", client)
-        assert client.calls == []
-
-    def test_tier3_create_refuses_before_any_provider_call(self) -> None:
-        client = _FakeClient()
-        action = _person_action(existing_uid=None)
-        with pytest.raises(PersonNeverLLMRewriteError):
-            tier3_create(action, "sessions/raw.md", client)
-        assert client.calls == []
-
-    def test_tier3_write_refuses_the_whole_batch_before_any_provider_call(
-        self, tmp_path: Path
-    ) -> None:
-        """A person action mixed alongside an ordinary company action must
-        refuse the WHOLE batch up front — the company action's call must
-        never fire either, proving the guard runs before any dispatch."""
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        index = EntityIndex(wiki)
-        client = _FakeClient()
-        raw = _make_raw("Something about Alice and Acme.")
-        actions = [
-            _person_action(existing_uid=None),
-            EntityAction(
-                kind="create",
-                name="Acme Corp",
-                entity_type="company",
-                tags=[],
-                access="internal",
-                existing_uid=None,
-                observations="text",
-            ),
-        ]
-        with pytest.raises(PersonNeverLLMRewriteError):
-            tier3_write(raw, actions, index, wiki, client)
-        assert client.calls == []
-
-
-# ---------------------------------------------------------------------------
 # Production round-trip — the real dispatch cascade, not process_one directly
 # ---------------------------------------------------------------------------
 
@@ -577,9 +505,8 @@ class TestProductionRoundTrip:
     wired into `process_one`'s dispatch cascade, this exact scenario was
     broken: `EntityIndex.items()` withholds `type: person` (AC1), so
     `tier1_programmatic_match` never matches the mention; tier2 then
-    classifies it as a NEW entity (no `existing_uid`); tier3_create raises
-    `PersonNeverLLMRewriteError`; the run's generic per-file exception
-    handler catches it, logs it, and moves on -- the observation is lost
+    classifies it as a NEW entity (no `existing_uid`); nothing captured the
+    observation against the existing page -- the observation is lost
     forever and the file is stuck on this corpus permanently. This class
     proves that no longer happens.
     """
