@@ -2075,14 +2075,34 @@ def process_one(
 
     # --- Tier 0 (person-registry consult): resolve + attribute a mention of
     # an EXISTING type: person record via the consult-only registry,
-    # LLM-free (issue athenaeum#1183 AC2/AC3). Runs before Tier 1 because
-    # Tier 1 (tier1_programmatic_match) no longer matches person names at
-    # all -- DEMOTED_NAME_MATCH_TYPES withholds them from
-    # EntityIndex.items() entirely -- so without this step an ordinary
-    # free-text mention of a known person would fall through to Tier 2/3,
-    # which would try to CREATE it as a new entity and hit
-    # tier3_create's PersonNeverLLMRewriteError guard (issue athenaeum#1183
-    # AC4) instead of ever attributing the observation anywhere.
+    # LLM-free (issue athenaeum#1183 AC2/AC3).
+    #
+    # Reassessed for athenaeum#1597 AC1's follow-on (tier1 restored to
+    # matching persons -- DEMOTED_NAME_MATCH_TYPES removed). This step's
+    # ORIGINAL rationale -- "runs before Tier 1 because Tier 1 no longer
+    # matches person names at all" -- is now stale: tier1 CAN match a
+    # person page again. KEPT ANYWAY, deliberately, for a measured reason,
+    # not by default: on today's UNMIGRATED corpus (person pages still
+    # living under wiki_root, pre-athenaeum#1247) this step and tier1 both
+    # match against the SAME underlying data (a person page's `name`/
+    # `aliases` fields), using the identical literal-substring mechanism
+    # (:func:`athenaeum.identity_resolution.match_person_mentions` here,
+    # :func:`athenaeum.tiers.tier1_programmatic_match` there). Measured
+    # directly against the live corpus's 305 held `PersonNeverLLMRewriteError`
+    # entries (athenaeum#1597's PR body): tier1, with the demotion removed,
+    # matched a `type: person` entry for 0 of 305 -- because every one of
+    # those 305 had ALREADY failed this exact step's equivalent-strength
+    # match test (that is WHY each became a `create` action in the first
+    # place). Since both steps require the same literal name/alias
+    # substring, tier1 restoration cannot succeed anywhere this step
+    # doesn't already, and this step is cheaper (zero LLM calls vs. a real
+    # `tier3_merge` call) for every case where it DOES succeed. Removing it
+    # would only add cost, not coverage, GIVEN today's corpus shape.
+    # Revisit if either changes: athenaeum#1247 relocates person pages out
+    # of `wiki_root` (this step's `person_registry` root and tier1's
+    # `EntityIndex` root would then diverge), or a caller ever runs the
+    # entity pipeline with `person_registry=None` (this step never engages,
+    # and tier1 restoration becomes the only remaining match path).
     #
     # Early-returns on a match, exactly like the tier-0 steps above --
     # deliberately, not incidentally: this is what lets the process_one-level

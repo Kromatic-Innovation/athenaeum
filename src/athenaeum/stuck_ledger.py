@@ -37,6 +37,24 @@ from typing import Any
 # Removed when empty.
 STUCK_MANIFEST_NAME = "_stuck_files.json"
 
+# Issue athenaeum#1597 AC1: last_error values naming an exception class that no
+# longer exists in the codebase. A ledger entry escalated against
+# ``PersonNeverLLMRewriteError`` is a permanent refusal that can never
+# recur -- the guard that raised it (``_refuse_person_rewrite`` in
+# ``athenaeum.tiers``, issue athenaeum#1183 AC4) was removed by operator
+# ruling on athenaeum#1600 ("LLMs ... should be rewriting everything. There
+# should be no prohibition there."). Dropped at LOAD time (not merely
+# ignored at read time) so every reader -- the librarian's own retry
+# decisions AND status.py's dominant-error warning surface, both of which
+# go through this one shared leaf -- sees an identical, already-cleaned
+# view with no bespoke migration code, and so the file itself is one
+# load-drop-rewrite cycle away from having the stale entries gone from
+# disk too (the librarian re-persists whatever load_stuck_ledger handed
+# it). A file dropped here is simply re-attempted on the next run, exactly
+# like a genuinely-new file -- if it fails again, it starts a fresh
+# consecutive-failure count under whatever error actually occurs now.
+_RETIRED_LAST_ERRORS = frozenset({"PersonNeverLLMRewriteError"})
+
 
 def stuck_content_hash(raw: Any) -> str:
     """Stable short hash of a raw file's content (athenaeum#663 ledger key).
@@ -59,6 +77,11 @@ def load_stuck_ledger(wiki_root: Path) -> dict[str, dict[str, Any]]:
     A corrupt ledger must never wedge a caller — a parse error is treated as
     "no stuck files known", so at worst a genuinely-stuck file gets one more
     retry (in the librarian) or is invisible to a status read, never a crash.
+
+    Issue athenaeum#1597 AC1: an entry whose ``last_error`` names a retired
+    class (:data:`_RETIRED_LAST_ERRORS`) is dropped here too — see that
+    constant's comment for why a load-time drop, not a one-off migration
+    script, is the right mechanism.
     """
     path = wiki_root / STUCK_MANIFEST_NAME
     if not path.exists():
@@ -70,11 +93,14 @@ def load_stuck_ledger(wiki_root: Path) -> dict[str, dict[str, Any]]:
     files = data.get("files") if isinstance(data, dict) else None
     if not isinstance(files, dict):
         return {}
-    # Keep only well-shaped entries; drop anything a future/older schema wrote.
+    # Keep only well-shaped entries; drop anything a future/older schema wrote,
+    # and drop any entry escalated against a now-retired error class.
     return {
         ref: entry
         for ref, entry in files.items()
-        if isinstance(entry, dict) and isinstance(entry.get("failures"), int)
+        if isinstance(entry, dict)
+        and isinstance(entry.get("failures"), int)
+        and entry.get("last_error") not in _RETIRED_LAST_ERRORS
     }
 
 

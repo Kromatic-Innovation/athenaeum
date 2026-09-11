@@ -1,8 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """athenaeum#1597: the entity phase has compiled nothing for five days because a
-by-design person-page refusal (``PersonNeverLLMRewriteError``, athenaeum#1183 AC4)
-sits in the stuck ledger unnoticed, and the resulting `all-slots-skipped`
-condition is invisible on any surface the operator reads.
+by-design person-page refusal (originally ``PersonNeverLLMRewriteError``,
+athenaeum#1183 AC4) sits in the stuck ledger unnoticed, and the resulting
+`all-slots-skipped` condition is invisible on any surface the operator reads.
+
+Naming note: the fixtures below use the placeholder error name
+``ProviderRefusalError`` rather than the historical
+``PersonNeverLLMRewriteError``. That guard and exception class were removed
+by athenaeum#1597 AC1 (operator ruling on athenaeum#1600: "LLMs ... should be
+rewriting everything. There should be no prohibition there."), so the real
+class name no longer exists in the codebase; these tests exercise the
+generic stuck-ledger/dominant-error mechanism, which is agnostic to which
+error string dominates, so the rename changes nothing about what is proven.
 
 Scope of THIS file (AC1 and AC5 are out — see the PR body):
 
@@ -29,12 +38,12 @@ Scope of THIS file (AC1 and AC5 are out — see the PR body):
   ``{"considered": 308, "held_stuck": 308, "window": 0, "stuck": 308,
   "reason": "all-slots-skipped"}`` on essentially every recent run — ALL
   308 currently-discoverable raw files are in the stuck ledger, 305 of them
-  permanently (``PersonNeverLLMRewriteError``), so the window is correctly
+  permanently (``ProviderRefusalError``), so the window is correctly
   empty. (The issue body's "14,485 considered" style daily figures are a
   SUM across ~47 runs/day of this same ~308-file count, not 14,485 distinct
   files — there is no growing set of starved NEW work; the same 308 files
   are re-counted, correctly held out, every run.) The scaled fixture here
-  (30 ``PersonNeverLLMRewriteError`` + 5 ``BadRequestError`` stuck entries,
+  (30 ``ProviderRefusalError`` + 5 ``BadRequestError`` stuck entries,
   the live ledger's ~86/14 split) demonstrates the ALREADY-SHIPPED
   behaviour at production-like proportions: new, workable intake is not
   starved by a dominant stuck set, through both doors into the window.
@@ -113,7 +122,7 @@ def _write_scaled_stuck_ledger(
 ) -> None:
     """Mark *refs* stuck with *error*, keyed on their real content hash — the
     production shape (athenaeum#1597's live ledger), scaled down. Reuses the
-    same 30 ``PersonNeverLLMRewriteError`` / 5 ``BadRequestError`` proportion
+    same 30 ``ProviderRefusalError`` / 5 ``BadRequestError`` proportion
     as ``tests/fixtures/athenaeum_1597/stuck_files_shape.json``."""
     from athenaeum.librarian import _stuck_content_hash
     from athenaeum.models import RawFile
@@ -171,7 +180,7 @@ class TestAthenaeum1322RegressionPinNotAC2Evidence:
             f"relationship-stub/{p.name}" for p in (root / "raw" / "relationship-stub").glob("*.md")
         )
         stuck_refs, workable_refs = all_refs[:35], all_refs[35:]
-        _write_scaled_stuck_ledger(root, stuck_refs[:30], error="PersonNeverLLMRewriteError")
+        _write_scaled_stuck_ledger(root, stuck_refs[:30], error="ProviderRefusalError")
         _write_scaled_stuck_ledger(root, stuck_refs[30:35], error="BadRequestError")
         assert len(workable_refs) == 4
 
@@ -210,7 +219,7 @@ class TestAthenaeum1322RegressionPinNotAC2Evidence:
             f"relationship-stub/{p.name}" for p in (root / "raw" / "relationship-stub").glob("*.md")
         )
         stuck_refs, workable_refs = all_refs[:35], all_refs[35:]
-        _write_scaled_stuck_ledger(root, stuck_refs[:30], error="PersonNeverLLMRewriteError")
+        _write_scaled_stuck_ledger(root, stuck_refs[:30], error="ProviderRefusalError")
         _write_scaled_stuck_ledger(root, stuck_refs[30:35], error="BadRequestError")
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
@@ -252,7 +261,7 @@ class TestAthenaeum1322RegressionPinNotAC2Evidence:
         all_refs = sorted(
             f"relationship-stub/{p.name}" for p in (root / "raw" / "relationship-stub").glob("*.md")
         )
-        _write_scaled_stuck_ledger(root, all_refs, error="PersonNeverLLMRewriteError")
+        _write_scaled_stuck_ledger(root, all_refs, error="ProviderRefusalError")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
 
         with caplog.at_level("INFO", logger="athenaeum.librarian"):
@@ -316,7 +325,7 @@ class TestStuckBacklogWarningOnStatus:
         # 30 of 31 pending raw files are permanently held (97%, above the 90%
         # alert ratio) — the live shape (355/358 = 99%), scaled down.
         root = self._seed_status_knowledge(
-            tmp_path, n_stuck=30, n_workable=1, error="PersonNeverLLMRewriteError"
+            tmp_path, n_stuck=30, n_workable=1, error="ProviderRefusalError"
         )
 
         info = status(root)
@@ -325,20 +334,20 @@ class TestStuckBacklogWarningOnStatus:
         warning = info["stuck_backlog_warning"]
         assert warning["considered"] == 31
         assert warning["held"] == 30
-        assert warning["dominant_error"] == "PersonNeverLLMRewriteError"
+        assert warning["dominant_error"] == "ProviderRefusalError"
         assert warning["dominant_error_count"] == 30
 
         rendered = format_status(info)
         assert "WARNING" in rendered
         assert "entity phase starved" in rendered
-        assert "PersonNeverLLMRewriteError" in rendered
+        assert "ProviderRefusalError" in rendered
         assert "30/31" in rendered
 
     def test_a_backlog_with_healthy_headroom_is_not_alarmed(self, tmp_path: Path) -> None:
         # Only 3 of 10 pending files are stuck (30%, below the 90% ratio) --
         # a genuine backlog awaiting capacity, not a starved one.
         root = self._seed_status_knowledge(
-            tmp_path, n_stuck=3, n_workable=7, error="PersonNeverLLMRewriteError"
+            tmp_path, n_stuck=3, n_workable=7, error="ProviderRefusalError"
         )
 
         info = status(root)
@@ -348,7 +357,7 @@ class TestStuckBacklogWarningOnStatus:
         assert "entity phase starved" not in rendered
 
     def test_dominant_error_is_correctly_identified_among_two(self, tmp_path: Path) -> None:
-        # AC4: BadRequestError and PersonNeverLLMRewriteError coexist in the
+        # AC4: BadRequestError and ProviderRefusalError coexist in the
         # live ledger. The WARNING must name whichever dominates, not
         # whichever sorts first / was written last.
         root = tmp_path / "knowledge"
@@ -366,7 +375,7 @@ class TestStuckBacklogWarningOnStatus:
         all_refs = sorted(f"relationship-stub/{p.name}" for p in raw.glob("*.md"))
         # 30 person-error, 5 bad-request, 1 not-yet-escalated transient — the
         # exact proportions in tests/fixtures/athenaeum_1597/stuck_files_shape.json.
-        _write_scaled_stuck_ledger(root, all_refs[:30], error="PersonNeverLLMRewriteError")
+        _write_scaled_stuck_ledger(root, all_refs[:30], error="ProviderRefusalError")
         _write_scaled_stuck_ledger(root, all_refs[30:35], error="BadRequestError")
         _write_scaled_stuck_ledger(
             root,
@@ -380,7 +389,7 @@ class TestStuckBacklogWarningOnStatus:
 
         warning = info["stuck_backlog_warning"]
         assert warning is not None
-        assert warning["dominant_error"] == "PersonNeverLLMRewriteError"
+        assert warning["dominant_error"] == "ProviderRefusalError"
         assert warning["dominant_error_count"] == 30
         # The not-yet-escalated transient failure must NOT count as held —
         # it is still retryable, unlike the two escalated errors.
@@ -432,7 +441,7 @@ class TestStuckBacklogWarningOnStatus:
 
         warning = info["stuck_backlog_warning"]
         assert warning is not None
-        assert warning["dominant_error"] == "PersonNeverLLMRewriteError"
+        assert warning["dominant_error"] == "ProviderRefusalError"
         # 35 of 36 are escalated (the fixture's 1 TransientAPIError is not).
         assert warning["held"] == 35
         assert warning["considered"] == 36

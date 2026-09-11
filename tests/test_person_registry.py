@@ -1,12 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the consult-only person registry (issue athenaeum#1183).
 
-Covers all four acceptance criteria:
+Covers the acceptance criteria that remain live. Two of the original four
+have since been withdrawn by operator ruling, both under athenaeum#1597 AC1:
 
-1. ``type: person`` pages are withheld from :class:`~athenaeum.models.EntityIndex`'s
-   raw-text MATCHING surface (:func:`~athenaeum.tiers.tier1_programmatic_match`),
-   while every name/uid-ADDRESSED lookup keeps finding one exactly as before
-   (backward compatible with an unmigrated corpus).
+- AC4 (the never-a-tier-3-LLM-rewrite guard, ``PersonNeverLLMRewriteError`` /
+  ``_refuse_person_rewrite`` in ``athenaeum.tiers``) was withdrawn on
+  athenaeum#1600 ("LLMs ... should be rewriting everything.") and removed.
+- AC1 (``type: person`` pages withheld from
+  :class:`~athenaeum.models.EntityIndex`'s raw-text MATCHING surface) was
+  ALSO withdrawn, on the follow-on measurement that this withholding left a
+  raw mention of an already-known person with no path back to their
+  existing page once the tier-0 registry consult also missed it — minting a
+  second page instead, the exact defect a separate operator ruling names.
+  See :data:`athenaeum.models.DEMOTED_NAME_MATCH_TYPES`'s historical-note
+  comment. ``TestAC1EntityIndexPersonMatchingRestored`` below now pins the
+  OPPOSITE of the original AC1 invariant.
+
+1. Every name/uid-ADDRESSED lookup keeps finding a ``type: person`` page
+   exactly as it always has, unaffected by either withdrawal.
 2. :func:`~athenaeum.identity_resolution.resolve_person_mention` +
    :func:`~athenaeum.intake.attribute_person_observation` resolve and
    attribute a person mention via the registry when the entity index has no
@@ -14,9 +26,6 @@ Covers all four acceptance criteria:
 3. :func:`~athenaeum.intake.tier0_passthrough` /
    :func:`~athenaeum.librarian.tier0_handle_upsert` apply structured field
    updates to a registry person record with ZERO LLM provider calls.
-4. :func:`~athenaeum.tiers.tier3_merge` / ``tier3_merge_full`` / ``tier3_write``
-   / ``tier3_create`` refuse a ``type: person`` target before any provider
-   call.
 
 ``TestProductionRoundTrip`` drives an ordinary free-text raw file mentioning
 an EXISTING ``type: person`` page through the real ``athenaeum.librarian.run()``
@@ -40,20 +49,13 @@ import pytest
 from athenaeum.identity_resolution import resolve_person_mention
 from athenaeum.intake import attribute_person_observation, tier0_passthrough
 from athenaeum.librarian import process_one, tier0_handle_upsert
-from athenaeum.models import EntityAction, EntityIndex, RawFile
+from athenaeum.models import EntityIndex, RawFile
 from athenaeum.person_registry import (
     PersonRegistry,
     PersonRegistryEntry,
     apply_person_field_update,
 )
-from athenaeum.tiers import (
-    PersonNeverLLMRewriteError,
-    tier1_programmatic_match,
-    tier3_create,
-    tier3_merge,
-    tier3_merge_full,
-    tier3_write,
-)
+from athenaeum.tiers import tier1_programmatic_match
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -115,21 +117,37 @@ class _FakeClient:
 
 
 # ---------------------------------------------------------------------------
-# AC1 — demotion out of the entity-index MATCHING surface
+# AC1 — entity-index MATCHING surface (person demotion REMOVED, athenaeum#1597
+# AC1 follow-on)
+#
+# This class used to pin the athenaeum#1183 demotion (`type: person` withheld
+# from `EntityIndex.items()`, so `tier1_programmatic_match` could never match
+# one). That demotion is REMOVED: a duplicate-entity-page measurement against
+# the live corpus (athenaeum#1597's PR body) found real cases of a person
+# already having a wiki page under a name/alias variant that only tier1
+# (not just the tier-0 registry consult) could plausibly have matched, and a
+# separate binding operator ruling names a second entity page as THE defect
+# to avoid. These tests now pin the OPPOSITE invariant: tier1 CAN match a
+# `type: person` entry again. See :data:`athenaeum.models.DEMOTED_NAME_MATCH_TYPES`'s
+# historical-note comment for the full removal rationale, and the PR body's
+# "Duplicate entity pages" section for why restoring this alone does not
+# fully close the gap on today's corpus (the tier-0 registry consult already
+# matches everything tier1 could on an unmigrated corpus, and both share the
+# same literal-substring-match limitation).
 # ---------------------------------------------------------------------------
 
 
-class TestAC1EntityIndexDemotion:
-    def test_tier1_never_matches_a_person_name(self, tmp_path: Path) -> None:
+class TestAC1EntityIndexPersonMatchingRestored:
+    def test_tier1_can_match_a_person_name_again(self, tmp_path: Path) -> None:
         wiki = tmp_path / "wiki"
         _write_person(wiki, uid="person1a", name="Alice Zhang")
         index = EntityIndex(wiki)
 
         raw = _make_raw("Had coffee with Alice Zhang yesterday.")
         matched = tier1_programmatic_match(raw, index)
-        assert "alice zhang" not in {n for n, _, _ in matched}
+        assert "alice zhang" in {n for n, _, _ in matched}
 
-    def test_items_withholds_person_but_a_sibling_type_still_matches(
+    def test_items_includes_person_alongside_a_sibling_type(
         self, tmp_path: Path
     ) -> None:
         wiki = tmp_path / "wiki"
@@ -138,7 +156,8 @@ class TestAC1EntityIndexDemotion:
         index = EntityIndex(wiki)
 
         keys = dict(index.items())
-        assert "alice zhang" not in keys
+        assert "alice zhang" in keys
+        assert keys["alice zhang"].type == "person"
         assert "widget traders" in keys
 
     def test_lookup_still_finds_a_person_by_name(self, tmp_path: Path) -> None:
@@ -499,71 +518,6 @@ class TestAC3TierZeroNoLLM:
 
 
 # ---------------------------------------------------------------------------
-# AC4 — never a tier-3 full-page LLM rewrite
-# ---------------------------------------------------------------------------
-
-
-def _person_action(existing_uid: str | None = "person1a") -> EntityAction:
-    return EntityAction(
-        kind="update" if existing_uid else "create",
-        name="Alice Zhang",
-        entity_type="person",
-        tags=[],
-        access="internal",
-        existing_uid=existing_uid,
-        observations="Some observation about Alice.",
-    )
-
-
-class TestAC4NeverTier3Rewrite:
-    def test_tier3_merge_refuses_before_any_provider_call(self) -> None:
-        client = _FakeClient()
-        with pytest.raises(PersonNeverLLMRewriteError):
-            tier3_merge(_person_action(), "Existing body.", "sessions/raw.md", client)
-        assert client.calls == []
-
-    def test_tier3_merge_full_refuses_before_any_provider_call(self) -> None:
-        client = _FakeClient()
-        with pytest.raises(PersonNeverLLMRewriteError):
-            tier3_merge_full(_person_action(), "Existing body.", "sessions/raw.md", client)
-        assert client.calls == []
-
-    def test_tier3_create_refuses_before_any_provider_call(self) -> None:
-        client = _FakeClient()
-        action = _person_action(existing_uid=None)
-        with pytest.raises(PersonNeverLLMRewriteError):
-            tier3_create(action, "sessions/raw.md", client)
-        assert client.calls == []
-
-    def test_tier3_write_refuses_the_whole_batch_before_any_provider_call(
-        self, tmp_path: Path
-    ) -> None:
-        """A person action mixed alongside an ordinary company action must
-        refuse the WHOLE batch up front — the company action's call must
-        never fire either, proving the guard runs before any dispatch."""
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        index = EntityIndex(wiki)
-        client = _FakeClient()
-        raw = _make_raw("Something about Alice and Acme.")
-        actions = [
-            _person_action(existing_uid=None),
-            EntityAction(
-                kind="create",
-                name="Acme Corp",
-                entity_type="company",
-                tags=[],
-                access="internal",
-                existing_uid=None,
-                observations="text",
-            ),
-        ]
-        with pytest.raises(PersonNeverLLMRewriteError):
-            tier3_write(raw, actions, index, wiki, client)
-        assert client.calls == []
-
-
-# ---------------------------------------------------------------------------
 # Production round-trip — the real dispatch cascade, not process_one directly
 # ---------------------------------------------------------------------------
 
@@ -577,9 +531,8 @@ class TestProductionRoundTrip:
     wired into `process_one`'s dispatch cascade, this exact scenario was
     broken: `EntityIndex.items()` withholds `type: person` (AC1), so
     `tier1_programmatic_match` never matches the mention; tier2 then
-    classifies it as a NEW entity (no `existing_uid`); tier3_create raises
-    `PersonNeverLLMRewriteError`; the run's generic per-file exception
-    handler catches it, logs it, and moves on -- the observation is lost
+    classifies it as a NEW entity (no `existing_uid`); nothing captured the
+    observation against the existing page -- the observation is lost
     forever and the file is stuck on this corpus permanently. This class
     proves that no longer happens.
     """

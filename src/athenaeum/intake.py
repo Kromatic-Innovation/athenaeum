@@ -1368,11 +1368,14 @@ def attribute_person_observation(
 
     Companion to :func:`athenaeum.identity_resolution.resolve_person_mention`:
     once that function resolves a raw-text mention to a
-    :class:`~athenaeum.person_registry.PersonRegistryEntry` — because the
-    mentioned person has no :class:`~athenaeum.models.EntityIndex` entry for
-    :func:`athenaeum.tiers.tier1_programmatic_match` to attribute through —
-    this is the no-LLM write that records the observation on the matched
-    record: *raw*'s body is prepended, as a dated bullet, immediately under
+    :class:`~athenaeum.person_registry.PersonRegistryEntry`, this is the
+    no-LLM write that records the observation on the matched record —
+    cheaper than, and (on today's unmigrated corpus) reaching the same
+    outcome as, a tier1 match feeding a real `tier3_merge` LLM call (see
+    the historical note on :data:`athenaeum.models.DEMOTED_NAME_MATCH_TYPES`'s
+    removal, athenaeum#1597 AC1 follow-on, for why this step still runs
+    first even though tier1 can match a person page again): *raw*'s body is
+    prepended, as a dated bullet, immediately under
     the page's ``## Notes`` heading (most-recent-first; the heading is
     created, at the end of the body, if the page does not have one yet).
     Never a full-page LLM rewrite — this function does not import an LLM

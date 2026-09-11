@@ -3129,25 +3129,44 @@ class IndexEntry(NamedTuple):
     type: str | None = None
 
 
-#: Page types withheld from :meth:`EntityIndex.items` — the raw-text
+#: Historical note (athenaeum#1597 AC1 follow-on): this used to withhold
+#: ``type: person`` pages from :meth:`EntityIndex.items` — the raw-text
 #: MENTION-matching surface :func:`athenaeum.tiers.tier1_programmatic_match`
-#: walks (issue athenaeum#1183). ``type: person`` pages are CRM-imported
-#: contact records, not wiki entities that a raw observation should be
-#: fuzzy-matched against by name. Every OTHER read/write path —
-#: :meth:`EntityIndex.lookup` (name/alias, one specific name at a time),
-#: :meth:`EntityIndex.get_by_uid`, :meth:`EntityIndex.has_entity_format`,
-#: ``__iter__``/``__len__`` — is UNAFFECTED and keeps finding a person page
-#: exactly as before: those back structured, no-LLM, name-or-uid-ADDRESSED
-#: operations (:func:`athenaeum.corrections.resolve_target`,
-#: :func:`athenaeum.tiers.validate_create_name`'s collision check, the
-#: uid-less fallback in :func:`athenaeum.librarian.tier0_handle_upsert`,
-#: :mod:`athenaeum.pii`'s excluded-read join, the handle-shaped-query
-#: resolver in :mod:`athenaeum.identity_resolution`), which this issue does
-#: not change — only raw-text mention MATCHING does. Person mentions instead
-#: resolve via the consult-only :class:`athenaeum.person_registry.PersonRegistry`
-#: (see that module and :func:`athenaeum.identity_resolution.resolve_person_mention`).
-#: Demotion only — nothing here deletes a page or a field.
-DEMOTED_NAME_MATCH_TYPES: frozenset[str] = frozenset({"person"})
+#: walks (issue athenaeum#1183). That demotion is REMOVED. The operator
+#: ruling that removed the tier-3 never-rewrite guard on athenaeum#1600
+#: ("LLMs ... should be rewriting everything. There should be no
+#: prohibition there.") also named the concrete cost of leaving this
+#: withholding in place while the guard was gone: a raw mention of an
+#: EXISTING person under a name/alias variant the tier-0 registry consult
+#: (:func:`athenaeum.identity_resolution.resolve_person_mention`) does not
+#: catch could no longer even be MATCHED by tier1 — since tier1 was the
+#: only OTHER remaining path back to that page's uid — so it fell through
+#: to tier2/tier3 as a brand-new entity and minted a SECOND page for
+#: someone who already had one. That is exactly the defect a separate,
+#: binding operator ruling names: "Thin type:source pages are BY DESIGN.
+#: The defect is a second ENTITY page or an orphaned source page."
+#:
+#: MEASURED, not assumed, whether removing this demotion alone closes that
+#: gap (athenaeum#1597's PR body has the full accounting): against the live
+#: corpus's 305 stuck ``PersonNeverLLMRewriteError`` entries, 0 of 305
+#: tier1-match a ``type: person`` page even with this demotion removed —
+#: because every one of the 305 already failed the tier-0 consult's
+#: EQUIVALENT literal-substring match over the SAME underlying data (that
+#: is WHY each became a ``create`` action rather than an ``update`` in the
+#: first place). Restoring this matching surface is still correct,
+#: low-risk infrastructure — it is real, immediate coverage for any FUTURE
+#: mention that matches an existing person's name/alias verbatim, and
+#: fixes the theoretical case (a caller running the entity pipeline with no
+#: person-registry consult at all). It does not, by itself, retroactively
+#: fix the specific mismatch shape (a decorated/short-form mention against
+#: a messy CRM-imported ``name:`` field with no clean alias) that produced
+#: most of the 305 — see :func:`athenaeum.tiers.tier1_programmatic_match`'s
+#: and :func:`athenaeum.identity_resolution.match_person_mentions`'s shared
+#: literal-substring limitation, named in the PR body as a separate,
+#: unscoped follow-up decision. :meth:`EntityIndex.lookup` (name/alias, one
+#: specific name at a time), :meth:`EntityIndex.get_by_uid`,
+#: :meth:`EntityIndex.has_entity_format`, ``__iter__``/``__len__`` were
+#: never affected by the demotion and are unaffected by its removal either.
 
 
 class EntityIndex:
@@ -3257,27 +3276,17 @@ class EntityIndex:
         Replaces direct access to ``_by_name`` from callers that need to
         walk the index (e.g. tier-based scans) — :func:`athenaeum.tiers.
         tier1_programmatic_match` is, deliberately, the ONLY caller (see its
-        module-level import). Issue athenaeum#1183: a
-        :data:`DEMOTED_NAME_MATCH_TYPES` entry (``person``) is withheld HERE,
-        at the sole matching call site, rather than at storage time — so
-        :meth:`lookup` (used by :func:`athenaeum.corrections.resolve_target`,
-        :func:`athenaeum.tiers.validate_create_name`'s collision check, and
-        the uid-less fallback in :func:`athenaeum.librarian.tier0_handle_upsert`)
-        keeps finding a person page by name/alias exactly as before —
-        those are structured, no-LLM, name-addressed operations this issue
-        does not change; only raw-text MENTION matching does. Returns a
-        generator, not a live view of ``_by_name`` — do not mutate the index
-        while iterating.
+        module-level import).
+
+        Issue athenaeum#1597 AC1 follow-on: `type: person` pages used to be
+        withheld here (issue athenaeum#1183's since-removed
+        ``DEMOTED_NAME_MATCH_TYPES`` — see that name's historical-note
+        comment above for why). They are no longer withheld: every indexed
+        key, regardless of type, is yielded. Returns a generator, not a
+        live view of ``_by_name`` — do not mutate the index while
+        iterating.
         """
-        for key, entry in self._by_name.items():
-            # getattr, not `entry.type`: a handful of existing tests poke
-            # `_by_name` directly with a bare (pre-athenaeum#1169) 2-tuple that
-            # carries no `.type` at all — `getattr(..., None)` degrades that
-            # to "not a demoted type" (unfiltered, the pre-athenaeum#1183
-            # behaviour) instead of raising AttributeError.
-            if getattr(entry, "type", None) in DEMOTED_NAME_MATCH_TYPES:
-                continue
-            yield key, entry
+        yield from self._by_name.items()
 
     def __iter__(self) -> "Iterator[str]":
         """Iterate over indexed name/alias keys."""
