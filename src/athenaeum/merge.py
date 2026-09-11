@@ -550,6 +550,29 @@ class MergedWikiEntry:
     def filename(self) -> str:
         return f"{AUTO_WIKI_PREFIX}{self.topic_slug}.md"
 
+    @property
+    def member_names(self) -> list[str]:
+        """Original per-member ``name:`` values, in member order, deduped.
+
+        Issue athenaeum#1596: ``topic_slug`` (the compiled page's own
+        ``name:``) is synthesized from token frequency across ALL member
+        filenames — for a fused cluster it matches none of the individual
+        members' written names. This property recovers the name each
+        member's author actually wrote (``AutoMemoryFile.name``, falling
+        back to the file's stem when a legacy member never carried one) so
+        :func:`render_merged_entry` can preserve them as ``aliases:``. A
+        singleton cluster's one member typically already equals
+        ``topic_slug`` — the caller filters that case out.
+        """
+        seen: set[str] = set()
+        names: list[str] = []
+        for am in self.resolved_members:
+            name = (am.name or am.path.stem).strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        return names
+
 
 # ---------------------------------------------------------------------------
 # Cluster JSONL reader
@@ -1351,6 +1374,17 @@ def render_merged_entry(entry: MergedWikiEntry) -> str:
     - When ``contradictions_detected`` is true: ``status`` is set to
       :data:`CONTRADICTION_STATUS_FLAGGED`. When false, the ``status`` key
       is OMITTED entirely (absence = clean) — see module-level comment.
+    - ``aliases``: issue athenaeum#1596. A fused cluster's own ``name`` is a
+      synthesized slug (:func:`derive_topic_slug`) that matches none of the
+      individual members' written names — the addressability harm the issue
+      describes. Every member name from :attr:`MergedWikiEntry.member_names`
+      OTHER than the chosen ``topic_slug`` itself is preserved here, so the
+      page stays findable under every name a caller originally wrote it
+      under (FTS5/keyword backends already index ``aliases:`` — see
+      ``search.py``'s ``_row_for`` / ``_extract_frontmatter_fields``).
+      Omitted entirely when empty (a singleton cluster, or a fused cluster
+      whose members all happened to share one name) — same omit-at-default
+      convention every optional field in this dict follows.
     """
     meta: dict[str, Any] = {
         "name": entry.topic_slug,
@@ -1361,6 +1395,9 @@ def render_merged_entry(entry: MergedWikiEntry) -> str:
         "origin_scopes": list(entry.origin_scopes),
         "sources": list(entry.sources),
     }
+    aliases = [n for n in entry.member_names if n != entry.topic_slug]
+    if aliases:
+        meta["aliases"] = aliases
     if entry.contradictions_detected:
         meta["status"] = CONTRADICTION_STATUS_FLAGGED
         if entry.contradiction is not None and entry.contradiction.conflict_type:
