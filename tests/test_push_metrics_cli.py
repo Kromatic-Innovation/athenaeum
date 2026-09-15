@@ -35,7 +35,12 @@ def _seed_valid_ledger(cache_dir: Path, *, session_id: str = "s1") -> None:
     over *cache_dir* has ``reference_record_count > 0`` — the CLI refuses to
     write a snapshot otherwise (issue athenaeum#795)."""
     push = push_metrics.build_push_record(
-        session_id=session_id, query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+        session_id=session_id,
+        query="q",
+        backend="fts5",
+        hits=[
+            ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b")),
+        ]
     )
     push_metrics.record_push(push, cache_dir=cache_dir)
     ref = push_metrics.ReferenceResult(
@@ -115,7 +120,12 @@ def test_baseline_exclude_session_flag(tmp_path: Path) -> None:
     """
     cache_dir = tmp_path / "cache"
     clean = push_metrics.build_push_record(
-        session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+        session_id="clean",
+        query="q",
+        backend="fts5",
+        hits=[
+            ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b")),
+        ]
     )
     push_metrics.record_push(clean, cache_dir=cache_dir)
     push_metrics.record_reference_result(
@@ -128,7 +138,12 @@ def test_baseline_exclude_session_flag(tmp_path: Path) -> None:
         cache_dir=cache_dir,
     )
     synth = push_metrics.build_push_record(
-        session_id="synth", query="q", backend="fts5", hits=[("test-page.md", None, "b")]
+        session_id="synth",
+        query="q",
+        backend="fts5",
+        hits=[
+            ("test-page.md", None, push_metrics.estimate_tokens("b")),
+        ]
     )
     push_metrics.record_push(synth, cache_dir=cache_dir)
     push_metrics.record_reference_result(
@@ -168,7 +183,12 @@ def test_baseline_exclude_session_accepts_unambiguous_prefix(tmp_path: Path) -> 
     """
     cache_dir = tmp_path / "cache"
     clean = push_metrics.build_push_record(
-        session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+        session_id="clean",
+        query="q",
+        backend="fts5",
+        hits=[
+            ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b")),
+        ]
     )
     push_metrics.record_push(clean, cache_dir=cache_dir)
     push_metrics.record_reference_result(
@@ -181,7 +201,7 @@ def test_baseline_exclude_session_accepts_unambiguous_prefix(tmp_path: Path) -> 
         session_id="d5774338-7d8b-4152-a252-248d156f95ef",
         query="q",
         backend="fts5",
-        hits=[("test-page.md", None, "b")],
+        hits=[("test-page.md", None, push_metrics.estimate_tokens("b"))],
     )
     push_metrics.record_push(synth, cache_dir=cache_dir)
     push_metrics.record_reference_result(
@@ -247,7 +267,12 @@ def test_baseline_exclude_session_ambiguous_prefix_is_a_loud_failure(tmp_path: P
     for sid in ("synth-a", "synth-b"):
         push_metrics.record_push(
             push_metrics.build_push_record(
-                session_id=sid, query="q", backend="fts5", hits=[("f.md", {"uid": sid}, "b")]
+                session_id=sid,
+                query="q",
+                backend="fts5",
+                hits=[
+                    ("f.md", {"uid": sid}, push_metrics.estimate_tokens("b")),
+                ]
             ),
             cache_dir=cache_dir,
         )
@@ -405,7 +430,12 @@ def test_baseline_default_docs_path_not_written_for_invalid_baseline(
 def test_coverage_audit_writes_worksheet_file(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     rec = push_metrics.build_push_record(
-        session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "body")]
+        session_id="s1",
+        query="q",
+        backend="fts5",
+        hits=[
+            ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("body")),
+        ]
     )
     push_metrics.record_push(rec, cache_dir=cache_dir)
 
@@ -434,7 +464,12 @@ def test_coverage_audit_writes_worksheet_file(tmp_path: Path) -> None:
 def test_coverage_audit_json_stdout(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     rec = push_metrics.build_push_record(
-        session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "body")]
+        session_id="s1",
+        query="q",
+        backend="fts5",
+        hits=[
+            ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("body")),
+        ]
     )
     push_metrics.record_push(rec, cache_dir=cache_dir)
     rc, out = _run(
@@ -464,11 +499,21 @@ def test_coverage_audit_exclude_session_flag(tmp_path: Path) -> None:
     """
     cache_dir = tmp_path / "cache"
     clean = push_metrics.build_push_record(
-        session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+        session_id="clean",
+        query="q",
+        backend="fts5",
+        hits=[
+            ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b")),
+        ]
     )
     push_metrics.record_push(clean, cache_dir=cache_dir)
     synth = push_metrics.build_push_record(
-        session_id="synth", query="q", backend="fts5", hits=[("test-page.md", None, "b")]
+        session_id="synth",
+        query="q",
+        backend="fts5",
+        hits=[
+            ("test-page.md", None, push_metrics.estimate_tokens("b")),
+        ]
     )
     push_metrics.record_push(synth, cache_dir=cache_dir)
 
@@ -503,14 +548,19 @@ def test_coverage_audit_exclude_session_accepts_unambiguous_prefix(tmp_path: Pat
     """
     cache_dir = tmp_path / "cache"
     clean = push_metrics.build_push_record(
-        session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+        session_id="clean",
+        query="q",
+        backend="fts5",
+        hits=[
+            ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b")),
+        ]
     )
     push_metrics.record_push(clean, cache_dir=cache_dir)
     synth = push_metrics.build_push_record(
         session_id="d5774338-7d8b-4152-a252-248d156f95ef",
         query="q",
         backend="fts5",
-        hits=[("test-page.md", None, "b")],
+        hits=[("test-page.md", None, push_metrics.estimate_tokens("b"))],
     )
     push_metrics.record_push(synth, cache_dir=cache_dir)
 
@@ -546,7 +596,12 @@ def test_coverage_audit_exclude_session_no_match_is_a_loud_failure(tmp_path: Pat
     cache_dir = tmp_path / "cache"
     push_metrics.record_push(
         push_metrics.build_push_record(
-            session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+            session_id="s1",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b")),
+            ]
         ),
         cache_dir=cache_dir,
     )
@@ -580,7 +635,12 @@ def test_coverage_audit_exclude_session_ambiguous_prefix_is_a_loud_failure(tmp_p
     for sid in ("synth-a", "synth-b"):
         push_metrics.record_push(
             push_metrics.build_push_record(
-                session_id=sid, query="q", backend="fts5", hits=[("f.md", {"uid": sid}, "b")]
+                session_id=sid,
+                query="q",
+                backend="fts5",
+                hits=[
+                    ("f.md", {"uid": sid}, push_metrics.estimate_tokens("b")),
+                ]
             ),
             cache_dir=cache_dir,
         )
@@ -629,7 +689,7 @@ def test_liveness_fail_exits_nonzero(tmp_path: Path) -> None:
                 session_id=f"s{i}",
                 query="q",
                 backend="fts5",
-                hits=[("f.md", {"uid": f"u{i}"}, "b")],
+                hits=[("f.md", {"uid": f"u{i}"}, push_metrics.estimate_tokens("b"))],
             ),
             cache_dir=cache_dir,
         )
@@ -650,12 +710,17 @@ def test_liveness_pass_exits_zero(tmp_path: Path) -> None:
                 session_id=f"s{i}",
                 query="q",
                 backend="fts5",
-                hits=[("f.md", {"uid": f"u{i}"}, "b")],
+                hits=[("f.md", {"uid": f"u{i}"}, push_metrics.estimate_tokens("b"))],
             ),
             cache_dir=cache_dir,
         )
     sidecar_record = push_metrics.build_push_record(
-        session_id="s-sidecar", query="q", backend="fts5", hits=[("f.md", {"uid": "u-sc"}, "b")]
+        session_id="s-sidecar",
+        query="q",
+        backend="fts5",
+        hits=[
+            ("f.md", {"uid": "u-sc"}, push_metrics.estimate_tokens("b")),
+        ]
     )
     sidecar_record.source = "sidecar"
     push_metrics.record_push(sidecar_record, cache_dir=cache_dir)
@@ -676,7 +741,7 @@ def test_liveness_text_output_names_next_step_on_fail(tmp_path: Path) -> None:
                 session_id=f"s{i}",
                 query="q",
                 backend="fts5",
-                hits=[("f.md", {"uid": f"u{i}"}, "b")],
+                hits=[("f.md", {"uid": f"u{i}"}, push_metrics.estimate_tokens("b"))],
             ),
             cache_dir=cache_dir,
         )
@@ -1105,7 +1170,13 @@ def _seed_push(cache_dir: Path, *, session_id: str, uid: str, source: str = "") 
         session_id=session_id,
         query="q",
         backend="fts5",
-        hits=[(f"{uid}.md", {"uid": uid, "access": "internal", "audience": ["owner"]}, "body")],
+        hits=[
+            (
+                f"{uid}.md",
+                {"uid": uid, "access": "internal", "audience": ["owner"]},
+                push_metrics.estimate_tokens("body"),
+            ),
+        ],
     )
     if source:
         record.source = source

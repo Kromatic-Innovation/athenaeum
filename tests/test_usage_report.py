@@ -28,12 +28,20 @@ def _seed_ledgers(cache_dir: Path) -> None:
         session_id="s1",
         query="q1",
         backend="fts5",
-        hits=[("f.md", {"uid": "a"}, "snip"), ("g.md", {"uid": "b"}, "snip")],
+        hits=[
+            ("f.md", {"uid": "a"}, push_metrics.estimate_tokens("snip")),
+            ("g.md", {"uid": "b"}, push_metrics.estimate_tokens("snip")),
+        ],
     )
     push_metrics.record_push(push_rec_1, cache_dir=cache_dir)
 
     push_rec_2 = push_metrics.build_push_record(
-        session_id="s2", query="q2", backend="fts5", hits=[("f.md", {"uid": "a"}, "snip")]
+        session_id="s2",
+        query="q2",
+        backend="fts5",
+        hits=[
+            ("f.md", {"uid": "a"}, push_metrics.estimate_tokens("snip")),
+        ]
     )
     push_metrics.record_push(push_rec_2, cache_dir=cache_dir)
 

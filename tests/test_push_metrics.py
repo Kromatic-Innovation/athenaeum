@@ -232,7 +232,13 @@ class TestBuildPushRecordRedaction:
             session_id="sess-1",
             query="what is jane doe's phone number",
             backend="fts5",
-            hits=[("abc12345-jane-doe.md", fm, "Jane Doe's phone is 555-1234")],
+            hits=[
+                (
+                    "abc12345-jane-doe.md",
+                    fm,
+                    push_metrics.estimate_tokens("Jane Doe's phone is 555-1234"),
+                ),
+            ],
         )
         blob = json.dumps(record.to_dict()).lower()
         assert "jane" not in blob
@@ -261,7 +267,7 @@ class TestBuildPushRecordRedaction:
             session_id="sess-9",
             query="q",
             backend="fts5",
-            hits=[("x1-thing.md", fm, "some body text here")],
+            hits=[("x1-thing.md", fm, push_metrics.estimate_tokens("some body text here"))],
         )
         d = record.to_dict()
         for key in (
@@ -301,7 +307,7 @@ class TestBuildPushRecordMemoryTier:
             session_id="sess-mt",
             query="q",
             backend="fts5",
-            hits=[("p1-page.md", fm, "some body text")],
+            hits=[("p1-page.md", fm, push_metrics.estimate_tokens("some body text"))],
         )
         item = record.to_dict()["items"][0]
         assert "memory_tier" not in item
@@ -319,7 +325,7 @@ class TestBuildPushRecordMemoryTier:
                 session_id="sess-mt2",
                 query="q",
                 backend="fts5",
-                hits=[("p2-page.md", {"uid": "p2"}, "body")],
+                hits=[("p2-page.md", {"uid": "p2"}, push_metrics.estimate_tokens("body"))],
                 memory_tier_by_filename={"p2-page.md": "hot"},  # type: ignore[call-arg]
             )
 
@@ -386,7 +392,7 @@ class TestRecordPush:
             session_id="s1",
             query="q",
             backend="fts5",
-            hits=[("f.md", {"uid": "u1"}, "body")],
+            hits=[("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("body"))],
         )
         assert push_metrics.record_push(record, cache_dir=tmp_path) is True
         rows = push_metrics.read_push_records(cache_dir=tmp_path)
@@ -395,7 +401,12 @@ class TestRecordPush:
 
     def test_noop_when_disabled(self, tmp_path: Path) -> None:
         record = push_metrics.build_push_record(
-            session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+            session_id="s1",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         ok = push_metrics.record_push(
             record, cache_dir=tmp_path, config={"push_metrics": {"enabled": False}}
@@ -405,7 +416,12 @@ class TestRecordPush:
 
     def test_noop_when_no_session_id(self, tmp_path: Path) -> None:
         record = push_metrics.build_push_record(
-            session_id="", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+            session_id="",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         assert push_metrics.record_push(record, cache_dir=tmp_path) is False
 
@@ -421,7 +437,13 @@ class TestRecordPush:
             session_id="s1",
             query="jane doe personal cell number, project moonshot budget",
             backend="fts5",
-            hits=[("f.md", {"uid": "u1"}, "body text nobody should see")],
+            hits=[
+                (
+                    "f.md",
+                    {"uid": "u1"},
+                    push_metrics.estimate_tokens("body text nobody should see"),
+                ),
+            ],
         )
         assert push_metrics.record_push(record, cache_dir=tmp_path) is True
 
@@ -445,7 +467,12 @@ class TestRecordPush:
         path = push_metrics.push_records_path(tmp_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         good = push_metrics.build_push_record(
-            session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+            session_id="s1",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b")),
+            ]
         ).to_dict()
         path.write_text(json.dumps(good) + "\n" + '{"broken json')
         rows = push_metrics.read_push_records(cache_dir=tmp_path)
@@ -489,7 +516,7 @@ class TestRecordHookPush:
             session_id="sess-1",
             query="q",
             backend="fts5",
-            hits=[("abc12345-page.md", {"uid": "abc12345"}, "body")],
+            hits=[("abc12345-page.md", {"uid": "abc12345"}, push_metrics.estimate_tokens("body"))],
         )
         recall_dict = recall_record.to_dict()
 
@@ -544,7 +571,12 @@ class TestRecordHookPush:
         case, not `recall` by elimination."""
         push_metrics.record_hook_push("hook-sess", ["a"], cache_dir=tmp_path)
         recall_record = push_metrics.build_push_record(
-            session_id="recall-sess", query="q", backend="fts5", hits=[("b.md", {"uid": "b"}, "x")]
+            session_id="recall-sess",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("b.md", {"uid": "b"}, push_metrics.estimate_tokens("x")),
+            ]
         )
         push_metrics.record_push(recall_record, cache_dir=tmp_path)
         sidecar_record = push_metrics.PushRecord(
@@ -656,7 +688,7 @@ class TestDetermineReferences:
             session_id="sess-a",
             query="q",
             backend="fts5",
-            hits=[("f.md", {"uid": "abc12345"}, "body")],
+            hits=[("f.md", {"uid": "abc12345"}, push_metrics.estimate_tokens("body"))],
         )
         push_metrics.record_push(record, cache_dir=cache)
 
@@ -699,7 +731,7 @@ class TestDetermineReferences:
             session_id="sess-b",
             query="q",
             backend="fts5",
-            hits=[("f.md", {"uid": "toolid99"}, "body")],
+            hits=[("f.md", {"uid": "toolid99"}, push_metrics.estimate_tokens("body"))],
         )
         push_metrics.record_push(record, cache_dir=cache)
 
@@ -736,7 +768,7 @@ class TestDetermineReferences:
             session_id="sess-c",
             query="q",
             backend="fts5",
-            hits=[("f.md", {"uid": "neverused"}, "body")],
+            hits=[("f.md", {"uid": "neverused"}, push_metrics.estimate_tokens("body"))],
         )
         push_metrics.record_push(record, cache_dir=cache)
 
@@ -768,7 +800,7 @@ class TestDetermineReferences:
             session_id="sess-d",
             query="q",
             backend="fts5",
-            hits=[("f.md", {"uid": "x"}, "body")],
+            hits=[("f.md", {"uid": "x"}, push_metrics.estimate_tokens("body"))],
         )
         push_metrics.record_push(record, cache_dir=cache)
         projects_root = tmp_path / "projects"
@@ -783,7 +815,12 @@ class TestRunReferenceDetermination:
     def test_noop_when_disabled(self, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         record = push_metrics.build_push_record(
-            session_id="sess-e", query="q", backend="fts5", hits=[("f.md", {"uid": "x"}, "b")]
+            session_id="sess-e",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "x"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         push_metrics.record_push(record, cache_dir=cache)
         result = push_metrics.run_reference_determination(
@@ -797,7 +834,12 @@ class TestRunReferenceDetermination:
     def test_writes_reference_record_when_enabled(self, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         record = push_metrics.build_push_record(
-            session_id="sess-f", query="q", backend="fts5", hits=[("f.md", {"uid": "refid"}, "b")]
+            session_id="sess-f",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "refid"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         push_metrics.record_push(record, cache_dir=cache)
 
@@ -843,7 +885,7 @@ class TestReferenceContentSignal:
                 session_id=session,
                 query="q",
                 backend="fts5",
-                hits=[(f"{uid}-{slug}.md", {"uid": uid}, page_body)],
+                hits=[(f"{uid}-{slug}.md", {"uid": uid}, push_metrics.estimate_tokens(page_body))],
             ),
             cache_dir=cache,
         )
@@ -1134,7 +1176,12 @@ class TestReferenceDeterminationStatus:
     ) -> tuple[Path, Path]:
         cache = tmp_path / "cache"
         record = push_metrics.build_push_record(
-            session_id=session, query="q", backend="fts5", hits=[("f.md", {"uid": uid}, "body")]
+            session_id=session,
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": uid}, push_metrics.estimate_tokens("body")),
+            ]
         )
         push_metrics.record_push(record, cache_dir=cache)
         projects_root = tmp_path / "projects"
@@ -1284,7 +1331,12 @@ class TestDetermineReferencesReason:
         ) == (None, push_metrics.REFERENCE_REASON_NO_PUSH_RECORDS)
 
         record = push_metrics.build_push_record(
-            session_id="sess-rsn", query="q", backend="fts5", hits=[("f.md", {"uid": "u"}, "b")]
+            session_id="sess-rsn",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "u"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         push_metrics.record_push(record, cache_dir=cache)
         projects_root = tmp_path / "projects"
@@ -1327,7 +1379,12 @@ class TestComputeBaseline:
         push_metrics.record_reference_result(r1, cache_dir=cache)
         push_metrics.record_reference_result(r2, cache_dir=cache)
         push_rec = push_metrics.build_push_record(
-            session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "a"}, "b")]
+            session_id="s1",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "a"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         push_metrics.record_push(push_rec, cache_dir=cache)
 
@@ -1371,7 +1428,7 @@ class TestComputeBaselineExcludeSessions:
             session_id="clean-session",
             query="q",
             backend="fts5",
-            hits=[("f.md", {"uid": "a1b2c3d4"}, "clean body")],
+            hits=[("f.md", {"uid": "a1b2c3d4"}, push_metrics.estimate_tokens("clean body"))],
         )
         push_metrics.record_push(clean_push, cache_dir=cache)
         clean_ref = push_metrics.ReferenceResult(
@@ -1386,7 +1443,7 @@ class TestComputeBaselineExcludeSessions:
             session_id="synth-session",
             query="q",
             backend="fts5",
-            hits=[("test-page.md", None, "fixture body")],
+            hits=[("test-page.md", None, push_metrics.estimate_tokens("fixture body"))],
         )
         push_metrics.record_push(synth_push, cache_dir=cache)
         synth_ref = push_metrics.ReferenceResult(
@@ -1467,7 +1524,7 @@ class TestComputeBaselineExcludeSessions:
                 session_id=extra_sid,
                 query="q",
                 backend="fts5",
-                hits=[("f2.md", {"uid": extra_uid}, "b")],
+                hits=[("f2.md", {"uid": extra_uid}, push_metrics.estimate_tokens("b"))],
             )
             push_metrics.record_push(extra_push, cache_dir=cache)
         with pytest.raises(ValueError, match="ambiguous"):
@@ -1496,7 +1553,7 @@ class TestWriteSnapshot:
             session_id=session_id,
             query="q",
             backend="fts5",
-            hits=[("f.md", {"uid": "u1"}, "b")],
+            hits=[("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b"))],
         )
         push_metrics.record_push(push, cache_dir=cache)
         ref = push_metrics.ReferenceResult(
@@ -1573,7 +1630,7 @@ class TestCoverageWorksheet:
                 session_id=f"s{i}",
                 query="q",
                 backend="fts5",
-                hits=[("f.md", {"uid": f"u{i}"}, "b")],
+                hits=[("f.md", {"uid": f"u{i}"}, push_metrics.estimate_tokens("b"))],
             )
             push_metrics.record_push(rec, cache_dir=cache)
         ws = push_metrics.build_coverage_worksheet(
@@ -1585,10 +1642,20 @@ class TestCoverageWorksheet:
     def test_candidates_exclude_own_pushed_set(self, tmp_path: Path) -> None:
         cache = tmp_path
         rec1 = push_metrics.build_push_record(
-            session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "pushed1"}, "b")]
+            session_id="s1",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "pushed1"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         rec2 = push_metrics.build_push_record(
-            session_id="s2", query="q", backend="fts5", hits=[("f.md", {"uid": "other2"}, "b")]
+            session_id="s2",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "other2"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         push_metrics.record_push(rec1, cache_dir=cache)
         push_metrics.record_push(rec2, cache_dir=cache)
@@ -1609,10 +1676,20 @@ class TestCoverageWorksheet:
         """
         cache = tmp_path
         rec1 = push_metrics.build_push_record(
-            session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "a"}, "b")]
+            session_id="s1",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "a"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         rec2 = push_metrics.build_push_record(
-            session_id="s2", query="q", backend="fts5", hits=[("f.md", {"uid": "b"}, "b")]
+            session_id="s2",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "b"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         push_metrics.record_push(rec1, cache_dir=cache)
         push_metrics.record_push(rec2, cache_dir=cache)
@@ -1666,7 +1743,13 @@ class TestCoverageWorksheet:
                 session_id=sid,
                 query="q",
                 backend="fts5",
-                hits=[(f"f{i}.md", {"uid": f"u{i}", "access": "internal"}, "b")],
+                hits=[
+                    (
+                        f"f{i}.md",
+                        {"uid": f"u{i}", "access": "internal"},
+                        push_metrics.estimate_tokens("b"),
+                    ),
+                ],
             )
             push_metrics.record_push(rec, cache_dir=cache)
 
@@ -1685,13 +1768,21 @@ class TestCoverageWorksheet:
             session_id="s1",
             query="q",
             backend="fts5",
-            hits=[("f.md", {"uid": "secret1", "access": "secret"}, "b")],
+            hits=[
+                ("f.md", {"uid": "secret1", "access": "secret"}, push_metrics.estimate_tokens("b")),
+            ],
         )
         rec2 = push_metrics.build_push_record(
             session_id="s2",
             query="q",
             backend="fts5",
-            hits=[("f.md", {"uid": "internal2", "access": "internal"}, "b")],
+            hits=[
+                (
+                    "f.md",
+                    {"uid": "internal2", "access": "internal"},
+                    push_metrics.estimate_tokens("b"),
+                ),
+            ],
         )
         push_metrics.record_push(rec1, cache_dir=cache)
         push_metrics.record_push(rec2, cache_dir=cache)
@@ -1706,7 +1797,12 @@ class TestCoverageWorksheet:
     def test_write_coverage_worksheet_is_a_file_not_console_only(self, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         rec = push_metrics.build_push_record(
-            session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "a"}, "b")]
+            session_id="s1",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "a"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         push_metrics.record_push(rec, cache_dir=cache)
         ws = push_metrics.build_coverage_worksheet(
@@ -1730,7 +1826,12 @@ class TestCoverageWorksheet:
         for i, sid in enumerate(["s1", "s2", "s3"]):
             pid = f"id{i}"
             rec = push_metrics.build_push_record(
-                session_id=sid, query="q", backend="fts5", hits=[("f.md", {"uid": pid}, "b")]
+                session_id=sid,
+                query="q",
+                backend="fts5",
+                hits=[
+                    ("f.md", {"uid": pid}, push_metrics.estimate_tokens("b")),
+                ]
             )
             push_metrics.record_push(rec, cache_dir=cache)
             ids[sid] = pid
@@ -1756,19 +1857,29 @@ class TestCoverageWorksheet:
             session_id="s1",
             query="q",
             backend="fts5",
-            hits=[("f.md", {"uid": "secret1", "access": "secret"}, "b")],
+            hits=[
+                ("f.md", {"uid": "secret1", "access": "secret"}, push_metrics.estimate_tokens("b")),
+            ],
         )
         rec2 = push_metrics.build_push_record(
             session_id="s2",
             query="q",
             backend="fts5",
-            hits=[("f.md", {"uid": "internal2", "access": "internal"}, "b")],
+            hits=[
+                (
+                    "f.md",
+                    {"uid": "internal2", "access": "internal"},
+                    push_metrics.estimate_tokens("b"),
+                ),
+            ],
         )
         rec3 = push_metrics.build_push_record(
             session_id="s3",
             query="q",
             backend="fts5",
-            hits=[("f.md", {"uid": "secret3", "access": "secret"}, "b")],
+            hits=[
+                ("f.md", {"uid": "secret3", "access": "secret"}, push_metrics.estimate_tokens("b")),
+            ],
         )
         for rec in (rec1, rec2, rec3):
             push_metrics.record_push(rec, cache_dir=cache)
@@ -1791,7 +1902,10 @@ class TestCoverageWorksheet:
         n_sessions = 60
         items_per_session = 5
         for i in range(n_sessions):
-            hits = [(f"f{i}_{j}.md", {"uid": f"u{i}_{j}"}, "b") for j in range(items_per_session)]
+            hits = [
+                (f"f{i}_{j}.md", {"uid": f"u{i}_{j}"}, push_metrics.estimate_tokens("b"))
+                for j in range(items_per_session)
+            ]
             rec = push_metrics.build_push_record(
                 session_id=f"sess{i}", query="q", backend="fts5", hits=hits
             )
@@ -1816,10 +1930,20 @@ class TestCoverageWorksheet:
         """
         cache = tmp_path
         rec1 = push_metrics.build_push_record(
-            session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "p1"}, "b")]
+            session_id="s1",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "p1"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         rec2 = push_metrics.build_push_record(
-            session_id="s2", query="q", backend="fts5", hits=[("f.md", {"uid": "p2"}, "b")]
+            session_id="s2",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "p2"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         push_metrics.record_push(rec1, cache_dir=cache)
         push_metrics.record_push(rec2, cache_dir=cache)
@@ -1849,13 +1973,18 @@ class TestCoverageWorksheet:
         """
         cache = tmp_path
         clean = push_metrics.build_push_record(
-            session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+            session_id="clean",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         synth = push_metrics.build_push_record(
             session_id="synth",
             query="q",
             backend="fts5",
-            hits=[("test-page.md", None, "b")],
+            hits=[("test-page.md", None, push_metrics.estimate_tokens("b"))],
         )
         push_metrics.record_push(clean, cache_dir=cache)
         push_metrics.record_push(synth, cache_dir=cache)
@@ -1878,7 +2007,12 @@ class TestCoverageWorksheet:
         """
         cache = tmp_path
         rec = push_metrics.build_push_record(
-            session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+            session_id="s1",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         push_metrics.record_push(rec, cache_dir=cache)
 
@@ -1897,13 +2031,18 @@ class TestCoverageWorksheet:
         """
         cache = tmp_path
         clean = push_metrics.build_push_record(
-            session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+            session_id="clean",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         synth = push_metrics.build_push_record(
             session_id="d5774338-7d8b-4152-a252-248d156f95ef",
             query="q",
             backend="fts5",
-            hits=[("test-page.md", None, "b")],
+            hits=[("test-page.md", None, push_metrics.estimate_tokens("b"))],
         )
         push_metrics.record_push(clean, cache_dir=cache)
         push_metrics.record_push(synth, cache_dir=cache)
@@ -1927,7 +2066,12 @@ class TestCoverageWorksheet:
         cache = tmp_path
         for sid, uid in (("synth-a", "u1"), ("synth-b", "u2")):
             rec = push_metrics.build_push_record(
-                session_id=sid, query="q", backend="fts5", hits=[("f.md", {"uid": uid}, "b")]
+                session_id=sid,
+                query="q",
+                backend="fts5",
+                hits=[
+                    ("f.md", {"uid": uid}, push_metrics.estimate_tokens("b")),
+                ]
             )
             push_metrics.record_push(rec, cache_dir=cache)
 
@@ -2064,7 +2208,12 @@ class TestDurablePushRecordsPath:
     def test_record_push_without_wiki_root_is_unchanged(self, tmp_path: Path) -> None:
         cache_dir = tmp_path / "cache"
         record = push_metrics.build_push_record(
-            session_id="s1", query="q", backend="fts5", hits=[("p.md", {}, "snip")]
+            session_id="s1",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("p.md", {}, push_metrics.estimate_tokens("snip")),
+            ]
         )
         assert push_metrics.record_push(record, cache_dir=cache_dir) is True
         assert (cache_dir / push_metrics.PUSH_RECORDS_FILENAME).exists()
@@ -2081,7 +2230,12 @@ class TestDurablePushRecordsPath:
         wiki_root.mkdir()
         cache_dir = tmp_path / "cache"
         record = push_metrics.build_push_record(
-            session_id="s1", query="q", backend="fts5", hits=[("p.md", {}, "snip")]
+            session_id="s1",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("p.md", {}, push_metrics.estimate_tokens("snip")),
+            ]
         )
         assert push_metrics.record_push(record, cache_dir=cache_dir, wiki_root=wiki_root) is True
         assert (cache_dir / push_metrics.PUSH_RECORDS_FILENAME).exists()
@@ -2143,7 +2297,7 @@ class TestDurablePushRecordsPath:
             session_id="split-brain-probe-session",
             query="q",
             backend="fts5",
-            hits=[("p.md", {}, "snip")],
+            hits=[("p.md", {}, push_metrics.estimate_tokens("snip"))],
         )
         assert push_metrics.record_push(record, cache_dir=cache_dir, wiki_root=wiki_root) is True
 
@@ -2416,7 +2570,13 @@ class TestTailRecords:
             session_id=session_id,
             query="q",
             backend="fts5",
-            hits=[(f"{uid}.md", {"uid": uid, "access": "internal", "audience": ["owner"]}, "body")],
+            hits=[
+                (
+                    f"{uid}.md",
+                    {"uid": uid, "access": "internal", "audience": ["owner"]},
+                    push_metrics.estimate_tokens("body"),
+                ),
+            ],
         )
         if source:
             record.source = source
