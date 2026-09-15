@@ -33,6 +33,7 @@ from athenaeum import cluster_comparator as cc_mod
 from athenaeum.cluster_comparator import (
     ClusterComparatorResult,
     ClusterScreenContext,
+    auto_memory_root,
     run_cluster_comparator,
 )
 from athenaeum.models import AutoMemoryFile, TokenUsage
@@ -326,7 +327,10 @@ class TestT1Armed:
         assert result.pair_count == 1
         assert result.outcomes == []  # never compared
         assert result.screened_out == [
-            (page_id_for_path(members[0].path), page_id_for_path(members[1].path))
+            (
+                page_id_for_path(members[0].path, root=auto_memory_root(members[0])),
+                page_id_for_path(members[1].path, root=auto_memory_root(members[1])),
+            )
         ]
         # The comparator's own client was never asked to compare anything.
         client.messages.create.assert_not_called()
@@ -446,7 +450,10 @@ class TestT1Armed:
         assert len(result.screened_out) == 2
         assert len(result.outcomes) == 1
         compared = {result.outcomes[0][0], result.outcomes[0][1]}
-        assert compared == {page_id_for_path(a.path), page_id_for_path(b.path)}
+        assert compared == {
+            page_id_for_path(a.path, root=auto_memory_root(a)),
+            page_id_for_path(b.path, root=auto_memory_root(b)),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -471,8 +478,8 @@ class TestScreenedOutRow:
         assert row["outcomes"] == []
         assert row["screened_out"] == [
             {
-                "a": page_id_for_path(members[0].path),
-                "b": page_id_for_path(members[1].path),
+                "a": page_id_for_path(members[0].path, root=auto_memory_root(members[0])),
+                "b": page_id_for_path(members[1].path, root=auto_memory_root(members[1])),
             }
         ]
 
