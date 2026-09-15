@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from athenaeum import search as search_module
+from athenaeum.models import WikiEntity
 from athenaeum.search import (
     FTS5Backend,
     KeywordBackend,
     KeywordScanNotSupportedError,
     SearchBackend,
     VectorBackend,
+    _extract_frontmatter_fields,
     build_fts5_index,
     get_backend,
     query_fts5_index,
@@ -2261,3 +2264,151 @@ class TestExactTitleRanking:
             f"{[r[0] for r in results]} with distances "
             f"{[round(r[2], 4) for r in results]}"
         )
+
+
+class TestExtractFrontmatterFieldsBlockList:
+    """Regression guard for the block-list branch commit 324bb3c4 added to
+    ``_extract_frontmatter_fields`` (``src/athenaeum/search.py:378-384``,
+    issue athenaeum#1596 / athenaeum#1613).
+
+    Before that commit the parser only understood inline ``tags: [a, b]`` /
+    ``aliases: [a, b]`` — a YAML BLOCK list (``aliases:`` alone, then
+    ``- item`` lines on their own, which is what ``render_frontmatter``
+    actually emits for a Python list because it dumps with
+    ``default_flow_style=False``) round-tripped to the empty string. These
+    tests fail if the block branch is reverted: with it removed, every
+    ``- item`` line here is silently dropped instead of being folded into
+    ``tags``/``aliases``, so the assertions below on non-empty, itemized
+    values go red.
+    """
+
+    def test_block_style_aliases_and_tags_are_parsed(self) -> None:
+        # WikiEntity.render() -> render_frontmatter() is the REAL writer path
+        # (the entity template shape) -- it dumps lists as YAML block style,
+        # never inline [a, b], so this fixture is representative of what is
+        # actually on disk, not a synthetic shape chosen to flatter the test.
+        entity = WikiEntity(
+            uid="30001",
+            type="company",
+            name="Acme Corp",
+            aliases=["Nightjar", "NJC"],
+            tags=["fintech", "client"],
+        )
+        text = entity.render()
+        assert "\naliases:\n- Nightjar\n" in text, "fixture must really be block style"
+        _name, tags, aliases, _description = _extract_frontmatter_fields(text)
+        assert aliases == "Nightjar NJC"
+        assert tags == "fintech client"
+
+    def test_inline_style_aliases_and_tags_are_parsed(self) -> None:
+        text = (
+            "---\n"
+            "name: Lean Startup\n"
+            "tags: [methodology, startup]\n"
+            "aliases: [lean, LSM]\n"
+            "---\n\n"
+            "Body.\n"
+        )
+        _name, tags, aliases, _description = _extract_frontmatter_fields(text)
+        assert tags == "methodology, startup"
+        assert aliases == "lean, LSM"
+
+    def test_block_list_followed_by_another_key_does_not_leak(self) -> None:
+        """A block list must stop consuming ``- item`` lines the moment a
+        non-list key follows -- and a SECOND block key right after that must
+        start its own fresh accumulation rather than inheriting the first."""
+        text = (
+            "---\n"
+            "name: Sample\n"
+            "aliases:\n"
+            "  - Alt Name\n"
+            "  - Nickname\n"
+            "access: internal\n"
+            "tags:\n"
+            "  - active\n"
+            "description: A page with a block list followed by another key.\n"
+            "---\n\n"
+            "Body.\n"
+        )
+        name, tags, aliases, description = _extract_frontmatter_fields(text)
+        assert name == "Sample"
+        assert aliases == "Alt Name Nickname"
+        assert tags == "active"
+        assert description == "A page with a block list followed by another key."
+
+
+class TestBlockListIndexRegression:
+    """Index-level guard (issue athenaeum#1613 AC2/AC3): the FTS5 build path
+    must fill the ``aliases``/``tags`` columns from block-style frontmatter,
+    and the FTS index must be able to find a page by an alias-only token.
+
+    Fails against a parser that returns ``""`` for block lists: every count
+    below would read 0 and the MATCH query would return no hits.
+    """
+
+    @pytest.fixture
+    def block_style_wiki(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        # Three pages, only some of which carry aliases/tags, so the counts
+        # below are a genuine partition rather than an artifact of every
+        # fixture page matching.
+        (wiki / "acme-corp.md").write_text(
+            WikiEntity(
+                uid="30001",
+                type="company",
+                name="Acme Corp",
+                aliases=["Nightjar", "NJC"],
+                tags=["fintech"],
+                body="Acme Corp is a financial services company.\n",
+            ).render()
+        )
+        (wiki / "widget-works.md").write_text(
+            WikiEntity(
+                uid="30002",
+                type="company",
+                name="Widget Works",
+                tags=["manufacturing"],
+                body="Widget Works makes widgets.\n",
+            ).render()
+        )
+        (wiki / "plain-note.md").write_text(
+            WikiEntity(
+                uid="30003",
+                type="concept",
+                name="Plain Note",
+                body="No aliases or tags on this one.\n",
+            ).render()
+        )
+        return wiki
+
+    def test_row_counts_match_the_fixtures_on_disk(
+        self, block_style_wiki: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(block_style_wiki, cache)
+        conn = sqlite3.connect(str(cache / search_module._DB_NAME))
+        try:
+            aliases_count = conn.execute(
+                "SELECT COUNT(*) FROM wiki WHERE aliases != ''"
+            ).fetchone()[0]
+            tags_count = conn.execute(
+                "SELECT COUNT(*) FROM wiki WHERE tags != ''"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        # Only acme-corp.md carries aliases; acme-corp.md and
+        # widget-works.md carry tags; plain-note.md carries neither.
+        assert aliases_count == 1
+        assert tags_count == 2
+
+    def test_fts_match_on_alias_only_token_returns_the_page(
+        self, block_style_wiki: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(block_style_wiki, cache)
+        # "Nightjar" appears ONLY in acme-corp.md's aliases -- not in any
+        # page's name, body, tags, or description -- so a hit here proves
+        # the aliases column is both filled AND indexed, not merely filled.
+        results = FTS5Backend().query("Nightjar", cache)
+        assert "acme-corp.md" in [r[0] for r in results]
