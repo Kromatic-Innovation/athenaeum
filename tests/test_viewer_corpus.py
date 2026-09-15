@@ -317,6 +317,161 @@ def test_breadcrumb_is_one_hop_and_needs_a_pushed_parent(tmp_path: Path) -> None
     assert states["dddddddd"] == _cmd_viewer.CLASSIFICATION_PULLED_COLD
 
 
+def test_classify_direct_no_edges_beats_pulled_cold() -> None:
+    """issue athenaeum#1568: unit-level pin on :func:`classify` itself.
+
+    With no outgoing edges from the pushed set, a pull that is not a
+    breadcrumb is a data gap, not a miss -- and the default (every existing
+    caller that never learned about this parameter) must keep the pre-fix
+    `pulled-cold` behaviour verbatim.
+    """
+    assert (
+        _cmd_viewer.classify(
+            "x",
+            pushed_ids=set(),
+            pulled_ids={"x"},
+            breadcrumb_ids=set(),
+            unknown_ids=set(),
+            has_outgoing_edges=False,
+        )
+        == _cmd_viewer.CLASSIFICATION_PULLED_NO_EDGES
+    )
+    assert (
+        _cmd_viewer.classify(
+            "x",
+            pushed_ids=set(),
+            pulled_ids={"x"},
+            breadcrumb_ids=set(),
+            unknown_ids=set(),
+        )
+        == _cmd_viewer.CLASSIFICATION_PULLED_COLD
+    )
+    assert (
+        _cmd_viewer.classify(
+            "x",
+            pushed_ids=set(),
+            pulled_ids={"x"},
+            breadcrumb_ids=set(),
+            unknown_ids=set(),
+            has_outgoing_edges=True,
+        )
+        == _cmd_viewer.CLASSIFICATION_PULLED_COLD
+    )
+
+
+def test_no_edges_still_loses_to_breadcrumb_and_unknown_provenance() -> None:
+    """`has_outgoing_edges=False` only softens the RESIDUAL cold-pull case; it
+    must not shadow a real breadcrumb or the unknown-provenance state, both of
+    which assert something `pulled-no-edges` does not."""
+    assert (
+        _cmd_viewer.classify(
+            "x",
+            pushed_ids=set(),
+            pulled_ids={"x"},
+            breadcrumb_ids={"x"},
+            unknown_ids=set(),
+            has_outgoing_edges=False,
+        )
+        == _cmd_viewer.CLASSIFICATION_BREADCRUMB
+    )
+    assert (
+        _cmd_viewer.classify(
+            "x",
+            pushed_ids=set(),
+            pulled_ids=set(),
+            breadcrumb_ids=set(),
+            unknown_ids={"x"},
+            has_outgoing_edges=False,
+        )
+        == _cmd_viewer.CLASSIFICATION_UNKNOWN_PROVENANCE
+    )
+
+
+def test_pulled_no_edges_when_pushed_pages_have_no_related_edges(tmp_path: Path) -> None:
+    """issue athenaeum#1568, AC (fixture): `related:` is unpopulated on
+    roughly 92% of the live corpus (issue body). When every page pushed this
+    session carries no `related:` edge at all, an unpushed pull is a data
+    gap, not a miss -- painting it `pulled-cold` would claim evidence that
+    was never collected.
+    """
+    wiki = tmp_path / "knowledge" / "wiki"
+    _page(wiki, "aaaaaaaa", "pushed", name="Pushed")  # no related: at all
+    _page(wiki, "bbbbbbbb", "pulled", name="Pulled alone")
+
+    payload = _cmd_viewer.shape_viewer_payload(
+        session_id="s",
+        records=[
+            {
+                "record_type": "push",
+                "source": "sidecar",
+                "ts": "2026-09-09T10:00:00Z",
+                "items": [{"id": "aaaaaaaa"}],
+            },
+            {
+                "record_type": "push",
+                "ts": "2026-09-09T10:01:00Z",
+                "items": [{"id": "bbbbbbbb"}],
+            },
+        ],
+    )
+    enriched = _cmd_viewer.enrich_payload(payload, wiki_root=wiki)
+    states = {row["id"]: row["classification"] for row in enriched["pages"]}
+
+    assert states["aaaaaaaa"] == _cmd_viewer.CLASSIFICATION_PUSHED
+    assert states["bbbbbbbb"] == _cmd_viewer.CLASSIFICATION_PULLED_NO_EDGES
+
+
+def test_pulled_cold_survives_when_a_pushed_page_does_carry_edges(tmp_path: Path) -> None:
+    """issue athenaeum#1568, AC (counter-example fixture): the moment ONE
+    pushed page carries a `related:` edge, a one-hop target is a breadcrumb
+    and a page unrelated to anything pushed stays `pulled-cold` -- the
+    softened state must not leak beyond sessions with zero edge data.
+    """
+    wiki = tmp_path / "knowledge" / "wiki"
+    _page(wiki, "aaaaaaaa", "pushed", name="Pushed", related="bbbbbbbb")
+    _page(wiki, "bbbbbbbb", "crumb", name="Crumb")
+    _page(wiki, "cccccccc", "unrelated", name="Unrelated")
+
+    payload = _cmd_viewer.shape_viewer_payload(
+        session_id="s",
+        records=[
+            {
+                "record_type": "push",
+                "source": "sidecar",
+                "ts": "2026-09-09T10:00:00Z",
+                "items": [{"id": "aaaaaaaa"}],
+            },
+            {
+                "record_type": "push",
+                "ts": "2026-09-09T10:01:00Z",
+                "items": [{"id": "bbbbbbbb"}, {"id": "cccccccc"}],
+            },
+        ],
+    )
+    enriched = _cmd_viewer.enrich_payload(payload, wiki_root=wiki)
+    states = {row["id"]: row["classification"] for row in enriched["pages"]}
+
+    assert states["bbbbbbbb"] == _cmd_viewer.CLASSIFICATION_BREADCRUMB
+    assert states["cccccccc"] == _cmd_viewer.CLASSIFICATION_PULLED_COLD
+
+
+def test_index_html_documents_the_no_edges_state() -> None:
+    """issue athenaeum#1568: the legend and the JS label map must both name
+    the new state, or the swatch would render with no explanation and a row
+    would fall back to displaying its raw classification string.
+    """
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "athenaeum"
+        / "viewer_static"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+    legend = html.split('<div class="legend">', 1)[1].split("</div>", 1)[0]
+    assert "pulled; pushed pages had no edges to traverse" in legend
+    assert '"pulled-no-edges": "pulled, no edges to traverse"' in html
+
+
 def test_enriched_rows_carry_name_and_description(tmp_path: Path) -> None:
     wiki = tmp_path / "knowledge" / "wiki"
     _page(wiki, "aaaaaaaa", "p", name="Orca Partner FAQ", desc="A brainstorm.")
