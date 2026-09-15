@@ -282,13 +282,16 @@ def page_id_for_path(path: Path, *, root: Path | None = None) -> str:
     **Corpus-wide uniqueness (issue athenaeum#1484).** With *root* omitted
     (the default), the id is just the bare filename stem's slug, byte-
     identical to this function's behavior before that issue. That default
-    is deliberate, not an oversight: :mod:`athenaeum.cluster_comparator`
-    and the ``refines:`` frontmatter edges :mod:`athenaeum.scope_resolution`
-    reads both pin this exact bare-stem shape for cross-domain slug
-    alignment (see ``tests/test_cluster_comparator.py::TestPageFromAutoMemoryFile
-    ::test_id_matches_verdict_ledger_slug_space`` and
+    is deliberate, not an oversight: the ``refines:`` frontmatter edges
+    :mod:`athenaeum.scope_resolution` reads pin this exact bare-stem shape
+    for cross-domain slug alignment (see
     ``tests/test_scope_resolution.py::TestRefinesEdgeThroughRecall``), so
-    this function must never change their id space out from under them.
+    this function must never change that caller's id space out from under
+    it. (:mod:`athenaeum.cluster_comparator` used to pin the same bare-stem
+    shape too, but athenaeum#1677 fixed that call site to pass a *root* —
+    see :func:`athenaeum.cluster_comparator.auto_memory_root` — because the
+    bare stem let two same-``origin_scope``-distinct cluster members collide
+    onto one id.)
 
     Pass *root* — the corpus/wiki root the page lives under — to fold the
     page's root-relative path into the id instead of just its stem, so two
@@ -311,11 +314,12 @@ def page_id_for_path(path: Path, *, root: Path | None = None) -> str:
     :func:`record_pair_decision` — the current production caller writing
     real ledger rows — passes ``root=wiki_root``, so a same-stem collision
     across two directories under one wiki root is fixed today.
-    :mod:`athenaeum.cluster_comparator` and :mod:`athenaeum.comparator`
-    intentionally do not pass *root* (see the cross-domain pin above); their
-    residual collision risk is unchanged by this fix and stays gated by the
-    comparator's own default-off flag, per athenaeum#1484's "Out of scope"
-    section deferring the comparator itself to athenaeum#1483.
+    :mod:`athenaeum.cluster_comparator` also passes *root* now (athenaeum#1677
+    fixed its call sites). :mod:`athenaeum.comparator`'s own (non-cluster)
+    call site intentionally still does not pass *root* (see the cross-domain
+    pin above); its residual collision risk is unchanged by this fix and
+    stays gated by the comparator's own default-off flag, per athenaeum#1484's
+    "Out of scope" section deferring the comparator itself to athenaeum#1483.
     """
     p = Path(path)
     if root is not None:
