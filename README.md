@@ -178,3 +178,5 @@ Open an issue at
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
+
+<!-- no-op: athenaeum#1609 probe PR, docs-only change, throwaway (never merged) -->
