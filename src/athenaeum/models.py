@@ -2400,6 +2400,24 @@ class TokenUsage:
     # contradicts.
     attempted_calls: int = 0
     succeeded_calls: int = 0
+    # Tier-3 merge decision counters (issue athenaeum#1463). A merge response
+    # (patch-mode JSON, or the full-echo ``ADDS_NEW_CLAIM:`` sentinel) now
+    # reports whether the observation adds any new claim at all.
+    # ``citation_only_merges`` counts a response that said ``false`` — the
+    # page body was left otherwise unchanged and only the source was
+    # recorded as a citation (``tiers._append_source_citation``).
+    # ``full_merges`` counts a response that resulted in an actual body
+    # rewrite, exactly as every merge behaved before this field existed
+    # (``true``, missing, or unparseable all count here — "never worse than
+    # today" for anything but an explicit ``false``). Incremented inside
+    # ``tiers.parse_merge_ops_response`` / ``tiers.parse_tier3_merge`` — the
+    # ONE choke point each of the patch-mode and full-echo response shapes
+    # pass through on BOTH the synchronous and Batch API transports (mirrors
+    # ``preamble_stripped``/``preamble_rejected`` above: no separate
+    # per-transport accumulator is needed). Rendered in
+    # ``librarian-run-summary`` only when non-zero.
+    citation_only_merges: int = 0
+    full_merges: int = 0
 
     def record_attempt(self) -> None:
         """Record ONE call about to be dispatched, before its outcome is known.

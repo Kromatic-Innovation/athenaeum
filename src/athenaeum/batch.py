@@ -1872,6 +1872,11 @@ def process_batch_run(
                     existing_body,
                     stop_reason=getattr(msg, "stop_reason", None),
                     wiki_root=wiki_root,
+                    # Issue athenaeum#1463: same shared ``usage`` instance the
+                    # synchronous transport threads through — accumulates
+                    # citation_only_merges/full_merges identically on both
+                    # transports (see TokenUsage's own docstring).
+                    usage=usage,
                 )
                 if needs_fallback:
                     updated_body, esc = tier3_merge_full(
