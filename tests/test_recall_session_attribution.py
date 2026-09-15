@@ -358,6 +358,59 @@ class TestLoudFallback:
 
 
 # ---------------------------------------------------------------------------
+# AC2 regression (issue athenaeum#1593) — session resolution survives a
+# stale-server detection event mid-connection
+# ---------------------------------------------------------------------------
+
+
+class TestResolverSurvivesAVersionChange:
+    def test_a_hook_push_and_a_later_mcp_recall_still_agree_after_a_version_change(
+        self,
+        projects_root: Path,
+        stale_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """issue athenaeum#1593's own regression test: the stale-server check
+        that issue adds reads the installed distribution's version on every
+        liveness call — a `ToolUseSessionResolver` constructed BEFORE a
+        simulated version change must still resolve an MCP recall to the
+        SAME session id as a hook push from the same transcript, made on the
+        SAME long-lived connection, after that change. Session resolution
+        and server-version detection are orthogonal; one must never disturb
+        the other.
+        """
+        resolver = push_metrics.ToolUseSessionResolver(projects_root=projects_root)
+
+        # A hook push, before the simulated version change.
+        before = resolver.resolve("toolu_JOINME")
+        assert before.session_id == CURRENT_ID
+        assert before.attribution == push_metrics.ATTRIBUTION_TRANSCRIPT
+
+        # Simulate the installed distribution changing under the running
+        # process — the athenaeum#1593 scenario — without restarting the
+        # resolver or its connection.
+        monkeypatch.setattr(push_metrics, "_get_version", lambda: "9.9.9")
+        monkeypatch.setattr(
+            push_metrics, "_installed_version_info", lambda: ("10.0.0", 1_800_000_000.0)
+        )
+        staleness = push_metrics.check_sidecar_liveness(cache_dir=tmp_path / "cache")
+        assert staleness.server_state == push_metrics.SERVER_STATE_STALE
+
+        # An MCP recall's toolUseId, from the SAME transcript, issued after
+        # the simulated version change.
+        path = projects_root / SCOPE / f"{CURRENT_ID}.jsonl"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(_tool_use_record(CURRENT_ID, "toolu_AFTER_VERSION_CHANGE") + "\n")
+
+        after = resolver.resolve("toolu_AFTER_VERSION_CHANGE")
+
+        assert after.session_id == CURRENT_ID
+        assert after.session_id == before.session_id
+        assert after.attribution == push_metrics.ATTRIBUTION_TRANSCRIPT
+
+
+# ---------------------------------------------------------------------------
 # End to end — what actually lands in the ledger
 # ---------------------------------------------------------------------------
 
