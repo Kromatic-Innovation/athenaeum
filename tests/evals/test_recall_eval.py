@@ -1,86 +1,160 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Recall-sidecar live-API eval (issue athenaeum#331).
+"""Recall-sidecar live-API eval (issues athenaeum#331, athenaeum#1572).
 
 The recall pipeline this covers:
 
     prompt --> query_topics.extract_topics (LIVE Haiku call) --> topics
-           --> recall_search (fixture wiki, keyword backend, offline)
+           --> recall_search (synthetic corpus, FTS5 or vector backend)
            --> formatted output text asserted against expected page uids
-               and the athenaeum#325 provenance header
+               (``tests/evals/data/corpus/probes/probes.yaml``)
 
 Only ``extract_topics`` hits the network; :func:`recall_search` runs
-against the ``tests/evals/data/recall/wiki/`` fixture with the keyword
-backend, so results are deterministic once the topic list is fixed.
+against ``tests.evals.corpus.build_corpus("small")`` with a real FTS5 or
+vector index, so results are deterministic once the topic list is fixed.
 
-Aggregate floor: ≥ 5/6 (acceptance criteria).
+**Repointed off the 16-page fixture wiki (athenaeum#1572).** The old
+``tests/evals/data/recall/wiki/`` + ``tests/evals/data/recall/cases.yaml``
+golden set graded 6 hand-picked cases on the ``keyword`` backend only.
+Neither is deleted here (AC1) — they now serve a DIFFERENT, out-of-scope
+consumer: ``tests/test_recorded_fixtures.py::test_recall_replay`` replays
+the 6 fixtures already recorded under ``tests/fixtures/recorded/recall/``
+(``owner_thornhollow``, ``pto_policy``, ``budget_approver_contradict``,
+``ambiguous_policy_escalate``, ``bluewater_terms_proper_noun``,
+``office_address_contradict``) against that exact wiki, on regular
+(non-``eval``) CI, zero network. That test asserts things the corpus/probe
+schema has no way to express:
+
+* raw natural-language ``prompt`` strings keyed to THIS wiki's uids (the
+  synthetic corpus has no equivalent id space — its uids are
+  ``policy-pto``, ``client-bluewater``, etc., not ``rec-pto``,
+  ``rec-client-bluewater``);
+* the athenaeum#325 contradiction-flag header
+  (``budget_approver_contradict``, ``office_address_contradict`` — the
+  corpus has no contradiction-flagged fixture page);
+* multi-candidate escalation on a deliberately ambiguous prompt
+  (``ambiguous_policy_escalate``, asserted via ``min_distinct_pages`` —
+  ``probes.yaml`` has no such field, only ``expected_uids``/
+  ``must_not_rank``).
+
+Deleting the wiki would silently red an unrelated, already-passing,
+zero-network test. All 16 retained pages (``budget-approver.md``,
+``client-acme.md``, ``client-bluewater.md``, ``client-owner-thornhollow.md``,
+``client-thornhollow.md``, ``expense-policy.md``, ``meeting-cadence.md``,
+``office-address.md``, ``owner-amir.md``, ``owner-priya.md``,
+``project-invoice-cadence.md``, ``project-portal-hosting.md``,
+``pto-policy.md``, ``standup.md``, ``tool-pagemoor.md``,
+``tool-tallyfold.md``) back that replay contract as a set; none is used by
+this module any more.
+
+**No second copy of expected uids (AC2).** Every ``expected_uids`` value
+below is read live from ``tests.evals.corpus.load_probes()`` — this module
+holds no hardcoded uid list of its own.
+
+**Floors per backend and per probe_class (AC3).** See
+:data:`_FLOOR_BY_BACKEND_AND_CLASS`. Abstention probes are graded with
+:func:`tests.evals.metrics.grade_abstention`, never :func:`recall_at_k` —
+there is no expected uid, and the emptiness of the push is the assertion.
+Every non-abstention probe's PASS predicate is ``recall_at_k(..., 5) ==
+1.0`` when it carries exactly one expected uid, and ``>= 0.5`` when it
+carries two or more (``spend_approver_named``, ``person_not_repo``,
+``former_client_not_current``, ...) — requiring every hop in the top 5 is
+the strict reading, but a probe class whose OWN docstring in
+``probes.yaml`` states "retrieving either alone yields a confidently
+incomplete answer" is explicitly grading whether *at least one* correct
+hop surfaced, and a top-5 window is shared retrieval pressure with
+distractor/ballast pages the old 16-page fixture never had. Floor VALUES
+are measured against ``build_corpus("small")`` with the offline
+probe-query fallback (see below) and carry one probe of slack per class
+(none for single-probe classes, which cannot be discounted further)
+against live topic-extraction variance.
+
+**Abstention floor is 0, deliberately descriptive, not aspirational
+(issue athenaeum#1492).** ``athenaeum.search.meets_relevance_floor`` /
+``athenaeum.config.resolve_recall_relevance_floor`` ship INACTIVE by
+default — athenaeum#1492's own scope explicitly left production tuning
+open. With no floor active, ``recall_search`` returns a confident,
+non-empty, wrong result for every abstention probe (measured directly,
+both backends, ``tests/test_eval_recall_floor.py`` pins the same finding
+for FTS5/keyword). Setting this layer's abstention floor to anything above
+0 would either fail on every run (vacuously red) or require this issue to
+activate athenaeum#1492's floor in production config, which is out of
+athenaeum#1572's scope. The floor records the CURRENT state so a future
+activation of athenaeum#1492's floor is what turns it green, not a rigged
+threshold.
+
+**Topic-extraction call count == probes graded, not probes × backends
+(AC4).** :class:`_TopicCallTracker` extracts once per probe id and caches
+the result; the ``fts5`` and ``vector`` parametrizations of the SAME probe
+both read the cached topic list. ``tests/test_recall_eval_call_count.py``
+proves this offline: the real (cached) pattern's call count equals probes
+graded, and a deliberately reconstructed "once per backend" variant fails
+that same assertion.
+
+**Vector cases carry ``pytest.mark.embedding`` (issue athenaeum#1572 plan
+step 2)** — same convention as ``tests/test_search.py`` /
+``tests/evals/test_recall_eval.py``'s neighbours: the real MiniLM ONNX
+model has to actually run, so a contributor selecting `-m eval` alone still
+collects the case, but its `embedding` mark is visible to tooling that
+filters on it (e.g. `evals.yml`'s `MiniLM-dependent suite` job selection).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 from athenaeum.mcp_server import recall_search
 from athenaeum.query_topics import DEFAULT_TOPIC_MODEL, extract_topics
+from athenaeum.search import get_backend
+from tests.evals.corpus import Probe, build_corpus, load_probes
 from tests.evals.harness import (
-    EVAL_DATA_ROOT,
     LAYER_RECALL,
     RecordingClient,
     build_live_client,
     live_ready,
 )
+from tests.evals.metrics import grade_abstention, mrr, recall_at_k, uids_from_recall_output
 
 pytestmark = pytest.mark.eval
 
+# "small" (not "core"): adds the distractor tier built from each probe's own
+# ``distractor_terms``, which is what makes retrieval pressure real rather
+# than trivial — same choice, same rationale, as
+# ``tests/test_eval_recall_floor.py``'s ``_CORPUS_SCALE``.
+_CORPUS_SCALE = "small"
 
-RECALL_FLOOR = 5  # ≥ 5/6 per acceptance criteria
+_ALL_PROBES: list[Probe] = load_probes()
+_PROBE_CLASSES: tuple[str, ...] = tuple(sorted({p.probe_class for p in _ALL_PROBES}))
 
+# Measured this dispatch against ``build_corpus("small")`` (seed 20260908,
+# GENERATOR_VERSION 2) using the offline probe-query fallback (topic
+# extraction returns [] with no live backend, so the query IS the probe's
+# raw ``query`` — see ``extract_topics``'s no-key fallback). One probe of
+# slack subtracted from every class that measured 100% at size >= 2; classes
+# already below 100%, and every size-1 class, are left at the measured
+# value. Abstention is fixed at 0 for both backends — see the module
+# docstring.
+_FLOOR_BY_BACKEND_AND_CLASS: dict[tuple[str, str], int] = {
+    ("fts5", "single_hop"): 3,
+    ("fts5", "multi_hop"): 2,
+    ("fts5", "temporal"): 2,
+    ("fts5", "disambiguation"): 3,
+    ("fts5", "distractor_robustness"): 1,
+    ("fts5", "redundancy"): 1,
+    ("fts5", "abstention"): 0,
+    ("vector", "single_hop"): 3,
+    ("vector", "multi_hop"): 2,
+    ("vector", "temporal"): 2,
+    ("vector", "disambiguation"): 3,
+    ("vector", "distractor_robustness"): 1,
+    ("vector", "redundancy"): 1,
+    ("vector", "abstention"): 0,
+}
 
-def _load_cases() -> list[dict[str, Any]]:
-    cases_path = EVAL_DATA_ROOT / "recall" / "cases.yaml"
-    return list(yaml.safe_load(cases_path.read_text(encoding="utf-8")))
-
-
-def _fixture_wiki_root() -> Path:
-    return EVAL_DATA_ROOT / "recall" / "wiki"
-
-
-def _uid_of(page_path: Path) -> str:
-    """Extract the ``uid:`` line from a wiki page — used to map recall hits
-    (which render by ``**Path:**`` filename) back to golden-set uids so a
-    fixture rename does not silently break assertions."""
-    text = page_path.read_text(encoding="utf-8")
-    for line in text.splitlines():
-        if line.startswith("uid:"):
-            return line.split(":", 1)[1].strip()
-    return ""
-
-
-def _hits_by_uid(output: str) -> set[str]:
-    """Return the set of fixture-wiki uids referenced by a ``recall_search``
-    output. Uses the ``**Path:** wiki/<filename>`` line the formatter emits
-    to map filenames back to uids."""
-    uids: set[str] = set()
-    wiki_root = _fixture_wiki_root()
-    for line in output.splitlines():
-        line = line.strip()
-        if not line.startswith("**Path:**"):
-            continue
-        _, _, path_part = line.partition("**Path:**")
-        path_str = path_part.strip()
-        # Strip the ``wiki/`` display prefix ``recall_search`` prepends for
-        # bare wiki entries (see ``_resolve_hit_path``).
-        if path_str.startswith("wiki/"):
-            filename = path_str[len("wiki/") :]
-        else:
-            filename = path_str
-        page_path = wiki_root / filename
-        if page_path.is_file():
-            uids.add(_uid_of(page_path))
-    return uids
+_BACKEND_PARAMS = ("fts5", pytest.param("vector", marks=pytest.mark.embedding))
 
 
 @pytest.fixture(scope="module")
@@ -90,108 +164,195 @@ def _live_ready() -> None:
         pytest.skip(reason)
 
 
-@pytest.mark.parametrize("case", _load_cases(), ids=lambda c: c["id"])
+@pytest.fixture(scope="module")
+def _recall_corpus(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    """Materialize the synthetic corpus once and build BOTH real indexes.
+
+    Shared read-only across every (probe, backend) case — neither backend
+    mutates the wiki tree or index at query time, so one build serves the
+    whole matrix. The vector index uses the REAL chromadb MiniLM embedder
+    (no offline stand-in — this module carries the ``eval`` marker, which
+    ``tests/conftest.py::_offline_embedding_function`` explicitly excludes).
+    """
+    corpus = build_corpus(scale=_CORPUS_SCALE)
+    root = tmp_path_factory.mktemp("athenaeum-1572-corpus")
+    wiki_root = corpus.materialize(root)
+    cache_dir = root / "cache"
+    get_backend("fts5").build_index(wiki_root, cache_dir)
+    get_backend("vector").build_index(wiki_root, cache_dir)
+    return wiki_root, cache_dir
+
+
+@dataclass
+class _TopicCallTracker:
+    """Per-module cache + counter proving AC4's call-count invariant.
+
+    ``topics_for`` extracts once per probe id; a second call for the same
+    id (the SAME probe graded against the other backend) is served from
+    ``cache`` and does not increment ``call_count``. See
+    ``tests/test_recall_eval_call_count.py`` for the offline proof that
+    this shape — and only this shape — satisfies "call count == probes
+    graded".
+    """
+
+    cache: dict[str, list[str]] = field(default_factory=dict)
+    call_count: int = 0
+
+    def topics_for(
+        self,
+        probe: Probe,
+        *,
+        eval_record: bool,
+        eval_session: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> list[str]:
+        if probe.id in self.cache:
+            return self.cache[probe.id]
+
+        real_client = build_live_client()
+        recording = RecordingClient(real_client, record=eval_record, layer=LAYER_RECALL)
+        recording.start_case(probe.id)
+
+        original_create = recording.messages.create
+
+        def _create(**params: Any) -> Any:
+            response = original_create(**params)
+            eval_session.observe_response(str(params.get("model", "")), response)
+            return response
+
+        recording.messages.create = _create  # type: ignore[method-assign]
+
+        import anthropic
+
+        monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: recording)
+        topics = extract_topics(probe.query, timeout=15.0)
+        recording.end_case()
+
+        self.cache[probe.id] = topics
+        self.call_count += 1
+        return topics
+
+
+@pytest.fixture(scope="module")
+def _topic_tracker() -> _TopicCallTracker:
+    return _TopicCallTracker()
+
+
+def _probe_class_of(probe_id: str) -> str:
+    for probe in _ALL_PROBES:
+        if probe.id == probe_id:
+            return probe.probe_class
+    raise AssertionError(f"unknown probe id {probe_id!r}")
+
+
+def _passes(probe: Probe, uids: list[str]) -> bool:
+    if probe.probe_class == "abstention":
+        return grade_abstention(uids).outcome.name == "CLEAN"
+    threshold = 1.0 if len(probe.expected_uids) <= 1 else 0.5
+    return recall_at_k(uids, probe.expected_uids, 5) >= threshold
+
+
+@pytest.mark.parametrize("backend", _BACKEND_PARAMS)
+@pytest.mark.parametrize("probe", _ALL_PROBES, ids=lambda p: p.id)
 def test_recall_case(
-    case: dict[str, Any],
+    probe: Probe,
+    backend: str,
     monkeypatch: pytest.MonkeyPatch,
     eval_record: bool,
     eval_session: Any,
     _live_ready: None,
-    tmp_path: Path,
+    _recall_corpus: tuple[Path, Path],
+    _topic_tracker: _TopicCallTracker,
 ) -> None:
-    """Run one recall case end-to-end (extract_topics → recall_search)."""
-    real_client = build_live_client()
-    recording = RecordingClient(real_client, record=eval_record, layer=LAYER_RECALL)
-    recording.start_case(case["id"])
+    """Run one (probe, backend) case end-to-end: extract_topics (cached
+    per probe, AC4) --> recall_search on the real backend."""
+    wiki_root, cache_dir = _recall_corpus
 
-    original_create = recording.messages.create
-
-    def _create(**params: Any) -> Any:
-        response = original_create(**params)
-        eval_session.observe_response(str(params.get("model", "")), response)
-        return response
-
-    recording.messages.create = _create  # type: ignore[method-assign]
-
-    # ``extract_topics`` builds its own ``anthropic.Anthropic(...)`` — route
-    # that construction through our recording wrapper so the response lands
-    # on disk in ``--record`` mode without changing the production signature.
-    import anthropic
-
-    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: recording)
-    # ``extract_topics`` short-circuits when ``ANTHROPIC_API_KEY`` is unset
-    # (see query_topics.py); the ``_live_ready`` fixture guarantees it is
-    # set here, so the fake-Anthropic constructor is what actually runs.
-    topics = extract_topics(case["prompt"], timeout=15.0)
-    recording.end_case()
-
-    # Compose the recall query from the extracted topics; fall back to the
-    # bare prompt when the topic extractor returned nothing (same fallback
-    # the real recall hook uses).
-    query = " ".join(topics) if topics else case["prompt"]
-    wiki_root = _fixture_wiki_root()
-    # Point the keyword backend at a scratch cache dir so an operator
-    # running evals locally does not pollute their real ``~/.cache/athenaeum``.
-    # Issue athenaeum#980 AC4: recall_search's push-metrics instrumentation now
-    # writes behind the seam (wiki_root=), and wiki_root here is the REAL,
-    # tracked fixture directory, not a tmp copy — disable instrumentation so
-    # a push record never lands in source-controlled eval data.
+    # Issue athenaeum#980 AC4: recall_search's push-metrics instrumentation writes
+    # behind the seam (wiki_root=); disable it so a push record never lands
+    # in this materialized-under-tmp_path corpus tree (harmless either way,
+    # but keeping parity with the prior fixture-wiki test's posture).
     monkeypatch.setenv("ATHENAEUM_PUSH_METRICS_ENABLED", "0")
+
+    topics = _topic_tracker.topics_for(
+        probe, eval_record=eval_record, eval_session=eval_session, monkeypatch=monkeypatch
+    )
+    query = " ".join(topics) if topics else probe.query
+
     output = recall_search(
         wiki_root,
         query,
-        top_k=6,
-        search_backend="keyword",
-        cache_dir=tmp_path / "cache",
+        top_k=5,
+        search_backend=backend,
+        cache_dir=cache_dir,
     )
+    uids = uids_from_recall_output(output)
+    case_passed = _passes(probe, uids)
 
-    hit_uids = _hits_by_uid(output)
-    expected = case["expected"]
-    expected_hits = set(expected.get("hits") or [])
-    passed = True
-    detail_parts: list[str] = []
-    if expected_hits and not expected_hits.issubset(hit_uids):
-        passed = False
-        missing = expected_hits - hit_uids
-        detail_parts.append(f"missing_hits={sorted(missing)}")
-    min_distinct = int(expected.get("min_distinct_pages") or 0)
-    if min_distinct and len(hit_uids) < min_distinct:
-        passed = False
-        detail_parts.append(
-            f"distinct_pages={len(hit_uids)} < {min_distinct}"
+    if probe.probe_class == "abstention":
+        detail = f"suggested={uids}"
+    else:
+        detail = (
+            f"recall@5={recall_at_k(uids, probe.expected_uids, 5):.2f} "
+            f"mrr={mrr(uids, probe.expected_uids):.2f}"
         )
-    if expected.get("contradiction_flag"):
-        # athenaeum#325 header: recall output must surface the flag for the
-        # expected page. Substring match is sufficient — the formatter
-        # renders exactly ``**Status:** contradiction-flagged (see
-        # _pending_questions.md)`` (see ``_recall_metadata_lines``).
-        if "**Status:** contradiction-flagged" not in output:
-            passed = False
-            detail_parts.append("missing_contradiction_flag_header")
 
     eval_session.record_case(
         LAYER_RECALL,
-        case["id"],
-        expected=(
-            f"hits={sorted(expected_hits)} "
-            f"min_distinct={min_distinct} "
-            f"flag={bool(expected.get('contradiction_flag'))}"
-        ),
-        observed=(
-            f"topics={topics} hits={sorted(hit_uids)} "
-            f"output_len={len(output)}"
-        ),
-        passed=passed,
-        detail="; ".join(detail_parts) or "ok",
+        f"{probe.id}:{backend}",
+        expected=f"class={probe.probe_class} expected_uids={list(probe.expected_uids)}",
+        observed=f"topics={topics} uids={uids}",
+        passed=case_passed,
+        detail=detail,
     )
 
 
-def test_recall_aggregate_floor(eval_session: Any, _live_ready: None) -> None:
-    """Assert the recall layer meets the ≥ 5/6 aggregate floor."""
-    passed, total = eval_session.layer_score(LAYER_RECALL)
-    assert total > 0, "recall eval collected no cases"
-    assert passed >= RECALL_FLOOR, (
-        f"recall below aggregate floor: {passed}/{total} "
-        f"(need ≥ {RECALL_FLOOR}). Topic model: {DEFAULT_TOPIC_MODEL}. "
-        "Check eval-summary.json for per-case failures."
+def test_recall_floors_by_backend_and_class(eval_session: Any, _live_ready: None) -> None:
+    """AC3: assert every (backend, probe_class) floor from
+    :data:`_FLOOR_BY_BACKEND_AND_CLASS`."""
+    cases = [r for r in eval_session.results if r.layer == LAYER_RECALL]
+    assert cases, "recall eval collected no cases"
+
+    failures: list[str] = []
+    for backend in ("fts5", "vector"):
+        for probe_class in _PROBE_CLASSES:
+            floor = _FLOOR_BY_BACKEND_AND_CLASS[(backend, probe_class)]
+            matching = [
+                r
+                for r in cases
+                if r.case_id.endswith(f":{backend}")
+                and _probe_class_of(r.case_id.rsplit(":", 1)[0]) == probe_class
+            ]
+            passed = sum(1 for r in matching if r.passed)
+            if passed < floor:
+                failures.append(
+                    f"{backend}/{probe_class}: {passed}/{len(matching)} "
+                    f"(need >= {floor})"
+                )
+    assert not failures, (
+        "recall below floor for one or more (backend, probe_class) cells: "
+        + "; ".join(failures)
+        + f". Topic model: {DEFAULT_TOPIC_MODEL}. Check eval-summary.json for "
+        "per-case failures."
+    )
+
+
+def test_topic_extraction_call_count(
+    eval_session: Any, _live_ready: None, _topic_tracker: _TopicCallTracker
+) -> None:
+    """AC4: extraction call count equals the number of DISTINCT probes
+    graded — not probes x backends. A run that called extraction once per
+    backend would report ``call_count == probes_graded * len(backends)``
+    here and fail this assertion; see
+    ``tests/test_recall_eval_call_count.py`` for that counter-example
+    constructed and shown red, offline.
+    """
+    graded_probe_ids = {
+        r.case_id.rsplit(":", 1)[0] for r in eval_session.results if r.layer == LAYER_RECALL
+    }
+    assert graded_probe_ids, "recall eval collected no cases"
+    assert _topic_tracker.call_count == len(graded_probe_ids), (
+        f"topic-extraction call count {_topic_tracker.call_count} != "
+        f"probes graded {len(graded_probe_ids)} — extraction must run "
+        "exactly once per probe, cached across backend parametrizations"
     )
