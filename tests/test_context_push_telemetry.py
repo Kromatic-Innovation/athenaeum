@@ -166,7 +166,13 @@ def test_sidecar_and_mcp_records_share_key_structure() -> None:
         session_id="s1",
         query="some raw prompt text",
         backend="fts5",
-        hits=[("abc12345-page.md", {"uid": "abc12345", "audience": ["opsadmin"]}, "body text")],
+        hits=[
+            (
+                "abc12345-page.md",
+                {"uid": "abc12345", "audience": ["opsadmin"]},
+                push_metrics.estimate_tokens("body text"),
+            ),
+        ],
     )
 
     sidecar_dict = sidecar_record.to_dict()
