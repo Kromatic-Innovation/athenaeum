@@ -91,6 +91,23 @@ graded here is the **retrieval cost** of the split, via the `redundancy` probe
 `keelbridge_programme_scope`: a complete answer needs both halves and retrieval
 delivers one.
 
+A third cluster, `person-company-project`, lives in its own world file,
+`core/09-person-company-project.yaml` (issue athenaeum#1658, a child of
+athenaeum#1600 AC3):
+
+| cluster | shape | ground truth |
+|---|---|---|
+| **person-company-project** | a person who works at a company, the company that commissioned a project, and the project itself, with zero edges between them | the three edges that **should** exist, *and* the payment fact recorded on the person's page that belongs on the project instead |
+
+It carries an assertion the other two do not: a `fact_placements` entry
+recording that the person's page holds a payment fact (under `## Fundraising
+Pipeline`, the section header athenaeum#1600 measured on the live corpus) that
+belongs on the project, or a sub-page linked from it. That half is scored by
+`tests/evals/fact_placement.py`, a sibling to `relatedness.py` rather than an
+extension of it — edges and fact placement are orthogonal, and the shipped
+athenaeum#1576 writer satisfies neither for this cluster: it only ever
+proposes `related:` edges and has no mechanism that moves body text.
+
 **Not a fourth tier, and the edges are not in the pages.** `core` is defined as
 the tier carrying every ground-truth assertion, and these clusters are ground
 truth; `distractor` and `ballast` are held apart because each is a *generated*

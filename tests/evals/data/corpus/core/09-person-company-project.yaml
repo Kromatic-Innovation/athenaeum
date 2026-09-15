@@ -1,0 +1,75 @@
+# Person / company / project relatedness cluster (issue athenaeum#1658, a
+# child of athenaeum#1600 AC3).
+#
+# Three invented pages describing a client engagement: a person who works at
+# a company, the company that commissioned a project, and the project
+# itself. They carry ZERO edges between them, on purpose -- same reasoning as
+# Cluster A in ``08-relatedness.yaml``: the three edges that SHOULD exist are
+# ground truth in ``ground_truth/relatedness.yaml``, not here. Authoring them
+# into the pages would make the corpus already-correct and the measure
+# vacuous.
+#
+# The person's page also carries a payment fact that belongs on the project
+# (or a sub-page linked from it), not on the person -- the "wrong card"
+# shape athenaeum#1600 named. This is a SEPARATE assertion from the missing
+# edges, graded by ``tests/evals/fact_placement.py``, not
+# ``tests/evals/relatedness.py``.
+#
+# Content policy (../README.md, a review blocker): every name, company,
+# project and number below is INVENTED. Only the STRUCTURE is taken from the
+# live shape athenaeum#1600 measured on 2026-09-10: 17,267 `type: person`
+# pages, ~95% with no `related:` key, and 600 `## Fundraising Pipeline`
+# sections on person pages -- reproduced here as the section header under
+# which the misplaced fact sits, not as any real page's content.
+# ``tests/test_eval_corpus_leakage.py`` is the bar.
+
+- uid: person-dara-featherstone
+  type: person
+  name: Dara Featherstone
+  aliases: [Dara]
+  tags: [person, client-contact]
+  source_ref: "session-2026-04-30"
+  created: 2026-04-30
+  body: |
+    # Dara Featherstone
+
+    Dara Featherstone is the operations director at Corvane Robotics and the
+    firm's point of contact for the automation line rollout.
+
+    ## Fundraising Pipeline
+
+    Milestone three cleared on 2026-04-30: GBP 42,500 against invoice
+    INV-CRV-0483. Milestone four's invoice is not yet raised.
+
+- uid: company-corvane-robotics
+  type: company
+  name: Corvane Robotics
+  aliases: [Corvane]
+  tags: [company, client]
+  source_ref: "session-2026-01-14"
+  created: 2026-01-14
+  body: |
+    # Corvane Robotics
+
+    Corvane Robotics is a mid-size industrial automation manufacturer. It
+    commissioned the automation line rollout in January 2026; its operations
+    director is the firm's point of contact for delivery.
+
+    Standing terms: milestone billing across four milestones, net 30 days
+    from each milestone's sign-off.
+
+- uid: project-corvane-automation-rollout
+  type: project
+  name: Automation Line Rollout
+  aliases: [automation rollout]
+  tags: [project, client-delivery]
+  source_ref: "session-2026-01-20"
+  created: 2026-01-20
+  body: |
+    # Automation Line Rollout
+
+    A four-milestone project delivering a new automated production line for
+    Corvane Robotics. Milestones are invoiced on sign-off, net 30 days.
+
+    Milestones one and two are signed off. Milestone three signed off on
+    2026-04-30; milestone four is scheduled at final commissioning.
