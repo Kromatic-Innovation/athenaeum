@@ -13,6 +13,13 @@ Re-pointed by issue athenaeum#1257: the screen moved from ``athenaeum.merge`` to
 it). Every assertion below is unchanged — this file proves the MOVE preserved
 the behaviour verbatim, including the ``spend.ceiling_tripped`` degrade path
 that used to be asserted through ``merge.spend``.
+
+``TestT1ScreenGuards`` additionally pins issue athenaeum#1620 AC1's reproduction:
+each of the four pre-tier gates now records ITS OWN named reason in the
+process-global T1 census (``athenaeum.t1_census``) rather than collapsing
+into one silent ``return False`` — in particular
+``test_disabled_is_a_noop`` is the concrete repro athenaeum#1620 AC1 asks for
+("enabled=False produces the T1_SKIP_DISABLED reason and no client call").
 """
 
 from __future__ import annotations
@@ -26,6 +33,14 @@ from athenaeum import reasoning_screens as screens_mod
 from athenaeum.calibration import calibration_summary
 from athenaeum.models import TokenUsage
 from athenaeum.reasoning_screens import t1_screen_rejects_merge_proposal
+from athenaeum.t1_census import (
+    T1_SKIP_CEILING,
+    T1_SKIP_DISABLED,
+    T1_SKIP_DRY_RUN,
+    T1_SKIP_NO_CLIENT,
+    T1_SKIP_NO_MEMBERS,
+    get_t1_census,
+)
 
 # High sample rates so a T1 reject is always surfaced to the audit ledger.
 _SAMPLE_CFG = {
@@ -92,24 +107,49 @@ def _screen(tmp_path: Path, *, member_paths: list[str] | None = None, **override
 
 class TestT1ScreenGuards:
     def test_disabled_is_a_noop(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1620 AC1 reproduction: ``enabled=False`` produces the
+        ``T1_SKIP_DISABLED`` census reason and makes no client call — the
+        surviving reason athenaeum#1620's own elimination analysis names for why
+        the cluster path's measured proposals produced no T1 call."""
         client = MagicMock()
         dropped, _ = _screen(tmp_path, enabled=False, client=client)
         assert dropped is False
         client.messages.create.assert_not_called()
+        census = get_t1_census()
+        assert census.screened == 0
+        assert census.unscreened_by_reason == {T1_SKIP_DISABLED: 1}
 
     def test_no_client_is_a_noop(self, tmp_path: Path) -> None:
         dropped, _ = _screen(tmp_path, client=None)
         assert dropped is False
+        assert get_t1_census().unscreened_by_reason == {T1_SKIP_NO_CLIENT: 1}
 
     def test_dry_run_is_a_noop(self, tmp_path: Path) -> None:
         client = MagicMock()
         dropped, _ = _screen(tmp_path, dry_run=True, client=client)
         assert dropped is False
         client.messages.create.assert_not_called()
+        assert get_t1_census().unscreened_by_reason == {T1_SKIP_DRY_RUN: 1}
 
     def test_empty_members_is_a_noop(self, tmp_path: Path) -> None:
         dropped, _ = _screen(tmp_path, member_paths=[])
         assert dropped is False
+        assert get_t1_census().unscreened_by_reason == {T1_SKIP_NO_MEMBERS: 1}
+
+    def test_pretier_reason_priority_matches_original_short_circuit_order(
+        self, tmp_path: Path
+    ) -> None:
+        """``enabled`` beats ``client`` beats ``dry_run`` beats ``member_paths``
+        — the same left-to-right order the original collapsed
+        ``if not (enabled and client is not None and not dry_run and
+        member_paths)`` boolean short-circuited in, so the athenaeum#1620 refactor
+        changed only what is observable, never which combinations return
+        early."""
+        dropped, _ = _screen(
+            tmp_path, enabled=False, client=None, dry_run=True, member_paths=[]
+        )
+        assert dropped is False
+        assert get_t1_census().unscreened_by_reason == {T1_SKIP_DISABLED: 1}
 
 
 class TestT1ScreenDecision:
@@ -130,6 +170,10 @@ class TestT1ScreenDecision:
         assert usage.api_calls == 1
         # ...and surfaced for the human-audit calibration loop.
         assert calibration_summary(wiki)["T1"]["sampled"] == 1
+        # Issue athenaeum#1620 AC3: a reject is still the screen RUNNING —
+        # counts as screened, not unscreened.
+        assert get_t1_census().screened == 1
+        assert get_t1_census().unscreened_by_reason == {}
 
     def test_model_reject_drops(self, tmp_path: Path) -> None:
         wiki = _wiki(tmp_path)
@@ -157,6 +201,8 @@ class TestT1ScreenDecision:
         )
         assert dropped is False  # a pass-up is written to the human queue as today
         client.messages.create.assert_called_once()
+        # Issue athenaeum#1620 AC3: a pass-up is also the screen running.
+        assert get_t1_census().screened == 1
 
     def test_ceiling_trip_degrades_to_unscreened_write(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -170,3 +216,4 @@ class TestT1ScreenDecision:
         assert dropped is False  # never blocks the queue — writes unscreened
         client.messages.create.assert_not_called()
         assert usage.api_calls == 0  # screen skipped before any spend
+        assert get_t1_census().unscreened_by_reason == {T1_SKIP_CEILING: 1}

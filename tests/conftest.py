@@ -600,6 +600,27 @@ def _pin_spend_accounting_timezone_utc(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_t1_census() -> Iterator[None]:
+    """Reset the process-global T1 screened/unscreened census after every
+    test (issue athenaeum#1620).
+
+    ``athenaeum.t1_census`` is a deliberate process-wide mutable counter —
+    see its module docstring's "Global mutable state, deliberately" section
+    for why — incremented by :mod:`athenaeum.reasoning_screens`,
+    :mod:`athenaeum.name_collisions`, and :mod:`athenaeum.name_structure`.
+    Left unreset, one test's writes would leak into the next test's
+    assertions about the census in the same session — the exact cross-test
+    global-state leak :func:`_reset_model_rates` immediately below already
+    guards against for the model-rate table. Autouse and function-scoped so
+    no test can opt out or forget to clean up.
+    """
+    yield
+    from athenaeum.t1_census import reset_t1_census
+
+    reset_t1_census()
+
+
+@pytest.fixture(autouse=True)
 def _reset_model_rates() -> Iterator[None]:
     """Reset the ACTIVE per-MTok rate table to the code default after every
     test (issue athenaeum#783).

@@ -36,6 +36,7 @@ from typing import Literal
 
 from athenaeum.models import parse_frontmatter, resolve_page_type, slugify
 from athenaeum.pending_merges import parse_pending_merges, resolve_merge, write_pending_merge
+from athenaeum.t1_census import T1_UNSCREENED_NAME_COLLISION, get_t1_census
 
 log = logging.getLogger(__name__)
 
@@ -450,6 +451,20 @@ def resolve_name_collisions(
             draft_full_text = canonical.path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             draft_full_text = canonical.body
+        # Issue athenaeum#1620: deliberately unscreened by T1. This proposal's
+        # evidence is name IDENTITY — two-plus pages literally sharing a
+        # `name:` value (see `scan_name_collisions` above) — a deterministic
+        # equality check with no LLM client anywhere in this module's call
+        # chain (`resolve_name_collisions` takes no client parameter at
+        # all). A reasoning screen adds nothing over a same-string
+        # comparison, and the `unambiguous` branch below already auto-merges
+        # without ever reaching a human queue, so there is no queue-side
+        # cost T1 could reduce either way. Routing this through T1 would
+        # mean threading an LLM client (plus usage/provider/authority
+        # manifest/spend-ceiling participation) into a writer that has never
+        # needed one — an architecture change, not a fix. Recorded here so
+        # the gap is attributable rather than silent (AC3).
+        get_t1_census().record_unscreened(T1_UNSCREENED_NAME_COLLISION)
         write_pending_merge(
             merges_path,
             merge_target_name=canonical.path.stem,

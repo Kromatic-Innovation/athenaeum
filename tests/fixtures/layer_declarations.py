@@ -65,6 +65,7 @@ MODULE_LAYER: dict[str, int] = {
     "owner": 0,
     "pagination": 0,
     "progress": 0,
+    "t1_census": 0,
     "vecmath": 0,
     # L1 -- data model.
     "authority": 1,

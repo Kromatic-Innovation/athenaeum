@@ -41,8 +41,9 @@ is relocated here with it but keeps only its existing C4 call site.
 Layering: L4 (domain/pipeline). Imports :mod:`athenaeum.pending_merges`
 (L4) for the proposal id / write / resolve surface, plus
 :mod:`athenaeum.calibration` (L3), :mod:`athenaeum.spend` (L3),
-:mod:`athenaeum.models` (L1), :mod:`athenaeum.provider` (L3) and
-:mod:`athenaeum.reasoning_tiers`. It imports nothing from
+:mod:`athenaeum.models` (L1), :mod:`athenaeum.provider` (L3),
+:mod:`athenaeum.reasoning_tiers` and :mod:`athenaeum.t1_census` (L0, issue
+athenaeum#1620 — the run-scoped screened/unscreened counter). It imports nothing from
 :mod:`athenaeum.merge` or :mod:`athenaeum.cluster_comparator` — both of
 those import THIS module, and neither back-edge exists, so no cycle is
 introduced (``tests/test_import_graph_acyclic.py`` stays pinned at
@@ -67,6 +68,14 @@ from athenaeum.reasoning_tiers import (
     run_t1_tier,
     run_t2_tier,
 )
+from athenaeum.t1_census import (
+    T1_SKIP_CEILING,
+    T1_SKIP_DISABLED,
+    T1_SKIP_DRY_RUN,
+    T1_SKIP_NO_CLIENT,
+    T1_SKIP_NO_MEMBERS,
+    get_t1_census,
+)
 
 if TYPE_CHECKING:
     from athenaeum.provider import LLMBackend
@@ -77,6 +86,37 @@ __all__ = [
 ]
 
 log = logging.getLogger(__name__)
+
+
+def _t1_pretier_skip_reason(
+    *,
+    enabled: bool,
+    client: "LLMBackend | None",
+    dry_run: bool,
+    member_paths: list[str],
+) -> str | None:
+    """Which of the four pre-tier gates (if any) stops T1 from running.
+
+    Issue athenaeum#1620 AC1: before this helper existed, all four collapsed into
+    one silent ``if not (enabled and client is not None and not dry_run and
+    member_paths): return False`` — a caller had to INFER which condition
+    fired; nothing recorded or logged which one it actually was. Checked in
+    the same left-to-right order the original boolean short-circuited in, so
+    this refactor changes only what is observable, never which input
+    combinations return early: ``enabled`` first, then ``client``, then
+    ``dry_run``, then ``member_paths``. Returns ``None`` when none of the
+    four gates fires, i.e. the screen should actually run (the caller still
+    has its own separate spend-ceiling gate to check after this).
+    """
+    if not enabled:
+        return T1_SKIP_DISABLED
+    if client is None:
+        return T1_SKIP_NO_CLIENT
+    if dry_run:
+        return T1_SKIP_DRY_RUN
+    if not member_paths:
+        return T1_SKIP_NO_MEMBERS
+    return None
 
 
 def t1_screen_rejects_merge_proposal(
@@ -107,8 +147,27 @@ def t1_screen_rejects_merge_proposal(
     ``proposal_id`` is derived with the SAME :func:`_make_id` that
     :func:`write_pending_merge` uses, so the tier log / audit sample correlate
     with the human-facing :class:`~athenaeum.pending_merges.PendingMerge`.
+
+    Issue athenaeum#1620 AC1/AC3: every early return below now names its reason
+    (one of :data:`~athenaeum.t1_census.T1_SKIP_DISABLED` /
+    ``T1_SKIP_NO_CLIENT`` / ``T1_SKIP_DRY_RUN`` / ``T1_SKIP_NO_MEMBERS`` /
+    ``T1_SKIP_CEILING``) both in a log line and in the process-global
+    :func:`~athenaeum.t1_census.get_t1_census` counter, and a call that
+    actually reaches :func:`run_reasoning_pipeline` records itself as
+    ``screened`` — closing the gap where a silent skip could previously only
+    be inferred, never read.
     """
-    if not (enabled and client is not None and not dry_run and member_paths):
+    skip_reason = _t1_pretier_skip_reason(
+        enabled=enabled, client=client, dry_run=dry_run, member_paths=member_paths
+    )
+    if skip_reason is not None:
+        get_t1_census().record_unscreened(skip_reason)
+        log.info(
+            "resolutions: T1 reasoning screen not run for cluster %s (%s); "
+            "writing proposal unscreened",
+            cluster_id,
+            skip_reason,
+        )
         return False
 
     # Issue athenaeum#568: the reasoning screen adds LLM calls to the merge phase, so it
@@ -117,6 +176,7 @@ def t1_screen_rejects_merge_proposal(
     if usage is not None:
         ceiling = spend.ceiling_tripped(usage, provider=provider, config=config)
         if ceiling is not None:
+            get_t1_census().record_unscreened(T1_SKIP_CEILING)
             log.warning(
                 "resolutions: spend ceiling reached (%s) — skipping T1 reasoning "
                 "screen for cluster %s; writing proposal unscreened",
@@ -125,6 +185,7 @@ def t1_screen_rejects_merge_proposal(
             )
             return False
 
+    get_t1_census().record_screened()
     proposal = ReasoningProposal(
         proposal_id=_make_id(member_paths, merge_target_name),
         merge_target_name=merge_target_name,
