@@ -31,18 +31,22 @@ pipeline:
    section): an existing page whose ``name:`` frontmatter carries
    decorative characters picked up by a CRM import (e.g. ``"Bill Lennan
    \U0001F4AD"``, no ``aliases:`` registered), and a raw mention using the
-   clean form ("Bill Lennan"). **This is marked ``xfail(strict=True)``,
-   not asserted as passing** — measured directly against this PR's own
-   current head (after both the tier-3 guard removal AND the
-   ``DEMOTED_NAME_MATCH_TYPES`` removal), the outcome is TWO person pages,
-   not one. Neither the tier-0 registry consult nor the now-restored tier1
-   match can bridge this gap: both require the target's full registered
+   clean form ("Bill Lennan"). Neither the tier-0 registry consult nor
+   tier1 can bridge this gap: both require the target's full registered
    ``name``/``aliases`` string to appear as a literal (word-boundary,
    case-insensitive) substring of the new raw text -- see
    :func:`athenaeum.identity_resolution.match_person_mentions` and
    :func:`athenaeum.tiers.tier1_programmatic_match`. A decorated `name:`
    field with no clean alias registered defeats both identically, so
-   restoring tier1 wins nothing here either.
+   restoring tier1 won nothing here.
+
+   **athenaeum#1615 closes this specific gap** with a meaning-based fallback
+   (embedding similarity + tier-2 LLM confirmation) that runs when the
+   exact-string lookup misses -- this test was originally ``xfail(strict=
+   True)`` (two pages, the pre-athenaeum#1615 outcome); athenaeum#1615 removed that
+   marker and updated the fixture to assert the now-correct one-page
+   outcome. See ``tests/test_1615_similarity_wiring.py`` for the resolver's
+   own dedicated end-to-end coverage of this same shape.
 
 **Conclusion recorded in the PR body:** restoring tier1 person-matching is
 correct, low-risk, semantically-restorative infrastructure, and it is NOT
@@ -161,28 +165,24 @@ class TestExactNameMatchIsHandledButNotByTier1:
 
 
 class TestDecoratedNameMismatchStillDuplicates:
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "athenaeum#1597 AC1 follow-on, measured not assumed: restoring tier1 "
-            "person-matching does not fix a decorated-name/clean-mention "
-            "mismatch. Both the tier-0 registry consult and the now-restored "
-            "tier1 match require the EXISTING page's full registered "
-            "name/alias string to appear as a literal substring of the new "
-            "raw text; a `name:` field polluted with decorative characters "
-            "(the real shape sampled from the live corpus) and no clean "
-            "alias defeats both identically. See the PR body's 'Duplicate "
-            "entity pages' section for the live-corpus measurement (0 of "
-            "305 stuck entries newly resolve via tier1) and the recommended, "
-            "separately-scoped follow-up (key normalization / alias "
-            "backfill / fuzzy matching)."
-        ),
-    )
     def test_clean_mention_of_a_decoratively_named_existing_person_does_not_duplicate(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """athenaeum#1615: this used to be ``xfail(strict=True)`` (two pages) --
+        neither tier-0 nor tier1 can bridge a decorated-name/clean-mention
+        mismatch (see the class/module docstrings). athenaeum#1615's
+        meaning-based fallback (embedding similarity + tier-2 LLM
+        confirmation), which runs when the exact-string lookup misses,
+        closes exactly this gap -- so this now asserts ONE page, not two.
+        The embedder is stubbed (never real chromadb in the test suite,
+        matching every other athenaeum#1615 test) and ``tier3_merge`` is
+        monkeypatched wholesale (same shortcut ``test_create_name_gate_1173
+        .py``'s athenaeum#1170 collision tests take) so this stays
+        deterministic regardless of whether the ``[vector]`` extra is
+        installed.
+        """
         import anthropic as anthropic_mod
 
         from athenaeum.librarian import run
@@ -193,11 +193,6 @@ class TestDecoratedNameMismatchStillDuplicates:
             mention_text="Bill Lennan",  # clean mention, the real corpus shape
         )
 
-        # Realistic: since neither tier-0 nor tier1 can match this mention,
-        # tier2 classify has no "already known" signal and (like a real LLM
-        # facing an apparently-new name) classifies it as NEW; tier3_create
-        # then succeeds (the athenaeum#1597 AC1 guard removal already
-        # shipped) and mints a second page.
         classify_response = MagicMock()
         classify_response.content = [
             MagicMock(
@@ -214,29 +209,36 @@ class TestDecoratedNameMismatchStillDuplicates:
                 )
             )
         ]
-        create_response = MagicMock()
-        create_response.content = [
-            MagicMock(
-                text=(
-                    "# Bill Lennan\n\n## Notes\n\n"
-                    "- 2026-09-10: Launching a new coaching program.\n"
-                )
-            )
-        ]
+        # athenaeum#1615: the meaning-based fallback's tier-2 confirmation call
+        # -- the SECOND client.messages.create call in this pipeline now
+        # that the resolver runs before tier-3 create. Confirms the match
+        # against the decorated existing page's uid.
+        confirm_response = MagicMock()
+        confirm_response.content = [MagicMock(text="MATCH: aaaaaaaa")]
+
         mock_client = MagicMock()
-        mock_client.messages.create.side_effect = [classify_response, create_response]
+        mock_client.messages.create.side_effect = [classify_response, confirm_response]
         monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setattr(
+            "athenaeum.entity_resolution.embed_texts",
+            lambda texts: [[1.0, 0.0] for _ in texts],
+        )
 
-        run(
+        def _fake_tier3_merge(action, existing_body, source_ref, client, **_kwargs):
+            return existing_body + "\n\nLaunching a new coaching program.\n", None
+
+        monkeypatch.setattr("athenaeum.tiers.tier3_merge", _fake_tier3_merge)
+
+        exit_code = run(
             raw_root=root / "raw",
             wiki_root=root / "wiki",
             knowledge_root=root,
             max_api_calls=10,
         )
 
+        assert exit_code == 0
         assert len(_person_pages(root)) == 1, (
-            "expected exactly one person page -- if this assertion now "
-            "PASSES, the xfail above must be removed and the PR body's "
-            "'does not go to approximately zero' finding is stale"
+            "athenaeum#1615's meaning-based fallback must fold this observation "
+            "into the existing decorated-name page, not mint a duplicate"
         )

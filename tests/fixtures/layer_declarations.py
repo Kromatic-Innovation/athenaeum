@@ -157,6 +157,7 @@ MODULE_LAYER: dict[str, int] = {
     "decisions": 4,
     "dedupe": 4,
     "drain": 4,
+    "entity_resolution": 4,
     "filename_entity_prune": 4,
     "intake_audit": 4,
     "librarian": 4,

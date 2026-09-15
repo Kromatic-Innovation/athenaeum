@@ -123,6 +123,11 @@ include = [
     # (athenaeum.erasure.available_retention_packs), not a Python literal,
     # so they must actually ship in the wheel like rule_examples/ above.
     "src/athenaeum/retention_packs/**/*.yaml",
+    # Entity-name-resolution confirmation prompt (issue athenaeum#1615) -- prompt
+    # text is content, not code (policy: prompt-text-is-content.md), loaded via
+    # importlib.resources by athenaeum.tiers, same rationale as the two entries
+    # above.
+    "src/athenaeum/prompts/**/*.md",
 ]
 
 # Ship the bundled skills/ directory (adapter-authoring, issue athenaeum#419) INSIDE the

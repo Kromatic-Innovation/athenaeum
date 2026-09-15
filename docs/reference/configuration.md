@@ -377,6 +377,43 @@ configures. No seed in ``_DEFAULTS``. This default
 DEFAULT_FRESHNESS_HOURS` — kept as a separate literal rather than an
 import since this module (L2) may not import that one (L4, layering).
 
+## `entity_resolution`
+
+### `resolve_name_similarity_threshold`
+
+- **YAML path:** `entity_resolution.name_similarity_threshold`
+- **Environment variable:** `ATHENAEUM_NAME_SIMILARITY_THRESHOLD`
+- **CLI flag:** —
+- **Default:** `0.9`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the embedding cosine-similarity threshold for entity NAME
+resolution.
+
+Gates `athenaeum.entity_resolution.resolve_same_subject`'s
+candidate-generation stage: a normalized-name embedding must score at or
+above this threshold to even reach the tier-2 confirmation step. Below
+it, the candidate is never surfaced and the create path proceeds as
+today (`NoMatch`).
+
+Deliberately its OWN key — AC6 is explicit that no
+code path may reuse `resolve_resolved_similarity_threshold`'s 0.83
+(`athenaeum.fingerprint`), which was tuned for claim-pair resolution
+(matching two DESCRIPTIONS of a fact), not short entity names. A wrong
+merge here welds two real people/companies/projects together and is
+hard to detect, so this ships HIGHER than the claim-pair value: 0.90.
+Two independent normalized-name variants of the same subject (e.g.
+"Bryan Went" vs. "Bryan Went 🦁", which normalize identically
+via `athenaeum.entity_resolution.normalize_name`) score at or near
+1.0, comfortably above 0.90; two DIFFERENT people who merely share a
+surname or a common given name sit well below it. No seed in
+``_DEFAULTS`` so the code default stays reachable. Env
+``ATHENAEUM_NAME_SIMILARITY_THRESHOLD`` > yaml
+``entity_resolution.name_similarity_threshold`` > this default. A
+malformed env value logs a WARNING (via `_env_number`) and falls
+back to yaml/default; a ``bool``/non-numeric yaml value falls back to
+the default.
+
 ## `erasure`
 
 ### `resolve_retention_pack_selection`
@@ -3307,6 +3344,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_MERGE_FULL_THINKING` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_MERGE_PATCH_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_MERGE_PATCH_THINKING` | `src/athenaeum/tiers.py` |
+| `ATHENAEUM_NAME_RESOLUTION_CONFIRM_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS` | `src/athenaeum/fingerprint.py` |
 | `ATHENAEUM_PUSH_FAILURE_ALERT_THRESHOLD` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_QUARANTINE_THRESHOLD` | `src/athenaeum/librarian.py` |

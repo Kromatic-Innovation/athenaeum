@@ -2280,8 +2280,11 @@ def process_one(
     # Issue athenaeum#1170: `index` (already a local parameter here) is threaded
     # through so a colliding create disambiguates against — or escalates
     # for — the existing page instead of minting a duplicate.
+    # Issue athenaeum#1615: thread the same tier-2 client through so a missed
+    # exact-name lookup falls back to the meaning-based (embedding + tier-2
+    # confirmation) resolver instead of creating unconditionally.
     name_gate_outcome = gate_create_name_classifications(
-        classified, raw.ref, raw.content, config, index=index
+        classified, raw.ref, raw.content, config, index=index, client=client, usage=usage
     )
     classified = name_gate_outcome.kept
     address_escalations.extend(name_gate_outcome.escalations)
