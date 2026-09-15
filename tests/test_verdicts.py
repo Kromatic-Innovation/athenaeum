@@ -309,6 +309,76 @@ class TestPageIdForPath:
         assert make_pair_key(id_a, id_b) == make_pair_key(id_b, id_a)
 
 
+class TestPageIdForPathTruncationCollision:
+    """Issue athenaeum#1677 follow-up: ``slugify``'s 60-char cap means a
+    long ``root``-relative path (a real-corpus ``origin_scope`` is
+    frequently 45-60+ chars on its own) can truncate away everything that
+    would have disambiguated it, silently re-introducing a same-id
+    collision worse than the bare-stem one *root* exists to fix."""
+
+    def test_short_root_relative_path_id_is_unchanged(self, tmp_path: Path) -> None:
+        """A root-relative path whose slug does NOT hit the cap must come
+        out byte-identical to plain slugify output -- point 2 of the
+        follow-up fix: existing short ledger ids must not move."""
+        wiki_root = tmp_path / "wiki"
+        scope_dir = wiki_root / "scope-x"
+        scope_dir.mkdir(parents=True)
+        page = scope_dir / "project_widget.md"
+        page.write_text("claim", encoding="utf-8")
+
+        # Pin the literal id: this is the exact id this path has always
+        # produced (well under the 60-char cap, so no truncation logic is
+        # even reached).
+        assert page_id_for_path(page, root=wiki_root) == "scope-x-project-widget"
+
+    def test_long_same_prefix_scopes_get_different_ids(self, tmp_path: Path) -> None:
+        """Two long, same-prefix ``origin_scope``-shaped directories that
+        would truncate to the identical 60-char slug now get DIFFERENT
+        ids. Modeled on the real corpus collision (measured against the
+        live corpus): multiple 55+ char scope names sharing a long common
+        prefix, each holding a differently-named file, all collapsed onto
+        one id under the pre-fix truncate-then-collide behavior.
+        """
+        wiki_root = tmp_path / "wiki"
+        scope_a = "users-tristankromer-code-kromatic-project-good-reads-newslet"
+        scope_b = "users-tristankromer-code-kromatic-project-good-reads-newsletx"
+        dir_a = wiki_root / scope_a
+        dir_b = wiki_root / scope_b
+        dir_a.mkdir(parents=True)
+        dir_b.mkdir(parents=True)
+        page_a = dir_a / "hestia_lock_drops_silently.md"
+        page_b = dir_b / "mailchimp_variate_test_size_manual_step.md"
+        page_a.write_text("a", encoding="utf-8")
+        page_b.write_text("b", encoding="utf-8")
+
+        id_a = page_id_for_path(page_a, root=wiki_root)
+        id_b = page_id_for_path(page_b, root=wiki_root)
+
+        assert id_a != id_b
+        assert len(id_a) <= 60
+        assert len(id_b) <= 60
+
+    def test_two_stems_in_the_same_long_scope_get_different_ids(
+        self, tmp_path: Path
+    ) -> None:
+        """The within-scope case the live measurement flagged as the worse
+        collision class: two DIFFERENT files in the SAME long scope
+        directory must not collapse onto one id either."""
+        wiki_root = tmp_path / "wiki"
+        scope = "users-tristankromer-code-kromatic-project-good-reads-newslet"
+        scope_dir = wiki_root / scope
+        scope_dir.mkdir(parents=True)
+        page_a = scope_dir / "hestia_lock_drops_silently.md"
+        page_b = scope_dir / "MEMORY.md"
+        page_a.write_text("a", encoding="utf-8")
+        page_b.write_text("b", encoding="utf-8")
+
+        id_a = page_id_for_path(page_a, root=wiki_root)
+        id_b = page_id_for_path(page_b, root=wiki_root)
+
+        assert id_a != id_b
+
+
 # ---------------------------------------------------------------------------
 # Schema round-trip
 # ---------------------------------------------------------------------------

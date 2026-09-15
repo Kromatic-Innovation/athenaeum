@@ -85,6 +85,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ClusterComparatorResult",
     "ClusterScreenContext",
+    "auto_memory_root",
     "candidate_pairs",
     "page_from_auto_memory_file",
     "planned_pair_count",
@@ -92,7 +93,34 @@ __all__ = [
 ]
 
 
-def page_from_auto_memory_file(member: AutoMemoryFile) -> ComparatorPage:
+def auto_memory_root(member: AutoMemoryFile) -> Path:
+    """The corpus root a cluster member's :attr:`~AutoMemoryFile.path` lives
+    under, for disambiguating :func:`~athenaeum.verdicts.page_id_for_path`
+    ids across ``origin_scope``\\ s (athenaeum#1677).
+
+    ``member.path`` is normally ``<root>/<origin_scope>/<prefix>_<slug>.md``
+    (see :class:`~athenaeum.models.AutoMemoryFile`'s docstring), so when the
+    immediate parent directory's name matches ``origin_scope`` verbatim, the
+    root one level up is ``<root>`` — passing that as ``page_id_for_path``'s
+    *root* is exactly what turns the id into ``<origin_scope>/<stem>``
+    instead of the bare ``<stem>``, which is the disambiguation two same-stem
+    members from different ``origin_scope``\\ s under one root need to avoid
+    colliding onto one id (and therefore one :func:`~athenaeum.verdicts.make_pair_key`
+    pairing). If the parent directory's name does NOT match ``origin_scope``
+    — a flat layout, or a test fixture that skips the scope subdirectory —
+    there is no scope segment to peel off, so this falls back to the
+    immediate parent directory, defensively: still a valid *root*, just one
+    with nothing to disambiguate.
+    """
+    parent = member.path.parent
+    if parent.name == member.origin_scope:
+        return parent.parent
+    return parent
+
+
+def page_from_auto_memory_file(
+    member: AutoMemoryFile, *, root: Path | None = None
+) -> ComparatorPage:
     """Adapt one auto-memory cluster member into a :class:`ComparatorPage`.
 
     Mirrors :func:`athenaeum.comparator.page_from_path` exactly, but for a
@@ -104,8 +132,17 @@ def page_from_auto_memory_file(member: AutoMemoryFile) -> ComparatorPage:
     included — :attr:`~athenaeum.models.AutoMemoryFile.content` lazily
     reads it from disk once and caches it, so repeated pairings of the
     same member across candidate pairs cost one read, not one per pair).
+
+    *root* scopes the id to the corpus/knowledge root the member's path is
+    resolved under (athenaeum#1677) — without it, two members that share a
+    filename stem but sit under different ``origin_scope``\\ s collide onto
+    one id. Defaults to :func:`auto_memory_root` when omitted; pass it
+    explicitly to use a caller-supplied root verbatim instead (the seam a
+    future wiring step, athenaeum#1678, uses to thread a real ``wiki_root``
+    through instead of this module's own best-effort derivation).
     """
-    return page_from_text(page_id_for_path(member.path), member.content)
+    resolved_root = auto_memory_root(member) if root is None else root
+    return page_from_text(page_id_for_path(member.path, root=resolved_root), member.content)
 
 
 def candidate_pairs(
@@ -303,7 +340,10 @@ def run_cluster_comparator(
             fallback_client=client,
         ):
             screened_out.append(
-                (page_id_for_path(member_a.path), page_id_for_path(member_b.path))
+                (
+                    page_id_for_path(member_a.path, root=auto_memory_root(member_a)),
+                    page_id_for_path(member_b.path, root=auto_memory_root(member_b)),
+                )
             )
             continue
         page_a = page_from_auto_memory_file(member_a)
