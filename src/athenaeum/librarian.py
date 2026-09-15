@@ -4416,8 +4416,9 @@ class RunContext:
     # mirroring ``rule_proposals_summary``'s "disabled phase never touches
     # this field" contract immediately above).
     audit_nightly_drain_summary: dict[str, Any] | None = None
-    # Issue athenaeum#1679 (§3.10): comparator-domain (athenaeum.wiki_dedupe /
-    # athenaeum.comparator) counts from ``_run_wiki_dedup_phase`` (``None``
+    # Issue athenaeum#1679 (§3.10): comparator-domain (five-verdict
+    # comparator, reached only via ``athenaeum.wiki_dedupe`` -- see that
+    # module's own docstring) counts from ``_run_wiki_dedup_phase`` (``None``
     # until that phase runs). ``_run_merge_only_phase``/``_run_auto_memory_phase``
     # fold these into the pre-existing "detector_haiku"/"escalations"
     # run-summary counters alongside the C4 (``merge.py``) stats those
