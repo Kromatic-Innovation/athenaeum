@@ -799,7 +799,7 @@ Propose folding one or more source pages INTO a named canonical page. Derives me
 |---|---|---|---|
 | `--apply` | `False` | — | Queue the proposal. Default: dry-run — print the plan, write nothing. |
 | `--draft-file` | — | — | Override the merged draft body with this file's contents (for a genuine content merge). Default: the canonical page's current text VERBATIM. |
-| `--into` | — | — | The canonical page to fold sources into (a slug, a `<slug>.md` filename, or a path). Must be an existing wiki page whose filename matches its `name:` slug. |
+| `--into` | — | — | The canonical page to fold sources into (a slug, a `<slug>.md` filename, or a path). Must be an existing wiki page whose filename identity-resolves to its `name:` slug: either `<slug>.md`, or `<uid>-<slug>.md` where `<uid>` is that page's own `uid:` frontmatter. |
 | `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--rationale` | — | — | Optional human rationale recorded on the proposal. |

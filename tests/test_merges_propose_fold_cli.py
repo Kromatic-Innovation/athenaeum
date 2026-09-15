@@ -260,12 +260,15 @@ def test_refuses_source_equals_into(tmp_path: Path) -> None:
 
 
 def test_refuses_canonical_whose_filename_is_not_its_slug(tmp_path: Path) -> None:
-    """A uid-prefixed canonical page (`<uid>-<slug>.md`) would classify as
+    """A page whose filename matches neither the bare-slug form nor its OWN
+    `<uid>-<slug>.md` form (no `uid:` frontmatter here at all, so the
+    uid-prefixed identity form can never match) would classify as
     create-merged (not fold) — refuse at proposal time rather than queue a
     proposal that silently would not delete the sources (athenaeum#748)."""
     wiki = tmp_path / "wiki"
     wiki.mkdir()
-    # filename stem "4c7946d3-maria-springer" != slugify("Maria Springer").
+    # filename stem "4c7946d3-maria-springer" != slugify("Maria Springer"),
+    # and there is no `uid: 4c7946d3` frontmatter to validate it by identity.
     uid_page = wiki / "4c7946d3-maria-springer.md"
     _wiki_page(uid_page, name="Maria Springer", body="body\n")
     src = wiki / "dup.md"
@@ -287,6 +290,90 @@ def test_refuses_canonical_whose_filename_is_not_its_slug(tmp_path: Path) -> Non
     payload = json.loads(out)
     assert payload["ok"] is False
     assert "slugifies" in payload["error"]
+    # issue athenaeum#1635: the refusal must no longer recommend a renamer that
+    # cannot act on this page (it only feeds the name-is-an-email path).
+    assert "migrate-pii" not in payload["error"]
+    assert not (wiki / "_pending_merges.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# issue athenaeum#1635 — identity-based resolution: a `<uid>-<slug>.md` canonical
+# page (the real corpus convention) is accepted when uid:/name: match the
+# filename; two live pages resolving to the same slug stay refused, naming
+# both; the stale `migrate-pii --rename-only` recommendation is gone.
+# ---------------------------------------------------------------------------
+
+
+def _uid_wiki_page(path: Path, *, uid: str, name: str, body: str) -> None:
+    path.write_text(
+        "---\n" f"uid: {uid}\n" f"name: {name}\n" "type: concept\n" "---\n" + body,
+        encoding="utf-8",
+    )
+
+
+def test_uid_prefixed_canonical_page_succeeds_in_dry_run(tmp_path: Path) -> None:
+    """The corpus's real filename convention, `<uid>-<slug>.md`, is now an
+    accepted canonical target when the page's own `uid:`/`name:` frontmatter
+    matches the filename (issue athenaeum#1635)."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    canonical = wiki / "f351b6a1-learn-something.md"
+    _uid_wiki_page(canonical, uid="f351b6a1", name="Learn Something", body="RICH body\n")
+    src = wiki / "dup.md"
+    _wiki_page(src, name="Dup", body="d\n")
+    rc, out = _run(
+        [
+            "merges",
+            "propose-fold",
+            "--path",
+            str(tmp_path),
+            "--json",
+            "--into",
+            "f351b6a1-learn-something",
+            "--source",
+            "dup",
+        ]
+    )
+    assert rc == 0
+    plan = json.loads(out)
+    assert plan["ok"] is True
+    assert plan["applied"] is False
+    assert plan["merge_target_name"] == "Learn Something"
+    assert plan["canonical_page"] == str(canonical)
+    assert not (wiki / "_pending_merges.md").exists()
+
+
+def test_refuses_ambiguous_target_naming_both_colliding_pages(tmp_path: Path) -> None:
+    """Two live pages resolving to the same slug stay refused, and the error
+    names both (issue athenaeum#1635 AC2) -- e.g. a bare-slug file and a
+    uid-prefixed file that both carry the same `name:`."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    bare = wiki / "maria-springer.md"
+    _wiki_page(bare, name="Maria Springer", body="bare body\n")
+    uid_dup = wiki / "aaaa1111-maria-springer.md"
+    _uid_wiki_page(uid_dup, uid="aaaa1111", name="Maria Springer", body="uid body\n")
+    src = wiki / "dup.md"
+    _wiki_page(src, name="Dup", body="d\n")
+    rc, out = _run(
+        [
+            "merges",
+            "propose-fold",
+            "--path",
+            str(tmp_path),
+            "--json",
+            "--into",
+            "maria-springer",
+            "--source",
+            "dup",
+        ]
+    )
+    assert rc == 2
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert "ambiguous" in payload["error"]
+    assert "maria-springer.md" in payload["error"]
+    assert "aaaa1111-maria-springer.md" in payload["error"]
     assert not (wiki / "_pending_merges.md").exists()
 
 
