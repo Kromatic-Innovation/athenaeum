@@ -133,6 +133,7 @@ Read-and-reason audit pass over wiki pages: stamps last_audited/audit_version, f
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--sample` | — | — | Audit a stratified (by type:) random sample of N pages instead of the whole corpus. Combine with --seed for reproducibility. |
 | `--seed` | `0` | — | Seed for --sample (default: 0). The same seed over the same corpus always selects the same pages. |
+| `--stale` | `False` | — | Report mode: list pages whose last_audited is missing/older than audit.stale_after_days, or whose audit_version is behind the current version, oldest/never-audited first. Read-only -- ignores --apply/--batch/--sample/--seed/--uids/--mechanical-dry-run; honors --path/--json/--limit. |
 | `--uids` | — | — | Path to a file listing one page uid per line; audit exactly those pages. |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 

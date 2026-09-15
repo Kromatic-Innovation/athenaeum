@@ -2737,6 +2737,109 @@ def resolve_spend_warning_threshold_pct(config: dict[str, Any] | None) -> float:
     return DEFAULT_SPEND_WARNING_THRESHOLD_PCT
 
 
+# ---------------------------------------------------------------------------
+# Stale-page review queue + bounded nightly re-audit (issue athenaeum#1630)
+# ---------------------------------------------------------------------------
+
+#: Default staleness age, in days, for :func:`resolve_audit_stale_after_days`.
+DEFAULT_AUDIT_STALE_AFTER_DAYS = 90
+
+#: Default share of :func:`resolve_spend_max_usd_per_day` the nightly drain
+#: (issue athenaeum#1630) may spend, for :func:`resolve_audit_nightly_spend_share`.
+DEFAULT_AUDIT_NIGHTLY_SPEND_SHARE = 0.5
+
+
+def resolve_audit_stale_after_days(config: dict[str, Any] | None) -> int:
+    """Resolve the stale-page age threshold, in days (issue athenaeum#1630).
+
+    A page whose ``last_audited`` is missing, or older than this many days,
+    is stale (see :mod:`athenaeum.audit_queue`). NOT opt-in — always
+    resolves to a usable value (:data:`DEFAULT_AUDIT_STALE_AFTER_DAYS` when
+    unset), mirroring :func:`resolve_spend_warning_threshold_pct`'s "always
+    resolves" shape rather than the ceilings' "unset means off" shape,
+    because the stale-page REPORT itself is always on (only the nightly
+    drain phase is opt-in — see :func:`resolve_audit_nightly_max_pages`).
+    Precedence: ``ATHENAEUM_AUDIT_STALE_AFTER_DAYS`` env > ``audit.stale_after_days``
+    yaml > ``90``. A ``bool`` / non-int / ``<= 0`` value (env or yaml) falls
+    through to the default — a zero/negative age would mark every page
+    stale unconditionally.
+    """
+    value = _env_number("ATHENAEUM_AUDIT_STALE_AFTER_DAYS", int)
+    if value is not None and value > 0:
+        return value
+    if isinstance(config, dict):
+        cfg = config.get("audit")
+        if isinstance(cfg, dict):
+            raw = cfg.get("stale_after_days")
+            if raw is not None and not isinstance(raw, bool):
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError):
+                    value = None
+                if value is not None and value > 0:
+                    return value
+    return DEFAULT_AUDIT_STALE_AFTER_DAYS
+
+
+def resolve_audit_nightly_max_pages(config: dict[str, Any] | None) -> int | None:
+    """Resolve the nightly re-audit drain's per-run page cap (issue athenaeum#1630).
+
+    Strictly opt-in, like the spend ceilings this module already resolves
+    (:func:`_resolve_optional_positive_number`): unset means ``None``, and
+    :func:`athenaeum.audit_queue.run_nightly_drain` treats ``None`` as "the
+    phase does not run at all" — the librarian's nightly re-audit phase
+    (``athenaeum.librarian._run_audit_nightly_drain_phase``) is OFF by
+    default and only wires in once an operator sets this key. Precedence:
+    ``ATHENAEUM_AUDIT_NIGHTLY_MAX_PAGES`` env > ``audit.nightly_max_pages``
+    yaml > ``None`` (disabled).
+    """
+    return _resolve_optional_positive_number(
+        config,
+        "audit",
+        "nightly_max_pages",
+        "ATHENAEUM_AUDIT_NIGHTLY_MAX_PAGES",
+        cast=int,
+    )
+
+
+def resolve_audit_nightly_spend_share(config: dict[str, Any] | None) -> float:
+    """Resolve the nightly drain's share of the daily spend ceiling (athenaeum#1630).
+
+    The fraction of :func:`resolve_spend_max_usd_per_day` the nightly
+    re-audit drain (issue athenaeum#1630) may spend before it stops
+    submitting further pages this run and records the remainder of its
+    page window as skipped for budget — see
+    :func:`athenaeum.audit_queue.run_nightly_drain`. This knob NEVER changes
+    the underlying daily USD ceiling itself, via yaml or otherwise (out of
+    scope for athenaeum#1630); it only narrows how much of that
+    ALREADY-configured ceiling the nightly drain, specifically, may claim
+    on top of whatever else has already spent today. When no daily ceiling
+    is configured at all, this knob does
+    nothing (mirrors every other share/percent-of-an-unset-ceiling knob in
+    this module) — the drain is then bounded only by
+    :func:`resolve_audit_nightly_max_pages`. NOT opt-in itself — always
+    resolves to a usable fraction (:data:`DEFAULT_AUDIT_NIGHTLY_SPEND_SHARE`
+    when unset). Precedence: ``ATHENAEUM_AUDIT_NIGHTLY_SPEND_SHARE`` env >
+    ``audit.nightly_spend_share`` yaml > ``0.5``. A ``bool`` / non-numeric /
+    value outside ``(0, 1]`` (env or yaml) falls through to the default.
+    """
+    value = _env_number("ATHENAEUM_AUDIT_NIGHTLY_SPEND_SHARE", float)
+    if value is not None and 0.0 < value <= 1.0:
+        return value
+    if isinstance(config, dict):
+        cfg = config.get("audit")
+        if isinstance(cfg, dict):
+            raw = cfg.get("nightly_spend_share")
+            if raw is not None and not isinstance(raw, bool):
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    value = None
+                if value is not None and 0.0 < value <= 1.0:
+                    return value
+    return DEFAULT_AUDIT_NIGHTLY_SPEND_SHARE
+
+
 #: Code default for the classify-model knob (env ``ATHENAEUM_CLASSIFY_MODEL`` >
 #: yaml ``models.classify`` > this literal, via :func:`resolve_model`).
 #: Single-sourced HERE (issue athenaeum#640) rather than in :mod:`athenaeum.tiers`:
