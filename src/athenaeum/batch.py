@@ -70,16 +70,18 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, Sequence, cast
 
 import anthropic
 
 from athenaeum import batch_state, spend
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.config import resolve_page_size_threshold_chars
 from athenaeum.intake import tier0_passthrough
 from athenaeum.models import (
     SURFACE_SAME_PAGE_MULTI_MERGE,
@@ -92,6 +94,7 @@ from athenaeum.models import (
     cache_usage_counts,
     parse_frontmatter,
     render_frontmatter,
+    resolve_page_type,
 )
 from athenaeum.provider import AnthropicBatchClientBackend, response_text
 from athenaeum.relatedness import run_index as relatedness_run_index
@@ -131,6 +134,118 @@ if TYPE_CHECKING:
     from anthropic.types.messages.batch_create_params import Request
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1657: create-name-variant evidence, duplicated from
+# athenaeum.name_structure because this module cannot import it.
+# ---------------------------------------------------------------------------
+#
+# tiers.gate_create_name_classifications' `variant_candidate_builder`
+# parameter (see that function's own docstring for the full account) takes a
+# caller-injected evidence builder rather than importing
+# athenaeum.name_structure.collect_create_name_variant_candidates directly,
+# because name_structure has its own pre-existing, unrelated edge into
+# athenaeum.pending_merges (issue athenaeum#1577's write_pending_merge call),
+# and pending_merges -> audit_on_touch -> audit -> batch -> tiers already
+# reaches back here -- so a batch -> name_structure edge (this module, EITHER
+# top-level or function-local; both count for
+# tests/test_import_graph_acyclic.py's SCC guard) closes a cycle spanning
+# {batch, tiers, audit, audit_on_touch, pending_merges, name_structure}.
+# librarian.py sits strictly above that cycle and injects the REAL
+# name_structure implementation instead; this module cannot, so it injects
+# this small, deliberately-duplicated equivalent. Both are locked together
+# by tests/test_create_name_variant_gate_1657.py's parity test -- update both
+# in the same commit if the matching rule or the size-threshold arithmetic
+# ever changes.
+_BATCH_QUALIFIER_RE = re.compile(r"^(?P<base>.+?)\s*\((?P<qualifier>[^()]+)\)$")
+_BATCH_GROUP_QUALIFIERS: frozenset[str] = frozenset(
+    {"team", "desk", "rota", "crew", "squad", "staff", "the team"}
+)
+
+
+def _batch_normalize_name(name: str) -> str:
+    """Duplicate of ``athenaeum.name_structure.normalize_name``."""
+    return " ".join(name.split()).casefold()
+
+
+def _batch_is_create_name_variant(create_name: str, matched_name: str) -> bool:
+    """Duplicate of
+    ``athenaeum.name_structure.is_create_name_variant_of_matched_page``.
+    """
+    matched_norm = _batch_normalize_name(matched_name)
+    match = _BATCH_QUALIFIER_RE.match(create_name.strip())
+    if match is not None:
+        base = match.group("base").strip()
+        qualifier = match.group("qualifier").strip()
+        if (
+            base
+            and qualifier
+            and _batch_normalize_name(qualifier) not in _BATCH_GROUP_QUALIFIERS
+            and _batch_normalize_name(base) == matched_norm
+        ):
+            return True
+    create_tokens = _batch_normalize_name(create_name).split()
+    matched_tokens = matched_norm.split()
+    if not create_tokens or not matched_tokens:
+        return False
+    if len(create_tokens) <= len(matched_tokens):
+        shorter, longer = create_tokens, matched_tokens
+    else:
+        shorter, longer = matched_tokens, create_tokens
+    return longer[: len(shorter)] == shorter
+
+
+@dataclass(frozen=True)
+class _BatchCreateNameVariantCandidate:
+    """Duplicate of ``athenaeum.name_structure.CreateNameVariantCandidate``."""
+
+    uid: str
+    name: str
+    entity_type: str
+    body_chars: int
+    within_threshold: bool
+
+
+def _batch_collect_create_name_variant_candidates(
+    create_name: str,
+    tier1_matched_entities: "Sequence[tuple[str, str, Path]]",
+    observation: str,
+    config: dict[str, Any] | None,
+) -> list[_BatchCreateNameVariantCandidate]:
+    """Duplicate of
+    ``athenaeum.name_structure.collect_create_name_variant_candidates`` --
+    injected as this transport's ``variant_candidate_builder`` (see the
+    banner comment above this section for why this module cannot call the
+    real one).
+    """
+    seen_uids: set[str] = set()
+    candidates: list[_BatchCreateNameVariantCandidate] = []
+    for name, uid_or_name, fpath in tier1_matched_entities:
+        if uid_or_name in seen_uids:
+            continue
+        if not _batch_is_create_name_variant(create_name, name):
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, body = parse_frontmatter(text)
+        display_name = meta.get("name")
+        if not (isinstance(display_name, str) and display_name):
+            display_name = name
+        seen_uids.add(uid_or_name)
+        candidates.append(
+            _BatchCreateNameVariantCandidate(
+                uid=uid_or_name,
+                name=display_name,
+                entity_type=resolve_page_type(meta),
+                body_chars=len(body),
+                within_threshold=(len(body) + len(observation))
+                <= resolve_page_size_threshold_chars(config),
+            )
+        )
+    return candidates
+
 
 # Poll cadence for ``processing_status``. 30s keeps the nightly run
 # responsive to the common fast-completion case without hammering the API;
@@ -1474,8 +1589,29 @@ def process_batch_run(
         # request or sync-create) on this transport either.
         # Issue athenaeum#1170: `index` (already a local parameter here) is
         # threaded through, symmetric with the sync transport above.
+        # Issue athenaeum#1657: thread this raw file's own tier-1 matches
+        # (`st.matched`, already collected above) plus a batch-wrapped
+        # client (same `AnthropicBatchClientBackend` boundary the 3 existing
+        # LLMBackend hand-offs in this function use) so a create whose name
+        # is a name-structure variant of one of them reaches the fold/mint
+        # model decision on this transport too. Passed as `variant_client`,
+        # deliberately NOT as `client` (left at its default `None`, as
+        # before this issue) — `client` here would also feed
+        # `validate_create_name`'s athenaeum#1615 meaning-based-fallback
+        # confirmation, which this transport has never wired a client for;
+        # `gate_create_name_classifications`'s docstring covers why this
+        # issue keeps that pairing unchanged rather than incidentally
+        # switching it on.
         name_gate_outcome = gate_create_name_classifications(
-            classified, st.raw.ref, st.raw.content, config, index=index
+            classified,
+            st.raw.ref,
+            st.raw.content,
+            config,
+            index=index,
+            usage=usage,
+            tier1_matched_entities=st.matched,
+            variant_client=AnthropicBatchClientBackend(client),
+            variant_candidate_builder=_batch_collect_create_name_variant_candidates,
         )
         classified = name_gate_outcome.kept
         st.address_escalations.extend(name_gate_outcome.escalations)

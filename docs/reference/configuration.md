@@ -1477,6 +1477,22 @@ yaml > ``16384``. A page over this is flagged more loudly (and logged during
 Kept comfortably below the tier-3 merge body cap so flagging precedes any
 hard merge-budget pressure. See `_resolve_positive_int_knob`.
 
+### `resolve_page_size_threshold_chars`
+
+- **YAML path:** `librarian.page_size_threshold_chars`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `10000`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.page_size_threshold_chars``.
+
+Mirrors `athenaeum.tiers.resolve_mention_density_min_occurrences`'s
+validation contract exactly: must be ``>= 1`` (bool rejected as an int
+subclass, so ``page_size_threshold_chars: yes`` in yaml cannot silently
+become a threshold of 1); non-numeric, non-positive, missing, or bool
+values fall back to `DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`.
+
 ### `resolve_page_warn_bytes`
 
 - **YAML path:** `librarian.page_warn_bytes`
@@ -3329,6 +3345,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_COMPARATOR_CONTENT_RELATION_THINKING` | `src/athenaeum/comparator.py` |
 | `ATHENAEUM_CONTRADICTION_DETECT_MAX_TOKENS` | `src/athenaeum/contradictions.py`, `src/athenaeum/shadow_parity.py` |
 | `ATHENAEUM_CONTRADICTION_DETECT_THINKING` | `src/athenaeum/contradictions.py` |
+| `ATHENAEUM_CREATE_NAME_VARIANT_DECISION_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CROSS_SCOPE_MODE` | `src/athenaeum/config.py`, `src/athenaeum/cross_scope.py`, `src/athenaeum/merge.py` |
 | `ATHENAEUM_DISABLED` | `src/athenaeum/context.py`, `src/athenaeum/killswitch.py` |
 | `ATHENAEUM_ENTITY_RUNTIME_SHARE` | `src/athenaeum/librarian.py` |

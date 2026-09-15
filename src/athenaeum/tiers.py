@@ -55,7 +55,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Protocol, Sequence
 
 import yaml
 
@@ -86,8 +86,10 @@ from athenaeum._retry import with_retry
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     DEFAULT_CLASSIFY_MODEL,
+    DEFAULT_PAGE_SIZE_THRESHOLD_CHARS,  # noqa: F401 — re-exported for back-compat
     resolve_heartbeat_interval,
     resolve_model,
+    resolve_page_size_threshold_chars,
     resolve_preserved_log_dir,
 )
 from athenaeum.entity_resolution import (
@@ -1511,6 +1513,21 @@ def _load_name_resolution_confirm_prompt() -> str:
     return resource.read_text(encoding="utf-8")
 
 
+def _load_create_name_variant_decision_prompt() -> str:
+    """Read the create-name-variant fold/mint system prompt (issue athenaeum#1657).
+
+    Same "prompt text is content, not code" convention
+    :func:`_load_name_resolution_confirm_prompt` already established: this
+    multi-line judgment prompt lives in
+    ``src/athenaeum/prompts/create_name_variant_decision.md`` and is loaded
+    via ``importlib.resources``.
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(
+        "create_name_variant_decision.md"
+    )
+    return resource.read_text(encoding="utf-8")
+
+
 def _parse_name_resolution_confirm_response(text: str) -> _NameResolutionConfirmParse:
     """Parse the confirmer's ``MATCH:``/``AMBIGUOUS:``/``NO_MATCH`` line.
 
@@ -1775,6 +1792,135 @@ def validate_create_name(
             )
 
 
+class _CreateNameVariantCandidateLike(Protocol):
+    """Structural shape a create-name-variant candidate must satisfy (issue athenaeum#1657).
+
+    A ``Protocol``, not the concrete dataclass, DELIBERATELY: this module
+    (:mod:`athenaeum.tiers`) must never import
+    :mod:`athenaeum.name_structure` — see ``gate_create_name_classifications``'s
+    ``variant_candidate_builder`` parameter docstring for the import-cycle
+    reason. :class:`athenaeum.name_structure.CreateNameVariantCandidate`
+    (the real, canonical producer, built via
+    :func:`athenaeum.name_structure.collect_create_name_variant_candidates`)
+    structurally satisfies this Protocol; so does ``batch.py``'s
+    behaviourally-equivalent duplicate builder, without either needing to
+    import the other's concrete type.
+    """
+
+    uid: str
+    name: str
+    entity_type: str
+    body_chars: int
+    within_threshold: bool
+
+
+#: A caller-supplied evidence builder for
+#: :func:`gate_create_name_classifications`'s ``variant_candidate_builder``
+#: parameter (issue athenaeum#1657): ``(create_name, tier1_matched_entities,
+#: observation, config) -> candidates``.
+#: Return type deliberately ``Sequence[Any]``, not
+#: ``Sequence[_CreateNameVariantCandidateLike]``: the two concrete builders
+#: this gets assigned (``athenaeum.name_structure.
+#: collect_create_name_variant_candidates`` and ``batch.py``'s duplicate)
+#: return their OWN concrete dataclass types, and mypy's structural
+#: ``Protocol`` matching does not widen a ``Callable``'s return type across
+#: an assignment the way a plain value assignment does. ``Any`` here costs
+#: nothing: every element this gate actually reads is re-checked against
+#: :class:`_CreateNameVariantCandidateLike` at the point of use (the
+#: ``Sequence[_CreateNameVariantCandidateLike]`` parameter on
+#: :func:`_decide_create_name_fold_or_mint` and the prompt-building loop
+#: inside it).
+CreateNameVariantCandidateBuilder = Callable[
+    [str, "Sequence[tuple[str, str, Path]]", str, "dict[str, Any] | None"],
+    "Sequence[Any]",
+]
+
+
+def _decide_create_name_fold_or_mint(
+    create_name: str,
+    candidates: "Sequence[_CreateNameVariantCandidateLike]",
+    observation: str,
+    *,
+    client: LLMBackend,
+    config: dict[str, Any] | None,
+    usage: "TokenUsage | None",
+) -> tuple[str, str | None, str]:
+    """Ask the classify-tier model to fold *create_name* or mint it (issue athenaeum#1657).
+
+    Returns ``(decision, uid, reason)``:
+
+    - ``("fold", uid, reason)`` — *uid* is one of *candidates*' uids.
+    - ``("mint", None, reason)``
+    - ``("unparseable", None, reason)`` — the response carried no
+      recognizable decision (no JSON object, unknown ``decision`` value, or
+      a ``fold`` naming a uid not in *candidates*). Callers keep the create
+      exactly as today, matching every other "malformed model reply never
+      silently mints/merges" contract in this module.
+
+    The prompt deliberately carries only the fields AC1 names — each
+    candidate's uid, name, type, body size, and fold-size verdict — plus
+    the new entity's own name and observation; never the candidate pages'
+    own body text (unlike :func:`_tier2_confirm_same_subject`, which needs
+    body content to judge SAME-SUBJECT; this decision is scoped to
+    fold-vs-mint given a name-structure match already established
+    deterministically).
+    """
+    system_prompt = _load_create_name_variant_decision_prompt()
+    blocks = [
+        f"New entity name: {create_name!r}",
+        "Observed so far:",
+        fence_untrusted(observation[:2000], tag="new_observation", max_chars=2000),
+        "",
+        "Candidate existing pages:",
+    ]
+    for cand in candidates:
+        blocks.append(
+            f"\n- uid: {cand.uid}\n  name: {cand.name!r}\n  "
+            f"type: {cand.entity_type or '(none)'}\n  body_chars: {cand.body_chars}\n  "
+            f"within_page_size_threshold_if_folded: {cand.within_threshold}"
+        )
+    user_content = "\n".join(blocks) + "\n\n" + data_only_clause("new_observation")
+
+    model = _get_classify_model(config)
+    max_tokens = resolve_max_tokens(
+        "create_name_variant_decision",
+        "ATHENAEUM_CREATE_NAME_VARIANT_DECISION_MAX_TOKENS",
+        300,
+        config,
+    )
+    params: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_content}],
+    }
+    response = _timed_llm_call(
+        lambda: client.messages.create(**params),
+        f"create_name_variant_decision name={create_name!r}",
+        usage=usage,
+    )
+    _record_usage(response, usage, model=model, knob="classify")
+    text = response_text(response)
+    obj = extract_json_object(text)
+    if not isinstance(obj, dict):
+        return (
+            "unparseable",
+            None,
+            f"response carried no recognizable JSON object: {text[:200]!r}",
+        )
+    decision = obj.get("decision")
+    reason = obj.get("reason")
+    reason_str = reason if isinstance(reason, str) else ""
+    if decision == "mint":
+        return "mint", None, reason_str
+    if decision == "fold":
+        uid = obj.get("uid")
+        if isinstance(uid, str) and any(cand.uid == uid for cand in candidates):
+            return "fold", uid, reason_str
+        return "unparseable", None, f"fold decision named an unknown uid: {uid!r}"
+    return "unparseable", None, f"response decision field was not fold/mint: {decision!r}"
+
+
 @dataclass(frozen=True)
 class CreateNameGateOutcome:
     """Result of :func:`gate_create_name_classifications` (issue athenaeum#1173)."""
@@ -1789,6 +1935,14 @@ class CreateNameGateOutcome:
     #: "DISAMBIGUATE" branch. Defaults to ``()`` so every pre-athenaeum#1170
     #: construction site/test is unaffected.
     disambiguated: tuple[str, ...] = ()
+    #: Issue athenaeum#1657: names of classifications whose CREATE name was a
+    #: name-structure variant of a tier-1-matched page (see
+    #: :func:`athenaeum.name_structure.is_create_name_variant_of_matched_page`)
+    #: and which the fold/mint model decision folded into that page — rewritten
+    #: in place the same way ``disambiguated`` is (``is_new=False``,
+    #: ``existing_uid`` set). Defaults to ``()`` so every pre-athenaeum#1657
+    #: construction site/test is unaffected.
+    folded: tuple[str, ...] = ()
 
 
 def gate_create_name_classifications(
@@ -1800,6 +1954,9 @@ def gate_create_name_classifications(
     index: "EntityIndex | None" = None,
     client: "LLMBackend | None" = None,
     usage: "TokenUsage | None" = None,
+    tier1_matched_entities: "Sequence[tuple[str, str, Path]] | None" = None,
+    variant_client: "LLMBackend | None" = None,
+    variant_candidate_builder: "CreateNameVariantCandidateBuilder | None" = None,
 ) -> CreateNameGateOutcome:
     """Stop tier-2 from minting unusable entity NAMES at create (issue athenaeum#1173).
 
@@ -1859,11 +2016,90 @@ def gate_create_name_classifications(
       "name_collision"``) is appended to ``escalations``, mirroring the AC2
       branch above — folding an observation into a page whose type cannot
       be confirmed is not a safe disambiguation.
+
+    ``tier1_matched_entities`` (issue athenaeum#1657, keyword-only, ``None``
+    default) threads the SAME ``(name, uid_or_name, path)`` triples
+    :func:`tier1_programmatic_match` produced for this raw file — both
+    call sites already hold this value under a local ``matched``/
+    ``st.matched`` variable. ``None`` (or an empty sequence), OR
+    ``variant_candidate_builder`` (below) left at its ``None`` default,
+    skips this check entirely, so a caller that does not pass BOTH is
+    byte-identical to before this issue.
+
+    ``variant_candidate_builder`` (issue athenaeum#1657, keyword-only, ``None``
+    default) is a caller-supplied ``(create_name, tier1_matched_entities,
+    observation, config) -> candidates`` callable — see
+    :data:`CreateNameVariantCandidateBuilder`. It is a callable injected by
+    the CALLER, deliberately, rather than this module importing
+    :func:`athenaeum.name_structure.collect_create_name_variant_candidates`
+    directly: :mod:`athenaeum.name_structure` has its own pre-existing,
+    unrelated edge into :mod:`athenaeum.pending_merges` (issue athenaeum#1577's
+    ``write_pending_merge`` call), which is reachable back to THIS module via
+    ``pending_merges -> audit_on_touch -> audit -> batch -> tiers`` — so a
+    ``tiers -> name_structure`` edge of ANY kind (top-level or deferred; both
+    count for ``tests/test_import_graph_acyclic.py``'s SCC guard) closes a
+    cycle spanning ``{tiers, batch, audit, audit_on_touch, pending_merges,
+    name_structure}``. Dependency injection sidesteps that entirely: this
+    module never references ``name_structure`` by name. ``librarian.py``
+    (the ONLY one of this issue's two call sites able to import
+    ``name_structure`` at all — it sits strictly ABOVE this cycle, nothing
+    reachable from ``name_structure`` reaches back to it) passes the REAL
+    :func:`~athenaeum.name_structure.collect_create_name_variant_candidates`
+    here — the production caller issue athenaeum#1657 AC5 needs for
+    :func:`~athenaeum.name_structure.merged_body_within_page_size_threshold`.
+    ``batch.py`` cannot reach ``name_structure`` either (it sits ON that same
+    cycle), so it injects its own small, behaviourally-equivalent duplicate
+    instead — see that duplicate's docstring in ``batch.py``.
+
+    ``variant_client`` (keyword-only, ``None`` default) is the model client
+    for the fold/mint decision below, kept DELIBERATELY SEPARATE from
+    *client* (which continues to serve only ``validate_create_name``'s
+    issue athenaeum#1615 meaning-based-fallback confirmation, unchanged): when
+    ``variant_client`` is not given, it falls back to *client* — the sync
+    transport (``librarian.process_one``) needs no new argument, since it
+    already passes one shared classify-tier ``client`` for both purposes.
+    The batch transport (``batch.process_batch_run``) passes
+    ``variant_client`` explicitly (wrapped via
+    :class:`~athenaeum.provider.AnthropicBatchClientBackend`, like its 3
+    existing ``LLMBackend`` hand-offs) WITHOUT also passing *client* — so
+    this issue's new fold/mint decision reaches the model on that transport
+    too, without incidentally switching on athenaeum#1615's confirmation calls
+    there for the first time, which is a separate, unrelated behaviour
+    change this issue does not make.
+
+    When both ``tier1_matched_entities`` and ``variant_candidate_builder``
+    are supplied, a create that survives every check above (no reject, no
+    escalation, no exact-hit collision) is run through the builder — the
+    real implementation applies a deterministic, name-string-only pre-filter
+    (:func:`athenaeum.name_structure.is_create_name_variant_of_matched_page`)
+    before paying for anything else. A create with no matching candidate
+    proceeds unchanged, with NO model call (AC3). A create with at least one
+    candidate is put in front of :func:`_decide_create_name_fold_or_mint`,
+    along with each candidate's uid, name, type, body size, and a fold-size
+    verdict (the real builder's is
+    :func:`~athenaeum.name_structure.merged_body_within_page_size_threshold`):
+
+    - **fold** — rewritten via :func:`dataclasses.replace` to
+      ``is_new=False, existing_uid=<the model's chosen uid>``, and its name
+      recorded in :attr:`CreateNameGateOutcome.folded` — the same "attach
+      to the existing page instead of minting a collider" shape as the
+      DISAMBIGUATE branch above.
+    - **mint** — the create passes through unchanged.
+    - **unparseable** (no client, no JSON object, or a decision this gate
+      cannot act on) — the create passes through unchanged, exactly
+      today's behaviour, with a WARNING log line so a later pass can
+      attribute the gap.
+
+    Every decision (fold, mint, or unparseable) is logged as
+    ``tier3-create-name-variant``, carrying the candidate uids/sizes and
+    the deciding tier, so a later pass can attribute it (issue athenaeum#1657
+    plan step 4).
     """
     kept: list[ClassifiedEntity] = []
     rejected: list[str] = []
     escalations: list[EscalationItem] = []
     disambiguated: list[str] = []
+    folded: list[str] = []
     for c in classified:
         if not c.is_new:
             kept.append(c)
@@ -1996,12 +2232,70 @@ def gate_create_name_classifications(
                 )
             )
             continue
+
+        # Issue athenaeum#1657: name-structure variant check, only reached by a
+        # create that survived every check above unchanged. No matched
+        # entities, no injected builder, or none of them a variant of
+        # c.name -> zero candidates, zero model calls (AC3), byte-identical
+        # to pre-athenaeum#1657 behaviour.
+        variant_candidates = (
+            list(
+                variant_candidate_builder(
+                    c.name,
+                    tier1_matched_entities,
+                    c.observations or raw_content[:2000],
+                    config,
+                )
+            )
+            if tier1_matched_entities and variant_candidate_builder is not None
+            else []
+        )
+        if not variant_candidates:
+            kept.append(c)
+            continue
+        effective_variant_client = variant_client if variant_client is not None else client
+        if effective_variant_client is None:
+            log.warning(
+                "tier3-create-name-variant ref=%s name=%r candidate_uids=%s "
+                "decision=unparseable tier=none reason=%s",
+                raw_ref,
+                c.name,
+                [cand.uid for cand in variant_candidates],
+                "no LLM client available to decide fold/mint",
+            )
+            kept.append(c)
+            continue
+        decision, decided_uid, reason = _decide_create_name_fold_or_mint(
+            c.name,
+            variant_candidates,
+            c.observations or raw_content[:2000],
+            client=effective_variant_client,
+            config=config,
+            usage=usage,
+        )
+        log_fn = log.info if decision != "unparseable" else log.warning
+        log_fn(
+            "tier3-create-name-variant ref=%s name=%r candidate_uids=%s "
+            "candidate_sizes=%s decision=%s uid=%s tier=classify reason=%s",
+            raw_ref,
+            c.name,
+            [cand.uid for cand in variant_candidates],
+            {cand.uid: cand.body_chars for cand in variant_candidates},
+            decision,
+            decided_uid,
+            reason,
+        )
+        if decision == "fold" and decided_uid is not None:
+            kept.append(replace(c, is_new=False, existing_uid=decided_uid))
+            folded.append(c.name)
+            continue
         kept.append(c)
     return CreateNameGateOutcome(
         kept=kept,
         rejected=tuple(rejected),
         escalations=tuple(escalations),
         disambiguated=tuple(disambiguated),
+        folded=tuple(folded),
     )
 
 
@@ -4832,19 +5126,20 @@ def stamp_merge_provenance(
 # Issue athenaeum#1182: page-size invariant
 # ---------------------------------------------------------------------------
 #
-# Atomic pages must not be merged into indefinitely. Corpus shape (23,534
-# pages, non-`_`-prefixed *.md, re-measured 2026-08-30): median 1,544 bytes,
-# p75 1,751, p90 2,061, p99 8,468 -- only 84 pages (0.36%) exceed the
-# 20,000-char merge-input window (:data:`_MAX_EXISTING_BODY_CHARS`, above).
-# That shape is an atomic-page corpus with 84 anomalies, not a corpus with a
-# legitimate large-document tail, so the threshold below is picked from the
-# DISTRIBUTION, not from the model's context window: well under 20,000 AND
-# comfortably above p99, so it catches genuine unbounded-accretion anomalies
-# without false-positiving on the ordinary corpus. 10,000 sits ~18% above
-# p99 (8,468 -> some headroom for ordinary variance in the top percentile)
-# and at exactly half of the 20,000 merge-input window, so a future change
-# to the window does not have to chase this threshold, or vice versa.
-DEFAULT_PAGE_SIZE_THRESHOLD_CHARS = 10_000
+# DEFAULT_PAGE_SIZE_THRESHOLD_CHARS / resolve_page_size_threshold_chars moved
+# DOWN to :mod:`athenaeum.config` (issue athenaeum#1657) to break a
+# tiers<->name_structure import cycle: name_structure.merged_body_within_
+# page_size_threshold_chars (issue athenaeum#1657's own new production
+# caller) needs this resolver, and name_structure already has its own
+# (pre-existing, issue athenaeum#1577) reason to never be imported BY tiers
+# at all -- so the resolver had to move rather than either side importing
+# the other, mirroring the exact DEFAULT_CLASSIFY_MODEL precedent this
+# module's own docstring records for issue athenaeum#640. Both names are
+# imported from there above (see the ``athenaeum.config`` import block) and
+# stay reachable as ``athenaeum.tiers.DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`` /
+# ``athenaeum.tiers.resolve_page_size_threshold_chars`` for backwards
+# compatibility -- every existing call site and test in this module is
+# unaffected.
 
 # Issue athenaeum#1430: the three EscalationItem.conflict_type values
 # check_page_size_gate can produce (below), treated as one dedup FAMILY by
@@ -4873,24 +5168,6 @@ OVERSIZE_ESCALATION_CONFLICT_TYPES = frozenset(
 # routes give).
 VALID_OVERSIZE_PAGE_ACTIONS = ("review", "split", "log_demote")
 DEFAULT_OVERSIZE_PAGE_ACTION = "review"
-
-
-def resolve_page_size_threshold_chars(config: dict[str, Any] | None = None) -> int:
-    """Resolve ``librarian.page_size_threshold_chars`` (issue athenaeum#1182).
-
-    Mirrors :func:`resolve_mention_density_min_occurrences`'s validation
-    contract exactly: must be ``>= 1`` (bool rejected as an int subclass, so
-    ``page_size_threshold_chars: yes`` in yaml cannot silently become a
-    threshold of 1); non-numeric, non-positive, missing, or bool values fall
-    back to :data:`DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`.
-    """
-    if isinstance(config, dict):
-        cfg = config.get("librarian")
-        if isinstance(cfg, dict):
-            raw = cfg.get("page_size_threshold_chars")
-            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
-                return raw
-    return DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
 
 
 def resolve_oversize_page_action(config: dict[str, Any] | None = None) -> str:

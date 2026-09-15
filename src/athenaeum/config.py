@@ -2967,6 +2967,55 @@ def resolve_model(
     return default
 
 
+#: The page-size invariant's threshold (issue athenaeum#1182). Atomic pages must
+#: not be merged into indefinitely. Corpus shape (23,534 pages,
+#: non-``_``-prefixed ``*.md``, re-measured 2026-08-30): median 1,544 bytes,
+#: p75 1,751, p90 2,061, p99 8,468 -- only 84 pages (0.36%) exceed the
+#: 20,000-char merge-input window (:data:`athenaeum.tiers._MAX_EXISTING_
+#: BODY_CHARS`). That shape is an atomic-page corpus with 84 anomalies, not
+#: a corpus with a legitimate large-document tail, so the threshold below is
+#: picked from the DISTRIBUTION, not from the model's context window: well
+#: under 20,000 AND comfortably above p99, so it catches genuine
+#: unbounded-accretion anomalies without false-positiving on the ordinary
+#: corpus. 10,000 sits ~18% above p99 (8,468 -> some headroom for ordinary
+#: variance in the top percentile) and at exactly half of the 20,000
+#: merge-input window, so a future change to the window does not have to
+#: chase this threshold, or vice versa.
+#:
+#: Single-sourced HERE (issue athenaeum#1657) rather than in
+#: :mod:`athenaeum.tiers`, its original issue athenaeum#1182 home: both
+#: :mod:`athenaeum.tiers` (``check_page_size_gate`` and friends) and
+#: :mod:`athenaeum.name_structure`
+#: (``merged_body_within_page_size_threshold``, issue athenaeum#1657's own new
+#: production caller for it) need this resolver, and ``name_structure`` has
+#: its own pre-existing (issue athenaeum#1577) reason it must never be
+#: imported BY ``tiers`` -- so the resolver had to move rather than either
+#: side importing the other, the SAME ``DEFAULT_CLASSIFY_MODEL`` /
+#: issue athenaeum#640 precedent this file already carries a few lines up.
+#: Re-imported into :mod:`athenaeum.tiers` and stays reachable as
+#: ``athenaeum.tiers.DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`` for backwards
+#: compatibility.
+DEFAULT_PAGE_SIZE_THRESHOLD_CHARS = 10_000
+
+
+def resolve_page_size_threshold_chars(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.page_size_threshold_chars`` (issue athenaeum#1182).
+
+    Mirrors :func:`athenaeum.tiers.resolve_mention_density_min_occurrences`'s
+    validation contract exactly: must be ``>= 1`` (bool rejected as an int
+    subclass, so ``page_size_threshold_chars: yes`` in yaml cannot silently
+    become a threshold of 1); non-numeric, non-positive, missing, or bool
+    values fall back to :data:`DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("page_size_threshold_chars")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+                return raw
+    return DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
+
+
 def resolve_model_rates(
     config: dict[str, Any] | None,
 ) -> dict[str, tuple[float, float]]:
