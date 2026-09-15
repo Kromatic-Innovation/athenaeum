@@ -1856,7 +1856,12 @@ class VectorBackend:
                 # code couldn't extract.
                 _fm, doc_body = parse_frontmatter(text)
                 doc_body = doc_body.strip()
-                doc_text = f"{name}\n\n{doc_body}" if doc_body else name
+                # PROBE REVERT (athenaeum#1609 AC5, throwaway, never merged):
+                # removes the frontmatter strip so this branch falls back to
+                # the pre-athenaeum#1603 full-text behavior, which should turn
+                # the embedding-guard job red on TestExactTitleRanking.
+                doc_text = text
+                _ = doc_body  # silence unused-variable lint on this throwaway revert
             else:
                 doc_text = text
             documents.append(doc_text[: self._DOC_LIMIT])
