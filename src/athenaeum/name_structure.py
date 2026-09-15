@@ -93,6 +93,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.models import parse_frontmatter
+from athenaeum.t1_census import T1_UNSCREENED_NAME_STRUCTURE, get_t1_census
 
 log = logging.getLogger(__name__)
 
@@ -503,6 +504,21 @@ def propose_qualified_name_merges(
             "those apart, so a human decides. The draft below concatenates both "
             "bodies verbatim — nothing was summarised."
         )
+        # Issue athenaeum#1620: deliberately unscreened by T1. This module's own
+        # rationale text two lines up says it plainly: the scan "cannot tell
+        # those apart, so a human decides" — it exists precisely to route an
+        # ambiguity TO a human. T1's only power is to DROP a proposal before
+        # the human queue (see `reasoning_screens.t1_screen_rejects_merge_
+        # proposal`'s docstring), so screening here could only ever destroy
+        # the escalation this scan was built to make — the opposite of its
+        # job, and the same "must reach a human" invariant issue athenaeum#1577 AC2
+        # already pins (module docstring above: "Nothing in this module
+        # calls resolve_merge, and it has no auto-merge switch"). This
+        # module also has no LLM client anywhere in its call chain
+        # (`propose_qualified_name_merges` takes none) — routing it through
+        # T1 would be a new architecture, not a fix. Recorded here so the
+        # gap is attributable rather than silent (AC3).
+        get_t1_census().record_unscreened(T1_UNSCREENED_NAME_STRUCTURE)
         write_pending_merge(
             merges_path,
             merge_target_name=split.bare_path.stem,
