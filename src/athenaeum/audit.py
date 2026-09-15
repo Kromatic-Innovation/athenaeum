@@ -142,13 +142,30 @@ def _now_iso(now: Callable[[], datetime] | None = None) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _is_populated(value: object) -> bool:
+    """Whether a frontmatter value counts as already set.
+
+    Deliberately NOT ``isinstance(value, str) and value.strip()``: YAML
+    parses an unquoted ``valid_from: 2026-01-01`` into a ``datetime.date``,
+    not a string, so a string-only test reports a populated date as empty —
+    which then asks the model to fill it and overwrites it with a string,
+    breaking the "populated coordinate is NEVER overwritten" invariant this
+    module's docstring states. Any non-``None``, non-blank value counts;
+    strings keep the blank-string test they always had.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
+
+
 def _empty_coordinate_fields(meta: dict[str, Any]) -> list[str]:
     """Coordinate fields on *meta* that are missing/blank — the only ones a
     prompt ever asks about, and the only ones a verdict may ever fill."""
     empty = []
     for name in COORDINATE_FIELDS:
-        value = meta.get(name)
-        if not (isinstance(value, str) and value.strip()):
+        if not _is_populated(meta.get(name)):
             empty.append(name)
     return empty
 
@@ -779,8 +796,7 @@ def apply_verdict_to_meta(meta: dict[str, Any], verdict: AuditVerdict) -> tuple[
 
     filled = 0
     for name, value in verdict.coordinate_fills.items():
-        existing = meta.get(name)
-        if isinstance(existing, str) and existing.strip():
+        if _is_populated(meta.get(name)):
             continue
         meta[name] = value
         findings.pop(name, None)
@@ -788,14 +804,18 @@ def apply_verdict_to_meta(meta: dict[str, Any], verdict: AuditVerdict) -> tuple[
 
     undeterminable = 0
     for name, reason in verdict.audit_findings.items():
-        existing = meta.get(name)
-        if isinstance(existing, str) and existing.strip():
+        if _is_populated(meta.get(name)):
             continue
         findings[name] = reason
         undeterminable += 1
 
+    # Always write the map back, including when it has emptied out: a page
+    # whose every recorded finding has since been resolved must not keep a
+    # stale `audit_findings:` block.
     if findings:
         meta["audit_findings"] = findings
+    else:
+        meta.pop("audit_findings", None)
 
     return filled, undeterminable
 
