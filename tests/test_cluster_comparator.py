@@ -146,6 +146,35 @@ class TestPageFromAutoMemoryFile:
         assert page_a.id == page_id_for_path(am_a.path, root=root)
         assert page_b.id == page_id_for_path(am_b.path, root=root)
 
+    def test_same_long_scope_different_stems_get_different_ids(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#1677 follow-up: on the live corpus, ``origin_scope`` is
+        frequently a full path-hash identifier 45-60+ characters long --
+        long enough on its own to hit :func:`~athenaeum.models.slugify`'s
+        60-char cap, truncating away the stem entirely and silently
+        re-colliding two DIFFERENT members of the SAME scope onto one id.
+        End-to-end via the real adapter (not :func:`page_id_for_path`
+        directly): two members sharing one long ``origin_scope`` but
+        different filename stems must resolve to different page ids.
+        """
+        long_scope = "users-tristankromer-code-kromatic-project-good-reads-newslet"
+        root = tmp_path / "raw" / "auto-memory"
+        am_a = _write_am(
+            root / long_scope,
+            "hestia_lock_drops_silently.md",
+            "claim a",
+            origin_scope=long_scope,
+        )
+        am_b = _write_am(
+            root / long_scope, "MEMORY.md", "claim b", origin_scope=long_scope
+        )
+
+        page_a = page_from_auto_memory_file(am_a)
+        page_b = page_from_auto_memory_file(am_b)
+
+        assert page_a.id != page_b.id
+
     def test_reads_content_only_once(self, tmp_path: Path) -> None:
         """``AutoMemoryFile.content`` caches after first read; adapting twice
         must not re-read the file (would raise if the file were deleted
