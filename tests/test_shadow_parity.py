@@ -628,6 +628,132 @@ class TestAgreementMatrixOverFixtures:
 
 
 # ---------------------------------------------------------------------------
+# Memoized pairs must fold into the verdict roll-up, not just call count
+# (issue athenaeum#1678 -- Seer HIGH finding on cluster_result.memoised)
+# ---------------------------------------------------------------------------
+
+
+class TestMemoizedPairsFoldIntoTheRollup:
+    def test_second_pass_over_the_same_workdir_stays_decided_not_inconclusive(
+        self, tmp_path: Path
+    ) -> None:
+        """Running the SAME case twice against the SAME workdir memoizes the
+        second pass's only pair (record_comparison's ledger lives under
+        ``workdir/_verdicts/``, which persists across both
+        ``run_shadow_parity`` calls here). Before this fix,
+        ``run_shadow_parity`` read only ``cluster_result.outcomes`` for both
+        the verdict roll-up and ``pair_verdicts`` -- a memoised pair
+        contributes nothing to ``outcomes`` (no fresh ``CompareOutcome``),
+        so the SECOND pass's case silently rolled up to "no-decision"
+        (``inconclusive``) instead of its real, ledgered verdict. This is
+        latent against the shipped CLI (``_cmd_measure.py`` always uses a
+        fresh ``TemporaryDirectory``) but live the moment any caller reuses
+        a ``workdir`` -- exactly what this test drives directly.
+        """
+        from athenaeum.shadow_parity import DeclaredDetectorVerdict
+
+        # subject/claimed_scope/valid_from/valid_until all IDENTICAL across
+        # both members -> EQUAL, not DISJOINT, so Gate 1 does not resolve
+        # this pair on its own and Gate 2's canned "conflicting" response
+        # decides it -- mirrors TestAgreementMatrixOverFixtures' case_b
+        # recipe. declared_detector bypasses the detector lane entirely, so
+        # an exploding detector client proves it is never touched on either
+        # pass.
+        shared_fm = {
+            "type": "feedback",
+            "subject": "acme-corp",
+            "claimed_scope": "engineering",
+            "valid_from": "'2026-01-01'",
+            "valid_until": "'2026-12-31'",
+        }
+        case = _case(
+            "memo_case",
+            (
+                _member("m1.md", "memo body one", dict(shared_fm)),
+                _member("m2.md", "memo body two", dict(shared_fm)),
+            ),
+            outcome_class="contradict",
+            declared_detector=DeclaredDetectorVerdict(
+                conflict_type="factual", rationale="pre-declared", passages=["p1", "p2"]
+            ),
+        )
+
+        def _exploding_detector_client() -> MagicMock:
+            client = MagicMock()
+            client.messages.create.side_effect = AssertionError(
+                "a declared-detector case must never dispatch a detector call"
+            )
+            return client
+
+        # First pass: nothing ledgered yet, so this pair is freshly decided
+        # -- one real Gate-2 dispatch, landing in `outcomes`.
+        first_comparator_client = _uniform_client(_content_relation_payload("conflicting"))
+        first_report = run_shadow_parity(
+            [case],
+            detector_client=_exploding_detector_client(),
+            comparator_client=first_comparator_client,
+            workdir=tmp_path,
+        )
+        assert len(first_report.items) == 1
+        first_item = first_report.items[0]
+        assert first_item.comparator_verdict == "contradiction"
+        assert first_item.comparator_calls == 1
+        assert first_comparator_client.messages.create.call_count == 1
+        assert first_item.pair_verdicts == [
+            {
+                "a": first_item.pair_verdicts[0]["a"],
+                "b": first_item.pair_verdicts[0]["b"],
+                "verdict": "contradiction",
+                "memoised": False,
+                "reason": "",
+            }
+        ]
+
+        # Second pass: SAME workdir, SAME case (same member ids, same
+        # content) -> record_comparison's get_verdict_status finds the
+        # pair fresh and returns skipped="fresh" without ever touching
+        # Gate 2. A client that raises on any call proves that directly;
+        # the assertions below prove the case still reads as a real,
+        # decided CONTRADICTION rather than falling back to inconclusive.
+        def _exploding_comparator_client() -> MagicMock:
+            client = MagicMock()
+            client.messages.create.side_effect = AssertionError(
+                "a fully-memoised pass must never dispatch a comparator call"
+            )
+            return client
+
+        second_report = run_shadow_parity(
+            [case],
+            detector_client=_exploding_detector_client(),
+            comparator_client=_exploding_comparator_client(),
+            workdir=tmp_path,
+        )
+        assert len(second_report.items) == 1
+        second_item = second_report.items[0]
+        # The whole point: memoised must count for the VERDICT...
+        assert second_item.comparator_verdict == "contradiction"
+        assert second_item.comparator_verdict != "inconclusive"
+        # ...and NOT for the CALL COUNT.
+        assert second_item.comparator_calls == 0
+        assert second_report.comparator_calls == 0
+        assert second_item.pair_verdicts == [
+            {
+                "a": second_item.pair_verdicts[0]["a"],
+                "b": second_item.pair_verdicts[0]["b"],
+                "verdict": "contradiction",
+                "memoised": True,
+                "reason": "",
+            }
+        ]
+        # Same pair ids both passes -- this is genuinely the SAME pair
+        # being memoised, not a coincidentally-matching different one.
+        assert {second_item.pair_verdicts[0]["a"], second_item.pair_verdicts[0]["b"]} == {
+            first_item.pair_verdicts[0]["a"],
+            first_item.pair_verdicts[0]["b"],
+        }
+
+
+# ---------------------------------------------------------------------------
 # AC3 — multiplier over fixtures with a known call count
 # ---------------------------------------------------------------------------
 
