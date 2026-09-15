@@ -1,12 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """``athenaeum context`` — CLI wiring for the sidecar core (issue athenaeum#1358).
 
-Thin argv/stdin parsing plus one call into :func:`athenaeum.context.build_context`
-and a JSON print of the result. All the logic lives in :mod:`athenaeum.context`
-per that module's own import-weight contract; this file exists only because
-``athenaeum context`` needs *a* subcommand registration, and ``cli.py``'s
-factoring rule ("every subcommand lives in its own ``_cmd_<name>.py``") means
-that registration cannot live inline in ``athenaeum.context`` itself.
+Thin argv/stdin parsing plus one call into
+:func:`athenaeum.context.build_context_for_turn` (session-dedup + the core
+build + push-telemetry, issue athenaeum#1621) and a JSON print of the
+result. All the logic lives in :mod:`athenaeum.context` per that module's
+own import-weight contract; this file exists only because ``athenaeum
+context`` needs *a* subcommand registration, and ``cli.py``'s factoring
+rule ("every subcommand lives in its own ``_cmd_<name>.py``") means that
+registration cannot live inline in ``athenaeum.context`` itself.
+
+The Claude Code adapter (:mod:`athenaeum.claude_code_adapter`, issue
+athenaeum#1621) calls the SAME :func:`~athenaeum.context.build_context_for_turn`
+this module calls, rather than going through this CLI wrapper — see that
+module's own docstring for why, and see
+:func:`athenaeum.context.build_context_for_turn`'s docstring for why the
+sequence is shared rather than reimplemented here.
 
 **This subcommand is not the fast path.** Invoking it via the installed
 ``athenaeum`` console script pays ``athenaeum.cli.build_parser()``'s cost of
@@ -46,44 +55,8 @@ from pathlib import Path
 from athenaeum.config import DEFAULT_CACHE_DIR, resolve_cache_dir
 
 
-def _seen_file(cache_dir: Path, session_id: str) -> Path:
-    """Session-dedup bookkeeping (issue athenaeum#1358 scope: "session dedup").
-
-    Mirrors the pre-convergence shell hook's ``/tmp/knowledge-seen-<session_id>``
-    convention, but under ``cache_dir`` rather than ``/tmp`` — this file
-    persists for the life of the cache, not just the OS's tmp-cleanup
-    window, and stays alongside the rest of athenaeum's per-session state
-    rather than in a world-writable shared directory. A page pushed once in
-    a session is excluded from every later push in that same session, so a
-    turn's context never repeats a candidate the session already saw.
-    """
-    safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id) or "unknown"
-    return cache_dir / f"context-seen-{safe_id}.txt"
-
-
-def _read_seen(path: Path) -> frozenset[str]:
-    try:
-        return frozenset(
-            line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
-        )
-    except OSError:
-        return frozenset()
-
-
-def _append_seen(path: Path, filenames: list[str]) -> None:
-    if not filenames:
-        return
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            for fn in filenames:
-                f.write(fn + "\n")
-    except OSError:
-        pass  # best-effort — a dedup-bookkeeping failure must never break the push
-
-
 def cmd_context(args: argparse.Namespace) -> int:
-    from athenaeum.context import build_context, record_context_push
+    from athenaeum.context import build_context_for_turn
 
     prompt = args.prompt
     session_id = args.session_id
@@ -103,28 +76,17 @@ def cmd_context(args: argparse.Namespace) -> int:
 
     session_id = session_id or "unknown"
     cache_dir = resolve_cache_dir(Path(args.cache_dir) if args.cache_dir else None)
-    seen_path = _seen_file(cache_dir, session_id)
-    exclude = _read_seen(seen_path)
 
-    envelope = build_context(
+    envelope = build_context_for_turn(
         prompt,
         session_id,
         cache_dir=cache_dir,
         n=args.n,
         budget=args.budget,
         search_backend=args.backend,
-        exclude=exclude,
         use_llm=not args.no_llm,
         llm_timeout=args.llm_timeout,
     )
-    _append_seen(seen_path, [c["filename"] for c in envelope["candidates"]])
-
-    # Issue athenaeum#1362: route this turn's push through the same durable
-    # ledger the MCP `recall` path writes, tagged `"source":"sidecar"`.
-    # `record_context_push` is itself best-effort and never raises (see its
-    # own docstring) — this CLI's exit code and printed envelope must never
-    # depend on the ledger write succeeding.
-    record_context_push(envelope, cache_dir=cache_dir)
 
     print(json.dumps(envelope))
     return 0

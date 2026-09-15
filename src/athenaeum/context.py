@@ -492,7 +492,9 @@ def build_context(
     push-telemetry record, or anything else. Callers (the CLI wiring in
     ``_cmd_context.py``, or an adapter) own those side effects, using
     ``exclude`` (input) and the returned ``candidates`` (output) as the
-    seam.
+    seam. A Tier-1 (per-turn push) caller that wants those side effects
+    without reimplementing them should call :func:`build_context_for_turn`
+    instead of this function directly — see that function's docstring.
     """
     t0 = time.monotonic()
     budget = budget if budget is not None else DEFAULT_BUDGET_TOKENS
@@ -688,3 +690,119 @@ def record_context_push(
     except Exception:  # must never break the turn this envelope serves
         log.debug("context: push-metrics instrumentation failed", exc_info=True)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Per-turn (Tier-1) composition: session dedup + push telemetry
+# ---------------------------------------------------------------------------
+#
+# Everything below was, until issue athenaeum#1621, private to
+# ``_cmd_context.py`` — the CLI wiring was the only caller of
+# ``build_context()`` that also needed session-dedup bookkeeping and
+# push-telemetry recording, so it owned that sequence itself. athenaeum#1621
+# added a second Tier-1 caller, the Claude Code adapter
+# (:mod:`athenaeum.claude_code_adapter`), which needs the identical
+# sequence to make its own acceptance criterion true "by construction": its
+# rendered output must equal what ``athenaeum context --stdin-json`` prints
+# for the same input, and the only way that equality can never drift is for
+# both callers to run the SAME code, not two independently-written copies
+# of it. Moved here rather than duplicated.
+
+
+def _seen_file(cache_dir: Path, session_id: str) -> Path:
+    """Session-dedup bookkeeping (issue athenaeum#1358 scope: "session dedup").
+
+    Mirrors the pre-convergence shell hook's ``/tmp/knowledge-seen-<session_id>``
+    convention, but under ``cache_dir`` rather than ``/tmp`` — this file
+    persists for the life of the cache, not just the OS's tmp-cleanup
+    window, and stays alongside the rest of athenaeum's per-session state
+    rather than in a world-writable shared directory. A page pushed once in
+    a session is excluded from every later push in that same session, so a
+    turn's context never repeats a candidate the session already saw.
+    """
+    safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id) or "unknown"
+    return cache_dir / f"context-seen-{safe_id}.txt"
+
+
+def _read_seen(path: Path) -> frozenset[str]:
+    try:
+        return frozenset(
+            line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+        )
+    except OSError:
+        return frozenset()
+
+
+def _append_seen(path: Path, filenames: list[str]) -> None:
+    if not filenames:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            for fn in filenames:
+                f.write(fn + "\n")
+    except OSError:
+        pass  # best-effort — a dedup-bookkeeping failure must never break the push
+
+
+def build_context_for_turn(
+    prompt: str,
+    session_id: str,
+    *,
+    cache_dir: Path,
+    n: int = 3,
+    budget: int | None = None,
+    search_backend: str = "fts5",
+    use_llm: bool = True,
+    llm_timeout: float = 3.0,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The full per-turn (Tier-1) sequence: session-dedup exclude-set read,
+    :func:`build_context`, seen-list append, then push-telemetry recording
+    via :func:`record_context_push` — in that order, matching what
+    ``athenaeum context``'s CLI wiring has always done. Every Tier-1 caller
+    (a per-turn push adapter) should call THIS function, not
+    :func:`build_context` directly, so the bookkeeping around it is shared
+    rather than reimplemented per caller (issue athenaeum#1621).
+
+    A Tier-2 (periodic/static-refresh) adapter must NOT use this function —
+    see ``docs/extending/sidecar-adapter-contract.md`` §3's worked design:
+    a periodic refresh calls :func:`build_context` directly with
+    ``exclude=frozenset()`` and keeps no seen-file, because accumulating
+    exclusions across refreshes (rather than per-turn) would converge a
+    snapshot file to empty after a few cycles.
+
+    Never raises on the bookkeeping side: :func:`record_context_push` is
+    itself best-effort (see its own docstring), and a failure to read or
+    write the seen-file degrades to "no dedup this call" rather than an
+    exception (see :func:`_read_seen` / :func:`_append_seen`). A failure
+    inside :func:`build_context` itself is NOT caught here — that is a
+    genuine retrieval error a caller may want to see; a per-turn adapter
+    that must never let such a failure reach its own caller (issue
+    athenaeum#1621 AC3) wraps ITS call to this function, not the other way
+    around.
+    """
+    seen_path = _seen_file(cache_dir, session_id)
+    exclude = _read_seen(seen_path)
+
+    envelope = build_context(
+        prompt,
+        session_id,
+        cache_dir=cache_dir,
+        n=n,
+        budget=budget,
+        search_backend=search_backend,
+        exclude=exclude,
+        use_llm=use_llm,
+        llm_timeout=llm_timeout,
+        config=config,
+    )
+    _append_seen(seen_path, [c["filename"] for c in envelope["candidates"]])
+
+    # Issue athenaeum#1362: route this turn's push through the same durable
+    # ledger the MCP `recall` path writes, tagged `"source":"sidecar"`.
+    # Best-effort — never raises, never affects the envelope this function
+    # returns.
+    record_context_push(envelope, cache_dir=cache_dir)
+
+    return envelope
