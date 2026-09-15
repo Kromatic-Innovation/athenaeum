@@ -125,14 +125,15 @@ class Arm(str, Enum):
 
     @classmethod
     def _missing_(cls, value: object) -> Arm | None:
-        """Back-compat for a result-store row written before issue
-        athenaeum#1574 renamed ``"push"`` to ``"push_pages_upper_bound"``
-        (AC5: resuming an existing row must still work). ``Arm("push")`` —
-        the exact string every pre-#1574 ``RolloutRecord.to_payload()``
-        persisted — resolves to the SAME arm the old value named (the
-        five-full-page delivery), not a ``ValueError``. Any other unknown
-        value still raises, same as a bare ``Enum`` — this is a single,
-        named legacy alias, not a silent catch-all.
+        """Back-compat for a result-store row that predates issue
+        athenaeum#1574, which renamed ``"push"`` to
+        ``"push_pages_upper_bound"`` (AC5: resuming an existing row must
+        still work). ``Arm("push")`` — the exact string the older
+        ``RolloutRecord.to_payload()`` persisted — resolves to the SAME arm
+        the old value named (the five-full-page delivery), not a
+        ``ValueError``. Any other unknown value still raises, same as a
+        bare ``Enum`` — this is a single, named legacy alias, not a silent
+        catch-all.
         """
         if value == "push":
             return cls.PUSH_PAGES_UPPER_BOUND
