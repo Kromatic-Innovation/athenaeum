@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Offline tests for the four-arm rollout runner (issue athenaeum#1522).
+"""Offline tests for the six-arm rollout runner (issues athenaeum#1522,
+athenaeum#1574).
 
 Everything here is ``rollout``-marked (deselected by default, same as
 ``eval``/``embedding`` — see ``pyproject.toml``) AND runs with no network
@@ -7,10 +8,13 @@ call and no subprocess spawn: the stream-json parser tests replay a
 committed, redacted fixture
 (``tests/evals/data/rollout/pull_stream_spike.jsonl``), and the arm tests
 use ``tests.conftest.FakeLLMClient`` (the repo's canonical anthropic-shaped
-test double) instead of a live client. The credential-gated tool-use-loop
-test and the real-``claude``-binary spike test live in
-``tests/evals/test_rollout_pull_spike.py`` — this module never needs either
-gate.
+test double) instead of a live client, plus (for the two breadcrumb arms) an
+injected ``context_fn``/``breadcrumb_pull_runner`` stub instead of actually
+shelling out to the shipped hooks. The credential-gated tool-use-loop test
+and the real-``claude``-binary spike test live in
+``tests/evals/test_rollout_pull_spike.py``; the real-hook byte-equivalence
+test lives in ``tests/evals/test_rollout_push_breadcrumb_spike.py`` — this
+module never needs any of those gates.
 """
 
 from __future__ import annotations
@@ -35,7 +39,8 @@ from tests.evals.rollout import (
     run_none,
     run_oracle,
     run_probe_all_arms,
-    run_push,
+    run_push_breadcrumb,
+    run_push_pages_upper_bound,
 )
 
 pytestmark = pytest.mark.rollout
@@ -57,12 +62,27 @@ def _probe(probe_id: str):
 # ---------------------------------------------------------------------------
 
 
-def test_arm_enumeration_has_exactly_four_arms() -> None:
-    assert set(ALL_ARMS) == {Arm.NONE, Arm.PUSH, Arm.ORACLE, Arm.PULL}
-    assert len(ALL_ARMS) == 4
+def test_arm_enumeration_has_exactly_six_arms() -> None:
+    assert set(ALL_ARMS) == {
+        Arm.NONE,
+        Arm.PUSH_PAGES_UPPER_BOUND,
+        Arm.PUSH_BREADCRUMB,
+        Arm.PUSH_BREADCRUMB_PULL,
+        Arm.ORACLE,
+        Arm.PULL,
+    }
+    assert len(ALL_ARMS) == 6
     # str-subclass so an arm round-trips through GridCell.arm (a plain str).
-    assert Arm("push") is Arm.PUSH
+    assert Arm("push_pages_upper_bound") is Arm.PUSH_PAGES_UPPER_BOUND
     assert Arm.PULL.value == "pull"
+
+
+def test_arm_legacy_push_value_resolves_to_the_renamed_upper_bound_arm() -> None:
+    """Issue athenaeum#1574 AC5: a result-store row written before this
+    issue persisted the bare ``"push"`` string. ``Arm("push")`` must still
+    resolve (to the arm that value actually named — the five-page delivery,
+    now called ``push_pages_upper_bound``), not raise ``ValueError``."""
+    assert Arm("push") is Arm.PUSH_PAGES_UPPER_BOUND
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +209,8 @@ def test_build_pull_mcp_config_scopes_to_the_athenaeum_server_only(tmp_path: Pat
 
 
 # ---------------------------------------------------------------------------
-# NONE / PUSH / ORACLE single-shot arms, offline via FakeLLMClient
+# NONE / PUSH_PAGES_UPPER_BOUND / PUSH_BREADCRUMB / ORACLE single-shot arms,
+# offline via FakeLLMClient
 # ---------------------------------------------------------------------------
 
 
@@ -217,7 +238,7 @@ def test_run_none_sends_no_context() -> None:
     assert "Context:" not in call["messages"][0]["content"]
 
 
-def test_run_push_delivers_recall_search_output(tmp_path: Path) -> None:
+def test_run_push_pages_upper_bound_delivers_recall_search_output(tmp_path: Path) -> None:
     probe, corpus = _probe("pto_allowance")
     wiki_root = corpus.materialize(tmp_path)
     session = EvalSession()
@@ -227,7 +248,7 @@ def test_run_push_delivers_recall_search_output(tmp_path: Path) -> None:
         )
     )
 
-    record = run_push(
+    record = run_push_pages_upper_bound(
         probe,
         "core",
         wiki_root=wiki_root,
@@ -238,12 +259,85 @@ def test_run_push_delivers_recall_search_output(tmp_path: Path) -> None:
         model="stub-model",
     )
 
-    assert record.arm is Arm.PUSH
+    assert record.arm is Arm.PUSH_PAGES_UPPER_BOUND
     assert record.injected_context_tokens is not None
     assert record.injected_context_tokens >= 0
     [call] = client.calls
     assert "Context:" in call["messages"][0]["content"]
     assert record.transcript[0]["pushed_context"]
+
+
+def test_run_push_breadcrumb_uses_the_injected_context_fn(tmp_path: Path) -> None:
+    """Offline: no subprocess spawn — a stub ``context_fn`` stands in for
+    :func:`build_push_breadcrumb_context`, matching this module's own
+    no-subprocess discipline. The real-hook proof lives in
+    ``test_rollout_push_breadcrumb_spike.py``."""
+    probe, _corpus = _probe("pto_allowance")
+    session = EvalSession()
+    client = FakeLLMClient(
+        response=make_llm_response(
+            "10 days per year.", usage=make_llm_usage(input_tokens=90, output_tokens=10)
+        )
+    )
+    seen_args: dict[str, object] = {}
+
+    def _stub_context_fn(knowledge_root: Path, hook_home: Path, query: str) -> str:
+        seen_args["knowledge_root"] = knowledge_root
+        seen_args["hook_home"] = hook_home
+        seen_args["query"] = query
+        return (
+            "[Knowledge context] Wiki pages relevant to this message "
+            "(use `recall` MCP tool for full details):\n"
+            "  - PTO policy — 25 days per year\n"
+        )
+
+    record = run_push_breadcrumb(
+        probe,
+        "core",
+        knowledge_root=tmp_path / "knowledge",
+        hook_home=tmp_path / "hook_home",
+        client=client,
+        session=session,
+        model="stub-model",
+        context_fn=_stub_context_fn,
+    )
+
+    assert record.arm is Arm.PUSH_BREADCRUMB
+    assert seen_args["query"] == probe.query
+    assert record.injected_context_tokens is not None
+    assert record.injected_context_tokens > 0
+    [call] = client.calls
+    assert "PTO policy" in call["messages"][0]["content"]
+    assert "Context:" in call["messages"][0]["content"]
+    assert record.transcript[0]["pushed_context"].startswith("[Knowledge context]")
+
+
+def test_run_push_breadcrumb_empty_hook_output_injects_nothing(tmp_path: Path) -> None:
+    """The shipped hook returns ``""`` when it declines to inject (short
+    prompt, no index, no match) — never an error. PUSH_BREADCRUMB must
+    treat that the same way NONE treats "nothing to inject"."""
+    probe, _corpus = _probe("pto_allowance")
+    session = EvalSession()
+    client = FakeLLMClient(
+        response=make_llm_response(
+            "I don't know.", usage=make_llm_usage(input_tokens=20, output_tokens=6)
+        )
+    )
+
+    record = run_push_breadcrumb(
+        probe,
+        "core",
+        knowledge_root=tmp_path / "knowledge",
+        hook_home=tmp_path / "hook_home",
+        client=client,
+        session=session,
+        model="stub-model",
+        context_fn=lambda *args, **kwargs: "",
+    )
+
+    assert record.injected_context_tokens == 0
+    [call] = client.calls
+    assert "Context:" not in call["messages"][0]["content"]
 
 
 def test_run_oracle_uses_ground_truth_pages_directly() -> None:
@@ -289,7 +383,7 @@ def test_run_oracle_abstention_probe_gets_zero_injected_tokens() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_run_probe_all_arms_dispatches_all_four_arms_offline(tmp_path: Path) -> None:
+def test_run_probe_all_arms_dispatches_all_six_arms_offline(tmp_path: Path) -> None:
     session = EvalSession()
     client = FakeLLMClient(
         response=make_llm_response(
@@ -309,6 +403,21 @@ def test_run_probe_all_arms_dispatches_all_four_arms_offline(tmp_path: Path) -> 
             recall_called=False,
         )
 
+    def _stub_breadcrumb_context_fn(knowledge_root, hook_home, query) -> str:
+        return "  - stub breadcrumb\n"
+
+    def _stub_breadcrumb_pull_runner(
+        probe, knowledge_root, hook_home, cache_dir, corpus_scale, **kwargs
+    ) -> RolloutRecord:
+        return RolloutRecord(
+            arm=Arm.PUSH_BREADCRUMB_PULL,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub breadcrumb-pull answer",
+            recall_called=False,
+        )
+
     records = run_probe_all_arms(
         "pto_allowance",
         "core",
@@ -317,27 +426,42 @@ def test_run_probe_all_arms_dispatches_all_four_arms_offline(tmp_path: Path) -> 
         search_backend="keyword",
         client=client,
         pull_runner=_stub_pull_runner,
+        breadcrumb_context_fn=_stub_breadcrumb_context_fn,
+        breadcrumb_pull_runner=_stub_breadcrumb_pull_runner,
     )
 
-    assert set(records) == {"none", "push", "oracle", "pull"}
+    assert set(records) == {
+        "none",
+        "push_pages_upper_bound",
+        "push_breadcrumb",
+        "push_breadcrumb_pull",
+        "oracle",
+        "pull",
+    }
     for arm_value, record in records.items():
         assert record.arm.value == arm_value
         assert record.probe_id == "pto_allowance"
         assert record.corpus_scale == "core"
     assert records["pull"].answer == "stub pull answer"
     assert records["pull"].recall_called is False  # a legitimate, recorded choice
+    assert records["push_breadcrumb_pull"].answer == "stub breadcrumb-pull answer"
 
 
 def test_pull_arm_receives_the_knowledge_root_not_the_wiki_root(tmp_path: Path) -> None:
-    """PULL and PUSH take DIFFERENT roots, and that asymmetry is load-bearing.
+    """PULL and PUSH_PAGES_UPPER_BOUND take DIFFERENT roots, and that
+    asymmetry is load-bearing.
 
-    ``recall_search`` (PUSH) takes the wiki root directly, whereas PULL drives
-    ``athenaeum serve --path``, which takes the KNOWLEDGE root and derives
-    ``<path>/wiki`` and ``<path>/raw`` from it. An automated reviewer read the
-    difference as a bug on issue athenaeum#1522's PR; it is not, and this test
-    pins it so the "fix" that would actually break it -- handing ``serve`` the
-    wiki root, leaving it looking for ``<root>/wiki/wiki`` and serving an empty
-    corpus -- fails loudly instead of shipping.
+    ``recall_search`` (PUSH_PAGES_UPPER_BOUND) takes the wiki root directly,
+    whereas PULL drives ``athenaeum serve --path``, which takes the
+    KNOWLEDGE root and derives ``<path>/wiki`` and ``<path>/raw`` from it.
+    An automated reviewer read the difference as a bug on issue
+    athenaeum#1522's PR; it is not, and this test pins it so the "fix" that
+    would actually break it -- handing ``serve`` the wiki root, leaving it
+    looking for ``<root>/wiki/wiki`` and serving an empty corpus -- fails
+    loudly instead of shipping. PUSH_BREADCRUMB(_PULL) matches PULL's
+    choice (the knowledge root, not the wiki root — see
+    ``build_push_breadcrumb_context``'s own ``knowledge_root`` param), pinned
+    here too via the stubbed ``breadcrumb_context_fn``.
     """
     session = EvalSession()
     client = FakeLLMClient(
@@ -359,6 +483,22 @@ def test_pull_arm_receives_the_knowledge_root_not_the_wiki_root(tmp_path: Path) 
             answer="stub pull answer",
         )
 
+    def _capturing_breadcrumb_context_fn(knowledge_root, hook_home, query) -> str:
+        seen["breadcrumb_knowledge_root"] = knowledge_root
+        return ""
+
+    def _stub_breadcrumb_pull_runner(
+        probe, knowledge_root, hook_home, cache_dir, corpus_scale, **kwargs
+    ) -> RolloutRecord:
+        seen["breadcrumb_pull_knowledge_root"] = knowledge_root
+        return RolloutRecord(
+            arm=Arm.PUSH_BREADCRUMB_PULL,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub breadcrumb-pull answer",
+        )
+
     run_probe_all_arms(
         "pto_allowance",
         "core",
@@ -367,12 +507,16 @@ def test_pull_arm_receives_the_knowledge_root_not_the_wiki_root(tmp_path: Path) 
         search_backend="keyword",
         client=client,
         pull_runner=_capturing_pull_runner,
+        breadcrumb_context_fn=_capturing_breadcrumb_context_fn,
+        breadcrumb_pull_runner=_stub_breadcrumb_pull_runner,
     )
 
     # The knowledge root is the PARENT of the materialized wiki tree, and the
     # wiki tree really is where the corpus landed -- asserting both directions
     # so this cannot pass by both sides being wrong in the same way.
     assert seen["knowledge_root"] == tmp_path
+    assert seen["breadcrumb_knowledge_root"] == tmp_path
+    assert seen["breadcrumb_pull_knowledge_root"] == tmp_path
     assert (seen["knowledge_root"] / "wiki").is_dir()
     assert any((seen["knowledge_root"] / "wiki").glob("*.md"))
     assert not (seen["knowledge_root"] / "wiki" / "wiki").exists()

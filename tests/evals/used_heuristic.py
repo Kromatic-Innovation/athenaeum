@@ -46,7 +46,8 @@ not because they are equiprobable.
 **Rollout agreement (AC2).** When a ``ResultStore`` of north-star rollout
 rows is present, :func:`compute_rollout_agreement` compares, per
 ``probe_class``, the ledger-equivalent signal (uid citation) against the
-free content signal (distinctive n-gram overlap) on PUSH arm rows. Both
+free content signal (distinctive n-gram overlap) on PUSH_PAGES_UPPER_BOUND arm
+rows (issue athenaeum#1574 renamed the bare PUSH arm). Both
 signals are already computed by ``north_star_report`` — no judge, no
 Anthropic API call, anywhere in this module. When no rows are present the
 report says **no records**; it never reports absence as zero agreement.
@@ -474,19 +475,26 @@ class AgreementStat:
 def compute_rollout_agreement(rows: Sequence[RolloutRow]) -> list[AgreementStat]:
     """Per-``probe_class`` agreement between the ledger heuristic (uid
     citation) and the free content signal (distinctive n-gram overlap), over
-    PUSH arm rows only.
+    PUSH_PAGES_UPPER_BOUND arm rows only (issue athenaeum#1574 renamed the
+    bare ``PUSH`` arm to ``push_pages_upper_bound`` — the arm identity this
+    function needs is unchanged, only its name).
 
-    PUSH is the arm the viewer's ``used`` column describes, and its delivered
+    PUSH_PAGES_UPPER_BOUND is the arm the viewer's ``used`` column
+    describes: it delivers full pages via the SAME ``recall_search``
+    rendering production's real push telemetry uid-tags, so its delivered
     text and uids are read straight off the rollout record — no corpus
-    rebuild, no judge. Rows that delivered nothing are skipped: "nothing to
-    cite" is not evidence about the heuristic.
+    rebuild, no judge. (The newer breadcrumb arms deliver no uid marker at
+    all — see ``tests.evals.north_star_report.delivered_uids_for_utilization``
+    — so they could not serve this cross-check even if substituted.) Rows
+    that delivered nothing are skipped: "nothing to cite" is not evidence
+    about the heuristic.
 
     An empty result means **no records**, not zero agreement; the renderer
     is what must say so.
     """
     buckets: dict[str, list[tuple[bool, bool]]] = {}
     for row in rows:
-        if row.record.arm is not Arm.PUSH:
+        if row.record.arm is not Arm.PUSH_PAGES_UPPER_BOUND:
             continue
         delivered_uids = delivered_uids_for_utilization(row)
         citation = uid_citation_rate(row.record, delivered_uids)
@@ -635,7 +643,7 @@ def render_report(report: UsedHeuristicReport) -> str:
         "",
         "Compares the ledger-equivalent signal (uid citation) against the free content "
         "signal (distinctive 4-gram overlap between delivered text and the answer) on "
-        "PUSH arm rows, per `probe_class`. Both signals are already computed by "
+        "PUSH_PAGES_UPPER_BOUND arm rows, per `probe_class`. Both signals are already computed by "
         "`tests/evals/north_star_report.py`; no judge and no Anthropic API call is "
         "involved.",
         "",
@@ -647,7 +655,8 @@ def render_report(report: UsedHeuristicReport) -> str:
         )
     elif not report.agreement:
         lines.append(
-            f"**No records.** The store (`{report.store_path}`) holds no PUSH arm rows "
+            f"**No records.** The store (`{report.store_path}`) holds no PUSH_PAGES_UPPER_BOUND "
+            "arm rows "
             "with delivered pages, so agreement was not measured. This is an absence "
             "of records, not an agreement of zero."
         )
