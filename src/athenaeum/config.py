@@ -2438,13 +2438,14 @@ def resolve_recall_relevance_floor(
               fts5: -3.0
               keyword: 20.0
 
-    ``"vector"`` (athenaeum#1571) is in the allowlist too, YAML-only: there is
-    no ``ATHENAEUM_RECALL_MIN_SCORE_VECTOR`` / ``..._PUSH_MIN_SCORE_VECTOR``
-    entry in ``_RECALL_FLOOR_ENV`` (adding one is not in athenaeum#1571's
-    scope), so a vector floor can only be set via ``recall.relevance_floor.
-    vector`` / ``...push.vector`` in yaml -- the env-var precedence step
-    below is simply a no-op for it. gate 2, the comparison DIRECTION for a
-    vector floor once resolved, is :func:`athenaeum.search.meets_relevance_floor`,
+    ``"vector"`` (athenaeum#1571) is in the allowlist too, YAML-only: unlike
+    ``fts5``/``keyword``, it has no corresponding entry in
+    ``_RECALL_FLOOR_ENV`` (adding a vector-suffixed env var pair is not in
+    athenaeum#1571's scope), so a vector floor can only be set via
+    ``recall.relevance_floor.vector`` / ``...push.vector`` in yaml -- the
+    env-var precedence step below is simply a no-op for it. gate 2, the
+    comparison DIRECTION for a vector floor once resolved, is
+    :func:`athenaeum.search.meets_relevance_floor`,
     not this function.
 
     A genuinely unrecognized ``backend_name`` (anything other than
