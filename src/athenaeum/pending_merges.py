@@ -2011,3 +2011,140 @@ def revalidate_pending_merges(
         archive_path.name,
     )
     return result
+
+
+@dataclass
+class WithdrawnMergeProposal:
+    """One unresolved ``_pending_merges.md`` block withdrawn because it
+    references a page a caller is retiring (issue athenaeum#1625)."""
+
+    id: str
+    merge_target_name: str
+    reason: str
+
+
+@dataclass
+class WithdrawalResult:
+    """Outcome of :func:`withdraw_pending_merges_for_retired_pages`."""
+
+    withdrawn: list[WithdrawnMergeProposal]
+    kept: int
+    applied: bool
+
+
+def withdraw_pending_merges_for_retired_pages(
+    merges_path: Path,
+    retired_pages: list[Path],
+    *,
+    reason: str,
+    apply: bool = False,
+    now: datetime | None = None,
+) -> WithdrawalResult:
+    """Withdraw/archive every unresolved block whose sources or target
+    reference a page in *retired_pages* (issue athenaeum#1625, generic
+    wiki-page retirement command).
+
+    Mirrors :func:`revalidate_pending_merges`'s dry-run-by-default /
+    ``apply=True`` split and its non-destructive "move to
+    ``_pending_merges_archive.md``, never delete" discipline — see that
+    function's docstring for why. The only difference is WHAT makes a
+    block a candidate: here it is "references a page this run is
+    retiring", not "fails the current merge-suppression gate".
+
+    A block is withdrawn when either:
+
+    - one of its ``**Sources**:`` entries names a retired page (matched by
+      filename, since a source may be recorded as an absolute or a
+      relative path), or
+    - its merge target's slug (:func:`athenaeum.models.slugify` of
+      ``merge_target_name``) equals a retired page's filename stem — i.e.
+      the proposal would fold/create INTO a page that is being retired.
+
+    Already-resolved blocks and unparseable blocks are left byte-for-byte
+    untouched, same as :func:`revalidate_pending_merges`. Dry-run by
+    default (reports what WOULD be withdrawn, writes nothing); pass
+    ``apply=True`` to write.
+    """
+    result = WithdrawalResult(withdrawn=[], kept=0, applied=False)
+    if not merges_path.exists():
+        return result
+
+    retired_names = {p.name for p in retired_pages}
+    retired_stems = {p.stem for p in retired_pages}
+
+    text = merges_path.read_text(encoding="utf-8")
+    blocks = _split_blocks(text)
+
+    ts = now_iso(now)
+    remaining: list[str] = []
+    withdrawn_blocks: list[str] = []
+
+    for block_text in blocks:
+        pm = _parse_block(block_text)
+        if pm is None or pm.resolved:
+            remaining.append(block_text)
+            continue
+
+        hit_source = next(
+            (s for s in pm.sources if Path(s).name in retired_names), None
+        )
+        target_retired = slugify(pm.merge_target_name) in retired_stems
+
+        if hit_source is None and not target_retired:
+            remaining.append(block_text)
+            continue
+
+        if target_retired:
+            why = f"target page {slugify(pm.merge_target_name)!r} was retired"
+        else:
+            assert hit_source is not None  # the `continue` above ruled out both-None
+            why = f"source {Path(hit_source).name!r} was retired"
+        full_reason = f"{why}: {reason}" if reason else why
+
+        result.withdrawn.append(
+            WithdrawnMergeProposal(
+                id=pm.id, merge_target_name=pm.merge_target_name, reason=full_reason
+            )
+        )
+        withdrawn_blocks.append(f"{block_text}\n\n**Retired**: {ts} — {full_reason}\n")
+
+    result.kept = len(remaining)
+
+    if not apply or not withdrawn_blocks:
+        return result
+
+    # --- apply: rewrite primary (withdrawn blocks removed) + append archive,
+    # mirroring `revalidate_pending_merges`'s file-writing shape exactly.
+    primary_parts = ["# Pending Merges", *remaining]
+    new_primary = "\n\n---\n\n".join(primary_parts) + "\n"
+    atomic_write_text(merges_path, new_primary)
+
+    archive_path = merges_path.parent / "_pending_merges_archive.md"
+    new_section = "\n\n---\n\n".join(withdrawn_blocks)
+    existing_archive = ""
+    if archive_path.exists():
+        existing_archive = archive_path.read_text(encoding="utf-8")
+    if existing_archive.strip():
+        if existing_archive.startswith("# Archived Merges"):
+            _, _, rest = existing_archive.partition("\n")
+            combined = (
+                "# Archived Merges\n\n" + new_section + "\n\n---\n\n" + rest.lstrip()
+            )
+        else:
+            combined = (
+                "# Archived Merges\n\n"
+                + new_section
+                + "\n\n---\n\n"
+                + existing_archive.lstrip()
+            )
+    else:
+        combined = "# Archived Merges\n\n" + new_section + "\n"
+    atomic_write_text(archive_path, combined)
+
+    result.applied = True
+    log.info(
+        "pending_merges: withdrew %d proposal(s) referencing a retired page to %s",
+        len(withdrawn_blocks),
+        archive_path.name,
+    )
+    return result
