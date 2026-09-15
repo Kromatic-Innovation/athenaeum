@@ -53,6 +53,56 @@ Seven example hook scripts ship in `examples/claude-code/`:
 | `rebuild-index.sh` | SessionEnd (optional) | Out-of-band index rebuild with atomic dir lock — wire when a synchronous SessionStart rebuild becomes painful |
 | `stop-hook-validate.sh` | Stop (optional) | Warns when auto-memory frontmatter is missing citation fields — see [Claude Code auto-memory integration](claude-code.md) |
 
+## I want the packaged Claude Code adapter instead of the shell hook
+
+`user-prompt-recall.sh` (above) is a full reimplementation — its own SQL,
+its own ranking, its own budget packing. Athenaeum also ships a thin
+`UserPromptSubmit` adapter that calls the same core `athenaeum context`
+uses, so the two never independently drift. Installing the Python package
+installs it as a console script (no extra copy/chmod step, unlike the
+shell hooks above):
+
+```bash
+pip install athenaeum   # or: pip install -e . from a source checkout
+which athenaeum-claude-hook
+```
+
+Point the `UserPromptSubmit` hook in `~/.claude/settings.json` at it:
+
+```json
+"hooks": {
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "athenaeum-claude-hook 2>/dev/null || true",
+          "timeout": 5
+        }
+      ]
+    }
+  ]
+}
+```
+
+Use the full path to the console script (for example
+`/path/to/venv/bin/athenaeum-claude-hook`) if the venv that installed
+`athenaeum` is not already on the `PATH` Claude Code's hook subprocess
+inherits.
+
+The adapter reads no flags — it takes its input from the hook's stdin JSON
+and its cache directory from `ATHENAEUM_CACHE_DIR` (or the same
+`~/.cache/athenaeum` default `athenaeum context` uses) — and it never
+blocks a turn: a recall failure, a missing index, or no matching pages all
+exit `0` with nothing printed, rather than surfacing hook noise.
+
+**Rollback.** Replace the `command` value with the previous entry — either
+the `user-prompt-recall.sh` line from the settings snippet above, or
+remove the `UserPromptSubmit` hook block entirely to turn off per-turn
+recall. No other file changes are needed; the adapter and the shell hook
+are independent, so switching back does not require reinstalling or
+rebuilding anything.
+
 ## I want to understand why `remember` didn't make something recallable
 
 Athenaeum has two phases, and the hooks only handle one of them:
