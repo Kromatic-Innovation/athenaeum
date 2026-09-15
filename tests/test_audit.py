@@ -511,6 +511,9 @@ class TestTemplatesDocumentFields:
             "valid_until",
             "claimed_scope",
             "audit_findings",
+            # issue athenaeum#1628 Plan item 5 / AC7: the schema-version
+            # marker itself must be documented alongside the audit fields.
+            "schema_version",
         ):
             assert field_name in text, f"_entity-template.md must document {field_name}"
 
@@ -601,3 +604,170 @@ class TestResolvedFindingsAreCleared:
 
         meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
         assert set(meta["audit_findings"]) == {"valid_from", "valid_until"}
+
+
+# --- issue athenaeum#1628: fields-to-determine come from the registry ------
+
+
+class TestFieldsComeFromSchemaMigrationsRegistry:
+    def test_no_hard_coded_three_field_tuple_left_in_audit_module(self) -> None:
+        """issue athenaeum#1628 AC: `audit.py` takes its fields to determine
+        from the registry, with no hard-coded tuple of the three field
+        names left in it. `COORDINATE_FIELDS` may still EXIST (kept as a
+        derived constant for existing importers), but it must be built by
+        reading `athenaeum.schema_migrations.MIGRATIONS`, never by writing
+        the three names out as a literal tuple in this module."""
+        import athenaeum.audit as audit_module
+
+        source = Path(audit_module.__file__).read_text(encoding="utf-8")
+        assert '("valid_from", "valid_until", "claimed_scope")' not in source
+        assert "schema_migrations" in source
+
+    def test_coordinate_fields_still_equals_the_v1_to_v2_migration_fields(self) -> None:
+        from athenaeum.audit import COORDINATE_FIELDS
+        from athenaeum.schema_migrations import MIGRATIONS
+
+        model_migration = next(m for m in MIGRATIONS if m.derivation == "model")
+        assert COORDINATE_FIELDS == model_migration.fields
+
+    def test_page_already_past_every_model_migration_is_asked_nothing(self, wiki: Path) -> None:
+        # schema_version already at CURRENT_SCHEMA_VERSION: the v1->v2
+        # migration is no longer pending, so its fields are not asked about
+        # even though they are still blank on the page.
+        from athenaeum.schema_migrations import CURRENT_SCHEMA_VERSION
+
+        _page(
+            wiki,
+            "current.md",
+            f"uid: current1\ntype: concept\nname: Current Thing\n"
+            f"schema_version: {CURRENT_SCHEMA_VERSION}\n",
+            "No temporal detail at all.\n",
+        )
+        client = _client()
+        build_audit_report(wiki, client=client, model="claude-haiku-4-5-20251001")
+        prompt = client.calls[0]["messages"][0]["content"]
+        assert "none — every coordinate already set" in prompt
+
+
+class TestSchemaVersionBump:
+    """issue athenaeum#1628 decision 4 / AC5: the audit pass bumps
+    `schema_version` only when every pending model migration's fields are
+    populated or recorded in `audit_findings`, and leaves it unchanged
+    otherwise."""
+
+    def _all_empty_page(self, wiki: Path, *, extra_frontmatter: str = "") -> Path:
+        return _page(
+            wiki,
+            "fully.md",
+            f"uid: fully1\ntype: concept\nname: Fully Resolved Thing\n{extra_frontmatter}",
+            "This ran from 2026-01-01 to 2026-06-30 for team:eng, per the "
+            "signed statement of work.[^1]\n\n[^1]: [[src-sow|SOW]] 2026-01-01\n",
+        )
+
+    @staticmethod
+    def _client_for(text: str) -> "FakeLLMClient":
+        def responder(**params: Any) -> Any:
+            return make_llm_response(text, usage=make_llm_usage(100, 50))
+
+        return FakeLLMClient(responder=responder)
+
+    def test_bumps_to_current_version_when_every_field_is_resolved(self, wiki: Path) -> None:
+        path = self._all_empty_page(wiki)
+        fully_resolved = json.dumps(
+            {
+                "valid_from": {"value": "2026-01-01"},
+                "valid_until": {"value": "2026-06-30"},
+                "claimed_scope": {"value": "team:eng"},
+                "retirement_candidate": False,
+                "retirement_reason": "",
+            }
+        )
+        report = build_audit_report(
+            wiki, client=self._client_for(fully_resolved), model="claude-haiku-4-5-20251001"
+        )
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["schema_version"] == 2
+
+    def test_bumps_when_the_remainder_is_recorded_undeterminable_not_filled(
+        self, wiki: Path
+    ) -> None:
+        path = self._all_empty_page(wiki)
+        mixed = json.dumps(
+            {
+                "valid_from": {"value": "2026-01-01"},
+                "valid_until": {"value": "2026-06-30"},
+                "claimed_scope": {"undeterminable": "no scope statement found"},
+                "retirement_candidate": False,
+                "retirement_reason": "",
+            }
+        )
+        report = build_audit_report(
+            wiki, client=self._client_for(mixed), model="claude-haiku-4-5-20251001"
+        )
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["schema_version"] == 2
+
+    def test_leaves_schema_version_unchanged_when_a_field_is_neither_filled_nor_recorded(
+        self, wiki: Path
+    ) -> None:
+        path = self._all_empty_page(wiki)
+        # claimed_scope is entirely absent from the model's JSON: neither a
+        # fill nor an undeterminable finding.
+        partial = json.dumps(
+            {
+                "valid_from": {"value": "2026-01-01"},
+                "valid_until": {"value": "2026-06-30"},
+                "retirement_candidate": False,
+                "retirement_reason": "",
+            }
+        )
+        report = build_audit_report(
+            wiki, client=self._client_for(partial), model="claude-haiku-4-5-20251001"
+        )
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert "schema_version" not in meta
+
+    def test_a_page_already_at_v1_bumps_straight_to_v2(self, wiki: Path) -> None:
+        path = self._all_empty_page(wiki, extra_frontmatter="schema_version: 1\n")
+        fully_resolved = json.dumps(
+            {
+                "valid_from": {"value": "2026-01-01"},
+                "valid_until": {"value": "2026-06-30"},
+                "claimed_scope": {"value": "team:eng"},
+                "retirement_candidate": False,
+                "retirement_reason": "",
+            }
+        )
+        report = build_audit_report(
+            wiki, client=self._client_for(fully_resolved), model="claude-haiku-4-5-20251001"
+        )
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["schema_version"] == 2
+
+    def test_audit_version_still_stamped_unchanged_alongside_the_bump(self, wiki: Path) -> None:
+        path = self._all_empty_page(wiki)
+        fully_resolved = json.dumps(
+            {
+                "valid_from": {"value": "2026-01-01"},
+                "valid_until": {"value": "2026-06-30"},
+                "claimed_scope": {"value": "team:eng"},
+                "retirement_candidate": False,
+                "retirement_reason": "",
+            }
+        )
+        report = build_audit_report(
+            wiki, client=self._client_for(fully_resolved), model="claude-haiku-4-5-20251001"
+        )
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["schema_version"] == 2
+        assert meta["audit_version"] == AUDIT_VERSION
