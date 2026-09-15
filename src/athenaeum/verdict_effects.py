@@ -110,6 +110,20 @@ helpers (:mod:`athenaeum.verdicts`), and reuses
 :mod:`athenaeum.tiers`'s existing escalation writer rather than inventing
 either. Does NOT import :mod:`athenaeum.pending_merges`,
 :mod:`athenaeum.decisions`, or any LLM backend.
+
+**Ported resolver actions (issue athenaeum#1680).** Alongside the five-verdict
+dispatch above, this module also exposes
+:func:`apply_suppress_or_attribute_both_effect` and
+:func:`apply_propose_merge_effect` -- a narrow port of three of the
+resolver's own ledger actions (``not_a_conflict`` / ``attribute_both`` /
+``propose_merge``, see :mod:`athenaeum.resolutions`) onto this module's
+:class:`EffectResult` shape, per the operator decision recorded in
+athenaeum#1663's adjudication document and disposed in athenaeum#1680. The
+first two may auto-apply under thresholds MIRRORED (not imported -- see
+those functions' docstrings for why) from ``resolutions.py``'s own
+per-action table; ``propose_merge`` always queues for a human at any
+confidence, structurally (see :func:`apply_propose_merge_effect`'s
+docstring) rather than merely by convention.
 """
 
 from __future__ import annotations
@@ -835,9 +849,215 @@ def apply_verdict_effect(
     )
 
 
+# ---------------------------------------------------------------------------
+# Ported resolver actions (issue athenaeum#1680): suppress (`not_a_conflict`)
+# and `attribute_both` may auto-apply; `propose_merge` always queues for a
+# human. These three are RESOLVER ACTIONS -- a namespace distinct from the
+# five VERDICT_* comparator verdicts :func:`apply_verdict_effect` dispatches
+# on above. A caller that has already attached one of these three actions to
+# a comparator-driven pair (e.g. a resolver-shaped proposal riding alongside
+# a ``duplicate``/``specialization`` outcome) enacts it through the two
+# functions below instead of going through ``apply_verdict_effect``.
+#
+# Mirrored, not imported, from :mod:`athenaeum.resolutions`: that module
+# transitively imports :mod:`athenaeum.provider` (the LLM backend), which
+# this module's own docstring ("No confidence, no similarity, no LLM call,
+# anywhere in this module") names explicitly as forbidden. Mirroring instead
+# of importing keeps that guarantee intact; the values below are pinned
+# equal to ``resolutions.py``'s own table by
+# ``tests/test_verdict_effects_resolver_actions.py::
+# TestResolverActionMirrorMatchesResolutions`` so the two cannot silently
+# diverge.
+# ---------------------------------------------------------------------------
+
+#: Ledger action tokens. Mirrors ``athenaeum.resolutions.SUPPRESS_ACTION`` /
+#: ``ATTRIBUTE_BOTH_ACTION`` / ``PROPOSE_MERGE_ACTION``.
+RESOLVER_SUPPRESS_ACTION = "not_a_conflict"
+RESOLVER_ATTRIBUTE_BOTH_ACTION = "attribute_both"
+RESOLVER_PROPOSE_MERGE_ACTION = "propose_merge"
+
+#: Mirrors ``athenaeum.resolutions.DEFAULT_AUTO_APPLY_THRESHOLD`` -- the
+#: general auto-apply floor, documented here for parity even though both
+#: ported auto-apply-capable actions below carry an explicit per-action
+#: override rather than falling back to it.
+RESOLVER_DEFAULT_AUTO_APPLY_THRESHOLD = 0.90
+
+#: Mirrors the destructive 0.95 floor ``resolutions.py`` reserves for
+#: ``correct_*``/``forget_*``. Neither ported action below reaches it --
+#: kept here so a threshold-band test can assert the ``[0.90, 0.95)``
+#: escalation semantics stay aligned with ``resolutions.py`` without
+#: importing it, and so this port does not reclassify ``not_a_conflict``/
+#: ``attribute_both`` onto the destructive band (operator decision, issue
+#: athenaeum#1680).
+RESOLVER_DESTRUCTIVE_AUTO_APPLY_THRESHOLD = 0.95
+
+#: Per-action auto-apply floor for the two actions that may auto-apply.
+#: Mirrors ``athenaeum.resolutions.DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION``'s
+#: entries for these same two keys: ``not_a_conflict`` sits BELOW the 0.90
+#: default (0.75 -- issue athenaeum#170's "cheap to be wrong" rationale, a
+#: false-suppress just re-detects next run) while ``attribute_both`` sits AT
+#: the 0.90 default (a non-destructive marking verdict).
+RESOLVER_AUTO_APPLY_THRESHOLD_PER_ACTION: dict[str, float] = {
+    RESOLVER_SUPPRESS_ACTION: 0.75,
+    RESOLVER_ATTRIBUTE_BOTH_ACTION: 0.90,
+}
+
+#: Sentinel set of ported actions that never auto-apply, regardless of
+#: confidence. Mirrors ``athenaeum.resolutions._NEVER_AUTO_APPLY_ACTIONS``.
+#: :func:`apply_suppress_or_attribute_both_effect` checks this FIRST,
+#: unconditionally, and refuses to run for a member of this set -- the
+#: structural half of the guard. The other half is that
+#: :func:`apply_propose_merge_effect` (the function that actually enacts
+#: this action) has no ``confidence`` parameter on its signature at all, so
+#: a future refactor cannot add a confidence-gated auto-apply branch to it
+#: without first changing that signature -- a visible, reviewable diff --
+#: rather than merely adding a comparison against this set. Same protection
+#: ``resolutions.py:200-206``'s docstring describes for the resolver lane.
+RESOLVER_NEVER_AUTO_APPLY_ACTIONS: frozenset[str] = frozenset({RESOLVER_PROPOSE_MERGE_ACTION})
+
+
+def apply_suppress_or_attribute_both_effect(
+    action: str,
+    confidence: float,
+    page_a: ComparatorPage,
+    page_b: ComparatorPage,
+    *,
+    wiki_root: Path,
+    config: dict[str, Any] | None = None,
+) -> EffectResult:
+    """Enact the ported ``not_a_conflict`` (suppress) or ``attribute_both``
+    resolver action for a comparator-driven pair.
+
+    ``confidence`` is the caller's own resolver-shaped proposal confidence
+    (e.g. from a ``ResolutionProposal``) -- this module still never COMPUTES
+    a confidence itself; the module docstring's "no confidence ... anywhere
+    in this module" describes the five-verdict comparator path above, which
+    never emits one, and remains true of that path. This function's
+    ``confidence`` parameter belongs entirely to the ported action's own
+    domain.
+
+    At or above the per-action threshold (:data:`RESOLVER_AUTO_APPLY_THRESHOLD_PER_ACTION`),
+    returns an ``action="auto-applied"`` :class:`EffectResult` and enacts
+    nothing further (mirrors the resolver lane: auto-apply here means "mark
+    resolved", not "mutate a page" -- neither ``not_a_conflict`` nor
+    ``attribute_both`` edits a page body). Below it, queues for a human via
+    the same :func:`_queue` helper every other branch in this module uses.
+
+    Raises :class:`ValueError` for ``propose_merge`` (use
+    :func:`apply_propose_merge_effect`, which has no ``confidence``
+    parameter to gate on) or any other unrecognized action -- not a silent
+    no-op, matching this module's "no silent no-ops" discipline.
+    """
+    if action not in RESOLVER_AUTO_APPLY_THRESHOLD_PER_ACTION:
+        if action in RESOLVER_NEVER_AUTO_APPLY_ACTIONS:
+            raise ValueError(
+                f"{action!r} never auto-applies -- call apply_propose_merge_effect() "
+                "instead, which has no confidence parameter to gate on."
+            )
+        raise ValueError(
+            "apply_suppress_or_attribute_both_effect only knows "
+            f"{sorted(RESOLVER_AUTO_APPLY_THRESHOLD_PER_ACTION)!r}; got action={action!r}."
+        )
+
+    wiki_root = Path(wiki_root)
+    threshold = RESOLVER_AUTO_APPLY_THRESHOLD_PER_ACTION[action]
+    pair_key = make_pair_key(page_a.id, page_b.id)
+    title_a, title_b = _title(page_a), _title(page_b)
+
+    if confidence >= threshold:
+        return EffectResult(
+            verdict=action,
+            action="auto-applied",
+            details={"resolver_action": action, "confidence": confidence, "threshold": threshold},
+        )
+
+    description = (
+        f'Resolver proposed "{action}" for "{title_a}" / "{title_b}" at '
+        f"confidence {confidence:.2f}, below the {threshold:.2f} auto-apply "
+        "floor -- please confirm."
+    )
+    _queue(
+        wiki_root,
+        config=config,
+        entity_name=f'"{title_a}" / "{title_b}"',
+        conflict_type=action,
+        raw_ref=f"comparator:{pair_key}",
+        description=description,
+    )
+    return EffectResult(
+        verdict=action,
+        action="queued",
+        queued=[pair_key],
+        details={
+            "resolver_action": action,
+            "confidence": confidence,
+            "threshold": threshold,
+            "reason": "below_auto_apply_threshold",
+        },
+    )
+
+
+def apply_propose_merge_effect(
+    page_a: ComparatorPage,
+    page_b: ComparatorPage,
+    *,
+    wiki_root: Path,
+    config: dict[str, Any] | None = None,
+) -> EffectResult:
+    """Enact the ported ``propose_merge`` resolver action -- ALWAYS queues
+    for a human, at any confidence, unconditionally.
+
+    Deliberately takes NO ``confidence`` parameter and constructs no
+    ``draft_merged_body`` anywhere in its body: this is the structural half
+    of the never-auto-apply guarantee (the other half is
+    :data:`RESOLVER_NEVER_AUTO_APPLY_ACTIONS`, consulted by
+    :func:`apply_suppress_or_attribute_both_effect`). A future refactor
+    cannot add a confidence-gated auto-apply branch to THIS function
+    without first changing its signature -- a visible, reviewable diff --
+    so a merge proposal can never "slip past on confidence alone" the way
+    ``resolutions.py:200-206``'s docstring warns against for the resolver
+    lane. This is also why the comparator's own ``duplicate``/
+    ``specialization`` verdicts are never handed a fabricated ``confidence``
+    scalar or ``draft_merged_body`` here to drive an auto-finalize --
+    exactly the athenaeum#658-D2 / athenaeum#715-banned anti-pattern
+    :mod:`athenaeum.cluster_comparator`'s own module docstring records.
+    """
+    wiki_root = Path(wiki_root)
+    pair_key = make_pair_key(page_a.id, page_b.id)
+    title_a, title_b = _title(page_a), _title(page_b)
+    description = (
+        f'Resolver proposed merging "{title_a}" and "{title_b}" -- a human '
+        "must draft and approve the merged body; propose_merge never "
+        "auto-applies, at any confidence."
+    )
+    _queue(
+        wiki_root,
+        config=config,
+        entity_name=f'"{title_a}" / "{title_b}"',
+        conflict_type=RESOLVER_PROPOSE_MERGE_ACTION,
+        raw_ref=f"comparator:{pair_key}",
+        description=description,
+    )
+    return EffectResult(
+        verdict=RESOLVER_PROPOSE_MERGE_ACTION,
+        action="queued",
+        queued=[pair_key],
+        details={"resolver_action": RESOLVER_PROPOSE_MERGE_ACTION, "reason": "never_auto_apply"},
+    )
+
+
 __all__ = [
     "FOLD_EVIDENCE_DIRNAME",
+    "RESOLVER_ATTRIBUTE_BOTH_ACTION",
+    "RESOLVER_AUTO_APPLY_THRESHOLD_PER_ACTION",
+    "RESOLVER_DEFAULT_AUTO_APPLY_THRESHOLD",
+    "RESOLVER_DESTRUCTIVE_AUTO_APPLY_THRESHOLD",
+    "RESOLVER_NEVER_AUTO_APPLY_ACTIONS",
+    "RESOLVER_PROPOSE_MERGE_ACTION",
+    "RESOLVER_SUPPRESS_ACTION",
     "EffectResult",
+    "apply_propose_merge_effect",
+    "apply_suppress_or_attribute_both_effect",
     "apply_verdict_effect",
     "build_coordinate_request",
     "build_fold_evidence",
