@@ -1228,6 +1228,51 @@ def resolve_min_merge_mean_similarity(config: dict[str, Any] | None) -> float:
     return default
 
 
+def resolve_name_similarity_threshold(config: dict[str, Any] | None) -> float:
+    """Resolve the embedding cosine-similarity threshold for entity NAME
+    resolution (athenaeum#1615).
+
+    Gates :func:`athenaeum.entity_resolution.resolve_same_subject`'s
+    candidate-generation stage: a normalized-name embedding must score at or
+    above this threshold to even reach the tier-2 confirmation step. Below
+    it, the candidate is never surfaced and the create path proceeds as
+    today (`NoMatch`).
+
+    Deliberately its OWN key — issue athenaeum#1615 AC6 is explicit that no
+    code path may reuse `resolve_resolved_similarity_threshold`'s 0.83
+    (`athenaeum.fingerprint`), which was tuned for claim-pair resolution
+    (matching two DESCRIPTIONS of a fact), not short entity names. A wrong
+    merge here welds two real people/companies/projects together and is
+    hard to detect, so this ships HIGHER than the claim-pair value: 0.90.
+    Two independent normalized-name variants of the same subject (e.g.
+    "Bryan Went" vs. "Bryan Went \U0001f981", which normalize identically
+    via :func:`athenaeum.entity_resolution.normalize_name`) score at or near
+    1.0, comfortably above 0.90; two DIFFERENT people who merely share a
+    surname or a common given name sit well below it. No seed in
+    ``_DEFAULTS`` (athenaeum#231) so the code default stays reachable. Env
+    ``ATHENAEUM_NAME_SIMILARITY_THRESHOLD`` > yaml
+    ``entity_resolution.name_similarity_threshold`` > this default. A
+    malformed env value logs a WARNING (via :func:`_env_number`) and falls
+    back to yaml/default; a ``bool``/non-numeric yaml value falls back to
+    the default.
+    """
+    default = 0.90
+    value = _env_number("ATHENAEUM_NAME_SIMILARITY_THRESHOLD", float)
+    if value is not None:
+        return value
+    if isinstance(config, dict):
+        cfg = config.get("entity_resolution")
+        if isinstance(cfg, dict):
+            raw = cfg.get("name_similarity_threshold")
+            if raw is None or isinstance(raw, bool):
+                return default
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return default
+    return default
+
+
 def resolve_delta_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve the delta-scoped-compile opt-in (athenaeum#370 PR2) from ``librarian.delta``.
 

@@ -3309,3 +3309,28 @@ class EntityIndex:
     def __iter__(self) -> "Iterator[str]":
         """Iterate over indexed name/alias keys."""
         return iter(self._by_name)
+
+    def pages_of_type(self, entity_type: str) -> "Iterator[tuple[str, str, Path]]":
+        """Yield ``(uid, name, path)`` for every indexed page whose resolved
+        type matches *entity_type* (case-insensitively).
+
+        Issue athenaeum#1615: the candidate pool for
+        :func:`athenaeum.entity_resolution.resolve_same_subject`'s embedding
+        stage — deliberately type-scoped by the CALLER via this method,
+        mirroring :func:`athenaeum.tiers.validate_create_name`'s existing
+        type-scoping rule (a ``type: project`` page and a ``type: person``
+        page may legitimately share a name; a candidate pool that ignored
+        type would wrongly compare them). Walks ``self._entities`` (one
+        entry per UID, populated only for pages that carry a ``uid:``) once,
+        not ``_by_name`` — so a page's aliases never yield duplicate
+        candidates the way iterating ``items()`` would.
+        """
+        entity_type_norm = entity_type.strip().lower()
+        for uid, meta in self._entities.items():
+            page_type = resolve_page_type(meta)
+            if page_type and page_type.strip().lower() == entity_type_norm:
+                name = meta.get("name", "")
+                if isinstance(name, str) and name:
+                    path = self._by_uid.get(uid)
+                    if path is not None:
+                        yield uid, name, path

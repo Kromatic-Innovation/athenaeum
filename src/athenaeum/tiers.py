@@ -55,7 +55,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 import yaml
 
@@ -89,6 +89,12 @@ from athenaeum.config import (
     resolve_heartbeat_interval,
     resolve_model,
     resolve_preserved_log_dir,
+)
+from athenaeum.entity_resolution import (
+    Ambiguous,
+    Match,
+    SubjectPage,
+    resolve_same_subject,
 )
 from athenaeum.fingerprint import (
     _member_key_str,
@@ -1294,6 +1300,30 @@ class CreateNameCollisionError(Exception):
         super().__init__(f"tier3 create name {name!r} collides: {reason}")
 
 
+class CreateNameAmbiguousError(Exception):
+    """*name*, via the meaning-based resolver, plausibly matches MULTIPLE
+    existing pages of the same type (issue athenaeum#1615).
+
+    Raised by :func:`validate_create_name`'s meaning-based fallback
+    (:func:`_apply_similarity_resolution`) when
+    :func:`athenaeum.entity_resolution.resolve_same_subject` returns
+    :class:`~athenaeum.entity_resolution.Ambiguous` — the embedding
+    candidate-generation plus tier-2 confirmation path found more than one
+    plausible same-subject candidate and could not pick a single winner.
+    Unlike :class:`CreateNameCollisionError`'s DISAMBIGUATE branch (a single
+    confident match, safe to fold into), there is no safe automatic choice
+    here: :func:`gate_create_name_classifications` routes this straight to
+    escalation (``conflict_type="name_collision"``, AC4) — never creates,
+    and never folds into any one of the candidates.
+    """
+
+    def __init__(self, name: str, reason: str, *, candidate_uids: tuple[str, ...]) -> None:
+        self.name = name
+        self.reason = reason
+        self.candidate_uids = candidate_uids
+        super().__init__(f"tier3 create name {name!r} ambiguous: {reason}")
+
+
 class CreateNameDemotedError(Exception):
     """*name* (or one of its aliases) was retired by ``log_demote`` (issue athenaeum#1406).
 
@@ -1456,12 +1486,203 @@ def _write_retired_names(wiki_root: Path, records_by_uid: dict[str, RetiredNameR
     atomic_write_text(_retired_names_path(wiki_root), yaml.safe_dump(payload, sort_keys=False))
 
 
+@dataclass(frozen=True)
+class _NameResolutionConfirmParse:
+    """Parsed tier-2 confirmation response (issue athenaeum#1615). Internal."""
+
+    matched_uid: str | None = None
+    ambiguous_uids: tuple[str, ...] = ()
+
+
+def _load_name_resolution_confirm_prompt() -> str:
+    """Read the entity-name-resolution confirmation system prompt.
+
+    Issue athenaeum#1615: prompt text is content, not code (see
+    ``policies/prompt-text-is-content.md``) — this multi-line prompt (tone,
+    judgment guidance, and a response-format spec a non-engineer may want to
+    tune) lives in ``src/athenaeum/prompts/name_resolution_confirm.md`` and
+    is loaded via ``importlib.resources``, same convention
+    :func:`athenaeum.erasure._load_packaged_pack` already established for
+    packaged retention-pack YAML.
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(
+        "name_resolution_confirm.md"
+    )
+    return resource.read_text(encoding="utf-8")
+
+
+def _parse_name_resolution_confirm_response(text: str) -> _NameResolutionConfirmParse:
+    """Parse the confirmer's ``MATCH:``/``AMBIGUOUS:``/``NO_MATCH`` line.
+
+    Any response that does not conform to the protocol (no recognized
+    prefix) is treated exactly like ``NO_MATCH`` — a malformed response must
+    never be read as a confident match (issue athenaeum#1615: never silently
+    mint a duplicate OR silently merge on an unparseable response).
+    """
+    line = text.strip().splitlines()[0].strip() if text.strip() else ""
+    if line.startswith("MATCH:"):
+        uid = line[len("MATCH:") :].strip()
+        return _NameResolutionConfirmParse(matched_uid=uid or None)
+    if line.startswith("AMBIGUOUS:"):
+        uids = tuple(u.strip() for u in line[len("AMBIGUOUS:") :].split(",") if u.strip())
+        return _NameResolutionConfirmParse(ambiguous_uids=uids)
+    return _NameResolutionConfirmParse()
+
+
+def _tier2_confirm_same_subject(
+    candidate: SubjectPage,
+    top_k: "Sequence[tuple[SubjectPage, float]]",
+    *,
+    client: "LLMBackend",
+    config: dict[str, Any] | None = None,
+    usage: "TokenUsage | None" = None,
+) -> "Ambiguous | Match | object":
+    """The concrete tier-2 confirmer for :func:`athenaeum.entity_resolution.
+    resolve_same_subject`'s ``confirm`` callback (issue athenaeum#1615).
+
+    Lazily reads each candidate page's body (truncated, same 2000-char
+    convention used elsewhere in this module) from disk via its ``path`` —
+    only for the (at most ``top_k``) pages the embedding stage already
+    surfaced, not the whole corpus. Page bodies are fenced as untrusted data
+    (:func:`athenaeum.prompt_safety.data_only_clause` /
+    :func:`athenaeum.prompt_safety.fence_untrusted`), matching every other
+    LLM call site in this module that embeds wiki-page content.
+    """
+    from athenaeum.entity_resolution import Ambiguous as _Ambiguous
+    from athenaeum.entity_resolution import Match as _Match
+    from athenaeum.entity_resolution import NoMatch as _NoMatch
+
+    system_prompt = _load_name_resolution_confirm_prompt()
+    candidate_desc = f"New candidate name: {candidate.name!r}"
+    if candidate.body:
+        candidate_desc += (
+            "\nObserved so far:\n"
+            + fence_untrusted(candidate.body[:2000], tag="candidate_context", max_chars=2000)
+        )
+    blocks = [candidate_desc, "", "Candidate existing pages:"]
+    for page, score in top_k:
+        body = page.body
+        if not body and page.path is not None:
+            try:
+                body = page.path.read_text(encoding="utf-8")
+            except OSError:
+                body = ""
+        blocks.append(
+            f"\n- uid: {page.uid}\n  name: {page.name!r}\n  "
+            f"embedding_similarity: {score:.4f}\n  body:\n"
+            + fence_untrusted(body[:2000], tag="existing_page", max_chars=2000)
+        )
+    user_content = (
+        "\n".join(blocks) + "\n\n" + data_only_clause("candidate_context", "existing_page")
+    )
+
+    model = _get_classify_model(config)
+    max_tokens = resolve_max_tokens(
+        "name_resolution_confirm",
+        "ATHENAEUM_NAME_RESOLUTION_CONFIRM_MAX_TOKENS",
+        200,
+        config,
+    )
+    params: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_content}],
+    }
+    response = _timed_llm_call(
+        lambda: client.messages.create(**params),
+        f"tier2_confirm_same_subject candidate={candidate.name!r}",
+        usage=usage,
+    )
+    _record_usage(response, usage, model=model, knob="classify")
+    text = response_text(response)
+    parsed = _parse_name_resolution_confirm_response(text)
+    if parsed.matched_uid is not None:
+        return _Match(parsed.matched_uid)
+    if parsed.ambiguous_uids:
+        return _Ambiguous(parsed.ambiguous_uids)
+    return _NoMatch()
+
+
+def _apply_similarity_resolution(
+    name: str,
+    config: dict[str, Any] | None,
+    *,
+    index: "EntityIndex",
+    entity_type: str,
+    client: "LLMBackend | None",
+    usage: "TokenUsage | None",
+) -> None:
+    """Issue athenaeum#1615: meaning-based fallback when the exact-string
+    lookup in :func:`validate_create_name` misses.
+
+    Builds the candidate pool from :meth:`EntityIndex.pages_of_type` —
+    already type-scoped, mirroring :func:`validate_create_name`'s own
+    type-scoping rule (never compares a ``type: person`` candidate against a
+    ``type: project`` page). Calls
+    :func:`athenaeum.entity_resolution.resolve_same_subject` with the real
+    embedder default (:func:`athenaeum.search.embed_texts`) and, when
+    *client* is supplied, :func:`_tier2_confirm_same_subject` as the
+    confirmer.
+
+    - :class:`~athenaeum.entity_resolution.Match` — raises
+      :class:`CreateNameCollisionError` with ``existing_type`` set (known),
+      so :func:`gate_create_name_classifications`'s DISAMBIGUATE branch
+      folds the observation into the matched page — exactly the issue's
+      step-3 wiring.
+    - :class:`~athenaeum.entity_resolution.Ambiguous` — raises
+      :class:`CreateNameAmbiguousError` (AC4: routes to a ``name_collision``
+      escalation, never a merge).
+    - :class:`~athenaeum.entity_resolution.NoMatch` (including every
+      degraded path — no candidates, no embedder, no confirmer, confirmer
+      error) — returns normally; the create proceeds exactly as today.
+    """
+    candidates = [
+        SubjectPage(uid=uid, name=page_name, type=entity_type, path=path)
+        for uid, page_name, path in index.pages_of_type(entity_type)
+    ]
+    if not candidates:
+        return
+
+    confirm = None
+    if client is not None:
+
+        def confirm(cand: SubjectPage, top: "Sequence[tuple[SubjectPage, float]]") -> Any:
+            return _tier2_confirm_same_subject(cand, top, client=client, config=config, usage=usage)
+
+    result = resolve_same_subject(name, candidates, config=config, confirm=confirm)
+    if isinstance(result, Match):
+        matched = next((c for c in candidates if c.uid == result.uid), None)
+        # resolve_same_subject only ever returns a Match whose uid is one of
+        # the candidates it was given (it degrades to NoMatch otherwise --
+        # see its own docstring), and every SubjectPage this function builds
+        # from EntityIndex.pages_of_type carries a real path.
+        assert matched is not None and matched.path is not None
+        raise CreateNameCollisionError(
+            name,
+            f"meaning-based resolver match (issue athenaeum#1615): uid={result.uid}",
+            existing_uid=result.uid,
+            existing_path=matched.path,
+            existing_type=entity_type,
+        )
+    if isinstance(result, Ambiguous):
+        raise CreateNameAmbiguousError(
+            name,
+            f"meaning-based resolver found {len(result.uids)} plausible matches "
+            f"(issue athenaeum#1615): uids={list(result.uids)}",
+            candidate_uids=result.uids,
+        )
+    # NoMatch (or any degraded path): fall through, create proceeds as today.
+
+
 def validate_create_name(
     name: str,
     config: dict[str, Any] | None = None,
     *,
     index: "EntityIndex | None" = None,
     entity_type: str | None = None,
+    client: "LLMBackend | None" = None,
+    usage: "TokenUsage | None" = None,
 ) -> None:
     """Single validation point for a Tier-3 CREATE name (issue athenaeum#1173 AC3).
 
@@ -1500,6 +1721,19 @@ def validate_create_name(
       example: the ``tristankromer`` repo vs. the person of the same
       name) — a scan that ignored type would wrongly pair them.
     - Otherwise, raises :class:`CreateNameCollisionError`.
+
+    Issue athenaeum#1615 — meaning-based fallback: when ``hit is None`` (the
+    exact-string lookup missed) and *entity_type* is truthy, falls through to
+    :func:`_apply_similarity_resolution` instead of passing unconditionally.
+    That helper is a no-op (returns normally, exactly today's behaviour) when
+    *entity_type* is empty (no type to scope a candidate pool by) or the
+    index has no other page of that type. *client* (keyword-only, ``None``
+    default) threads the same tier-2 LLM client the caller already built for
+    :func:`tier2_classify` into the resolver's confirmation stage — with no
+    client, the resolver degrades to ``no_match`` (never a silent merge; see
+    :func:`athenaeum.entity_resolution.resolve_same_subject`'s docstring), so
+    a caller that does not pass one is unaffected beyond the (embedder-only)
+    candidate-generation cost.
     """
     if _BARE_ISSUE_REF_RE.match(name.strip()):
         raise CreateNameRejectedError(name, "bare issue-number-shaped name")
@@ -1535,6 +1769,10 @@ def validate_create_name(
                     existing_path=hit.path,
                     existing_type=hit.type,
                 )
+        elif entity_type:
+            _apply_similarity_resolution(
+                name, config, index=index, entity_type=entity_type, client=client, usage=usage
+            )
 
 
 @dataclass(frozen=True)
@@ -1560,6 +1798,8 @@ def gate_create_name_classifications(
     config: dict[str, Any] | None = None,
     *,
     index: "EntityIndex | None" = None,
+    client: "LLMBackend | None" = None,
+    usage: "TokenUsage | None" = None,
 ) -> CreateNameGateOutcome:
     """Stop tier-2 from minting unusable entity NAMES at create (issue athenaeum#1173).
 
@@ -1629,7 +1869,39 @@ def gate_create_name_classifications(
             kept.append(c)
             continue
         try:
-            validate_create_name(c.name, config, index=index, entity_type=c.entity_type)
+            validate_create_name(
+                c.name,
+                config,
+                index=index,
+                entity_type=c.entity_type,
+                client=client,
+                usage=usage,
+            )
+        except CreateNameAmbiguousError as exc:
+            log.warning(
+                "tier3-create-name-ambiguous ref=%s name=%r candidate_uids=%s reason=%s",
+                raw_ref,
+                exc.name,
+                exc.candidate_uids,
+                exc.reason,
+            )
+            escalations.append(
+                EscalationItem(
+                    raw_ref=raw_ref,
+                    entity_name=c.name,
+                    conflict_type="name_collision",
+                    description=(
+                        f"Tier-3 create for {c.name!r} was suppressed (issue "
+                        f"athenaeum#1615): {exc.reason}. The meaning-based "
+                        "resolver found more than one plausible existing page "
+                        "and could not pick a single winner, so folding this "
+                        "observation into any one of them is not a safe "
+                        "disambiguation. No page was created; the observation "
+                        f"follows so the fact is not lost:\n\n{raw_content[:2000]}"
+                    ),
+                )
+            )
+            continue
         except CreateNameDemotedError as exc:
             log.warning(
                 "tier3-create-name-demoted ref=%s name=%r demoted_to=%s reason=%s",
