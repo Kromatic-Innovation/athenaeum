@@ -65,6 +65,7 @@ MODULE_LAYER: dict[str, int] = {
     "owner": 0,
     "pagination": 0,
     "progress": 0,
+    "schema_migrations": 0,
     "t1_census": 0,
     "vecmath": 0,
     # L1 -- data model.
@@ -95,6 +96,7 @@ MODULE_LAYER: dict[str, int] = {
     "never_ingest": 2,
     "page_description": 2,
     "person_registry": 2,
+    "schema_migrate": 2,
     "subject_backfill": 2,
     "push_state": 2,
     "recovery_yield": 2,
@@ -223,6 +225,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_repair": 5,
     "_cmd_retire": 5,
     "_cmd_run": 5,
+    "_cmd_schema": 5,
     "_cmd_serve": 5,
     "_cmd_storage": 5,
     "_cmd_surface_divergence": 5,
