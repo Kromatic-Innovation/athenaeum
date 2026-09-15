@@ -89,6 +89,38 @@ def _page(
     return page_from_text(page_id, text)
 
 
+def _declared_page(
+    page_id: str,
+    *,
+    name: str,
+    supersedes: list[dict[str, str]] | None = None,
+    refines: list[str] | None = None,
+    merge_rejected_with: list[str] | None = None,
+    body: str = "some claim text",
+) -> ComparatorPage:
+    """Build a :class:`ComparatorPage` carrying declared-relationship frontmatter.
+
+    Issue athenaeum#1682. Sibling to :func:`_page`, which has no ``name:``/
+    ``refines:``/``supersedes:``/``merge_rejected_with:`` knobs of its own.
+    """
+    lines = ["---", f"name: {name}", "type: feedback"]
+    if supersedes:
+        lines.append("supersedes:")
+        for rec in supersedes:
+            lines.append(f"  - name: {rec['name']}")
+    if refines:
+        lines.append("refines:")
+        for n in refines:
+            lines.append(f"  - {n}")
+    if merge_rejected_with:
+        lines.append("merge_rejected_with:")
+        for n in merge_rejected_with:
+            lines.append(f"  - {n}")
+    lines.append("---")
+    text = "\n".join(lines) + "\n" + body + "\n"
+    return page_from_text(page_id, text)
+
+
 def _fake_client(payload_json: str) -> MagicMock:
     """A MagicMock mirroring the Anthropic SDK's ``messages.create`` response shape."""
     client = MagicMock()
@@ -635,6 +667,69 @@ class TestAC11DistinctRecordsSeparator:
         assert entry.verdict == VERDICT_DISTINCT
         assert "scope" in entry.separator
         client.messages.create.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1682 — declared-relationship Gate 1 short-circuit, ported from
+# merge.py's C4 ``_declared_relationship`` (merge.py:216) via the shared
+# athenaeum.declared_relationships primitive. Mirrors
+# TestAC11DistinctRecordsSeparator.test_gate1_disjoint_scope_records_separator
+# above -- same "settled before Gate 2, client never called" shape.
+# ---------------------------------------------------------------------------
+
+
+class TestDeclaredRelationshipGate1:
+    def test_declared_supersession_records_separator_zero_llm_calls(
+        self, tmp_path: Path
+    ) -> None:
+        page_a = _declared_page("alpha", name="alpha-memory")
+        page_b = _declared_page(
+            "beta", name="beta-memory", supersedes=[{"name": "alpha-memory"}]
+        )
+        client = MagicMock()
+        lock = RunLock(tmp_path)
+        with lock:
+            result = record_comparison(tmp_path, page_a, page_b, client=client, lock=lock)
+        entry = lookup_pair(tmp_path, result["pair"])
+        assert entry is not None
+        assert entry.verdict == VERDICT_DISTINCT
+        assert entry.separator == ["declared-supersession"]
+        client.messages.create.assert_not_called()
+
+    def test_declared_refinement_short_circuits_before_gate2(self) -> None:
+        page_a = _declared_page("alpha", name="alpha-memory", refines=["beta-memory"])
+        page_b = _declared_page("beta", name="beta-memory")
+        client = MagicMock()
+        outcome = compare_pages(page_a, page_b, client=client)
+        assert outcome.verdict == VERDICT_DISTINCT
+        assert outcome.separator == ["declared-refinement"]
+        assert outcome.comparator_version == COMPARATOR_VERSION_GATE1
+        client.messages.create.assert_not_called()
+
+    def test_declared_merge_rejection_short_circuits_before_gate2(self) -> None:
+        page_a = _declared_page(
+            "alpha", name="alpha-memory", merge_rejected_with=["beta-memory"]
+        )
+        page_b = _declared_page("beta", name="beta-memory")
+        client = MagicMock()
+        outcome = compare_pages(page_a, page_b, client=client)
+        assert outcome.verdict == VERDICT_DISTINCT
+        assert outcome.separator == ["declared-merge-rejection"]
+        assert outcome.comparator_version == COMPARATOR_VERSION_GATE1
+        client.messages.create.assert_not_called()
+
+    def test_no_declared_relationship_still_reaches_gate2(self) -> None:
+        """Negative control: two undeclared pages are NOT short-circuited --
+        content_relation still runs and the client IS called, proving the
+        new exit does not fire on an ordinary pair."""
+        page_a = _declared_page("alpha", name="alpha-memory")
+        page_b = _declared_page("beta", name="beta-memory")
+        client = _fake_client(_content_payload(ContentRelation.COMPATIBLE))
+        outcome = compare_pages(page_a, page_b, client=client)
+        assert outcome.verdict == VERDICT_DISTINCT
+        assert outcome.separator == [COEXIST_SEPARATOR]
+        assert outcome.comparator_version == COMPARATOR_VERSION_GATE2
+        client.messages.create.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
