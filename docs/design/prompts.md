@@ -854,27 +854,33 @@ Summarize each page below. Return the JSON array described in the system prompt 
 - **Constant:** `athenaeum.audit.AUDIT_SYSTEM`
 - **Source:** `src/athenaeum/audit.py`
 - **Model knob:** `classify` &middot; **max_tokens:** `1024`
-- **sha256:** `9ab40d02c384d456cb492b817d84b3254e200724c1f5ce036f9c2a0994142040`
+- **sha256:** `d10753048a49462bc41aebf26c06226356db86dbc0032ce6394f5c5955e565ef`
 
 ```text
 You are auditing ONE knowledge-base page. Read only the page's own body and its cited sources below — never guess, never use outside knowledge.
 
-Do two things:
+Do three things:
 
 1. COORDINATES. For each field listed under "Fields to determine", decide:
-   - a determinable value, in plain text, when the page's own body or cited sources state it explicitly, or
+   - a determinable value, in plain text, when the page's own body or cited sources state a stated role, event, or effective date/scope explicitly, or
    - "undeterminable" with a one-line reason, when they do not.
-   A date value must be ISO-8601 (YYYY-MM-DD). Never invent a value that is not actually stated.
+   A date value must be ISO-8601 (YYYY-MM-DD). Never invent a value that is not actually stated. A date field (valid_from/valid_until) may ONLY be filled from a stated role, event, or effective date — NEVER from relationship or contact metadata. None of the following ever justify a date fill, even when stated on the page: a connect date (for example a LinkedIn connect date), a CRM first-contact, last-contact, last-email, or meeting date, a note date, an updated-timestamp, or any ingestion/import date. When the only dates available are of that kind, report the field as undeterminable and name the excluded date class in the reason.
 
-2. RETIREMENT CANDIDACY. Decide whether this page states any claim beyond a restatement or bare usage-log of its cited sources — an independent observation, judgment, or synthesis the sources do not already contain. A page with no such claim is a retirement candidate.
+2. RETIREMENT CANDIDACY. A page is a retirement candidate ONLY when at least one of these two things is true:
+   - it states no claim at all — no independent observation, judgment, or synthesis, just a name/heading or nothing, or
+   - its content duplicates another page.
+   Restating or summarizing a cited source is NOT, on its own, a reason to flag a page — a page that accurately summarizes and scopes its source still adds value by making that source findable. A page whose entire content is a summary of a source it names (for example a whiteboard or board source page) is light BY DESIGN, not by deficiency: it asserts the source of truth and the chain of evidence another page relies on. Never flag such a page for retirement merely for being light.
 
-Return ONLY a JSON object, no markdown fence, no prose, in exactly this shape (include a key only for a field actually listed under "Fields to determine"):
+3. SOURCE SUMMARY. Only when this page's own type is a source page: decide whether it gives a summary of the source it names (a summary, not the full detail) plus any information about that source's validity. When a source page lacks that summary, report it via "source_summary_missing" with a one-line reason — this is a finding to record, never a reason to flag the page for retirement.
+
+Return ONLY a JSON object, no markdown fence, no prose, in exactly this shape (include a coordinate key only for a field actually listed under "Fields to determine"; include "source_summary_missing" only when it applies):
 
 {
   "<field>": {"value": "<determined value>"},
   "<field>": {"undeterminable": "<one-line reason>"},
   "retirement_candidate": true,
-  "retirement_reason": "<one-line reason, empty string when false>"
+  "retirement_reason": "<one-line reason, empty string when false>",
+  "source_summary_missing": "<one-line reason, omit key when not applicable>"
 }
 ```
 

@@ -67,13 +67,13 @@ class TestComputeStalePages:
             wiki,
             "old.md",
             "old1",
-            extra="last_audited: '2025-08-11T00:00:00Z'\naudit_version: audit-v1\n",
+            extra=f"last_audited: '2025-08-11T00:00:00Z'\naudit_version: {AUDIT_VERSION}\n",
         )
         _page(
             wiki,
             "fresh.md",
             "fresh1",
-            extra="last_audited: '2026-09-13T00:00:00Z'\naudit_version: audit-v1\n",
+            extra=f"last_audited: '2026-09-13T00:00:00Z'\naudit_version: {AUDIT_VERSION}\n",
         )
 
         entries = compute_stale_pages(
@@ -97,7 +97,7 @@ class TestComputeStalePages:
             wiki,
             "current.md",
             "current1",
-            extra="last_audited: '2026-09-14T00:00:00Z'\naudit_version: audit-v1\n",
+            extra=f"last_audited: '2026-09-14T00:00:00Z'\naudit_version: {AUDIT_VERSION}\n",
         )
 
         entries = compute_stale_pages(
