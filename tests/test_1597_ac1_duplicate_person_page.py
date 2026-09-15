@@ -43,7 +43,7 @@ pipeline:
    **athenaeum#1615 closes this specific gap** with a meaning-based fallback
    (embedding similarity + tier-2 LLM confirmation) that runs when the
    exact-string lookup misses -- this test was originally ``xfail(strict=
-   True)`` (two pages, the pre-#1615 outcome); athenaeum#1615 removed that
+   True)`` (two pages, the pre-athenaeum#1615 outcome); athenaeum#1615 removed that
    marker and updated the fixture to assert the now-correct one-page
    outcome. See ``tests/test_1615_similarity_wiring.py`` for the resolver's
    own dedicated end-to-end coverage of this same shape.
