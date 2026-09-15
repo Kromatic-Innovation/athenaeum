@@ -14,6 +14,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from athenaeum.cluster_comparator import (
     ClusterComparatorResult,
     auto_memory_root,
@@ -24,6 +26,7 @@ from athenaeum.cluster_comparator import (
 )
 from athenaeum.comparator import ContentRelation
 from athenaeum.models import AutoMemoryFile, TokenUsage
+from athenaeum.runlock import RunLock
 from athenaeum.verdicts import page_id_for_path
 
 _AUTO_ON: dict[str, object] = {"librarian": {"comparator_enabled": True}}
@@ -254,7 +257,15 @@ class TestRunClusterComparatorGateOn:
         members = [_write_am(tmp_path, f"m{i}.md", f"distinct body {i}") for i in range(3)]
         client = _fake_client(ContentRelation.COMPATIBLE)
 
-        result = run_cluster_comparator(members, client, config=_AUTO_ON, cluster_id="c2")
+        with RunLock(tmp_path) as lock:
+            result = run_cluster_comparator(
+                members,
+                client,
+                config=_AUTO_ON,
+                cluster_id="c2",
+                wiki_root=tmp_path,
+                lock=lock,
+            )
 
         assert result.gate_enabled is True
         assert result.pair_count == 3
@@ -272,7 +283,10 @@ class TestRunClusterComparatorGateOn:
         b = _write_am(tmp_path, "beta.md", "text b")
         client = _fake_client(ContentRelation.COMPATIBLE)
 
-        result = run_cluster_comparator([a, b], client, config=_AUTO_ON)
+        with RunLock(tmp_path) as lock:
+            result = run_cluster_comparator(
+                [a, b], client, config=_AUTO_ON, wiki_root=tmp_path, lock=lock
+            )
 
         assert len(result.outcomes) == 1
         id_a, id_b, _outcome = result.outcomes[0]
@@ -284,22 +298,33 @@ class TestRunClusterComparatorGateOn:
         client = _fake_client(ContentRelation.COMPATIBLE)
         usage = TokenUsage()
 
-        run_cluster_comparator([a, b], client, config=_AUTO_ON, usage=usage)
+        with RunLock(tmp_path) as lock:
+            run_cluster_comparator(
+                [a, b], client, config=_AUTO_ON, usage=usage, wiki_root=tmp_path, lock=lock
+            )
         # No exception is the assertion; exact token counts are Gate 2's own
         # contract (tests/test_comparator.py), not this driver's.
 
     def test_client_none_degrades_without_raising(self, tmp_path: Path) -> None:
-        """``compare_pages`` never raises for an unavailable client -- the
-        driver must pass that posture through unchanged."""
+        """``compare_pages`` never raises for an unavailable client --
+        ``record_comparison`` reports it as ``ok=False`` (Gate 2
+        unavailable) rather than a fabricated verdict, and this driver
+        surfaces that as an ``unresolved`` entry rather than raising or
+        silently dropping the pair (issue athenaeum#1678)."""
         a = _write_am(tmp_path, "alpha.md", "text a")
         b = _write_am(tmp_path, "beta.md", "text b")
 
-        result = run_cluster_comparator([a, b], None, config=_AUTO_ON)
+        with RunLock(tmp_path) as lock:
+            result = run_cluster_comparator(
+                [a, b], None, config=_AUTO_ON, wiki_root=tmp_path, lock=lock
+            )
 
         assert result.pair_count == 1
-        assert len(result.outcomes) == 1
-        _id_a, _id_b, outcome = result.outcomes[0]
-        assert outcome.verdict is None
+        assert result.outcomes == []
+        assert len(result.unresolved) == 1
+        id_a, id_b, reason = result.unresolved[0]
+        assert {id_a, id_b} == {page_id_for_path(a.path), page_id_for_path(b.path)}
+        assert reason
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +344,10 @@ class TestClusterComparatorResultToRow:
             # athenaeum#1257: the T1 screen's drop list, always present and
             # empty unless a ClusterScreenContext armed the screen.
             "screened_out": [],
+            # athenaeum#1678: memoized-fresh and no-verdict pairs, always
+            # present and empty when the gate never ran.
+            "memoised": [],
+            "unresolved": [],
         }
 
     def test_to_row_gate_on_shape(self, tmp_path: Path) -> None:
@@ -326,7 +355,10 @@ class TestClusterComparatorResultToRow:
         b = _write_am(tmp_path, "beta.md", "text b")
         client = _fake_client(ContentRelation.COMPATIBLE)
 
-        result = run_cluster_comparator([a, b], client, config=_AUTO_ON, cluster_id="c4")
+        with RunLock(tmp_path) as lock:
+            result = run_cluster_comparator(
+                [a, b], client, config=_AUTO_ON, cluster_id="c4", wiki_root=tmp_path, lock=lock
+            )
         row = result.to_row()
 
         assert row["cluster_id"] == "c4"
@@ -335,3 +367,69 @@ class TestClusterComparatorResultToRow:
         assert len(row["outcomes"]) == 1
         entry = row["outcomes"][0]
         assert set(entry) == {"a", "b", "verdict"}
+        assert row["memoised"] == []
+        assert row["unresolved"] == []
+
+
+# ---------------------------------------------------------------------------
+# Memoization -- record_comparison wiring (issue athenaeum#1678)
+# ---------------------------------------------------------------------------
+
+
+class TestClusterComparatorMemoization:
+    def test_same_pair_compared_twice_in_one_run_is_memoized(self, tmp_path: Path) -> None:
+        """AC4: a cluster-domain pair compared twice in the SAME run (same
+        ids, same content) must hit the ``skipped="fresh"`` path the
+        second time -- i.e. actually memoized via the verdict ledger, not
+        merely routed through ``record_comparison`` once and forgotten.
+
+        Two ``run_cluster_comparator`` calls sharing one caller-acquired
+        ``RunLock`` and the same ``wiki_root`` count as "the same run" for
+        memoization purposes (see the function's own docstring): the
+        ledger lives on disk under ``wiki_root``, not in the lock object,
+        so what makes the second call see the first call's verdict is the
+        SAME ``wiki_root`` -- the shared lock only proves the single-
+        appender contract is satisfiable across repeated calls.
+        """
+        a = _write_am(tmp_path, "alpha.md", "text a")
+        b = _write_am(tmp_path, "beta.md", "text b")
+        client = _fake_client(ContentRelation.COMPATIBLE)
+
+        with RunLock(tmp_path) as lock:
+            first = run_cluster_comparator(
+                [a, b], client, config=_AUTO_ON, wiki_root=tmp_path, lock=lock
+            )
+            assert len(first.outcomes) == 1
+            assert first.memoised == []
+            first_calls = client.messages.create.call_count
+            assert first_calls == 1
+            first_verdict = first.outcomes[0][2].verdict
+            assert first_verdict is not None
+
+            second = run_cluster_comparator(
+                [a, b], client, config=_AUTO_ON, wiki_root=tmp_path, lock=lock
+            )
+
+        # Memoized: no fresh CompareOutcome, no second LLM dispatch, and the
+        # reused verdict matches what the first call actually decided.
+        assert second.outcomes == []
+        assert second.unresolved == []
+        assert len(second.memoised) == 1
+        id_a, id_b, memoised_verdict = second.memoised[0]
+        assert {id_a, id_b} == {page_id_for_path(a.path), page_id_for_path(b.path)}
+        assert memoised_verdict == first_verdict
+        assert client.messages.create.call_count == first_calls  # no new dispatch
+
+    def test_wiki_root_required_once_a_pair_reaches_record_comparison(
+        self, tmp_path: Path
+    ) -> None:
+        """Without wiki_root/lock, a pair that survives to the comparison
+        step raises rather than silently falling back to an unrecorded
+        ``compare_pages`` call (issue athenaeum#1678's single-appender
+        contract -- see run_cluster_comparator's docstring)."""
+        a = _write_am(tmp_path, "alpha.md", "text a")
+        b = _write_am(tmp_path, "beta.md", "text b")
+        client = _fake_client(ContentRelation.COMPATIBLE)
+
+        with pytest.raises(ValueError, match="wiki_root"):
+            run_cluster_comparator([a, b], client, config=_AUTO_ON)
