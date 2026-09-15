@@ -33,7 +33,14 @@ must fail today on at least one of B/C/E while passing D. Tuning the floor to
 observed behaviour would turn the layer into a rubber stamp. This is safe:
 ``-m eval`` is deselected from ordinary CI (``pyproject.toml``) and
 ``evals.yml`` is dispatch/main-push only, so a red layer here never blocks
-develop.
+develop. The red is now carried explicitly by a strict
+``pytest.mark.xfail(strict=True, raises=AssertionError)`` on
+:func:`test_attachment_aggregate_floor` (athenaeum#1654) rather than by an
+uncontrolled job failure: it keeps the Live-API eval job green while the
+floor is unmet, turns the job red (XPASS) the day a fix pushes the score to
+or past the floor, and does not swallow an infrastructure error, such as a
+crashed tier call, as an "expected" failure. Remove the marker in the same
+change that clears the floor.
 
 **AC4 is an invariant, not a score.** ``docs/north-star.md`` §2.8: anything
 irreversible — a merge, a demotion to source document — is a PROPOSAL reaching
@@ -355,6 +362,15 @@ def test_attachment_case(
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "athenaeum#1580 AC3: the attachment layer is aspirationally RED "
+        "until the librarian's routing crosses ATTACHMENT_FLOOR. Delete "
+        "this marker in the same change that clears the floor (athenaeum#1654)."
+    ),
+)
 def test_attachment_aggregate_floor(eval_session: Any, _live_ready: None) -> None:
     """Assert the attachment layer meets the aggregate floor.
 
