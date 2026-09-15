@@ -89,6 +89,12 @@ bench = [
 
 [project.scripts]
 athenaeum = "athenaeum.cli:main"
+# Claude Code `UserPromptSubmit` hook adapter (issue athenaeum#1621). A
+# separate console script, not an `athenaeum` subcommand, so a hook command
+# in `settings.json` never pays `athenaeum.cli.build_parser()`'s cost of
+# importing every `_cmd_*` module up front — see
+# `src/athenaeum/claude_code_adapter.py`'s module docstring.
+athenaeum-claude-hook = "athenaeum.claude_code_adapter:main"
 
 [project.urls]
 Homepage = "https://github.com/Kromatic-Innovation/athenaeum"

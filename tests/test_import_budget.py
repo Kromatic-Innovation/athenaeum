@@ -75,6 +75,22 @@ PINNED_IMPORTS: dict[str, frozenset[str]] = {
             "athenaeum.text_overlap",
         }
     ),
+    # issue athenaeum#1621: the Claude Code `UserPromptSubmit` adapter. Pins
+    # this module's own MODULE-SCOPE import weight — `athenaeum.context` is
+    # deliberately NOT here, because the adapter defers that import inside
+    # `main()` (matching `athenaeum.context`'s own function-local-import
+    # discipline, see that module's docstring), so merely importing the
+    # adapter never pays the retrieval-core cost. `athenaeum.config` pulls
+    # in `athenaeum.models` (config's own `_DEFAULTS` validation reaches
+    # it) — that pair is this module's entire load.
+    "athenaeum.claude_code_adapter": frozenset(
+        {
+            "athenaeum",
+            "athenaeum.claude_code_adapter",
+            "athenaeum.config",
+            "athenaeum.models",
+        }
+    ),
 }
 
 _PROBE = textwrap.dedent(
