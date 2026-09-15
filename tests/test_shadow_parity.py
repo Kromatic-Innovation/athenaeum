@@ -452,12 +452,20 @@ class TestAgreementMatrixOverFixtures:
                 _member(
                     "a1.md",
                     "CASE_A body one",
-                    {"type": "feedback", "valid_from": "2020-01-01", "valid_until": "2020-06-30"},
+                    {
+                        "type": "feedback",
+                        "valid_from": "'2020-01-01'",
+                        "valid_until": "'2020-06-30'",
+                    },
                 ),
                 _member(
                     "a2.md",
                     "CASE_A body two",
-                    {"type": "feedback", "valid_from": "2021-01-01", "valid_until": "2021-06-30"},
+                    {
+                        "type": "feedback",
+                        "valid_from": "'2021-01-01'",
+                        "valid_until": "'2021-06-30'",
+                    },
                 ),
             ),
             outcome_class="pass",
@@ -470,8 +478,15 @@ class TestAgreementMatrixOverFixtures:
             "type": "feedback",
             "subject": "acme-corp",
             "claimed_scope": "engineering",
-            "valid_from": "2026-01-01",
-            "valid_until": "2026-12-31",
+            # Quoted so materialise_members' naive f"{key}: {value}"
+            # frontmatter writer emits a YAML-quoted scalar -- an
+            # unquoted YYYY-MM-DD string is YAML's implicit date type,
+            # which parse_frontmatter would hand back as a real
+            # datetime.date, and record_comparison's ledger write
+            # (issue athenaeum#1678 -- this fixture now reaches
+            # append_verdict for real) needs a JSON-serializable str.
+            "valid_from": "'2026-01-01'",
+            "valid_until": "'2026-12-31'",
         }
         case_b = _case(
             "case_b",
