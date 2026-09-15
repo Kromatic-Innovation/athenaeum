@@ -338,6 +338,27 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
         help="Run the compile without writing files, committing, updating the "
         "ingest stamp, or reindexing.",
     )
+    # Issue athenaeum#1566: reference determination is a function of the
+    # finished TRANSCRIPT, not of the corpus — so a hook that skips
+    # `session-end` because no page changed also skips the thing that
+    # populates the viewer's `used` column, for every session that did not
+    # happen to edit the knowledge base (i.e. most of them). This mode runs
+    # ONLY the determination: no ingest, no reindex, no corpus scan, no run
+    # lock, no LLM — cheap enough for a SessionEnd hook to call
+    # unconditionally, on every session, before it decides whether the
+    # full change-gated pass is warranted.
+    session_end_parser.add_argument(
+        "--references-only",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="SESSION",
+        help="Run ONLY reference determination for SESSION (or --session) and "
+        "exit: no ingest, no reindex, no corpus scan, no run lock. Cheap "
+        "enough for a SessionEnd hook to call unconditionally. Prints a "
+        "one-line JSON status and exits non-zero when determination was "
+        "owed but could not be produced (never fatal to the hook's own work).",
+    )
     session_end_parser.add_argument(
         "--verbose",
         "-v",
@@ -860,6 +881,55 @@ def _record_ingest_trigger_completion(cache_dir: Path | None) -> None:
         log.warning("reasoning-trigger stamp write failed (non-fatal): %s", exc)
 
 
+def _run_references_only(
+    args: argparse.Namespace,
+    knowledge_root: Path,
+    wiki_root: Path,
+    inline_session: str,
+) -> int:
+    """``session-end --references-only`` — determination alone (issue athenaeum#1566).
+
+    Prints one JSON line and returns the status's own exit code: ``0`` when a
+    record was written, when an identical one already existed, or when there
+    was simply nothing to determine; ``1`` when determination was owed but
+    could not be produced. The caller is a hook, so the non-zero is a
+    *reported* status for it to log — the determination itself stays
+    best-effort and never raises.
+    """
+    import json
+
+    from athenaeum import push_metrics
+    from athenaeum.config import load_config
+
+    session = inline_session or getattr(args, "session", None) or ""
+    if not session:
+        print(
+            json.dumps(
+                {
+                    "command": "session-end",
+                    "mode": "references-only",
+                    "error": "no session id: pass --references-only SESSION or --session SESSION",
+                    "exit_code": 2,
+                }
+            )
+        )
+        sys.stdout.flush()
+        return 2
+
+    status = push_metrics.run_reference_determination_status(
+        session,
+        cache_dir=args.cache_dir,
+        config=load_config(knowledge_root),
+        wiki_root=wiki_root,
+    )
+    payload = {"command": "session-end", "mode": "references-only"}
+    payload.update(status.to_dict())
+    print(json.dumps(payload))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    return status.exit_code
+
+
 def cmd_session_end(args: argparse.Namespace) -> int:
     """Change-gated SessionEnd ingest + reindex (issue athenaeum#350).
 
@@ -889,6 +959,17 @@ def cmd_session_end(args: argparse.Namespace) -> int:
     raw_root = knowledge_root / "raw"
     wiki_root = knowledge_root / "wiki"
     incremental = True if args.incremental is None else args.incremental
+
+    # Issue athenaeum#1566: --references-only short-circuits BEFORE the
+    # compile kill switch and the run lock. Neither applies: this path runs
+    # no compile (the kill switch's subject) and mutates nothing the lock
+    # guards (it appends to its own reference ledger only). Holding it behind
+    # either would reintroduce exactly the bug this mode exists to fix — a
+    # cheap, always-relevant computation suppressed by a gate about something
+    # else entirely.
+    references_only = getattr(args, "references_only", None)
+    if references_only is not None:
+        return _run_references_only(args, knowledge_root, wiki_root, references_only)
 
     # Kill switch (athenaeum#379): the compile/detect pass is the expensive, unattended
     # ``claude -p`` fan-out — honour the disabled flag BEFORE the lock or any

@@ -814,6 +814,190 @@ class TestRunReferenceDetermination:
         assert rows[0]["session_id"] == "sess-f"
 
 
+class TestReferenceDeterminationStatus:
+    """Issue athenaeum#1566 AC2: a failure to determine must be visible.
+
+    ``run_reference_determination`` returns ``None`` for four structurally
+    different situations — instrumentation off, nothing pushed, transcript
+    unreadable, exception — and an operator staring at a ``pending`` column
+    cannot tell them apart. These cover the reported status that can.
+    """
+
+    @staticmethod
+    def _seed(
+        tmp_path: Path, session: str, uid: str, transcript_text: str | None
+    ) -> tuple[Path, Path]:
+        cache = tmp_path / "cache"
+        record = push_metrics.build_push_record(
+            session_id=session, query="q", backend="fts5", hits=[("f.md", {"uid": uid}, "body")]
+        )
+        push_metrics.record_push(record, cache_dir=cache)
+        projects_root = tmp_path / "projects"
+        scope_dir = projects_root / "-scope"
+        scope_dir.mkdir(parents=True)
+        if transcript_text is not None:
+            (scope_dir / f"{session}.jsonl").write_text(
+                json.dumps({"type": "assistant", "message": {"content": transcript_text}}) + "\n"
+            )
+        return cache, projects_root
+
+    def test_determined_records_and_reports_zero_exit(self, tmp_path: Path) -> None:
+        cache, projects_root = self._seed(tmp_path, "sess-st-a", "uidaaaa1", "uidaaaa1 was useful")
+
+        status = push_metrics.run_reference_determination_status(
+            "sess-st-a", cache_dir=cache, projects_root=projects_root
+        )
+
+        assert status.outcome == push_metrics.REFERENCE_DETERMINED
+        assert status.recorded is True
+        assert status.failed is False
+        assert status.exit_code == 0
+        assert status.result is not None
+        assert status.result.referenced_ids == ["uidaaaa1"]
+        assert status.to_dict()["referenced_count"] == 1
+        rows = push_metrics._read_jsonl(push_metrics.reference_records_path(cache))
+        assert len(rows) == 1
+
+    def test_missing_transcript_is_a_reported_failure_not_a_silent_none(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        cache, projects_root = self._seed(tmp_path, "sess-st-b", "uidbbbb1", None)
+
+        with caplog.at_level(logging.WARNING, logger="athenaeum.push_metrics"):
+            status = push_metrics.run_reference_determination_status(
+                "sess-st-b", cache_dir=cache, projects_root=projects_root
+            )
+
+        assert status.outcome == push_metrics.REFERENCE_UNDETERMINED
+        assert status.reason == push_metrics.REFERENCE_REASON_TRANSCRIPT_NOT_FOUND
+        assert status.failed is True
+        assert status.exit_code == 1
+        # AC2: the WARNING names the session id AND the cause.
+        assert "sess-st-b" in caplog.text
+        assert push_metrics.REFERENCE_REASON_TRANSCRIPT_NOT_FOUND in caplog.text
+        assert push_metrics.reference_records_path(cache).is_file() is False
+
+    def test_nothing_pushed_is_a_noop_not_a_failure(self, tmp_path: Path) -> None:
+        status = push_metrics.run_reference_determination_status(
+            "sess-st-c", cache_dir=tmp_path / "cache", projects_root=tmp_path / "projects"
+        )
+
+        assert status.outcome == push_metrics.REFERENCE_NOOP
+        assert status.reason == push_metrics.REFERENCE_REASON_NO_PUSH_RECORDS
+        assert status.failed is False
+        assert status.exit_code == 0
+
+    def test_disabled_is_a_noop_with_its_own_reason(self, tmp_path: Path) -> None:
+        cache, projects_root = self._seed(tmp_path, "sess-st-d", "uidddd11", "uidddd11")
+
+        status = push_metrics.run_reference_determination_status(
+            "sess-st-d",
+            cache_dir=cache,
+            projects_root=projects_root,
+            config={"push_metrics": {"enabled": False}},
+        )
+
+        assert status.outcome == push_metrics.REFERENCE_NOOP
+        assert status.reason == push_metrics.REFERENCE_REASON_DISABLED
+        assert push_metrics.reference_records_path(cache).is_file() is False
+
+    def test_exception_is_reported_as_error_and_warned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("ledger on fire")
+
+        monkeypatch.setattr(push_metrics, "_determine_references_with_reason", _boom)
+
+        with caplog.at_level(logging.WARNING, logger="athenaeum.push_metrics"):
+            status = push_metrics.run_reference_determination_status(
+                "sess-st-e", cache_dir=tmp_path / "cache"
+            )
+
+        assert status.outcome == push_metrics.REFERENCE_ERROR
+        assert status.reason == "RuntimeError"
+        assert status.exit_code == 1
+        assert "sess-st-e" in caplog.text
+        assert "ledger on fire" in caplog.text
+
+    def test_identical_repeat_is_not_double_counted(self, tmp_path: Path) -> None:
+        """AC3: the hook may call both paths on a corpus-changing session."""
+        cache, projects_root = self._seed(tmp_path, "sess-st-f", "uidffff1", "uidffff1 cited")
+
+        first = push_metrics.run_reference_determination_status(
+            "sess-st-f", cache_dir=cache, projects_root=projects_root
+        )
+        second = push_metrics.run_reference_determination_status(
+            "sess-st-f", cache_dir=cache, projects_root=projects_root
+        )
+
+        assert first.outcome == push_metrics.REFERENCE_DETERMINED
+        assert second.outcome == push_metrics.REFERENCE_ALREADY_DETERMINED
+        assert second.recorded is False
+        assert second.failed is False
+        rows = push_metrics._read_jsonl(push_metrics.reference_records_path(cache))
+        assert len(rows) == 1
+
+    def test_a_changed_verdict_is_still_recorded(self, tmp_path: Path) -> None:
+        """Dedup must not swallow genuinely new information."""
+        cache, projects_root = self._seed(tmp_path, "sess-st-g", "uidgggg1", "nothing relevant")
+        first = push_metrics.run_reference_determination_status(
+            "sess-st-g", cache_dir=cache, projects_root=projects_root
+        )
+        assert first.result is not None and first.result.referenced_ids == []
+
+        # The session goes on to actually cite the page.
+        (projects_root / "-scope" / "sess-st-g.jsonl").write_text(
+            json.dumps({"type": "assistant", "message": {"content": "uidgggg1 cited"}}) + "\n"
+        )
+        second = push_metrics.run_reference_determination_status(
+            "sess-st-g", cache_dir=cache, projects_root=projects_root
+        )
+
+        assert second.outcome == push_metrics.REFERENCE_DETERMINED
+        rows = push_metrics._read_jsonl(push_metrics.reference_records_path(cache))
+        assert len(rows) == 2
+
+    def test_legacy_wrapper_still_returns_the_result_only(self, tmp_path: Path) -> None:
+        """AC3/AC4: `session_end`'s call site is untouched by the new status API."""
+        cache, projects_root = self._seed(tmp_path, "sess-st-h", "uidhhhh1", "uidhhhh1 cited")
+
+        result = push_metrics.run_reference_determination(
+            "sess-st-h", cache_dir=cache, projects_root=projects_root
+        )
+
+        assert isinstance(result, push_metrics.ReferenceResult)
+        assert result.referenced_ids == ["uidhhhh1"]
+
+
+class TestDetermineReferencesReason:
+    def test_each_decline_path_names_its_own_cause(self, tmp_path: Path) -> None:
+        cache = tmp_path / "cache"
+        # No push records at all.
+        assert push_metrics._determine_references_with_reason(
+            "absent", cache_dir=cache, projects_root=tmp_path / "projects"
+        ) == (None, push_metrics.REFERENCE_REASON_NO_PUSH_RECORDS)
+
+        record = push_metrics.build_push_record(
+            session_id="sess-rsn", query="q", backend="fts5", hits=[("f.md", {"uid": "u"}, "b")]
+        )
+        push_metrics.record_push(record, cache_dir=cache)
+        projects_root = tmp_path / "projects"
+        scope = projects_root / "-scope"
+        scope.mkdir(parents=True)
+
+        # Transcript file absent.
+        assert push_metrics._determine_references_with_reason(
+            "sess-rsn", cache_dir=cache, projects_root=projects_root
+        ) == (None, push_metrics.REFERENCE_REASON_TRANSCRIPT_NOT_FOUND)
+
+        # Transcript present but empty.
+        (scope / "sess-rsn.jsonl").write_text("")
+        assert push_metrics._determine_references_with_reason(
+            "sess-rsn", cache_dir=cache, projects_root=projects_root
+        ) == (None, push_metrics.REFERENCE_REASON_TRANSCRIPT_EMPTY)
+
+
 # ---------------------------------------------------------------------------
 # compute_baseline
 # ---------------------------------------------------------------------------

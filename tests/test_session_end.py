@@ -1562,6 +1562,226 @@ class TestSessionEndReferenceDetermination:
         assert result.session == "sess-no-transcript"
 
 
+class TestSessionEndReferencesOnly:
+    """`session-end --references-only` — determination without the corpus gate.
+
+    Issue athenaeum#1566: the SessionEnd hook skips `session-end` entirely when
+    no knowledge page changed, which also skips reference determination — a
+    computation over the finished TRANSCRIPT that has nothing to do with the
+    corpus. This mode is what the hook can call unconditionally instead.
+    """
+
+    @staticmethod
+    def _seed_push_and_transcript(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        session: str,
+        uid: str,
+        *,
+        transcript: str | None,
+    ) -> Path:
+        from athenaeum import push_metrics, transcript_verify
+
+        cache = tmp_path / "cache"
+        push_metrics.record_push(
+            push_metrics.build_push_record(
+                session_id=session, query="q", backend="fts5", hits=[("f.md", {"uid": uid}, "b")]
+            ),
+            cache_dir=cache,
+        )
+        projects_root = tmp_path / "projects"
+        scope = projects_root / "-scope"
+        scope.mkdir(parents=True)
+        if transcript is not None:
+            (scope / f"{session}.jsonl").write_text(
+                json.dumps({"type": "assistant", "message": {"content": transcript}}) + "\n"
+            )
+        monkeypatch.setattr(transcript_verify, "default_projects_root", lambda: projects_root)
+        return cache
+
+    def test_determines_without_ingest_or_reindex(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum import librarian, push_metrics
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = self._seed_push_and_transcript(
+            tmp_path, monkeypatch, "sess-ro-a", "uidroa11", transcript="uidroa11 was useful"
+        )
+
+        # AC1: no ingest, no reindex — calling either is the failure.
+        def _never(*_a: object, **_k: object) -> None:
+            raise AssertionError("--references-only must not run the ingest/reindex pass")
+
+        monkeypatch.setattr(librarian, "session_end", _never)
+
+        rc = main(
+            [
+                "session-end",
+                "--references-only",
+                "sess-ro-a",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["command"] == "session-end"
+        assert payload["mode"] == "references-only"
+        assert payload["outcome"] == push_metrics.REFERENCE_DETERMINED
+        assert payload["referenced_count"] == 1
+        assert payload["exit_code"] == 0
+        rows = push_metrics._read_jsonl(push_metrics.reference_records_path(cache))
+        assert [r["session_id"] for r in rows] == ["sess-ro-a"]
+
+    def test_accepts_the_session_flag_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path)
+        cache = self._seed_push_and_transcript(
+            tmp_path, monkeypatch, "sess-ro-b", "uidrob11", transcript="uidrob11 cited"
+        )
+
+        rc = main(
+            [
+                "session-end",
+                "--references-only",
+                "--session",
+                "sess-ro-b",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["session"] == "sess-ro-b"
+
+    def test_reports_non_zero_and_warns_when_determination_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """AC2: a failure is visible — a WARNING naming session + cause, and a
+        non-zero REPORTED status (the hook logs it; nothing is fatal)."""
+        from athenaeum import push_metrics
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = self._seed_push_and_transcript(
+            tmp_path, monkeypatch, "sess-ro-c", "uidroc11", transcript=None
+        )
+
+        with caplog.at_level(logging.WARNING, logger="athenaeum.push_metrics"):
+            rc = main(
+                [
+                    "session-end",
+                    "--references-only",
+                    "sess-ro-c",
+                    "--path",
+                    str(root),
+                    "--cache-dir",
+                    str(cache),
+                ]
+            )
+
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["outcome"] == push_metrics.REFERENCE_UNDETERMINED
+        assert payload["failed"] is True
+        assert "sess-ro-c" in caplog.text
+        assert push_metrics.REFERENCE_REASON_TRANSCRIPT_NOT_FOUND in caplog.text
+
+    def test_missing_session_id_is_a_usage_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path)
+
+        rc = main(["session-end", "--references-only", "--path", str(root)])
+
+        assert rc == 2
+        assert "no session id" in capsys.readouterr().out
+
+    def test_runs_even_while_the_run_lock_is_held(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Cheap enough to call unconditionally means it cannot queue behind
+        the nightly run's single-flight lock — it mutates nothing that lock
+        guards."""
+        from athenaeum import push_metrics
+        from athenaeum.runlock import RunLock
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = self._seed_push_and_transcript(
+            tmp_path, monkeypatch, "sess-ro-d", "uidrod11", transcript="uidrod11 cited"
+        )
+
+        with RunLock(root):
+            rc = main(
+                [
+                    "session-end",
+                    "--references-only",
+                    "sess-ro-d",
+                    "--path",
+                    str(root),
+                    "--cache-dir",
+                    str(cache),
+                ]
+            )
+
+        assert rc == 0
+        assert (
+            json.loads(capsys.readouterr().out.strip().splitlines()[-1])["outcome"]
+            == push_metrics.REFERENCE_DETERMINED
+        )
+
+    def test_hook_calling_both_paths_does_not_double_count(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mock_anthropic: MagicMock
+    ) -> None:
+        """AC3: on a corpus-changing session the hook runs BOTH this mode and
+        the ordinary change-gated pass. One verdict, one record."""
+        from athenaeum import push_metrics
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        cache = self._seed_push_and_transcript(
+            tmp_path, monkeypatch, "sess-ro-e", "uidroe11", transcript="uidroe11 cited"
+        )
+
+        rc = main(
+            [
+                "session-end",
+                "--references-only",
+                "sess-ro-e",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+        assert rc == 0
+
+        result = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            session="sess-ro-e",
+            cache_dir=cache,
+            backend="fts5",
+        )
+
+        assert result.exit_code == 0
+        rows = push_metrics._read_jsonl(push_metrics.reference_records_path(cache))
+        assert len(rows) == 1
+
+
 class TestSessionEndLiveness:
     """issue athenaeum#1422: `session_end` is the chosen automatic path for
     the post-merge push-telemetry liveness assertion — it is invoked by the

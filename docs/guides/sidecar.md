@@ -86,6 +86,57 @@ listing matching wiki pages. Empty output means either the wiki has no
 relevant pages, or the index hasn't been built — check
 `~/.cache/athenaeum/`.
 
+## I want the `used` column to populate for every session (SessionEnd)
+
+Two different things happen at SessionEnd, and wiring them as one call is a
+mistake worth avoiding:
+
+1. **The change-gated pass** — `athenaeum session-end` compiles this session's
+   new raw intake and refreshes the index. It is a function of the **corpus**,
+   so skipping it when no knowledge page changed is correct and cheap.
+2. **Reference determination** — which of the pages pushed into this session
+   were actually referenced afterward. It is a function of the **finished
+   transcript**, which by definition just changed, so it is relevant on every
+   session — including the majority that never touch the corpus.
+
+A hook that guards the whole SessionEnd call behind a corpus-change check
+therefore silently suppresses (2) as well, and the viewer's `used` column
+reads `pending` forever for those sessions.
+
+Call determination on its own, unconditionally, before any corpus-change
+gate:
+
+```bash
+athenaeum session-end --references-only "$SESSION_ID"
+```
+
+The contract a hook can rely on:
+
+- **Cheap and independent.** No ingest, no reindex, no corpus scan, no index
+  build, no LLM call, and it does not take the nightly run lock — so it is
+  safe to call on every session, and safe to call while a librarian run is in
+  flight.
+- **One JSON line on stdout**, with `outcome` one of `determined`,
+  `already-determined`, `noop`, `undetermined` or `error`, plus `session`,
+  `reason`, `recorded`, `failed` and `exit_code`.
+- **Exit status.** `0` when a record was written, when an identical one
+  already existed, or when there was simply nothing to determine (no pages
+  were pushed into the session). `1` when determination was owed but could
+  not be produced — for example the transcript could not be located. `2` for
+  a usage error (no session id). A failure also logs a `WARNING` naming the
+  session id and the cause, so the hook can log the status and an operator
+  can find out why rather than staring at an indefinite `pending`.
+- **Never fatal, never double-counted.** Determination is best-effort and
+  never raises; the non-zero is a *reported* status for the hook to log, not
+  a reason to abort its own work. Running this mode and then the ordinary
+  `session-end` on the same session records one verdict, not two — an
+  identical repeat is skipped, while a genuinely changed verdict is still
+  appended.
+
+`--session "$SESSION_ID"` is accepted as an alternative to the positional
+form. The ordinary `session-end` path still runs determination itself, so a
+hook that already calls it unconditionally needs no change.
+
 ## I want to bridge Claude Code's own auto-memory into Athenaeum
 
 That's a separate integration — see [Claude Code auto-memory
