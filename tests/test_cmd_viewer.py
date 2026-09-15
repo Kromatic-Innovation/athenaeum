@@ -404,6 +404,115 @@ def test_build_viewer_data_raises_on_non_json_line(tmp_path: Path, monkeypatch) 
 
 
 # ---------------------------------------------------------------------------
+# server_state -- stale-server surfaced on the viewer payload (athenaeum#1593)
+# ---------------------------------------------------------------------------
+
+
+def _fake_run_tail_and_liveness(liveness_payload: dict):
+    """A `subprocess.run` stand-in that answers BOTH CLI contracts this
+    module drives: an empty (but valid) `tail --json` drain, and whatever
+    *liveness_payload* the caller wants for `liveness --json`, distinguished
+    by which subcommand appears in argv."""
+    import subprocess as subprocess_mod
+
+    def _fake_run(argv, **kwargs):
+        if "liveness" in argv:
+            return subprocess_mod.CompletedProcess(
+                argv, returncode=0, stdout=json.dumps(liveness_payload) + "\n", stderr=""
+            )
+        return subprocess_mod.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+
+    return _fake_run
+
+
+def test_build_viewer_data_surfaces_a_stale_server(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        _cmd_viewer.subprocess,
+        "run",
+        _fake_run_tail_and_liveness(
+            {
+                "outcome": "pass",
+                "server_state": "stale-server",
+                "running_version": "0.20.0",
+                "installed_version": "0.21.0",
+            }
+        ),
+    )
+
+    payload = _cmd_viewer.build_viewer_data(
+        session_id="s1", path=tmp_path / "knowledge", cache_dir=tmp_path / "cache"
+    )
+
+    assert payload["server_state"] == {
+        "state": "stale-server",
+        "running_version": "0.20.0",
+        "installed_version": "0.21.0",
+    }
+
+
+def test_build_viewer_data_matching_versions_reports_current_not_stale(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The counter-example: equal versions must never surface as stale on
+    the viewer payload either."""
+    monkeypatch.setattr(
+        _cmd_viewer.subprocess,
+        "run",
+        _fake_run_tail_and_liveness(
+            {
+                "outcome": "pass",
+                "server_state": "current",
+                "running_version": "0.21.0",
+                "installed_version": "0.21.0",
+            }
+        ),
+    )
+
+    payload = _cmd_viewer.build_viewer_data(
+        session_id="s1", path=tmp_path / "knowledge", cache_dir=tmp_path / "cache"
+    )
+
+    assert payload["server_state"]["state"] == "current"
+
+
+def test_build_viewer_data_liveness_failure_fails_open_not_raise(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Unlike the load-bearing tail contract, a broken `liveness --json`
+    subprocess must never take the whole page down -- it degrades to the
+    unknown state rather than raising :class:`_cmd_viewer.ViewerContractError`."""
+    import subprocess as subprocess_mod
+
+    def _fake_run(argv, **kwargs):
+        if "liveness" in argv:
+            return subprocess_mod.CompletedProcess(
+                argv, returncode=1, stdout="not json", stderr="boom"
+            )
+        return subprocess_mod.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(_cmd_viewer.subprocess, "run", _fake_run)
+
+    payload = _cmd_viewer.build_viewer_data(
+        session_id="s1", path=tmp_path / "knowledge", cache_dir=tmp_path / "cache"
+    )
+
+    assert payload["server_state"]["state"] == "unknown"
+
+
+def test_build_viewer_data_real_liveness_subprocess_end_to_end(tmp_path: Path) -> None:
+    """No mocking: a real `push-metrics liveness --json` subprocess against
+    an empty ledger, run the same way the served page does. Proves the argv
+    this module builds is actually a valid CLI invocation, not just a shape
+    the mocked tests happen to accept."""
+    payload = _cmd_viewer.build_viewer_data(
+        session_id="s1", path=tmp_path / "knowledge", cache_dir=tmp_path / "cache"
+    )
+
+    assert payload["server_state"]["state"] in ("current", "unknown", "stale-server")
+    assert isinstance(payload["server_state"]["running_version"], str)
+
+
+# ---------------------------------------------------------------------------
 # AC4: consumes the contract, opens no ledger file directly
 # ---------------------------------------------------------------------------
 

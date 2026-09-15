@@ -2550,6 +2550,94 @@ class TestSidecarLivenessRecency:
         assert result.outcome == push_metrics.LIVENESS_STALE
 
 
+class TestServerStaleness:
+    """issue athenaeum#1593: is the CODE this running server imported the
+    same code currently INSTALLED on disk — orthogonal to whether the
+    ledger itself is advancing (`outcome`, tested above). The motivating
+    incident: a deploy reinstalled the distribution while two `athenaeum
+    serve` processes that predated it kept running, and nothing surfaced it
+    because the only version ever read was this process's own frozen
+    belief about itself, never a comparison with disk."""
+
+    def test_a_differing_installed_version_reports_stale_server(self, tmp_path: Path) -> None:
+        result = push_metrics.check_sidecar_liveness(
+            cache_dir=tmp_path / "cache",
+            running_version="0.20.0",
+            installed_version="0.21.0",
+            installed_version_mtime=1_800_000_000.0,
+        )
+        assert result.server_state == push_metrics.SERVER_STATE_STALE
+        assert result.running_version == "0.20.0"
+        assert result.installed_version == "0.21.0"
+        assert "stale-server" in result.message
+        assert "0.21.0" in result.message
+
+    def test_a_matching_installed_version_does_not_warn(self, tmp_path: Path) -> None:
+        """The counter-example this issue explicitly requires: equal
+        versions must never read as stale."""
+        result = push_metrics.check_sidecar_liveness(
+            cache_dir=tmp_path / "cache",
+            running_version="0.21.0",
+            installed_version="0.21.0",
+            installed_version_mtime=1_800_000_000.0,
+        )
+        assert result.server_state == push_metrics.SERVER_STATE_CURRENT
+        assert "stale-server" not in result.message
+
+    def test_an_unresolvable_installed_version_is_not_reported_stale(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A source checkout with no dist-info at all must never read as
+        stale — there is no evidence either way, and reading absence as a
+        mismatch would false-alarm on every such checkout. Simulated the
+        same way :func:`push_metrics._installed_version_info` itself reports
+        that case: ``(None, None)``."""
+        monkeypatch.setattr(push_metrics, "_installed_version_info", lambda: (None, None))
+
+        result = push_metrics.check_sidecar_liveness(
+            cache_dir=tmp_path / "cache",
+            running_version="0.21.0",
+        )
+        assert result.server_state == push_metrics.SERVER_STATE_UNKNOWN
+        assert result.installed_version is None
+        assert "stale-server" not in result.message
+
+    def test_stale_server_is_reported_regardless_of_ledger_outcome(self, tmp_path: Path) -> None:
+        """Orthogonal dimensions: a fresh, fully-tagged ledger (PASS) still
+        carries the stale-server finding — it is not swallowed by an
+        unrelated ledger-health outcome."""
+        cache_dir = tmp_path / "cache"
+        base = datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc)
+        for i in range(19):
+            _write_raw_row(cache_dir, _recall_row(i, ts=base))
+        _write_raw_row(cache_dir, _sidecar_row(19, ts=base))
+
+        result = push_metrics.check_sidecar_liveness(
+            cache_dir=cache_dir,
+            window=20,
+            now=base,
+            running_version="0.20.0",
+            installed_version="0.21.0",
+        )
+
+        assert result.outcome == push_metrics.LIVENESS_PASS
+        assert result.server_state == push_metrics.SERVER_STATE_STALE
+
+    def test_default_reads_the_real_installed_distribution(self, tmp_path: Path) -> None:
+        """With nothing injected, both versions resolve from the real
+        environment this test runs in (this repo's own installed checkout),
+        so they agree and the state is CURRENT — proves the defaults wire
+        up to :func:`push_metrics._get_version` and
+        :func:`push_metrics._installed_version_info` rather than silently
+        no-op'ing to UNKNOWN."""
+        result = push_metrics.check_sidecar_liveness(cache_dir=tmp_path / "cache")
+        assert result.running_version
+        assert result.server_state in (
+            push_metrics.SERVER_STATE_CURRENT,
+            push_metrics.SERVER_STATE_UNKNOWN,
+        )
+
+
 # ---------------------------------------------------------------------------
 # tail_records — the documented NDJSON contract (issue athenaeum#1479)
 # ---------------------------------------------------------------------------

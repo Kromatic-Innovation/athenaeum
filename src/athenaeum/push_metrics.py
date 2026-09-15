@@ -1089,6 +1089,29 @@ _LIVENESS_NEXT_STEP = (
     "assuming the code is wrong"
 )
 
+#: Server-version states (issue athenaeum#1593), orthogonal to the ledger
+#: `outcome` literals above: those ask "is the push-telemetry ledger
+#: advancing and tagged correctly", this asks "is the CODE this running
+#: process imported the same code currently INSTALLED on disk". A server can
+#: be `SERVER_STATE_CURRENT` while the ledger reads FAIL, or `SERVER_STATE_STALE`
+#: while the ledger reads PASS -- two different questions, never folded into
+#: one field (see :class:`LivenessResult`'s own docstring on why `outcome`
+#: is never inferred from other fields).
+#:
+#: The motivating incident (issue athenaeum#1593): a deploy reinstalled the
+#: distribution at 2026-09-15 02:16 while two `athenaeum serve` processes
+#: that started the day before kept running the PRE-install code -- nothing
+#: surfaced it, because the only version ever read in the push-metrics path
+#: was `_get_version()` (this process's own frozen belief about itself),
+#: never compared against what is actually on disk.
+SERVER_STATE_CURRENT = "current"
+SERVER_STATE_STALE = "stale-server"
+#: The installed distribution's version could not be determined at all (for
+#: example a source checkout with no dist-info) -- absence of evidence, never
+#: treated as evidence of staleness (that would false-alarm on every such
+#: checkout, including this repo's own test suite in some layouts).
+SERVER_STATE_UNKNOWN = "unknown"
+
 
 @dataclass
 class LivenessResult:
@@ -1100,6 +1123,13 @@ class LivenessResult:
     a caller from the other fields, always this field directly, so "empty
     ledger reads as PASS" (the exact hazard AC2 rules out) cannot silently
     regress at a call site.
+
+    ``server_state`` (issue athenaeum#1593) is a SEPARATE dimension, one of
+    :data:`SERVER_STATE_CURRENT`, :data:`SERVER_STATE_STALE`,
+    :data:`SERVER_STATE_UNKNOWN` — whether the CODE this process imported
+    matches what is currently installed on disk. Always present, regardless
+    of which ``outcome`` branch produced this result, so a stale server is
+    never swallowed by an unrelated ledger-health finding.
     """
 
     outcome: str
@@ -1107,6 +1137,10 @@ class LivenessResult:
     window: int
     rows_checked: int
     sidecar_rows: int
+    server_state: str = SERVER_STATE_UNKNOWN
+    running_version: str = ""
+    installed_version: str | None = None
+    installed_version_mtime: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1115,6 +1149,10 @@ class LivenessResult:
             "window": self.window,
             "rows_checked": self.rows_checked,
             "sidecar_rows": self.sidecar_rows,
+            "server_state": self.server_state,
+            "running_version": self.running_version,
+            "installed_version": self.installed_version,
+            "installed_version_mtime": self.installed_version_mtime,
         }
 
 
@@ -1124,9 +1162,28 @@ def check_sidecar_liveness(
     wiki_root: Path | None = None,
     window: int = LIVENESS_WINDOW,
     now: datetime | None = None,
+    running_version: str | None = None,
+    installed_version: str | None = None,
+    installed_version_mtime: float | None = None,
 ) -> LivenessResult:
     """Read-only assertion: does the push-telemetry ledger show the sidecar
     is actually running — AND actually advancing?
+
+    *running_version*/*installed_version*/*installed_version_mtime* (issue
+    athenaeum#1593) drive the SEPARATE ``server_state`` finding on every
+    returned :class:`LivenessResult`, regardless of which ``outcome`` branch
+    below fires. Defaults: *running_version* from :func:`_get_version` (this
+    process's own belief, frozen the first time anything reads
+    ``athenaeum.__version__``); *installed_version*/*installed_version_mtime*
+    from a FRESH :func:`_installed_version_info` read of whatever is
+    currently on disk. Callers pass explicit values only in tests, mirroring
+    the *now* clock-injection shape below. ``server_state`` is
+    :data:`SERVER_STATE_STALE` only when both versions are known AND differ
+    — an unresolvable installed version (``None``, e.g. a source checkout
+    with no dist-info) is :data:`SERVER_STATE_UNKNOWN`, never treated as
+    evidence of staleness, and equal versions are always
+    :data:`SERVER_STATE_CURRENT` (the required counter-example: matching
+    versions must never warn).
 
     Reads the ledger via :func:`read_push_records` (the sanctioned reader —
     never re-parses the JSONL itself) and checks the most recent *window*
@@ -1182,19 +1239,50 @@ def check_sidecar_liveness(
     "ambiguous signal never reads as PASS" discipline the INCONCLUSIVE
     branch already applies to row count.
     """
+    if running_version is None:
+        running_version = _get_version()
+    if installed_version is None:
+        installed_version, resolved_mtime = _installed_version_info()
+        if installed_version_mtime is None:
+            installed_version_mtime = resolved_mtime
+    if installed_version is None:
+        server_state = SERVER_STATE_UNKNOWN
+    elif installed_version != running_version:
+        server_state = SERVER_STATE_STALE
+    else:
+        server_state = SERVER_STATE_CURRENT
+
+    def _result(outcome: str, message: str, rows_checked: int, sidecar_rows: int) -> LivenessResult:
+        if server_state == SERVER_STATE_STALE:
+            message = (
+                f"{message} stale-server: running v{running_version}, installed "
+                f"v{installed_version} on disk — restart the server to pick up "
+                "the newer build (detection only; this never auto-restarts)."
+            )
+        return LivenessResult(
+            outcome=outcome,
+            message=message,
+            window=window,
+            rows_checked=rows_checked,
+            sidecar_rows=sidecar_rows,
+            server_state=server_state,
+            running_version=running_version,
+            installed_version=installed_version,
+            installed_version_mtime=installed_version_mtime,
+        )
+
     records = read_push_records(cache_dir, wiki_root=wiki_root)
     total = len(records)
     if total < window:
-        return LivenessResult(
-            outcome=LIVENESS_INCONCLUSIVE,
-            message=(
+        return _result(
+            LIVENESS_INCONCLUSIVE,
+            (
                 f"push-telemetry liveness: INCONCLUSIVE — {total} row(s) recorded "
                 f"(ledger absent or under the {window}-row window); not enough "
                 "signal to assert sidecar liveness yet."
             ),
-            window=window,
-            rows_checked=total,
-            sidecar_rows=0,
+            total,
+            0,
         )
     current_time = now if now is not None else datetime.now(tz=timezone.utc)
     newest_ts = _parse_ts(records[-1].get("ts"))
@@ -1205,41 +1293,38 @@ def check_sidecar_liveness(
         else:
             age_hours = (current_time - newest_ts).total_seconds() / 3600
             age_desc = f"the newest row is {age_hours:.1f}h old"
-        return LivenessResult(
-            outcome=LIVENESS_STALE,
-            message=(
+        return _result(
+            LIVENESS_STALE,
+            (
                 f"push-telemetry liveness: STALE — {window} rows recorded but "
                 f"{age_desc}, past the {stale_hours:g}h freshness threshold; the "
                 "ledger has stopped advancing (this does not by itself distinguish "
                 "a broken push path from a system that has simply been idle for "
                 "longer than the threshold)."
             ),
-            window=window,
-            rows_checked=window,
-            sidecar_rows=0,
+            window,
+            0,
         )
     recent = records[-window:]
     sidecar_rows = sum(1 for rec in recent if rec.get("source") == "sidecar")
     if sidecar_rows == 0:
-        return LivenessResult(
-            outcome=LIVENESS_FAIL,
-            message=(
+        return _result(
+            LIVENESS_FAIL,
+            (
                 f"push-telemetry liveness: FAIL — 0/{window} of the most recent "
                 f"rows are sidecar-tagged; {_LIVENESS_NEXT_STEP}."
             ),
-            window=window,
-            rows_checked=window,
-            sidecar_rows=0,
+            window,
+            0,
         )
-    return LivenessResult(
-        outcome=LIVENESS_PASS,
-        message=(
+    return _result(
+        LIVENESS_PASS,
+        (
             f"push-telemetry liveness: PASS — {sidecar_rows}/{window} of the "
             "most recent rows are sidecar-tagged."
         ),
-        window=window,
-        rows_checked=window,
-        sidecar_rows=sidecar_rows,
+        window,
+        sidecar_rows,
     )
 
 
@@ -2127,6 +2212,45 @@ def _get_version() -> str:
     from athenaeum import __version__
 
     return __version__
+
+
+def _installed_version_info() -> tuple[str | None, float | None]:
+    """Fresh read of the INSTALLED athenaeum distribution's version and the
+    dist-info directory's mtime — independent of whatever this already-
+    running process imported (issue athenaeum#1593).
+
+    :func:`_get_version` above returns ``athenaeum.__version__``, which is
+    resolved via ``importlib.metadata`` on first access and then CACHED into
+    the module's own globals (see ``athenaeum/__init__.py``'s lazy
+    ``__getattr__``) — exactly this process's frozen belief about itself for
+    the rest of its life. That is the right thing for ``_get_version`` to
+    report, but it means nothing about re-reading that attribute can ever
+    notice a LATER reinstall of the on-disk distribution underneath a
+    long-lived ``athenaeum serve`` process.
+
+    This function instead calls ``importlib.metadata.distribution`` directly,
+    every time it is called, which re-resolves against ``sys.path`` rather
+    than returning a cached value — so it reflects whatever is installed
+    RIGHT NOW even when that differs from what this process imported at
+    startup. Returns ``(None, None)`` if the distribution cannot be found at
+    all (a source checkout with no dist-info) — a caller must treat that as
+    "unknown", never as evidence of a mismatch either way. Never raises.
+    """
+    import importlib.metadata
+
+    try:
+        dist = importlib.metadata.distribution("athenaeum")
+    except importlib.metadata.PackageNotFoundError:
+        return None, None
+    version = dist.version
+    mtime: float | None = None
+    dist_info_path = getattr(dist, "_path", None)
+    if dist_info_path is not None:
+        try:
+            mtime = Path(str(dist_info_path)).stat().st_mtime
+        except OSError:
+            mtime = None
+    return version, mtime
 
 
 def _get_git_sha(repo_root: Path | None = None) -> str:
