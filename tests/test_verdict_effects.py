@@ -162,10 +162,24 @@ class TestEF1PublicAPIShape:
             result.action = "changed"  # type: ignore[misc]
 
     def test_module_exports_expected_names(self) -> None:
+        # issue athenaeum#1680 added the ported-resolver-action names
+        # (RESOLVER_* constants + apply_suppress_or_attribute_both_effect /
+        # apply_propose_merge_effect) alongside the original five-verdict
+        # exports below -- see
+        # tests/test_verdict_effects_resolver_actions.py for their coverage.
         assert set(ve_mod.__all__) == {
             "CONTRADICTION_STATUS_FLAGGED",
             "FOLD_EVIDENCE_DIRNAME",
+            "RESOLVER_ATTRIBUTE_BOTH_ACTION",
+            "RESOLVER_AUTO_APPLY_THRESHOLD_PER_ACTION",
+            "RESOLVER_DEFAULT_AUTO_APPLY_THRESHOLD",
+            "RESOLVER_DESTRUCTIVE_AUTO_APPLY_THRESHOLD",
+            "RESOLVER_NEVER_AUTO_APPLY_ACTIONS",
+            "RESOLVER_PROPOSE_MERGE_ACTION",
+            "RESOLVER_SUPPRESS_ACTION",
             "EffectResult",
+            "apply_propose_merge_effect",
+            "apply_suppress_or_attribute_both_effect",
             "apply_verdict_effect",
             "build_coordinate_request",
             "build_fold_evidence",
