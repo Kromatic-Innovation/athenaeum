@@ -86,6 +86,7 @@ MODULE_LAYER: dict[str, int] = {
     "bounce_contract": 2,  # "L2-ish" -> upper (non-boundary) bound stated
     "config": 2,
     "corrections": 2,
+    "declared_relationships": 2,  # "L1/L2 boundary primitive" -> upper bound
     "dimensions": 2,       # "L1/L2" -> upper bound
     "field_constraints": 2,
     "intake": 2,

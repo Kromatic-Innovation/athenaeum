@@ -118,6 +118,7 @@ from athenaeum.cross_scope import (
     resolve_cross_scope_mode,
     resolve_similarity_threshold,
 )
+from athenaeum.declared_relationships import DeclaredRelationshipFacts, declared_relationship
 from athenaeum.ephemeral import classify_ephemeral
 from athenaeum.fingerprint import (
     _member_key_str,
@@ -151,7 +152,6 @@ from athenaeum.models import (
     parse_supersedes,
     render_frontmatter,
     safe_source_ref,
-    slugify,
     validity_bound_str,
     validity_windows_disjoint,
 )
@@ -233,39 +233,27 @@ def _declared_relationship(a: "AutoMemoryFile", b: "AutoMemoryFile") -> str | No
         specialization claim, a rejection is only "these are not the same
         claim". ``None`` when no declaration applies.
     """
-    a_name = (a.name or "").strip()
-    b_name = (b.name or "").strip()
-    if not a_name or not b_name:
-        return None
-    # Quine review athenaeum#171 / SHOULD #4: compare via slugify so a case- or
-    # punctuation-mismatched declaration still matches.
-    a_slug = slugify(a_name)
-    b_slug = slugify(b_name)
-    a_super = {slugify(n) for n in a.supersedes_names()}
-    b_super = {slugify(n) for n in b.supersedes_names()}
-    a_refines = {slugify(n) for n in (a.refines or [])}
-    b_refines = {slugify(n) for n in (b.refines or [])}
-    a_rejected = {slugify(n) for n in (a.merge_rejected_with or [])}
-    b_rejected = {slugify(n) for n in (b.merge_rejected_with or [])}
-    a_supersedes_b = b_slug in a_super
-    b_supersedes_a = a_slug in b_super
-    # MUST #3: mutual supersedes is itself a declared contradiction —
-    # neither side wins deterministically. Log and refuse to declare;
-    # the pair falls through to the detector/resolver path.
-    if a_supersedes_b and b_supersedes_a:
-        log.warning(
-            "merge: mutual supersedes between %r and %r — not a declarable relationship",
-            a_name,
-            b_name,
-        )
-        return None
-    if a_supersedes_b or b_supersedes_a:
-        return "declared-supersession"
-    if b_slug in a_refines or a_slug in b_refines:
-        return "declared-refinement"
-    if b_slug in a_rejected or a_slug in b_rejected:
-        return "declared-merge-rejection"
-    return None
+    # athenaeum#1682: the actual comparison logic now lives in
+    # :func:`athenaeum.declared_relationships.declared_relationship`, so
+    # `comparator.py`'s Gate 1 can reuse it without importing this L4
+    # module. This function is now purely an adapter -- unpack each side's
+    # four declared-relationship facts off its `AutoMemoryFile` and hand
+    # them to the shared primitive. Name, signature, and docstring are
+    # unchanged; only the body moved.
+    return declared_relationship(
+        DeclaredRelationshipFacts(
+            name=a.name,
+            refines=a.refines,
+            supersedes_names=a.supersedes_names(),
+            merge_rejected_with=a.merge_rejected_with,
+        ),
+        DeclaredRelationshipFacts(
+            name=b.name,
+            refines=b.refines,
+            supersedes_names=b.supersedes_names(),
+            merge_rejected_with=b.merge_rejected_with,
+        ),
+    )
 
 
 def _filter_declared_pairs(
