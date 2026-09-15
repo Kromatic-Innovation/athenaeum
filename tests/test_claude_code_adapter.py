@@ -8,8 +8,10 @@ own convention of naming the counter-example each test defeats.
 from __future__ import annotations
 
 import ast
+import contextlib
 import io
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -70,10 +72,16 @@ def _build_index(
 
 
 def _run_adapter(
-    stdin_json: str, *, cache_dir: Path, timeout: float = 30
+    stdin_json: str,
+    *,
+    cache_dir: Path,
+    timeout: float = 30,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     env = dict(_BASE_ENV)
     env["ATHENAEUM_CACHE_DIR"] = str(cache_dir)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [sys.executable, "-m", "athenaeum.claude_code_adapter"],
         input=stdin_json,
@@ -82,6 +90,25 @@ def _run_adapter(
         env=env,
         timeout=timeout,
     )
+
+
+@pytest.fixture()
+def imported_adapter():
+    """Import ``athenaeum.claude_code_adapter`` (and ``athenaeum.context``,
+    for tests that monkeypatch its ``build_context_for_turn``) for
+    in-process testing — factored out of the ``sys.path`` dance every
+    in-process test in this file otherwise repeats individually (issue
+    athenaeum#1661's new tests below are numerous enough that inlining it
+    each time would be its own maintenance burden).
+    """
+    sys.path.insert(0, SRC)
+    try:
+        import athenaeum.claude_code_adapter as adapter
+        import athenaeum.context as context_mod
+
+        yield adapter, context_mod
+    finally:
+        sys.path.remove(SRC)
 
 
 def _run_cli_context(
@@ -106,7 +133,7 @@ def _run_cli_context(
 
 
 # ---------------------------------------------------------------------------
-# AC1 — additionalContext equals `athenaeum context --stdin-json`'s render.text
+# AC1 — additionalContext equals the CLI's preamble + render.text
 # ---------------------------------------------------------------------------
 
 
@@ -114,6 +141,14 @@ class TestAC1MatchesCliRender:
     """Counter-example this defeats: an adapter that re-renders from
     ``candidates[]`` with its own bullet format, drifting from the core's
     ``render.text`` the moment either implementation changes independently.
+
+    Updated by issue athenaeum#1661: the adapter's ``additionalContext`` is no
+    longer byte-identical to the CLI's bare ``render.text`` — it is now that
+    text prefixed with ``render.preamble`` and a newline, matching the shell
+    hook's own final ``printf`` (``user-prompt-recall.sh:1213``). This
+    class's claim narrows from "equals `render.text`" to "equals
+    `render.preamble` + `render.text`", still deriving both halves from the
+    SAME CLI-produced envelope so the two implementations can't drift.
     """
 
     def test_additional_context_equals_cli_render_text(self, tmp_path: Path) -> None:
@@ -147,6 +182,7 @@ class TestAC1MatchesCliRender:
         assert cli_result.returncode == 0, cli_result.stderr
         cli_envelope = json.loads(cli_result.stdout)
         expected_text = cli_envelope["render"]["text"]
+        expected_preamble = cli_envelope["render"]["preamble"]
         # Sanity: the fixture actually produced a hit, or this test would
         # pass vacuously on two empty strings.
         assert expected_text != "", "fixture produced no candidates — test is vacuous"
@@ -161,7 +197,7 @@ class TestAC1MatchesCliRender:
         assert hook_output == {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
-                "additionalContext": expected_text,
+                "additionalContext": f"{expected_preamble}\n{expected_text}",
             }
         }
 
@@ -323,7 +359,9 @@ class TestAC3FailSafe:
         assert result.stdout == ""
         assert result.stderr == ""
 
-    def test_core_raising_prints_nothing_in_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_core_raising_prints_nothing_in_process(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """Same claim as above, exercised in-process against `main()`
         directly so the failure is unambiguously attributed to the
         adapter's own `except Exception` (not to some other process-level
@@ -337,11 +375,15 @@ class TestAC3FailSafe:
                 raise RuntimeError("simulated core failure")
 
             monkeypatch.setattr(context_mod, "build_context_for_turn", _raise)
+            # Point ATHENAEUM_CACHE_DIR at an empty tmp dir (issue athenaeum#1661):
+            # `main()` now calls `_load_config_env` unconditionally, before the
+            # mocked core is ever reached, so an in-process test must not read
+            # whatever `~/.cache/athenaeum/config.env` happens to exist on the
+            # box running this suite.
+            monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
             monkeypatch.setattr(
                 sys, "stdin", io.StringIO(json.dumps({"prompt": "hello there", "session_id": "s"}))
             )
-            import contextlib
-
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 rc = adapter.main()
@@ -367,3 +409,434 @@ class TestAC3FailSafe:
         assert result.returncode == 0
         assert result.stdout == ""
         assert result.stderr == ""
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1661 AC — API key present only in config.env reaches LLM topic
+# extraction, and existing process env wins over the file
+# ---------------------------------------------------------------------------
+
+
+class TestConfigEnvLoading:
+    """Counter-example this defeats: an adapter that never reads
+    ``config.env``, so an operator's cached ``ANTHROPIC_API_KEY`` never
+    reaches the LLM topic extractor and recall silently degrades to the
+    regex fallback — the athenaeum#1361 query-10 regression this issue
+    exists to fix."""
+
+    def test_config_env_key_reaches_extract_topics(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        adapter, _context_mod = imported_adapter
+        secret = "sk-athenaeum-configenv-only-4f8b2c1a"
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        (tmp_path / "config.env").write_text(f"ANTHROPIC_API_KEY={secret}\n", encoding="utf-8")
+
+        captured: dict[str, object] = {}
+
+        def _fake_extract_topics(prompt, timeout=3.0, config=None, **kwargs):
+            captured["called"] = True
+            captured["key_seen"] = os.environ.get("ANTHROPIC_API_KEY")
+            return []
+
+        monkeypatch.setattr("athenaeum.query_topics.extract_topics", _fake_extract_topics)
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps({"prompt": "a sufficiently long test prompt", "session_id": "s"})
+            ),
+        )
+
+        try:
+            rc = adapter.main()
+        finally:
+            # `_load_config_env` mutates the real process env directly (by
+            # design — see its docstring); `monkeypatch` only auto-reverts
+            # env vars IT set, so a key the code under test wrote must be
+            # cleaned up by hand or it leaks into every later test in this
+            # process.
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+
+        assert rc == 0
+        assert captured.get("called") is True, "LLM extraction path was never reached"
+        assert captured.get("key_seen") == secret, (
+            "config.env's ANTHROPIC_API_KEY was not in the process env by the "
+            "time LLM topic extraction ran"
+        )
+
+    def test_process_env_wins_over_config_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        """Issue athenaeum#1661 Plan item 1: a key already set in the process
+        env is never overwritten by config.env — the opposite of plain
+        ``source``'s last-write-wins precedence."""
+        adapter, _context_mod = imported_adapter
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "already-set-in-process-env")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        (tmp_path / "config.env").write_text(
+            "ANTHROPIC_API_KEY=should-never-win\n", encoding="utf-8"
+        )
+
+        captured: dict[str, object] = {}
+
+        def _fake_extract_topics(prompt, timeout=3.0, config=None, **kwargs):
+            captured["key_seen"] = os.environ.get("ANTHROPIC_API_KEY")
+            return []
+
+        monkeypatch.setattr("athenaeum.query_topics.extract_topics", _fake_extract_topics)
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps({"prompt": "a sufficiently long test prompt", "session_id": "s"})
+            ),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        assert captured.get("key_seen") == "already-set-in-process-env"
+
+    def test_missing_config_env_is_a_silent_noop(
+        self, tmp_path: Path, imported_adapter: tuple[object, object]
+    ) -> None:
+        """No ``config.env`` file at all must not raise or touch the env."""
+        adapter, _context_mod = imported_adapter
+        before = dict(os.environ)
+        adapter._load_config_env(tmp_path)
+        assert os.environ == before
+
+    def test_comments_and_blank_lines_are_skipped(
+        self, tmp_path: Path, imported_adapter: tuple[object, object]
+    ) -> None:
+        adapter, _context_mod = imported_adapter
+        (tmp_path / "config.env").write_text(
+            "\n# a comment\nSOME_ATHENAEUM_TEST_KNOB=configured\n\n# trailing\n",
+            encoding="utf-8",
+        )
+        before = "SOME_ATHENAEUM_TEST_KNOB" in os.environ
+        assert not before, "test pollution from an earlier test — fix the leaking test"
+        try:
+            adapter._load_config_env(tmp_path)
+            assert os.environ.get("SOME_ATHENAEUM_TEST_KNOB") == "configured"
+        finally:
+            os.environ.pop("SOME_ATHENAEUM_TEST_KNOB", None)
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1661 AC — AUTO_RECALL=false produces no output and exit 0
+# ---------------------------------------------------------------------------
+
+
+class TestAutoRecallKillSwitch:
+    """Counter-example this defeats: an adapter that ignores ``AUTO_RECALL``
+    entirely, so an operator who disabled unprompted recall still gets a
+    pushed context block on every turn."""
+
+    def test_auto_recall_false_produces_no_output(self, tmp_path: Path) -> None:
+        extra_row = (
+            "autorecall-page.md",
+            "Autorecall Page",
+            "autorecall",
+            "",
+            "would otherwise match this prompt",
+            "|__access_open__|",
+            "reference",
+            "warm",
+        )
+        _build_index(tmp_path / "wiki-index.db", 0, extra_rows=[extra_row])
+        stdin_payload = json.dumps({"prompt": "autorecall page lookup", "session_id": "s"})
+
+        result = _run_adapter(
+            stdin_payload, cache_dir=tmp_path, extra_env={"AUTO_RECALL": "false"}
+        )
+        assert result.returncode == 0
+        assert result.stdout == ""
+        assert result.stderr == ""
+
+    def test_auto_recall_non_true_value_disables(self, tmp_path: Path) -> None:
+        """Exact-string-match parity with the shell hook's
+        ``[ "$AUTO_RECALL" = "true" ]``: any non-``"true"`` value disables,
+        not just the literal ``"false"``."""
+        extra_row = (
+            "autorecall-page2.md",
+            "Autorecall Page Two",
+            "autorecall",
+            "",
+            "would otherwise match this prompt",
+            "|__access_open__|",
+            "reference",
+            "warm",
+        )
+        _build_index(tmp_path / "wiki-index.db", 0, extra_rows=[extra_row])
+        stdin_payload = json.dumps({"prompt": "autorecall page lookup", "session_id": "s"})
+
+        result = _run_adapter(stdin_payload, cache_dir=tmp_path, extra_env={"AUTO_RECALL": "0"})
+        assert result.returncode == 0
+        assert result.stdout == ""
+
+    def test_auto_recall_unset_defaults_to_enabled(self, tmp_path: Path) -> None:
+        """Sanity/negative control: with ``AUTO_RECALL`` unset, the same
+        fixture and prompt DO produce output — proving the two tests above
+        fail for the right reason, not because the fixture never matches."""
+        extra_row = (
+            "autorecall-page3.md",
+            "Autorecall Page Three",
+            "autorecall",
+            "",
+            "would otherwise match this prompt",
+            "|__access_open__|",
+            "reference",
+            "warm",
+        )
+        _build_index(tmp_path / "wiki-index.db", 0, extra_rows=[extra_row])
+        stdin_payload = json.dumps({"prompt": "autorecall page lookup", "session_id": "s"})
+
+        result = _run_adapter(stdin_payload, cache_dir=tmp_path)
+        assert result.returncode == 0
+        assert result.stdout != "", "fixture never matched — the disabled-tests above are vacuous"
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1661 AC — SEARCH_BACKEND=vector reaches the core as the vector
+# backend
+# ---------------------------------------------------------------------------
+
+
+class TestSearchBackendPassthrough:
+    """Counter-example this defeats: an adapter that always calls the core
+    with the ``"fts5"`` default, so ``SEARCH_BACKEND=vector`` is silently
+    ignored."""
+
+    def test_search_backend_vector_is_forwarded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        adapter, context_mod = imported_adapter
+        captured: dict[str, object] = {}
+
+        def _fake_build_context_for_turn(prompt, session_id, *, cache_dir, **kwargs):
+            captured["search_backend"] = kwargs.get("search_backend")
+            return {"render": {"text": "", "preamble": "x"}, "candidates": []}
+
+        monkeypatch.setattr(context_mod, "build_context_for_turn", _fake_build_context_for_turn)
+        monkeypatch.setenv("SEARCH_BACKEND", "vector")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps({"prompt": "a sufficiently long test prompt", "session_id": "s"})
+            ),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        assert captured.get("search_backend") == "vector"
+
+    def test_search_backend_defaults_to_fts5(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        adapter, context_mod = imported_adapter
+        captured: dict[str, object] = {}
+
+        def _fake_build_context_for_turn(prompt, session_id, *, cache_dir, **kwargs):
+            captured["search_backend"] = kwargs.get("search_backend")
+            return {"render": {"text": "", "preamble": "x"}, "candidates": []}
+
+        monkeypatch.setattr(context_mod, "build_context_for_turn", _fake_build_context_for_turn)
+        monkeypatch.delenv("SEARCH_BACKEND", raising=False)
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps({"prompt": "a sufficiently long test prompt", "session_id": "s"})
+            ),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        assert captured.get("search_backend") == "fts5"
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1661 AC — prompts shorter than 8 characters produce no output
+# ---------------------------------------------------------------------------
+
+
+class TestMinimumPromptLength:
+    """Counter-example this defeats: an adapter that only checks for an
+    empty prompt, so a 1-7 character prompt still triggers a push (and,
+    with a hair-trigger LLM extractor, wastes a round-trip on essentially
+    no signal)."""
+
+    def test_seven_char_prompt_produces_no_output(self, tmp_path: Path) -> None:
+        extra_row = (
+            "shortprompt7.md",
+            "gadgetx",
+            "gadgetx",
+            "",
+            "gadgetx",
+            "|__access_open__|",
+            "reference",
+            "warm",
+        )
+        _build_index(tmp_path / "wiki-index.db", 0, extra_rows=[extra_row])
+        prompt = "gadgetx"
+        assert len(prompt) == 7
+        stdin_payload = json.dumps({"prompt": prompt, "session_id": "s"})
+
+        result = _run_adapter(stdin_payload, cache_dir=tmp_path)
+        assert result.returncode == 0
+        assert result.stdout == ""
+
+    def test_eight_char_prompt_is_processed(self, tmp_path: Path) -> None:
+        """Boundary control: the SAME construction one character longer must
+        NOT be gated — proving the 7-char case above is skipped because of
+        length, not because the fixture never matches."""
+        extra_row = (
+            "shortprompt8.md",
+            "gadgetxx",
+            "gadgetxx",
+            "",
+            "gadgetxx",
+            "|__access_open__|",
+            "reference",
+            "warm",
+        )
+        _build_index(tmp_path / "wiki-index.db", 0, extra_rows=[extra_row])
+        prompt = "gadgetxx"
+        assert len(prompt) == 8
+        stdin_payload = json.dumps({"prompt": prompt, "session_id": "s"})
+
+        result = _run_adapter(stdin_payload, cache_dir=tmp_path)
+        assert result.returncode == 0
+        assert result.stdout != "", "8-char prompt was gated — boundary is off by one"
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1661 AC — rendered additionalContext starts with the shell
+# hook's preamble
+# ---------------------------------------------------------------------------
+
+
+class TestPreamble:
+    """Counter-example this defeats: an adapter that prints the bare
+    ``render.text`` with no preamble, so the pushed block never tells the
+    reading session it can issue an explicit ``recall`` for more."""
+
+    def test_additional_context_starts_with_shell_preamble(self, tmp_path: Path) -> None:
+        extra_row = (
+            "preamble-page.md",
+            "Preamble Widget",
+            "preamble",
+            "",
+            "the only preamble-widget page in this fixture",
+            "|__access_open__|",
+            "reference",
+            "warm",
+        )
+        _build_index(tmp_path / "wiki-index.db", 0, extra_rows=[extra_row])
+        stdin_payload = json.dumps({"prompt": "preamble widget lookup", "session_id": "s"})
+
+        result = _run_adapter(stdin_payload, cache_dir=tmp_path)
+        assert result.returncode == 0, result.stderr
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        assert len(lines) == 1, f"expected one JSON line, got: {result.stdout!r}"
+        hook_output = json.loads(lines[0])
+        additional_context = hook_output["hookSpecificOutput"]["additionalContext"]
+
+        expected_preamble = (
+            "[Knowledge context] Wiki pages relevant to this message "
+            "(use `recall` MCP tool for full details):"
+        )
+        assert additional_context.startswith(expected_preamble), additional_context
+        # And the shell hook's exact separator between preamble and matches.
+        assert additional_context[len(expected_preamble)] == "\n"
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1661 AC6 — no secret value is ever written to stdout, stderr,
+# or logs
+# ---------------------------------------------------------------------------
+
+
+class TestAC6NoSecretLeakage:
+    """Counter-example this defeats: a `config.env`-sourced secret reaching
+    stdout/stderr via a raw print, an uncaught exception's repr, or a
+    library's ``logging.warning`` hitting Python's ``logging.lastResort``
+    stderr handler (which fires by default when nothing configures a
+    handler — exactly this adapter's runtime)."""
+
+    _SECRET = "sk-athenaeum-test-DO-NOT-LEAK-9f31ad"
+
+    def test_secret_does_not_leak_on_success_path(self, tmp_path: Path) -> None:
+        (tmp_path / "config.env").write_text(
+            f"ANTHROPIC_API_KEY={self._SECRET}\n", encoding="utf-8"
+        )
+        _build_index(tmp_path / "wiki-index.db", 0)
+        stdin_payload = json.dumps(
+            {"prompt": "a moderately long prompt with no fixture match", "session_id": "s"}
+        )
+
+        result = _run_adapter(stdin_payload, cache_dir=tmp_path)
+
+        assert result.returncode == 0
+        assert self._SECRET not in result.stdout
+        assert self._SECRET not in result.stderr
+
+    def test_secret_does_not_leak_when_core_raises(self, tmp_path: Path) -> None:
+        (tmp_path / "config.env").write_text(
+            f"ANTHROPIC_API_KEY={self._SECRET}\n", encoding="utf-8"
+        )
+        # A genuinely corrupt index (same fixture shape as TestAC3FailSafe's
+        # equivalent case) forces `build_context` to raise past this
+        # adapter's own try/except boundaries.
+        (tmp_path / "wiki-index.db").write_bytes(b"not a sqlite database\x00\x01\x02")
+        stdin_payload = json.dumps({"prompt": "some ordinary prompt words", "session_id": "s"})
+
+        result = _run_adapter(stdin_payload, cache_dir=tmp_path)
+
+        assert result.returncode == 0
+        assert self._SECRET not in result.stdout
+        assert self._SECRET not in result.stderr
+
+    def test_load_config_env_never_prints(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], imported_adapter
+    ) -> None:
+        """Directly exercises `_load_config_env` in-process — the one
+        function in this module that ever reads a secret value at all —
+        against `capsys`, independent of whatever the core does or does
+        not log."""
+        adapter, _context_mod = imported_adapter
+        (tmp_path / "config.env").write_text(
+            f"ANTHROPIC_API_KEY={self._SECRET}\nSOME_OTHER_TOKEN=another-secret-value\n",
+            encoding="utf-8",
+        )
+        try:
+            adapter._load_config_env(tmp_path)
+            captured = capsys.readouterr()
+        finally:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            os.environ.pop("SOME_OTHER_TOKEN", None)
+
+        assert self._SECRET not in captured.out
+        assert self._SECRET not in captured.err
+        assert "another-secret-value" not in captured.out
+        assert "another-secret-value" not in captured.err
