@@ -174,6 +174,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
+from athenaeum.declared_relationships import DeclaredRelationshipFacts, declared_relationship
 from athenaeum.dimensions import (
     DEFAULT_REGISTRY,
     Dimension,
@@ -187,7 +188,14 @@ from athenaeum.dimensions import (
 )
 from athenaeum.dimensions import compare_dimension as _compare_dimension
 from athenaeum.json_utils import extract_json_object
-from athenaeum.models import TokenUsage, cache_usage_counts, parse_frontmatter
+from athenaeum.models import (
+    TokenUsage,
+    cache_usage_counts,
+    parse_frontmatter,
+    parse_merge_rejected_with,
+    parse_refines,
+    parse_supersedes,
+)
 from athenaeum.pii import is_pii_flagged
 from athenaeum.prompt_safety import fence_untrusted
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
@@ -317,6 +325,52 @@ def page_from_path(path: Path) -> ComparatorPage:
     """
     p = Path(path)
     return page_from_text(page_id_for_path(p), p.read_text(encoding="utf-8"))
+
+
+def _declared_relationship_facts(page: ComparatorPage) -> DeclaredRelationshipFacts:
+    """Extract one page's four declared-relationship facts from its frontmatter.
+
+    Issue athenaeum#1682: feeds :func:`athenaeum.declared_relationships.declared_relationship`
+    -- the ported primitive behind :mod:`athenaeum.merge`'s
+    ``_declared_relationship`` -- from a :class:`ComparatorPage` instead of
+    an :class:`~athenaeum.models.AutoMemoryFile`. ``supersedes_names`` keeps
+    only the ``name`` key of each ``supersedes:`` record, mirroring
+    :meth:`athenaeum.models.AutoMemoryFile.supersedes_names`.
+
+    Fail-open on a malformed ``refines``/``supersedes``/``merge_rejected_with``
+    value: :func:`~athenaeum.models.parse_refines` and its two siblings raise
+    ``ValueError`` on a shape violation (a durable-contract typo should be
+    loud -- see their docstrings), but :mod:`athenaeum.intake` already treats
+    that as fail-open at discovery time (logs, then empty lists) rather than
+    aborting the run. This mirrors that same posture so a bad frontmatter
+    value degrades this optional Gate 1 short-circuit instead of crashing a
+    module whose Gate 2 already promises never to raise.
+    """
+    meta = page.meta
+    name = meta.get("name")
+    if not isinstance(name, str):
+        name = ""
+    try:
+        refines = parse_refines(meta)
+        supersedes = parse_supersedes(meta)
+        merge_rejected_with = parse_merge_rejected_with(meta)
+    except ValueError as exc:
+        log.warning(
+            "comparator: invalid refines/supersedes/merge_rejected_with on "
+            "page %r (%s); treating as empty",
+            page.id,
+            exc,
+        )
+        refines, supersedes, merge_rejected_with = [], [], []
+    supersedes_names = [
+        rec["name"] for rec in supersedes if isinstance(rec, dict) and rec.get("name")
+    ]
+    return DeclaredRelationshipFacts(
+        name=name,
+        refines=refines,
+        supersedes_names=supersedes_names,
+        merge_rejected_with=merge_rejected_with,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -850,6 +904,23 @@ def compare_pages(
         return CompareOutcome(
             verdict=VERDICT_DISTINCT,
             separator=disjoint_dims,
+            comparator_version=COMPARATOR_VERSION_GATE1,
+        )
+
+    # athenaeum#1682: declared-pair filter, ported from C4's
+    # ``_declared_relationship`` (merge.py:216) via the shared
+    # :func:`~athenaeum.declared_relationships.declared_relationship`
+    # primitive. A pair whose two pages already declare a supersession,
+    # refinement, or merge-rejection relationship to each other in their
+    # OWN frontmatter is settled here, before Gate 2 / any LLM call --
+    # mirrors the ``disjoint_dims`` exit just above.
+    declared = declared_relationship(
+        _declared_relationship_facts(page_a), _declared_relationship_facts(page_b)
+    )
+    if declared is not None:
+        return CompareOutcome(
+            verdict=VERDICT_DISTINCT,
+            separator=[declared],
             comparator_version=COMPARATOR_VERSION_GATE1,
         )
 
