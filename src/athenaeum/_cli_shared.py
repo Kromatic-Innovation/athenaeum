@@ -26,7 +26,7 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
+from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, resolve_cache_dir
 
 if TYPE_CHECKING:
     from athenaeum.runlock import RunLock
@@ -190,3 +190,44 @@ def _acquire_or_exit(
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_LOCK_HELD
     return lock
+
+
+def rebuild_recall_index(
+    knowledge_root: Path,
+    cfg: dict[str, Any],
+    args: argparse.Namespace,
+) -> None:
+    """Rebuild the recall index after a mutating command applies.
+
+    Factored out of ``_cmd_decay.py`` (issue athenaeum#1625) so
+    ``_cmd_retire.py``'s ``athenaeum retire-pages --apply`` triggers the
+    IDENTICAL rebuild ``athenaeum decay-sweep --apply`` does, rather than a
+    second, driftable copy — both resolve ``--backend``/``--cache-dir`` off
+    the same ``args`` shape (see ``add_decay_subparser`` / ``add_retire_subparser``,
+    which both add those two flags). A rebuild failure is reported but
+    never fails the caller's mutating command (the git commit already
+    landed).
+    """
+    from athenaeum.config import resolve_extra_intake_roots
+    from athenaeum.search import build_fts5_index, build_vector_index
+
+    wiki_root = knowledge_root / "wiki"
+    backend = getattr(args, "backend", None) or cfg.get("search_backend", "fts5")
+    cache_dir = resolve_cache_dir(getattr(args, "cache_dir", None)).resolve()
+    extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        if backend == "vector":
+            count = build_vector_index(
+                wiki_root, cache_dir, extra_roots=extra_roots, config=cfg
+            )
+        else:
+            count = build_fts5_index(
+                wiki_root, cache_dir, extra_roots=extra_roots, config=cfg
+            )
+        print(f"  recall index rebuilt ({backend}): {count} page(s).")
+    except Exception as exc:  # noqa: BLE001 - rebuild failure must not fail the caller
+        print(
+            f"  WARN recall index rebuild failed ({type(exc).__name__}): {exc}",
+            file=sys.stderr,
+        )
