@@ -193,7 +193,7 @@ wrong side of every disagreement.
   `scripts/annotate_shadow_parity_subject_scope.py`, and was fixed in athenaeum#1483 before
   any run.
 - **Fixture predates this run.** The fixtures were committed in `20df7b35`
-  (athenaeum#1483 / PR #1506), which is an ancestor of this lane's base `0148c7f9`. This run
+  (athenaeum#1483 / PR athenaeum#1506), which is an ancestor of this lane's base `0148c7f9`. This run
   changed no coordinate.
 - **Byte-identical regeneration (checked).** Re-running
   `python scripts/annotate_shadow_parity_subject_scope.py` just before the run left
