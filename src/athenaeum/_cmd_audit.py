@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -22,6 +23,35 @@ from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
 if TYPE_CHECKING:
     from athenaeum.runlock import RunLock
+
+
+def _load_cache_config_env() -> None:
+    """Load ``<cache_dir>/config.env`` into the process env (issue athenaeum#1667
+    Plan item 10; issue athenaeum#1661 tracks the same gap for the hook adapter).
+
+    ``KEY=VALUE`` lines only; blank lines and ``#``-comments are skipped.
+    Existing process env always wins — a key already set (by the caller's
+    shell, or set earlier this same process) is never overwritten. A
+    missing file is a silent no-op. Values are NEVER printed or logged.
+    """
+    from athenaeum.config import resolve_cache_dir
+
+    config_env_path = resolve_cache_dir() / "config.env"
+    try:
+        if not config_env_path.is_file():
+            return
+        lines = config_env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip()
 
 
 def _read_uids_file(path: Path) -> list[str]:
@@ -60,6 +90,8 @@ def cmd_audit(args: argparse.Namespace) -> int:
     model = args.model or resolve_model(
         "classify", "ATHENAEUM_CLASSIFY_MODEL", DEFAULT_CLASSIFY_MODEL, config
     )
+
+    _load_cache_config_env()
 
     client: Any = None
     if not args.mechanical_dry_run:

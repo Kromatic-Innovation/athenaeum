@@ -260,6 +260,24 @@ sync sets both ``pull_before_run: true`` and ``push_after_run: true`` in
 
 ## `audit`
 
+### `resolve_audit_date_fill`
+
+- **YAML path:** `audit.date_fill`
+- **Environment variable:** `ATHENAEUM_AUDIT_DATE_FILL`
+- **CLI flag:** —
+- **Default:** `'constrained'`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the audit date-fill mode (Decision 1).
+
+Precedence: ``ATHENAEUM_AUDIT_DATE_FILL`` env > ``audit.date_fill`` yaml
+> ``"constrained"``. Only ``"constrained"`` and ``"off"`` are valid
+values (case-insensitive); anything else -- malformed env override,
+unrecognised yaml value, missing config -- falls back to
+`DEFAULT_AUDIT_DATE_FILL`, the safer default that still routes
+every fill through `athenaeum.audit._excluded_date_values`
+rather than silently accepting every model-proposed date.
+
 ### `resolve_audit_nightly_max_pages`
 
 - **YAML path:** `audit.nightly_max_pages`

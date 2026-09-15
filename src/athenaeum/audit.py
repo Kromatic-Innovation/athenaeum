@@ -31,10 +31,14 @@ about) or by the write path (:func:`apply_audit_report` re-checks
 emptiness immediately before writing, defending against a race between
 scan and apply).
 
-The same call also returns a GENERIC retirement-candidate flag: whether the
-page states any claim beyond restatement/usage of its cited sources. The
-check and its parsing carry no source-type, adapter-name, or board-title
-string anywhere — see this module's own text below, and
+The same call also returns a GENERIC retirement-candidate flag (issue
+athenaeum#1667 Decision 2): a page is a candidate only when it states NO claim
+at all, or when it duplicates another page (duplicate detection is
+deterministic, in code — see :func:`_find_duplicate_reasons` — not a
+model judgment). Restating/summarizing a cited source is explicitly NOT a
+criterion, and a light source page (a source summary plus validity info)
+is never a candidate on that basis. The check and its parsing carry no
+source-type, adapter-name, or board-title string anywhere — see this module's own text below, and
 ``tests/test_audit.py``'s ``git grep`` regression test. Out of scope
 (athenaeum#1624's own "Out of scope" section): this command never deletes or
 retires a page, and never fills ``subject`` (athenaeum#1244 / athenaeum#1615 own
@@ -63,9 +67,11 @@ the CLI layer stays the only place that resolves credentials.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import random
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -79,7 +85,7 @@ log = logging.getLogger(__name__)
 #: page as ``audit_version:`` so a later pass can tell "audited under an old
 #: prompt" apart from "never audited" (the latter has no ``last_audited`` at
 #: all — see the module docstring).
-AUDIT_VERSION = "audit-v1"
+AUDIT_VERSION = "audit-v2"
 
 #: The three kernel-dimension coordinate fields this pass may fill. Mirrors
 #: ``dimensions.py``'s ``VALID_TIME`` / ``SCOPE`` frontmatter readers
@@ -93,29 +99,54 @@ AUDIT_SYSTEM = """\
 You are auditing ONE knowledge-base page. Read only the page's own body and \
 its cited sources below — never guess, never use outside knowledge.
 
-Do two things:
+Do three things:
 
 1. COORDINATES. For each field listed under "Fields to determine", decide:
    - a determinable value, in plain text, when the page's own body or \
-cited sources state it explicitly, or
+cited sources state a stated role, event, or effective date/scope \
+explicitly, or
    - "undeterminable" with a one-line reason, when they do not.
    A date value must be ISO-8601 (YYYY-MM-DD). Never invent a value that \
-is not actually stated.
+is not actually stated. A date field (valid_from/valid_until) may ONLY be \
+filled from a stated role, event, or effective date — NEVER from \
+relationship or contact metadata. None of the following ever justify a \
+date fill, even when stated on the page: a connect date (for example a \
+LinkedIn connect date), a CRM first-contact, last-contact, last-email, or \
+meeting date, a note date, an updated-timestamp, or any ingestion/import \
+date. When the only dates available are of that kind, report the field \
+as undeterminable and name the excluded date class in the reason.
 
-2. RETIREMENT CANDIDACY. Decide whether this page states any claim beyond \
-a restatement or bare usage-log of its cited sources — an independent \
-observation, judgment, or synthesis the sources do not already contain. A \
-page with no such claim is a retirement candidate.
+2. RETIREMENT CANDIDACY. A page is a retirement candidate ONLY when at \
+least one of these two things is true:
+   - it states no claim at all — no independent observation, judgment, or \
+synthesis, just a name/heading or nothing, or
+   - its content duplicates another page.
+   Restating or summarizing a cited source is NOT, on its own, a reason \
+to flag a page — a page that accurately summarizes and scopes its source \
+still adds value by making that source findable. A page whose entire \
+content is a summary of a source it names (for example a whiteboard or \
+board source page) is light BY DESIGN, not by deficiency: it asserts the \
+source of truth and the chain of evidence another page relies on. Never \
+flag such a page for retirement merely for being light.
+
+3. SOURCE SUMMARY. Only when this page's own type is a source page: \
+decide whether it gives a summary of the source it names (a summary, not \
+the full detail) plus any information about that source's validity. When \
+a source page lacks that summary, report it via "source_summary_missing" \
+with a one-line reason — this is a finding to record, never a reason to \
+flag the page for retirement.
 
 Return ONLY a JSON object, no markdown fence, no prose, in exactly this \
-shape (include a key only for a field actually listed under "Fields to \
-determine"):
+shape (include a coordinate key only for a field actually listed under \
+"Fields to determine"; include "source_summary_missing" only when it \
+applies):
 
 {
   "<field>": {"value": "<determined value>"},
   "<field>": {"undeterminable": "<one-line reason>"},
   "retirement_candidate": true,
-  "retirement_reason": "<one-line reason, empty string when false>"
+  "retirement_reason": "<one-line reason, empty string when false>",
+  "source_summary_missing": "<one-line reason, omit key when not applicable>"
 }\
 """
 
@@ -190,24 +221,107 @@ def _valid_date_string(value: str) -> bool:
     return True
 
 
+#: Date coordinate fields (subset of :data:`COORDINATE_FIELDS`) — the only
+#: two fields the excluded-date-class guard below ever applies to.
+_DATE_FIELDS: tuple[str, ...] = ("valid_from", "valid_until")
+
+#: Generic KEY-NAME pattern (never a source-type/adapter-name literal — see
+#: AC6 / ``test_flagging_logic_is_generic``) matching frontmatter keys that
+#: hold relationship/contact/ingestion metadata rather than a stated role,
+#: event, or effective date (issue athenaeum#1667 Decision 1): connect dates,
+#: CRM first/last-contact/last-email/meeting dates, note/ingestion
+#: timestamps. A value under a matching key can never legitimately fill
+#: ``valid_from``/``valid_until``, however the page states it.
+_EXCLUDED_DATE_KEY_RE = re.compile(
+    r"(_connected_on$|first_contact|last_contact|last_email|contact_date|"
+    r"meeting|^updated$|updated_at$|^created$|created_at$|ingested)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_date_like(value: object) -> str | None:
+    """Normalize a frontmatter value to a comparable ISO-ish string, or
+    ``None`` when it is not a date/string value (dict/list/None/etc)."""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _excluded_date_values(meta: dict[str, Any]) -> dict[str, str]:
+    """Map excluded-class frontmatter VALUE -> the key name it came from.
+
+    Built purely from *meta*'s own key NAMES via :data:`_EXCLUDED_DATE_KEY_RE`
+    — never a source-type/adapter-name/board-title literal — so a model
+    ``valid_from``/``valid_until`` fill matching one of these values is
+    refused as relationship/contact/ingestion metadata (issue athenaeum#1667
+    Decision 1), whatever page type or adapter it came from.
+    """
+    excluded: dict[str, str] = {}
+    for key, raw in meta.items():
+        if not isinstance(key, str) or not _EXCLUDED_DATE_KEY_RE.search(key):
+            continue
+        normalized = _normalize_date_like(raw)
+        if normalized:
+            excluded[normalized] = key
+    return excluded
+
+
+def _fields_to_ask(empty_fields: list[str], date_fill: str) -> list[str]:
+    """Fields actually put in front of the model this pass.
+
+    With ``date_fill == "off"`` (issue athenaeum#1667 Decision 1 fallback,
+    option B), the date fields are withheld from the prompt entirely —
+    :func:`_date_fill_off_findings` records why. ``claimed_scope`` is
+    unaffected in either mode.
+    """
+    if date_fill == "off":
+        return [f for f in empty_fields if f not in _DATE_FIELDS]
+    return list(empty_fields)
+
+
+def _date_fill_off_findings(empty_fields: list[str], asked_fields: list[str]) -> dict[str, str]:
+    """Forced findings for date fields withheld from the prompt by
+    ``date_fill == "off"``. Empty when every empty field was asked about."""
+    asked = set(asked_fields)
+    return {
+        f: "undeterminable: date filling disabled (audit.date_fill=off)"
+        for f in empty_fields
+        if f in _DATE_FIELDS and f not in asked
+    }
+
+
 def parse_audit_response(
-    text: str, empty_fields: list[str]
+    text: str, empty_fields: list[str], *, meta: dict[str, Any] | None = None
 ) -> tuple[dict[str, str], dict[str, str], bool, str]:
     """Parse the model's JSON verdict text.
 
     Returns ``(coordinate_fills, audit_findings, retirement_candidate,
     retirement_reason)``. ``coordinate_fills``/``audit_findings`` keys are
-    always a subset of *empty_fields* — a field not asked about is never
-    written, whatever the model returns for it (defense against a model
-    echoing a field it was not asked to fill). Malformed/unparseable JSON
-    yields empty fills/findings and ``retirement_candidate=False`` rather
-    than raising — the caller surfaces that as a per-page error instead.
+    always a subset of *empty_fields* (plus the standalone
+    ``"source_summary_missing"`` finding key, which is not a coordinate
+    field) — a field not asked about is never written, whatever the model
+    returns for it (defense against a model echoing a field it was not
+    asked to fill). Malformed/unparseable JSON yields empty fills/findings
+    and ``retirement_candidate=False`` rather than raising — the caller
+    surfaces that as a per-page error instead.
+
+    *meta* — the page's own frontmatter, when supplied — gates a
+    ``valid_from``/``valid_until`` fill through :func:`_excluded_date_values`:
+    a model-proposed date matching an excluded relationship/contact/
+    ingestion value is refused and recorded as a finding instead of filled
+    (issue athenaeum#1667 Decision 1). Omitting *meta* (legacy callers) skips
+    that guard — the date is still parsed but never cross-checked.
     """
     from athenaeum.json_utils import extract_json_object
 
     obj = extract_json_object(text) or {}
     fills: dict[str, str] = {}
     findings: dict[str, str] = {}
+    excluded = _excluded_date_values(meta) if meta else {}
     for name in empty_fields:
         entry = obj.get(name)
         if not isinstance(entry, dict):
@@ -216,12 +330,23 @@ def parse_audit_response(
         reason = entry.get("undeterminable")
         if isinstance(value, str) and value.strip():
             candidate = value.strip()
-            if name in ("valid_from", "valid_until") and not _valid_date_string(candidate):
-                findings[name] = "undeterminable: model returned an unparseable date"
-                continue
+            if name in _DATE_FIELDS:
+                if not _valid_date_string(candidate):
+                    findings[name] = "undeterminable: model returned an unparseable date"
+                    continue
+                excluded_key = excluded.get(candidate)
+                if excluded_key is not None:
+                    findings[name] = (
+                        f"undeterminable: date matches {excluded_key}, which is "
+                        "contact/ingestion metadata"
+                    )
+                    continue
             fills[name] = candidate
         elif isinstance(reason, str) and reason.strip():
             findings[name] = f"undeterminable: {reason.strip()}"
+    summary_missing = obj.get("source_summary_missing")
+    if isinstance(summary_missing, str) and summary_missing.strip():
+        findings["source_summary_missing"] = summary_missing.strip()
     retirement_candidate = bool(obj.get("retirement_candidate"))
     raw_reason = obj.get("retirement_reason")
     retirement_reason = raw_reason.strip() if isinstance(raw_reason, str) else ""
@@ -238,6 +363,20 @@ class AuditVerdict:
     could not audit (malformed response, API failure, ...); every other
     field is then a zero/empty placeholder and :func:`apply_audit_report`
     skips writing it.
+
+    ``uid`` (issue athenaeum#1667 Decision 3): despite the name, this holds the
+    page's IDENTITY key — the page's real ``uid`` when it has one, otherwise
+    its wiki-root-relative POSIX path (see :func:`identity_key`), so a
+    uid-less ``type: auto-memory`` page is addressable end-to-end. Kept as
+    ``uid`` rather than renamed to avoid rippling into
+    :mod:`athenaeum.audit_on_touch`/:mod:`athenaeum.audit_queue`, which
+    already read this field.
+
+    ``scan_type``/``scan_name``/``scan_cluster_id`` are set ONLY for a
+    uid-less page: a snapshot of those three frontmatter values as read at
+    SCAN time, for :func:`apply_audit_report`'s identity re-check (path
+    alone is not enough to prove a uid-less page hasn't been renamed or
+    reclustered between scan and apply).
     """
 
     uid: str
@@ -252,6 +391,9 @@ class AuditVerdict:
     output_tokens: int = 0
     cost_usd: float = 0.0
     error: str | None = None
+    scan_type: str | None = None
+    scan_name: str | None = None
+    scan_cluster_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -267,6 +409,9 @@ class AuditVerdict:
             "output_tokens": self.output_tokens,
             "cost_usd": self.cost_usd,
             "error": self.error,
+            "scan_type": self.scan_type,
+            "scan_name": self.scan_name,
+            "scan_cluster_id": self.scan_cluster_id,
         }
 
 
@@ -312,7 +457,7 @@ def _verdict_from_response(
             error=f"unreadable response: {exc}",
         )
     fills, findings, retirement_candidate, retirement_reason = parse_audit_response(
-        text, empty_fields
+        text, empty_fields, meta=meta
     )
     return AuditVerdict(
         uid=uid,
@@ -340,6 +485,7 @@ def audit_page(
     max_tokens: int = _AUDIT_MAX_TOKENS,
     audit_version: str = AUDIT_VERSION,
     now: Callable[[], datetime] | None = None,
+    date_fill: str = "constrained",
 ) -> AuditVerdict:
     """Audit ONE page synchronously. The reusable per-page entry point.
 
@@ -357,7 +503,8 @@ def audit_page(
     failure cannot abort a caller iterating over many.
     """
     empty_fields = _empty_coordinate_fields(meta)
-    prompt = render_audit_prompt(meta, body, empty_fields)
+    asked_fields = _fields_to_ask(empty_fields, date_fill)
+    prompt = render_audit_prompt(meta, body, asked_fields)
     try:
         response = client.messages.create(
             model=model,
@@ -373,7 +520,7 @@ def audit_page(
             audit_version=audit_version,
             error=f"{exc.__class__.__name__}: {exc}",
         )
-    return _verdict_from_response(
+    verdict = _verdict_from_response(
         uid=uid,
         path=path,
         meta=meta,
@@ -381,9 +528,33 @@ def audit_page(
         model=model,
         audit_version=audit_version,
         now=now,
-        empty_fields=empty_fields,
+        empty_fields=asked_fields,
         is_batch=False,
     )
+    forced = _date_fill_off_findings(empty_fields, asked_fields)
+    if forced:
+        verdict = replace(verdict, audit_findings={**forced, **verdict.audit_findings})
+    return verdict
+
+
+#: Messages Batch API's own ``custom_id`` charset/length constraint.
+_CUSTOM_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def _batch_custom_id(identity: str) -> str:
+    """Wire-level ``custom_id`` for *identity* (issue athenaeum#1667 Plan item 9).
+
+    The Messages Batch API limits ``custom_id`` to ``[a-zA-Z0-9_-]{1,64}``;
+    a ``uid`` usually satisfies that already, but a wiki-relative PATH
+    identity (uid-less auto-memory pages) contains ``.``/``/`` and can
+    exceed 64 chars. When *identity* does not already satisfy the pattern,
+    use a deterministic digest instead — :func:`audit_pages_via_batch`
+    keeps the reverse map back to *identity*.
+    """
+    if _CUSTOM_ID_RE.match(identity):
+        return identity
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+    return f"p-{digest}"
 
 
 def build_audit_batch_request(
@@ -393,6 +564,7 @@ def build_audit_batch_request(
     *,
     model: str,
     max_tokens: int = _AUDIT_MAX_TOKENS,
+    date_fill: str = "constrained",
 ) -> Any:
     """Build one :class:`athenaeum.batch.BatchRequest` for *uid* (``--batch``).
 
@@ -407,9 +579,10 @@ def build_audit_batch_request(
     from athenaeum.batch import BatchRequest
 
     empty_fields = _empty_coordinate_fields(meta)
-    prompt = render_audit_prompt(meta, body, empty_fields)
+    asked_fields = _fields_to_ask(empty_fields, date_fill)
+    prompt = render_audit_prompt(meta, body, asked_fields)
     return BatchRequest(
-        custom_id=uid,
+        custom_id=_batch_custom_id(uid),
         params={
             "model": model,
             "max_tokens": max_tokens,
@@ -428,6 +601,7 @@ def audit_pages_via_batch(
     audit_version: str = AUDIT_VERSION,
     now: Callable[[], datetime] | None = None,
     usage: TokenUsage | None = None,
+    date_fill: str = "constrained",
 ) -> list[AuditVerdict]:
     """Audit *pages* through ``batch.py``'s transport (``--batch``).
 
@@ -442,8 +616,16 @@ def audit_pages_via_batch(
     from athenaeum.batch import execute_batch
 
     empty_fields_by_uid = {uid: _empty_coordinate_fields(meta) for uid, _p, meta, _b in pages}
+    asked_fields_by_uid = {
+        uid: _fields_to_ask(fields, date_fill) for uid, fields in empty_fields_by_uid.items()
+    }
+    # Reverse map wire-level custom_id -> identity, since a path-shaped
+    # identity is digested (see :func:`_batch_custom_id`) before submission.
+    custom_id_to_uid = {_batch_custom_id(uid): uid for uid, _p, _m, _b in pages}
     requests = [
-        build_audit_batch_request(uid, meta, body, model=model, max_tokens=max_tokens)
+        build_audit_batch_request(
+            uid, meta, body, model=model, max_tokens=max_tokens, date_fill=date_fill
+        )
         for uid, _path, meta, body in pages
     ]
     outcome = execute_batch(client, requests, description="audit", knob="classify", usage=usage)
@@ -451,9 +633,10 @@ def audit_pages_via_batch(
     verdicts: list[AuditVerdict] = []
     by_uid = {uid: (path, meta) for uid, path, meta, _body in pages}
     for req in requests:
-        uid = req.custom_id
+        custom_id = req.custom_id
+        uid = custom_id_to_uid.get(custom_id, custom_id)
         path, meta = by_uid[uid]
-        message = outcome.results.get(uid)
+        message = outcome.results.get(custom_id)
         if message is None:
             verdicts.append(
                 AuditVerdict(
@@ -465,19 +648,21 @@ def audit_pages_via_batch(
                 )
             )
             continue
-        verdicts.append(
-            _verdict_from_response(
-                uid=uid,
-                path=path,
-                meta=meta,
-                response=message,
-                model=model,
-                audit_version=audit_version,
-                now=now,
-                empty_fields=empty_fields_by_uid[uid],
-                is_batch=True,
-            )
+        verdict = _verdict_from_response(
+            uid=uid,
+            path=path,
+            meta=meta,
+            response=message,
+            model=model,
+            audit_version=audit_version,
+            now=now,
+            empty_fields=asked_fields_by_uid[uid],
+            is_batch=True,
         )
+        forced = _date_fill_off_findings(empty_fields_by_uid[uid], asked_fields_by_uid[uid])
+        if forced:
+            verdict = replace(verdict, audit_findings={**forced, **verdict.audit_findings})
+        verdicts.append(verdict)
     return verdicts
 
 
@@ -504,10 +689,16 @@ def _stratified_sample(
 ) -> list[tuple[Path, dict[str, Any]]]:
     """Deterministic sample of *n* candidates, stratified by ``type:``.
 
-    Proportional (largest-remainder) allocation across strata, each
-    stratum sampled with ``random.Random(seed)`` in a FIXED (sorted
-    stratum name) order so the same *seed* over the same candidate set
-    always selects the same pages (issue athenaeum#1624 AC2).
+    Per-type floor (issue athenaeum#1667 Plan item 7): every non-empty
+    stratum gets at least 1 page. When *n* is smaller than the number of
+    strata (the degenerate case), the *n* LARGEST strata each get exactly
+    1 page (ties broken by sorted type name) and every other stratum gets
+    0. Otherwise every stratum gets its floor of 1, and the remaining
+    ``n - len(strata)`` slots are allocated proportionally to stratum size
+    (largest-remainder) over each stratum's REMAINING capacity
+    (``size - 1``). Each stratum sampled with ``random.Random(seed)`` in a
+    FIXED (sorted stratum name) order so the same *seed* over the same
+    candidate set always selects the same pages (issue athenaeum#1624 AC2).
     """
     if n >= len(candidates):
         return list(candidates)
@@ -519,23 +710,36 @@ def _stratified_sample(
     for key in strata:
         strata[key].sort(key=lambda it: str(it[0]))
 
-    total = len(candidates)
-    quotas: dict[str, int] = {}
-    remainders: list[tuple[float, str]] = []
-    for key, items in strata.items():
-        exact = n * len(items) / total
-        base = int(exact)
-        quotas[key] = base
-        remainders.append((exact - base, key))
-    allocated = sum(quotas.values())
-    remainders.sort(key=lambda pair: (-pair[0], pair[1]))
-    idx = 0
-    while allocated < n and idx < len(remainders):
-        _frac, key = remainders[idx]
-        if quotas[key] < len(strata[key]):
-            quotas[key] += 1
-            allocated += 1
-        idx += 1
+    floor_order = sorted(strata, key=lambda k: (-len(strata[k]), k))
+
+    if n <= len(strata):
+        keep = set(floor_order[:n])
+        quotas: dict[str, int] = {key: (1 if key in keep else 0) for key in strata}
+    else:
+        quotas = {key: 1 for key in strata}
+        remaining = n - len(strata)
+        pool = [(key, len(strata[key]) - 1) for key in strata if len(strata[key]) - 1 > 0]
+        pool_total = sum(cap for _k, cap in pool)
+        if remaining > 0 and pool_total > 0:
+            extra: dict[str, int] = {}
+            remainders: list[tuple[float, str]] = []
+            for key, cap in pool:
+                exact = remaining * cap / pool_total
+                base = min(int(exact), cap)
+                extra[key] = base
+                remainders.append((exact - int(exact), key))
+            allocated_extra = sum(extra.values())
+            remainders.sort(key=lambda pair: (-pair[0], pair[1]))
+            idx = 0
+            cap_by_key = dict(pool)
+            while allocated_extra < remaining and idx < len(remainders):
+                _frac, key = remainders[idx]
+                if extra[key] < cap_by_key[key]:
+                    extra[key] += 1
+                    allocated_extra += 1
+                idx += 1
+            for key, amount in extra.items():
+                quotas[key] += amount
 
     rng = random.Random(seed)
     selected: list[tuple[Path, dict[str, Any]]] = []
@@ -544,6 +748,94 @@ def _stratified_sample(
         selected.extend(rng.sample(strata[key], quota))
     selected.sort(key=lambda it: str(it[0]))
     return selected
+
+
+def identity_key(path: Path, meta: dict[str, Any], wiki_root: Path) -> str:
+    """The audit identity for one page (issue athenaeum#1667 Decision 3).
+
+    ``uid`` when present and non-blank; otherwise the page's
+    wiki-root-relative POSIX path, so a uid-less ``type: auto-memory``
+    page (the librarian's cluster pages, which never carry a ``uid:``) is
+    still addressable end-to-end. NOT ``name:`` (not unique across
+    auto-memory pages) and NOT ``cluster_id`` (shared by every member of a
+    cluster) — see the issue's own "why not the obvious alternatives".
+    """
+    uid_value = meta.get("uid")
+    if isinstance(uid_value, str) and uid_value.strip():
+        return uid_value.strip()
+    try:
+        return path.resolve().relative_to(wiki_root.resolve()).as_posix()
+    except ValueError:  # pragma: no cover - defensive: path outside wiki_root
+        return path.name
+
+
+def _is_retired(meta: dict[str, Any]) -> bool:
+    return bool(meta.get("retired"))
+
+
+def _is_auto_memory_eligible(meta: dict[str, Any]) -> bool:
+    """``type: auto-memory`` and not (truthy) ``retired:`` (issue athenaeum#1667
+    Decision 3). Selected on ``type:``, never the ``auto-*.md`` filename
+    glob — some glob matches carry a different ``type:`` and are not
+    auto-memory pages."""
+    return meta.get("type") == "auto-memory" and not _is_retired(meta)
+
+
+def _collect_eligible_pages(wiki_root: Path) -> list[tuple[Path, dict[str, Any], str]]:
+    """Every page under *wiki_root* eligible for audit: a ``uid:`` page, or
+    a non-retired ``type: auto-memory`` page (issue athenaeum#1667 Decision 3).
+    Frontmatter-less/unparseable pages are silently excluded."""
+    pages: list[tuple[Path, dict[str, Any], str]] = []
+    for path in discover_wiki_pages(wiki_root):
+        text = _read(path)
+        if text is None:
+            continue
+        meta, body = parse_frontmatter(text)
+        if not meta:
+            continue
+        uid_value = meta.get("uid")
+        has_uid = isinstance(uid_value, str) and bool(uid_value.strip())
+        if not has_uid and not _is_auto_memory_eligible(meta):
+            continue
+        pages.append((path, meta, body))
+    return pages
+
+
+def _normalize_body(body: str) -> str:
+    return " ".join((body or "").split())
+
+
+def _find_duplicate_reasons(
+    selected: list[tuple[Path, dict[str, Any], str]],
+    all_eligible: list[tuple[Path, dict[str, Any], str]],
+    wiki_root: Path,
+) -> dict[str, str]:
+    """identity -> "duplicate of <other identity>" for a *selected* page
+    whose whitespace-normalised body exactly matches another ELIGIBLE page
+    anywhere in the corpus (issue athenaeum#1667 Plan item 5) — computed
+    deterministically in code, before prompting, over the FULL eligible
+    corpus (not only the sampled/selected set); a single-page prompt
+    cannot see other pages, so the model is never asked to judge
+    duplicates. With more than one peer, the lexicographically smallest
+    identity is named, for seed-independent determinism.
+    """
+    by_norm: dict[str, list[str]] = {}
+    for path, meta, body in all_eligible:
+        norm = _normalize_body(body)
+        if not norm:
+            continue
+        by_norm.setdefault(norm, []).append(identity_key(path, meta, wiki_root))
+
+    reasons: dict[str, str] = {}
+    for path, meta, body in selected:
+        norm = _normalize_body(body)
+        if not norm:
+            continue
+        own = identity_key(path, meta, wiki_root)
+        peers = sorted(k for k in by_norm.get(norm, []) if k != own)
+        if peers:
+            reasons[own] = f"duplicate of {peers[0]}"
+    return reasons
 
 
 def select_audit_pages(
@@ -562,23 +854,18 @@ def select_audit_pages(
     *limit* then further bounds whatever set was chosen, taken in sorted-
     path order — independent of *sample*, so ``--limit`` always caps the
     pages actually processed this pass regardless of selector.
-    Frontmatter-less or unparseable pages, and pages with no ``uid:``, are
-    silently excluded (nothing to stamp against).
+    Frontmatter-less or unparseable pages are silently excluded. A page is
+    eligible when it carries a ``uid:``, OR when it is a non-retired
+    ``type: auto-memory`` page (issue athenaeum#1667 Decision 3) — *uids*
+    matches either kind of page via :func:`identity_key`.
     """
-    all_pages: list[tuple[Path, dict[str, Any], str]] = []
-    for path in discover_wiki_pages(wiki_root):
-        text = _read(path)
-        if text is None:
-            continue
-        meta, body = parse_frontmatter(text)
-        uid_value = meta.get("uid") if meta else None
-        if not isinstance(uid_value, str) or not uid_value.strip():
-            continue
-        all_pages.append((path, meta, body))
+    all_pages = _collect_eligible_pages(wiki_root)
 
     if uids is not None:
         wanted = set(uids)
-        candidates = [item for item in all_pages if item[1]["uid"] in wanted]
+        candidates = [
+            item for item in all_pages if identity_key(item[0], item[1], wiki_root) in wanted
+        ]
     elif sample is not None:
         pairs = _stratified_sample([(p, m) for p, m, _b in all_pages], sample, seed)
         by_path = {p: (m, b) for p, m, b in all_pages}
@@ -699,9 +986,33 @@ def build_audit_report(
     run is exactly "call this function and print the report" — no code
     path unique to dry-run exists to drift from what apply sees.
     """
+    from athenaeum.config import resolve_audit_date_fill
+
+    date_fill = resolve_audit_date_fill(config)
+
     report = AuditReport(used_batch=use_batch)
     candidates = select_audit_pages(wiki_root, limit=limit, sample=sample, seed=seed, uids=uids)
     report.scanned = len(candidates)
+
+    all_eligible = _collect_eligible_pages(wiki_root)
+    duplicate_reasons = _find_duplicate_reasons(candidates, all_eligible, wiki_root)
+
+    def _finalize(verdict: AuditVerdict, meta: dict[str, Any]) -> AuditVerdict:
+        uid_value = meta.get("uid")
+        has_uid = isinstance(uid_value, str) and bool(uid_value.strip())
+        if not has_uid:
+            verdict = replace(
+                verdict,
+                scan_type=meta.get("type") if isinstance(meta.get("type"), str) else None,
+                scan_name=meta.get("name") if isinstance(meta.get("name"), str) else None,
+                scan_cluster_id=(
+                    meta.get("cluster_id") if isinstance(meta.get("cluster_id"), str) else None
+                ),
+            )
+        dup_reason = duplicate_reasons.get(verdict.uid)
+        if dup_reason is not None:
+            verdict = replace(verdict, retirement_candidate=True, retirement_reason=dup_reason)
+        return verdict
 
     if client is None:
         report.llm_available = False
@@ -712,7 +1023,11 @@ def build_audit_report(
     usage = run_usage if run_usage is not None else TokenUsage()
 
     if use_batch:
-        pages = [(meta["uid"], path, meta, body) for path, meta, body in candidates]
+        pages = [
+            (identity_key(path, meta, wiki_root), path, meta, body)
+            for path, meta, body in candidates
+        ]
+        meta_by_identity = {identity: meta for identity, _p, meta, _b in pages}
         if pages:
             verdicts = audit_pages_via_batch(
                 client,
@@ -722,14 +1037,16 @@ def build_audit_report(
                 audit_version=audit_version,
                 now=now,
                 usage=usage,
+                date_fill=date_fill,
             )
+            verdicts = [_finalize(v, meta_by_identity[v.uid]) for v in verdicts]
             report.verdicts.extend(verdicts)
             report.llm_calls += len(pages)
     else:
         for path, meta, body in candidates:
             verdict = audit_page(
                 client,
-                uid=meta["uid"],
+                uid=identity_key(path, meta, wiki_root),
                 path=path,
                 meta=meta,
                 body=body,
@@ -737,7 +1054,9 @@ def build_audit_report(
                 max_tokens=max_tokens,
                 audit_version=audit_version,
                 now=now,
+                date_fill=date_fill,
             )
+            verdict = _finalize(verdict, meta)
             report.verdicts.append(verdict)
             report.llm_calls += 1
             usage.add(
@@ -841,8 +1160,26 @@ def apply_audit_report(report: AuditReport, wiki_root: Path) -> int:
         if text is None:
             continue
         meta, body = parse_frontmatter(text)
-        if not meta or meta.get("uid") != verdict.uid:
+        if not meta:
             continue
+
+        current_identity = identity_key(verdict.path, meta, wiki_root)
+        if current_identity != verdict.uid:
+            continue
+
+        uid_value = meta.get("uid")
+        has_uid = isinstance(uid_value, str) and bool(uid_value.strip())
+        if not has_uid:
+            # Uid-less (auto-memory) page: identity is the path, and path
+            # alone can silently re-target a different page after a
+            # rename/recluster — re-check type/name/cluster_id against the
+            # SCAN-time snapshot (issue athenaeum#1667 Plan item 8).
+            if (
+                meta.get("type") != verdict.scan_type
+                or meta.get("name") != verdict.scan_name
+                or meta.get("cluster_id") != verdict.scan_cluster_id
+            ):
+                continue
 
         apply_verdict_to_meta(meta, verdict)
 
@@ -865,6 +1202,7 @@ __all__ = [
     "build_audit_batch_request",
     "build_audit_report",
     "discover_wiki_pages",
+    "identity_key",
     "parse_audit_response",
     "render_audit_prompt",
     "select_audit_pages",
