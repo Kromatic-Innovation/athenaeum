@@ -78,6 +78,17 @@ from pathlib import Path
 from athenaeum.push_metrics import estimate_tokens
 from athenaeum.shadow_linkage import _get_git_sha, _get_version
 from athenaeum.store import now_iso
+
+# ``DISTINCTIVE_NGRAM_SIZE`` is re-exported explicitly (``as`` itself): this
+# module published it before issue athenaeum#1585 moved the definition into
+# ``athenaeum.text_overlap``, and the report's prose still points readers here.
+from athenaeum.text_overlap import (
+    DISTINCTIVE_NGRAM_SIZE as DISTINCTIVE_NGRAM_SIZE,
+)
+from athenaeum.text_overlap import (
+    distinctive_ngram_overlap,
+    ngrams,
+)
 from tests.evals.containment import GridCell, ResultStore
 from tests.evals.corpus import Corpus, Probe, build_corpus
 from tests.evals.metrics import uids_from_recall_output
@@ -176,42 +187,12 @@ def lexical_overlap(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
-def _ngrams(text: str, n: int) -> set[tuple[str, ...]]:
-    words = _WORD_RE.findall(text.lower())
-    if len(words) < n:
-        return set()
-    return {tuple(words[i : i + n]) for i in range(len(words) - n + 1)}
-
-
-#: Word-shingle size for :func:`distinctive_ngram_overlap`. 4 words is long
-#: enough that a shared shingle is very unlikely by chance (unlike a
-#: 1- or 2-gram, which overlaps between almost any two passages on the same
-#: topic) while still short enough to survive light paraphrase of a
-#: sentence fragment.
-DISTINCTIVE_NGRAM_SIZE = 4
-
-
-def distinctive_ngram_overlap(
-    delivered: str, answer: str, n: int = DISTINCTIVE_NGRAM_SIZE
-) -> float:
-    """Fraction of *delivered*'s n-gram shingles that also appear in *answer*.
-
-    ``overlap = |ngrams(delivered) & ngrams(answer)| / |ngrams(delivered)|``
-    -- the denominator is the shingle count of the DELIVERED text (what
-    there was to draw from), not the answer's, so the metric reads as
-    "how much of what was delivered shows up verbatim in the answer",
-    never the reverse. ``0.0`` when *delivered* is too short to have any
-    n-grams at all (never a division by zero).
-
-    This is a coarse, free, zero-judgment signal that the answer echoes
-    delivered phrasing -- it is NOT a claim-support check (that requires a
-    judge and is explicitly out of scope for this report).
-    """
-    delivered_grams = _ngrams(delivered, n)
-    if not delivered_grams:
-        return 0.0
-    answer_grams = _ngrams(answer, n)
-    return len(delivered_grams & answer_grams) / len(delivered_grams)
+#: Issue athenaeum#1585 moved the shingle-overlap definition into
+#: ``athenaeum.text_overlap`` so ``push_metrics.determine_references`` and this
+#: report compute the SAME content signal from ONE definition. Re-exported
+#: under the names this module has always published, so every caller here and
+#: in ``used_heuristic.py`` is unaffected.
+_ngrams = ngrams
 
 
 # ---------------------------------------------------------------------------

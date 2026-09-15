@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The viewer's `used` column consults a content signal, and stops counting
+  echoes and hex collisions.** `determine_references` marked a pushed page used
+  iff its recorded push id appeared anywhere in the transcript as a bare
+  substring. That rule could not reach content-only use at all (a breadcrumb
+  delivers `name — description` and carries no id), could not tell a cited id
+  from recall's own output quoted back in a tool result, and — because every
+  compiled entity's uid is `uuid4().hex[:8]` — matched any git SHA that happened
+  to start with the same eight characters. It now fires on either of two
+  signals: the id appearing as a *whole token* in user- or assistant-written
+  text (tool results excluded), or the assistant's own text reproducing a
+  distinctive 4-word shingle of the pushed page. Both are local, free and
+  judge-free; the shingle definition moved to `athenaeum.text_overlap` so the
+  measurement that scores the rule and the rule itself cannot drift apart. An
+  id seen only in a tool result whose page text cannot be resolved keeps its
+  prior verdict rather than being downgraded on evidence nobody has. The
+  synthetic matrix moves from 1 TP / 1 FP / 1 FN / 1 TN to 2 TP / 0 FP / 0 FN /
+  3 TN over five quadrants, and the viewer legend now states the rule that is
+  actually implemented.
+  ([#1585](https://github.com/Kromatic-Innovation/athenaeum/issues/1585))
+
 - **The push-records ledger returns to the cache dir; it is never written under
   `wiki_root` again.** `push_metrics.py` carried two contradictory contracts — a
   header forbidding the wiki/raw corpus and a `durable_push_records_path` that
@@ -32,6 +52,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployment's highest-frequency producer, which reimplements the resolution in
   bash — is corrected the same way and pinned by a mechanical test.
   ([#1591](https://github.com/Kromatic-Innovation/athenaeum/issues/1591))
+
+### Added
+
+- **`athenaeum session-end --references-only SESSION`** — reference
+  determination alone: no ingest, no reindex, no corpus scan, no run lock, no
+  LLM. Determination is a function of the finished transcript, not of the
+  corpus, so a SessionEnd hook that skips the change-gated pass when no page
+  changed was also skipping the thing that populates the viewer's `used`
+  column — for most sessions, since most change no page. The new mode is cheap
+  enough to call unconditionally, prints a one-line JSON status, logs a
+  `WARNING` naming the session id and the cause on every failure path, and
+  exits non-zero when determination was owed but could not be produced (never
+  fatal to the hook's own work). Running it and the ordinary `session-end` on
+  the same session records one verdict, not two.
+  ([#1566](https://github.com/Kromatic-Innovation/athenaeum/issues/1566))
 
 ### Removed
 

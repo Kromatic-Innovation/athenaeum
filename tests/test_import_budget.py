@@ -69,6 +69,10 @@ PINNED_IMPORTS: dict[str, frozenset[str]] = {
             "athenaeum.models",
             "athenaeum.push_metrics",
             "athenaeum.store",
+            # issue athenaeum#1585: the content signal behind the `used`
+            # column. Pure text arithmetic over `re` — no I/O, no config, no
+            # model — so it drags in nothing itself; see its module docstring.
+            "athenaeum.text_overlap",
         }
     ),
 }
