@@ -388,30 +388,47 @@ def test_no_changed_paths_is_byte_identical_to_full(
 
 # ---------------------------------------------------------------------------
 # Chain topology: A–B–C where B is the SOLE bridge linking A and C (probed
-# cosines: A~B=0.61, B~C=0.77, A~C=0.16). Under single-linkage this was ONE
-# cluster; under complete-linkage (athenaeum#681) it is NOT — greedy complete linkage
-# merges the strongest pair B~C=0.77 into a {B,C} clique and leaves A a
-# singleton (A~C=0.16 forbids the clique from spanning all three). Changing B
-# to drop the B~C link and strengthen A~B must repartition the affected
-# closure: B leaves {B,C} to join A, and C splits into its own singleton —
-# and the delta path must reproduce that whole repartition exactly like a
-# full run, INCLUDING pulling A into the pool via B's new similarity even
-# though A was not in B's prior clique.
+# cosines: A~B=0.60, B~C=0.66, A~C=-0.06). Under single-linkage this would be
+# ONE cluster; under complete-linkage (athenaeum#681) it is NOT — greedy
+# complete linkage merges the strongest pair B~C=0.66 into a {B,C} clique and
+# leaves A a singleton (A~C=-0.06 forbids the clique from spanning all three).
+# Changing B to drop the B~C link and strengthen A~B must repartition the
+# affected closure: B leaves {B,C} to join A, and C splits into its own
+# singleton — and the delta path must reproduce that whole repartition exactly
+# like a full run, INCLUDING pulling A into the pool via B's new similarity
+# even though A was not in B's prior clique.
+#
+# THE FILENAME IS PART OF THE VECTOR (athenaeum#1603, re-tuned in
+# athenaeum#1649). ``VectorBackend._add_records`` used to embed a page's raw
+# bytes — frontmatter first, body after. Since athenaeum#1603 it strips the
+# frontmatter and LEADS with the page's ``name`` instead, so a page's title now
+# carries real weight in every cosine this fixture is tuned on. That silently
+# re-partitioned the chain: with B named ``project_inbox_triage_bridge`` the
+# shared ``inbox``/``triage`` title tokens pushed A~B from 0.59 to 0.72 and
+# dropped B~C to 0.51 (below the 0.55 threshold), so the golden run produced
+# {A,B}, {C} instead of {A}, {B,C}. The bridge is therefore named for BOTH
+# topics it bridges, and its body is re-weighted 3×A + 2×B, which restores
+# B~C as the strongest pair while keeping A~B above threshold. Re-probe these
+# three cosines (``_assert_chain_cosines`` below does it at run time) before
+# touching either the names or the bodies.
 # ---------------------------------------------------------------------------
 
 # B mixes both topics (== the bridge recipe) so it links A (voltaire) and C
 # (pgvector); A and C do not link each other. Kept verbatim for stable cosines.
 # Filenames are chosen so the post-split clusters derive DISTINCT topic slugs
-# ({A,B} → "inbox/triage/bridge", {C} → "pgvector/store"), exercising the clean
+# ({A,B} → "triage-bridge-inbox", {C} → "pgvector-store"), exercising the clean
 # delta path rather than the F6 slug-collision fallback (covered separately).
-_CHAIN_B = f"{_A} {_A} {_B} {_B}"
+_CHAIN_A_NAME = "project_inbox_triage_a"
+_CHAIN_B_NAME = "project_triage_pgvector_bridge"
+_CHAIN_C_NAME = "reference_pgvector_store"
+_CHAIN_B = f"{_A} {_A} {_A} {_B} {_B}"
 _CHAIN_DOCK = BASE_FILES["gamma"]["reference_docker_orphan_a.md"]
 
 
 def _write_chain_base(root: Path, b_body: str) -> None:
-    _write_am_file(root, "chain", "project_inbox_triage_a.md", _A)
-    _write_am_file(root, "chain", "project_inbox_triage_bridge.md", b_body)
-    _write_am_file(root, "chain", "reference_pgvector_store.md", _B)
+    _write_am_file(root, "chain", f"{_CHAIN_A_NAME}.md", _A)
+    _write_am_file(root, "chain", f"{_CHAIN_B_NAME}.md", b_body)
+    _write_am_file(root, "chain", f"{_CHAIN_C_NAME}.md", _B)
     # An unrelated singleton, to prove delta leaves untouched entries alone.
     _write_am_file(root, "misc", "reference_docker_note.md", _CHAIN_DOCK)
     _write_config(root)
@@ -419,13 +436,66 @@ def _write_chain_base(root: Path, b_body: str) -> None:
 
 
 def _break_bridge(root: Path) -> set[Path]:
-    """Rewrite B to a pure-A near-dup so it no longer links C (B~C falls below)."""
-    p = root / "raw" / "auto-memory" / "chain" / "project_inbox_triage_bridge.md"
+    """Rewrite B to a pure-A near-dup so it no longer links C (B~C falls below).
+
+    Probed after the rewrite: A~B=0.94, B~C=0.06 — A~B becomes the strongest
+    pair in the corpus and B~C drops far below the 0.55 threshold.
+    """
+    p = root / "raw" / "auto-memory" / "chain" / f"{_CHAIN_B_NAME}.md"
     p.write_text(
-        f"---\nname: project_inbox_triage_bridge\ntype: auto-memory\n---\n{_A}\n",
+        f"---\nname: {_CHAIN_B_NAME}\ntype: auto-memory\n---\n{_A}\n",
         encoding="utf-8",
     )
     return {p}
+
+
+def _chain_cosines(root: Path) -> dict[str, float]:
+    """Pairwise cosines of the three chain pages, READ BACK from the index.
+
+    Reads the vectors the clustering path actually consumed
+    (``VectorBackend.fetch_embeddings`` — a pure read, it never re-embeds)
+    rather than re-deriving them, so the numbers in the section comment above
+    are checked against the production embedding text, whatever that text
+    currently is. Ids are the recall-index form ``{extra_root.name}/{relpath}``
+    that ``clusters._indexed_id_for`` reconstructs.
+    """
+    from athenaeum.search import VectorBackend
+
+    ids = {
+        "A": f"auto-memory/chain/{_CHAIN_A_NAME}.md",
+        "B": f"auto-memory/chain/{_CHAIN_B_NAME}.md",
+        "C": f"auto-memory/chain/{_CHAIN_C_NAME}.md",
+    }
+    vecs = VectorBackend().fetch_embeddings(ids.values(), root / ".cache")
+    missing = [k for k, i in ids.items() if i not in vecs]
+    assert not missing, f"chain pages missing from the vector index: {missing}"
+
+    def cos(x: str, y: str) -> float:
+        u, v = vecs[ids[x]], vecs[ids[y]]
+        nu = sum(a * a for a in u) ** 0.5 or 1.0
+        nv = sum(b * b for b in v) ** 0.5 or 1.0
+        return sum(a * b for a, b in zip(u, v)) / (nu * nv)
+
+    return {"A~B": cos("A", "B"), "B~C": cos("B", "C"), "A~C": cos("A", "C")}
+
+
+def _assert_chain_cosines(root: Path) -> None:
+    """Pin the chain's similarity SHAPE, so a vector change names itself.
+
+    athenaeum#1649: when athenaeum#1603 changed which text
+    ``VectorBackend._add_records`` embeds, this fixture's cosines moved and the
+    only symptom was an opaque clique-membership mismatch three asserts later.
+    Checking the shape here turns that into a message naming the pair that
+    moved. Bands, not point values — the exact cosines are model-specific and
+    are recorded in the section comment above.
+    """
+    cos = _chain_cosines(root)
+    tau = DEFAULT_CLUSTER_THRESHOLD
+    shape = ", ".join(f"{k}={v:+.4f}" for k, v in cos.items())
+    assert cos["B~C"] >= tau, f"B~C must link (>= {tau}); measured {shape}"
+    assert cos["A~B"] >= tau, f"A~B must link (>= {tau}); measured {shape}"
+    assert cos["B~C"] > cos["A~B"], f"B~C must be the strongest pair; got {shape}"
+    assert cos["A~C"] < tau, f"A~C must NOT link (< {tau}); measured {shape}"
 
 
 @pytest.mark.embedding
@@ -446,13 +516,17 @@ def test_chain_transitive_repartition(
     _compile(golden, changed=None, monkeypatch=monkeypatch)
 
     # Sanity: under complete-linkage (athenaeum#681) the chain is NOT one cluster — the
-    # strongest pair (B~C=0.77) forms a {B,C} clique and A is a singleton
-    # (A~C=0.16 forbids a clique spanning all three), plus the docker singleton.
+    # strongest pair (B~C=0.66) forms a {B,C} clique and A is a singleton
+    # (A~C=-0.06 forbids a clique spanning all three), plus the docker singleton.
+    # Check the similarity shape the cliques below are derived from FIRST, so a
+    # change in what gets embedded reports itself as a moved cosine rather than
+    # as an unexplained membership diff (athenaeum#1649).
+    _assert_chain_cosines(golden)
     gmem = _cluster_membership(golden)
     gmem_sorted = sorted(sorted(m) for m in gmem.values())
     assert gmem_sorted == [
         ["chain/project_inbox_triage_a.md"],
-        ["chain/project_inbox_triage_bridge.md", "chain/reference_pgvector_store.md"],
+        [f"chain/{_CHAIN_B_NAME}.md", f"chain/{_CHAIN_C_NAME}.md"],
         ["misc/reference_docker_note.md"],
     ], f"expected complete-linkage cliques {{A}}, {{B,C}}, {{docker}}, got {gmem_sorted}"
     golden_wiki = _read_wiki(golden)
@@ -478,11 +552,13 @@ def test_chain_transitive_repartition(
         max_affected_members=200,
     )
     assert scope is not None
-    assert sorted(p.name for p in (f.path for f in scope.pool)) == [
-        "project_inbox_triage_a.md",
-        "project_inbox_triage_bridge.md",
-        "reference_pgvector_store.md",
-    ]
+    assert sorted(p.name for p in (f.path for f in scope.pool)) == sorted(
+        [
+            f"{_CHAIN_A_NAME}.md",
+            f"{_CHAIN_B_NAME}.md",
+            f"{_CHAIN_C_NAME}.md",
+        ]
+    )
 
     # (b) Full == delta, byte-for-byte + membership, and C split into a singleton.
     branch_a = _make_branch(golden, tmp_path / "chain-A")
@@ -501,7 +577,7 @@ def test_chain_transitive_repartition(
     assert _cluster_membership(branch_a) == _cluster_membership(branch_b)
     # C really was repartitioned out into its own cluster.
     assert any(
-        m == ["chain/reference_pgvector_store.md"]
+        m == [f"chain/{_CHAIN_C_NAME}.md"]
         for m in _cluster_membership(branch_b).values()
     ), "C should split into its own singleton cluster after the bridge breaks"
 
