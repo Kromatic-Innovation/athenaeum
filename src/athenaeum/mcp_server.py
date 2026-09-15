@@ -1074,7 +1074,7 @@ class _RecallRow:
     here."""
 
     block: str
-    pushed_hit: tuple[str, dict[str, object], str]
+    pushed_hit: tuple[str, dict[str, object], int]
     tokens: int
 
 
@@ -1441,18 +1441,24 @@ def _recall_via_backend(
             f"{meta_block}{scope_block}{links_line}{excluded_block}\n"
             f"{snip}\n"
         )
+        # Issue athenaeum#718: meter the FULLY RENDERED block --
+        # path/tags/uid/type/meta/scope/links/excluded headers
+        # plus the snippet -- never just `snip` alone. The token
+        # budget must bound what actually gets pushed into the
+        # session; metering only the snippet undercounts by the
+        # header overhead (which this issue's own scope segment
+        # adds to) and lets the budget be consistently overrun.
+        block_tokens = estimate_tokens(block)
         _rows.append(
             _RecallRow(
                 block=block,
-                pushed_hit=(filename, fm, snip),
-                # Issue athenaeum#718: meter the FULLY RENDERED block --
-                # path/tags/uid/type/meta/scope/links/excluded headers
-                # plus the snippet -- never just `snip` alone. The token
-                # budget must bound what actually gets pushed into the
-                # session; metering only the snippet undercounts by the
-                # header overhead (which this issue's own scope segment
-                # adds to) and lets the budget be consistently overrun.
-                tokens=estimate_tokens(block),
+                # Issue athenaeum#1567: the ledger element carries the SAME
+                # already-computed block token count as `tokens` below, not
+                # the raw snippet text -- `build_push_record` metered the
+                # snippet alone, which saturates at 100 tokens (400 chars /
+                # 4) regardless of how large the fully rendered block is.
+                pushed_hit=(filename, fm, block_tokens),
+                tokens=block_tokens,
             )
         )
 
@@ -1576,7 +1582,7 @@ def _recall_via_backend(
         _rows = _packed
 
     blocks: list[str] = [row.block for row in _rows]
-    _pushed_hits: list[tuple[str, dict[str, object], str]] = [row.pushed_hit for row in _rows]
+    _pushed_hits: list[tuple[str, dict[str, object], int]] = [row.pushed_hit for row in _rows]
     if not blocks:
         return f"No wiki pages matched query: {query!r}{unrecognized_note}"
 

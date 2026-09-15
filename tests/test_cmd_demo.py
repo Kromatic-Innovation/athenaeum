@@ -45,7 +45,13 @@ def _seed_push(
         session_id=session_id,
         query="q",
         backend="fts5",
-        hits=[(f"{uid}.md", {"uid": uid, "access": "internal", "audience": ["owner"]}, "body")],
+        hits=[
+            (
+                f"{uid}.md",
+                {"uid": uid, "access": "internal", "audience": ["owner"]},
+                push_metrics.estimate_tokens("body"),
+            ),
+        ],
     )
     record.ts = ts
     push_metrics.record_push(record, cache_dir=cache_dir)

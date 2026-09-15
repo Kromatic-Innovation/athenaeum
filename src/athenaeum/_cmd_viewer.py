@@ -415,6 +415,12 @@ CLASSIFICATION_PULLED_COLD = "pulled-cold"
 #: predates the ``source`` key, so whether the session pushed it or pulled it
 #: is genuinely not knowable. Rendered, never dropped; never counted as a pull.
 CLASSIFICATION_UNKNOWN_PROVENANCE = "unknown-provenance"
+#: Sixth state (issue athenaeum#1568): the pages pushed this session carry NO
+#: ``related:`` edges at all, so a pull that isn't a breadcrumb is not
+#: evidence of anything -- there was nothing for it to be a breadcrumb FROM.
+#: `pulled-cold` is reserved for the case where edges existed and this page
+#: simply wasn't reached by one; that is a real signal, this is a data gap.
+CLASSIFICATION_PULLED_NO_EDGES = "pulled-no-edges"
 
 
 def classify(
@@ -424,8 +430,9 @@ def classify(
     pulled_ids: set[str],
     breadcrumb_ids: set[str],
     unknown_ids: set[str],
+    has_outgoing_edges: bool = True,
 ) -> str:
-    """Which of the four states one page is in for this session.
+    """Which of the six states one page is in for this session.
 
     The order of these tests IS the definition, not an implementation detail:
 
@@ -440,8 +447,13 @@ def classify(
        athenaeum#1542). Tested BEFORE breadcrumb and pulled-cold: both of
        those are claims about the session having *pulled* the page, and this
        is exactly the case where that is not known.
-    5. pulled, not pushed, unrelated - the session found it alone. The miss,
-       and the only state that should alarm anyone.
+    5. pulled, not pushed, unrelated, but no pushed page in this session
+       carried any ``related:`` edge at all (issue athenaeum#1568) - there was
+       no edge data to traverse either way, so painting this page as the
+       alarm state would claim evidence that does not exist.
+    6. pulled, not pushed, unrelated, and edges DID exist among the pushed
+       pages - the session found it alone despite a thread being available.
+       The miss, and the only state that should alarm anyone.
 
     A page can be both pushed and related-to-something-pushed; (1)/(2) win,
     because having been pushed outright is the stronger statement about it.
@@ -453,6 +465,11 @@ def classify(
     is NOT the session-end reference determination, which cannot populate
     mid-session. The page's legend has to say so, or light green reads as a
     claim about usefulness that this data does not support.
+
+    ``has_outgoing_edges`` defaults to ``True`` so every existing caller that
+    does not pass it keeps the pre-athenaeum#1568 pulled-cold behaviour
+    verbatim; only :func:`enrich_payload`, which actually knows whether the
+    pushed set carried any ``related:`` edge, passes ``False``.
     """
     was_pushed = item_id in pushed_ids
     was_pulled = item_id in pulled_ids
@@ -464,6 +481,8 @@ def classify(
         return CLASSIFICATION_UNKNOWN_PROVENANCE
     if item_id in breadcrumb_ids:
         return CLASSIFICATION_BREADCRUMB
+    if not has_outgoing_edges:
+        return CLASSIFICATION_PULLED_NO_EDGES
     return CLASSIFICATION_PULLED_COLD
 
 
@@ -650,6 +669,15 @@ def enrich_payload(
             breadcrumb_ids.update(page.related)
     breadcrumb_ids -= pushed_ids
 
+    # issue athenaeum#1568: whether the pages PUSHED this session carried any
+    # `related:` edge at all. `related:` is currently written only on the
+    # split-disposition path (~8% of the live corpus), so on most sessions
+    # this is False -- and painting every non-breadcrumb pull `pulled-cold`
+    # in that case claims evidence of a miss that was never collected.
+    has_outgoing_edges = any(
+        info[uid].related for uid in pushed_ids if uid in info
+    )
+
     def _page_row(uid: str) -> dict[str, Any]:
         row = dict(all_items[uid])
         page = info[uid]
@@ -661,6 +689,7 @@ def enrich_payload(
             pulled_ids=pulled_ids,
             breadcrumb_ids=breadcrumb_ids,
             unknown_ids=unknown_ids,
+            has_outgoing_edges=has_outgoing_edges,
         )
         row["referenced"] = _referenced_flag(
             uid,
@@ -680,6 +709,12 @@ def enrich_payload(
         # default, so its position is a decision on the record: below every
         # state that asserts something, above nothing.
         CLASSIFICATION_UNKNOWN_PROVENANCE: 4,
+        # issue athenaeum#1568: like unknown-provenance, this state asserts
+        # nothing about the page itself -- it says the pushed set carried no
+        # edge data, not that this particular pull was or wasn't a miss.
+        # Grouped at the same low-interest end, below unknown-provenance
+        # since that one is at least a genuine provenance fact about the row.
+        CLASSIFICATION_PULLED_NO_EDGES: 5,
     }
     pages = sorted(
         (_page_row(uid) for uid in all_items),
@@ -702,6 +737,7 @@ def enrich_payload(
                 pulled_ids=pulled_ids,
                 breadcrumb_ids=breadcrumb_ids,
                 unknown_ids=unknown_ids,
+                has_outgoing_edges=has_outgoing_edges,
             )
             turn_items.append(row)
         query_hash = last_turn_record.get("query_hash", "")
