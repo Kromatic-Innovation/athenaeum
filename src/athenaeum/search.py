@@ -2885,3 +2885,5 @@ def _warn_embed_texts_none_once(exc: BaseException | None = None) -> None:
             type(exc).__name__,
             exc,
         )
+
+# no-op comment: athenaeum#1609 probe PR touching this path filter entry (throwaway, never merged)
