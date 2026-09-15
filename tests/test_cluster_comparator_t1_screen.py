@@ -37,6 +37,7 @@ from athenaeum.cluster_comparator import (
     run_cluster_comparator,
 )
 from athenaeum.models import AutoMemoryFile, TokenUsage
+from athenaeum.runlock import RunLock
 from athenaeum.verdicts import page_id_for_path
 
 _SRC = Path(cc_mod.__file__)
@@ -244,9 +245,15 @@ class TestT1NotArmed:
         )
         members = _cross_class_pair(tmp_path)
 
-        result = run_cluster_comparator(
-            members, _comparator_client(), config=_COMPARATOR_ON, cluster_id="c1"
-        )
+        with RunLock(tmp_path) as lock:
+            result = run_cluster_comparator(
+                members,
+                _comparator_client(),
+                config=_COMPARATOR_ON,
+                cluster_id="c1",
+                wiki_root=tmp_path,
+                lock=lock,
+            )
 
         assert calls == []
         assert result.screened_out == []
@@ -264,13 +271,16 @@ class TestT1NotArmed:
         )
         members = _cross_class_pair(tmp_path)
 
-        result = run_cluster_comparator(
-            members,
-            _comparator_client(),
-            config=_COMPARATOR_ON,  # comparator on, T1 knob absent -> off
-            cluster_id="c1",
-            screen=_screen_ctx(tmp_path),
-        )
+        with RunLock(tmp_path) as lock:
+            result = run_cluster_comparator(
+                members,
+                _comparator_client(),
+                config=_COMPARATOR_ON,  # comparator on, T1 knob absent -> off
+                cluster_id="c1",
+                screen=_screen_ctx(tmp_path),
+                wiki_root=tmp_path,
+                lock=lock,
+            )
 
         assert calls == []
         assert result.screened_out == []
@@ -370,13 +380,16 @@ class TestT1Armed:
         members = _same_class_pair(tmp_path)
         t1_client = _t1_passup_client()
 
-        result = run_cluster_comparator(
-            members,
-            _comparator_client(),
-            config=_COMPARATOR_ON_T1_ON,
-            cluster_id="c1",
-            screen=_screen_ctx(tmp_path, client=t1_client),
-        )
+        with RunLock(tmp_path) as lock:
+            result = run_cluster_comparator(
+                members,
+                _comparator_client(),
+                config=_COMPARATOR_ON_T1_ON,
+                cluster_id="c1",
+                screen=_screen_ctx(tmp_path, client=t1_client),
+                wiki_root=tmp_path,
+                lock=lock,
+            )
 
         assert result.screened_out == []
         assert len(result.outcomes) == 1
@@ -394,14 +407,17 @@ class TestT1Armed:
         )
         members = _cross_class_pair(tmp_path)  # would otherwise be rejected
 
-        result = run_cluster_comparator(
-            members,
-            _comparator_client(),
-            config=_COMPARATOR_ON_T1_ON,
-            usage=TokenUsage(),
-            cluster_id="c1",
-            screen=_screen_ctx(tmp_path, client=MagicMock()),
-        )
+        with RunLock(tmp_path) as lock:
+            result = run_cluster_comparator(
+                members,
+                _comparator_client(),
+                config=_COMPARATOR_ON_T1_ON,
+                usage=TokenUsage(),
+                cluster_id="c1",
+                screen=_screen_ctx(tmp_path, client=MagicMock()),
+                wiki_root=tmp_path,
+                lock=lock,
+            )
 
         assert result.screened_out == []
         assert len(result.outcomes) == 1
@@ -438,13 +454,19 @@ class TestT1Armed:
         # (a, b) are same-class, so T1's deterministic checks pass and the
         # model decides — canned to pass_up so only the CROSS-class pairs
         # containing ``c`` are dropped.
-        result = run_cluster_comparator(
-            [a, b, c],
-            _comparator_client(),
-            config=_COMPARATOR_ON_T1_ON,
-            cluster_id="c1",
-            screen=_screen_ctx(tmp_path, client=_t1_passup_client()),
-        )
+        # wiki_root is the members' actual auto_memory_root (scope's parent)
+        # so the ids below (asserted against auto_memory_root(a)/(b)
+        # directly) stay unchanged by threading wiki_root through.
+        with RunLock(scope.parent) as lock:
+            result = run_cluster_comparator(
+                [a, b, c],
+                _comparator_client(),
+                config=_COMPARATOR_ON_T1_ON,
+                cluster_id="c1",
+                screen=_screen_ctx(tmp_path, client=_t1_passup_client()),
+                wiki_root=scope.parent,
+                lock=lock,
+            )
 
         assert result.pair_count == 3
         assert len(result.screened_out) == 2

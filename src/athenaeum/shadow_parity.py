@@ -104,6 +104,7 @@ from athenaeum.models import (
     estimate_prompt_tokens,
 )
 from athenaeum.provider import resolve_max_tokens
+from athenaeum.runlock import RunLock
 from athenaeum.shadow_linkage import _get_git_sha, _get_version
 from athenaeum.store import now_iso
 from athenaeum.verdicts import VERDICT_VALUES
@@ -579,6 +580,20 @@ class ParityItem:
     ``comparator_calls`` is NOT ``len(pair_verdicts)`` — a Gate-1-resolved
     pair appears in ``pair_verdicts`` (it has a real verdict) but costs zero
     dispatches; see :func:`_comparator_calls_issued`.
+
+    ``pair_verdicts`` (issue athenaeum#1678) is a full census of every pair
+    this case's :func:`~athenaeum.cluster_comparator.run_cluster_comparator`
+    call actually reached ``record_comparison`` for — each row is
+    ``{"a", "b", "verdict", "memoised", "reason"}``. ``memoised=True`` marks
+    a pair whose verdict was reused from a PRIOR ``record_comparison`` call
+    against the same ``workdir`` (``skipped="fresh"``) rather than freshly
+    decided this call — it still counts as a real, decided verdict for
+    ``comparator_verdict``'s roll-up, but never for ``comparator_calls``
+    (no Gate-2 dispatch was issued for it). A row with ``verdict=None`` and
+    a non-empty ``reason`` is UNRESOLVED (Gate 2 unavailable, or an
+    erasure-class refusal) — examined but never decided, so it contributes
+    nothing to the roll-up either, but is still listed here rather than
+    silently dropped.
     """
 
     case_id: str
@@ -1057,6 +1072,27 @@ def run_shadow_parity(
     is deliberately a :class:`BaseException` for exactly that reason (see
     its docstring) — a blanket ``except Exception`` could never have caught
     it in the first place.
+
+    **Ledger wiring (issue athenaeum#1678).** ``run_cluster_comparator`` now
+    calls :func:`athenaeum.comparator.record_comparison` instead of
+    :func:`~athenaeum.comparator.compare_pages` directly, which requires an
+    already-acquired :class:`~athenaeum.runlock.RunLock` plus a
+    ``wiki_root``. This function acquires ONE lock over *workdir* before the
+    per-case loop and holds it for the loop's whole duration, passing
+    ``wiki_root=workdir`` into every call — mirroring
+    :func:`athenaeum.merge.merge_clusters_to_wiki`'s caller-held lock
+    lifecycle. A live-corpus run never reaches this function's scratch
+    *workdir*, so this measurement now also exercises (and memoizes into) a
+    real, but disposable, verdict ledger under ``workdir/_verdicts/`` — a
+    side effect confined entirely to this run's own scratch directory.
+    Today's ONE shipped caller (``_cmd_measure.py``) always passes a fresh
+    ``tempfile.TemporaryDirectory``, so a pair is never actually memoised
+    in practice yet — but a caller that passes a STABLE *workdir* across
+    runs (replaying the same cases twice, say) would see it, which is
+    exactly what folding ``cluster_result.memoised`` into the verdict
+    roll-up below (rather than only ``cluster_result.outcomes``) guards
+    against: a case whose every pair came back memoised must still roll up
+    to its real verdict, not silently read as "no-decision".
     """
     projection = project_shadow_parity(cases, config=config, workdir=workdir)
     corpus_digest = _corpus_digest_for_cases(cases)
@@ -1132,99 +1168,153 @@ def run_shadow_parity(
     aborted = False
     abort_reason = ""
 
-    for case in cases:
-        dest_dir = _case_scope_dir(workdir, case)
-        members = materialise_members(case, dest_dir)
+    # Issue athenaeum#1678: run_cluster_comparator now requires an
+    # already-acquired RunLock once a pair reaches record_comparison. ONE
+    # lock, acquired here over `workdir` and held for the whole per-case
+    # loop, mirrors merge_clusters_to_wiki's caller-held lock lifecycle --
+    # see this function's own docstring.
+    workdir.mkdir(parents=True, exist_ok=True)
+    with RunLock(workdir) as lock:
+        for case in cases:
+            dest_dir = _case_scope_dir(workdir, case)
+            members = materialise_members(case, dest_dir)
 
-        try:
-            if case.declared_detector is not None:
-                det = case.declared_detector
-                result = ContradictionResult(
-                    detected=True,
-                    conflict_type=det.conflict_type,
-                    conflicting_passages=list(det.passages),
-                    rationale=det.rationale,
+            try:
+                if case.declared_detector is not None:
+                    det = case.declared_detector
+                    result = ContradictionResult(
+                        detected=True,
+                        conflict_type=det.conflict_type,
+                        conflicting_passages=list(det.passages),
+                        rationale=det.rationale,
+                    )
+                    case_detector_calls = 0
+                else:
+                    result = contradictions.detect_contradictions(
+                        members, guarded_detector_client, config=config, usage=usage
+                    )
+                    # Mirrors detect_contradictions' own short-circuit conditions
+                    # (<2 members, or client is None) exactly, rather than guessing
+                    # from the result alone -- both short-circuits return
+                    # detected=False without ever dispatching a request.
+                    case_detector_calls = (
+                        1 if (len(members) >= 2 and detector_client is not None) else 0
+                    )
+                detector_verdict = detector_verdict_from_result(result)
+
+                cluster_result: ClusterComparatorResult = run_cluster_comparator(
+                    members,
+                    guarded_comparator_client,
+                    config=effective_config,
+                    usage=usage,
+                    cluster_id=f"{case.source}-{case.case_id}",
+                    wiki_root=workdir,
+                    lock=lock,
                 )
-                case_detector_calls = 0
-            else:
-                result = contradictions.detect_contradictions(
-                    members, guarded_detector_client, config=config, usage=usage
+            except _CostCeilingExceeded as exc:
+                aborted = True
+                abort_reason = f"{exc} (during case {case.source}/{case.case_id!r})"
+                break
+
+            if not cluster_result.gate_enabled:
+                # Belt 2 of QA finding 1: this should be unreachable given the
+                # preflight check above (the SAME effective_config is passed to
+                # every case), but if it ever fires, an empty `outcomes` must
+                # never be folded into the matrix as a fabricated "no-decision"
+                # -- abort instead.
+                aborted = True
+                abort_reason = (
+                    f"comparator gate reported disabled (gate_enabled=False) for "
+                    f"case {case.source}/{case.case_id!r} -- the comparator lane "
+                    "did not run for this case even though the preflight check "
+                    "passed; aborting rather than reporting a fabricated "
+                    "no-decision result"
                 )
-                # Mirrors detect_contradictions' own short-circuit conditions
-                # (<2 members, or client is None) exactly, rather than guessing
-                # from the result alone -- both short-circuits return
-                # detected=False without ever dispatching a request.
-                case_detector_calls = (
-                    1 if (len(members) >= 2 and detector_client is not None) else 0
+                break
+
+            detector_calls += case_detector_calls
+            # Issue athenaeum#1678 (Seer HIGH finding): case_comparator_calls
+            # is a SPEND measure and stays scoped to `outcomes` ONLY -- a
+            # memoised pair issued no Gate-2 dispatch, so it must not
+            # inflate this count even though it DOES carry a decided
+            # verdict (folded into the rollup below). Conflating the two
+            # would make comparator_calls lie about spend the moment a
+            # caller passes a stable `workdir` (today's `_cmd_measure.py`
+            # always uses a fresh `TemporaryDirectory`, so `memoised` is
+            # latent, never live, through the shipped CLI).
+            case_comparator_calls = _comparator_calls_issued(
+                [outcome for _a, _b, outcome in cluster_result.outcomes]
+            )
+            comparator_calls += case_comparator_calls
+            # A memoised pair (`skipped="fresh"`) IS a decided verdict --
+            # record_comparison just didn't re-derive it this call -- so it
+            # must feed the SAME rollup a freshly-decided pair does, or a
+            # case whose every pair happens to be memoised silently rolls
+            # up to "no-decision" (inconclusive) instead of its real
+            # verdict. Minimal synthetic CompareOutcome objects (only
+            # `verdict` set) let this reuse roll_up_comparator_verdict's
+            # existing `Sequence[CompareOutcome]` contract unchanged --
+            # narrower than widening the function to also accept bare
+            # verdict strings, which would weaken that contract for every
+            # OTHER caller too.
+            memoised_outcomes = [
+                CompareOutcome(verdict=verdict) for _a, _b, verdict in cluster_result.memoised
+            ]
+            comparator_verdict = roll_up_comparator_verdict(
+                [outcome for _a, _b, outcome in cluster_result.outcomes] + memoised_outcomes
+            )
+
+            agreement = classify_agreement(detector_verdict, comparator_verdict)
+            correct = comparator_decided_correctly(case.outcome_class, comparator_verdict)
+
+            # pair_verdicts is a full census of every pair this case
+            # actually reached record_comparison for (screened-out pairs
+            # never reach it, so they are not here either) -- freshly
+            # decided, memoised, AND unresolved (ok=False: Gate 2
+            # unavailable or an erasure-class refusal). `unresolved`
+            # deliberately contributes NO verdict to the rollup above
+            # (nothing was decided; "inconclusive" is the honest read when
+            # every pair is unresolved) but is still surfaced here rather
+            # than dropped, so a reader auditing this row is not silently
+            # missing pairs the run examined. `memoised` marks which rows
+            # cost no Gate-2 dispatch, so this list is never mistaken for a
+            # spend accounting -- that is `comparator_calls`' job alone.
+            pair_verdicts: list[dict[str, Any]] = [
+                {"a": id_a, "b": id_b, "verdict": outcome.verdict, "memoised": False, "reason": ""}
+                for id_a, id_b, outcome in cluster_result.outcomes
+            ]
+            pair_verdicts.extend(
+                {"a": id_a, "b": id_b, "verdict": verdict, "memoised": True, "reason": ""}
+                for id_a, id_b, verdict in cluster_result.memoised
+            )
+            pair_verdicts.extend(
+                {"a": id_a, "b": id_b, "verdict": None, "memoised": False, "reason": reason}
+                for id_a, id_b, reason in cluster_result.unresolved
+            )
+
+            items.append(
+                ParityItem(
+                    case_id=case.case_id,
+                    source=case.source,
+                    outcome_class=case.outcome_class,
+                    detector_verdict=detector_verdict,
+                    comparator_verdict=comparator_verdict,
+                    pair_verdicts=pair_verdicts,
+                    agreement=agreement,
+                    comparator_correct=correct,
+                    detector_calls=case_detector_calls,
+                    comparator_calls=case_comparator_calls,
                 )
-            detector_verdict = detector_verdict_from_result(result)
-
-            cluster_result: ClusterComparatorResult = run_cluster_comparator(
-                members,
-                guarded_comparator_client,
-                config=effective_config,
-                usage=usage,
-                cluster_id=f"{case.source}-{case.case_id}",
             )
-        except _CostCeilingExceeded as exc:
-            aborted = True
-            abort_reason = f"{exc} (during case {case.source}/{case.case_id!r})"
-            break
+            matrix.add(detector_verdict, comparator_verdict)
 
-        if not cluster_result.gate_enabled:
-            # Belt 2 of QA finding 1: this should be unreachable given the
-            # preflight check above (the SAME effective_config is passed to
-            # every case), but if it ever fires, an empty `outcomes` must
-            # never be folded into the matrix as a fabricated "no-decision"
-            # -- abort instead.
-            aborted = True
-            abort_reason = (
-                f"comparator gate reported disabled (gate_enabled=False) for "
-                f"case {case.source}/{case.case_id!r} -- the comparator lane "
-                "did not run for this case even though the preflight check "
-                "passed; aborting rather than reporting a fabricated "
-                "no-decision result"
-            )
-            break
-
-        detector_calls += case_detector_calls
-        case_comparator_calls = _comparator_calls_issued(
-            [outcome for _a, _b, outcome in cluster_result.outcomes]
-        )
-        comparator_calls += case_comparator_calls
-        comparator_verdict = roll_up_comparator_verdict(
-            [outcome for _a, _b, outcome in cluster_result.outcomes]
-        )
-
-        agreement = classify_agreement(detector_verdict, comparator_verdict)
-        correct = comparator_decided_correctly(case.outcome_class, comparator_verdict)
-
-        items.append(
-            ParityItem(
-                case_id=case.case_id,
-                source=case.source,
-                outcome_class=case.outcome_class,
-                detector_verdict=detector_verdict,
-                comparator_verdict=comparator_verdict,
-                pair_verdicts=[
-                    {"a": id_a, "b": id_b, "verdict": outcome.verdict}
-                    for id_a, id_b, outcome in cluster_result.outcomes
-                ],
-                agreement=agreement,
-                comparator_correct=correct,
-                detector_calls=case_detector_calls,
-                comparator_calls=case_comparator_calls,
-            )
-        )
-        matrix.add(detector_verdict, comparator_verdict)
-
-        if max_usd is not None and usage.estimated_cost_usd > max_usd:
-            aborted = True
-            abort_reason = (
-                f"observed spend ${usage.estimated_cost_usd:.4f} exceeds "
-                f"--max-usd ${max_usd:.2f} after case {case.source}/{case.case_id!r}"
-            )
-            break
+            if max_usd is not None and usage.estimated_cost_usd > max_usd:
+                aborted = True
+                abort_reason = (
+                    f"observed spend ${usage.estimated_cost_usd:.4f} exceeds "
+                    f"--max-usd ${max_usd:.2f} after case {case.source}/{case.case_id!r}"
+                )
+                break
 
     call_multiplier = comparator_calls / detector_calls if detector_calls > 0 else None
 
