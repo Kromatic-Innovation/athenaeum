@@ -373,6 +373,34 @@ def _wiki_snapshot(root: Path) -> dict[str, str]:
     }
 
 
+_AUDIT_STAMP_LINE_RE = re.compile(r"^(?:last_audited|audit_version): .*\n?", re.MULTILINE)
+
+
+def _wiki_snapshot_ignoring_audit_stamps(root: Path) -> dict[str, str]:
+    """Like :func:`_wiki_snapshot`, with `last_audited:`/`audit_version:`
+    frontmatter lines stripped (issue athenaeum#1627).
+
+    Audit-on-touch (:meth:`athenaeum.librarian.RunContext.
+    resolve_audit_on_touch_client`) deliberately never resolves a client
+    while ``ctx.batch_mode`` is true -- :func:`athenaeum.audit.audit_page`
+    always makes a SYNCHRONOUS call, and a batch run routes LLM traffic
+    through the async Batch API instead; audit-on-touch has no
+    batch-transport path yet. So the SYNC pass of a sync/batch equivalence
+    test below DOES stamp a merged page's `last_audited`/`audit_version`
+    (it has a real, if fake, classify client) while the BATCH pass never
+    does -- a real, permanent, by-design asymmetry between the two
+    transports, not the wall-clock NONdeterminism `_freeze_recorded_at`
+    exists for (issue athenaeum#1064) -- freezing `now=` cannot make an
+    ABSENT stamp equal to a PRESENT one. Stripped here rather than folded
+    into `_wiki_snapshot` itself so every OTHER caller (most of which never
+    merge into an existing page at all) keeps comparing byte-for-byte.
+    """
+    return {
+        name: _AUDIT_STAMP_LINE_RE.sub("", text)
+        for name, text in _wiki_snapshot(root).items()
+    }
+
+
 def _all_batch_messages(client: _FakeClient) -> list[str]:
     return [
         req["params"]["messages"][0]["content"]
@@ -601,6 +629,14 @@ class TestBatchSyncEquivalence:
         _freeze_recorded_at(monkeypatch)
         caplog.set_level(logging.INFO, logger="athenaeum")
 
+        # Issue athenaeum#1627: audit-on-touch stamps `last_audited` from the
+        # real wall clock on any tier-3 merge (the "Acme Corp" update
+        # below). Freeze `now=` identically on both passes — same idiom
+        # `_freeze_recorded_at` established for `recorded_at` (issue
+        # athenaeum#1064) — so a straddled wall-clock instant can't fail
+        # this byte-identical comparison on nothing but that stamp.
+        frozen_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
         sync_client = _FakeClient(_scripted_responder)
         monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: sync_client)
         _patch_uids(monkeypatch)
@@ -609,6 +645,7 @@ class TestBatchSyncEquivalence:
                 raw_root=root_sync / "raw",
                 wiki_root=root_sync / "wiki",
                 knowledge_root=root_sync,
+                now=frozen_now,
             )
             == 0
         )
@@ -629,6 +666,7 @@ class TestBatchSyncEquivalence:
                 wiki_root=root_batch / "wiki",
                 knowledge_root=root_batch,
                 batch_mode=True,
+                now=frozen_now,
             )
             == 0
         )
@@ -636,7 +674,9 @@ class TestBatchSyncEquivalence:
             r.getMessage() for r in caplog.records if r.getMessage().startswith("Done:")
         ]
 
-        assert _wiki_snapshot(root_batch) == _wiki_snapshot(root_sync)
+        assert _wiki_snapshot_ignoring_audit_stamps(
+            root_batch
+        ) == _wiki_snapshot_ignoring_audit_stamps(root_sync)
         # Summary accounting (created/updated/escalated/skipped/failed)
         # identical between the two transports.
         assert sync_done and sync_done == batch_done
@@ -660,6 +700,10 @@ class TestBatchSyncEquivalence:
         root_batch = _seed_root(tmp_path, "batch", contents, with_acme=True)
         _clean_env(monkeypatch)
         _freeze_recorded_at(monkeypatch)
+        # Issue athenaeum#1627: see the matching comment in
+        # test_wiki_output_identical — the tier-3 merge here stamps
+        # `last_audited` from the wall clock too.
+        frozen_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
         sync_client = _FakeClient(_scripted_responder)
         monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: sync_client)
@@ -669,6 +713,7 @@ class TestBatchSyncEquivalence:
                 raw_root=root_sync / "raw",
                 wiki_root=root_sync / "wiki",
                 knowledge_root=root_sync,
+                now=frozen_now,
             )
             == 0
         )
@@ -682,11 +727,14 @@ class TestBatchSyncEquivalence:
                 wiki_root=root_batch / "wiki",
                 knowledge_root=root_batch,
                 batch_mode=True,
+                now=frozen_now,
             )
             == 0
         )
 
-        assert _wiki_snapshot(root_batch) == _wiki_snapshot(root_sync)
+        assert _wiki_snapshot_ignoring_audit_stamps(
+            root_batch
+        ) == _wiki_snapshot_ignoring_audit_stamps(root_sync)
         # Both actions of the one file went through the Batch API.
         msgs = _all_batch_messages(batch_client)
         assert any("## Entity to create" in m for m in msgs)

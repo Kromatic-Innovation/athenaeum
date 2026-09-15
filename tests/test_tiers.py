@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -4166,6 +4167,207 @@ class TestTier3DeriveActionsBudget:
         assert pending_updates == []
         assert updated_uids == []
         assert escalations == []
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 — audit-on-touch (issue athenaeum#1627): re-audit an `update`
+# action's TARGET page before the merge call rewrites it.
+# ---------------------------------------------------------------------------
+
+
+def _seed_acme_page(wiki_dir: Path, *, last_audited: str | None = None) -> None:
+    lines = [
+        "---",
+        "uid: a1b2c3d4",
+        "type: company",
+        "name: Acme Corp",
+        "access: confidential",
+    ]
+    if last_audited:
+        lines.append(f"last_audited: '{last_audited}'")
+    lines.extend(["---", "", "# Acme Corp", "", "Fintech startup.", ""])
+    (wiki_dir / "a1b2c3d4-acme-corp.md").write_text("\n".join(lines))
+
+
+def _acme_update_action() -> EntityAction:
+    return EntityAction(
+        kind="update",
+        name="Acme Corp",
+        entity_type="company",
+        tags=[],
+        access="",
+        existing_uid="a1b2c3d4",
+        observations="Acme expanded ops.",
+    )
+
+
+def _audit_or_merge_responder(**kwargs: Any) -> str:
+    """Routes a shared FakeLLMClient's calls: the audit system prompt
+    (``athenaeum.audit.AUDIT_SYSTEM``) gets a determinable coordinate fill;
+    anything else is treated as a merge call and gets a full-page echo."""
+    system = kwargs.get("system") or ""
+    if "auditing ONE knowledge-base page" in system:
+        return json.dumps(
+            {
+                "valid_from": {"value": "2026-01-01"},
+                "retirement_candidate": False,
+                "retirement_reason": "",
+            }
+        )
+    return "# Acme Corp\n\nFintech startup. Expanded ops."
+
+
+def _make_audit_hook(
+    *,
+    client: Any,
+    model: str = "claude-haiku-4-5-20251001",
+    counters: Any,
+    freshness_hours: float | None = None,
+    now: Any = None,
+) -> Any:
+    """Build a ``tier3_derive_actions``-shaped ``audit_hook`` closure —
+    mirrors :func:`athenaeum.librarian.process_one`'s own ``_audit_hook``,
+    the real production wiring (a closure so ``tiers.py`` never imports
+    ``athenaeum.audit_on_touch`` directly — see ``tier3_derive_actions``'s
+    own docstring for why)."""
+    from athenaeum.audit_on_touch import audit_on_touch
+
+    def _hook(uid: str, path: Path, meta: dict, body: str) -> None:
+        kwargs: dict[str, Any] = {}
+        if freshness_hours is not None:
+            kwargs["freshness_hours"] = freshness_hours
+        if now is not None:
+            kwargs["now"] = now
+        audit_on_touch(
+            client,
+            uid=uid,
+            path=path,
+            meta=meta,
+            body=body,
+            model=model,
+            counters=counters,
+            **kwargs,
+        )
+
+    return _hook
+
+
+class TestTier3DeriveActionsAuditOnTouch:
+    def test_audits_target_page_before_the_merge_call(self, wiki_dir: Path) -> None:
+        from athenaeum.audit_on_touch import AuditOnTouchCounters
+        from tests.conftest import FakeLLMClient
+
+        _seed_acme_page(wiki_dir)
+        raw = _make_raw("New info about Acme.")
+        index = EntityIndex(wiki_dir)
+        client = FakeLLMClient(responder=_audit_or_merge_responder)
+        counters = AuditOnTouchCounters()
+
+        new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
+            raw,
+            [_acme_update_action()],
+            index,
+            wiki_dir,
+            client,
+            audit_hook=_make_audit_hook(client=client, counters=counters),
+        )
+
+        # One audit call, and it is the FIRST call this client received —
+        # i.e. it happened before the merge call.
+        audit_calls = [c for c in client.calls if "auditing ONE" in (c.get("system") or "")]
+        assert len(audit_calls) == 1
+        assert "auditing ONE" in (client.calls[0].get("system") or "")
+        assert counters.audited == 1
+
+        assert updated_uids == ["a1b2c3d4"]
+        assert len(pending_updates) == 1
+        written_path, written_text = pending_updates[0]
+        assert written_path == wiki_dir / "a1b2c3d4-acme-corp.md"
+
+        from athenaeum.audit import AUDIT_VERSION
+        from athenaeum.models import parse_frontmatter
+
+        meta, body = parse_frontmatter(written_text)
+        assert meta["audit_version"] == AUDIT_VERSION
+        from datetime import datetime as _dt
+
+        _dt.strptime(meta["last_audited"], "%Y-%m-%dT%H:%M:%SZ")
+        assert meta["valid_from"] == "2026-01-01"
+        assert counters.coordinates_filled == 1
+        # The merge itself still happened normally.
+        assert "Expanded ops" in body
+
+    def test_fresh_last_audited_skips_the_audit_call(self, wiki_dir: Path) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from athenaeum.audit_on_touch import AuditOnTouchCounters
+        from tests.conftest import FakeLLMClient
+
+        now = datetime(2026, 9, 15, 12, 0, 0, tzinfo=timezone.utc)
+        recent = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _seed_acme_page(wiki_dir, last_audited=recent)
+        raw = _make_raw("New info about Acme.")
+        index = EntityIndex(wiki_dir)
+        client = FakeLLMClient(responder=_audit_or_merge_responder)
+        counters = AuditOnTouchCounters()
+
+        new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
+            raw,
+            [_acme_update_action()],
+            index,
+            wiki_dir,
+            client,
+            audit_hook=_make_audit_hook(client=client, counters=counters, now=lambda: now),
+        )
+
+        audit_calls = [c for c in client.calls if "auditing ONE" in (c.get("system") or "")]
+        assert audit_calls == []
+        assert counters.skipped_fresh == 1
+        assert counters.audited == 0
+        # The merge still happened — the audit skip never blocks the touch.
+        assert updated_uids == ["a1b2c3d4"]
+
+    def test_no_audit_client_still_completes_the_merge(self, wiki_dir: Path) -> None:
+        from athenaeum.audit_on_touch import AuditOnTouchCounters
+
+        _seed_acme_page(wiki_dir)
+        raw = _make_raw("New info about Acme.")
+        index = EntityIndex(wiki_dir)
+        write_client = _mock_client("# Acme Corp\n\nFintech startup. Expanded ops.")
+        counters = AuditOnTouchCounters()
+
+        new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
+            raw,
+            [_acme_update_action()],
+            index,
+            wiki_dir,
+            write_client,
+            audit_hook=_make_audit_hook(client=None, counters=counters),
+        )
+
+        assert counters.skipped_unavailable == 1
+        assert counters.audited == 0
+        # The change goes ahead exactly as it does today.
+        assert updated_uids == ["a1b2c3d4"]
+        assert len(pending_updates) == 1
+
+    def test_audit_counters_none_disables_the_hook_entirely(self, wiki_dir: Path) -> None:
+        """Every pre-athenaeum#1627 caller passes no audit_* kwargs at
+        all — must be byte-identical to before this issue."""
+        _seed_acme_page(wiki_dir)
+        raw = _make_raw("New info about Acme.")
+        index = EntityIndex(wiki_dir)
+        client = _mock_client("# Acme Corp\n\nFintech startup. Expanded ops.")
+
+        new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
+            raw, [_acme_update_action()], index, wiki_dir, client
+        )
+
+        assert updated_uids == ["a1b2c3d4"]
+        from athenaeum.models import parse_frontmatter
+
+        meta, _body = parse_frontmatter(pending_updates[0][1])
+        assert "last_audited" not in meta
 
 
 # ---------------------------------------------------------------------------

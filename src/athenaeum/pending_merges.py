@@ -82,11 +82,19 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.merge_type_gate import _merge_proposal_suppression_reason
 from athenaeum.models import parse_frontmatter, render_frontmatter, slugify
+
+if TYPE_CHECKING:
+    # Annotation-only (issue athenaeum#1627) — the real import stays local to
+    # `_audit_pending_merge_sources` to avoid paying for
+    # `athenaeum.audit_on_touch` (and transitively `athenaeum.audit`) on a
+    # write path that never runs an audit (`audit_counters=None`, every
+    # pre-athenaeum#1627 caller).
+    from athenaeum.audit_on_touch import AuditOnTouchCounters
 from athenaeum.provenance import record_merge_provenance
 from athenaeum.sidecar_blocks import (
     MARKDOWN_FENCE_OPEN_RE,
@@ -537,8 +545,22 @@ def write_pending_merge(
     write_kind: str | None = None,
     embedder: str | None = None,
     display_name: str | None = None,
+    audit_client: Any = None,
+    audit_model: str = "",
+    audit_counters: "AuditOnTouchCounters | None" = None,
+    audit_freshness_hours: float | None = None,
+    audit_now: "Callable[[], datetime] | None" = None,
 ) -> str:
     """Append one merge-proposal block to ``_pending_merges.md``.
+
+    ``audit_client`` / ``audit_model`` / ``audit_counters`` /
+    ``audit_freshness_hours`` / ``audit_now`` (issue athenaeum#1627): when
+    ``audit_counters`` is given, every page named in *sources* is
+    re-audited (:func:`athenaeum.audit_on_touch.audit_on_touch`) BEFORE
+    this proposal block is written — see :func:`_audit_pending_merge_sources`
+    below. ``audit_counters=None`` (every pre-athenaeum#1627 caller)
+    disables the hook entirely — byte-identical behavior to before this
+    issue.
 
     Returns the rendered block text (without surrounding separator).
     Creates the file lazily with a ``# Pending Merges`` header. Idempotent:
@@ -592,6 +614,15 @@ def write_pending_merge(
             "'fold-into-existing' deletes the source pages at approve time. "
             "Pass write_kind=None to derive it, or correct merge_target_name."
         )
+    if audit_counters is not None:
+        _audit_pending_merge_sources(
+            sources,
+            client=audit_client,
+            model=audit_model,
+            counters=audit_counters,
+            freshness_hours=audit_freshness_hours,
+            now=audit_now,
+        )
     block = render_block(
         merge_target_name=merge_target_name,
         sources=sources,
@@ -617,6 +648,64 @@ def write_pending_merge(
         combined = "# Pending Merges\n\n" + block + "\n"
     atomic_write_text(merges_path, combined)
     return block
+
+
+def _audit_pending_merge_sources(
+    sources: list[str],
+    *,
+    client: Any,
+    model: str,
+    counters: "AuditOnTouchCounters",
+    freshness_hours: float | None,
+    now: "Callable[[], datetime] | None",
+) -> None:
+    """Re-audit each page in *sources* before its merge proposal is written
+    (issue athenaeum#1627 plan step 3).
+
+    Reads/writes each page directly using the SAME parse-frontmatter ->
+    mutate-dict -> render-frontmatter -> atomic-write idiom this module
+    already uses for its own sidecar file (and every other in-place page
+    editor in this codebase — see :mod:`athenaeum.audit`'s module
+    docstring). :func:`athenaeum.audit.apply_verdict_to_meta` (called
+    inside :func:`~athenaeum.audit_on_touch.audit_on_touch`) is the ONE
+    stamping implementation; this loop only re-reads/writes the file, it
+    does not duplicate that mutation logic.
+
+    Never raises and never blocks the proposal write that follows: a
+    source that cannot be read, or carries no ``uid:``, is silently
+    skipped (nothing to audit/stamp), matching every other best-effort
+    page scan in this codebase; :func:`~athenaeum.audit_on_touch.audit_on_touch`
+    itself never raises either.
+    """
+    from athenaeum.audit_on_touch import audit_on_touch
+
+    for raw_path in sources:
+        path = Path(raw_path)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, body = parse_frontmatter(text)
+        uid = meta.get("uid") if meta else None
+        if not isinstance(uid, str) or not uid.strip():
+            continue
+
+        call_kwargs: dict[str, Any] = {}
+        if freshness_hours is not None:
+            call_kwargs["freshness_hours"] = freshness_hours
+        verdict = audit_on_touch(
+            client,
+            uid=uid,
+            path=path,
+            meta=meta,
+            body=body,
+            model=model,
+            counters=counters,
+            now=now,
+            **call_kwargs,
+        )
+        if verdict is not None and verdict.error is None:
+            atomic_write_text(path, render_frontmatter(meta) + "\n" + body)
 
 
 def _preview_draft_body(draft_merged_body: str, preview_chars: int) -> tuple[str, bool]:

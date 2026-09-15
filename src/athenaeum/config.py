@@ -4536,6 +4536,48 @@ def resolve_name_collision_automerge_enabled(config: dict[str, Any] | None) -> b
     return False
 
 
+def resolve_audit_on_touch_freshness_hours(config: dict[str, Any] | None) -> float:
+    """Resolve the audit-on-touch freshness window in hours (issue athenaeum#1627).
+
+    A page whose ``last_audited`` falls inside this window of "now" is
+    skipped by :func:`athenaeum.audit_on_touch.audit_on_touch` (counted
+    ``audit_on_touch.skipped_fresh``) rather than re-audited before the
+    librarian touches it again — the plan's "a page touched repeatedly in
+    one run is audited once" rule, generalized to any window an operator
+    configures, not just a single run.
+
+    Precedence: ``ATHENAEUM_AUDIT_ON_TOUCH_FRESHNESS_HOURS`` env > yaml
+    ``librarian.audit_on_touch_freshness_hours`` > the issue's suggested
+    default, ``24.0``. A non-positive value (env or yaml) falls through to
+    the default — mirrors :func:`_resolve_positive_int_knob`'s "cannot
+    silently disable the guardrail" reasoning: a zero/negative window would
+    make every touch re-audit, defeating the freshness gate this knob
+    configures. No seed in ``_DEFAULTS`` (issue athenaeum#231). This default
+    (``24.0``) intentionally mirrors :data:`athenaeum.audit_on_touch.
+    DEFAULT_FRESHNESS_HOURS` — kept as a separate literal rather than an
+    import since this module (L2) may not import that one (L4, issue
+    athenaeum#1280 layering).
+    """
+    default = 24.0
+
+    value = _env_number("ATHENAEUM_AUDIT_ON_TOUCH_FRESHNESS_HOURS", float)
+    if value is not None and value > 0:
+        return value
+
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("audit_on_touch_freshness_hours")
+            if raw is not None and not isinstance(raw, bool):
+                try:
+                    yaml_value = float(raw)
+                except (TypeError, ValueError):
+                    return default
+                if yaml_value > 0:
+                    return yaml_value
+    return default
+
+
 def resolve_verdict_epoch_batch_interval_days(config: dict[str, Any] | None) -> int:
     """Resolve the comparator-epoch batching interval in days (issue athenaeum#712).
 
