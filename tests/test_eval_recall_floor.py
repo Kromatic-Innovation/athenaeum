@@ -75,10 +75,24 @@ class TestRelevanceFloorResolver:
         assert resolve_recall_relevance_floor(None, backend, unprompted=unprompted) is None
 
     def test_unrecognized_backend_never_gets_a_floor(self) -> None:
-        """``vector`` is not named in athenaeum#1492's acceptance criteria; even
-        an explicit config value for it must not produce a floor."""
+        """A genuinely unrecognized backend name (not ``fts5``/``keyword``/
+        ``vector``) is not in the resolver's allowlist; even an explicit
+        config value for it must not produce a floor. Rewritten for
+        athenaeum#1571, which moved ``vector`` OUT of this category -- see
+        ``test_vector_floor_is_read`` for its new, opposite behavior."""
+        config = {"recall": {"relevance_floor": {"made-up-backend": 0.5}}}
+        assert (
+            resolve_recall_relevance_floor(config, "made-up-backend", unprompted=False)
+            is None
+        )
+
+    def test_vector_floor_is_read(self) -> None:
+        """athenaeum#1571 gate 1: ``vector`` is now in the resolver's allowlist,
+        so an explicit config value for it resolves like ``fts5``/``keyword``
+        (YAML only -- there is no env-var entry for it, see
+        ``resolve_recall_relevance_floor``'s docstring)."""
         config = {"recall": {"relevance_floor": {"vector": 0.5}}}
-        assert resolve_recall_relevance_floor(config, "vector", unprompted=False) is None
+        assert resolve_recall_relevance_floor(config, "vector", unprompted=False) == 0.5
 
     def test_yaml_floor_is_read_per_backend(self) -> None:
         config = {"recall": {"relevance_floor": {"fts5": -6.0, "keyword": 12.0}}}
@@ -129,18 +143,39 @@ class TestRelevanceFloorResolver:
     def test_meets_relevance_floor_is_a_noop_when_inactive(self) -> None:
         assert meets_relevance_floor("fts5", -1000.0, None) is True
         assert meets_relevance_floor("keyword", -1000.0, None) is True
+        assert meets_relevance_floor("vector", 1000.0, None) is True
+        # Even an unrecognized backend name is a no-op when the floor is
+        # inactive -- the ValueError below only fires for a non-None floor
+        # (see ``test_unrecognized_backend_raises``).
+        assert meets_relevance_floor("made-up-backend", 1000.0, None) is True
 
     def test_meets_relevance_floor_directions_differ_by_backend(self) -> None:
-        """FTS5's rank is lower-is-better; keyword's score is higher-is-better.
-        A floor comparator that used one direction for both would silently
-        invert one backend's behavior."""
+        """FTS5's rank and vector's distance are lower-is-better; keyword's
+        score is higher-is-better. A floor comparator that used one
+        direction for all backends would silently invert the others.
+        athenaeum#1571: this used to be true of ``vector``, which fell through
+        the old higher-is-better fallback -- these two assertions fail on
+        pre-athenaeum#1571 code (0.2 was rejected, 0.8 was accepted -- both
+        backwards)."""
         # FTS5: more negative is better, so a MORE negative score clears a
         # LESS negative floor, and vice versa.
         assert meets_relevance_floor("fts5", -10.0, -5.0) is True
         assert meets_relevance_floor("fts5", -1.0, -5.0) is False
+        # vector (athenaeum#1571): chromadb cosine DISTANCE, lower is better --
+        # same direction as fts5, opposite of keyword.
+        assert meets_relevance_floor("vector", 0.2, 0.5) is True
+        assert meets_relevance_floor("vector", 0.8, 0.5) is False
         # keyword: higher is better.
         assert meets_relevance_floor("keyword", 40.0, 10.0) is True
         assert meets_relevance_floor("keyword", 5.0, 10.0) is False
+
+    def test_unrecognized_backend_raises(self) -> None:
+        """athenaeum#1571 AC2: an unrecognized backend name with a non-None
+        floor must raise rather than silently fall through to a direction
+        that may be wrong -- the exact failure mode ``vector`` had before
+        this issue opened gate 2 for it."""
+        with pytest.raises(ValueError):
+            meets_relevance_floor("made-up-backend", 5.0, 0.5)
 
 
 # ---------------------------------------------------------------------------
