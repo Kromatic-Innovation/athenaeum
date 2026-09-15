@@ -646,6 +646,25 @@ made concrete.
 > a path for each: where an artifact's own issue fixes its location, that
 > location wins.
 
+> **Note, issues athenaeum#1591 / athenaeum#1601 — this table classifies
+> persistence, not filesystem location.** The correction directly above fixed
+> one row (`_push_records.jsonl`); athenaeum#1601 (operator decision,
+> 2026-09-15) applied the identical fix to the other two ledgers row 8 still
+> named as candidates for the same table-membership relocation —
+> `spend.jsonl` and `observations.jsonl` (`_llm_schema_observations.jsonl`)
+> now both resolve to the cache dir, never `wiki_root`, mirroring
+> `push_metrics.durable_push_records_path` exactly, including its one-time
+> stranded-file warning. Generalizing: nothing in this table's "where it
+> resolves" column is authoritative over an artifact's own resolver. It
+> records the R3 persistence *class* and *scope* (`operational` /
+> `store-durable`, in every row 8 case), which those three ledgers still
+> share — R3 requires a declaration, not a `wiki_root` write target, and
+> §5.3 requires only that a `store-durable` artifact share a restore point
+> with the `source` it attests to. Treat any other cell in this table the
+> same way: consult the artifact's own resolver and its `ARTIFACT_REGISTRY`
+> entry (`src/athenaeum/store.py`) before treating this table as a location
+> authority.
+
 The `operational` scope split answers the question the cache dir raises
 directly: **machine-local state stays machine-local and outside the adapter;
 store-durable state moves behind it.** That is why a spend ledger and an FTS5
@@ -797,6 +816,19 @@ ledgers currently sitting in the cache dir — `spend.jsonl`,
 `observations.jsonl`, `_push_records.jsonl` — are misfiled. They are durable
 and not reconstructible, so they belong inside the store, and today they are
 in the one directory a user would feel safe deleting.
+
+> **Superseded, issues athenaeum#1591 / athenaeum#1601.** "Belong inside the
+> store" was S5's classification argument, and read literally it drove PR
+> athenaeum#1080 to move all three of these ledgers to `wiki_root` — put
+> them under `knowledge_root`, where `FilesystemStore.snapshot`'s `git add -A`
+> commits them into corpus history. That is the exact harm both corrections
+> above describe. `operational`/`store-durable` — the classification this
+> paragraph is actually arguing for — does not require `wiki_root` placement;
+> it requires only a declaration (R3) and a shared restore point with the
+> `source` an artifact attests to (§5.3), and the cache dir satisfies that
+> when the restore procedure accounts for it. All three ledgers now stay in
+> the cache dir; treat this paragraph as motivating their R3 classification
+> only, not their filesystem location.
 
 **Layering.** `athenaeum/store.py` is **L0/L1**, and it does **not** inherit
 `storage.py`'s upward reach to L2 `config` — an earlier draft of this section

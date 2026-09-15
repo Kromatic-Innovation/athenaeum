@@ -2812,72 +2812,124 @@ class TestSuiteLedgerIsolation:
 
 
 # ---------------------------------------------------------------------------
-# durable_ledger_path / resolve_ledger_path(wiki_root=...) — issue athenaeum#980
-# AC4: the R3 operational/store-durable relocation seam. NOT wired to any
-# production caller in this slice (see athenaeum.store.ARTIFACT_REGISTRY's
-# "spend-ledger" entry) — these tests cover the resolver capability itself.
+# durable_ledger_path — issue athenaeum#1601: the ledger resolves to the
+# cache dir, ALWAYS, and never into wiki_root. This withdraws issue
+# athenaeum#980 AC4's relocation of this artifact (the same withdrawal issue
+# athenaeum#1591 already made for `_push_records.jsonl`); see the function's
+# own docstring for the archaeology, and athenaeum.store.ARTIFACT_REGISTRY's
+# "spend-ledger" entry for the (unchanged) R3 class/scope declaration.
+#
+# The four-way resolution matrix below is exhaustive over the two files'
+# populated/absent states — the point being that the answer is now the same
+# in every cell, so no state of the disk can migrate a deployment.
 # ---------------------------------------------------------------------------
 
 
 class TestDurableLedgerPath:
-    def test_fresh_store_resolves_to_wiki_root(self, tmp_path: Path) -> None:
+    @staticmethod
+    def _roots(tmp_path: Path) -> tuple[Path, Path]:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         cache_dir = tmp_path / "cache"
-        resolved = spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
-        assert resolved == wiki_root / spend.LEDGER_FILENAME
+        cache_dir.mkdir()
+        return wiki_root, cache_dir
 
-    def test_already_migrated_store_resolves_to_wiki_root(self, tmp_path: Path) -> None:
-        wiki_root = tmp_path / "wiki"
-        wiki_root.mkdir()
+    def test_matrix_neither_populated(self, tmp_path: Path) -> None:
+        wiki_root, cache_dir = self._roots(tmp_path)
+        assert (
+            spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
+            == cache_dir / spend.LEDGER_FILENAME
+        )
+
+    def test_matrix_legacy_populated(self, tmp_path: Path) -> None:
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = cache_dir / spend.LEDGER_FILENAME
+        legacy.write_text('{"v":1}\n', encoding="utf-8")
+        assert spend.durable_ledger_path(wiki_root, cache_dir=cache_dir) == legacy
+
+    def test_matrix_wiki_path_populated(self, tmp_path: Path) -> None:
+        """The cell that used to migrate a deployment. A populated
+        ``<wiki_root>/spend.jsonl`` no longer captures resolution."""
+        wiki_root, cache_dir = self._roots(tmp_path)
         (wiki_root / spend.LEDGER_FILENAME).write_text('{"v":1}\n', encoding="utf-8")
-        cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
-        (cache_dir / spend.LEDGER_FILENAME).write_text('{"v":1}\n', encoding="utf-8")
-        resolved = spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
-        assert resolved == wiki_root / spend.LEDGER_FILENAME
+        assert (
+            spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
+            == cache_dir / spend.LEDGER_FILENAME
+        )
 
-    def test_legacy_store_falls_back_to_cache_dir(self, tmp_path: Path) -> None:
-        """An existing installation with ONLY the legacy cache-dir ledger
-        keeps resolving there — never silently orphaned by this slice."""
-        wiki_root = tmp_path / "wiki"
-        wiki_root.mkdir()
-        cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
+    def test_matrix_both_populated(self, tmp_path: Path) -> None:
+        wiki_root, cache_dir = self._roots(tmp_path)
         legacy = cache_dir / spend.LEDGER_FILENAME
         legacy.write_text('{"v":1}\n', encoding="utf-8")
-        resolved = spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
-        assert resolved == legacy
+        (wiki_root / spend.LEDGER_FILENAME).write_text('{"v":1}\n', encoding="utf-8")
+        assert spend.durable_ledger_path(wiki_root, cache_dir=cache_dir) == legacy
 
-    def test_empty_new_path_is_not_treated_as_already_migrated(self, tmp_path: Path) -> None:
-        """Issue athenaeum#1512 audit finding: this module's two-branch rule
-        carried the same defect as ``push_metrics.durable_push_records_path``
-        — an EMPTY ``<wiki_root>/spend.jsonl`` (a stray ``touch``, a
-        partially-written file from a crashed run) must not look "already
-        migrated" and silently strand a populated legacy ledger."""
-        wiki_root = tmp_path / "wiki"
-        wiki_root.mkdir()
-        cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
+    def test_empty_wiki_path_never_captures_resolution(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1512 AC3 held that an EMPTY
+        ``<wiki_root>/spend.jsonl`` — a stray ``touch``, a partially written
+        file from a crashed run, a scratch-dir test invocation — must not
+        look "already migrated". Kept as a regression guard: under issue
+        athenaeum#1601 NO wiki-path file, empty or populated, can capture
+        resolution, so athenaeum#1512's hazard is now closed by construction
+        rather than by a content check."""
+        wiki_root, cache_dir = self._roots(tmp_path)
         legacy = cache_dir / spend.LEDGER_FILENAME
         legacy.write_text('{"v":1}\n', encoding="utf-8")
+        (wiki_root / spend.LEDGER_FILENAME).touch()
 
-        new_path = wiki_root / spend.LEDGER_FILENAME
-        new_path.touch()
-        assert new_path.exists() and new_path.stat().st_size == 0
+        assert spend.durable_ledger_path(wiki_root, cache_dir=cache_dir) == legacy
 
-        resolved = spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
+    def test_populated_wiki_path_warns_once_naming_both_paths(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """AC3: a deployment already carrying the misrouted file is left in a
+        DELIBERATE state — nothing is auto-migrated or auto-deleted, and the
+        operator is told the rows are stranded. Warned once per path per
+        process, mirroring push_metrics.durable_push_records_path exactly."""
+        wiki_root, cache_dir = self._roots(tmp_path)
+        misrouted = wiki_root / spend.LEDGER_FILENAME
+        misrouted.write_text('{"v":1}\n', encoding="utf-8")
+        spend._MISROUTED_WARNED.discard(str(misrouted))
 
-        assert resolved == legacy
+        with caplog.at_level(logging.WARNING, logger=spend.log.name):
+            spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
+            spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
 
-    def test_reservation_ledger_path_mirrors_the_same_migration_rule(
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, "must warn once per path, not once per call"
+        message = warnings[0].getMessage()
+        assert str(misrouted) in message
+        assert str(cache_dir / spend.LEDGER_FILENAME) in message
+
+    def test_absent_wiki_path_is_silent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Counter-example: the healthy case must not warn."""
+        wiki_root, cache_dir = self._roots(tmp_path)
+        with caplog.at_level(logging.WARNING, logger=spend.log.name):
+            spend.durable_ledger_path(wiki_root, cache_dir=cache_dir)
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+    def test_artifact_registry_declares_the_cache_dir(self) -> None:
+        """Issue athenaeum#1601 AC5: the resolver and the R3 declaration must
+        agree, or the contradiction this issue was filed about simply moves
+        to a different pair of files."""
+        from athenaeum.store import ARTIFACT_REGISTRY
+
+        decl = next(a for a in ARTIFACT_REGISTRY if a.name == "spend-ledger")
+        assert decl.persistence_class == "operational"
+        assert decl.operational_scope == "store-durable"
+        assert decl.location == "cache dir"
+
+    def test_reservation_ledger_path_keeps_its_own_independent_rule(
         self, tmp_path: Path
     ) -> None:
-        """``reservation_ledger_path``'s own docstring promises it "mirrors
-        :func:`durable_ledger_path` exactly ... including its migration
-        rule", so issue athenaeum#1512's content-based rule has to move with
-        it or that promise silently becomes false: an EMPTY new-path
-        reservation ledger must not strand a populated legacy one either."""
+        """``reservation_ledger_path`` (``batch_reservations.jsonl``) is a
+        DIFFERENT artifact, out of issue athenaeum#1601's scope, and was not
+        migrated. It keeps its own legacy-fallback rule, unaffected by
+        ``durable_ledger_path`` now always resolving to the cache dir — an
+        EMPTY new-path reservation ledger still must not strand a populated
+        legacy one, per issue athenaeum#1512."""
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         cache_dir = tmp_path / "cache"
@@ -2895,29 +2947,26 @@ class TestDurableLedgerPath:
         new_path.write_text('{"v":1}\n', encoding="utf-8")
         assert spend.reservation_ledger_path(wiki_root, cache_dir=cache_dir) == new_path
 
-    def test_explicit_cache_dir_alone_does_not_isolate_this_function(
-        self, tmp_path: Path
-    ) -> None:
-        """Issue athenaeum#1512 audit finding, direct function level: same
-        boundary as ``push_metrics.durable_push_records_path`` — a non-``None``
-        ``cache_dir`` is not treated as an isolation signal here, because
-        production call sites resolve it eagerly as routine plumbing, not as
-        an "isolate me" flag. There is no ``spend`` CLI equivalent of
-        ``push-metrics record`` in this issue's scope, so no CLI-layer
-        companion fix was needed on this side."""
+    def test_explicit_cache_dir_now_does_isolate_this_function(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1512 defect 1 at the function level. Before issue
+        athenaeum#1601 this function could not isolate ``cache_dir``: a
+        populated live ``wiki_root`` won over an empty scratch cache dir. It
+        is now isolated by construction — ``cache_dir`` is the only input
+        that can affect the answer."""
         would_be_live_wiki_root = tmp_path / "wiki"
         would_be_live_wiki_root.mkdir()
         scratch_cache_dir = tmp_path / "scratch-cache"  # deliberately not created
 
         resolved = spend.durable_ledger_path(would_be_live_wiki_root, cache_dir=scratch_cache_dir)
 
-        assert resolved == would_be_live_wiki_root / spend.LEDGER_FILENAME
+        assert resolved == scratch_cache_dir / spend.LEDGER_FILENAME
 
     def test_resolve_ledger_path_without_wiki_root_is_unchanged(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A caller that does not opt in gets byte-identical resolution to
-        before issue athenaeum#980 — no existing caller's behavior changes."""
+        """A caller that never passes wiki_root gets byte-identical
+        resolution to before issue athenaeum#980 — no existing un-migrated
+        caller's behavior changes."""
         monkeypatch.delenv("ATHENAEUM_SPEND_LEDGER", raising=False)
         cache_dir = tmp_path / "cache"
         assert spend.resolve_ledger_path(cache_dir=cache_dir) == spend.default_ledger_path(
@@ -2944,11 +2993,8 @@ class TestDurableLedgerPath:
         as librarian.py calls them) and the production READ path
         (resolve_ledger_path + read_ledger, as status.py/drain.py/
         backlog_price_sheet.py/etc. call them) must agree on where a fresh
-        store's ledger lives — issue athenaeum#980 AC4. This is the assertion
-        that makes the cutover safe rather than merely intended: a write with
-        wiki_root= that a read without the matching wiki_root= would miss is
-        exactly the split-brain hazard flagged during review.
-        """
+        store's ledger lives, and neither may put it under wiki_root (issue
+        athenaeum#1601)."""
         monkeypatch.delenv("ATHENAEUM_SPEND_LEDGER", raising=False)
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
@@ -2967,21 +3013,17 @@ class TestDurableLedgerPath:
             is True
         )
 
-        # The write must have landed BEHIND THE SEAM, not in the cache dir.
-        assert (wiki_root / spend.LEDGER_FILENAME).exists()
-        assert not (cache_dir / spend.LEDGER_FILENAME).exists()
+        # The write must have landed in the CACHE DIR, never under wiki_root.
+        assert (cache_dir / spend.LEDGER_FILENAME).exists()
+        assert not (wiki_root / spend.LEDGER_FILENAME).exists()
 
-        # The production read path, given the SAME wiki_root, must see it.
+        # The production read path, with or without wiki_root=, must agree.
         read_path = spend.resolve_ledger_path(cache_dir=cache_dir, wiki_root=wiki_root)
         records = spend.read_ledger(read_path)
         assert any(r.get("models") == ["split-brain-probe-model"] for r in records)
 
-        # A read that forgets wiki_root= (the un-migrated-caller shape) must
-        # NOT silently see the same records via the old cache-dir default —
-        # that would mean the two paths aren't actually the same location,
-        # which is a different bug than split-brain but worth pinning too.
-        stale_read = spend.read_ledger(spend.resolve_ledger_path(cache_dir=cache_dir))
-        assert stale_read == []
+        same_read = spend.read_ledger(spend.resolve_ledger_path(cache_dir=cache_dir))
+        assert same_read == records
 
 
 # ---------------------------------------------------------------------------
