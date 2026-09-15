@@ -73,9 +73,9 @@ def test_default_max_spend_covers_smoke_scale() -> None:
     )  # must not raise
     assert estimate.estimated_usd < north_star_cli.DEFAULT_MAX_SPEND_USD
     # smoke caps probe/corpus_scale/replicate to 1 each, but every selected
-    # group always expands to its real four arms (see _build_cells) --
-    # never fewer, since run_probe_all_arms has no partial-arm mode.
-    assert estimate.cell_count == 4
+    # group always expands to its real arms (see _build_cells) -- never
+    # fewer, since run_probe_all_arms has no partial-arm mode.
+    assert estimate.cell_count == len(ALL_ARMS)
 
 
 # ---------------------------------------------------------------------------
@@ -126,13 +126,13 @@ def test_dry_run_full_scale_over_budget_is_refused_before_any_call(
 # ---------------------------------------------------------------------------
 
 
-def test_smoke_run_persists_all_four_arms_for_one_group(
+def test_smoke_run_persists_every_arm_for_one_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _stub_run_probe_all_arms)
     monkeypatch.setattr(north_star_cli, "_default_store_path", lambda: tmp_path / "r.jsonl")
 
-    # smoke caps arms to 1, but our driver always requests all four for the
+    # smoke caps arms to 1, but our driver always requests every arm for the
     # ONE (probe, corpus_scale, replicate) group smoke selects -- assert the
     # actual persisted rows, not the grid's own per-axis cap.
     exit_code = north_star_cli.main(
@@ -146,7 +146,7 @@ def test_smoke_run_persists_all_four_arms_for_one_group(
     assert exit_code == 0
     store_path = tmp_path / "r.jsonl"
     lines = store_path.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 4  # all four arms for the one smoke-selected group
+    assert len(lines) == len(ALL_ARMS)  # every arm, for the one smoke-selected group
     arms = {json.loads(line)["arm"] for line in lines}
     assert arms == {arm.value for arm in ALL_ARMS}
 
@@ -212,5 +212,5 @@ def test_store_rows_round_trip_through_the_report_loader(
     )
 
     rows = load_rollout_rows(ResultStore(tmp_path / "r.jsonl"))
-    assert len(rows) == 4
+    assert len(rows) == len(ALL_ARMS)
     assert {row.record.arm for row in rows} == set(ALL_ARMS)

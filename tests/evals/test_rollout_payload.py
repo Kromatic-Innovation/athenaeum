@@ -68,7 +68,14 @@ def test_round_trip_is_lossless_for_every_field() -> None:
 
 @pytest.mark.parametrize(
     "arm",
-    [Arm.NONE, Arm.PUSH, Arm.ORACLE, Arm.PULL],
+    [
+        Arm.NONE,
+        Arm.PUSH_PAGES_UPPER_BOUND,
+        Arm.PUSH_BREADCRUMB,
+        Arm.PUSH_BREADCRUMB_PULL,
+        Arm.ORACLE,
+        Arm.PULL,
+    ],
 )
 def test_round_trip_preserves_arm_enum_identity(arm: Arm) -> None:
     record = RolloutRecord(
@@ -80,6 +87,23 @@ def test_round_trip_preserves_arm_enum_identity(arm: Arm) -> None:
     )
     restored = RolloutRecord.from_payload(json.loads(json.dumps(record.to_payload())))
     assert restored.arm is arm
+
+
+def test_from_payload_resolves_the_legacy_push_arm_value() -> None:
+    """Issue athenaeum#1574 AC5: a payload persisted with the pre-rename
+    ``"arm": "push"`` string (exactly what ``RolloutRecord.to_payload()``
+    wrote before this issue) must still deserialize -- to the arm that
+    value actually named, ``push_pages_upper_bound`` -- not raise
+    ``ValueError``."""
+    payload = {
+        "arm": "push",
+        "probe_id": "p",
+        "probe_class": "single_hop",
+        "corpus_scale": "core",
+        "answer": "a",
+    }
+    restored = RolloutRecord.from_payload(json.loads(json.dumps(payload)))
+    assert restored.arm is Arm.PUSH_PAGES_UPPER_BOUND
 
 
 def test_round_trip_preserves_empty_defaults() -> None:
