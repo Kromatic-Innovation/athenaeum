@@ -61,13 +61,22 @@ sources via footnotes.[^1]
 | `created` | ISO date when page was first created. |
 | `updated` | ISO date when page was last modified. |
 
+### Schema version (declared kernel-field migrations, issue athenaeum#1628)
+
+| Field | Purpose |
+|-------|---------|
+| `schema_version` | Integer: which declared kernel fields this page is expected to carry, per `athenaeum.schema_migrations`'s registry. Absent means version 0 — nothing has stamped this page yet. Advanced two ways: `athenaeum schema migrate --apply` for rule-based/eager migrations (a deterministic, no-model sweep), and the `athenaeum audit` pass for model-based/on-audit migrations (only once every field that migration names is filled or recorded in `audit_findings`). Never hand-set this field. |
+
 ### Set by the audit pass (`athenaeum audit`, issue athenaeum#1624)
 
 Never hand-fill these — an `athenaeum audit` run stamps them, and only
 that pass's write path may set them. Absent entirely on a page that has
 never been audited; `last_audited` is what distinguishes "never checked"
 from "checked, and every coordinate below is either filled or recorded
-undeterminable."
+undeterminable." The three coordinate fields below are one MODEL-based,
+on-audit schema migration (`schema_version` 1 -> 2) — see the section
+above; they are declared in `athenaeum.schema_migrations`, not hard-coded
+in the audit pass itself.
 
 | Field | Purpose |
 |-------|---------|

@@ -18,18 +18,32 @@ Stamps two new frontmatter fields on a page:
 - ``audit_version`` — the audit prompt/schema version the pass ran
   against (:data:`AUDIT_VERSION`).
 
-For each of the three coordinate fields declared empty on a page
-(:data:`COORDINATE_FIELDS` — ``valid_from`` / ``valid_until`` /
-``claimed_scope``, the kernel dimensions :mod:`athenaeum.dimensions`
-already reads), the per-page call either fills a value determinable from
-the page's own body and cited sources, or records an ``undeterminable``
-reason in the ``audit_findings:`` frontmatter map — distinguishable from a
-page that was never checked at all (no ``last_audited``, no
-``audit_findings`` entry). A populated coordinate value is NEVER
-overwritten, either by the LLM prompt (only empty fields are ever asked
-about) or by the write path (:func:`apply_audit_report` re-checks
-emptiness immediately before writing, defending against a race between
-scan and apply).
+For each declared-empty field named by a page's PENDING model-derivation
+migration (issue athenaeum#1628 decision 4 — read from
+:mod:`athenaeum.schema_migrations`'s registry via
+:func:`schema_migrations.pending_migrations`, never a hard-coded tuple;
+:data:`COORDINATE_FIELDS` below is kept only as a value DERIVED from that
+same registry, for existing importers — today that is the v1->v2 entry's
+``valid_from`` / ``valid_until`` / ``claimed_scope``, the kernel dimensions
+:mod:`athenaeum.dimensions` already reads), the per-page call either fills
+a value determinable from the page's own body and cited sources, or
+records an ``undeterminable`` reason in the ``audit_findings:`` frontmatter
+map — distinguishable from a page that was never checked at all (no
+``last_audited``, no ``audit_findings`` entry). A populated coordinate
+value is NEVER overwritten, either by the LLM prompt (only empty fields are
+ever asked about) or by the write path (:func:`apply_audit_report`
+re-checks emptiness immediately before writing, defending against a race
+between scan and apply).
+
+Also stamps ``schema_version`` (issue athenaeum#1628 decision 4): once every
+field a pending MODEL migration names is either filled or recorded
+``undeterminable``, :func:`apply_verdict_to_meta` bumps the page's
+``schema_version`` to the highest version the registry says it has now
+earned (:func:`_advance_schema_version`) — never partially, and never past
+an unresolved migration (see that function's own docstring). ``schema_version``
+is a SEPARATE marker from :data:`AUDIT_VERSION` (which still versions only
+the audit prompt/response shape, unchanged by this) — see
+:mod:`athenaeum.schema_migrations`'s module docstring for the distinction.
 
 The same call also returns a GENERIC retirement-candidate flag (issue
 athenaeum#1667 Decision 2): a page is a candidate only when it states NO claim
@@ -54,7 +68,9 @@ other in-place page editor in this codebase uses (see e.g.
 ``athenaeum.templates`` (those are user-facing scaffolds, not a writer;
 see that subpackage's own docstring).
 
-Layering: L4 domain/pipeline. Imports :mod:`athenaeum.batch` (L4, for the
+Layering: L4 domain/pipeline. Imports :mod:`athenaeum.schema_migrations`
+(L0, module scope — the migration registry this module's fields-to-determine
+and ``schema_version`` bump both read) and :mod:`athenaeum.batch` (L4, for the
 ``--batch`` transport: :class:`~athenaeum.batch.BatchRequest` /
 :func:`~athenaeum.batch.execute_batch` — both already-generic building
 blocks, so this module adds nothing to ``batch.py`` itself and never
@@ -76,6 +92,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from athenaeum import schema_migrations
 from athenaeum.models import TokenUsage, cache_usage_counts, parse_frontmatter, render_frontmatter
 
 log = logging.getLogger(__name__)
@@ -87,11 +104,25 @@ log = logging.getLogger(__name__)
 #: all — see the module docstring).
 AUDIT_VERSION = "audit-v2"
 
-#: The three kernel-dimension coordinate fields this pass may fill. Mirrors
-#: ``dimensions.py``'s ``VALID_TIME`` / ``SCOPE`` frontmatter readers
-#: (``valid_from``/``valid_until``, ``claimed_scope``) — see that module's
-#: docstring for why these three keys and no others.
-COORDINATE_FIELDS: tuple[str, ...] = ("valid_from", "valid_until", "claimed_scope")
+#: The kernel-dimension coordinate fields this pass may fill, DERIVED from
+#: the schema-migrations registry (issue athenaeum#1628 decision 3) — the
+#: union, in declaration order, of every ``derivation="model"`` migration's
+#: ``fields`` in :data:`athenaeum.schema_migrations.MIGRATIONS`. Today that
+#: is exactly the v1->v2 entry's three fields (``valid_from``/
+#: ``valid_until``/``claimed_scope`` — mirrors ``dimensions.py``'s
+#: ``VALID_TIME`` / ``SCOPE`` frontmatter readers), but this module no
+#: longer hard-codes that tuple: a new model migration widens this set
+#: automatically. Kept as a plain module-level constant purely so an
+#: existing ``from athenaeum.audit import COORDINATE_FIELDS`` caller keeps
+#: working unchanged — nothing in THIS module reads it any more; see
+#: :func:`_pending_model_fields` below, which reads the registry directly
+#: per-page instead.
+COORDINATE_FIELDS: tuple[str, ...] = tuple(
+    field_name
+    for migration in schema_migrations.MIGRATIONS
+    if migration.derivation == "model"
+    for field_name in migration.fields
+)
 
 _AUDIT_MAX_TOKENS = 1024
 
@@ -191,11 +222,30 @@ def _is_populated(value: object) -> bool:
     return bool(value)
 
 
+def _pending_model_fields(meta: dict[str, Any]) -> tuple[str, ...]:
+    """Fields *meta*'s pending MODEL migrations name (issue athenaeum#1628
+    decision 4) — the union, de-duplicated and order-stable, of every
+    ``derivation="model"`` migration :func:`schema_migrations.pending_migrations`
+    returns for *meta*. A page already past every model migration (its
+    ``schema_version`` already covers them) contributes nothing here — the
+    audit pass has nothing left to ask about for it.
+    """
+    fields: list[str] = []
+    for migration in schema_migrations.pending_migrations(meta):
+        if migration.derivation != "model":
+            continue
+        for name in migration.fields:
+            if name not in fields:
+                fields.append(name)
+    return tuple(fields)
+
+
 def _empty_coordinate_fields(meta: dict[str, Any]) -> list[str]:
-    """Coordinate fields on *meta* that are missing/blank — the only ones a
-    prompt ever asks about, and the only ones a verdict may ever fill."""
+    """*meta*'s pending-model-migration fields that are missing/blank right
+    now — the only ones a prompt ever asks about, and the only ones a
+    verdict may ever fill."""
     empty = []
-    for name in COORDINATE_FIELDS:
+    for name in _pending_model_fields(meta):
         if not _is_populated(meta.get(name)):
             empty.append(name)
     return empty
@@ -1082,6 +1132,40 @@ def build_audit_report(
     return report
 
 
+def _migration_satisfied(migration: Any, meta: dict[str, Any], findings: dict[str, str]) -> bool:
+    """Whether every one of *migration*'s fields is either populated on
+    *meta* or recorded (by name) in *findings* — issue athenaeum#1628 decision 4.
+    A migration with no fields at all (the v0->v1 worked rule example) is
+    vacuously satisfied: there is nothing for it to have resolved.
+    """
+    return all(_is_populated(meta.get(name)) or name in findings for name in migration.fields)
+
+
+def _advance_schema_version(meta: dict[str, Any], findings: dict[str, str]) -> int:
+    """The highest ``schema_version`` *meta* has earned, walking
+    :data:`schema_migrations.MIGRATIONS` forward from its CURRENT version.
+
+    Issue athenaeum#1628 decision 4 / Plan item 3: bump to the highest version
+    whose migrations' fields are all populated or recorded in
+    ``audit_findings``, and leave it UNCHANGED otherwise. "Otherwise" is
+    all-or-nothing, not partial credit: the instant a migration in the walk
+    is not satisfied, this returns *meta*'s ORIGINAL version outright,
+    discarding any progress an earlier vacuous (fields-less, rule/eager)
+    step would otherwise have made in this same call — a page must not
+    silently gain ``schema_version: 1`` off the back of an unresolved
+    model migration that happens to sit right after it in the chain.
+    """
+    original = schema_migrations.page_schema_version(meta)
+    reached = original
+    for migration in schema_migrations.MIGRATIONS:
+        if migration.from_version != reached:
+            continue
+        if not _migration_satisfied(migration, meta, findings):
+            return original
+        reached = migration.to_version
+    return reached
+
+
 def apply_verdict_to_meta(meta: dict[str, Any], verdict: AuditVerdict) -> tuple[int, int]:
     """Stamp ONE verdict onto an already-parsed ``meta`` dict, in place.
 
@@ -1135,6 +1219,16 @@ def apply_verdict_to_meta(meta: dict[str, Any], verdict: AuditVerdict) -> tuple[
         meta["audit_findings"] = findings
     else:
         meta.pop("audit_findings", None)
+
+    # Issue athenaeum#1628 decision 4: bump schema_version only when every
+    # pending migration's fields are now populated-or-recorded; otherwise
+    # leave it exactly as it was (see _advance_schema_version). Only write
+    # the key when it actually advances — a page that fails to resolve
+    # stays with no explicit schema_version at all rather than gaining a
+    # redundant `schema_version: 0` on every audit pass.
+    advanced = _advance_schema_version(meta, findings)
+    if advanced > schema_migrations.page_schema_version(meta):
+        meta["schema_version"] = advanced
 
     return filled, undeterminable
 
