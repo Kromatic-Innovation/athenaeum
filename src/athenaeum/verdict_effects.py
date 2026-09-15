@@ -667,6 +667,38 @@ def _apply_underdetermined(
 # contradiction -> supersession, else queue
 # ---------------------------------------------------------------------------
 
+# Mirrors athenaeum.merge.CONTRADICTION_STATUS_FLAGGED (merge.py:213) exactly.
+# Not imported directly: merge.py is layer 4 (same as this module, per both
+# modules' own docstrings) and owned by a parallel lane tonight -- importing
+# it would drag its full transitive import set into this module's pinned
+# import-budget set (tests/test_import_budget.py) for one string constant.
+# tests/test_verdict_effects.py asserts these two literals stay equal.
+CONTRADICTION_STATUS_FLAGGED = "contradiction-flagged"
+
+
+def write_contested_flag(path: Path) -> Path:
+    """Set BOTH contested-page trigger fields on *path*'s frontmatter.
+
+    Issue athenaeum#1679 (§3.3): the recall header
+    (``athenaeum.mcp_server``, ``mcp_server.py:736-740``) trips on EITHER
+    ``status == "contradiction-flagged"`` or a truthy
+    ``contradictions_detected`` -- this writes BOTH, matching the original
+    C4 write shape (:func:`athenaeum.merge.render_merged_entry`, which always
+    sets ``contradictions_detected`` and sets ``status`` alongside it when
+    true) rather than the bare minimum needed to satisfy the OR by itself.
+    Idempotent: re-running on an already-flagged page rewrites the same two
+    values.
+    """
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    meta, body = parse_frontmatter(text)
+    if not isinstance(meta, dict):
+        meta = {}
+    meta["status"] = CONTRADICTION_STATUS_FLAGGED
+    meta["contradictions_detected"] = True
+    atomic_write_text(path, render_frontmatter(meta) + body)
+    return path
+
 
 def _queue_contradiction(
     page_a: ComparatorPage,
@@ -674,6 +706,8 @@ def _queue_contradiction(
     outcome: CompareOutcome,
     *,
     wiki_root: Path,
+    path_a: Path | None = None,
+    path_b: Path | None = None,
     config: dict[str, Any] | None,
     details: dict[str, Any],
 ) -> EffectResult:
@@ -700,11 +734,20 @@ def _queue_contradiction(
         raw_ref=f"comparator:{pair_key}",
         description="\n".join(lines),
     )
+    # Issue athenaeum#1679 (§3.3): flag BOTH real files this pair identifies,
+    # when their paths are known -- an unresolved contradiction implicates
+    # either side equally, so a caller that later reads EITHER page alone
+    # (mcp_server's recall header) must see it as contested. No paths
+    # supplied -> nothing to write; recorded either way, never a silent gap.
+    contested_pages = [str(cp) for cp in (path_a, path_b) if cp is not None]
+    for cp in (path_a, path_b):
+        if cp is not None:
+            write_contested_flag(cp)
     return EffectResult(
         verdict=VERDICT_CONTRADICTION,
         action="queued",
         queued=[pair_key],
-        details=details,
+        details={**details, "contested_pages": contested_pages},
     )
 
 
@@ -714,6 +757,8 @@ def _apply_contradiction(
     outcome: CompareOutcome,
     *,
     wiki_root: Path,
+    path_a: Path | None = None,
+    path_b: Path | None = None,
     config: dict[str, Any] | None,
     now: datetime | None,
 ) -> EffectResult:
@@ -734,6 +779,8 @@ def _apply_contradiction(
             page_b,
             outcome,
             wiki_root=wiki_root,
+            path_a=path_a,
+            path_b=path_b,
             config=config,
             details={"supersession_available": False},
         )
@@ -742,7 +789,11 @@ def _apply_contradiction(
         page_a, page_b, outcome, wiki_root=wiki_root, config=config, now=now
     )
     if decision.action == SUPERSESSION_APPLIED:
-        # Record only -- enactment belongs to athenaeum.supersession, never here.
+        # Record only -- enactment belongs to athenaeum.supersession, never
+        # here, and the contested-page flag is deliberately NOT written on
+        # this branch: a resolved (superseded) pair is no longer an open
+        # conflict, so flagging it "contested" would misrepresent a decided
+        # pair as still pending.
         return EffectResult(
             verdict=VERDICT_CONTRADICTION,
             action="superseded",
@@ -760,6 +811,8 @@ def _apply_contradiction(
         page_b,
         outcome,
         wiki_root=wiki_root,
+        path_a=path_a,
+        path_b=path_b,
         config=config,
         details={
             "supersession_available": True,
@@ -831,16 +884,25 @@ def apply_verdict_effect(
     if outcome.verdict == VERDICT_UNDERDETERMINED:
         return _apply_underdetermined(page_a, page_b, outcome, wiki_root=wiki_root, config=config)
     return _apply_contradiction(
-        page_a, page_b, outcome, wiki_root=wiki_root, config=config, now=now
+        page_a,
+        page_b,
+        outcome,
+        wiki_root=wiki_root,
+        path_a=path_a,
+        path_b=path_b,
+        config=config,
+        now=now,
     )
 
 
 __all__ = [
+    "CONTRADICTION_STATUS_FLAGGED",
     "FOLD_EVIDENCE_DIRNAME",
     "EffectResult",
     "apply_verdict_effect",
     "build_coordinate_request",
     "build_fold_evidence",
+    "write_contested_flag",
     "write_fold_evidence",
     "write_refines_declaration",
 ]

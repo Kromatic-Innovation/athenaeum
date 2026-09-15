@@ -163,11 +163,13 @@ class TestEF1PublicAPIShape:
 
     def test_module_exports_expected_names(self) -> None:
         assert set(ve_mod.__all__) == {
+            "CONTRADICTION_STATUS_FLAGGED",
             "FOLD_EVIDENCE_DIRNAME",
             "EffectResult",
             "apply_verdict_effect",
             "build_coordinate_request",
             "build_fold_evidence",
+            "write_contested_flag",
             "write_fold_evidence",
             "write_refines_declaration",
         }
@@ -775,6 +777,104 @@ class TestEF13ContradictionSupersessionQueues:
         outcome = _outcome(VERDICT_CONTRADICTION, conflicting_passages=["p1", "p2"])
         result = apply_verdict_effect(_page("a"), _page("b"), outcome, wiki_root=wiki_root)
         assert result.details["rate_limited"] is True
+
+
+# ---------------------------------------------------------------------------
+# EF13b — athenaeum#1679 §3.3: contested-page flag + recall header
+# ---------------------------------------------------------------------------
+
+
+class TestEF13bContestedPageFlag:
+    def test_constant_matches_merge_module(self) -> None:
+        """Local mirror, not an import (merge.py is a parallel lane's file
+        tonight) -- pin the two literals equal so drift is caught."""
+        from athenaeum.merge import CONTRADICTION_STATUS_FLAGGED as merge_flag
+
+        assert ve_mod.CONTRADICTION_STATUS_FLAGGED == merge_flag == "contradiction-flagged"
+
+    def test_queued_contradiction_writes_both_fields_on_both_pages(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _uninstall_supersession(monkeypatch)
+        wiki_root = tmp_path / "wiki"
+        path_a = tmp_path / "alpha.md"
+        path_b = tmp_path / "beta.md"
+        page_a = _page("alpha", body="claim a")
+        page_b = _page("beta", body="claim b")
+        _write_page(path_a, page_a)
+        _write_page(path_b, page_b)
+        outcome = _outcome(VERDICT_CONTRADICTION, conflicting_passages=["p1", "p2"])
+        result = apply_verdict_effect(
+            page_a, page_b, outcome, wiki_root=wiki_root, path_a=path_a, path_b=path_b
+        )
+        assert result.action == "queued"
+        assert sorted(result.details["contested_pages"]) == sorted([str(path_a), str(path_b)])
+        for path in (path_a, path_b):
+            meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+            assert meta["status"] == "contradiction-flagged"
+            assert meta["contradictions_detected"] is True
+
+    def test_mcp_server_or_condition_trips_on_either_field_alone(self, tmp_path: Path) -> None:
+        """Regression guard for the exact half-the-trigger failure mode the
+        issue calls out: writing only one of the two fields would still
+        happen to trip THIS particular OR-condition, but a real port must
+        write both (see the docstring on write_contested_flag)."""
+        status_only = {"status": "contradiction-flagged"}
+        flag_only = {"contradictions_detected": True}
+        both = {"status": "contradiction-flagged", "contradictions_detected": True}
+        for fm in (status_only, flag_only, both):
+            status = fm.get("status")
+            contested = (isinstance(status, str) and status == "contradiction-flagged") or bool(
+                fm.get("contradictions_detected")
+            )
+            assert contested
+
+    def test_no_paths_supplied_writes_nothing_and_records_empty_list(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _uninstall_supersession(monkeypatch)
+        wiki_root = tmp_path / "wiki"
+        outcome = _outcome(VERDICT_CONTRADICTION, conflicting_passages=["p1", "p2"])
+        result = apply_verdict_effect(_page("a"), _page("b"), outcome, wiki_root=wiki_root)
+        assert result.action == "queued"
+        assert result.details["contested_pages"] == []
+
+    def test_superseded_contradiction_does_not_write_contested_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A resolved (superseded) pair is not an open conflict -- confirms
+        the existing 'this module writes nothing on applied' contract
+        (TestEF12) extends to the new contested-flag write too."""
+        decision = _FakeSupersessionDecision(
+            "applied", winner_id="alpha", loser_id="beta", located_passages=["p1"]
+        )
+        _install_fake_supersession(monkeypatch, lambda *a, **kw: decision)
+        wiki_root = tmp_path / "wiki"
+        path_a = tmp_path / "alpha.md"
+        path_b = tmp_path / "beta.md"
+        page_a = _page("alpha", body="claim a")
+        page_b = _page("beta", body="claim b")
+        _write_page(path_a, page_a)
+        _write_page(path_b, page_b)
+        outcome = _outcome(VERDICT_CONTRADICTION, conflicting_passages=["p1", "p2"])
+        result = apply_verdict_effect(
+            page_a, page_b, outcome, wiki_root=wiki_root, path_a=path_a, path_b=path_b
+        )
+        assert result.action == "superseded"
+        assert "contested_pages" not in result.details
+        for path in (path_a, path_b):
+            meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+            assert "status" not in meta
+            assert "contradictions_detected" not in meta
+
+    def test_write_contested_flag_is_idempotent(self, tmp_path: Path) -> None:
+        path = tmp_path / "alpha.md"
+        _write_page(path, _page("alpha", body="claim a"))
+        ve_mod.write_contested_flag(path)
+        first = path.read_text(encoding="utf-8")
+        ve_mod.write_contested_flag(path)
+        second = path.read_text(encoding="utf-8")
+        assert first == second
 
 
 # ---------------------------------------------------------------------------
