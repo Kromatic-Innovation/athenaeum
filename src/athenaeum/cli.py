@@ -162,6 +162,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "registry": ("athenaeum._cmd_index", "add_index_subparsers"),
     "ingest": ("athenaeum._cmd_index", "add_index_subparsers"),
     "session-end": ("athenaeum._cmd_index", "add_index_subparsers"),
+    "audit": ("athenaeum._cmd_audit", "add_audit_subparser"),
 }
 
 
@@ -173,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     ``func`` default) without going through argv parsing + dispatch. ``main``
     is the only intended caller in production code.
     """
+    from athenaeum._cmd_audit import add_audit_subparser
     from athenaeum._cmd_authority import add_authority_subparser
     from athenaeum._cmd_axiom import add_axiom_subparser
     from athenaeum._cmd_bounce_contract import add_bounce_contract_subparser
@@ -238,6 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_questions_subparser(subparsers)  # questions
     add_merges_subparser(subparsers)  # merges
     add_decisions_subparser(subparsers)  # decisions
+    add_audit_subparser(subparsers)  # audit (issue athenaeum#1624)
     add_authority_subparser(subparsers)  # authority
     add_axiom_subparser(subparsers)  # axiom
     add_calibration_subparser(subparsers)  # calibration

@@ -61,6 +61,23 @@ sources via footnotes.[^1]
 | `created` | ISO date when page was first created. |
 | `updated` | ISO date when page was last modified. |
 
+### Set by the audit pass (`athenaeum audit`, issue athenaeum#1624)
+
+Never hand-fill these — an `athenaeum audit` run stamps them, and only
+that pass's write path may set them. Absent entirely on a page that has
+never been audited; `last_audited` is what distinguishes "never checked"
+from "checked, and every coordinate below is either filled or recorded
+undeterminable."
+
+| Field | Purpose |
+|-------|---------|
+| `last_audited` | ISO-8601 UTC timestamp of the most recent audit pass. |
+| `audit_version` | The audit prompt/schema version that pass ran against. |
+| `valid_from` | Claim validity window, lower bound. Filled only when the page's own body/sources state it; open (absent) otherwise. |
+| `valid_until` | Claim validity window, upper bound. Same fill rule as `valid_from`. |
+| `claimed_scope` | Where the claim APPLIES (the `scope` kernel dimension's coordinate — distinct from `scope:`, a different, provenance-shaped legacy field). Same fill rule. |
+| `audit_findings` | Per-field map recording WHY a coordinate above was left unfilled (e.g. `valid_from: "undeterminable: no dated validity window stated"`) — a decision, not a guess, and not silence. A coordinate the audit pass filled has no entry here; one it left populated (already set before the pass ran) has no entry either — coordinates are never overwritten once set. |
+
 ## Sections by Entity Type
 
 | Type | Typical sections |

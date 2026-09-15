@@ -6,7 +6,7 @@
 
 # LLM prompt inventory
 
-Athenaeum sends 19 distinct prompt constants to the model. Each stays an inline
+Athenaeum sends 21 distinct prompt constants to the model. Each stays an inline
 constant in its home module (next to the parser it feeds); `athenaeum.prompt_registry`
 indexes them and this file is generated from that index.
 
@@ -847,5 +847,50 @@ Return ONLY a JSON array, one object per input page, each
 Summarize each page below. Return the JSON array described in the system prompt and nothing else.
 
 {pages}
+```
+
+## `audit.audit_system`
+
+- **Constant:** `athenaeum.audit.AUDIT_SYSTEM`
+- **Source:** `src/athenaeum/audit.py`
+- **Model knob:** `classify` &middot; **max_tokens:** `1024`
+- **sha256:** `9ab40d02c384d456cb492b817d84b3254e200724c1f5ce036f9c2a0994142040`
+
+```text
+You are auditing ONE knowledge-base page. Read only the page's own body and its cited sources below — never guess, never use outside knowledge.
+
+Do two things:
+
+1. COORDINATES. For each field listed under "Fields to determine", decide:
+   - a determinable value, in plain text, when the page's own body or cited sources state it explicitly, or
+   - "undeterminable" with a one-line reason, when they do not.
+   A date value must be ISO-8601 (YYYY-MM-DD). Never invent a value that is not actually stated.
+
+2. RETIREMENT CANDIDACY. Decide whether this page states any claim beyond a restatement or bare usage-log of its cited sources — an independent observation, judgment, or synthesis the sources do not already contain. A page with no such claim is a retirement candidate.
+
+Return ONLY a JSON object, no markdown fence, no prose, in exactly this shape (include a key only for a field actually listed under "Fields to determine"):
+
+{
+  "<field>": {"value": "<determined value>"},
+  "<field>": {"undeterminable": "<one-line reason>"},
+  "retirement_candidate": true,
+  "retirement_reason": "<one-line reason, empty string when false>"
+}
+```
+
+## `audit.audit_user_template`
+
+- **Constant:** `athenaeum.audit.AUDIT_USER_TEMPLATE`
+- **Source:** `src/athenaeum/audit.py`
+- **Model knob:** `classify` &middot; **max_tokens:** `1024`
+- **sha256:** `1bcfa7d8e252584ea9efec55333caf805e4474300c32327f7ae83e9e68e6be5b`
+
+```text
+Page name: {name}
+Page type: {page_type}
+Fields to determine: {fields}
+
+Body:
+{body}
 ```
 

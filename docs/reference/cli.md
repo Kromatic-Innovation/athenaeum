@@ -10,6 +10,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 
 ## Command index
 
+- [`athenaeum audit`](#athenaeum-audit) (command) — Read-and-reason audit pass over wiki pages: stamps last_audited/audit_version, fills determinable valid_from/valid_until/claimed_scope. Dry-run by default; --apply writes.
 - [`athenaeum authority`](#athenaeum-authority) (group) — Authority manifest: detect + convert memories that duplicate a live source (skill file, code path, config) into pointer stubs.
 - [`athenaeum authority convert`](#athenaeum-authority-convert) (command) — Convert ONE page into a one-line pointer stub for a given manifest source. Default is dry-run; --apply writes the file. Scoped to a single --page; never walks the corpus.
 - [`athenaeum authority lint`](#athenaeum-authority-lint) (command) — List wiki pages that duplicate a manifest-listed authoritative source. READ-ONLY — never mutates wiki/.
@@ -116,6 +117,25 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum verdicts show-one-pair`](#athenaeum-verdicts-show-one-pair) (command) — Show the current live verdict for one pair.
 - [`athenaeum verdicts show-stale`](#athenaeum-verdicts-show-stale) (command) — List every live verdict currently flagged stale.
 - [`athenaeum viewer`](#athenaeum-viewer) (command) — Serve a localhost-only, read-only page showing pushed-unbidden vs. pulled-deliberately vs. overlap recall for one session.
+
+## `athenaeum audit`
+
+Read-and-reason audit pass over wiki pages: stamps last_audited/audit_version, fills determinable valid_from/valid_until/claimed_scope. Dry-run by default; --apply writes.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | `False` | — | Write last_audited/audit_version and any determinable coordinate fills/undeterminable markers. Without this flag the command is a dry-run. |
+| `--batch` | `False` | — | Route audit calls through the Batch API transport (athenaeum.batch.execute_batch) instead of one synchronous call per page. |
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--limit` | — | — | Audit at most N pages this pass. |
+| `--mechanical-dry-run` | `False` | — | Skip building an LLM client entirely (every page reported no-llm-client). For CI/offline smoke checks only. |
+| `--model` | — | — | Override the model (default: the 'classify' knob's resolved model). |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--sample` | — | — | Audit a stratified (by type:) random sample of N pages instead of the whole corpus. Combine with --seed for reproducibility. |
+| `--seed` | `0` | — | Seed for --sample (default: 0). The same seed over the same corpus always selects the same pages. |
+| `--uids` | — | — | Path to a file listing one page uid per line; audit exactly those pages. |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum authority`
 

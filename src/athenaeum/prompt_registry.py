@@ -122,6 +122,12 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
     # deliberately NOT a new knob. No cache_control breakpoint at the call site.
     ("page_description.describe_system", "_DESCRIBE_SYSTEM", "classify", 4096, False),
     ("page_description.describe_user_template", "_DESCRIBE_USER_TEMPLATE", "classify", 4096, False),
+    # athenaeum#1624: the page audit pass (``athenaeum audit``) rides the
+    # ``classify`` knob too — a Haiku-class read-and-reason sibling of the
+    # Tier-2 classifier and the description backfill above, deliberately not
+    # a new knob. No cache_control breakpoint at the call site.
+    ("audit.audit_system", "AUDIT_SYSTEM", "classify", 1024, False),
+    ("audit.audit_user_template", "AUDIT_USER_TEMPLATE", "classify", 1024, False),
 ]
 
 PROMPT_META: dict[str, PromptMeta] = {

@@ -140,6 +140,7 @@ MODULE_LAYER: dict[str, int] = {
     "wiki_dedupe_attribution": 3,
     # L4 -- domain/pipeline modules.
     "answers": 4,
+    "audit": 4,
     "auto_memory_prune": 4,
     "axiom_governance": 4,
     "backlog_price_sheet": 4,
@@ -185,6 +186,7 @@ MODULE_LAYER: dict[str, int] = {
     "wiki_dedupe": 4,
     # L5 -- presentation (CLI).
     "_cli_shared": 5,
+    "_cmd_audit": 5,
     "_cmd_authority": 5,
     "_cmd_axiom": 5,
     "_cmd_bounce_contract": 5,
