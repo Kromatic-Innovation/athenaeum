@@ -15,10 +15,10 @@ name: Embedding Regression Guard
 #
 # Path filter — one line per path, and every file that currently carries
 # `@pytest.mark.embedding` is covered:
-#   - src/athenaeum/search.py                     the #1603 fix target: real-model retrieval ranking lives here
+#   - src/athenaeum/search.py                     the athenaeum#1603 fix target: real-model retrieval ranking lives here
 #   - src/athenaeum/delta.py                       feeds delta-compile-equivalence's real-model clustering assertions
 #   - pyproject.toml                               pins the `[vector]` extra (chromadb/numpy) the real embedder depends on
-#   - tests/test_search.py                         carries @pytest.mark.embedding (TestExactTitleRanking, the #1603 guard)
+#   - tests/test_search.py                         carries @pytest.mark.embedding (TestExactTitleRanking, the athenaeum#1603 guard)
 #   - tests/test_delta_compile_equivalence.py      carries @pytest.mark.embedding
 #   - tests/test_eval_corpus_consolidation.py      carries @pytest.mark.embedding
 #   - tests/test_eval_recall_floor.py              parametrizes a `vector` case marked embedding
