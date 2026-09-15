@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from tests.evals.containment import GridCell, ResultStore
+from tests.evals.corpus import build_corpus
 from tests.evals.north_star_report import (
     GroupStats,
     NorthStarReport,
@@ -30,10 +31,12 @@ from tests.evals.north_star_report import (
     delivered_text_for_utilization,
     delivered_uids_for_utilization,
     distinctive_ngram_overlap,
+    grade_correctness,
     lexical_overlap,
     load_rollout_rows,
     render_report,
     uid_citation_rate,
+    weak_probes,
     write_report,
 )
 from tests.evals.rollout import Arm, RolloutRecord, ToolCall, TurnTokenUsage
@@ -50,6 +53,20 @@ TARGET_BODY = (
     "The firm's PTO allowance is 25 days per year plus UK bank holidays. Up to "
     "five days may be carried into the following year; the rest lapse."
 )
+
+# Real corpus, loaded once, used by the correctness-grading fixtures below
+# (issue athenaeum#1573) -- probe ids and planted answer_tokens are read off
+# it rather than duplicated as literals, so a corpus edit cannot silently
+# desync these tests from the ground truth they claim to grade.
+_CORPUS = build_corpus(scale=CORPUS_SCALE)
+
+
+def _probe(probe_id: str):
+    for probe in _CORPUS.probes:
+        if probe.id == probe_id:
+            return probe
+    raise KeyError(probe_id)
+
 
 PUSH_DELIVERED = (
     "PTO policy (score: 9.5)\n"
@@ -252,6 +269,147 @@ def test_delivered_text_none_arm_is_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Correctness grading (issue athenaeum#1573) -- floor/ceiling ground truth.
+# Each fixture below targets ONE acceptance criterion with its own positive
+# AND negative control; none of these collapse into a single happy-path
+# assertion.
+# ---------------------------------------------------------------------------
+
+
+def _record(*, arm: Arm, probe_id: str, probe_class: str, answer: str) -> RolloutRecord:
+    return RolloutRecord(
+        arm=arm,
+        probe_id=probe_id,
+        probe_class=probe_class,
+        corpus_scale=CORPUS_SCALE,
+        answer=answer,
+        turn_tokens=[TurnTokenUsage(turn=1, input_tokens=10, output_tokens=10)],
+        turn_count=1,
+    )
+
+
+def test_correctness_grades_incorrect_on_distractor_token_without_probes_own_token() -> None:
+    """AC2: an answer containing a DIFFERENT probe's planted token -- a
+    distractor page's own ground truth, not this probe's -- must not grade
+    correct just because it contains *some* recognized token."""
+    pto_probe = _probe("pto_allowance")  # token: Cinderquill, on policy-pto
+    other_probe = _probe("confidentiality_rule")  # token: Harrowvex, on policy-confidentiality
+    assert pto_probe.answer_tokens and other_probe.answer_tokens
+    assert pto_probe.answer_tokens != other_probe.answer_tokens
+
+    distractor_token = other_probe.answer_tokens[0]
+    wrong_answer = _record(
+        arm=Arm.NONE,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer=f"The PTO allowance is documented under {distractor_token}.",
+    )
+    assert grade_correctness(wrong_answer, pto_probe, _CORPUS) is False
+
+    # Positive control: the SAME shape of answer, but carrying the probe's
+    # own token, grades correct -- proves the miss above is about which
+    # token is present, not some unrelated reason (e.g. answer length).
+    right_token = pto_probe.answer_tokens[0]
+    right_answer = _record(
+        arm=Arm.ORACLE,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer=f"The PTO allowance is documented under {right_token}.",
+    )
+    assert grade_correctness(right_answer, pto_probe, _CORPUS) is True
+
+
+def test_weak_probes_lists_probe_the_none_arm_already_answers_correctly() -> None:
+    """AC4: a probe the NONE arm (no context delivered) answers correctly is
+    a floor-leak signal and must be named in the weak-probe list."""
+    pto_probe = _probe("pto_allowance")
+    leaking_token = pto_probe.answer_tokens[0]
+    leaky_none_row = _row(
+        _record(
+            arm=Arm.NONE,
+            probe_id=pto_probe.id,
+            probe_class=pto_probe.probe_class,
+            answer=f"It's 25 days, code {leaking_token}.",
+        )
+    )
+
+    # Negative control: a different NONE-arm probe whose answer does NOT
+    # carry its own token must NOT be listed as weak.
+    confidentiality_probe = _probe("confidentiality_rule")
+    honest_none_row = _row(
+        _record(
+            arm=Arm.NONE,
+            probe_id=confidentiality_probe.id,
+            probe_class=confidentiality_probe.probe_class,
+            answer="I don't have that information.",
+        )
+    )
+
+    weak = weak_probes([leaky_none_row, honest_none_row])
+    assert weak == (pto_probe.id,)
+
+
+def test_abstention_grades_correct_only_when_no_token_is_asserted() -> None:
+    """AC5: an abstention probe grades correct only when the answer asserts
+    NONE of the corpus's planted tokens and uses declining language -- one
+    fixture that asserts (confabulates another probe's token) and one that
+    genuinely abstains."""
+    abstention_probe = _probe("abstain_unknown_client")
+    assert abstention_probe.probe_class == "abstention"
+    assert abstention_probe.answer_tokens == ()
+
+    confabulated_token = _probe("pto_allowance").answer_tokens[0]
+    asserting_answer = _record(
+        arm=Arm.NONE,
+        probe_id=abstention_probe.id,
+        probe_class=abstention_probe.probe_class,
+        answer=f"Harrowgate Industrial's payment terms are set under {confabulated_token}.",
+    )
+    assert grade_correctness(asserting_answer, abstention_probe, _CORPUS) is False
+
+    abstaining_answer = _record(
+        arm=Arm.NONE,
+        probe_id=abstention_probe.id,
+        probe_class=abstention_probe.probe_class,
+        answer="I don't know -- Harrowgate Industrial is not in the corpus.",
+    )
+    assert grade_correctness(abstaining_answer, abstention_probe, _CORPUS) is True
+
+
+def test_correctness_rate_rendered_per_group() -> None:
+    """AC3 (render half): the report's markdown carries a correctness
+    section broken out per (probe_class, corpus_scale, arm), the same shape
+    as every other dimension."""
+    pto_probe = _probe("pto_allowance")
+    token = pto_probe.answer_tokens[0]
+    rows = [
+        _row(
+            _record(
+                arm=Arm.NONE,
+                probe_id=pto_probe.id,
+                probe_class=pto_probe.probe_class,
+                answer="I don't know.",
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.ORACLE,
+                probe_id=pto_probe.id,
+                probe_class=pto_probe.probe_class,
+                answer=f"25 days, per {token}.",
+            )
+        ),
+    ]
+    report = build_report(rows)
+    text = render_report(report)
+    assert "## Correctness" in text
+    assert "correctness_rate" in text
+    stats_by_arm = {s.arm: s for s in report.stats}
+    assert stats_by_arm["none"].correctness_rate == pytest.approx(0.0)
+    assert stats_by_arm["oracle"].correctness_rate == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
 # Persistence bridge round-trip through ResultStore
 # ---------------------------------------------------------------------------
 
@@ -447,12 +605,44 @@ def test_no_model_client_constructed_on_report_path(
 
     monkeypatch.setattr("athenaeum.provider.build_llm_client", _exploding_build_llm_client)
 
+    # issue athenaeum#1573: correctness grading (grade_correctness / weak_probes)
+    # must be exercised here too, not just left passing incidentally -- a
+    # weak-probe (leaked-token NONE answer) and an abstention row cover the
+    # two NEW branches (non-abstention token match, abstention decline rule)
+    # this guard did not exercise before this issue.
+    pto_probe = _probe("pto_allowance")
+    abstention_probe = _probe("abstain_unknown_client")
+    leaking_token = pto_probe.answer_tokens[0]
+
     rows = [
         _row(_none_record()),
         _row(_push_record(answer=f"25 days ({TARGET_UID})")),
         _row(_oracle_record(answer="25 days")),
         _row(_pull_record(called=True, answer=f"25 days ({TARGET_UID})")),
+        _row(
+            _record(
+                arm=Arm.NONE,
+                probe_id=pto_probe.id,
+                probe_class=pto_probe.probe_class,
+                answer=f"It's 25 days, per {leaking_token}.",
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NONE,
+                probe_id=abstention_probe.id,
+                probe_class=abstention_probe.probe_class,
+                answer="I don't know -- not in the corpus.",
+            )
+        ),
     ]
     report = build_report(rows)  # must not raise
-    render_report(report)  # must not raise
+    text = render_report(report)  # must not raise
     write_report(report, out_dir=tmp_path)  # must not raise
+
+    # The new code path actually ran (not just skipped): at least one group's
+    # correctness_rate is populated, and the leaked-token row surfaced as a
+    # weak probe -- both computed without ever touching a live model client.
+    assert any(s.correctness_rate is not None for s in report.stats)
+    assert pto_probe.id in report.weak_probes
+    assert "## Correctness" in text

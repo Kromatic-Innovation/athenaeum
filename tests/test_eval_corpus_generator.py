@@ -36,6 +36,36 @@ def test_core_corpus_is_internally_consistent() -> None:
     assert not problems, "corpus inconsistencies:\n  " + "\n  ".join(problems)
 
 
+def test_every_non_abstention_probe_answer_token_is_in_its_page_body() -> None:
+    """AC1 (issue athenaeum#1573): every non-abstention probe must carry at
+    least one ``answer_tokens`` value, and it must actually occur in one of
+    the probe's own ``expected_uids`` pages' bodies -- a planted token that
+    does not occur anywhere would silently grade every rollout incorrect,
+    which reads as a model regression rather than a corpus authoring bug.
+
+    Also pins the inverse for abstention probes: they carry NO answer
+    tokens, because nothing in the corpus answers them (see
+    ``tests.evals.north_star_report``'s separate abstention grading rule).
+    """
+    pages_by_uid = {page.uid: page for page in load_core_pages()}
+    probes = load_probes()
+    non_abstention = [p for p in probes if p.probe_class != "abstention"]
+    abstention = [p for p in probes if p.probe_class == "abstention"]
+    assert non_abstention, "expected at least one non-abstention probe"
+    assert abstention, "expected at least one abstention probe"
+
+    for probe in non_abstention:
+        assert probe.answer_tokens, f"probe {probe.id!r} has no answer_tokens"
+        body = "\n".join(pages_by_uid[uid].body for uid in probe.expected_uids)
+        assert any(token in body for token in probe.answer_tokens), (
+            f"probe {probe.id!r}: none of {probe.answer_tokens} appear in its "
+            f"answer page body ({probe.expected_uids})"
+        )
+
+    for probe in abstention:
+        assert probe.answer_tokens == (), f"abstention probe {probe.id!r} must have no tokens"
+
+
 def test_generation_is_deterministic_within_a_process() -> None:
     first = build_corpus(scale="small", seed=4242)
     second = build_corpus(scale="small", seed=4242)

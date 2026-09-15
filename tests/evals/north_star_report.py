@@ -32,6 +32,14 @@ nothing that needs a judge:
   distinctive n-gram overlap (:func:`distinctive_ngram_overlap`). The
   judged per-claim support check is explicitly out of scope (issue's own
   acceptance criterion: no LLM judge anywhere in this module).
+* **Correctness** (issue athenaeum#1573) -- the dimension every arm above
+  was missing: did the final answer actually get the ground truth right.
+  Graded by :func:`grade_correctness`, a normalized substring match against
+  each probe's planted ``answer_tokens`` (or a declining-language rule for
+  abstention probes) -- still no LLM judge. This is what makes the NONE
+  (floor) and ORACLE (ceiling) arms readable as numbers, and what a
+  :func:`weak_probes` probe list is built from (probes the floor already
+  answers correctly, which is a corpus-leak signal, not a retrieval win).
 
 **Every dimension is broken out per ``probe_class`` x ``corpus_scale``,
 never collapsed to a single aggregate** -- the issue's hypothesis is that
@@ -235,6 +243,103 @@ def _target_page_text(probe: Probe, corpus: Corpus) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Correctness grading (issue athenaeum#1573): the NONE (floor) and ORACLE
+# (ceiling) arms had nothing to grade until now -- every dimension above
+# describes retrieval or cost, never whether the FINAL ANSWER was actually
+# right. ``Probe.answer_tokens`` (``tests/evals/corpus.py``) plants a unique,
+# invented token in the body of one of a non-abstention probe's own
+# ``expected_uids`` pages; grading is a plain, normalized substring match --
+# no LLM judge, matching this module's own "no LLM judge anywhere" invariant.
+#
+# Abstention probes carry no ``answer_tokens`` (nothing in the corpus answers
+# them) and are graded by a SEPARATE rule: an answer is correct abstention
+# only when it asserts NONE of the corpus's planted tokens (no confabulation
+# of some OTHER probe's answer) AND uses recognizably declining language
+# (:data:`_NOT_FOUND_PHRASES`) -- absence of a token alone is not proof the
+# arm actually declined rather than confidently asserting something else
+# wrong that happens not to collide with a planted token.
+# ---------------------------------------------------------------------------
+
+#: Phrases an abstention answer is checked for, alongside the token-absence
+#: check -- deliberately short and generic (this is a floor/ceiling number,
+#: not a judged classification) rather than an attempt at exhaustive NLI.
+_NOT_FOUND_PHRASES: tuple[str, ...] = (
+    "i don't know",
+    "i do not know",
+    "not found",
+    "no information",
+    "not in the corpus",
+    "cannot find",
+    "can't find",
+    "unable to find",
+    "i'm not sure",
+    "i am not sure",
+    "no record of",
+    "does not contain",
+    "doesn't contain",
+)
+
+
+def _normalize_for_match(text: str) -> str:
+    """Lowercased text for a normalized substring match. Deliberately
+    minimal -- no stemming/punctuation-stripping -- because the tokens
+    planted by the corpus are single invented words with no natural
+    inflection to normalize away."""
+    return text.lower()
+
+
+def _all_answer_tokens(corpus: Corpus) -> frozenset[str]:
+    """Every planted answer token across every probe in *corpus*. An
+    abstention probe's confabulation check needs the WHOLE corpus's tokens,
+    not just its own -- it has none of its own by construction."""
+    return frozenset(token for probe in corpus.probes for token in probe.answer_tokens)
+
+
+def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bool | None:
+    """Did *record*'s answer get *probe*'s ground truth right?
+
+    Non-abstention: normalized substring match -- ALL of ``probe.answer_tokens``
+    must appear in the answer (mirrors the multi-hop/disambiguation probes'
+    own ground truth, where surfacing only one of several required facts is a
+    documented incomplete answer, not a correct one). Returns ``None`` (never
+    ``False``) when the probe carries no tokens at all -- a corpus authoring
+    gap that :func:`tests.evals.corpus.validate_core` already refuses to let
+    ship, not a graded miss.
+
+    Abstention: correct only when the answer asserts none of the corpus's
+    planted tokens AND uses recognizable declining language -- see the
+    section docstring above.
+    """
+    answer = _normalize_for_match(record.answer)
+    if probe.probe_class == "abstention":
+        if any(_normalize_for_match(tok) in answer for tok in _all_answer_tokens(corpus)):
+            return False
+        return any(phrase in answer for phrase in _NOT_FOUND_PHRASES)
+    if not probe.answer_tokens:
+        return None
+    return all(_normalize_for_match(tok) in answer for tok in probe.answer_tokens)
+
+
+def weak_probes(rows: Sequence[RolloutRow]) -> tuple[str, ...]:
+    """Probe ids the NONE arm (no context at all) already answers correctly.
+
+    A NONE-arm correct answer is a floor-leak signal -- the model's own prior
+    knowledge (or a guessable token) already covers the ground truth -- not
+    evidence that any retrieval arm helped. Sorted, deduplicated, empty when
+    no such probe was observed in *rows*.
+    """
+    ids: set[str] = set()
+    for row in rows:
+        if row.record.arm is not Arm.NONE:
+            continue
+        probe = _probe_for_row(row)
+        corpus = _corpus_for_scale(row.record.corpus_scale)
+        if grade_correctness(row.record, probe, corpus):
+            ids.add(probe.id)
+    return tuple(sorted(ids))
+
+
+# ---------------------------------------------------------------------------
 # Delivered-content extraction (what the arm actually put in front of the model)
 # ---------------------------------------------------------------------------
 
@@ -382,6 +487,10 @@ class GroupStats:
     mean_uid_citation_rate: float | None
     mean_distinctive_ngram_overlap: float | None
 
+    # Correctness (issue athenaeum#1573) -- all arms; None when no probe in
+    # the group carries ground truth (answer_tokens) to grade against.
+    correctness_rate: float | None
+
 
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
@@ -404,6 +513,7 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
         wasted_tokens: list[float] = []
         citation_rates: list[float] = []
         ngram_overlaps: list[float] = []
+        correctness_flags: list[float] = []
 
         for row in group:
             record = row.record
@@ -413,11 +523,13 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
                 input_per_turn.append(float(turn.input_tokens))
                 output_per_turn.append(float(turn.output_tokens))
 
+            probe = _probe_for_row(row)
+            corpus = _corpus_for_scale(corpus_scale)
+
             if record.arm is Arm.PULL:
                 no_call_flags.append(0.0 if record.recall_called else 1.0)
                 if record.recall_called:
-                    probe = _probe_for_row(row)
-                    target = _target_page_text(probe, _corpus_for_scale(corpus_scale))
+                    target = _target_page_text(probe, corpus)
                     for call in record.tool_calls:
                         self_overlaps.append(lexical_overlap(call.query, target))
                     topic_overlaps.append(lexical_overlap(probe.query, target))
@@ -437,6 +549,10 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
             if delivered_text:
                 ngram_overlaps.append(distinctive_ngram_overlap(delivered_text, record.answer))
 
+            correct = grade_correctness(record, probe, corpus)
+            if correct is not None:
+                correctness_flags.append(1.0 if correct else 0.0)
+
         stats.append(
             GroupStats(
                 probe_class=probe_class,
@@ -455,6 +571,7 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
                 mean_wasted_tokens_estimate=_mean(wasted_tokens),
                 mean_uid_citation_rate=_mean(citation_rates),
                 mean_distinctive_ngram_overlap=_mean(ngram_overlaps),
+                correctness_rate=_mean(correctness_flags),
             )
         )
     return stats
@@ -475,6 +592,8 @@ class NorthStarReport:
     git_sha: str
     generated: str
     corpus_digests: dict[str, str]
+    # issue athenaeum#1573: probe ids the NONE arm already answers correctly.
+    weak_probes: tuple[str, ...]
 
 
 def build_report(
@@ -495,6 +614,7 @@ def build_report(
         git_sha=_get_git_sha(),
         generated=now_iso(),
         corpus_digests=digests,
+        weak_probes=weak_probes(rows),
     )
 
 
@@ -642,6 +762,43 @@ def render_report(report: NorthStarReport) -> str:
             f"| {s.probe_class} | {s.corpus_scale} | {s.arm} | {s.n} | "
             f"{_fmt(s.mean_uid_citation_rate)} | {_fmt(s.mean_distinctive_ngram_overlap)} |"
         )
+    lines.append("")
+
+    lines.append("## Correctness (answer ground truth, issue athenaeum#1573)")
+    lines.append("")
+    lines.append(
+        "`correctness_rate` grades the ANSWER, not retrieval: normalized substring match "
+        "against each probe's planted `answer_tokens` (non-abstention), or the declining-"
+        "language rule for abstention probes — see `grade_correctness`. No LLM judge. This is "
+        "what makes NONE (floor) and ORACLE (ceiling) readable as numbers for the first time — "
+        "every other dimension above describes retrieval or cost, never whether the final "
+        "answer was actually right. `n/a` means no probe in that group carries ground truth "
+        "tokens to grade against."
+    )
+    lines.append("")
+    lines.append("| probe_class | corpus_scale | arm | n | correctness_rate |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for s in report.stats:
+        lines.append(
+            f"| {s.probe_class} | {s.corpus_scale} | {s.arm} | {s.n} | "
+            f"{_fmt(s.correctness_rate)} |"
+        )
+    lines.append("")
+
+    lines.append("### Weak probes (NONE arm already answers correctly)")
+    lines.append("")
+    lines.append(
+        "Probes where the floor (no context at all) already grades correct — a signal the "
+        "ground truth leaked into the model's own prior knowledge, or the token is otherwise "
+        "guessable, not that any retrieval arm helped. Read alongside the ORACLE ceiling: a "
+        "probe listed here needs a harder token or a different question, not a better arm."
+    )
+    lines.append("")
+    if report.weak_probes:
+        for probe_id in report.weak_probes:
+            lines.append(f"- {probe_id}")
+    else:
+        lines.append("_none observed in this run_")
     lines.append("")
 
     lines.append("## Frontier (cost vs. quality — never a single composite)")

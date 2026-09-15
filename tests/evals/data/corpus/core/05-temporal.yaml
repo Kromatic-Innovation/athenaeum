@@ -33,6 +33,7 @@
 
     This supersedes the Thornlea Wharf address.
 
+    Internal reference tag: Driftwick.
 - uid: office-address-superseded
   type: note
   name: Office address (former, Thornlea Wharf)
@@ -66,6 +67,7 @@
     The delivery standup moved to 9:30 AM in April 2026 to accommodate the
     client-site rota. This is the current time.
 
+    Internal reference tag: Emberlyn.
 - uid: standup-time-superseded
   type: note
   name: Standup time (former, 9:00)
@@ -126,6 +128,7 @@
     The client-lead approval ceiling is 500 GBP. Above that, the finance
     partner approves.
 
+    Internal reference tag: Quorlinth.
 - uid: budget-threshold-superseded
   type: note
   name: Budget approval threshold (former, 250 GBP)

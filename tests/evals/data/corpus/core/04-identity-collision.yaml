@@ -33,6 +33,7 @@
     Not to be confused with the rowanwrenfield code repository, which is named
     after Rowan but is a software project, not a person.
 
+    Internal reference tag: Ashcaldera.
 - uid: repo-rowanwrenfield
   type: project
   name: rowanwrenfield
@@ -56,6 +57,7 @@
     A question about what Rowan Wrenfield decided is a question about the PERSON,
     not about this repository.
 
+    Internal reference tag: Brindlewake.
 - uid: person-ilva-wrenfield
   type: person
   name: Ilva Wrenfield
@@ -90,6 +92,7 @@
     He is recorded here solely because he was mistakenly added to a client
     mailing list in April 2026 and had to be removed.
 
+    Internal reference tag: Hollowmarsh.
 - uid: org-wrenfield-associates
   type: company
   name: Wrenfield Associates
@@ -123,6 +126,7 @@
 
     A near-miss that a given-name-only query should not confidently resolve to.
 
+    Internal reference tag: Sablethorn.
 - uid: project-pricing-review
   type: project
   name: 2026 pricing review

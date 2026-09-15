@@ -69,6 +69,7 @@
     The firm's internal build and release pipeline. Maintained by Tomas Briell.
     All internal repositories build through it, including the rate-card tooling.
 
+    Internal reference tag: Fennorack.
 - uid: tool-pagevault
   type: project
   name: Pagevault
