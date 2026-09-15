@@ -349,6 +349,43 @@ def test_weak_probes_lists_probe_the_none_arm_already_answers_correctly() -> Non
     assert weak == (pto_probe.id,)
 
 
+def test_weak_probes_never_lists_an_abstention_probe_the_none_arm_got_right() -> None:
+    """A correctly-abstaining NONE arm is the expected null result, not a
+    floor leak. Without this exclusion every abstention probe would be listed
+    as weak on every run, drowning the signal the list exists to carry.
+
+    Raised by Seer review on PR athenaeum#1670.
+    """
+    abstention_probe = _probe("abstain_unknown_client")
+    assert abstention_probe.probe_class == "abstention"
+
+    # This answer grades CORRECT for an abstention probe (asserts no planted
+    # token, uses declining language) -- so only the probe_class exclusion
+    # keeps it out of the weak list.
+    abstaining_none_row = _row(
+        _record(
+            arm=Arm.NONE,
+            probe_id=abstention_probe.id,
+            probe_class=abstention_probe.probe_class,
+            answer="I don't have that information; it is not in the corpus.",
+        )
+    )
+    assert grade_correctness(abstaining_none_row.record, abstention_probe, _CORPUS) is True
+
+    # Positive control in the same run: a genuine floor leak IS still listed.
+    pto_probe2 = _probe("pto_allowance")
+    leaky_row = _row(
+        _record(
+            arm=Arm.NONE,
+            probe_id=pto_probe2.id,
+            probe_class=pto_probe2.probe_class,
+            answer=f"It's 25 days, code {pto_probe2.answer_tokens[0]}.",
+        )
+    )
+
+    assert weak_probes([abstaining_none_row, leaky_row]) == (pto_probe2.id,)
+
+
 def test_abstention_grades_correct_only_when_no_token_is_asserted() -> None:
     """AC5: an abstention probe grades correct only when the answer asserts
     NONE of the corpus's planted tokens and uses declining language -- one
