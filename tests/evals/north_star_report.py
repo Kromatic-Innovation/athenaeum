@@ -19,10 +19,10 @@ nothing that needs a judge:
   step, let alone an LLM, is run to produce it) and is exactly what a
   system that skipped query reformulation entirely would have sent.
 * **Cost** -- input/output tokens **per turn**
-  (``RolloutRecord.turn_tokens``), not summed per task, so PUSH's
-  ``injected_context_tokens`` (paid whether the pages were used or not)
-  can be read directly beside PULL's turn cost (paid only when it calls) --
-  the asymmetry the issue names as the actual economic question.
+  (``RolloutRecord.turn_tokens``), not summed per task, so a push arm's
+  ``injected_context_tokens`` (paid whether the delivered content was used
+  or not) can be read directly beside PULL's turn cost (paid only when it
+  calls) -- the asymmetry the issue names as the actual economic question.
 * **Efficiency** -- turns to answer, tool-call count.
 * **Waste** -- delivered pages never cited later in the rollout, both as a
   page-count fraction and as an approximate token figure.
@@ -32,6 +32,14 @@ nothing that needs a judge:
   distinctive n-gram overlap (:func:`distinctive_ngram_overlap`). The
   judged per-claim support check is explicitly out of scope (issue's own
   acceptance criterion: no LLM judge anywhere in this module).
+  **Issue athenaeum#1574:** the breadcrumb arms (``push_breadcrumb``,
+  ``push_breadcrumb_pull``) get n-gram utilization RECOMPUTED against their
+  actual (small) delivered payload (:func:`delivered_text_for_utilization`),
+  never measured against the five-page basis they never received. Their
+  uid-citation/waste figures render ``n/a``, not a silent near-zero: the
+  shipped hook's breadcrumb bullet carries no uid marker at all, so there
+  is no textual basis to compute a citation rate against
+  (:func:`delivered_uids_for_utilization`'s own docstring has the detail).
 * **Correctness** (issue athenaeum#1573) -- the dimension every arm above
   was missing: did the final answer actually get the ground truth right.
   Graded by :func:`grade_correctness`, a normalized substring match against
@@ -389,34 +397,63 @@ def delivered_text_for_utilization(row: RolloutRow) -> str:
     """The text actually placed in front of the model for *row* -- the
     basis for both :func:`distinctive_ngram_overlap` and the delivered-uid
     set below. ``""`` for NONE (nothing delivered) and for a PULL rollout
-    that never called recall."""
+    that never called recall.
+
+    Issue athenaeum#1574 (AC4): the breadcrumb arms' delivered text is the
+    ACTUAL breadcrumb payload the shipped hook produced (or, for
+    PUSH_BREADCRUMB_PULL, that payload plus whatever the recall tool
+    additionally returned) -- utilization is recomputed against what was
+    really delivered, never left to silently read near-zero against a
+    five-page basis that was never sent.
+    """
     record = row.record
-    if record.arm is Arm.PUSH:
+    if record.arm is Arm.PUSH_PAGES_UPPER_BOUND:
         return _push_delivered_text(record)
     if record.arm is Arm.ORACLE:
         return _target_page_text(_probe_for_row(row), _corpus_for_scale(record.corpus_scale))
     if record.arm is Arm.PULL:
         return _pull_delivered_text(record)
+    if record.arm is Arm.PUSH_BREADCRUMB:
+        return _push_delivered_text(record)
+    if record.arm is Arm.PUSH_BREADCRUMB_PULL:
+        breadcrumb = _push_delivered_text(record)
+        pulled = _pull_delivered_text(record)
+        return "\n\n".join(part for part in (breadcrumb, pulled) if part)
     return ""
 
 
 def delivered_uids_for_utilization(row: RolloutRow) -> tuple[str, ...]:
     """Uids of the pages actually delivered for *row*.
 
-    PUSH and PULL are both served by the SAME ``recall_search`` rendering
-    (``**Uid:**`` marker), so :func:`~tests.evals.metrics.uids_from_recall_output`
-    applies unchanged to either one. ORACLE's context is the ground-truth
-    pages verbatim (:func:`tests.evals.rollout._oracle_context`) rendered
-    via ``Page.to_markdown()`` -- plain ``uid:`` frontmatter, not the bold
+    PUSH_PAGES_UPPER_BOUND and PULL are both served by the SAME
+    ``recall_search`` rendering (``**Uid:**`` marker), so
+    :func:`~tests.evals.metrics.uids_from_recall_output` applies unchanged
+    to either one. ORACLE's context is the ground-truth pages verbatim
+    (:func:`tests.evals.rollout._oracle_context`) rendered via
+    ``Page.to_markdown()`` -- plain ``uid:`` frontmatter, not the bold
     marker -- so ORACLE uses the probe's own ``expected_uids`` directly
     rather than mis-parsing a format that was never meant to match.
+
+    PUSH_BREADCRUMB is a structural ``()``, NOT a stand-in for "delivered
+    nothing" (issue athenaeum#1574 AC4): the shipped hook's breadcrumb
+    bullet is ``name`` or ``name — description`` -- it carries NO uid
+    marker at all (see ``examples/claude-code/user-prompt-recall.sh``'s
+    render loop), so there is no textual basis to recover which pages were
+    delivered. ``uid_citation_rate``/waste therefore render ``n/a`` for
+    this arm, which is the CORRECT "not applicable" reading, never a
+    silently-computed near-zero. PUSH_BREADCRUMB_PULL, if it actually
+    called recall, DOES carry uid markers in the pulled portion (the SAME
+    ``recall_search`` rendering PULL gets), so its uids come from there --
+    the breadcrumb portion contributes none, for the identical reason.
     """
     record = row.record
-    if record.arm is Arm.PUSH:
+    if record.arm is Arm.PUSH_PAGES_UPPER_BOUND:
         return tuple(uids_from_recall_output(_push_delivered_text(record)))
     if record.arm is Arm.ORACLE:
         return _probe_for_row(row).expected_uids
     if record.arm is Arm.PULL:
+        return tuple(uids_from_recall_output(_pull_delivered_text(record)))
+    if record.arm is Arm.PUSH_BREADCRUMB_PULL:
         return tuple(uids_from_recall_output(_pull_delivered_text(record)))
     return ()
 
@@ -648,6 +685,36 @@ def render_report(report: NorthStarReport) -> str:
         "deterministic computation over already-captured rollout transcripts. This is "
         "a **measurement, not a regression gate**; nothing here should ever fail a build."
     )
+    lines.append("")
+
+    lines.append("## Arms in this report (athenaeum#1574)")
+    lines.append("")
+    lines.append(
+        "**PUSH means breadcrumbs** — `push_breadcrumb` and `push_breadcrumb_pull` are the "
+        "arms that match what `examples/claude-code/user-prompt-recall.sh` actually ships: at "
+        "most three 200-character-clamped `name — description` bullets, assembled by running "
+        "that hook itself, never reimplemented. `push_pages_upper_bound` is the ORIGINAL "
+        "five-full-page PUSH arm, kept and renamed — read it as an explicit **upper bound** "
+        "(\"what if the model always got the whole page\"), never as the shipped configuration."
+    )
+    lines.append("")
+    lines.append("| arm | delivery | reads as |")
+    lines.append("| --- | --- | --- |")
+    lines.append("| `none` | nothing | floor |")
+    lines.append(
+        "| `push_pages_upper_bound` | 5 full pages via `recall_search` | **upper bound**, "
+        "NOT the shipped hook |"
+    )
+    lines.append(
+        "| `push_breadcrumb` | <=3 breadcrumbs, via the real shipped hook | **matches "
+        "production PUSH** |"
+    )
+    lines.append(
+        "| `push_breadcrumb_pull` | breadcrumbs injected + `recall` tool available | matches "
+        "production PUSH, agent may still PULL |"
+    )
+    lines.append("| `oracle` | ground-truth pages verbatim | ceiling |")
+    lines.append("| `pull` | nothing injected, `recall` tool available | agent-initiated only |")
     lines.append("")
 
     pull_stats = [s for s in report.stats if s.arm == Arm.PULL.value]

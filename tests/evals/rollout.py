@@ -1,39 +1,57 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Four-arm rollout runner: NONE / PUSH / ORACLE / PULL (issue athenaeum#1522).
+"""Six-arm rollout runner: NONE / PUSH_PAGES_UPPER_BOUND / PUSH_BREADCRUMB /
+PUSH_BREADCRUMB_PULL / ORACLE / PULL (issues athenaeum#1522, athenaeum#1574).
 
-The north-star comparison needs one probe run across four memory-delivery
-arms and captured with enough fidelity to measure it. The arms decompose
+The north-star comparison needs one probe run across memory-delivery arms
+and captured with enough fidelity to measure it. The arms decompose
 unevenly, and the split below is deliberate (see the issue body):
 
-* **NONE / PUSH / ORACLE are single-shot completions** — only the assembled
-  context differs, the model makes no tool choice. They reuse
-  ``tests/evals/harness.py``'s ``EvalSession.observe_response`` / provider
-  call shape (:func:`run_none`, :func:`run_push`, :func:`run_oracle`), not a
-  second provider abstraction.
-* **PULL is a real tool-use loop** (:func:`run_pull`), because the whole
-  point of that arm is whether the agent *decides* to call recall.
-  ``recall_search()`` is a plain function, not something a model can
-  decline to invoke — so PULL spawns ``claude -p`` with a scoped
-  ``--mcp-config`` exposing only athenaeum's ``recall`` tool and
-  ``--output-format stream-json`` so the tool-choice decision is visible in
-  the stream. This is the SAME argv discipline
-  :mod:`athenaeum.provider`'s ``ClaudeCliClient._build_argv`` uses (prompt on
-  stdin, never in argv — issue athenaeum#543 L4), with exactly the two
-  text-only-pinning flags (``--tools ""``, unscoped ``--strict-mcp-config``)
-  inverted. ``src/athenaeum/provider.py`` itself is left byte-unchanged —
-  this module builds its own argv rather than parameterizing that one.
+* **NONE / PUSH_PAGES_UPPER_BOUND / PUSH_BREADCRUMB / ORACLE are
+  single-shot completions** — only the assembled context differs, the
+  model makes no tool choice. They reuse ``tests/evals/harness.py``'s
+  ``EvalSession.observe_response`` / provider call shape (:func:`run_none`,
+  :func:`run_push_pages_upper_bound`, :func:`run_push_breadcrumb`,
+  :func:`run_oracle`), not a second provider abstraction.
+* **PULL and PUSH_BREADCRUMB_PULL are real tool-use loops** (:func:`run_pull`,
+  :func:`run_push_breadcrumb_pull`), because the whole point of those arms
+  is whether the agent *decides* to call recall. ``recall_search()`` is a
+  plain function, not something a model can decline to invoke — so both
+  spawn ``claude -p`` with a scoped ``--mcp-config`` exposing only
+  athenaeum's ``recall`` tool and ``--output-format stream-json`` so the
+  tool-choice decision is visible in the stream. This is the SAME argv
+  discipline :mod:`athenaeum.provider`'s ``ClaudeCliClient._build_argv``
+  uses (prompt on stdin, never in argv — issue athenaeum#543 L4), with
+  exactly the two text-only-pinning flags (``--tools ""``, unscoped
+  ``--strict-mcp-config``) inverted. ``src/athenaeum/provider.py`` itself is
+  left byte-unchanged — this module builds its own argv rather than
+  parameterizing that one.
 
-PULL choosing NOT to call recall is a recorded outcome, never an error:
-:func:`run_pull` / :func:`parse_pull_stream` never raise on an empty tool
-call list, and ``RolloutRecord.recall_called`` is simply ``False``.
+Neither PULL nor PUSH_BREADCRUMB_PULL choosing NOT to call recall is an
+error — it is a recorded outcome: :func:`run_pull` / :func:`parse_pull_stream`
+never raise on an empty tool call list, and ``RolloutRecord.recall_called``
+is simply ``False``.
+
+**PUSH means breadcrumbs (issue athenaeum#1574's operator decision).** The
+shipped hook (``examples/claude-code/user-prompt-recall.sh``) injects at
+most three 200-character-clamped ``name — description`` bullets, not five
+full pages. :func:`run_push_breadcrumb` and :func:`run_push_breadcrumb_pull`
+match that shape by ACTUALLY RUNNING the shipped hook
+(:func:`build_push_breadcrumb_context`) rather than reimplementing its
+SQL ranking / awk budget-and-clamp pass — see that function's docstring.
+The original five-full-page arm survives, renamed to
+:attr:`Arm.PUSH_PAGES_UPPER_BOUND` (:func:`run_push_pages_upper_bound`),
+explicitly labelled an upper bound rather than the shipped configuration.
 
 Reuse, not reimplementation:
 
 * Corpus: :func:`tests.evals.corpus.build_corpus` / ``Corpus.materialize``.
 * Index: ``athenaeum.search.get_backend(name).build_index`` (see
   ``tests/test_retrieval_golden_1420.py:132``).
-* PUSH delivery: mirrors ``athenaeum.mcp_server.recall_search`` directly —
-  same function, same default top_k.
+* PUSH_PAGES_UPPER_BOUND delivery: mirrors ``athenaeum.mcp_server.recall_search``
+  directly — same function, same default top_k.
+* PUSH_BREADCRUMB / PUSH_BREADCRUMB_PULL delivery: the shipped hook itself,
+  spawned as a subprocess exactly as Claude Code would invoke it — never a
+  second implementation of its ranking/clamp/budget logic.
 * Grading: intentionally NOT called here. ``tests/evals/metrics.py``'s
   ladder grades a *push* (ranked uids vs. ground truth); this module's job
   ends at capturing a :class:`RolloutRecord` with enough fidelity for a
@@ -55,10 +73,12 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from collections.abc import Callable, Iterable
 from enum import Enum
 from pathlib import Path
@@ -79,24 +99,57 @@ from tests.evals.harness import EvalSession, build_live_client
 
 
 class Arm(str, Enum):
-    """The four memory-delivery arms of the north-star comparison.
+    """The memory-delivery arms of the north-star comparison.
 
     A ``str`` subclass so an arm value round-trips through
     ``tests.evals.containment.GridCell.arm`` (a plain string field) without a
-    lookup table: ``Arm.PUSH.value == "push"`` and ``Arm("push") is
-    Arm.PUSH``.
+    lookup table: ``Arm.PULL.value == "pull"`` and ``Arm("pull") is
+    Arm.PULL``.
+
+    Issue athenaeum#1574 (operator decision, recorded on that issue): "PUSH
+    means breadcrumbs." The original five-full-page arm — what ``PUSH`` used
+    to mean — is renamed :attr:`PUSH_PAGES_UPPER_BOUND` and kept as an
+    explicitly labelled upper bound (see ``run_push_pages_upper_bound`` and
+    ``tests/evals/north_star_report.py``'s arm-legend section), never
+    deleted. :attr:`PUSH_BREADCRUMB` and :attr:`PUSH_BREADCRUMB_PULL` are
+    the two new arms that actually match what the shipped hook
+    (``examples/claude-code/user-prompt-recall.sh``) delivers.
     """
 
     NONE = "none"
-    PUSH = "push"
+    PUSH_PAGES_UPPER_BOUND = "push_pages_upper_bound"
+    PUSH_BREADCRUMB = "push_breadcrumb"
+    PUSH_BREADCRUMB_PULL = "push_breadcrumb_pull"
     ORACLE = "oracle"
     PULL = "pull"
+
+    @classmethod
+    def _missing_(cls, value: object) -> Arm | None:
+        """Back-compat for a result-store row written before issue
+        athenaeum#1574 renamed ``"push"`` to ``"push_pages_upper_bound"``
+        (AC5: resuming an existing row must still work). ``Arm("push")`` —
+        the exact string every pre-#1574 ``RolloutRecord.to_payload()``
+        persisted — resolves to the SAME arm the old value named (the
+        five-full-page delivery), not a ``ValueError``. Any other unknown
+        value still raises, same as a bare ``Enum`` — this is a single,
+        named legacy alias, not a silent catch-all.
+        """
+        if value == "push":
+            return cls.PUSH_PAGES_UPPER_BOUND
+        return None
 
 
 #: Enumeration order the runner always uses — the order every grid built by
 #: :func:`run_probe_all_arms` is enumerated in, so a rerun's cell order is
 #: stable (matches ``containment.build_grid``'s own determinism contract).
-ALL_ARMS: tuple[Arm, ...] = (Arm.NONE, Arm.PUSH, Arm.ORACLE, Arm.PULL)
+ALL_ARMS: tuple[Arm, ...] = (
+    Arm.NONE,
+    Arm.PUSH_PAGES_UPPER_BOUND,
+    Arm.PUSH_BREADCRUMB,
+    Arm.PUSH_BREADCRUMB_PULL,
+    Arm.ORACLE,
+    Arm.PULL,
+)
 
 #: Model used for both the single-shot arms and PULL's ``claude -p`` spawn
 #: when the caller does not override it. Cheap and identical to the proven
@@ -145,12 +198,15 @@ class RolloutRecord:
     """Everything captured for one (probe, arm) rollout.
 
     ``injected_context_tokens`` is populated (a count, possibly ``0`` for an
-    abstention probe with nothing to inject) for PUSH/ORACLE, and left
-    ``None`` for NONE/PULL — neither arm delivers context the caller
-    assembled: NONE gets none by design, PULL's context (if any) is
-    whatever the model itself chose to pull via the tool call, which is
-    already captured in ``tool_calls``/``transcript`` rather than a single
-    token count.
+    abstention probe with nothing to inject) for PUSH_PAGES_UPPER_BOUND,
+    PUSH_BREADCRUMB, PUSH_BREADCRUMB_PULL and ORACLE, and left ``None`` for
+    NONE/PULL — neither of those two delivers context the caller assembled:
+    NONE gets none by design, PULL's context (if any) is whatever the model
+    itself chose to pull via the tool call, which is already captured in
+    ``tool_calls``/``transcript`` rather than a single token count.
+    PUSH_BREADCRUMB_PULL is a hybrid — the breadcrumb IS caller-assembled
+    (hence a real count here), but it may ALSO pull further content via the
+    tool, which is captured the same way PULL's is.
     """
 
     arm: Arm
@@ -268,7 +324,7 @@ def _single_shot(
 
 
 # ---------------------------------------------------------------------------
-# NONE / PUSH / ORACLE — single-shot arms
+# NONE / PUSH_PAGES_UPPER_BOUND / PUSH_BREADCRUMB / ORACLE — single-shot arms
 # ---------------------------------------------------------------------------
 
 
@@ -295,7 +351,7 @@ def run_none(
     )
 
 
-def run_push(
+def run_push_pages_upper_bound(
     probe: Probe,
     corpus_scale: str,
     *,
@@ -306,10 +362,19 @@ def run_push(
     session: EvalSession,
     model: str,
 ) -> RolloutRecord:
-    """PUSH arm: context is whatever ``recall_search`` would actually
-    deliver for this probe's query — the real retrieval path, mirrored
-    directly rather than reimplemented (``athenaeum.mcp_server.recall_search``,
-    issue athenaeum#1522's explicit reuse instruction)."""
+    """PUSH_PAGES_UPPER_BOUND arm: context is whatever ``recall_search``
+    would actually deliver for this probe's query at ``top_k=5`` — the real
+    retrieval path, mirrored directly rather than reimplemented
+    (``athenaeum.mcp_server.recall_search``, issue athenaeum#1522's explicit
+    reuse instruction).
+
+    Named (and renamed from the original bare ``PUSH``) by issue
+    athenaeum#1574's operator decision: this five-full-page delivery is NOT
+    what the shipped hook injects — the shipped hook delivers at most three
+    200-character breadcrumbs (:func:`run_push_breadcrumb`). This arm is
+    kept as an explicitly labelled UPPER BOUND ("what if the model always
+    got the whole page"), not the production configuration.
+    """
     pushed = recall_search(
         wiki_root,
         probe.query,
@@ -321,7 +386,7 @@ def run_push(
         context=pushed, probe=probe, client=client, session=session, model=model
     )
     return RolloutRecord(
-        arm=Arm.PUSH,
+        arm=Arm.PUSH_PAGES_UPPER_BOUND,
         probe_id=probe.id,
         probe_class=probe.probe_class,
         corpus_scale=corpus_scale,
@@ -335,6 +400,157 @@ def run_push(
             {
                 "system": _SYSTEM_PROMPT,
                 "pushed_context": pushed,
+                "user": user_text,
+                "answer": answer,
+            }
+        ],
+    )
+
+
+#: Repo root, derived the same way ``tests/test_shell_hooks.py``'s
+#: ``HOOKS_DIR`` is (``Path(__file__).parent...`` walked up to the repo
+#: root) — ``rollout.py`` sits one directory deeper (``tests/evals/`` vs.
+#: ``tests/``), hence the extra ``.parent``.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_HOOKS_DIR = _REPO_ROOT / "examples" / "claude-code"
+SESSION_START_HOOK = _HOOKS_DIR / "session-start-recall.sh"
+USER_PROMPT_HOOK = _HOOKS_DIR / "user-prompt-recall.sh"
+
+
+def build_breadcrumb_hook_env(
+    knowledge_root: Path, hook_home: Path, *, athenaeum_src: Path | None = None
+) -> dict[str, str]:
+    """Environment for shelling out to the SHIPPED hooks
+    (:data:`SESSION_START_HOOK` / :data:`USER_PROMPT_HOOK`), scoped to
+    *hook_home* as ``HOME`` so the hooks' own hardcoded
+    ``${HOME}/.cache/athenaeum`` index/cache lives in a throwaway directory
+    rather than a developer's real one.
+
+    Same isolation shape ``tests/test_shell_hooks.py``'s ``hook_env``
+    fixture uses — reused here, not reimplemented (issue athenaeum#1574
+    plan step 1: "reusing the hook's SQL/awk contract rather than
+    reimplementing it" extends to the harness that invokes it).
+    """
+    src = athenaeum_src or _REPO_ROOT
+    return {
+        "HOME": str(hook_home),
+        "ATHENAEUM_CACHE_DIR": str(hook_home / ".cache" / "athenaeum"),
+        "PATH": os.environ.get("PATH", ""),
+        "KNOWLEDGE_ROOT": str(knowledge_root),
+        "ATHENAEUM_SRC": str(src),
+        "ATHENAEUM_PYTHON": sys.executable,
+        # Deliberately a path that cannot exist, so `command -v $ATHENAEUM_CLI`
+        # fails deterministically and the hook falls through to its offline
+        # regex term extractor — same reasoning as hook_env's own
+        # ATHENAEUM_CLI: a rollout arm that must stay a pure retrieval
+        # measurement must never shell out to a second live LLM call of its
+        # own (the only model call PUSH_BREADCRUMB/PUSH_BREADCRUMB_PULL make
+        # is their own single-shot / claude -p turn, already accounted for).
+        "ATHENAEUM_CLI": str(hook_home / "no-such-athenaeum-binary"),
+    }
+
+
+def build_push_breadcrumb_context(
+    knowledge_root: Path,
+    hook_home: Path,
+    query: str,
+    *,
+    session_id: str | None = None,
+    athenaeum_src: Path | None = None,
+    timeout: float = 30.0,
+) -> str:
+    """Assemble the breadcrumb PUSH arm's context by ACTUALLY RUNNING the
+    shipped hooks against *knowledge_root* — never a Python reimplementation
+    of the hook's SQL ranking / awk 200-char clamp / ``LIMIT 3`` (issue
+    athenaeum#1574 plan step 1; AC1's byte-equivalence requirement is
+    structural here, not merely tested: there is no second code path that
+    could drift from the shipped one).
+
+    Runs :data:`SESSION_START_HOOK` under *hook_home* as a throwaway
+    ``HOME`` to build the hook's own FTS5 index from *knowledge_root*, then
+    runs :data:`USER_PROMPT_HOOK` for *query* against that SAME ``HOME`` and
+    returns ``hookSpecificOutput.additionalContext`` verbatim — byte-for-byte
+    what a real Claude Code session would receive for the same prompt on the
+    same materialized corpus.
+
+    Returns ``""`` (never raises) when the hook itself declines to inject
+    anything — no index, a too-short prompt, no FTS match — mirroring the
+    hook's own "exit 0, no output" behaviour; the hook never raises either.
+    """
+    if shutil.which("bash") is None:
+        raise RuntimeError("bash not found on PATH (required to run the shipped hooks)")
+    env = build_breadcrumb_hook_env(knowledge_root, hook_home, athenaeum_src=athenaeum_src)
+    subprocess.run(
+        ["bash", str(SESSION_START_HOOK)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=True,
+    )
+    stdin_payload = json.dumps(
+        {"prompt": query, "session_id": session_id or f"rollout-{uuid.uuid4().hex}"}
+    )
+    result = subprocess.run(
+        ["bash", str(USER_PROMPT_HOOK)],
+        input=stdin_payload,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if not result.stdout.strip():
+        return ""
+    payload = json.loads(result.stdout)
+    return str(payload.get("hookSpecificOutput", {}).get("additionalContext", ""))
+
+
+def run_push_breadcrumb(
+    probe: Probe,
+    corpus_scale: str,
+    *,
+    knowledge_root: Path,
+    hook_home: Path,
+    client: Any,
+    session: EvalSession,
+    model: str,
+    context_fn: Callable[..., str] | None = None,
+) -> RolloutRecord:
+    """PUSH_BREADCRUMB arm: context is EXACTLY what the shipped
+    ``user-prompt-recall.sh`` hook injects for this probe's query — at most
+    three 200-character-clamped breadcrumbs, assembled by actually running
+    the hook (:func:`build_push_breadcrumb_context`), never a
+    reimplementation. This is what "PUSH" means in production (issue
+    athenaeum#1574's operator decision); :func:`run_push_pages_upper_bound`
+    is the five-full-page arm kept as an explicit upper bound.
+
+    *context_fn* is an injectable seam (defaults to
+    :func:`build_push_breadcrumb_context`) taking the same
+    ``(knowledge_root, hook_home, query)`` positional shape — lets an
+    offline caller (e.g. the grid-dispatch wiring test) substitute a stub
+    and avoid the subprocess spawn entirely, the same pattern
+    :func:`run_probe_all_arms`'s ``pull_runner`` seam already uses.
+    """
+    assemble = context_fn or build_push_breadcrumb_context
+    breadcrumb = assemble(knowledge_root, hook_home, probe.query)
+    answer, turn_usage, user_text = _single_shot(
+        context=breadcrumb or None, probe=probe, client=client, session=session, model=model
+    )
+    return RolloutRecord(
+        arm=Arm.PUSH_BREADCRUMB,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        corpus_scale=corpus_scale,
+        answer=answer,
+        turn_tokens=[turn_usage],
+        tool_calls=[],
+        recall_called=False,
+        injected_context_tokens=estimate_tokens(breadcrumb) if breadcrumb else 0,
+        turn_count=1,
+        transcript=[
+            {
+                "system": _SYSTEM_PROMPT,
+                "pushed_context": breadcrumb,
                 "user": user_text,
                 "answer": answer,
             }
@@ -393,7 +609,7 @@ def run_oracle(
 
 
 # ---------------------------------------------------------------------------
-# PULL — the real tool-use loop
+# PULL / PUSH_BREADCRUMB_PULL — the real tool-use loops
 # ---------------------------------------------------------------------------
 
 
@@ -598,8 +814,79 @@ def run_pull(
     )
 
 
+def run_push_breadcrumb_pull(
+    probe: Probe,
+    knowledge_root: Path,
+    hook_home: Path,
+    cache_dir: Path,
+    corpus_scale: str,
+    *,
+    claude_binary: str = "claude",
+    model: str = DEFAULT_ROLLOUT_MODEL,
+    timeout: float = 120.0,
+    athenaeum_bin: str | None = None,
+    context_fn: Callable[..., str] | None = None,
+) -> RolloutRecord:
+    """PUSH_BREADCRUMB_PULL arm: the breadcrumb context IS injected AND the
+    ``recall`` tool remains available — matching the shipped hook's own
+    design (inject a breadcrumb, expect the agent to PULL the full page
+    when it looks useful; see the hook's own
+    ``(use \\`recall\\` MCP tool for full details)`` wording). Reuses
+    :func:`run_pull`'s ``claude -p`` loop verbatim (same MCP config, same
+    argv, same stream parser); the only difference is the breadcrumb is
+    prepended to the stdin prompt rather than the prompt being sent bare.
+
+    ``recall_called`` is recorded exactly like PULL (issue athenaeum#1574
+    AC2) — choosing not to pull further after seeing the breadcrumb is a
+    legitimate, recorded outcome, never an error.
+    """
+    assemble = context_fn or build_push_breadcrumb_context
+    breadcrumb = assemble(knowledge_root, hook_home, probe.query)
+
+    if shutil.which(claude_binary) is None:
+        raise RuntimeError(f"{claude_binary!r} not found on PATH")
+
+    mcp_config = build_pull_mcp_config(knowledge_root, cache_dir, athenaeum_bin=athenaeum_bin)
+    prompt_text = f"{breadcrumb}\n\n{probe.query}" if breadcrumb else probe.query
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        config_path = Path(tmp_dir) / "mcp-config.json"
+        config_path.write_text(json.dumps(mcp_config), encoding="utf-8")
+        argv = build_pull_argv(claude_binary, config_path, model)
+        proc = subprocess.run(
+            argv,
+            input=prompt_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+
+    parsed = parse_pull_stream((proc.stdout or "").splitlines())
+    # The breadcrumb is recorded as transcript[0] — the SAME
+    # ``{"pushed_context": ...}`` shape :func:`run_push_breadcrumb` uses, so
+    # ``tests.evals.north_star_report._push_delivered_text`` (which reads
+    # ``transcript[0]["pushed_context"]``) needs no PUSH_BREADCRUMB_PULL-
+    # specific branch. The real stream-json events follow it; ``_pull_delivered_text``
+    # scans the whole list for ``type == "user"`` entries, so the leading
+    # dict (which has no ``type`` key) is simply skipped by that scan.
+    transcript = [{"pushed_context": breadcrumb}, *parsed.transcript]
+    return RolloutRecord(
+        arm=Arm.PUSH_BREADCRUMB_PULL,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        corpus_scale=corpus_scale,
+        answer=parsed.answer,
+        turn_tokens=parsed.turn_tokens,
+        tool_calls=parsed.tool_calls,
+        recall_called=parsed.recall_called,
+        injected_context_tokens=estimate_tokens(breadcrumb) if breadcrumb else 0,
+        turn_count=parsed.turn_count,
+        transcript=transcript,
+    )
+
+
 # ---------------------------------------------------------------------------
-# Runner entrypoint — one probe, all four arms
+# Runner entrypoint — one probe, all six arms
 # ---------------------------------------------------------------------------
 
 
@@ -622,26 +909,33 @@ def run_probe_all_arms(
     replicate: int = 0,
     client: Any | None = None,
     pull_runner: Callable[..., RolloutRecord] | None = None,
+    breadcrumb_context_fn: Callable[..., str] | None = None,
+    breadcrumb_pull_runner: Callable[..., RolloutRecord] | None = None,
 ) -> dict[str, RolloutRecord]:
-    """Run ONE probe across all four arms against a materialized corpus at
-    *corpus_scale* (issue athenaeum#1522 AC2/AC3/AC4).
+    """Run ONE probe across all six arms against a materialized corpus at
+    *corpus_scale* (issue athenaeum#1522 AC2/AC3/AC4; issue athenaeum#1574
+    added the two breadcrumb arms).
 
     Builds exactly one :class:`~tests.evals.containment.GridCell` per arm via
     ``containment.build_grid("full", ...)`` — "full" is uncapped on the arms
-    axis, so passing all four ``Arm`` values with a single-element probe/
+    axis, so passing all six ``Arm`` values with a single-element probe/
     corpus-scale/replicate list yields exactly ``len(ALL_ARMS)`` cells,
     reusing the SAME grid machinery a future multi-probe sweep would use
     rather than a bespoke loop.
 
     *client* and *pull_runner* are injectable seams (default to a real live
-    client / :func:`run_pull`) so a caller — including the offline test
-    suite — can supply stubs and exercise the arm-dispatch wiring without a
-    network call or a subprocess spawn.
+    client / :func:`run_pull`); *breadcrumb_context_fn* and
+    *breadcrumb_pull_runner* are the SAME kind of seam for the two
+    breadcrumb arms (default to :func:`build_push_breadcrumb_context` /
+    :func:`run_push_breadcrumb_pull`) — so a caller, including the offline
+    test suite, can supply stubs and exercise the arm-dispatch wiring
+    without a network call or a subprocess spawn.
     """
     corpus = build_corpus(corpus_scale)
     probe = _find_probe(corpus, probe_id)
     wiki_root = corpus.materialize(materialize_root)
     cache_dir = materialize_root / "cache"
+    hook_home = materialize_root / "hook_home"
     if search_backend != "keyword":
         get_backend(search_backend).build_index(wiki_root, cache_dir)
 
@@ -655,6 +949,7 @@ def run_probe_all_arms(
 
     resolved_client = client if client is not None else build_live_client()
     resolved_pull_runner = pull_runner if pull_runner is not None else run_pull
+    resolved_breadcrumb_pull_runner = breadcrumb_pull_runner or run_push_breadcrumb_pull
 
     records: dict[str, RolloutRecord] = {}
     for cell in cells:
@@ -663,8 +958,8 @@ def run_probe_all_arms(
             record = run_none(
                 probe, corpus_scale, client=resolved_client, session=session, model=model
             )
-        elif arm is Arm.PUSH:
-            record = run_push(
+        elif arm is Arm.PUSH_PAGES_UPPER_BOUND:
+            record = run_push_pages_upper_bound(
                 probe,
                 corpus_scale,
                 wiki_root=wiki_root,
@@ -674,20 +969,46 @@ def run_probe_all_arms(
                 session=session,
                 model=model,
             )
+        elif arm is Arm.PUSH_BREADCRUMB:
+            record = run_push_breadcrumb(
+                probe,
+                corpus_scale,
+                knowledge_root=materialize_root,
+                hook_home=hook_home,
+                client=resolved_client,
+                session=session,
+                model=model,
+                context_fn=breadcrumb_context_fn,
+            )
         elif arm is Arm.ORACLE:
             record = run_oracle(
                 probe, corpus, corpus_scale, client=resolved_client, session=session, model=model
             )
+        elif arm is Arm.PUSH_BREADCRUMB_PULL:
+            # Takes ``materialize_root`` (the KNOWLEDGE root), same as PULL
+            # — see the PULL branch's own comment below for why that must
+            # NOT be ``wiki_root``.
+            record = resolved_breadcrumb_pull_runner(
+                probe,
+                materialize_root,
+                hook_home,
+                cache_dir,
+                corpus_scale,
+                claude_binary=claude_binary,
+                model=model,
+                context_fn=breadcrumb_context_fn,
+            )
         else:
             # PULL gets ``materialize_root``, NOT ``wiki_root``, and the two
-            # arms differing here is deliberate rather than a slip: PUSH
-            # calls ``recall_search(wiki_root, ...)``, which takes the WIKI
-            # root directly, while PULL drives ``athenaeum serve --path``,
-            # which takes the KNOWLEDGE root and derives ``<path>/wiki`` and
-            # ``<path>/raw`` from it itself (see ``_cmd_serve``'s ``--path``
-            # help and ``_resolve_serve_roots``). Handing ``serve`` the wiki
-            # root would make it look for ``<materialize_root>/wiki/wiki``
-            # and serve an empty corpus. Pinned by
+            # arms differing here is deliberate rather than a slip:
+            # PUSH_PAGES_UPPER_BOUND calls ``recall_search(wiki_root, ...)``,
+            # which takes the WIKI root directly, while PULL drives
+            # ``athenaeum serve --path``, which takes the KNOWLEDGE root and
+            # derives ``<path>/wiki`` and ``<path>/raw`` from it itself (see
+            # ``_cmd_serve``'s ``--path`` help and ``_resolve_serve_roots``).
+            # Handing ``serve`` the wiki root would make it look for
+            # ``<materialize_root>/wiki/wiki`` and serve an empty corpus.
+            # Pinned by
             # ``test_rollout.py::test_pull_arm_receives_the_knowledge_root_not_the_wiki_root``.
             record = resolved_pull_runner(
                 probe,
