@@ -1170,6 +1170,7 @@ Change-gated ingest + reindex for SessionEnd: compile this session's new raw int
 | `--full` | `True` | — | Force a full recompile of all pending raw intake AND a full index rebuild (operator escape hatch). |
 | `--incremental` | — | — | Compile only raw new/changed since the last ingest and apply the index delta. This is the DEFAULT. |
 | `--path`, `--knowledge-root` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). --knowledge-root is an alias, matching `run`/`ingest`. |
+| `--references-only` | — | — | Run ONLY reference determination for SESSION (or --session) and exit: no ingest, no reindex, no corpus scan, no run lock. Cheap enough for a SessionEnd hook to call unconditionally. Prints a one-line JSON status and exits non-zero when determination was owed but could not be produced (never fatal to the hook's own work). |
 | `--session` | — | — | Scope the new/changed detection to one originSessionId (the SessionEnd use-case). |
 | `--verbose`, `-v` | `False` | — | Enable debug logging |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |

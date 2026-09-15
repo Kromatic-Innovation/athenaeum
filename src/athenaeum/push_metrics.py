@@ -1470,6 +1470,49 @@ def tail_records(
 # Reference determination (session end)
 # ---------------------------------------------------------------------------
 
+# Issue athenaeum#1566: reference determination's REPORTED outcome. The
+# determination itself is best-effort and must never break session end, so
+# every failure path here is swallowed — but swallowed silently is exactly
+# what made the viewer's `used` column read `pending` forever with nothing
+# anywhere naming a cause. These constants give the caller (the CLI's
+# `--references-only` mode, which a SessionEnd hook can invoke
+# unconditionally) something to log and a non-zero status to report.
+REFERENCE_DETERMINED = "determined"
+"""A reference record was computed AND appended for this session."""
+
+REFERENCE_ALREADY_DETERMINED = "already-determined"
+"""An identical record already exists — skipped, so the ledger is not double-counted."""
+
+REFERENCE_NOOP = "noop"
+"""Nothing to determine (instrumentation off, no session id, nothing pushed). Not a failure."""
+
+REFERENCE_UNDETERMINED = "undetermined"
+"""Pushes exist but the evidence needed to judge them could not be read. A failure."""
+
+REFERENCE_ERROR = "error"
+"""An unexpected exception was swallowed. A failure."""
+
+# Machine-readable causes, paired with the outcomes above.
+REFERENCE_REASON_DISABLED = "push-metrics-disabled"
+REFERENCE_REASON_NO_SESSION_ID = "no-session-id"
+REFERENCE_REASON_NO_PUSH_RECORDS = "no-push-records"
+REFERENCE_REASON_NO_PUSHED_IDS = "no-pushed-ids"
+REFERENCE_REASON_TRANSCRIPT_NOT_FOUND = "transcript-not-found"
+REFERENCE_REASON_TRANSCRIPT_EMPTY = "transcript-empty"
+
+#: Reasons that mean "there was nothing to determine" rather than "determination failed".
+_REFERENCE_NOOP_REASONS = frozenset(
+    {
+        REFERENCE_REASON_DISABLED,
+        REFERENCE_REASON_NO_SESSION_ID,
+        REFERENCE_REASON_NO_PUSH_RECORDS,
+        REFERENCE_REASON_NO_PUSHED_IDS,
+    }
+)
+
+#: Outcomes an operator (or a hook) should treat as a failure.
+REFERENCE_FAILURE_OUTCOMES = frozenset({REFERENCE_UNDETERMINED, REFERENCE_ERROR})
+
 
 @dataclass
 class ReferenceResult:
@@ -1497,6 +1540,63 @@ class ReferenceResult:
             "referenced_ids": sorted(self.referenced_ids),
             "precision": self.precision,
         }
+
+
+@dataclass
+class ReferenceDeterminationStatus:
+    """What one reference-determination attempt did, and why (athenaeum#1566 AC2).
+
+    ``result`` is the determination itself when there was one; ``outcome`` and
+    ``reason`` are always populated, including on the paths where ``result`` is
+    ``None``. ``failed`` / ``exit_code`` are the two derived views a caller
+    needs: a hook logs the message and reports the status, and a CLI turns the
+    same status into a process exit code — WITHOUT either of them having to
+    re-derive "was that None a no-op or a failure".
+    """
+
+    session_id: str
+    outcome: str
+    reason: str | None = None
+    result: ReferenceResult | None = None
+    recorded: bool = False
+    detail: str | None = None
+
+    @property
+    def failed(self) -> bool:
+        """True when determination was owed but could not be produced."""
+        return self.outcome in REFERENCE_FAILURE_OUTCOMES
+
+    @property
+    def exit_code(self) -> int:
+        """``1`` on a failure, ``0`` otherwise — the status a hook can log."""
+        return 1 if self.failed else 0
+
+    @property
+    def message(self) -> str:
+        """One human-readable line naming the session id and the cause."""
+        parts = [f"reference determination {self.outcome} for session {self.session_id}"]
+        if self.reason:
+            parts.append(f"reason={self.reason}")
+        if self.detail:
+            parts.append(self.detail)
+        return ": ".join(parts) if len(parts) == 1 else " — ".join(parts)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "session": self.session_id,
+            "outcome": self.outcome,
+            "reason": self.reason,
+            "recorded": self.recorded,
+            "failed": self.failed,
+            "exit_code": self.exit_code,
+        }
+        if self.result is not None:
+            payload["pushed_count"] = len(self.result.pushed_ids)
+            payload["referenced_count"] = len(self.result.referenced_ids)
+            payload["precision"] = self.result.precision
+        if self.detail:
+            payload["detail"] = self.detail
+        return payload
 
 
 def _find_session_transcript(session_id: str, projects_root: Path) -> tuple[Path, str] | None:
@@ -1535,6 +1635,37 @@ def determine_references(
 ) -> ReferenceResult | None:
     """Determine which of *session_id*'s pushed ids were referenced afterward.
 
+    Thin wrapper over :func:`_determine_references_with_reason` that discards
+    the machine-readable reason — the historical signature, unchanged, so the
+    ordinary ``session_end`` path and every existing caller behave exactly as
+    before. Callers that need to tell "nothing to determine" apart from
+    "could not determine" (issue athenaeum#1566 AC2) should use
+    :func:`run_reference_determination_status` instead.
+    """
+    return _determine_references_with_reason(
+        session_id,
+        cache_dir=cache_dir,
+        projects_root=projects_root,
+        wiki_root=wiki_root,
+    )[0]
+
+
+def _determine_references_with_reason(
+    session_id: str,
+    *,
+    cache_dir: Path | None = None,
+    projects_root: Path | None = None,
+    wiki_root: Path | None = None,
+) -> tuple[ReferenceResult | None, str | None]:
+    """:func:`determine_references`, plus WHY it declined when it returns ``None``.
+
+    The second element is ``None`` on success, else one of the
+    ``REFERENCE_REASON_*`` constants. Splitting the reason out is what lets
+    :func:`run_reference_determination_status` report a *cheap no-op*
+    (nothing was ever pushed for this session) differently from a *failure*
+    (the transcript could not be read), which the uniform ``None`` this
+    function's public wrapper returns cannot express.
+
     Reads this session's push records (from the ledger) and its transcript
     (read-only, via the same one-session-one-file primitive
     ``transcript_verify`` uses), then marks a pushed id "referenced" when it
@@ -1557,7 +1688,7 @@ def determine_references(
         if r.get("session_id") == session_id
     ]
     if not records:
-        return None
+        return None, REFERENCE_REASON_NO_PUSH_RECORDS
 
     pushed_ids: list[str] = []
     for rec in records:
@@ -1566,17 +1697,17 @@ def determine_references(
             if isinstance(pid, str) and pid and pid not in pushed_ids:
                 pushed_ids.append(pid)
     if not pushed_ids:
-        return None
+        return None, REFERENCE_REASON_NO_PUSHED_IDS
 
     root = projects_root if projects_root is not None else default_projects_root()
     located = _find_session_transcript(session_id, root)
     if located is None:
-        return None
+        return None, REFERENCE_REASON_TRANSCRIPT_NOT_FOUND
     scope_dir, _scope_name = located
 
     transcript_records = _iter_session_records(scope_dir, session_id)
     if not transcript_records:
-        return None
+        return None, REFERENCE_REASON_TRANSCRIPT_EMPTY
 
     haystacks: list[str] = []
     for trec in transcript_records:
@@ -1612,11 +1743,14 @@ def determine_references(
     blob = "\n".join(haystacks)
 
     referenced = [pid for pid in pushed_ids if pid in blob]
-    return ReferenceResult(
-        session_id=session_id,
-        ts=now_iso(),
-        pushed_ids=pushed_ids,
-        referenced_ids=referenced,
+    return (
+        ReferenceResult(
+            session_id=session_id,
+            ts=now_iso(),
+            pushed_ids=pushed_ids,
+            referenced_ids=referenced,
+        ),
+        None,
     )
 
 
@@ -1639,21 +1773,56 @@ def record_reference_result(
         return False
 
 
-def run_reference_determination(
+def _already_determined(
+    result: ReferenceResult,
+    *,
+    cache_dir: Path | None = None,
+) -> bool:
+    """True when this session's latest recorded determination is identical.
+
+    Issue athenaeum#1566 AC3: the SessionEnd hook may now call the cheap
+    ``--references-only`` path unconditionally AND still run the full
+    ``session-end`` when the corpus changed. Both reach determination, so
+    without this guard a corpus-changing session would append the same
+    verdict twice and inflate ``reference_records`` / ``referenced_count``
+    downstream. Only an *identical* verdict is skipped — a later run that
+    sees more pushed ids, or more of them referenced, is genuinely new
+    information and is still appended.
+    """
+    try:
+        prior = [
+            r
+            for r in read_reference_records(cache_dir)
+            if r.get("session_id") == result.session_id
+        ]
+    except Exception:  # noqa: BLE001 — an unreadable ledger must not block the write
+        return False
+    if not prior:
+        return False
+    latest = prior[-1]
+    return latest.get("pushed_count") == len(result.pushed_ids) and list(
+        latest.get("referenced_ids") or []
+    ) == sorted(result.referenced_ids)
+
+
+def run_reference_determination_status(
     session_id: str,
     *,
     cache_dir: Path | None = None,
     projects_root: Path | None = None,
     config: dict[str, Any] | None = None,
     wiki_root: Path | None = None,
-) -> ReferenceResult | None:
-    """Determine + durably record one session's reference outcome. Best-effort.
+) -> ReferenceDeterminationStatus:
+    """Determine + durably record one session's reference outcome, REPORTING why.
 
-    The single entry point :func:`athenaeum.librarian.session_end` calls.
-    Returns ``None`` (no-op, nothing written) when instrumentation is
-    disabled, there is no session id, or :func:`determine_references` itself
-    returns ``None``. Never raises — a reference-determination failure must
-    not break ``session_end``.
+    The full-fidelity entry point (issue athenaeum#1566).
+    :func:`run_reference_determination` is the historical, result-only view of
+    the same call and delegates here. Never raises — a reference-determination
+    failure must not break ``session_end`` — but unlike the historical
+    signature this one always says what happened, and logs a ``WARNING``
+    naming the session id and the cause on every failure path, so a silent
+    ``pending`` in the viewer is no longer indistinguishable from a
+    determination that was never attempted.
 
     *wiki_root* (issue athenaeum#1591): forwarded to :func:`determine_references`
     for the push-records read half only — the reference-determination WRITE
@@ -1664,23 +1833,93 @@ def run_reference_determination(
         from athenaeum.config import resolve_push_metrics_enabled
 
         if not resolve_push_metrics_enabled(config):
-            return None
+            return ReferenceDeterminationStatus(
+                session_id=session_id,
+                outcome=REFERENCE_NOOP,
+                reason=REFERENCE_REASON_DISABLED,
+            )
         if not session_id:
-            return None
-        result = determine_references(
+            return ReferenceDeterminationStatus(
+                session_id=session_id,
+                outcome=REFERENCE_NOOP,
+                reason=REFERENCE_REASON_NO_SESSION_ID,
+            )
+        result, reason = _determine_references_with_reason(
             session_id, cache_dir=cache_dir, projects_root=projects_root, wiki_root=wiki_root
         )
         if result is None:
-            return None
-        record_reference_result(result, cache_dir=cache_dir)
-        return result
-    except Exception as exc:  # noqa: BLE001 — must never break session_end
-        log.warning(
-            "push-metrics reference-determination FAILED (%s): %s",
-            type(exc).__name__,
-            exc,
+            outcome = (
+                REFERENCE_NOOP if reason in _REFERENCE_NOOP_REASONS else REFERENCE_UNDETERMINED
+            )
+            status = ReferenceDeterminationStatus(
+                session_id=session_id, outcome=outcome, reason=reason
+            )
+            if status.failed:
+                log.warning("push-metrics %s", status.message)
+            else:
+                log.debug("push-metrics %s", status.message)
+            return status
+        if _already_determined(result, cache_dir=cache_dir):
+            return ReferenceDeterminationStatus(
+                session_id=session_id,
+                outcome=REFERENCE_ALREADY_DETERMINED,
+                result=result,
+                recorded=False,
+            )
+        recorded = record_reference_result(result, cache_dir=cache_dir)
+        if not recorded:
+            status = ReferenceDeterminationStatus(
+                session_id=session_id,
+                outcome=REFERENCE_ERROR,
+                reason="record-write-failed",
+                result=result,
+                recorded=False,
+            )
+            log.warning("push-metrics %s", status.message)
+            return status
+        return ReferenceDeterminationStatus(
+            session_id=session_id,
+            outcome=REFERENCE_DETERMINED,
+            result=result,
+            recorded=True,
         )
-        return None
+    except Exception as exc:  # noqa: BLE001 — must never break session_end
+        status = ReferenceDeterminationStatus(
+            session_id=session_id,
+            outcome=REFERENCE_ERROR,
+            reason=type(exc).__name__,
+            detail=str(exc),
+        )
+        log.warning("push-metrics reference-determination FAILED — %s", status.message)
+        return status
+
+
+def run_reference_determination(
+    session_id: str,
+    *,
+    cache_dir: Path | None = None,
+    projects_root: Path | None = None,
+    config: dict[str, Any] | None = None,
+    wiki_root: Path | None = None,
+) -> ReferenceResult | None:
+    """Determine + durably record one session's reference outcome. Best-effort.
+
+    The entry point :func:`athenaeum.librarian.session_end` calls. Returns
+    ``None`` (no-op, nothing written) when instrumentation is disabled, there
+    is no session id, or :func:`determine_references` itself returns ``None``.
+    Never raises — a reference-determination failure must not break
+    ``session_end``.
+
+    Result-only view of :func:`run_reference_determination_status`; callers
+    that need to tell a no-op apart from a failure should call that instead.
+    """
+    return run_reference_determination_status(
+        session_id,
+        cache_dir=cache_dir,
+        projects_root=projects_root,
+        config=config,
+        wiki_root=wiki_root,
+    ).result
 
 
 # ---------------------------------------------------------------------------
