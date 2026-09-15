@@ -25,9 +25,11 @@ detector's own logic in isolation:
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -820,3 +822,145 @@ class TestResolveNameCollisionsAliasSurvival:
         hit = index.lookup("u3-acme-duplicate")
         assert hit is not None
         assert hit.path == canonical_path
+
+
+# ---------------------------------------------------------------------------
+# Audit-on-touch (issue athenaeum#1627): every page in a collision group is
+# re-audited before its merge proposal is written -- filling a determinable
+# empty valid_from/valid_until/claimed_scope and recording `undeterminable`
+# for the rest, never guessed, never overwriting a populated value.
+# ---------------------------------------------------------------------------
+
+
+def _collision_responder(**kwargs: Any) -> str:
+    """Routes a shared FakeLLMClient by a body marker embedded in the
+    prompt -- distinguishes the two colliding pages (which necessarily
+    share ``name:``, so the marker can't be the name)."""
+    prompt = kwargs["messages"][0]["content"]
+    if "PAGE_A_MARKER" in prompt:
+        return json.dumps(
+            {
+                "claimed_scope": {"value": "team:engineering"},
+                "retirement_candidate": False,
+                "retirement_reason": "",
+            }
+        )
+    if "PAGE_B_MARKER" in prompt:
+        return json.dumps(
+            {
+                "claimed_scope": {"undeterminable": "no scope stated"},
+                "retirement_candidate": False,
+                "retirement_reason": "",
+            }
+        )
+    raise AssertionError(f"unexpected audit prompt: {prompt!r}")
+
+
+class TestResolveNameCollisionsAuditOnTouch:
+    def test_determinable_scope_filled_other_page_undeterminable(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.audit_on_touch import AuditOnTouchCounters
+        from tests.conftest import FakeLLMClient
+
+        wiki = tmp_path / "wiki"
+        path_a = _write_page(
+            wiki,
+            "u1-collideco.md",
+            uid="u1",
+            name="CollideCo",
+            type_="company",
+            body="PAGE_A_MARKER: scoped specifically to the engineering team.",
+        )
+        path_b = _write_page(
+            wiki,
+            "u2-collideco.md",
+            uid="u2",
+            name="CollideCo",
+            type_="company",
+            body="PAGE_B_MARKER: general commentary, no scope stated anywhere.",
+        )
+
+        client = FakeLLMClient(responder=_collision_responder)
+        counters = AuditOnTouchCounters()
+
+        # auto_merge=False: neither page is deleted/folded, so both are
+        # still on disk (and both audited) after the call, regardless of
+        # classify_collision's unambiguous/ambiguous verdict.
+        result = resolve_name_collisions(
+            wiki,
+            auto_merge=False,
+            dry_run=False,
+            audit_client=client,
+            audit_model="claude-haiku-4-5-20251001",
+            audit_counters=counters,
+        )
+        assert result["collisions"] == 1
+
+        meta_a, _ = parse_frontmatter(path_a.read_text(encoding="utf-8"))
+        meta_b, _ = parse_frontmatter(path_b.read_text(encoding="utf-8"))
+
+        assert meta_a["claimed_scope"] == "team:engineering"
+        assert "claimed_scope" not in meta_a.get("audit_findings", {})
+
+        assert "claimed_scope" not in meta_b
+        assert meta_b["audit_findings"]["claimed_scope"].startswith("undeterminable:")
+
+        assert counters.audited == 2
+        assert counters.coordinates_filled == 1
+        assert counters.coordinates_undeterminable == 1
+        assert counters.skipped_fresh == 0
+        assert counters.skipped_unavailable == 0
+
+    def test_no_audit_client_still_writes_the_proposal(self, tmp_path: Path) -> None:
+        """The audit is best-effort -- with no client, the collision scan
+        and proposal write proceed exactly as before this issue."""
+        from athenaeum.audit_on_touch import AuditOnTouchCounters
+
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki, "u1-collideco.md", uid="u1", name="CollideCo", type_="company", body="a"
+        )
+        _write_page(
+            wiki, "u2-collideco.md", uid="u2", name="CollideCo", type_="company", body="b"
+        )
+        counters = AuditOnTouchCounters()
+
+        result = resolve_name_collisions(
+            wiki,
+            auto_merge=False,
+            dry_run=False,
+            audit_client=None,
+            audit_counters=counters,
+        )
+        assert result["collisions"] == 1
+        assert counters.skipped_unavailable == 2
+        assert counters.audited == 0
+
+        merges = parse_pending_merges(wiki / "_pending_merges.md")
+        assert len(merges) == 1
+
+    def test_dry_run_never_calls_the_audit_client(self, tmp_path: Path) -> None:
+        from athenaeum.audit_on_touch import AuditOnTouchCounters
+        from tests.conftest import FakeLLMClient
+
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki, "u1-collideco.md", uid="u1", name="CollideCo", type_="company", body="a"
+        )
+        _write_page(
+            wiki, "u2-collideco.md", uid="u2", name="CollideCo", type_="company", body="b"
+        )
+        client = FakeLLMClient(responder=_collision_responder)
+        counters = AuditOnTouchCounters()
+
+        resolve_name_collisions(
+            wiki,
+            auto_merge=False,
+            dry_run=True,
+            audit_client=client,
+            audit_counters=counters,
+        )
+
+        assert client.calls == []
+        assert counters.is_zero

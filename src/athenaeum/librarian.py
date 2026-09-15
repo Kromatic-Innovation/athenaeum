@@ -95,6 +95,7 @@ from athenaeum import stuck_ledger as stuck_ledger_mod
 from athenaeum._retry import TransientAPIError
 from athenaeum.adapter_provenance import record_adapter_provenance_for_pages
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.audit_on_touch import AuditOnTouchCounters
 from athenaeum.authority import AuthorityManifest, load_authority_manifest
 from athenaeum.bounce_contract import (
     check_tier0_bounce_conformance,
@@ -117,6 +118,7 @@ from athenaeum.config import (
 from athenaeum.config import (
     load_config,
     preflight_model_rates,
+    resolve_audit_on_touch_freshness_hours,
     resolve_authority_manifest_path,
     resolve_corrections_max_escalations_per_run,
     resolve_corrections_runtime_share,
@@ -1820,8 +1822,20 @@ def process_one(
     write_client: LLMBackend | None = None,
     never_ingest_manifest: AuthorityManifest | None = None,
     person_registry: PersonRegistry | None = None,
+    audit_hook: "Callable[[str, Path, dict[str, Any], str], object] | None" = None,
 ) -> ProcessingResult:
     """Process a single raw file through all tiers.
+
+    ``audit_hook`` (issue athenaeum#1627): passed straight through to
+    :func:`~athenaeum.tiers.tier3_derive_actions`, which calls it for an
+    ``update`` action's TARGET page immediately before merging into it. Build
+    one via :meth:`RunContext.build_audit_hook` — a plain closure, not a
+    direct import, deliberately: :mod:`athenaeum.tiers` cannot import
+    :mod:`athenaeum.audit_on_touch` at all (that module imports
+    :mod:`athenaeum.audit`, which imports :mod:`athenaeum.batch`, which
+    imports :mod:`athenaeum.tiers` — a direct edge would close that cycle,
+    see ``tier3_derive_actions``'s own docstring). ``audit_hook=None`` (every
+    pre-athenaeum#1627 caller) disables the hook entirely.
 
     ``client`` serves Tier 2 (:func:`tier2_classify` — the ``classify``
     knob). ``write_client`` (issue athenaeum#841) serves Tier 3
@@ -2365,6 +2379,7 @@ def process_one(
             max_runtime_for_file=max_runtime_for_file,
             calls_before_file=calls_before_file,
             started_at_file=started_at_file,
+            audit_hook=audit_hook,
         )
     except RawFileOverBudgetError as exc:
         # Issue athenaeum#994: land the partial progress BEFORE propagating
@@ -4654,6 +4669,117 @@ class RunContext:
     total_oversize_split: int = 0
     total_oversize_log_demoted: int = 0
 
+    # Issue athenaeum#1627 (audit-on-touch): one counters accumulator shared
+    # across every touch point this run makes (the entity/tier-3 phase, the
+    # name-collision phase, ...) -- see
+    # :class:`athenaeum.audit_on_touch.AuditOnTouchCounters`. The classify-
+    # knob client is resolved lazily, at most once per run, the first time a
+    # touch point actually needs one (mirrors `_run_wiki_dedup_phase`'s own
+    # `_client` resolution: cheap when nothing this run ever touches an
+    # existing page, and a provider misconfiguration degrades to "no audit
+    # client" -- `skipped_unavailable` -- rather than aborting the run).
+    audit_on_touch_counters: AuditOnTouchCounters = field(default_factory=AuditOnTouchCounters)
+    audit_on_touch_client: Any = None
+    audit_on_touch_client_resolved: bool = False
+    audit_on_touch_model: str = ""
+
+    def resolve_audit_on_touch_client(self) -> Any:
+        """Lazily build (and cache) this run's audit-on-touch LLM client.
+
+        Resolved at most once per run, against the ``classify`` knob --
+        same knob :func:`athenaeum.audit.build_audit_report` (the
+        ``athenaeum audit`` CLI) uses for the standalone pass this issue's
+        inline hook shares a verdict shape with. A provider misconfiguration
+        or any other resolution failure degrades to ``None`` (audit
+        unavailable this run, every touch counts ``skipped_unavailable``)
+        rather than raising -- mirrors `_run_wiki_dedup_phase`'s own
+        Gate-2-unavailable degrade for the exact same knob.
+
+        ``ctx.batch_mode`` (resolved by the time either touch point calls
+        this -- see ``run()``'s ``ctx.batch_mode = ctx.batch_classify or
+        ctx.batch_write`` assignment) short-circuits to ``None`` WITHOUT
+        attempting ``build_llm_client`` at all: :func:`athenaeum.audit.audit_page`
+        always makes a SYNCHRONOUS ``messages.create`` call, and a batch
+        run's entire point is routing LLM traffic through the async Batch
+        API instead -- audit-on-touch has no batch-transport path yet (a
+        future issue's scope, not this one's), so it stays out of the way
+        here rather than silently spending a synchronous call a batch run
+        was configured specifically to avoid. Every touch this run still
+        counts ``skipped_unavailable`` via the same degrade path.
+        """
+        if self.audit_on_touch_client_resolved:
+            return self.audit_on_touch_client
+        self.audit_on_touch_client_resolved = True
+        if self.batch_mode:
+            self.audit_on_touch_client = None
+            return None
+        try:
+            from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
+            from athenaeum.provider import build_llm_client
+
+            self.audit_on_touch_model = resolve_model(
+                "classify", "ATHENAEUM_CLASSIFY_MODEL", DEFAULT_CLASSIFY_MODEL, self.config
+            )
+            self.audit_on_touch_client = build_llm_client(
+                self.config, knob="classify", api_key=self.api_key, max_retries=3
+            )
+        except Exception as exc:  # noqa: BLE001 - mirrors the wiki-dedup degrade
+            log.warning(
+                "audit-on-touch: no LLM client (%s); every touch this run "
+                "counts skipped_unavailable and proceeds unaudited",
+                exc,
+            )
+            self.audit_on_touch_client = None
+        return self.audit_on_touch_client
+
+    def build_audit_hook(self) -> "Callable[[str, Path, dict[str, Any], str], object]":
+        """Build the ``tier3_derive_actions``/``process_batch_run``-shaped
+        ``audit_hook`` closure for THIS run (issue athenaeum#1627) — the ONE
+        place this closure is built, reused by both transports (the
+        synchronous entity loop's :func:`process_one` call and the Batch API
+        transport's :func:`athenaeum.batch.process_batch_run` call) so a
+        tier-3 merge is re-audited before it rewrites a page regardless of
+        which transport reaches it.
+
+        A plain closure — not a direct import — deliberately: neither
+        :mod:`athenaeum.tiers` nor :mod:`athenaeum.batch` may import
+        :mod:`athenaeum.audit_on_touch` (that module imports
+        :mod:`athenaeum.audit`, which imports :mod:`athenaeum.batch` at
+        module scope, which imports :mod:`athenaeum.tiers` — a direct edge
+        from either back to ``audit_on_touch`` would close that cycle; see
+        ``tier3_derive_actions``'s own docstring). Resolves the audit
+        client/model/freshness window ONCE per call to this method (the
+        client itself is cached across calls via
+        :meth:`resolve_audit_on_touch_client`) — cheap to call once per
+        phase.
+        """
+        from athenaeum.config import resolve_audit_on_touch_freshness_hours
+
+        client = self.resolve_audit_on_touch_client()
+        model = self.audit_on_touch_model
+        counters = self.audit_on_touch_counters
+        freshness_hours = resolve_audit_on_touch_freshness_hours(self.config)
+        run_now = self.now
+
+        def _hook(uid: str, path: Path, meta: dict[str, Any], body: str) -> None:
+            from athenaeum.audit_on_touch import audit_on_touch
+
+            kwargs: dict[str, Any] = {"freshness_hours": freshness_hours}
+            if run_now is not None:
+                kwargs["now"] = lambda: run_now
+            audit_on_touch(
+                client,
+                uid=uid,
+                path=path,
+                meta=meta,
+                body=body,
+                model=model,
+                counters=counters,
+                **kwargs,
+            )
+
+        return _hook
+
     def deadline_exceeded(self) -> bool:
         return self.run_deadline is not None and time.monotonic() >= self.run_deadline
 
@@ -4767,6 +4893,21 @@ class RunContext:
                 self.run_profile.append(("t1-screen", 0.0, _t1_census.as_profile_fields()))
         except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
             log.debug("run-summary: t1 census skipped: %s", exc)
+        # Issue athenaeum#1627 (audit-on-touch): append the run-scoped
+        # audited/skipped_fresh/skipped_unavailable/coordinates_filled/
+        # coordinates_undeterminable counters as their own phase entry —
+        # same "omit, don't report a hollow zero" convention as the
+        # t1-screen block immediately above (a run that never touched an
+        # existing page — e.g. merge-only over an empty cluster set, or a
+        # run with the name-collision scan disabled and no tier-3 updates —
+        # keeps an unchanged run_profile).
+        try:
+            if not self.audit_on_touch_counters.is_zero:
+                self.run_profile.append(
+                    ("audit_on_touch", 0.0, self.audit_on_touch_counters.as_profile_fields())
+                )
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: audit-on-touch counters skipped: %s", exc)
         # Issue athenaeum#567: attribute the operator-fragment + shipped-prompt bytes
         # this run used, on the same greppable line. Computing them touches
         # the wiki (fragment reads) and the prompt registry — neither may
@@ -6042,8 +6183,23 @@ def _run_name_collision_phase(ctx: RunContext) -> None:
             _fields = {"reason": "disabled"}
         else:
             auto_merge = resolve_name_collision_automerge_enabled(ctx.config)
+            # Local capture (not `ctx.now` inline in the lambda below): mypy
+            # cannot narrow a closed-over attribute access to non-Optional
+            # even behind an `is not None` guard at the call site.
+            _run_now = ctx.now
             counts = resolve_name_collisions(
-                ctx.wiki_root, auto_merge=auto_merge, dry_run=ctx.dry_run
+                ctx.wiki_root,
+                auto_merge=auto_merge,
+                dry_run=ctx.dry_run,
+                # Issue athenaeum#1627: audit each page in a collision group
+                # before its merge proposal is written. Dry-run never
+                # reaches write_pending_merge (see resolve_name_collisions'
+                # own docstring), so these are unused on that path.
+                audit_client=ctx.resolve_audit_on_touch_client(),
+                audit_model=ctx.audit_on_touch_model,
+                audit_counters=ctx.audit_on_touch_counters,
+                audit_freshness_hours=resolve_audit_on_touch_freshness_hours(ctx.config),
+                audit_now=(lambda: _run_now) if _run_now is not None else None,
             )
             _fields = {"reason": "completed", **counts}
     except Exception:
@@ -6896,6 +7052,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             if ctx.entity_deadline is not None
                             else ctx.run_deadline
                         ),
+                        # Issue athenaeum#1627: re-audit a merge's target page
+                        # before it is rewritten — same hook, same closure,
+                        # as the synchronous transport (process_one below).
+                        audit_hook=ctx.build_audit_hook(),
                     )
                     ctx.total_created = outcome.created
                     ctx.total_updated = outcome.updated
@@ -7190,6 +7350,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 write_client=write_client,
                                 never_ingest_manifest=never_ingest_manifest,
                                 person_registry=person_registry,
+                                # Issue athenaeum#1627: re-audit an `update`
+                                # action's target page before tier3_merge
+                                # rewrites it.
+                                audit_hook=ctx.build_audit_hook(),
                             )
                         except RawFileTooLargeError as exc:
                             # Issue athenaeum#898: the per-file BYTE bound (checked by

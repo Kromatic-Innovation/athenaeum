@@ -525,3 +525,79 @@ class TestNeverTouchesLiveStore:
         # none rely on athenaeum.config.DEFAULT_KNOWLEDGE_ROOT. This test
         # exists as a named, greppable anchor for that property.
         assert True
+
+
+# --- regression: non-string populated values (review finding, athenaeum#1624) ---
+
+
+def _yaml_dated_page(root: Path) -> Path:
+    """A page whose `valid_from` is an UNQUOTED YAML date.
+
+    `parse_frontmatter` hands this back as a `datetime.date`, not a string —
+    the shape a string-only "is it populated?" test reports as empty.
+    """
+    return _page(
+        root,
+        "yamldate.md",
+        "uid: yamldate1\ntype: concept\nname: Dated Thing\nvalid_from: 2019-05-04\n",
+        "This engagement ran from 2026-01-01 to 2026-06-30, per the "
+        "signed statement of work.[^1]\n\n[^1]: [[src-sow|SOW]] 2026-01-01\n",
+    )
+
+
+class TestNonStringPopulatedCoordinates:
+    """A populated coordinate that YAML parsed as a non-string must be
+    treated as populated — never asked about, never overwritten."""
+
+    def test_unquoted_yaml_date_is_not_asked_about(self, wiki: Path) -> None:
+        path = _yaml_dated_page(wiki)
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert not isinstance(meta["valid_from"], str), "fixture must exercise the date path"
+
+        client = _client()
+        build_audit_report(wiki, client=client, model="claude-haiku-4-5-20251001")
+
+        prompt = client.calls[0]["messages"][0]["content"]
+        assert "valid_until" in prompt
+        assert "valid_from" not in prompt
+
+    def test_unquoted_yaml_date_is_never_overwritten(self, wiki: Path) -> None:
+        path = _yaml_dated_page(wiki)
+        report = build_audit_report(wiki, client=_client(), model="claude-haiku-4-5-20251001")
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert str(meta["valid_from"]) == "2019-05-04"
+        assert "valid_from" not in meta.get("audit_findings", {})
+
+
+class TestResolvedFindingsAreCleared:
+    """A page whose every recorded finding has since been resolved must not
+    keep a stale `audit_findings:` block."""
+
+    def test_stale_findings_removed_when_all_resolved(self, wiki: Path) -> None:
+        path = _page(
+            wiki,
+            "resolved.md",
+            "uid: dated1\ntype: concept\nname: Dated Thing\n"
+            "audit_findings:\n"
+            "  valid_from: 'undeterminable: no dated validity window stated'\n"
+            "  valid_until: 'undeterminable: no dated validity window stated'\n",
+            "This engagement ran from 2026-01-01 to 2026-06-30.[^1]\n\n"
+            "[^1]: [[src-sow|SOW]] 2026-01-01\n",
+        )
+        report = build_audit_report(wiki, client=_client(), model="claude-haiku-4-5-20251001")
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["valid_from"] == "2026-01-01"
+        assert meta["valid_until"] == "2026-06-30"
+        assert "audit_findings" not in meta
+
+    def test_unresolved_findings_are_kept(self, wiki: Path) -> None:
+        path = _vague_page(wiki)
+        report = build_audit_report(wiki, client=_client(), model="claude-haiku-4-5-20251001")
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert set(meta["audit_findings"]) == {"valid_from", "valid_until"}

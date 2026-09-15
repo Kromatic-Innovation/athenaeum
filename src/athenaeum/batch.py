@@ -1047,8 +1047,21 @@ def process_batch_run(
     resume: _ResumedWork | None = None,
     batch_classify: bool = True,
     batch_write: bool = True,
+    audit_hook: "Callable[[str, Path, dict[str, Any], str], object] | None" = None,
 ) -> BatchRunResult:
     """Process the intake window through the Batch API phases (issue athenaeum#236).
+
+    ``audit_hook`` (issue athenaeum#1627): called as ``audit_hook(uid, path,
+    meta, body)`` for a merge's TARGET page immediately before the merge
+    request is built/sent — both at request-ASSEMBLY time (the batched
+    patch-mode request, below) and at the ``sync_merges`` FINALIZE fallback
+    (unbatched write knob / same-page multi-merge / anchor-unsafe body).
+    The same closure :func:`athenaeum.librarian.process_one` is given for
+    the synchronous transport — see
+    :meth:`athenaeum.librarian.RunContext.build_audit_hook`, the ONE place
+    it is built, so a tier-3 merge is re-audited before it rewrites a page
+    regardless of which transport reaches it. ``audit_hook=None`` (every
+    pre-athenaeum#1627 caller) disables the hook entirely.
 
     Mirrors the per-file semantics of :func:`athenaeum.librarian.process_one`
     (tier 0/1 programmatic pass, per-file failure isolation, write-only-when-
@@ -1627,6 +1640,19 @@ def process_batch_run(
                     if oversize_escalation is not None:
                         st.address_escalations.append(oversize_escalation)
                         continue
+                    # Issue athenaeum#1627 (audit-on-touch): re-audit the
+                    # TARGET page before the batched merge REQUEST below is
+                    # even assembled — mirrors tier3_derive_actions's
+                    # synchronous placement (right before its own
+                    # tier3_merge call), just at this transport's assembly
+                    # point instead of its (much later, async) collection
+                    # point. `meta` is mutated in place on a successful
+                    # audit; it is the SAME dict `st.merge_ids` below
+                    # carries through to the eventual `pending_updates`
+                    # write in the collection loop, so no second write
+                    # happens here.
+                    if audit_hook is not None:
+                        audit_hook(action.existing_uid or "", existing_path, meta, existing_body)
                     cid = f"t3-{i}-m{j}"
                     t3_raw_by_cid[cid] = st.raw
                     usage.api_calls += 1
@@ -1953,6 +1979,13 @@ def process_batch_run(
                 if oversize_escalation is not None:
                     escalations.append(oversize_escalation)
                     continue
+
+                # Issue athenaeum#1627 (audit-on-touch): re-audit the TARGET
+                # page before the merge call below rewrites it — mirrors
+                # the assembly-site call above and tier3_derive_actions's
+                # synchronous placement.
+                if audit_hook is not None:
+                    audit_hook(action.existing_uid or "", existing_path, meta, existing_body)
 
                 updated_body, esc = tier3_merge(
                     action,

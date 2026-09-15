@@ -31,12 +31,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from athenaeum.models import parse_frontmatter, resolve_page_type, slugify
 from athenaeum.pending_merges import parse_pending_merges, resolve_merge, write_pending_merge
 from athenaeum.t1_census import T1_UNSCREENED_NAME_COLLISION, get_t1_census
+
+if TYPE_CHECKING:
+    # Annotation-only (issue athenaeum#1627) — the real import (inside
+    # ``athenaeum.pending_merges``'s own audit hook) stays deferred, so this
+    # module pays nothing extra for it.
+    from athenaeum.audit_on_touch import AuditOnTouchCounters
 
 log = logging.getLogger(__name__)
 
@@ -323,8 +330,24 @@ def resolve_name_collisions(
     *,
     auto_merge: bool,
     dry_run: bool,
+    audit_client: Any = None,
+    audit_model: str = "",
+    audit_counters: "AuditOnTouchCounters | None" = None,
+    audit_freshness_hours: float | None = None,
+    audit_now: "Callable[[], datetime] | None" = None,
 ) -> dict[str, int]:
     """Scan, propose, and (when enabled) auto-resolve name collisions.
+
+    ``audit_client`` / ``audit_model`` / ``audit_counters`` /
+    ``audit_freshness_hours`` / ``audit_now`` (issue athenaeum#1627): forwarded
+    verbatim to every :func:`~athenaeum.pending_merges.write_pending_merge`
+    call below, which re-audits each page in a collision group BEFORE
+    writing that group's proposal — filling any determinable empty
+    ``valid_from``/``valid_until``/``claimed_scope`` so the separator-
+    dimension comparator has something to read (issue athenaeum#1244).
+    ``audit_counters=None`` (every pre-athenaeum#1627 caller, and *dry_run*
+    regardless of what is passed — that path never reaches
+    ``write_pending_merge`` at all) disables the hook entirely.
 
     Issue athenaeum#1170 AC3-AC6, entirely via the EXISTING decision-queue and
     fold machinery in :mod:`athenaeum.pending_merges` — this function writes
@@ -479,6 +502,11 @@ def resolve_name_collisions(
             draft_merged_body=draft_full_text,
             confidence=1.0,
             write_kind=None,
+            audit_client=audit_client,
+            audit_model=audit_model,
+            audit_counters=audit_counters,
+            audit_freshness_hours=audit_freshness_hours,
+            audit_now=audit_now,
         )
         if verdict == "unambiguous":
             unambiguous += 1

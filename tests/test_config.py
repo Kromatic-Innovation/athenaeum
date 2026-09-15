@@ -10,6 +10,7 @@ import pytest
 from athenaeum.config import (
     load_config,
     resolve_audience,
+    resolve_audit_on_touch_freshness_hours,
     resolve_extra_intake_roots,
     resolve_max_merge_sources,
     resolve_min_cluster_cohesion,
@@ -1251,4 +1252,36 @@ class TestResolvePushTokenBudget:
 
     def test_bool_yaml_falls_through(self) -> None:
         assert resolve_push_token_budget({"push_budget": {"tokens_per_turn": True}}) == 1200
+
+
+class TestResolveAuditOnTouchFreshnessHours:
+    """Issue athenaeum#1627: the audit-on-touch freshness window is
+    configurable, env > yaml > the issue's suggested 24h default."""
+
+    def test_default(self) -> None:
+        assert resolve_audit_on_touch_freshness_hours(None) == 24.0
+
+    def test_yaml(self) -> None:
+        config = {"librarian": {"audit_on_touch_freshness_hours": 6}}
+        assert resolve_audit_on_touch_freshness_hours(config) == 6.0
+
+    def test_env_overrides_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_AUDIT_ON_TOUCH_FRESHNESS_HOURS", "1.5")
+        config = {"librarian": {"audit_on_touch_freshness_hours": 6}}
+        assert resolve_audit_on_touch_freshness_hours(config) == 1.5
+
+    def test_non_positive_yaml_falls_through(self) -> None:
+        config = {"librarian": {"audit_on_touch_freshness_hours": -1}}
+        assert resolve_audit_on_touch_freshness_hours(config) == 24.0
+
+    def test_bool_yaml_falls_through(self) -> None:
+        config = {"librarian": {"audit_on_touch_freshness_hours": True}}
+        assert resolve_audit_on_touch_freshness_hours(config) == 24.0
+
+    def test_non_positive_env_falls_through_to_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_AUDIT_ON_TOUCH_FRESHNESS_HOURS", "-5")
+        config = {"librarian": {"audit_on_touch_freshness_hours": 6}}
+        assert resolve_audit_on_touch_freshness_hours(config) == 6.0
 
