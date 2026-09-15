@@ -141,6 +141,7 @@ MODULE_LAYER: dict[str, int] = {
     # L4 -- domain/pipeline modules.
     "answers": 4,
     "audit": 4,
+    "audit_on_touch": 4,
     "audit_queue": 4,
     "auto_memory_prune": 4,
     "axiom_governance": 4,

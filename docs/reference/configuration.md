@@ -329,6 +329,36 @@ yaml > ``90``. A ``bool`` / non-int / ``<= 0`` value (env or yaml) falls
 through to the default — a zero/negative age would mark every page
 stale unconditionally.
 
+## `audit_on_touch`
+
+### `resolve_audit_on_touch_freshness_hours`
+
+- **YAML path:** `audit_on_touch.skipped_fresh`
+- **Environment variable:** `ATHENAEUM_AUDIT_ON_TOUCH_FRESHNESS_HOURS`
+- **CLI flag:** —
+- **Default:** `24.0`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the audit-on-touch freshness window in hours.
+
+A page whose ``last_audited`` falls inside this window of "now" is
+skipped by `athenaeum.audit_on_touch.audit_on_touch` (counted
+``audit_on_touch.skipped_fresh``) rather than re-audited before the
+librarian touches it again — the plan's "a page touched repeatedly in
+one run is audited once" rule, generalized to any window an operator
+configures, not just a single run.
+
+Precedence: ``ATHENAEUM_AUDIT_ON_TOUCH_FRESHNESS_HOURS`` env > yaml
+``librarian.audit_on_touch_freshness_hours`` > the issue's suggested
+default, ``24.0``. A non-positive value (env or yaml) falls through to
+the default — mirrors `_resolve_positive_int_knob`'s "cannot
+silently disable the guardrail" reasoning: a zero/negative window would
+make every touch re-audit, defeating the freshness gate this knob
+configures. No seed in ``_DEFAULTS``. This default
+(``24.0``) intentionally mirrors `athenaeum.audit_on_touch.
+DEFAULT_FRESHNESS_HOURS` — kept as a separate literal rather than an
+import since this module (L2) may not import that one (L4, layering).
+
 ## `erasure`
 
 ### `resolve_retention_pack_selection`

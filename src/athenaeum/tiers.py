@@ -5534,8 +5534,28 @@ def tier3_derive_actions(
     max_runtime_for_file: float | None = None,
     calls_before_file: int = 0,
     started_at_file: float | None = None,
+    audit_hook: "Callable[[str, Path, dict[str, Any], str], object] | None" = None,
 ) -> tuple[list[WikiEntity], list[tuple[Path, str]], list[str], list[EscalationItem]]:
     """The LLM-call phase of Tier 3 — makes every call, writes NOTHING.
+
+    ``audit_hook`` (issue athenaeum#1627): when given, called as
+    ``audit_hook(uid, path, meta, body)`` for an ``update`` action's TARGET
+    page, immediately BEFORE the merge call below rewrites it. The hook is
+    expected to mutate ``meta`` IN PLACE on a successful audit (stamping
+    ``last_audited``/``audit_version``/coordinate fills) — the SAME dict
+    this function already renders into ``pending_updates`` below then
+    carries those stamps through to that one write; no second disk write
+    happens here. Deliberately a plain callable rather than a typed
+    dependency on :mod:`athenaeum.audit_on_touch` — that module imports
+    :mod:`athenaeum.audit`, which imports :mod:`athenaeum.batch`, which
+    imports THIS module (:mod:`athenaeum.tiers`); a direct import here
+    would close that cycle (see ``tests/test_import_graph_acyclic.py``).
+    The real hook (a small closure binding the audit client/model/counters/
+    freshness window) is built by the caller —
+    :func:`athenaeum.librarian.process_one` — which sits outside that
+    cycle. ``audit_hook=None`` (every pre-athenaeum#1627 caller, and every
+    test that calls this function directly) disables the hook entirely —
+    byte-identical behavior to before this issue.
 
     Split out of :func:`tier3_write` (issue athenaeum#898) so a caller that needs a
     checkpoint BETWEEN "all this file's LLM calls are done" and "this file's
@@ -5668,6 +5688,18 @@ def tier3_derive_actions(
                 if oversize_escalation is not None:
                     escalations.append(oversize_escalation)
                     continue
+
+                # Issue athenaeum#1627 (audit-on-touch): re-audit the TARGET
+                # page before the merge call below rewrites it. `meta` is
+                # mutated in place on a successful audit (last_audited/
+                # audit_version stamped, determinable empty coordinates
+                # filled) — the SAME dict `pending_updates.append` below
+                # renders, so no separate write happens here. A skip
+                # (fresh / no audit client, decided inside the hook) leaves
+                # `meta` untouched and the merge proceeds exactly as it did
+                # before this issue.
+                if audit_hook is not None:
+                    audit_hook(action.existing_uid, existing_path, meta, existing_body)
 
                 updated_body, esc = tier3_merge(
                     action,

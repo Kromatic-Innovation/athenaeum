@@ -142,13 +142,30 @@ def _now_iso(now: Callable[[], datetime] | None = None) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _is_populated(value: object) -> bool:
+    """Whether a frontmatter value counts as already set.
+
+    Deliberately NOT ``isinstance(value, str) and value.strip()``: YAML
+    parses an unquoted ``valid_from: 2026-01-01`` into a ``datetime.date``,
+    not a string, so a string-only test reports a populated date as empty —
+    which then asks the model to fill it and overwrites it with a string,
+    breaking the "populated coordinate is NEVER overwritten" invariant this
+    module's docstring states. Any non-``None``, non-blank value counts;
+    strings keep the blank-string test they always had.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
+
+
 def _empty_coordinate_fields(meta: dict[str, Any]) -> list[str]:
     """Coordinate fields on *meta* that are missing/blank — the only ones a
     prompt ever asks about, and the only ones a verdict may ever fill."""
     empty = []
     for name in COORDINATE_FIELDS:
-        value = meta.get(name)
-        if not (isinstance(value, str) and value.strip()):
+        if not _is_populated(meta.get(name)):
             empty.append(name)
     return empty
 
@@ -746,6 +763,63 @@ def build_audit_report(
     return report
 
 
+def apply_verdict_to_meta(meta: dict[str, Any], verdict: AuditVerdict) -> tuple[int, int]:
+    """Stamp ONE verdict onto an already-parsed ``meta`` dict, in place.
+
+    The exact mutation :func:`apply_audit_report` performs per page,
+    factored out so a caller that already holds a page's ``meta`` in
+    memory — a librarian touch-point mid-flow, not a fresh ``wiki_root``
+    rescan — can apply the SAME stamping rules without forcing a second
+    disk read. See :mod:`athenaeum.audit_on_touch` (issue athenaeum#1627),
+    the caller this was extracted for; this is the ONE stamping
+    implementation both it and :func:`apply_audit_report` below use.
+
+    Never touches a field NOT already in ``verdict.coordinate_fills`` /
+    ``verdict.audit_findings`` — both are already a subset of the fields
+    that were empty when the page was scanned (see :func:`audit_page`) —
+    and never overwrites a coordinate that is populated by the time this
+    runs, whether it was populated at scan time or filled by another
+    writer since (the same "populated coordinate is NEVER overwritten"
+    invariant the module docstring states).
+
+    Returns ``(fields_filled, fields_undeterminable)`` — counts of fields
+    this call actually wrote (a field already populated by the time this
+    runs is skipped either way, so it counts toward neither number), for a
+    caller that wants to accumulate its own coordinate counters (e.g.
+    :class:`athenaeum.audit_on_touch.AuditOnTouchCounters`).
+    """
+    meta["last_audited"] = verdict.audited_at
+    meta["audit_version"] = verdict.audit_version
+
+    raw_findings = meta.get("audit_findings")
+    findings: dict[str, str] = dict(raw_findings) if isinstance(raw_findings, dict) else {}
+
+    filled = 0
+    for name, value in verdict.coordinate_fills.items():
+        if _is_populated(meta.get(name)):
+            continue
+        meta[name] = value
+        findings.pop(name, None)
+        filled += 1
+
+    undeterminable = 0
+    for name, reason in verdict.audit_findings.items():
+        if _is_populated(meta.get(name)):
+            continue
+        findings[name] = reason
+        undeterminable += 1
+
+    # Always write the map back, including when it has emptied out: a page
+    # whose every recorded finding has since been resolved must not keep a
+    # stale `audit_findings:` block.
+    if findings:
+        meta["audit_findings"] = findings
+    else:
+        meta.pop("audit_findings", None)
+
+    return filled, undeterminable
+
+
 def apply_audit_report(report: AuditReport, wiki_root: Path) -> int:
     """Write every successful verdict in *report*. Returns files-changed count.
 
@@ -753,9 +827,11 @@ def apply_audit_report(report: AuditReport, wiki_root: Path) -> int:
     ``uid`` identity plus each coordinate field's emptiness immediately
     before writing — the same defensive re-check
     :func:`athenaeum.page_description.apply_description_backfill` performs
-    for its own single field, generalized to three. A populated coordinate
-    is never overwritten; a coordinate already filled by another writer
-    between scan and apply is silently skipped, never clobbered.
+    for its own single field, generalized to three (now via
+    :func:`apply_verdict_to_meta`, which performs that re-check). A
+    populated coordinate is never overwritten; a coordinate already filled
+    by another writer between scan and apply is silently skipped, never
+    clobbered.
     """
     from athenaeum.atomic_io import atomic_write_text
 
@@ -768,24 +844,7 @@ def apply_audit_report(report: AuditReport, wiki_root: Path) -> int:
         if not meta or meta.get("uid") != verdict.uid:
             continue
 
-        meta["last_audited"] = verdict.audited_at
-        meta["audit_version"] = verdict.audit_version
-
-        raw_findings = meta.get("audit_findings")
-        findings: dict[str, str] = dict(raw_findings) if isinstance(raw_findings, dict) else {}
-        for name, value in verdict.coordinate_fills.items():
-            existing = meta.get(name)
-            if isinstance(existing, str) and existing.strip():
-                continue
-            meta[name] = value
-            findings.pop(name, None)
-        for name, reason in verdict.audit_findings.items():
-            existing = meta.get(name)
-            if isinstance(existing, str) and existing.strip():
-                continue
-            findings[name] = reason
-        if findings:
-            meta["audit_findings"] = findings
+        apply_verdict_to_meta(meta, verdict)
 
         atomic_write_text(verdict.path, render_frontmatter(meta) + "\n" + body)
         changed += 1
@@ -800,6 +859,7 @@ __all__ = [
     "AuditReport",
     "AuditVerdict",
     "apply_audit_report",
+    "apply_verdict_to_meta",
     "audit_page",
     "audit_pages_via_batch",
     "build_audit_batch_request",
