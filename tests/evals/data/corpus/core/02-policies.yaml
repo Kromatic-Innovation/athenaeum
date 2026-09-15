@@ -51,6 +51,7 @@
 
     Owned by Sofia Renn.
 
+    Internal reference tag: Cinderquill.
 - uid: policy-invoice-cadence
   type: principle
   name: Invoice cadence
@@ -85,6 +86,7 @@
 
     Escalation point: Nadia Frost.
 
+    Internal reference tag: Harrowvex.
 - uid: policy-onboarding
   type: principle
   name: Client onboarding
@@ -101,6 +103,7 @@
     one. The finance-lead call was added after the Atlas engagement onboarding
     review.
 
+    Internal reference tag: Larkspindle.
 - uid: policy-office-access
   type: principle
   name: Office access

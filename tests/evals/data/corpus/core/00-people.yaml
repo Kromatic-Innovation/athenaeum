@@ -31,6 +31,7 @@
     Amir Osei is the finance partner. He is the approver for discretionary
     spend above 500 GBP and owns the expense policy.
 
+    Internal reference tag: Voltmere.
 - uid: person-lena-varga
   type: person
   name: Lena Varga
@@ -128,6 +129,7 @@
     Hana Lindqvist is the design lead on the portal refresh and reviews all
     client-facing surfaces before release.
 
+    Internal reference tag: Greywisp.
 - uid: person-gabriel-orsini
   type: person
   name: Gabriel Orsini
