@@ -18,8 +18,9 @@ Two test classes, two different things pinned:
 * :class:`TestAbstentionProbesAbstainOnlyWhenFloorIsActive` -- the AC4 test
   named by the issue. Runs the real ``recall_search`` entry point against
   the three ``abstention``-class probes in
-  ``tests/evals/data/corpus/probes/probes.yaml``, on both FTS5 and keyword,
-  and asserts BOTH directions:
+  ``tests/evals/data/corpus/probes/probes.yaml``, on FTS5, keyword, and
+  (athenaeum#1571, ``embedding``-marked only) vector, and asserts BOTH
+  directions:
 
   1. with the floor set high enough, the probe returns an explicitly empty
      result (AC2, AC4 direction 1);
@@ -32,6 +33,7 @@ Two test classes, two different things pinned:
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 
 import pytest
@@ -188,18 +190,30 @@ class TestRelevanceFloorResolver:
 # floor-INACTIVE assertion vacuous for that probe. "small" adds the
 # distractor tier (built from each probe's own ``distractor_terms``), which
 # is what makes all three probes reproduce athenaeum#1492's defect --
-# confidently wrong, non-empty -- on BOTH backends. Measured this dispatch:
-# FTS5 ranks land in [-9.9, -4.0]; keyword scores land in [12.0, 49.0].
+# confidently wrong, non-empty -- on ALL THREE backends. Measured this
+# dispatch: FTS5 ranks land in [-9.9, -4.0]; keyword scores land in
+# [12.0, 49.0]; vector (athenaeum#1571) cosine distances land in
+# [0.740, 1.606] for the abstention probes specifically ([0.416, 1.606]
+# across every probe class).
 _CORPUS_SCALE = "small"
 
 # Chosen far outside the observed ranges above -- excludes every hit at this
-# scale without hand-tuning to a fragile boundary value.
+# scale without hand-tuning to a fragile boundary value. vector's floor is
+# very NEGATIVE (like fts5, not like keyword) because it is lower-is-better:
+# a distance floor of -1000.0 means no observed (positive) distance ever
+# clears it (``score <= floor``).
 _ACTIVE_FLOOR_CONFIG = {
-    "recall": {"relevance_floor": {"fts5": -1000.0, "keyword": 1_000_000.0}}
+    "recall": {
+        "relevance_floor": {"fts5": -1000.0, "keyword": 1_000_000.0, "vector": -1000.0}
+    }
 }
 _INACTIVE_FLOOR_CONFIG: dict[str, object] | None = None
 
-_BACKENDS = ("fts5", "keyword")
+# vector (athenaeum#1571) runs only under the ``embedding`` marker (real
+# MiniLM, deselected from the default suite by ``pyproject.toml``'s
+# addopts) -- see ``_ensure_vector_index`` for why the fts5/keyword-only
+# default suite never pays its chromadb/MiniLM cost.
+_BACKENDS = ("fts5", "keyword", pytest.param("vector", marks=pytest.mark.embedding))
 
 
 def _abstention_probe_ids() -> list[str]:
@@ -225,7 +239,12 @@ def abstention_wiki(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
     Shared read-only across every test below -- neither backend mutates the
     wiki tree or the index at query time, so one build serves the whole
-    (probe x backend x floor-state) matrix cheaply.
+    (probe x backend x floor-state) matrix cheaply. FTS5's index is built
+    eagerly here because fts5/keyword tests are always selected (default
+    suite); vector's index is deliberately NOT built here -- see
+    ``_ensure_vector_index``, called lazily only by the ``embedding``-marked
+    vector parametrization, so a default (``-m 'not embedding'``) run of
+    this module never imports chromadb or loads MiniLM.
     """
     corpus = build_corpus(scale=_CORPUS_SCALE)
     root = tmp_path_factory.mktemp("athenaeum-1492-corpus")
@@ -234,7 +253,23 @@ def abstention_wiki(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return wiki_root
 
 
+@functools.lru_cache(maxsize=None)
+def _ensure_vector_index(wiki_root: Path) -> None:
+    """Build ``wiki_root``'s chromadb vector index, once, on first use.
+
+    athenaeum#1571: kept OUT of the ``abstention_wiki`` fixture body (which
+    every fts5/keyword test also depends on) so the chromadb/MiniLM cost is
+    paid only when a vector-parametrized (``embedding``-marked) test
+    actually runs. ``lru_cache`` makes repeat calls for the same
+    module-scoped ``wiki_root`` free, the same idempotency the fixture
+    above gets from ``scope="module"``.
+    """
+    get_backend("vector").build_index(wiki_root, wiki_root.parent / "cache")
+
+
 def _run(wiki_root: Path, query: str, backend: str, config: dict[str, object] | None) -> str:
+    if backend == "vector":
+        _ensure_vector_index(wiki_root)
     return recall_search(
         wiki_root,
         query,

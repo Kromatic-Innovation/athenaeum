@@ -6,8 +6,8 @@ Issue athenaeum#1492, AC5: **this script does not choose a production
 threshold.** Selecting what value production should run is a deliberate
 product judgment, explicitly deferred to a follow-up. What this script does
 is measure, for a swept range of floor values on EACH backend the floor
-mechanism covers (FTS5, keyword), two numbers a human making that call needs
-side by side:
+mechanism covers (FTS5, keyword, and -- since athenaeum#1571 opened both gates
+for it -- vector), two numbers a human making that call needs side by side:
 
 * **abstention CLEAN count** -- of the 3 ``abstention``-class probes in
   ``tests/evals/data/corpus/probes/probes.yaml``, how many correctly return
@@ -50,7 +50,7 @@ from athenaeum.search import get_backend, meets_relevance_floor  # noqa: E402
 from tests.evals.corpus import Probe, build_corpus  # noqa: E402
 from tests.evals.metrics import grade_abstention, mrr  # noqa: E402
 
-BACKENDS = ("fts5", "keyword")
+BACKENDS = ("fts5", "keyword", "vector")
 TOP_K = 5
 
 # One sweep grid PER backend -- FTS5's rank and the keyword scorer's additive
@@ -83,6 +83,26 @@ KEYWORD_GRID: tuple[float | None, ...] = (
     30.0,
     50.0,
     80.0,
+)
+# vector (athenaeum#1571): chromadb cosine DISTANCE, lower-is-better like FTS5
+# -- score <= floor -- so this grid runs strict-to-loose the same direction
+# as FTS5_GRID. Endpoints measured against the `small` corpus's own probes
+# (this dispatch, all 20 probes x top-5): observed distances span
+# [0.416, 1.606], abstention probes alone span [0.740, 1.606]. 0.0 is below
+# every observed distance (every probe abstains, floor is maximally strict);
+# 1.7 is above every observed distance (every probe still confabulates,
+# floor is inert) -- the same "one end destroys everything, the other end
+# changes nothing" bracketing FTS5_GRID/KEYWORD_GRID use.
+VECTOR_GRID: tuple[float | None, ...] = (
+    None,  # inactive -- today's shipped default
+    0.0,
+    0.3,
+    0.5,
+    0.7,
+    0.9,
+    1.1,
+    1.3,
+    1.7,
 )
 
 
@@ -226,12 +246,19 @@ def main(argv: list[str] | None = None) -> int:
     wiki_root = corpus.materialize(root)
     cache_dir = root / "cache"
     get_backend("fts5").build_index(wiki_root, cache_dir)
+    # vector (athenaeum#1571): needs its own chromadb collection built once,
+    # same as FTS5's own index above. keyword is scan-on-query (no index).
+    get_backend("vector").build_index(wiki_root, cache_dir)
 
     probes = corpus.probes
     class_order = sorted({p.probe_class for p in probes if p.probe_class != "abstention"})
 
     by_backend: dict[str, list[dict[str, object]]] = {}
-    for backend_name, grid in (("fts5", FTS5_GRID), ("keyword", KEYWORD_GRID)):
+    for backend_name, grid in (
+        ("fts5", FTS5_GRID),
+        ("keyword", KEYWORD_GRID),
+        ("vector", VECTOR_GRID),
+    ):
         raw = _query_all(backend_name, wiki_root, cache_dir, probes)
         by_backend[backend_name] = _sweep_backend(backend_name, grid, raw, probes)
 
