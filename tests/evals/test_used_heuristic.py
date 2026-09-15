@@ -47,13 +47,14 @@ def _blob(fixture: used_heuristic.Fixture) -> str:
     return "\n".join(json.dumps(rec) for rec in fixture.transcript_records)
 
 
-def test_all_four_quadrants_are_present() -> None:
+def test_all_five_quadrants_are_present() -> None:
     quadrants = {f.quadrant for f in build_fixtures()}
     assert quadrants == {
         "used_with_uid",
         "used_without_uid",
         "echoed_not_used",
         "not_used",
+        "short_id_collision",
     }
 
 
@@ -97,29 +98,71 @@ def test_no_fixture_uid_leaks_into_another_fixture_body() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_synthetic_eval_produces_all_four_matrix_cells(tmp_path: Path) -> None:
+def test_synthetic_eval_scores_every_quadrant_correctly(tmp_path: Path) -> None:
     """RED here means the heuristic changed: re-run `used_heuristic_cli` and
-    regenerate the measurement doc."""
+    regenerate the measurement doc.
+
+    Issue athenaeum#1585 moved `used_without_uid` FN -> TP (a content signal
+    reaches it) and `echoed_not_used` FP -> TN (a tool-result echo is no longer
+    a citation), and added `short_id_collision`, which whole-token matching
+    scores TN where an unanchored substring test scored it FP.
+    """
     result = run_synthetic_eval(tmp_path)
     cells = {o.quadrant: o.cell for o in result.outcomes}
     assert cells == {
         "used_with_uid": "true_positive",
-        "used_without_uid": "false_negative",
-        "echoed_not_used": "false_positive",
+        "used_without_uid": "true_positive",
+        "echoed_not_used": "true_negative",
         "not_used": "true_negative",
+        "short_id_collision": "true_negative",
     }
     matrix = result.matrix
-    assert (matrix.true_positive, matrix.false_negative) == (1, 1)
-    assert (matrix.false_positive, matrix.true_negative) == (1, 1)
-    assert matrix.total == 4
+    assert (matrix.true_positive, matrix.false_negative) == (2, 0)
+    assert (matrix.false_positive, matrix.true_negative) == (0, 3)
+    assert matrix.total == 5
+
+
+def test_both_push_paths_derive_the_same_id_for_one_page() -> None:
+    """AC6: the measurement's push-path claim, asserted rather than assumed.
+
+    A compiled entity's uid is eight hex characters, and the entity page is
+    ``<uid>-<slug>.md`` — so the frontmatter derivation (MCP) and the filename
+    derivation (sidecar) agree on that page. What the two paths do NOT share is
+    raw-intake hits; the report says so explicitly.
+    """
+    from athenaeum import push_metrics
+
+    fixture = {f.quadrant: f for f in build_fixtures()}["short_id_collision"]
+
+    from_frontmatter = push_metrics.opaque_push_id(
+        fixture.page_filename, {"uid": fixture.uid}
+    )
+    from_filename = push_metrics.opaque_push_id_from_filename(fixture.page_filename)
+
+    assert from_frontmatter == from_filename == fixture.uid
+    assert len(fixture.uid) == 8
+
+
+def test_short_id_collision_fixture_really_collides() -> None:
+    """The fixture is only evidence if the push id IS a substring of the SHA —
+    otherwise it would pass under the old rule too and prove nothing."""
+    fixtures = {f.quadrant: f for f in build_fixtures()}
+    collision = fixtures["short_id_collision"]
+    blob = _blob(collision)
+
+    assert collision.uid in blob  # the substring the old rule matched on
+    # ...but never as a whole token.
+    import re
+
+    assert re.search(rf"(?<![0-9A-Za-z]){re.escape(collision.uid)}(?![0-9A-Za-z])", blob) is None
 
 
 def test_rates_are_computed_from_the_matrix(tmp_path: Path) -> None:
     """RED here means the heuristic changed: re-run `used_heuristic_cli` and
     regenerate the measurement doc."""
     matrix = run_synthetic_eval(tmp_path).matrix
-    assert matrix.false_negative_rate == 0.5
-    assert matrix.false_positive_rate == 0.5
+    assert matrix.false_negative_rate == 0.0
+    assert matrix.false_positive_rate == 0.0
 
 
 def test_rates_are_none_not_zero_on_an_empty_matrix() -> None:
@@ -272,8 +315,9 @@ def test_report_states_both_rates_and_what_used_means(tmp_path: Path) -> None:
     )
     assert "False-negative rate" in text
     assert "False-positive rate" in text
-    assert "50.0%" in text
-    assert "uid string appears" in text
+    assert "0.0%" in text
+    assert "whole token" in text
+    assert "distinctive 4-word shingle" in text
 
 
 def test_write_report_is_dated_and_lands_in_the_requested_dir(tmp_path: Path) -> None:
@@ -290,14 +334,25 @@ def test_write_report_is_dated_and_lands_in_the_requested_dir(tmp_path: Path) ->
     assert path.read_text(encoding="utf-8").startswith("# `used` column heuristic accuracy")
 
 
-def test_report_names_the_ac4_followup(tmp_path: Path) -> None:
-    """A measurement that states a defect without naming where it is tracked
-    reads as a finding that went nowhere."""
+def test_report_names_the_issue_that_changed_the_rule(tmp_path: Path) -> None:
+    """A reader must land on the change, not assume these numbers describe the
+    original substring rule."""
     text = render_report(
         build_report(run_synthetic_eval(tmp_path), [], store_path=None, store_consulted=False)
     )
-    assert used_heuristic.FOLLOWUP_ISSUE in text
-    assert "unchanged (AC4)" in text
+    assert used_heuristic.HEURISTIC_ISSUE in text
+    assert used_heuristic.FOLLOWUP_ISSUE == used_heuristic.HEURISTIC_ISSUE
+    assert "Synthetic fixtures only" in text
+
+
+def test_report_states_push_path_coverage(tmp_path: Path) -> None:
+    """AC6: the measurement must say which push paths it covers."""
+    text = render_report(
+        build_report(run_synthetic_eval(tmp_path), [], store_path=None, store_consulted=False)
+    )
+    assert "Push-path coverage" in text
+    assert "sidecar" in text
+    assert "raw-intake" in text
 
 
 def test_default_measurements_dir_is_the_tracked_docs_corpus() -> None:

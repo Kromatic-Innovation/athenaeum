@@ -70,7 +70,7 @@ import os
 import random
 import re
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -78,6 +78,7 @@ from typing import Any
 
 from athenaeum.config import resolve_cache_dir
 from athenaeum.store import append_line_durable, now_iso
+from athenaeum.text_overlap import distinctive_ngram_overlap
 
 log = logging.getLogger(__name__)
 
@@ -1477,6 +1478,20 @@ def tail_records(
 # anywhere naming a cause. These constants give the caller (the CLI's
 # `--references-only` mode, which a SessionEnd hook can invoke
 # unconditionally) something to log and a non-zero status to report.
+#: Issue athenaeum#1585: a pushed page counts as used when the assistant's own
+#: text reproduces any distinctive 4-word shingle of it — i.e. overlap strictly
+#: above zero. Expressed as a floor rather than a tuned cutoff on purpose: a
+#: magic threshold would make the `used` column an artifact of the threshold.
+CONTENT_SIGNAL_MIN_OVERLAP = 0.0
+
+#: Matches a push id only as a WHOLE token — not embedded in a longer
+#: alphanumeric run. Issue athenaeum#1585: the sidecar path records an 8-hex uid
+#: PREFIX, so an unanchored substring test marked a page "used" whenever the
+#: session happened to contain a git SHA, a hex dump, or another uid sharing
+#: those 8 characters. ``-``/``_``/``.`` stay outside the class so a genuine
+#: reference by filename (``<id>-<slug>.md``) still matches.
+_ID_BOUNDARY = "[0-9A-Za-z]"
+
 REFERENCE_DETERMINED = "determined"
 """A reference record was computed AND appended for this session."""
 
@@ -1599,6 +1614,63 @@ class ReferenceDeterminationStatus:
         return payload
 
 
+def _appears_as_whole_token(push_id: str, blob: str) -> bool:
+    """True when *push_id* appears in *blob* delimited by non-alphanumerics.
+
+    The rule ``determine_references``' docstring has always claimed and the
+    code never implemented (issue athenaeum#1585). Anchoring is what keeps an
+    8-hex sidecar push id from matching the first eight characters of an
+    unrelated git SHA.
+    """
+    if not push_id:
+        return False
+    pattern = f"(?<!{_ID_BOUNDARY}){re.escape(push_id)}(?!{_ID_BOUNDARY})"
+    return re.search(pattern, blob) is not None
+
+
+def _strip_frontmatter(text: str) -> str:
+    """Drop a leading YAML frontmatter block, so shingles come from prose only."""
+    if not text.startswith("---"):
+        return text
+    end = text.find("\n---", 3)
+    return text[end + 4 :] if end != -1 else text
+
+
+def _pushed_page_texts(wiki_root: Path | None, pushed_ids: Sequence[str]) -> dict[str, str]:
+    """Best-effort ``push id -> page prose``, for ids resolvable by FILENAME.
+
+    A compiled entity page is ``<uid>-<slug>.md``, so BOTH recorded id shapes —
+    the full uid (MCP ``recall`` path) and the 8-hex uid prefix (sidecar path)
+    — are filename prefixes. One directory listing resolves every pushed id at
+    once: no frontmatter reads, no index build, no corpus scan of page
+    CONTENT beyond the handful of pages this session was actually offered.
+
+    Ids that resolve to nothing are simply absent from the result — an honest
+    "no content signal available for this one", never a fabricated empty string
+    (which would read as "the page says nothing", a different claim).
+    """
+    wanted = [pid for pid in pushed_ids if pid]
+    if wiki_root is None or not wanted:
+        return {}
+    try:
+        names = sorted(entry.name for entry in wiki_root.iterdir() if entry.is_file())
+    except OSError:
+        return {}
+    texts: dict[str, str] = {}
+    for pid in wanted:
+        for name in names:
+            if not name.endswith(".md") or not name.startswith(pid):
+                continue
+            try:
+                texts[pid] = _strip_frontmatter(
+                    (wiki_root / name).read_text(encoding="utf-8", errors="replace")
+                )
+            except OSError:
+                pass
+            break
+    return texts
+
+
 def _find_session_transcript(session_id: str, projects_root: Path) -> tuple[Path, str] | None:
     """Locate ``<projects_root>/<scope>/<session_id>.jsonl`` by scanning scopes.
 
@@ -1668,11 +1740,33 @@ def _determine_references_with_reason(
 
     Reads this session's push records (from the ledger) and its transcript
     (read-only, via the same one-session-one-file primitive
-    ``transcript_verify`` uses), then marks a pushed id "referenced" when it
-    appears — as a whole-token substring match — anywhere in ANY transcript
-    record's text (user, assistant, or tool-result), not just user-authored
-    text. See the module docstring for why this must differ from
-    ``verify_user_stated``.
+    ``transcript_verify`` uses), then marks a pushed id "referenced" when
+    EITHER of two signals fires (issue athenaeum#1585):
+
+    * **Citation.** The id appears as a whole token — not embedded in a longer
+      alphanumeric run — in user- or assistant-authored text. Tool results are
+      excluded: recall's own output quoted back is an echo, not a citation.
+      Whole-token matching is what this docstring claimed before any code
+      implemented it, and it is what keeps an 8-hex sidecar push id from
+      matching the first eight characters of an unrelated git SHA.
+    * **Content.** The assistant's own text reproduces distinctive phrasing
+      from the pushed page (a shared 4-word shingle, via
+      :mod:`athenaeum.text_overlap`). This is the only signal that can reach
+      content-only use: a breadcrumb delivers ``name — description`` and
+      carries no id at all, so a session that acts on one without ever calling
+      recall leaves no id anywhere for a substring rule to find.
+
+    An id present ONLY in a tool result, with no content signal, is an echo and
+    is not counted — unless the page's own text cannot be resolved, in which
+    case the two readings are indistinguishable from here and the historical
+    verdict stands rather than a confident "not used". Both signals are local,
+    free and judge-free: no model call is made on this path.
+
+    User-authored text still counts, which is why this must differ from
+    ``verify_user_stated`` — see the module docstring.
+
+    *wiki_root* is what makes the content signal available: pushed page text is
+    resolved from it by filename prefix. Without it, only citation can fire.
 
     Returns ``None`` when there are no push records for this session (nothing
     to determine) or the transcript cannot be located (rolled off / never
@@ -1709,40 +1803,82 @@ def _determine_references_with_reason(
     if not transcript_records:
         return None, REFERENCE_REASON_TRANSCRIPT_EMPTY
 
-    haystacks: list[str] = []
+    # Issue athenaeum#1585: split the haystack by PROVENANCE. A uid the
+    # assistant (or the operator) wrote is a citation; the same uid inside a
+    # tool result is an echo of recall's own output, which the old single-blob
+    # rule could not tell apart. The assistant's own text is additionally kept
+    # on its own, because that — not a tool result echoing the page back — is
+    # where evidence of having DRAWN ON the page's content lives.
+    author_parts: list[str] = []
+    assistant_parts: list[str] = []
+    echo_parts: list[str] = []
+
+    def _emit(text: object, *, role: str, echo: bool) -> None:
+        if not isinstance(text, str) or not text:
+            return
+        if echo:
+            echo_parts.append(text)
+            return
+        author_parts.append(text)
+        if role == "assistant":
+            assistant_parts.append(text)
+
     for trec in transcript_records:
         if not isinstance(trec, dict):
             continue
         message = trec.get("message")
+        role = ""
+        if isinstance(message, dict) and isinstance(message.get("role"), str):
+            role = str(message["role"])
+        elif isinstance(trec.get("type"), str):
+            role = str(trec["type"])
         content = message.get("content") if isinstance(message, dict) else trec.get("content")
         if isinstance(content, str):
-            haystacks.append(content)
+            _emit(content, role=role, echo=False)
         elif isinstance(content, list):
             for block in content:
                 if isinstance(block, dict):
-                    txt = block.get("text") or block.get("content")
-                    if isinstance(txt, str):
-                        haystacks.append(txt)
+                    # A tool_result block is the model's INPUT, not its
+                    # output: recall's own rendering, uid included, quoted
+                    # back at it.
+                    is_echo = block.get("type") == "tool_result"
+                    _emit(block.get("text") or block.get("content"), role=role, echo=is_echo)
                     inner = block.get("content")
                     if isinstance(inner, list):
                         for sub in inner:
                             if isinstance(sub, dict):
-                                t = sub.get("text")
-                                if isinstance(t, str):
-                                    haystacks.append(t)
+                                _emit(sub.get("text"), role=role, echo=is_echo)
                 elif isinstance(block, str):
-                    haystacks.append(block)
+                    _emit(block, role=role, echo=False)
         tur = trec.get("toolUseResult")
         if isinstance(tur, str):
-            haystacks.append(tur)
+            _emit(tur, role=role, echo=True)
         elif isinstance(tur, dict):
             for key in ("stdout", "text", "content"):
-                v = tur.get(key)
-                if isinstance(v, str):
-                    haystacks.append(v)
-    blob = "\n".join(haystacks)
+                _emit(tur.get(key), role=role, echo=True)
 
-    referenced = [pid for pid in pushed_ids if pid in blob]
+    author_blob = "\n".join(author_parts)
+    assistant_blob = "\n".join(assistant_parts)
+    echo_blob = "\n".join(echo_parts)
+    page_texts = _pushed_page_texts(wiki_root, pushed_ids)
+
+    referenced: list[str] = []
+    for pid in pushed_ids:
+        cited = _appears_as_whole_token(pid, author_blob)
+        page_text = page_texts.get(pid)
+        drew_on_content = (
+            page_text is not None
+            and distinctive_ngram_overlap(page_text, assistant_blob) > CONTENT_SIGNAL_MIN_OVERLAP
+        )
+        if cited or drew_on_content:
+            referenced.append(pid)
+            continue
+        # Echo-only, and no page text to judge it against: the two readings
+        # are genuinely indistinguishable from here, so keep the historical
+        # verdict rather than silently converting an unresolvable page into a
+        # confident "not used".
+        if _appears_as_whole_token(pid, echo_blob) and page_text is None:
+            referenced.append(pid)
     return (
         ReferenceResult(
             session_id=session_id,

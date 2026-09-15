@@ -687,10 +687,13 @@ class TestDetermineReferences:
         assert result.referenced_ids == ["abc12345"]
         assert result.precision == 1.0
 
-    def test_matches_tool_result_text_not_just_user_text(self, tmp_path: Path) -> None:
-        # Reference-determination must catch ids referenced via tool output —
-        # NOT just user-authored text (that is what distinguishes it from
-        # transcript_verify.verify_user_stated, which only matches user text).
+    def test_tool_result_id_still_counts_when_no_page_text_resolves(
+        self, tmp_path: Path
+    ) -> None:
+        # Issue athenaeum#1585 made a tool-result echo insufficient ON ITS OWN —
+        # but only where the page's text is available to judge it against. With
+        # no ``wiki_root``, "echo" and "use" are indistinguishable from here, so
+        # the historical verdict stands rather than a confident "not used".
         cache = tmp_path / "cache"
         record = push_metrics.build_push_record(
             session_id="sess-b",
@@ -812,6 +815,308 @@ class TestRunReferenceDetermination:
         rows = push_metrics._read_jsonl(push_metrics.reference_records_path(cache))
         assert len(rows) == 1
         assert rows[0]["session_id"] == "sess-f"
+
+
+class TestReferenceContentSignal:
+    """Issue athenaeum#1585: what the ``used`` verdict counts as evidence.
+
+    The old rule was ``pid in blob`` over every transcript record. It could not
+    reach content-only use (a breadcrumb carries no id), could not tell a cited
+    id from an echoed one, and — because a compiled entity's uid is eight hex
+    characters — matched any git SHA that happened to start the same way.
+    """
+
+    @staticmethod
+    def _seed(
+        tmp_path: Path,
+        session: str,
+        uid: str,
+        page_body: str,
+        records: list[dict[str, object]],
+        *,
+        write_page: bool = True,
+        slug: str = "page",
+    ) -> tuple[Path, Path, Path]:
+        cache = tmp_path / "cache"
+        push_metrics.record_push(
+            push_metrics.build_push_record(
+                session_id=session,
+                query="q",
+                backend="fts5",
+                hits=[(f"{uid}-{slug}.md", {"uid": uid}, page_body)],
+            ),
+            cache_dir=cache,
+        )
+        projects_root = tmp_path / "projects"
+        scope = projects_root / "-scope"
+        scope.mkdir(parents=True)
+        (scope / f"{session}.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8"
+        )
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        if write_page:
+            (wiki / f"{uid}-{slug}.md").write_text(
+                f"---\nuid: {uid}\n---\n\n{page_body}\n", encoding="utf-8"
+            )
+        return cache, projects_root, wiki
+
+    _FACT = "the lantern ferry departs on the quarter hour from the east slip"
+
+    def test_content_only_use_is_reached_without_any_id(self, tmp_path: Path) -> None:
+        """The breadcrumb path: `name — description` carries no id at all."""
+        cache, projects, wiki = self._seed(
+            tmp_path,
+            "sess-content",
+            "ab12cd34",
+            f"Lantern ferry schedule — {self._FACT}.",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": (
+                            f"<system-reminder>Lantern ferry schedule — {self._FACT}."
+                            "</system-reminder>\nWhen should I arrive?"
+                        ),
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": f"Since {self._FACT}, arrive by 14:10.",
+                    },
+                },
+            ],
+        )
+
+        result = push_metrics.determine_references(
+            "sess-content", cache_dir=cache, projects_root=projects, wiki_root=wiki
+        )
+
+        assert result is not None
+        assert result.referenced_ids == ["ab12cd34"]
+
+    def test_an_echo_with_no_content_use_is_not_counted(self, tmp_path: Path) -> None:
+        cache, projects, wiki = self._seed(
+            tmp_path,
+            "sess-echo",
+            "cd34ef56",
+            "Quarry siren testing — the quarry siren is tested at noon on the first.",
+            [
+                {"type": "user", "message": {"role": "user", "content": "Why did the build fail?"}},
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "content": (
+                                    "**Uid:** cd34ef56\nQuarry siren testing — the quarry "
+                                    "siren is tested at noon on the first."
+                                ),
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": "Not relevant. A transitive dependency was yanked.",
+                    },
+                },
+            ],
+        )
+
+        result = push_metrics.determine_references(
+            "sess-echo", cache_dir=cache, projects_root=projects, wiki_root=wiki
+        )
+
+        assert result is not None
+        assert result.referenced_ids == []
+
+    def test_an_echo_the_assistant_then_draws_on_is_counted(self, tmp_path: Path) -> None:
+        """Recall echoing the page is the NORMAL path — what makes it use is
+        the assistant afterwards drawing on it."""
+        cache, projects, wiki = self._seed(
+            tmp_path,
+            "sess-echo-used",
+            "ef56ab78",
+            f"Lantern ferry schedule — {self._FACT}.",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "content": f"**Uid:** ef56ab78\nLantern ferry — {self._FACT}.",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": f"{self._FACT}, so arrive by 14:10.",
+                    },
+                },
+            ],
+        )
+
+        result = push_metrics.determine_references(
+            "sess-echo-used", cache_dir=cache, projects_root=projects, wiki_root=wiki
+        )
+
+        assert result is not None
+        assert result.referenced_ids == ["ef56ab78"]
+
+    def test_a_short_id_inside_a_git_sha_is_not_a_reference(self, tmp_path: Path) -> None:
+        """Every compiled entity's push id is eight hex characters."""
+        cache, projects, wiki = self._seed(
+            tmp_path,
+            "sess-collide",
+            "4b17ac02",
+            "Signal box inspection — the signal box is inspected before the first train.",
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            "The regression came in with "
+                            "4b17ac02f8e31d5c07ba9e4d6c2185fa30bd7e91; revert it."
+                        ),
+                    },
+                },
+            ],
+        )
+
+        result = push_metrics.determine_references(
+            "sess-collide", cache_dir=cache, projects_root=projects, wiki_root=wiki
+        )
+
+        assert result is not None
+        assert result.referenced_ids == []
+
+    def test_the_whole_id_is_still_matched_when_it_stands_alone(self, tmp_path: Path) -> None:
+        """Anchoring must not break the ordinary citation, including by filename."""
+        cache, projects, wiki = self._seed(
+            tmp_path,
+            "sess-cited",
+            "4b17ac02",
+            "Signal box inspection — the signal box is inspected before the first train.",
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": "See 4b17ac02-signal-box.md for the inspection window.",
+                    },
+                },
+            ],
+            slug="signal-box",
+        )
+
+        result = push_metrics.determine_references(
+            "sess-cited", cache_dir=cache, projects_root=projects, wiki_root=wiki
+        )
+
+        assert result is not None
+        assert result.referenced_ids == ["4b17ac02"]
+
+    def test_an_id_the_operator_typed_is_a_citation(self, tmp_path: Path) -> None:
+        cache, projects, wiki = self._seed(
+            tmp_path,
+            "sess-user-cite",
+            "99aa88bb",
+            "Tidal almanac — a double low water occurs in late autumn.",
+            [
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "What does 99aa88bb say?"},
+                },
+                {
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": "Checking now."},
+                },
+            ],
+        )
+
+        result = push_metrics.determine_references(
+            "sess-user-cite", cache_dir=cache, projects_root=projects, wiki_root=wiki
+        )
+
+        assert result is not None
+        assert result.referenced_ids == ["99aa88bb"]
+
+    def test_an_unresolvable_page_falls_back_to_the_prior_verdict(self, tmp_path: Path) -> None:
+        """No page text means echo and use are indistinguishable — do not
+        silently convert that into a confident "not used"."""
+        cache, projects, wiki = self._seed(
+            tmp_path,
+            "sess-nopage",
+            "12ab34cd",
+            "Quarry siren testing — the siren is tested at noon.",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "tool_result", "content": "**Uid:** 12ab34cd"}],
+                    },
+                },
+                {"type": "assistant", "message": {"role": "assistant", "content": "Noted."}},
+            ],
+            write_page=False,
+        )
+
+        result = push_metrics.determine_references(
+            "sess-nopage", cache_dir=cache, projects_root=projects, wiki_root=wiki
+        )
+
+        assert result is not None
+        assert result.referenced_ids == ["12ab34cd"]
+
+    def test_the_content_signal_reads_the_assistant_not_the_echo(self, tmp_path: Path) -> None:
+        """The tool result reproduces the page verbatim by construction; if the
+        content signal read it, every echo would score as use."""
+        cache, projects, wiki = self._seed(
+            tmp_path,
+            "sess-signal-scope",
+            "77dd66ee",
+            f"Lantern ferry schedule — {self._FACT}.",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "content": f"Lantern ferry schedule — {self._FACT}.",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": "Nothing here applies."},
+                },
+            ],
+        )
+
+        result = push_metrics.determine_references(
+            "sess-signal-scope", cache_dir=cache, projects_root=projects, wiki_root=wiki
+        )
+
+        assert result is not None
+        assert result.referenced_ids == []
 
 
 class TestReferenceDeterminationStatus:
