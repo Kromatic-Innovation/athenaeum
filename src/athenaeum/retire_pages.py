@@ -234,7 +234,15 @@ def apply_retirement(
         # `_cmd_decay._rebuild_recall_index` triggers, but for the entity
         # index rather than the recall search index (that one is rebuilt
         # separately, outside git — see `_cmd_retire.py`).
-        rebuild_index(wiki_root)
+        try:
+            rebuild_index(wiki_root)
+        except OSError as exc:
+            # Abort before Commit B rather than propagating: an unhandled
+            # raise here escapes `archive_via_two_commit_git_rm` with the
+            # `git rm` already staged and no archive commit written. The
+            # error return is that helper's own documented abort path, the
+            # same one the withdrawal and `git add` failures above take.
+            return [], f"wiki index rebuild failed ({type(exc).__name__}): {exc}"
         report.index_lines_removed = [p.name for p in retired_paths]
         extra.append(str((wiki_root / "_index.md").resolve().relative_to(kr)))
 
