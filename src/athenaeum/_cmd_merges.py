@@ -145,6 +145,8 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     from athenaeum.pending_merges import (
         _make_id,
         classify_write_kind,
+        find_identity_pages,
+        identity_slug,
         write_pending_merge,
     )
 
@@ -172,29 +174,6 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     merge_target_name = str(name)
     target_slug = slugify(merge_target_name)
 
-    def _identity_slug(path: Path, meta: object) -> str | None:
-        """The slug ``path`` resolves to BY IDENTITY, or ``None``.
-
-        A page identity-resolves to ``slugify(name)`` when its filename is
-        either the bare-slug form (``<slug>.md``) or the corpus's real
-        convention, ``<uid>-<slug>.md``, where ``<uid>`` is that SAME page's
-        own ``uid:`` frontmatter (issue athenaeum#1635) — not just any
-        uid-shaped prefix. A filename carrying some other prefix (e.g. the
-        ``auto-`` case reported in the issue) matches neither form and is
-        deliberately left unresolved: widening this to arbitrary prefixes
-        was explicitly out of scope for the fix.
-        """
-        p_name = meta.get("name") if isinstance(meta, dict) else None
-        if not p_name or not str(p_name).strip():
-            return None
-        slug = slugify(str(p_name))
-        if path.name == f"{slug}.md":
-            return slug
-        p_uid = meta.get("uid") if isinstance(meta, dict) else None
-        if p_uid and str(p_uid).strip() and path.name == f"{p_uid}-{slug}.md":
-            return slug
-        return None
-
     # The fold classifies by slugify(name); the canonical page's own
     # filename must resolve back to this SAME page by identity (bare-slug,
     # or `<uid>-<slug>.md` keyed on its own `uid:`). A page whose filename
@@ -202,7 +181,7 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     # slug — refuse with a clear, actionable error rather than queue a
     # proposal that will not fold — this is the athenaeum#748 misclassification,
     # prevented at proposal time.
-    if _identity_slug(into_path, into_meta) != target_slug:
+    if identity_slug(into_path, into_meta) != target_slug:
         bare_form = f"{target_slug}.md"
         return _fail(
             f"canonical page {into_path.name} has name {merge_target_name!r}, "
@@ -218,17 +197,11 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     # share a name. Only one file can be the fold target for this slug, so a
     # second candidate makes the target genuinely ambiguous: name both
     # colliding pages rather than silently picking one.
-    colliding: list[str] = []
-    for fpath in sorted(wiki_root.glob("*.md")):
-        if fpath.name.startswith("_") or fpath.resolve() == into_path:
-            continue
-        try:
-            f_text = fpath.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        f_meta, _ = parse_frontmatter(f_text)
-        if _identity_slug(fpath, f_meta) == target_slug:
-            colliding.append(fpath.name)
+    colliding = [
+        fpath.name
+        for fpath in find_identity_pages(merge_target_name, wiki_root)
+        if fpath.resolve() != into_path
+    ]
     if colliding:
         others = ", ".join(colliding)
         return _fail(

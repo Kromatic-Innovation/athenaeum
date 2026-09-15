@@ -268,9 +268,13 @@ def _fold_target_matches_canonical(wiki_root: Path, canonical: CollisionPage) ->
     — never its ``name:`` frontmatter value. ``slugify`` is idempotent on an
     already-slugified stem (``slugify("47f5ac89-john-sechrest") ==
     "47f5ac89-john-sechrest"``, same for a bare-slug ``"acme"`` stem), so
-    ``wiki_root / f"{slugify(stem)}.md"`` — the exact path
+    ``wiki_root / f"{slugify(stem)}.md"`` — the bare-slug path
     :func:`athenaeum.pending_merges.classify_write_kind` / ``resolve_merge``
-    derive the fold target from — resolves to the canonical page's own file
+    try FIRST when deriving the fold target (issue athenaeum#1642 widened
+    that derivation to also resolve a ``<uid>-<slug>.md`` page by its own
+    ``uid:``; see :func:`athenaeum.pending_merges.resolve_target_page`, which
+    both sides now share — the bare-slug branch below is unaffected) —
+    resolves to the canonical page's own file
     for BOTH wiki-page-convention shapes: a bare-slug ``compiled`` page (the
     convention :mod:`athenaeum.wiki_dedupe` / this reused fold machinery was
     originally built for) and an entity-template page minted via the create
