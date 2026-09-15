@@ -16,10 +16,14 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any
 
-from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _iso_date
-from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, resolve_cache_dir
+from athenaeum._cli_shared import (
+    _acquire_or_exit,
+    _add_lock_args,
+    _iso_date,
+    rebuild_recall_index,
+)
+from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
 
 def add_decay_subparser(subparsers: argparse._SubParsersAction) -> None:
@@ -143,45 +147,9 @@ def cmd_decay_sweep(args: argparse.Namespace) -> int:
                 f"\n  archived {len(report.kill)} page(s), routed "
                 f"{len(report.routed_off_corpus)} page(s) off-corpus; committed."
             )
-            _rebuild_recall_index(knowledge_root, cfg, args)
+            rebuild_recall_index(knowledge_root, cfg, args)
         else:
             print("\n  nothing archived or routed.")
         return 0
     finally:
         lock.release()
-
-
-def _rebuild_recall_index(
-    knowledge_root: Path,
-    cfg: dict[str, Any],
-    args: argparse.Namespace,
-) -> None:
-    """Rebuild the recall index after a sweep apply.
-
-    Mirrors ``_cmd_curate._rebuild_recall_index``'s backend resolution so the
-    index reflects the archived pages. A rebuild failure is reported but
-    never fails the sweep (the git archival already committed).
-    """
-    from athenaeum.config import resolve_extra_intake_roots
-    from athenaeum.search import build_fts5_index, build_vector_index
-
-    wiki_root = knowledge_root / "wiki"
-    backend = getattr(args, "backend", None) or cfg.get("search_backend", "fts5")
-    cache_dir = resolve_cache_dir(getattr(args, "cache_dir", None)).resolve()
-    extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        if backend == "vector":
-            count = build_vector_index(
-                wiki_root, cache_dir, extra_roots=extra_roots, config=cfg
-            )
-        else:
-            count = build_fts5_index(
-                wiki_root, cache_dir, extra_roots=extra_roots, config=cfg
-            )
-        print(f"  recall index rebuilt ({backend}): {count} page(s).")
-    except Exception as exc:  # noqa: BLE001 - rebuild failure must not fail sweep
-        print(
-            f"  WARN recall index rebuild failed ({type(exc).__name__}): {exc}",
-            file=sys.stderr,
-        )
