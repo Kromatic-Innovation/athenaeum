@@ -35,57 +35,60 @@ source on the existing page, or mint a second one?
 > Check eval-summary.json for per-case failures and the per-case tier
 > attribution.`
 
+Corroborated by the run's own `eval-summary.json` (`layer_scores.attachment
+= {"passed": 3, "total": 5}`, `generated_at: 2026-09-15T14:32:20Z` — matching
+the job log's test-completion timestamp to the second). Direct download of
+that artifact from this lane fails — `gh run download 34981842660 -n
+eval-summary -R Kromatic-Innovation/athenaeum` resolves to a presigned
+`*.blob.core.windows.net` URL, and this lane's network egress refuses that
+host outright (`dial tcp 57.150.87.97:443: connect: connection refused`,
+reproducible against all three resolved IPs; `api.github.com` itself is
+reachable). The per-case data below was relayed into this environment
+out-of-band by the orchestrator after that block, and checked against facts
+this lane had already obtained independently before the relay arrived — the
+aggregate score and the completion timestamp above — rather than trusted on
+its own say-so.
+
 ## Per-case result
 
 | Case | id | outcome_class (expected) | Observed | Deciding tier | Pass |
 |---|---|---|---|---|---|
-| A | `same_name_source_attaches` | `attach_same_name` | not recorded¹ | not recorded¹ | not recorded¹ |
-| B | `name_variant_source_attaches` | `attach_name_variant` | not recorded¹ | not recorded¹ | not recorded¹ |
-| C | `board_source_attaches_to_entity` | `attach_source_document` | not recorded¹ | not recorded¹ | not recorded¹ |
-| D | `new_entity_mints_page` | `mint_new_entity` | not recorded¹ | not recorded¹ | not recorded¹ |
-| E | `two_existing_entities_both_touched` | `attach_two_entities` | not recorded¹ | not recorded¹ | not recorded¹ |
+| A | `same_name_source_attaches` | `attach_same_name` | attached to `attach-project-quarrowfield`; nothing minted | `write_merge` (Tier 3 WRITE-MERGE; 1 classify call, 4 write calls) | **PASS** |
+| B | `name_variant_source_attaches` | `attach_name_variant` | minted a second page, "Bracklemoor transit study phase two" (uid `4eec4ede`); `attach-project-bracklemoor` was also touched | `write_merge` (1 classify call, 3 write calls) | **FAIL** — minted 1 page (max 0); page name carries "Bracklemoor" |
+| C | `board_source_attaches_to_entity` | `attach_source_document` | minted "Steepgate" (uid `62461957`, `type=company`, not the allowed `source`); touched `policy-onboarding` — `attach-company-steepgate` was neither touched nor proposed against | `write_merge` (1 classify call, 5 write calls) | **FAIL** — wrong-type mint, entity never reached |
+| D | `new_entity_mints_page` | `mint_new_entity` | minted "Fallowdyke Freight Audit"; nothing touched | `write_merge` (1 classify call, 1 write call) | **PASS** |
+| E | `two_existing_entities_both_touched` | `attach_two_entities` | touched both `attach-company-steepgate` and `attach-project-quarrowfield`; nothing minted | `write_merge` (1 classify call, 4 write calls) | **PASS** |
 
-¹ **Genuinely unavailable from this lane, not guessed.** The per-case
-`observed` string, `passed` bool and tier `detail` are written only by
-`eval_session.record_case(...)` (`tests/evals/test_attachment_eval.py:329-337`)
-into `eval-summary.json`, which the `Upload eval summary` step attaches as
-the `eval-summary` artifact (confirmed in the job log: `Artifact eval-summary
-successfully finalized. Artifact ID 10401967845`, 4368 bytes) — it is not
-printed to the job log itself. Both `gh run download 34981842660 -n
-eval-summary -R Kromatic-Innovation/athenaeum -D <dir>` and the same command
-against the fallback run (`34934473115`) failed identically:
-
-```
-error downloading eval-summary: Get "https://productionresultssa4.blob.core.windows.net/...":
-dial tcp 57.150.87.97:443: connect: connection refused
-```
-
-`gh run download` resolves to a presigned Azure Blob Storage URL
-(`*.blob.core.windows.net`) rather than an `api.github.com` or
-`objects.githubusercontent.com` URL, and this lane's network egress refuses
-that host outright (`curl` to the bare host also returns "Couldn't connect to
-server"; `getent hosts` resolves three distinct IPs in the
-`blob.core.windows.net` range and connection is refused on all three, so this
-is a host/IP-range block, not a transient failure). The job log
-(`gh run view 34981842660 --log`), read in full, confirms the aggregate
-3/5 line above but never prints `eval-summary.json`'s contents, so the
-per-case cells cannot be backfilled from it either. What every per-case
-`test_attachment_case[...]` PASSED line in the log DOES confirm (all five
-did) is the AC4 invariant each case asserts directly — no page vanished from
-the wiki in any case — which is a narrower claim than the routing verdict in
-the table above and is not conflated with it.
+Source: `eval-summary.json` for run 34981842660, `cases[]` entries with
+`layer == "attachment"` (`case_id`, `expected`, `observed`, `detail`,
+`passed`). "Deciding tier" is `attribute_tier(...)`'s `tier` field from
+`detail` (`tests/evals/attachment.py`); every one of the five cases in this
+run was decided at Tier 3 WRITE-MERGE — none was resolved at Tier 1's
+deterministic match or Tier 2's CLASSIFY, and none escalated.
 
 ## What the numbers say
 
-**The floor is missed by exactly one case**, the same margin the module
-docstring's own 2026-09-10 observation records (also 3/5, on an earlier
-commit) — the two dates agree on the aggregate without this file being able
-to independently confirm they agree on *which* case moved, because the
-per-case breakdown for this run's `eval-summary.json` could not be read (see
-the per-case table's footnote). Treat the case-level narrative in
-`tests/evals/test_attachment_eval.py`'s module docstring (C and E failing,
-A/B/D passing) as describing 2026-09-10's run, not this one, until a run
-whose artifact this lane can actually fetch confirms it still holds.
+**The aggregate matches 2026-09-10's observation (3/5) but the failing cases
+moved.** The module docstring's 2026-09-10 baseline records C and E failing,
+with A/B/D passing. This run, five days later at commit `0148c7f9`, has **B
+and C failing, with A/D/E passing** — E now passes cleanly (both entities
+reached, nothing minted) where it used to over-mint, and B newly fails by
+minting the exact "name / name (qualifier)" duplicate B exists to catch. The
+identical 3/5 score would misread as "nothing changed" if only the aggregate
+were recorded; it is not the same 3/5.
+
+**C is the one stable failure, and it is stable in its exact shape.** Both
+the 2026-09-10 docstring and this run's `eval-summary.json` describe the same
+failure: a second entity-typed page minted for "Steepgate" instead of a thin
+`type: source` page, and the existing `attach-company-steepgate` page left
+untouched. A board that is evidence FOR an entity is still becoming a page
+that competes with it.
+
+**Every one of the five decisions was made at Tier 3 WRITE-MERGE.** None
+was resolved deterministically (Tier 1) or at CLASSIFY (Tier 2), and none
+escalated — confirming the module docstring's claim that attach-vs-mint
+routing here costs the expensive tier on every source, not just on the ones
+that fail.
 
 **The floor is aspirational, not descriptive, by design.** `ATTACHMENT_FLOOR
 = 4` is set to what a correct librarian scores; the module docstring states
@@ -94,28 +97,19 @@ athenaeum#1580 AC3's anti-vacuity criterion is that it fails on at least one
 of B/C/E while passing D). A red floor here is therefore the intended
 starting state for this baseline, not a surprise this file is reporting.
 
-**Every routing decision is judgment, not a deterministic gate.** Unlike the
-decomposition layer (`docs/measurements/decomposition-baseline-2026-09-10.md`),
-where every verdict traces to a `len()` check, attach-vs-mint here is decided
-by Tier 1 exact/alias match, Tier 2's entity extraction, or the Tier 3
-create-name gate — so every one of the five cases costs at least one model
-call, and the aggregate result is a live-model measurement, not a code-path
-measurement.
-
 ## What would change this baseline
 
 - A routing fix that moves the shipped librarian's score past `ATTACHMENT_FLOOR`
   (4/5) → `test_attachment_aggregate_floor` starts passing and this file needs
   re-dating against the run that proves it.
-- Network egress to `*.blob.core.windows.net` opening from a future lane, or
-  `eval-summary.json` gaining an alternate retrieval path (for example being
-  echoed to the job log) → the per-case `observed`/`deciding tier`/`pass`
-  cells above can be backfilled from the SAME run (its artifact does not
-  expire until 2026-10-15) without re-running the eval.
+- A fix targeted at case B or C specifically → re-measure rather than hand-edit
+  the affected row: this run already shows the failing pair is not stable
+  (E moved from failing to passing between 2026-09-10 and 2026-09-15 while the
+  aggregate held at 3/5), so a plausible-looking single-row edit could easily
+  describe a case that has since moved for an unrelated reason.
 - A change to `ATTACHMENT_FLOOR`, `DEFAULT_CLASSIFY_MODEL`, or
   `DEFAULT_WRITE_MODEL` → the floor or the models named above go stale and
   this file needs re-measuring, not just re-editing.
-- The `eval-summary` artifact expiring 2026-10-15 without ever having been
-  read → the per-case backfill option in the second bullet above is lost, and
-  reconstructing the per-case breakdown at that point requires a fresh Evals
-  run rather than reading this one's artifact.
+- Network egress to `*.blob.core.windows.net` opening for a lane directly
+  (rather than via an out-of-band relay) → future baselines in this shape
+  stop depending on a second party to retrieve their own primary source.
