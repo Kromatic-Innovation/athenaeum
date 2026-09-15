@@ -222,60 +222,90 @@ def _has_migrated_content(path: Path) -> bool:
     """``True`` only when *path* exists AND carries at least one byte.
 
     Mirrors :func:`athenaeum.push_metrics._has_migrated_content` exactly
-    (issue athenaeum#1512 audit: this module's two-branch rule shares the
-    same defect). Bare ``path.exists()`` treats a stray ``touch``, a
+    (issue athenaeum#1512 audit: this module's two-branch rule shared the
+    same defect). Bare ``exists()`` treats a stray ``touch``, a
     partially-written file from a crashed run, or an empty file some other
     process created as proof of a completed migration — permanently
     repointing every subsequent read/write away from a populated legacy
-    ledger with no rows actually moved.
+    ledger with no rows actually moved. ``is_file()`` (not ``exists()``) so a
+    *directory* at the path, which ``stat().st_size`` reports as non-zero on
+    most filesystems, is not mistaken for rows.
+
+    Since issue athenaeum#1601 this no longer gates resolution at all — the
+    ledger always resolves to the cache dir — and it survives as the
+    "is there a real, non-empty ledger stranded here?" predicate behind
+    :func:`durable_ledger_path`'s operator warning.
     """
     try:
-        return path.exists() and path.stat().st_size > 0
+        return path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
 
 
+#: ``<wiki_root>/spend.jsonl`` paths already warned about, so the
+#: stranded-ledger warning in :func:`durable_ledger_path` fires once per path
+#: per process rather than once per pipeline run.
+_MISROUTED_WARNED: set[str] = set()
+
+
 def durable_ledger_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
-    """The R3 ``operational``/``store-durable`` location (design note §5.2
-    table row 8; issue athenaeum#980 AC4): ``<wiki_root>/spend.jsonl``, alongside
-    every other operational ledger this codebase already keeps behind the
-    seam (``_calibration.jsonl``, ``_axiom_governance.jsonl``, ...).
+    """Always ``<cache_dir>/spend.jsonl`` — NEVER ``<wiki_root>/``.
 
-    Backward-compatible with an on-disk store that pre-dates this move: if
-    the legacy ``<cache_dir>/spend.jsonl`` already has records and the new
-    location does not yet exist (or is empty — issue athenaeum#1512 AC3;
-    "populated"/"migrated" is judged by :func:`_has_migrated_content`, not
-    bare existence), this still resolves to the LEGACY path — an existing
-    installation keeps reading/writing exactly where it always has until an
-    explicit migration copies the file forward. A fresh store (neither path
-    populated yet) and an already-migrated store (the new path already has
-    content) both resolve to the new, behind-the-seam location.
+    *wiki_root* is retained (every caller passes it) but is **never a write
+    target**: it is read only to detect a ledger stranded at the withdrawn
+    location and warn about it. Passing it can no longer route a spend record
+    into the corpus.
 
-    Audited caveat (issue athenaeum#1512): a non-``None`` *cache_dir* is not
-    treated as an isolation signal here — production call sites pass a
-    concrete, already-resolved *cache_dir* routinely, so doing so would
-    silently reroute real writes. There is no ``spend`` CLI equivalent of
-    ``push-metrics record`` in that issue's scope, so no CLI-layer companion
-    fix was added on this side.
+    **Docstring rewrite, issue athenaeum#1601 (2026-09-15) — supersedes the
+    ruling below.** This function used to read issue athenaeum#980 AC4 as
+    "move it to ``wiki_root``" and, unlike
+    :func:`athenaeum.push_metrics.durable_push_records_path`, kept doing so:
+    the prior text here concluded "no equivalent acceptance was found for
+    ``spend.jsonl``" (unlike the push-records ledger's explicit
+    athenaeum#749 "outside the wiki corpus" AC) and left it resolving into
+    ``wiki_root`` once populated.
 
-    **This function no longer shares its contract with
-    :func:`athenaeum.push_metrics.durable_push_records_path`,** which it used
-    to cite as the matching implementation. Issue athenaeum#1591 withdrew the
-    push-records ledger's relocation to ``wiki_root``: that ledger has an
-    explicit "outside the wiki corpus" acceptance of its own (athenaeum#749)
-    which athenaeum#980 AC4 overrode without noticing. No equivalent
-    acceptance was found for ``spend.jsonl``, so THIS ledger stays at
-    ``wiki_root`` under athenaeum#980 AC4 as built. The two-branch rule below
-    is now specific to this artifact rather than a shared idiom; do not
-    "restore symmetry" by copying it back into ``push_metrics``.
+    **The athenaeum#749-equivalence finding, recorded 2026-09-15:** that conclusion
+    tested the wrong thing — whether *this specific ledger* carried
+    identical AC wording — rather than whether the *substance* of
+    athenaeum#749 (telemetry must stay "outside the wiki corpus (so they
+    never become claims and never enter the embedded index)") applies here
+    too. It does: ``spend.jsonl`` is append-only cost telemetry with the same
+    shape and the same hazard as ``_push_records.jsonl`` —
+    :meth:`athenaeum.store.FilesystemStore.snapshot` is ``git add -A`` over
+    ``knowledge_root``, so a populated ledger anywhere inside it is committed
+    into corpus history on every librarian snapshot regardless of whether its
+    governing issue used those exact words. The operator decision recorded in
+    issue athenaeum#1601 (2026-09-15) makes that equivalence explicit for
+    both ``spend.jsonl`` and ``_llm_schema_observations.jsonl``, and directs
+    both to the cache dir — the same fix issue athenaeum#1591 already made
+    for ``_push_records.jsonl``. This ledger now mirrors
+    :func:`athenaeum.push_metrics.durable_push_records_path` exactly again,
+    including its one-time stranded-file warning; the "do not restore
+    symmetry" instruction the prior text left here is withdrawn along with
+    the ruling it protected. R3's class/scope declaration is unchanged
+    (``operational``/``store-durable``) — see
+    :data:`athenaeum.store.ARTIFACT_REGISTRY`'s ``spend-ledger`` entry;
+    "store-durable" never implied "wiki root" (§5.2's post-athenaeum#1591
+    correction note, generalized by athenaeum#1601).
     """
-    new_path = Path(wiki_root) / LEDGER_FILENAME
     legacy_path = default_ledger_path(cache_dir)
-    if _has_migrated_content(new_path):
-        return new_path
-    if _has_migrated_content(legacy_path):
-        return legacy_path
-    return new_path
+    misrouted = Path(wiki_root) / LEDGER_FILENAME
+    if _has_migrated_content(misrouted) and str(misrouted) not in _MISROUTED_WARNED:
+        _MISROUTED_WARNED.add(str(misrouted))
+        log.warning(
+            "spend ledger found at the withdrawn wiki-root location %s "
+            "(issue athenaeum#1601: that location is no longer written or "
+            "read). Its rows are stranded — they sit inside the corpus the "
+            "R3 store-durable/cache-dir placement excludes. Merge them into "
+            "%s (deduplicated, re-sorted by 'ts'), then move the file out of "
+            "the knowledge root and commit its removal. Nothing is migrated "
+            "automatically: this is operator-decided, one-way data movement "
+            "over a git-tracked corpus.",
+            misrouted,
+            legacy_path,
+        )
+    return legacy_path
 
 
 def resolve_ledger_path(
@@ -288,11 +318,12 @@ def resolve_ledger_path(
 
     Honours ``spend.ledger_path`` / ``ATHENAEUM_SPEND_LEDGER`` (a full file
     path) first. Otherwise: when *wiki_root* is supplied, resolves via
-    :func:`durable_ledger_path` (issue athenaeum#980 AC4 — behind the seam,
-    with the legacy-store fallback that function documents); when *wiki_root*
-    is omitted (every caller this slice did not migrate), behavior is
-    UNCHANGED from before athenaeum#980 — ``<cache_dir>/spend.jsonl``, so an
-    un-migrated caller's resolution is byte-for-byte identical to today.
+    :func:`durable_ledger_path` — since issue athenaeum#1601 that is always
+    ``<cache_dir>/spend.jsonl``, with *wiki_root* used only to detect a
+    stranded file and warn; when *wiki_root* is omitted, resolution is the
+    same ``<cache_dir>/spend.jsonl``. A caller either way gets the identical
+    answer for a given ``cache_dir`` — there is no longer a wiki-root branch
+    to diverge on.
     """
     from athenaeum.config import resolve_spend_ledger_path
 
@@ -527,9 +558,11 @@ def record_spend(
     debug level: a ledger write must NEVER break or slow the run it measures.
     Returns ``True`` when a record was written.
 
-    *wiki_root*, when supplied, resolves the ledger behind the seam (issue
-    athenaeum#980 AC4) via :func:`resolve_ledger_path`; omitted, resolution is
-    unchanged from before that issue.
+    *wiki_root*, when supplied, is passed to :func:`resolve_ledger_path` /
+    :func:`durable_ledger_path` only to detect (and warn about) a ledger
+    stranded at the withdrawn ``<wiki_root>/`` location (issue athenaeum#1601);
+    it never changes where this write lands. Resolution is the cache dir
+    either way.
     """
     try:
         from athenaeum.config import resolve_spend_ledger_enabled
@@ -1813,13 +1846,21 @@ RESERVATION_STATE_SETTLED = "settled"
 def reservation_ledger_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
     """``<wiki_root>/batch_reservations.jsonl``, with the legacy cache-dir fallback.
 
-    Mirrors :func:`durable_ledger_path` exactly (AC1), including its migration
-    rule: an installation with records already at the legacy ``<cache_dir>``
-    path keeps using it until something copies the file forward. That mirror
-    is why this function moved with issue athenaeum#1512 too: "populated"/
-    "migrated" is judged by :func:`_has_migrated_content`, not bare existence,
-    so an empty new-path file cannot by itself repoint a populated legacy
-    reservation ledger.
+    Historically mirrored :func:`durable_ledger_path` exactly (AC1),
+    including its migration rule: an installation with records already at
+    the legacy ``<cache_dir>`` path keeps using it until something copies the
+    file forward. That mirror is why this function moved with issue
+    athenaeum#1512 too: "populated"/"migrated" is judged by
+    :func:`_has_migrated_content`, not bare existence, so an empty new-path
+    file cannot by itself repoint a populated legacy reservation ledger.
+
+    **Divergence, issue athenaeum#1601:** ``durable_ledger_path`` (the
+    ``spend.jsonl`` resolver) now always returns the cache dir and no longer
+    has a wiki-root migration branch at all. This ledger — ``batch_reservations.jsonl``,
+    a distinct artifact issue athenaeum#1601 does not name — was not in that
+    issue's scope and keeps its own independent legacy-fallback rule below,
+    unchanged, using the same :func:`_has_migrated_content` predicate the two
+    functions used to share.
     """
     new_path = Path(wiki_root) / RESERVATION_LEDGER_FILENAME
     legacy_path = Path(
