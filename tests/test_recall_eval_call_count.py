@@ -129,3 +129,35 @@ def test_double_counting_variant_fails_the_call_count_assertion(
             f"probes graded {graded_probes} — extraction must run exactly "
             "once per probe, cached across backend parametrizations"
         )
+
+
+def test_floor_table_covers_every_probe_class_on_every_backend() -> None:
+    """The floor table is hand-written; ``_PROBE_CLASSES`` is read from
+    ``probes.yaml``. Adding a probe class to the YAML without adding its
+    floors would raise ``KeyError`` inside
+    ``test_recall_floors_by_backend_and_class`` — and because that test is
+    ``-m eval`` and credential-gated, the crash would only surface on a
+    PAID main-push Evals run, not on the PR that introduced it.
+
+    This unmarked guard moves that failure forward to regular CI and turns
+    it into a readable message. It asserts exact coverage in BOTH
+    directions: a missing cell is the ``KeyError``, and a stale leftover
+    cell is a floor nobody is asserting any more.
+    """
+    from tests.evals import test_recall_eval as layer
+
+    expected = {
+        (backend, probe_class)
+        for backend in ("fts5", "vector")
+        for probe_class in layer._PROBE_CLASSES
+    }
+    actual = set(layer._FLOOR_BY_BACKEND_AND_CLASS)
+
+    missing = sorted(expected - actual)
+    stale = sorted(actual - expected)
+    assert not missing and not stale, (
+        "_FLOOR_BY_BACKEND_AND_CLASS is out of sync with probes.yaml: "
+        f"missing floors for {missing}; stale floors for {stale}. "
+        "Every (backend, probe_class) cell must carry a stated floor — "
+        "see athenaeum#1572 AC3."
+    )
