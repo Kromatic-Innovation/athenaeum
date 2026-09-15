@@ -38,6 +38,7 @@ from athenaeum.librarian import (
     EXIT_GRACEFUL_PARTIAL,
     RunContext,
     _arm_run_deadline,
+    _comparator_dual_source,
     _resolve_run_config,
     _run_git_vcs_io,
     _run_intake_audit_phase,
@@ -831,6 +832,126 @@ class TestRunWikiDedupPhase:
         with patch("athenaeum.wiki_dedupe.propose_wiki_page_merges"):
             result = _run_wiki_dedup_phase(ctx)
         assert result is None
+
+    # -----------------------------------------------------------------
+    # athenaeum#1679 (§3.10): comparator-domain run-summary dual-sourcing.
+    # wiki_dedup_comparator_summary is what _comparator_dual_source reads
+    # at the three librarian.py sites that populate the run-summary
+    # "detector_haiku"/"escalations" counters.
+    # -----------------------------------------------------------------
+
+    def test_default_mock_return_leaves_comparator_summary_none(
+        self, tmp_path: Path
+    ) -> None:
+        """An unconfigured mock (every OTHER test in this class) returns a
+        MagicMock, not a list -- iterating ``action`` off it yields nothing
+        and ctx.usage never moves, so the summary stays at its pre-phase
+        default. Pins the exact "untouched" baseline the dual-sourcing
+        tests below diff against."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root)
+        assert ctx.wiki_dedup_comparator_summary is None
+        with patch("athenaeum.wiki_dedupe.propose_wiki_page_merges"):
+            _run_wiki_dedup_phase(ctx)
+        assert ctx.wiki_dedup_comparator_summary == {"gate2_calls": 0, "escalations": 0}
+
+    def test_gate2_calls_is_the_usage_api_calls_delta(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root)
+
+        def _fake_dedup(*_a, usage=None, **_kw):
+            # Simulate 3 real Gate 2 LLM calls made during this pass.
+            if usage is not None:
+                usage.api_calls += 3
+            return []
+
+        with patch(
+            "athenaeum.wiki_dedupe.propose_wiki_page_merges", side_effect=_fake_dedup
+        ):
+            _run_wiki_dedup_phase(ctx)
+        assert ctx.wiki_dedup_comparator_summary == {"gate2_calls": 3, "escalations": 0}
+
+    def test_escalations_counts_only_queued_actions(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root)
+        decided = [
+            {"pair": "a+b", "verdict": "contradiction", "action": "queued"},
+            {"pair": "c+d", "verdict": "contradiction", "action": "superseded"},
+            {"pair": "e+f", "verdict": "specialization", "action": "refines-written"},
+            {"pair": "g+h", "verdict": "contradiction", "action": "queued"},
+        ]
+        with patch(
+            "athenaeum.wiki_dedupe.propose_wiki_page_merges", return_value=decided
+        ):
+            _run_wiki_dedup_phase(ctx)
+        assert ctx.wiki_dedup_comparator_summary == {"gate2_calls": 0, "escalations": 2}
+
+    def test_pre_existing_usage_counts_do_not_leak_into_the_delta(
+        self, tmp_path: Path
+    ) -> None:
+        """gate2_calls must be a DELTA, not the raw counter -- a run with
+        prior LLM activity (entity tier, classify, etc.) before this phase
+        must not misattribute that to the comparator."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root)
+        ctx.usage.api_calls = 40  # activity from an earlier phase
+
+        def _fake_dedup(*_a, usage=None, **_kw):
+            if usage is not None:
+                usage.api_calls += 2
+            return []
+
+        with patch(
+            "athenaeum.wiki_dedupe.propose_wiki_page_merges", side_effect=_fake_dedup
+        ):
+            _run_wiki_dedup_phase(ctx)
+        assert ctx.wiki_dedup_comparator_summary == {"gate2_calls": 2, "escalations": 0}
+        assert ctx.usage.api_calls == 42
+
+    def test_exception_leaves_comparator_summary_none(self, tmp_path: Path) -> None:
+        """Swallowed-exception path (test_dedup_exception_is_swallowed_and_
+        still_profiled above): the summary must stay at its safe "didn't
+        run" default, not a partially-computed value."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root)
+        with patch(
+            "athenaeum.wiki_dedupe.propose_wiki_page_merges",
+            side_effect=RuntimeError("boom"),
+        ):
+            _run_wiki_dedup_phase(ctx)
+        assert ctx.wiki_dedup_comparator_summary is None
+
+
+class TestComparatorDualSource:
+    """Direct unit coverage of ``_comparator_dual_source`` -- the exact
+    function the three run-summary sites (``_run_merge_only_phase``'s
+    "auto-memory" entry, and both branches of ``_run_auto_memory_phase``'s)
+    use to fold ``ctx.wiki_dedup_comparator_summary`` into the pre-existing
+    ``detector_haiku``/``escalations`` counters."""
+
+    def test_none_summary_yields_zero(self, tmp_path: Path) -> None:
+        ctx = _make_ctx(tmp_path)
+        assert ctx.wiki_dedup_comparator_summary is None
+        assert _comparator_dual_source(ctx, "gate2_calls") == 0
+        assert _comparator_dual_source(ctx, "escalations") == 0
+
+    def test_populated_summary_is_read_through(self, tmp_path: Path) -> None:
+        ctx = _make_ctx(tmp_path)
+        ctx.wiki_dedup_comparator_summary = {"gate2_calls": 5, "escalations": 2}
+        assert _comparator_dual_source(ctx, "gate2_calls") == 5
+        assert _comparator_dual_source(ctx, "escalations") == 2
+
+    def test_missing_key_in_a_populated_summary_yields_zero(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = _make_ctx(tmp_path)
+        ctx.wiki_dedup_comparator_summary = {"gate2_calls": 1}
+        assert _comparator_dual_source(ctx, "escalations") == 0
 
 
 # ---------------------------------------------------------------------------

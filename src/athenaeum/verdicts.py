@@ -82,6 +82,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -271,6 +272,28 @@ def content_hash_for_path(path: Path) -> str | None:
     return content_hash(text)
 
 
+_SLUG_CAP = 60  # mirrors athenaeum.models.slugify's own cap, verbatim.
+_SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
+_SLUG_HASH_LEN = 8
+
+
+def _slugify_unbounded(text: str) -> str:
+    """The same transform :func:`athenaeum.models.slugify` applies, minus
+    its 60-char cap.
+
+    :func:`page_id_for_path`'s *root* branch needs to know whether slugging
+    a root-relative path would have been truncated by the cap *before* the
+    cap is applied — a capped length alone can't distinguish "already
+    exactly 60 chars, no truncation" from "truncated down to 60" (issue
+    athenaeum#1677). Duplicating the two-line transform here (rather than
+    changing :func:`~athenaeum.models.slugify` itself) keeps that function,
+    and every OTHER caller of it, byte-for-byte unchanged.
+    """
+    slug = text.lower().strip()
+    slug = _SLUG_STRIP_RE.sub("-", slug)
+    return slug.strip("-")
+
+
 def page_id_for_path(path: Path, *, root: Path | None = None) -> str:
     """Canonical pair-member id for a wiki page path: its slug.
 
@@ -282,13 +305,16 @@ def page_id_for_path(path: Path, *, root: Path | None = None) -> str:
     **Corpus-wide uniqueness (issue athenaeum#1484).** With *root* omitted
     (the default), the id is just the bare filename stem's slug, byte-
     identical to this function's behavior before that issue. That default
-    is deliberate, not an oversight: :mod:`athenaeum.cluster_comparator`
-    and the ``refines:`` frontmatter edges :mod:`athenaeum.scope_resolution`
-    reads both pin this exact bare-stem shape for cross-domain slug
-    alignment (see ``tests/test_cluster_comparator.py::TestPageFromAutoMemoryFile
-    ::test_id_matches_verdict_ledger_slug_space`` and
+    is deliberate, not an oversight: the ``refines:`` frontmatter edges
+    :mod:`athenaeum.scope_resolution` reads pin this exact bare-stem shape
+    for cross-domain slug alignment (see
     ``tests/test_scope_resolution.py::TestRefinesEdgeThroughRecall``), so
-    this function must never change their id space out from under them.
+    this function must never change that caller's id space out from under
+    it. (:mod:`athenaeum.cluster_comparator` used to pin the same bare-stem
+    shape too, but athenaeum#1677 fixed that call site to pass a *root* —
+    see :func:`athenaeum.cluster_comparator.auto_memory_root` — because the
+    bare stem let two same-``origin_scope``-distinct cluster members collide
+    onto one id.)
 
     Pass *root* — the corpus/wiki root the page lives under — to fold the
     page's root-relative path into the id instead of just its stem, so two
@@ -304,6 +330,25 @@ def page_id_for_path(path: Path, *, root: Path | None = None) -> str:
     module's AC2 answer: existing ledger rows remain readable, because no
     row's id actually moves unless it was genuinely ambiguous.
 
+    **Truncation collisions under a long *root*-relative path (issue
+    athenaeum#1677 follow-up).** :func:`~athenaeum.models.slugify` caps
+    every id at 60 characters. On the live corpus, ``origin_scope`` is
+    frequently a full path-hash identifier 45-60+ characters on its own, so
+    the root-relative id (``<origin_scope>/<stem>``) can exceed the cap
+    before the stem contributes anything — every such path then truncates
+    to the SAME 60-char scope prefix, a worse collision than the bare-stem
+    one this *root* parameter exists to fix, because it can collapse
+    otherwise-unrelated memories, including several within one scope, onto
+    one id. When (and only when) the *uncapped* slug of the root-relative
+    path would exceed the cap, this function appends an 8-hex-char SHA-256
+    digest of the full root-relative path and truncates the slug portion to
+    keep the total at the cap — so two long, same-prefix root-relative
+    paths that would otherwise truncate identically get different ids. A
+    root-relative path whose slug does NOT hit the cap is completely
+    unaffected: it comes out byte-identical to plain
+    :func:`~athenaeum.models.slugify` output, same as before this
+    follow-up landed.
+
     *root* is best-effort: a *path* that resolves outside *root* falls back
     to the bare-stem id rather than raising — a resolution edge case must
     never take down a merge-decision recording.
@@ -311,11 +356,12 @@ def page_id_for_path(path: Path, *, root: Path | None = None) -> str:
     :func:`record_pair_decision` — the current production caller writing
     real ledger rows — passes ``root=wiki_root``, so a same-stem collision
     across two directories under one wiki root is fixed today.
-    :mod:`athenaeum.cluster_comparator` and :mod:`athenaeum.comparator`
-    intentionally do not pass *root* (see the cross-domain pin above); their
-    residual collision risk is unchanged by this fix and stays gated by the
-    comparator's own default-off flag, per athenaeum#1484's "Out of scope"
-    section deferring the comparator itself to athenaeum#1483.
+    :mod:`athenaeum.cluster_comparator` also passes *root* now (athenaeum#1677
+    fixed its call sites). :mod:`athenaeum.comparator`'s own (non-cluster)
+    call site intentionally still does not pass *root* (see the cross-domain
+    pin above); its residual collision risk is unchanged by this fix and
+    stays gated by the comparator's own default-off flag, per athenaeum#1484's
+    "Out of scope" section deferring the comparator itself to athenaeum#1483.
     """
     p = Path(path)
     if root is not None:
@@ -324,7 +370,21 @@ def page_id_for_path(path: Path, *, root: Path | None = None) -> str:
         except (OSError, ValueError):
             rel = None
         if rel is not None:
-            return slugify(str(rel))
+            rel_str = str(rel)
+            unbounded = _slugify_unbounded(rel_str)
+            if len(unbounded) <= _SLUG_CAP:
+                # No truncation would occur -- byte-identical to plain
+                # slugify(rel_str) (which is this same transform, capped).
+                return unbounded
+            # The uncapped slug exceeds the cap: two different long
+            # root-relative paths could truncate onto the identical prefix
+            # (athenaeum#1677 follow-up). Disambiguate with a hash of the
+            # FULL root-relative path, truncating the slug portion to keep
+            # the total at the cap.
+            digest = hashlib.sha256(rel_str.encode("utf-8")).hexdigest()[:_SLUG_HASH_LEN]
+            suffix = f"-{digest}"
+            prefix = unbounded[: _SLUG_CAP - len(suffix)].rstrip("-")
+            return f"{prefix}{suffix}"
     return slugify(p.stem)
 
 
