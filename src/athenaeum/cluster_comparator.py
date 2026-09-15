@@ -26,11 +26,15 @@ Two pieces:
   :mod:`athenaeum.wiki_dedupe` forms over wiki-page clusters
   (:func:`itertools.combinations`, complete pairwise) and, ONLY when
   :func:`athenaeum.config.resolve_comparator_enabled` is on, runs
-  :func:`athenaeum.comparator.compare_pages` over every pair. The pair
-  count itself — the N-ary-to-pairwise multiplier issue D needs to size —
-  is pure combinatorics (:func:`planned_pair_count`) and is always
-  computed and recorded, gate on or off: sizing the multiplier never
-  requires the gate to be on, let alone an LLM call.
+  :func:`athenaeum.comparator.record_comparison` over every pair (issue
+  athenaeum#1678 — memoized via the verdict ledger, the SAME call
+  :mod:`athenaeum.recompare` and :mod:`athenaeum.wiki_dedupe` already
+  use, rather than a direct, never-recorded
+  :func:`~athenaeum.comparator.compare_pages` call). The pair count
+  itself — the N-ary-to-pairwise multiplier issue D needs to size — is
+  pure combinatorics (:func:`planned_pair_count`) and is always computed
+  and recorded, gate on or off: sizing the multiplier never requires the
+  gate to be on, let alone an LLM call.
 
 **The T1 reasoning screen lives on this lane (issue athenaeum#1257).**
 :func:`athenaeum.reasoning_screens.t1_screen_rejects_merge_proposal` — a
@@ -67,12 +71,13 @@ go/no-go) decides otherwise.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import date
 from itertools import combinations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from athenaeum.comparator import ComparatorPage, CompareOutcome, compare_pages, page_from_text
+from athenaeum.comparator import ComparatorPage, CompareOutcome, page_from_text, record_comparison
 from athenaeum.config import resolve_comparator_enabled, resolve_reasoning_tier_auditing_enabled
 from athenaeum.models import AutoMemoryFile, TokenUsage
 from athenaeum.reasoning_screens import t1_screen_rejects_merge_proposal
@@ -81,6 +86,7 @@ from athenaeum.verdicts import page_id_for_path
 
 if TYPE_CHECKING:
     from athenaeum.provider import LLMBackend
+    from athenaeum.runlock import RunLock
 
 __all__ = [
     "ClusterComparatorResult",
@@ -143,6 +149,36 @@ def page_from_auto_memory_file(
     """
     resolved_root = auto_memory_root(member) if root is None else root
     return page_from_text(page_id_for_path(member.path, root=resolved_root), member.content)
+
+
+def _json_safe_page(page: ComparatorPage) -> ComparatorPage:
+    """Narrow *page*'s ``meta`` values to JSON-safe scalars before a
+    :func:`~athenaeum.comparator.record_comparison` call (issue athenaeum#1678).
+
+    :func:`athenaeum.models.parse_frontmatter`'s own docstring documents its
+    metadata dict as carrying "arbitrary YAML-scalar/list/dict values ...
+    callers that need narrower types should validate the fields they depend
+    on". An unquoted ``valid_from: 2026-03-01``-shaped frontmatter value is
+    YAML's implicit date type, so it parses to a real ``datetime.date`` --
+    which :func:`~athenaeum.comparator.record_comparison` eventually
+    ``json.dumps``\\ s into the verdict ledger via its ``VALID_TIME``
+    coordinate snapshot, and cannot. Raw auto-memory intake files have no
+    compilation step guaranteeing a string round-trip the way a compiled
+    wiki page might, so this call site narrows the one type that reaches
+    the ledger un-stringified. ``.isoformat()`` is byte-identical to what
+    ``str()``-ing a ``date``/``datetime`` already produces, so no
+    comparator decision (Gate 1's date coercion already normalizes either
+    representation identically -- see :func:`athenaeum.models.parse_valid_from`)
+    or reader-visible behavior changes; only the ledger write stops raising.
+    """
+    safe_meta = {
+        # datetime.datetime IS-A datetime.date, so this catches both.
+        key: value.isoformat() if isinstance(value, date) else value
+        for key, value in page.meta.items()
+    }
+    if safe_meta == page.meta:
+        return page
+    return replace(page, meta=safe_meta)
 
 
 def candidate_pairs(
@@ -217,8 +253,8 @@ class ClusterComparatorResult:
     ``pair_count`` is always populated, whether or not the gate was on —
     see :func:`planned_pair_count`. ``gate_enabled`` records which branch
     produced ``outcomes``: when ``False``, ``outcomes`` is always empty and
-    no :func:`~athenaeum.comparator.compare_pages` call was made for this
-    cluster at all.
+    no :func:`~athenaeum.comparator.record_comparison` call was made for
+    this cluster at all.
 
     ``screened_out`` (issue athenaeum#1257) names the pairs T1 confidently
     rejected before any comparison was attempted. It is always empty unless
@@ -226,6 +262,34 @@ class ClusterComparatorResult:
     knob is on. Without it a T1 reject would be indistinguishable from a
     pair that was never formed: ``len(outcomes) < pair_count`` alone does
     not say WHICH pairs were dropped, or why.
+
+    Issue athenaeum#1678 wires the gate-on branch to
+    :func:`~athenaeum.comparator.record_comparison` instead of calling
+    :func:`~athenaeum.comparator.compare_pages` directly, which splits what
+    used to be a single ``outcomes`` bucket into three, keyed on
+    ``record_comparison``'s own return shape (``{"ok", "skipped", ...}``):
+
+    - ``outcomes`` — UNCHANGED CONTRACT: only a pair ``record_comparison``
+      freshly decided this call (``ok=True`` and ``skipped`` falsy) lands
+      here, carrying the real :class:`~athenaeum.comparator.CompareOutcome`
+      it computed. Existing readers of this field see byte-identical
+      entries to before; they just may now see FEWER of them, with the
+      difference accounted for below rather than silently dropped.
+    - ``memoised`` (new) — a pair whose verdict was already ledgered and
+      still FRESH (``skipped="fresh"``): ``record_comparison`` deliberately
+      does not re-decide it, so there is no fresh ``CompareOutcome`` to
+      hand back — only the pair's ids and its (reused) verdict string. A
+      memoised pair IS a decided verdict for a downstream reader (e.g. a
+      future ``retire.py`` move-eligibility check) — it must not read as
+      absent just because it carries no ``CompareOutcome``.
+    - ``unresolved`` (new) — a pair ``record_comparison`` could not decide
+      at all this call (``ok=False``): either Gate 2 was unavailable (no
+      client, or a post-dispatch failure) or the pair was refused as
+      erasure-class (PII-flagged). Nothing was ledgered for these; the
+      ``reason`` string is whatever ``record_comparison`` reported, so a
+      caller can tell "examined, no verdict" apart from "never examined"
+      (mirrors :mod:`athenaeum.wiki_dedupe`'s own ``OUTCOME_NO_VERDICT``
+      handling of the identical return shape).
     """
 
     cluster_id: str
@@ -233,6 +297,8 @@ class ClusterComparatorResult:
     gate_enabled: bool
     outcomes: list[tuple[str, str, CompareOutcome]] = field(default_factory=list)
     screened_out: list[tuple[str, str]] = field(default_factory=list)
+    memoised: list[tuple[str, str, str]] = field(default_factory=list)
+    unresolved: list[tuple[str, str, str]] = field(default_factory=list)
 
     def to_row(self) -> dict[str, Any]:
         """JSONL-shaped row for observability — mirrors
@@ -249,6 +315,14 @@ class ClusterComparatorResult:
                 for id_a, id_b, outcome in self.outcomes
             ],
             "screened_out": [{"a": id_a, "b": id_b} for id_a, id_b in self.screened_out],
+            "memoised": [
+                {"a": id_a, "b": id_b, "verdict": verdict}
+                for id_a, id_b, verdict in self.memoised
+            ],
+            "unresolved": [
+                {"a": id_a, "b": id_b, "reason": reason}
+                for id_a, id_b, reason in self.unresolved
+            ],
         }
 
 
@@ -260,6 +334,8 @@ def run_cluster_comparator(
     *,
     cluster_id: str = "",
     screen: ClusterScreenContext | None = None,
+    wiki_root: Path | None = None,
+    lock: "RunLock | None" = None,
 ) -> ClusterComparatorResult:
     """Run (or dry-size) the comparator over one auto-memory cluster's members.
 
@@ -268,9 +344,27 @@ def run_cluster_comparator(
     already ships behind (mirrors :mod:`athenaeum.wiki_dedupe`'s posture:
     "not a new flag"). With it off, this returns immediately after
     computing ``pair_count`` — no adapter call, no
-    :func:`~athenaeum.comparator.compare_pages` call, no LLM spend of any
-    kind. This function has no caller in :mod:`athenaeum.librarian` yet
-    (issue athenaeum#1255 is dark); a live caller is future work.
+    :func:`~athenaeum.comparator.record_comparison` call, no LLM spend of
+    any kind, and neither *wiki_root* nor *lock* is required. This function
+    has no caller in :mod:`athenaeum.librarian` yet (issue athenaeum#1255
+    is dark); a live caller is future work.
+
+    **Single-appender contract (issue athenaeum#1678).** Once the gate is
+    on and a candidate pair reaches :func:`~athenaeum.comparator.record_comparison`
+    (i.e. it was not dropped by the T1 screen), this function requires an
+    ALREADY-ACQUIRED *lock* — it never acquires one itself. This mirrors
+    every other :func:`~athenaeum.comparator.record_comparison` caller in
+    this codebase (:func:`athenaeum.recompare.recompare_pending_merges`,
+    :func:`athenaeum.wiki_dedupe.propose_wiki_page_merges`) and the run-level
+    lifecycle :func:`athenaeum.merge.merge_clusters_to_wiki` sits inside:
+    the caller acquires ONE :class:`~athenaeum.runlock.RunLock` for the
+    whole run (``with RunLock(knowledge_root) as lock:``) and holds it for
+    the run's duration, passing the SAME instance into every mutating call
+    the run makes — this function's *lock* parameter is that same instance,
+    not a lock this function manages. Two (or more) calls to this function
+    sharing one caller-held *lock* are "the same run" for memoization
+    purposes: a pair compared in an earlier call and still fresh is
+    memoized on a later call, exactly as within a single call.
 
     Args:
         members: The cluster's resolved members (e.g.
@@ -278,15 +372,19 @@ def run_cluster_comparator(
             any other resolved :class:`~athenaeum.models.AutoMemoryFile`
             list for one cluster). Fewer than two members yields
             ``pair_count=0`` and, when the gate is on, an empty
-            ``outcomes`` list — not an error.
+            ``outcomes`` list — not an error, and neither *wiki_root* nor
+            *lock* is required in that case either (there is no pair to
+            record).
         client: A live LLM client, or ``None``. Passed straight through to
-            :func:`~athenaeum.comparator.compare_pages`, which never raises
-            for an unavailable client (Gate 2 degrades to
-            ``verdict=None``).
+            :func:`~athenaeum.comparator.record_comparison` (and, inside
+            it, to :func:`~athenaeum.comparator.compare_pages`), which
+            never raises for an unavailable client (Gate 2 degrades to
+            ``verdict=None``, landing this pair in ``unresolved`` — see
+            :class:`ClusterComparatorResult`).
         config: Optional resolved ``athenaeum.yaml`` dict — read once here
             for the gate, then passed straight through to
-            :func:`~athenaeum.comparator.compare_pages` for its own model
-            resolution.
+            :func:`~athenaeum.comparator.record_comparison` for its own
+            model resolution.
         usage: Optional run-level :class:`~athenaeum.models.TokenUsage`;
             accumulates across every pair in this cluster exactly as it
             does in :mod:`athenaeum.wiki_dedupe`/:mod:`athenaeum.recompare`.
@@ -299,9 +397,33 @@ def run_cluster_comparator(
             obeys its OWN default-OFF knob
             (:func:`~athenaeum.config.resolve_reasoning_tier_auditing_enabled`);
             see :func:`_t1_rejects_pair`.
+        wiki_root: Issue athenaeum#1678. The corpus/wiki root this run's
+            ledger keys and page ids are resolved against — passed
+            VERBATIM as :func:`~athenaeum.comparator.record_comparison`'s
+            first positional argument (where the verdict ledger under
+            ``<wiki_root>/_verdicts/`` lives) AND as
+            :func:`page_from_auto_memory_file`'s ``root=`` (and the
+            screened-out branch's own :func:`~athenaeum.verdicts.page_id_for_path`
+            calls), so the ledger's pair keys and the ids this run computes
+            for the SAME members always agree. ``None`` (the default)
+            falls back to each member's own best-effort
+            :func:`auto_memory_root` for id purposes — unchanged from
+            athenaeum#1677 — but is only viable at all while the gate is
+            off or every pair in the cluster is screened out; the first
+            pair that actually reaches ``record_comparison`` with
+            *wiki_root* still ``None`` raises :class:`ValueError`.
+        lock: Issue athenaeum#1678. The caller's already-acquired
+            :class:`~athenaeum.runlock.RunLock` — see "Single-appender
+            contract" above. Like *wiki_root*, only required once a pair
+            actually reaches :func:`~athenaeum.comparator.record_comparison`.
 
     Returns:
         A :class:`ClusterComparatorResult`.
+
+    Raises:
+        ValueError: A candidate pair survived the T1 screen (or no screen
+            ran) and reached :func:`~athenaeum.comparator.record_comparison`
+            while *wiki_root* or *lock* was still ``None``.
     """
     pair_count = planned_pair_count(members)
 
@@ -324,6 +446,8 @@ def run_cluster_comparator(
 
     outcomes: list[tuple[str, str, CompareOutcome]] = []
     screened_out: list[tuple[str, str]] = []
+    memoised: list[tuple[str, str, str]] = []
+    unresolved: list[tuple[str, str, str]] = []
     for member_a, member_b in candidate_pairs(members):
         # T1 is screened on the PATHS, before ``page_from_auto_memory_file``
         # reads either member's content and before any comparator call — a
@@ -339,16 +463,65 @@ def run_cluster_comparator(
             authority_manifest=authority_manifest,
             fallback_client=client,
         ):
+            root_a = wiki_root if wiki_root is not None else auto_memory_root(member_a)
+            root_b = wiki_root if wiki_root is not None else auto_memory_root(member_b)
             screened_out.append(
                 (
-                    page_id_for_path(member_a.path, root=auto_memory_root(member_a)),
-                    page_id_for_path(member_b.path, root=auto_memory_root(member_b)),
+                    page_id_for_path(member_a.path, root=root_a),
+                    page_id_for_path(member_b.path, root=root_b),
                 )
             )
             continue
-        page_a = page_from_auto_memory_file(member_a)
-        page_b = page_from_auto_memory_file(member_b)
-        outcome = compare_pages(page_a, page_b, client=client, config=config, usage=usage)
+
+        if wiki_root is None or lock is None:
+            raise ValueError(
+                "run_cluster_comparator: a cluster-domain pair reached "
+                "record_comparison without both wiki_root= and an "
+                "already-acquired lock= -- every athenaeum.verdicts mutator "
+                "is single-appender by contract (issue athenaeum#712), the "
+                "SAME contract athenaeum.recompare.recompare_pending_merges "
+                "and athenaeum.wiki_dedupe.propose_wiki_page_merges already "
+                "enforce for their own record_comparison calls. Acquire a "
+                "RunLock(knowledge_root) once per run (mirroring "
+                "athenaeum.merge.merge_clusters_to_wiki's caller-held lock "
+                "lifecycle -- see this function's own docstring) and pass "
+                "both wiki_root= and lock= through."
+            )
+
+        page_a = page_from_auto_memory_file(member_a, root=wiki_root)
+        page_b = page_from_auto_memory_file(member_b, root=wiki_root)
+        record = record_comparison(
+            wiki_root,
+            _json_safe_page(page_a),
+            _json_safe_page(page_b),
+            client=client,
+            config=config,
+            usage=usage,
+            lock=lock,
+        )
+        if not record["ok"]:
+            # Gate 2 unavailable, or an erasure-class (PII-flagged) refusal
+            # -- nothing was ledgered. Recorded here rather than dropped so
+            # a caller can tell "examined, no verdict" apart from "never
+            # examined" (mirrors wiki_dedupe.py's OUTCOME_NO_VERDICT
+            # handling of the identical record_comparison return shape).
+            unresolved.append((page_a.id, page_b.id, str(record.get("reason") or "")))
+            continue
+        if record.get("skipped") == "fresh":
+            # Memoized on a prior run (or an earlier call sharing this same
+            # lock) -- a DECIDED verdict, just not one this call re-derived.
+            # No CompareOutcome to hand back; the reused verdict string is
+            # all record_comparison returns for this branch.
+            memoised.append((page_a.id, page_b.id, str(record.get("verdict") or "")))
+            continue
+        outcome = record.get("outcome")
+        if outcome is None:
+            # Defensive: ok=True and not skipped should always carry an
+            # outcome. If that contract ever breaks, the pair is still
+            # accounted for rather than vanishing (mirrors wiki_dedupe.py's
+            # identical defensive branch).
+            unresolved.append((page_a.id, page_b.id, "no-outcome-returned"))
+            continue
         outcomes.append((page_a.id, page_b.id, outcome))
 
     return ClusterComparatorResult(
@@ -357,6 +530,8 @@ def run_cluster_comparator(
         gate_enabled=True,
         outcomes=outcomes,
         screened_out=screened_out,
+        memoised=memoised,
+        unresolved=unresolved,
     )
 
 
