@@ -4416,6 +4416,21 @@ class RunContext:
     # mirroring ``rule_proposals_summary``'s "disabled phase never touches
     # this field" contract immediately above).
     audit_nightly_drain_summary: dict[str, Any] | None = None
+    # Issue athenaeum#1679 (§3.10): comparator-domain (athenaeum.wiki_dedupe /
+    # athenaeum.comparator) counts from ``_run_wiki_dedup_phase`` (``None``
+    # until that phase runs). ``_run_merge_only_phase``/``_run_auto_memory_phase``
+    # fold these into the pre-existing "detector_haiku"/"escalations"
+    # run-summary counters alongside the C4 (``merge.py``) stats those
+    # already carry -- additive dual-sourcing, not a rename: with the
+    # comparator subsystem's default-off flag,
+    # ``athenaeum.wiki_dedupe.propose_wiki_page_merges`` no-ops immediately
+    # and this stays ``None`` (folded as zero), so every pre-athenaeum#1679
+    # run summary is byte-for-byte unchanged. No "resolver_opus" analog: the
+    # five-verdict comparator has no opus-resolution tier (that wiring is
+    # out of scope, athenaeum#1679's own §3.6 carve-out), so this only ever
+    # contributes to "gate2_calls" (folded into "detector_haiku") and
+    # "escalations" (folded into "escalations").
+    wiki_dedup_comparator_summary: dict[str, int] | None = None
     # Issue athenaeum#968: run-summary counts from the never-ingest gate applied
     # in ``_run_auto_memory_phase`` (``None`` until that phase runs) -- how
     # many auto-memory candidates were excluded this run because they
@@ -6434,7 +6449,18 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
                         "degraded mode",
                         exc,
                     )
-            propose_wiki_page_merges(
+            # Issue athenaeum#1679 (§3.10): snapshot ctx.usage.api_calls
+            # before the call and diff after -- this phase is the only
+            # thing touching the shared run-level TokenUsage between the two
+            # reads, so the delta is exactly this pass's comparator Gate 2
+            # LLM-call count. The returned list is one dict per DECIDED
+            # pair (`pair`/`verdict`/`action`/`sources` -- see
+            # `propose_wiki_page_merges`'s docstring); `action == "queued"`
+            # is the comparator's own escalation write
+            # (`verdict_effects._queue_contradiction`), the direct analog of
+            # merge.py's `escalations_written`.
+            _gate2_calls_before = ctx.usage.api_calls
+            _decided_pairs = propose_wiki_page_merges(
                 ctx.knowledge_root,
                 config=ctx.config,
                 dry_run=ctx.dry_run,
@@ -6442,6 +6468,12 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
                 usage=ctx.usage,
                 lock=ctx.lock,
             )
+            ctx.wiki_dedup_comparator_summary = {
+                "gate2_calls": ctx.usage.api_calls - _gate2_calls_before,
+                "escalations": sum(
+                    1 for _row in _decided_pairs if _row.get("action") == "queued"
+                ),
+            }
         except Exception:
             log.exception("wiki-page dedup pass failed; continuing run")
         finally:
@@ -6505,6 +6537,17 @@ def _auto_memory_reason(merge_stats: dict) -> str:
     return "completed"
 
 
+def _comparator_dual_source(ctx: RunContext, key: str) -> int:
+    """Issue athenaeum#1679 (§3.10): the comparator-domain contribution to the
+    dual-sourced ``detector_haiku``/``escalations`` run-summary counters
+    below -- ``0`` when ``_run_wiki_dedup_phase`` hasn't run or exited early
+    (``wiki_dedup_comparator_summary`` still ``None``) or when the
+    comparator subsystem is disabled (the default), matching that field's
+    own "``None`` until that phase runs" contract.
+    """
+    return (ctx.wiki_dedup_comparator_summary or {}).get(key, 0)
+
+
 def _run_merge_only_phase(ctx: RunContext) -> int:
     """The ``merge_only`` early-return path: C3 merge from a prior C2 cluster
     JSONL, retire, reresolve, push, and summary emit. Issue athenaeum#461 seam.
@@ -6549,11 +6592,16 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
             "auto-memory",
             time.monotonic() - _merge_only_start,
             {
-                "detector_haiku": _merge_only_stats.get("haiku_calls", 0),
+                # Issue athenaeum#1679 (§3.10): dual-sourced with the
+                # comparator-domain wiki-dedup counts -- see
+                # _comparator_dual_source's docstring.
+                "detector_haiku": _merge_only_stats.get("haiku_calls", 0)
+                + _comparator_dual_source(ctx, "gate2_calls"),
                 "resolver_opus": _merge_only_stats.get("resolve_calls", 0),
                 "sweep_pairs": _merge_only_stats.get("pairs_added_via_similarity", 0),
                 "clusters_merged": _merge_only_stats.get("entries_merged", 0),
-                "escalations": _merge_only_stats.get("escalations_written", 0),
+                "escalations": _merge_only_stats.get("escalations_written", 0)
+                + _comparator_dual_source(ctx, "escalations"),
                 "reason": _auto_memory_reason(_merge_only_stats),
             },
         )
@@ -8476,11 +8524,16 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 "auto-memory",
                 time.monotonic() - _auto_memory_start,
                 {
-                    "detector_haiku": _merge_stats.get("haiku_calls", 0),
+                    # Issue athenaeum#1679 (§3.10): dual-sourced with the
+                    # comparator-domain wiki-dedup counts -- see
+                    # _comparator_dual_source's docstring.
+                    "detector_haiku": _merge_stats.get("haiku_calls", 0)
+                    + _comparator_dual_source(ctx, "gate2_calls"),
                     "resolver_opus": _merge_stats.get("resolve_calls", 0),
                     "sweep_pairs": _merge_stats.get("pairs_added_via_similarity", 0),
                     "clusters_merged": _merge_stats.get("entries_merged", 0),
-                    "escalations": _merge_stats.get("escalations_written", 0),
+                    "escalations": _merge_stats.get("escalations_written", 0)
+                    + _comparator_dual_source(ctx, "escalations"),
                     # Issue athenaeum#1279: per-file embedder provenance this run's
                     # C2 cluster pass resolved — see
                     # ``clusters.cluster_auto_memory_files``'s
@@ -8502,11 +8555,16 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             "auto-memory",
             time.monotonic() - _auto_memory_start,
             {
-                "detector_haiku": _merge_stats.get("haiku_calls", 0),
+                # Issue athenaeum#1679 (§3.10): dual-sourced with the
+                # comparator-domain wiki-dedup counts -- see
+                # _comparator_dual_source's docstring.
+                "detector_haiku": _merge_stats.get("haiku_calls", 0)
+                + _comparator_dual_source(ctx, "gate2_calls"),
                 "resolver_opus": _merge_stats.get("resolve_calls", 0),
                 "sweep_pairs": _merge_stats.get("pairs_added_via_similarity", 0),
                 "clusters_merged": _merge_stats.get("entries_merged", 0),
-                "escalations": _merge_stats.get("escalations_written", 0),
+                "escalations": _merge_stats.get("escalations_written", 0)
+                + _comparator_dual_source(ctx, "escalations"),
                 # Issue athenaeum#1279: per-file embedder provenance this run's C2
                 # cluster pass resolved — see the deadline-trip branch above
                 # for the full rationale.
