@@ -365,3 +365,28 @@ class TestRecallIndexRebuildWiring:
         captured = capsys.readouterr()
         assert "WARN" in captured.err
         assert "recall index rebuild failed" in captured.err
+
+
+class TestIndexRebuildFailureAborts:
+    """An index-rebuild I/O error must abort before the archive commit, not
+    escape with the ``git rm`` already staged and nothing committed (review
+    finding on this issue's PR)."""
+
+    def test_rebuild_oserror_aborts_before_archive_commit(
+        self, wiki_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        candidates, errors = resolve_uids(wiki_repo / "wiki", ["aaaa1111"])
+        assert errors == []
+
+        def _boom(_wiki_root: Path) -> None:
+            raise OSError("disk went away")
+
+        monkeypatch.setattr("athenaeum.retire_pages.rebuild_index", _boom)
+
+        report = apply_retirement(wiki_repo, candidates, reason="dud template page")
+
+        assert report.committed is False
+        assert any("index rebuild failed" in e for e in report.errors), report.errors
+        # No archive commit landed, so the page is still reachable from HEAD.
+        recovered = _git(wiki_repo, "show", "HEAD:wiki/aaaa1111-alpha.md")
+        assert "Alpha content, a dud template restatement." in recovered.stdout
