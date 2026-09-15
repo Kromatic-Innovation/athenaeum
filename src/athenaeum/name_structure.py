@@ -90,9 +90,10 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
-from athenaeum.models import parse_frontmatter
+from athenaeum.config import resolve_page_size_threshold_chars
+from athenaeum.models import parse_frontmatter, resolve_page_type
 from athenaeum.t1_census import T1_UNSCREENED_NAME_STRUCTURE, get_t1_census
 
 log = logging.getLogger(__name__)
@@ -208,6 +209,51 @@ def split_qualifier(name: str) -> tuple[str, str] | None:
     if normalize_name(qualifier) in _GROUP_QUALIFIERS:
         return None
     return base, qualifier
+
+
+def is_create_name_variant_of_matched_page(create_name: str, matched_name: str) -> bool:
+    """Is *create_name* a NAME-STRUCTURE variant of an already-matched page?
+
+    Issue athenaeum#1657: the create-name gate's deterministic pre-filter for
+    whether a tier-2 CREATE is even a candidate for the fold/mint model
+    decision (:func:`athenaeum.tiers.gate_create_name_classifications`).
+    Two independent, name-string-only tests, either sufficient:
+
+    1. *create_name* carries a trailing parenthetical qualifier
+       (:func:`split_qualifier`) whose BASE equals *matched_name*, case-
+       and-whitespace-folded (:func:`normalize_name`) — the live "``Name``
+       / ``Name (qualifier)``" shape this module's docstring already
+       documents for the compiled-wiki scan, applied here at INTAKE
+       instead of after the fact.
+    2. One of the two names is a WHOLE-TOKEN prefix of the other, compared
+       case-folded — ``"Bracklemoor"`` is a token-prefix of ``"Bracklemoor
+       Transit Study"``; ``"Bracklemoorish"`` is not (no token boundary).
+
+    Deliberately splits only *create_name*'s own qualifier, not
+    *matched_name*'s — this asks "is my new name a variant of an EXISTING
+    page", not a general is-either-a-variant-of-the-other test. The
+    token-prefix check already covers the symmetric shape a reversed split
+    would add (a bare create against an already-qualified matched page).
+
+    No LLM, no I/O, no config — same posture as :func:`split_qualifier`
+    itself. This function only PROPOSES that a candidate is worth putting
+    in front of the fold/mint model; it never decides fold or mint itself.
+    """
+    matched_norm = normalize_name(matched_name)
+    split = split_qualifier(create_name)
+    if split is not None:
+        base, _qualifier = split
+        if normalize_name(base) == matched_norm:
+            return True
+    create_tokens = normalize_name(create_name).split()
+    matched_tokens = matched_norm.split()
+    if not create_tokens or not matched_tokens:
+        return False
+    if len(create_tokens) <= len(matched_tokens):
+        shorter, longer = create_tokens, matched_tokens
+    else:
+        shorter, longer = matched_tokens, create_tokens
+    return longer[: len(shorter)] == shorter
 
 
 @dataclass(frozen=True)
@@ -566,12 +612,18 @@ def merged_body_within_page_size_threshold(
       duplicate.
 
     The threshold is not a new number. It is
-    :func:`athenaeum.tiers.resolve_page_size_threshold_chars` -- the same
+    :func:`athenaeum.config.resolve_page_size_threshold_chars` -- the same
     constant, in the same unit (CHARACTERS of the frontmatter-stripped body,
     ``DEFAULT_PAGE_SIZE_THRESHOLD_CHARS``), that the oversize disposition
-    already gates on. Reusing it is what makes consolidation and
-    decomposition exact inverses instead of two independently-tuned rules
-    that can contradict each other on one page pair.
+    already gates on (issue athenaeum#1657 moved this resolver from
+    :mod:`athenaeum.tiers` down to :mod:`athenaeum.config` to keep this
+    module import-acyclic with ``tiers`` once ``tiers`` gained its own
+    reason to import THIS module -- see :func:`athenaeum.config.
+    resolve_page_size_threshold_chars`'s docstring; it is still reachable as
+    ``athenaeum.tiers.resolve_page_size_threshold_chars`` too). Reusing it is
+    what makes consolidation and decomposition exact inverses instead of two
+    independently-tuned rules that can contradict each other on one page
+    pair.
 
     The APPLICATION POINT differs, and the difference is the whole content of
     this function. :func:`athenaeum.tiers.check_page_size_gate` measures
@@ -589,9 +641,97 @@ def merged_body_within_page_size_threshold(
     it. Until then the scan over-proposes on long families, which that eval
     records as an observed baseline rather than a passing assertion.
     """
-    from athenaeum.tiers import resolve_page_size_threshold_chars
-
     return sum(len(body) for body in bodies) <= resolve_page_size_threshold_chars(config)
+
+
+@dataclass(frozen=True)
+class CreateNameVariantCandidate:
+    """One existing page offered as fold/mint evidence (issue athenaeum#1657).
+
+    Built by :func:`collect_create_name_variant_candidates` from a
+    tier-1-matched ``(name, uid_or_name, path)`` triple. ``entity_type`` is
+    ``""`` when the candidate page carries no ``type:`` frontmatter at all
+    (:func:`athenaeum.models.resolve_page_type`'s own sentinel).
+    """
+
+    uid: str
+    name: str
+    entity_type: str
+    body_chars: int
+    within_threshold: bool
+
+
+def collect_create_name_variant_candidates(
+    create_name: str,
+    tier1_matched_entities: "Sequence[tuple[str, str, Path]]",
+    observation: str,
+    config: dict[str, Any] | None = None,
+) -> list[CreateNameVariantCandidate]:
+    """Candidate existing pages *create_name* might fold into (issue athenaeum#1657).
+
+    Walks *tier1_matched_entities* — the SAME ``(name, uid_or_name, path)``
+    triples :func:`athenaeum.tiers.tier1_programmatic_match` already
+    produced for a raw file, so no second corpus scan is paid — keeping
+    only the ones :func:`is_create_name_variant_of_matched_page` accepts as
+    a name-structure variant of *create_name*. Deduplicates by uid (a page
+    can be reached via more than one matched name/alias key).
+
+    A candidate page that cannot be read (deleted, permissions, bad
+    encoding) is silently dropped from the pool — fail-open, matching every
+    other frontmatter reader in this module (e.g. ``_load_retired_names`` in
+    :mod:`athenaeum.tiers`): an evidence-gathering step must never crash the
+    compile over one unreadable file, it only loses that one candidate.
+
+    *observation* is what would be attached to a fold target, so it is
+    included (alongside the candidate's own current body) in the
+    :func:`merged_body_within_page_size_threshold` call this function makes
+    for every candidate — issue athenaeum#1657 AC5's production caller for
+    that predicate.
+
+    **Import-boundary note.** This is the canonical implementation, called
+    directly from :func:`athenaeum.librarian.process_one` (the ONLY module
+    among this issue's call sites that can safely import
+    :mod:`athenaeum.name_structure` — see :mod:`athenaeum.tiers`'s own
+    ``gate_create_name_classifications`` docstring for why ``tiers`` and
+    ``batch`` cannot: this module's own pre-existing, unrelated
+    :func:`write_pending_merge <athenaeum.pending_merges.write_pending_merge>`
+    edge (issue athenaeum#1577) makes it reachable FROM
+    ``tiers``/``batch`` via ``pending_merges -> audit_on_touch -> audit ->
+    batch -> tiers``, so either of those importing this module closes a
+    cycle ``tests/test_import_graph_acyclic.py`` forbids). ``batch.py``
+    instead injects its own small, behaviourally-equivalent duplicate as
+    ``gate_create_name_classifications``'s ``variant_candidate_builder``
+    callback — see that duplicate's own docstring in ``batch.py`` and
+    ``tests/test_create_name_variant_gate_1657.py``'s parity test.
+    """
+    seen_uids: set[str] = set()
+    candidates: list[CreateNameVariantCandidate] = []
+    for name, uid_or_name, fpath in tier1_matched_entities:
+        if uid_or_name in seen_uids:
+            continue
+        if not is_create_name_variant_of_matched_page(create_name, name):
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, body = parse_frontmatter(text)
+        display_name = meta.get("name")
+        if not (isinstance(display_name, str) and display_name):
+            display_name = name
+        seen_uids.add(uid_or_name)
+        candidates.append(
+            CreateNameVariantCandidate(
+                uid=uid_or_name,
+                name=display_name,
+                entity_type=resolve_page_type(meta),
+                body_chars=len(body),
+                within_threshold=merged_body_within_page_size_threshold(
+                    [body, observation], config=config
+                ),
+            )
+        )
+    return candidates
 
 
 def summarize(splits: list[QualifiedNameSplit]) -> dict[str, Any]:

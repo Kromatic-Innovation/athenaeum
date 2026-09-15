@@ -196,6 +196,7 @@ from athenaeum.models import (
     parse_frontmatter,
     render_frontmatter,
 )
+from athenaeum.name_structure import collect_create_name_variant_candidates
 from athenaeum.never_ingest import (
     NEVER_INGEST_TIER_ENTITY,
     check_and_refuse,
@@ -2290,8 +2291,19 @@ def process_one(
     # Issue athenaeum#1615: thread the same tier-2 client through so a missed
     # exact-name lookup falls back to the meaning-based (embedding + tier-2
     # confirmation) resolver instead of creating unconditionally.
+    # Issue athenaeum#1657: thread this raw file's own tier-1 matches so a
+    # create whose name is a name-structure variant of one of them reaches
+    # the fold/mint model decision instead of minting unconditionally.
     name_gate_outcome = gate_create_name_classifications(
-        classified, raw.ref, raw.content, config, index=index, client=client, usage=usage
+        classified,
+        raw.ref,
+        raw.content,
+        config,
+        index=index,
+        client=client,
+        usage=usage,
+        tier1_matched_entities=matched,
+        variant_candidate_builder=collect_create_name_variant_candidates,
     )
     classified = name_gate_outcome.kept
     address_escalations.extend(name_gate_outcome.escalations)
