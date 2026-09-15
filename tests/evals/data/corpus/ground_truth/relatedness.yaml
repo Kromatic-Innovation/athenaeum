@@ -32,6 +32,42 @@ unlinked_clusters:
         target: model-handover-ladder
         role: implements
 
+  - id: person-company-project
+    note: >-
+      Issue athenaeum#1658 (a child of athenaeum#1600 AC3): a client-engagement
+      triangle -- a person who works at a company, the company that
+      commissioned a project, and the project itself. Zero edges between them
+      in the corpus as committed, same reasoning as ``quiet-handover`` above.
+      This cluster ALSO carries a fact-placement assertion (``fact_placements``
+      below), which ``quiet-handover`` does not: the person's page holds a
+      payment fact that belongs on the project instead. That half is graded
+      by ``tests/evals/fact_placement.py``, not ``tests/evals/relatedness.py``.
+    members:
+      - person-dara-featherstone
+      - company-corvane-robotics
+      - project-corvane-automation-rollout
+    expected_edges:
+      - source: person-dara-featherstone
+        target: company-corvane-robotics
+        role: works_at
+      - source: company-corvane-robotics
+        target: project-corvane-automation-rollout
+        role: commissioned
+      - source: project-corvane-automation-rollout
+        target: person-dara-featherstone
+        role: point_of_contact
+    fact_placements:
+      - fact_id: corvane-milestone-three-payment
+        marker: "INV-CRV-0483"
+        correct_on: project-corvane-automation-rollout
+        misplaced_on: person-dara-featherstone
+        note: >-
+          The milestone-three payment is authored on the person's page (under
+          "## Fundraising Pipeline"), which is where the live-shape defect
+          puts it. A librarian that gets fact placement right would carry it
+          on the project page instead -- or a sub-page linked from it -- and
+          never leave it on the person.
+
 redundant_clusters:
   - id: keelbridge
     note: >-

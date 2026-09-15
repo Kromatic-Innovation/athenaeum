@@ -432,17 +432,42 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
 
 
 @dataclass(frozen=True)
+class FactPlacement:
+    """One fact whose correct page differs from where the fixture, as
+    committed, puts it (issue athenaeum#1658).
+
+    ``misplaced_on`` names the page the fact is deliberately authored on --
+    the live-shape defect athenaeum#1600 measured, a financial fact sitting on
+    a person page. ``correct_on`` names the page a librarian that places
+    facts correctly would carry it on instead. ``marker`` is the distinctive
+    substring :mod:`tests.evals.fact_placement` searches page bodies for --
+    offline, no model call, same reasoning as the term-overlap writer this
+    fixture also grades.
+    """
+
+    fact_id: str
+    marker: str
+    correct_on: str
+    misplaced_on: str
+    note: str = ""
+
+
+@dataclass(frozen=True)
 class UnlinkedCluster:
     """Pages that BELONG together and carry no edges between them.
 
     ``expected_edges`` is the assertion: those edges SHOULD exist and, in the
-    fixture as committed, do not.
+    fixture as committed, do not. ``fact_placements`` is a SEPARATE
+    assertion, orthogonal to edges: it may be empty (``quiet-handover``
+    carries none), and a cluster that has one is not thereby exempt from the
+    edge assertions above.
     """
 
     id: str
     members: tuple[str, ...]
     expected_edges: tuple[tuple[str, str, str], ...]  # (source, target, role)
     note: str = ""
+    fact_placements: tuple[FactPlacement, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -481,6 +506,16 @@ def load_unlinked_clusters() -> list[UnlinkedCluster]:
                 for e in entry.get("expected_edges", ())
             ),
             note=entry.get("note", ""),
+            fact_placements=tuple(
+                FactPlacement(
+                    fact_id=f["fact_id"],
+                    marker=f["marker"],
+                    correct_on=f["correct_on"],
+                    misplaced_on=f["misplaced_on"],
+                    note=f.get("note", ""),
+                )
+                for f in entry.get("fact_placements", ())
+            ),
         )
         for entry in raw.get("unlinked_clusters", ())
     ]
@@ -521,6 +556,20 @@ def _validate_relatedness_ground_truth(uids: set[str], probe_ids: set[str]) -> l
                     )
             if source == target:
                 problems.append(f"unlinked cluster {unlinked.id!r}: self-edge on {source!r}")
+        for placement in unlinked.fact_placements:
+            for uid in (placement.correct_on, placement.misplaced_on):
+                if uid not in unlinked.members:
+                    problems.append(
+                        f"unlinked cluster {unlinked.id!r}: fact placement "
+                        f"{placement.fact_id!r} names {uid!r}, which is not a "
+                        "member of the cluster"
+                    )
+            if placement.correct_on == placement.misplaced_on:
+                problems.append(
+                    f"unlinked cluster {unlinked.id!r}: fact placement "
+                    f"{placement.fact_id!r} names the same page as both "
+                    "correct_on and misplaced_on"
+                )
     for redundant in load_redundant_clusters():
         for uid in (*redundant.merge, *redundant.negative_control):
             if uid not in uids:
