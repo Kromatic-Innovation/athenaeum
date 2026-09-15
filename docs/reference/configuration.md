@@ -3154,7 +3154,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_CLAIM_KIND_MAX_TOKENS` | `src/athenaeum/claim_kind.py` |
 | `ATHENAEUM_CLAIM_KIND_THINKING` | `src/athenaeum/claim_kind.py` |
 | `ATHENAEUM_CLASSIFY_MAX_TOKENS` | `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
-| `ATHENAEUM_CLASSIFY_MODEL` | `src/athenaeum/claim_kind.py`, `src/athenaeum/comparator.py`, `src/athenaeum/config.py`, `src/athenaeum/contradictions.py`, `src/athenaeum/librarian.py`, `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
+| `ATHENAEUM_CLASSIFY_MODEL` | `src/athenaeum/_cmd_audit.py`, `src/athenaeum/claim_kind.py`, `src/athenaeum/comparator.py`, `src/athenaeum/config.py`, `src/athenaeum/contradictions.py`, `src/athenaeum/librarian.py`, `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_RETRY_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_THINKING` | `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLAUDE_CLI_BIN` | `src/athenaeum/provider.py` |

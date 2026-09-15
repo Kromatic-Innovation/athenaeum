@@ -170,6 +170,7 @@ RUN_TYPE_ANSWERS = "answers"
 RUN_TYPE_QUERY_TOPICS = "query-topics"
 RUN_TYPE_MEMORY_CLASS_BACKFILL = "memory-class-backfill"
 RUN_TYPE_DESCRIPTION_BACKFILL = "description-backfill"
+RUN_TYPE_AUDIT = "audit"
 
 
 def is_librarian_run_type(run_type: object) -> bool:
