@@ -332,7 +332,13 @@ def materialize(
             session_id=fixture.session_id,
             query="synthetic",
             backend="fts5",
-            hits=[(fixture.page_filename, {"uid": fixture.uid}, fixture.page_body)],
+            hits=[
+                (
+                    fixture.page_filename,
+                    {"uid": fixture.uid},
+                    push_metrics.estimate_tokens(fixture.page_body),
+                )
+            ],
         )
     push_metrics.record_push(record, cache_dir=cache_dir)
 

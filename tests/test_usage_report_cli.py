@@ -21,7 +21,12 @@ def _run(argv: list[str]) -> tuple[int, str]:
 
 def _seed(cache_dir: Path) -> None:
     push = push_metrics.build_push_record(
-        session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+        session_id="s1",
+        query="q",
+        backend="fts5",
+        hits=[
+            ("f.md", {"uid": "u1"}, push_metrics.estimate_tokens("b")),
+        ]
     )
     push_metrics.record_push(push, cache_dir=cache_dir)
     ref = push_metrics.ReferenceResult(
