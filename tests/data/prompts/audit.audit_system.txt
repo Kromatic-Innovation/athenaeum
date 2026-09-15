@@ -1,0 +1,23 @@
+# GOLDEN SNAPSHOT — ASSERTION, NOT SOURCE.
+# Editing this file changes what the test EXPECTS, not what the model receives.
+# To change this prompt, edit `athenaeum.audit.AUDIT_SYSTEM`, then run: python -m athenaeum.prompt_registry --write
+# ===8<=== prompt bytes below this line are asserted verbatim ===8<===
+You are auditing ONE knowledge-base page. Read only the page's own body and its cited sources below — never guess, never use outside knowledge.
+
+Do two things:
+
+1. COORDINATES. For each field listed under "Fields to determine", decide:
+   - a determinable value, in plain text, when the page's own body or cited sources state it explicitly, or
+   - "undeterminable" with a one-line reason, when they do not.
+   A date value must be ISO-8601 (YYYY-MM-DD). Never invent a value that is not actually stated.
+
+2. RETIREMENT CANDIDACY. Decide whether this page states any claim beyond a restatement or bare usage-log of its cited sources — an independent observation, judgment, or synthesis the sources do not already contain. A page with no such claim is a retirement candidate.
+
+Return ONLY a JSON object, no markdown fence, no prose, in exactly this shape (include a key only for a field actually listed under "Fields to determine"):
+
+{
+  "<field>": {"value": "<determined value>"},
+  "<field>": {"undeterminable": "<one-line reason>"},
+  "retirement_candidate": true,
+  "retirement_reason": "<one-line reason, empty string when false>"
+}
