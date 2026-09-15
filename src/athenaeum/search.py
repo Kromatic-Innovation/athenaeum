@@ -2608,7 +2608,8 @@ def get_backend(name: str, **kwargs: Any) -> SearchBackend:
     return cls(**kwargs)
 
 
-# Issue athenaeum#1492: the relevance-floor MECHANISM (not the tuning -- see
+# Issue athenaeum#1492 (direction mechanism) / athenaeum#1571 (vector gate opened):
+# the relevance-floor MECHANISM (not the tuning -- see
 # ``athenaeum.config.resolve_recall_relevance_floor``, which resolves the
 # ``floor`` value this compares against and documents which of the issue's
 # open design questions this shape settles at the mechanism level, and which
@@ -2625,26 +2626,45 @@ def meets_relevance_floor(backend_name: str, score: float, floor: float | None) 
 
     Comparison direction is BACKEND-NATIVE, never normalized across backends
     (one of the two open design questions this mechanism settles rather than
-    leaves ambiguous -- see ``resolve_recall_relevance_floor``'s docstring):
+    leaves ambiguous -- see ``resolve_recall_relevance_floor``'s docstring).
+    Each recognized backend gets its OWN branch rather than a directional
+    fallback, precisely because a fallback silently misjudges the next
+    backend added here -- athenaeum#1571 is that failure, caught before it
+    reached a live floor: ``"vector"`` fell through the old
+    higher-is-better ``else`` and would have inverted every comparison the
+    moment gate 1 (:func:`athenaeum.config.resolve_recall_relevance_floor`)
+    let a vector floor through.
 
     * ``"fts5"`` -- :meth:`FTS5Backend.query` returns SQLite FTS5's ``rank``
       column verbatim, which follows the bm25 convention that a MORE
       NEGATIVE value is a BETTER match. A hit clears the floor when its score
       is AT OR BELOW it (``score <= floor``).
-    * every other backend name (``"keyword"`` today; ``"vector"`` is not
-      named in athenaeum#1492's acceptance criteria and is not specially
-      handled here) -- higher-is-better, so a hit clears the floor when its
+    * ``"vector"`` (athenaeum#1571) -- :meth:`VectorBackend.query` returns
+      chromadb cosine DISTANCE (documented "Return [(id, distance)]"; also
+      documented lower-is-better in ``mcp_server.py``'s ``recall`` tool
+      docstring), so -- like ``fts5`` -- a hit clears the floor when its
+      score is AT OR BELOW it (``score <= floor``).
+    * ``"keyword"`` -- higher-is-better, so a hit clears the floor when its
       score is AT OR ABOVE it (``score >= floor``). :meth:`KeywordBackend.query`
       only ever returns positive scores (``score > 0`` is already enforced
-      there), so this is the correct default for it; a future backend with a
-      different scale/direction should add its own branch here rather than
-      be silently misjudged by the higher-is-better fallback.
+      there), so this is the correct comparison for it.
+    * any other ``backend_name`` raises :class:`ValueError` -- there is no
+      safe direction to default an unrecognized backend to (see athenaeum#1571
+      above), so a future backend MUST add its own branch here rather than
+      be silently misjudged by a fallback.
     """
     if floor is None:
         return True
     if backend_name == "fts5":
         return score <= floor
-    return score >= floor
+    if backend_name == "vector":
+        return score <= floor
+    if backend_name == "keyword":
+        return score >= floor
+    raise ValueError(
+        f"meets_relevance_floor: unrecognized backend_name {backend_name!r} "
+        "(expected 'fts5', 'keyword', or 'vector')"
+    )
 
 
 # ---------------------------------------------------------------------------

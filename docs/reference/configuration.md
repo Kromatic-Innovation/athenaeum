@@ -2693,10 +2693,20 @@ recall:
       keyword: 20.0
 ```
 
-An unrecognized ``backend_name`` (e.g. ``"vector"``, not named here's acceptance criteria) always resolves to ``None``: no
-floor is applied regardless of config. A malformed env value WARNs and
-falls through to yaml/default (see `_env_number`); a non-numeric
-yaml value is ignored the same way.
+``"vector"`` is in the allowlist too, YAML-only: unlike
+``fts5``/``keyword``, it has no corresponding entry in
+``_RECALL_FLOOR_ENV`` (adding a vector-suffixed env var pair is not here's scope), so a vector floor can only be set via
+``recall.relevance_floor.vector`` / ``...push.vector`` in yaml -- the
+env-var precedence step below is simply a no-op for it. gate 2, the
+comparison DIRECTION for a vector floor once resolved, is
+`athenaeum.search.meets_relevance_floor`,
+not this function.
+
+A genuinely unrecognized ``backend_name`` (anything other than
+``"fts5"``, ``"keyword"``, or ``"vector"``) always resolves to ``None``:
+no floor is applied regardless of config. A malformed env value WARNs
+and falls through to yaml/default (see `_env_number`); a
+non-numeric yaml value is ignored the same way.
 
 ## `screening`
 
