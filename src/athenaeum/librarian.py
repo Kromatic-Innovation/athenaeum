@@ -245,6 +245,7 @@ from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import route_sensitive_values
 from athenaeum.store import FilesystemStore, now_iso
+from athenaeum.t1_census import get_t1_census, reset_t1_census
 from athenaeum.tiers import (
     TIER2_ADDRESS_RESOLVED_MARKER,
     TIER2_ADDRESS_UNRESOLVED_MARKER,
@@ -4744,6 +4745,28 @@ class RunContext:
         if self.summary_emitted:
             return
         self.summary_emitted = True
+        # Issue athenaeum#1620 (AC3): append the run-scoped T1-screened vs.
+        # written-unscreened census as its own phase entry, BEFORE
+        # `_render_run_summary` below — `run_profile` is exactly the shared
+        # input both the prose line and the durable JSONL ledger record
+        # (`run_summary_log.build_run_summary_ledger_record`) already
+        # consume uniformly, so appending here is the only wiring this
+        # needs; no change to either renderer. Wrapped like every other
+        # observability block in this method: pure reporting, never allowed
+        # to affect a run's outcome. Omitted entirely when the census is
+        # all-zero (no merge-proposal writer ran this call at all — e.g. a
+        # merge-only run over an empty cluster set, or a run that never
+        # reached the entity/merge phases) — the same "omit, don't report a
+        # hollow zero" convention `build_run_summary_ledger_record` already
+        # uses for `economics`/`alerts`, and required here so a run with
+        # genuinely nothing to report keeps an unchanged, empty run_profile
+        # (several existing tests assert exactly that).
+        try:
+            _t1_census = get_t1_census()
+            if _t1_census.screened or _t1_census.unscreened_by_reason:
+                self.run_profile.append(("t1-screen", 0.0, _t1_census.as_profile_fields()))
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: t1 census skipped: %s", exc)
         # Issue athenaeum#567: attribute the operator-fragment + shipped-prompt bytes
         # this run used, on the same greppable line. Computing them touches
         # the wiki (fragment reads) and the prompt registry — neither may
@@ -9059,6 +9082,13 @@ def run(
     from athenaeum.logconf import new_run_id
 
     new_run_id()
+    # Issue athenaeum#1620: reset the T1-screened/unscreened census at the top of
+    # every run, same reasoning as `new_run_id()` immediately above — a
+    # long-lived process performing several runs must not let one run's
+    # counts bleed into the next. Covers the merge-only early-return path
+    # too (`_run_merge_only_phase` is dispatched later in this same call),
+    # since this reset happens before that dispatch.
+    reset_t1_census()
 
     # Issue athenaeum#546: run() is now the ORDERED SEQUENCE of named phase calls over
     # one shared, mutable RunContext (see the class docstring above) — a
