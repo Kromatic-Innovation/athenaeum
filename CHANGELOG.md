@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Stale-server detection: a running `athenaeum serve` reports when its own
+  code is older than what is currently installed on disk.** The
+  2026-09-10 session-attribution split traced back to a stale server, not an
+  incomplete fix — a deploy reinstalled the distribution while two live
+  servers that predated it kept running the OLD code, and nothing surfaced
+  it, because the only version ever read in the push-metrics path was the
+  running process's own frozen belief about itself, never a comparison with
+  disk. `push_metrics.check_sidecar_liveness`'s `LivenessResult` now also
+  carries a `server_state` field (`current` / `stale-server` / `unknown`),
+  computed by comparing that frozen version against a fresh
+  `importlib.metadata` read of the installed distribution on every call —
+  surfaced on `athenaeum push-metrics liveness` (CLI and `--json`), on
+  `athenaeum.librarian.session_end`'s existing liveness report, and on the
+  `athenaeum viewer` payload's new `server_state` key (sourced through the
+  same subprocess CLI contract the viewer already uses, never a direct
+  import). Detection only, by explicit operator decision — this never
+  restarts a stale server, which would drop every live client connection.
+  ([#1593](https://github.com/Kromatic-Innovation/athenaeum/issues/1593))
+
 ### Changed
 
 - **The viewer's `used` column consults a content signal, and stops counting

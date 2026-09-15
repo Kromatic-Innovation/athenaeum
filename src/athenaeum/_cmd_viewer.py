@@ -136,6 +136,14 @@ DEFAULT_POLL_INTERVAL = 3.0
 #: carries no information and the record's provenance is unknown.
 _UNBIDDEN_SOURCES = ("hook", "sidecar")
 
+#: ``LivenessResult.server_state`` literals (issue athenaeum#1593),
+#: reproduced here rather than imported for the same AC4 reason as
+#: :data:`_UNBIDDEN_SOURCES` above. Used only as the fallback when the
+#: `push-metrics liveness --json` subprocess (see
+#: :func:`_run_liveness_contract`) is unreachable or malformed — the state
+#: this module reports when it genuinely does not know.
+_SERVER_STATE_UNKNOWN = "unknown"
+
 #: The instant the ``source`` key first appears in a push record.
 #:
 #: **A corpus-observed cutover, not a protocol constant.** Nothing in the
@@ -310,6 +318,63 @@ def _run_tail_contract(
         if isinstance(row, dict):
             records.append(row)
     return records
+
+
+def _liveness_argv(*, path: Path, cache_dir: Path | None) -> list[str]:
+    """Build the ``python -m athenaeum.cli push-metrics liveness --json`` argv
+    (issue athenaeum#1593) -- same interpreter-pinning rationale as
+    :func:`_tail_argv`."""
+    argv = [
+        sys.executable,
+        "-m",
+        "athenaeum.cli",
+        "push-metrics",
+        "liveness",
+        "--json",
+        "--path",
+        str(path),
+    ]
+    if cache_dir is not None:
+        argv += ["--cache-dir", str(cache_dir)]
+    return argv
+
+
+def _run_liveness_contract(*, path: Path, cache_dir: Path | None) -> dict[str, Any]:
+    """Best-effort ``stale-server`` signal for the viewer payload (issue
+    athenaeum#1593), sourced through the SAME subprocess-CLI contract the
+    tail records use -- this module never imports :mod:`athenaeum.push_metrics`
+    directly (AC4).
+
+    Unlike :func:`_run_tail_contract` this is auxiliary, not load-bearing: a
+    page with no ``pages``/``last_turn`` data is useless, but a page missing
+    the server-staleness banner still shows everything else. Any failure
+    (subprocess error, non-JSON stdout) therefore fails open to the
+    :data:`_SERVER_STATE_UNKNOWN` state rather than raising
+    :class:`ViewerContractError` -- the same discipline
+    :func:`_load_topics_for_query_hash` already applies to its own
+    best-effort local trace. The subprocess's exit code is deliberately
+    IGNORED here (unlike the tail contract): ``push-metrics liveness``
+    exits nonzero on a legitimate FAIL/STALE ledger outcome while still
+    writing valid JSON to stdout, so a nonzero exit is not itself a contract
+    violation the way it is for ``tail``.
+    """
+    argv = _liveness_argv(path=path, cache_dir=cache_dir)
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, check=False)
+        payload = json.loads(result.stdout)
+    except (OSError, json.JSONDecodeError):
+        payload = None
+    if not isinstance(payload, dict):
+        return {
+            "state": _SERVER_STATE_UNKNOWN,
+            "running_version": "",
+            "installed_version": None,
+        }
+    return {
+        "state": payload.get("server_state", _SERVER_STATE_UNKNOWN),
+        "running_version": payload.get("running_version", ""),
+        "installed_version": payload.get("installed_version"),
+    }
 
 
 def _referenced_flag(
@@ -708,7 +773,12 @@ def build_viewer_data(
     """End-to-end: run the contract, shape the payload, join it to the corpus."""
     records = _run_tail_contract(session_id=session_id, path=path, cache_dir=cache_dir)
     payload = shape_viewer_payload(session_id=session_id, records=records)
-    return enrich_payload(payload, wiki_root=Path(path) / "wiki", cache_dir=cache_dir)
+    payload = enrich_payload(payload, wiki_root=Path(path) / "wiki", cache_dir=cache_dir)
+    # issue athenaeum#1593: whether the server serving this page is running
+    # older code than what is currently installed on disk. Auxiliary
+    # (best-effort, never raises) -- see _run_liveness_contract.
+    payload["server_state"] = _run_liveness_contract(path=path, cache_dir=cache_dir)
+    return payload
 
 
 def _load_static_html() -> bytes:
