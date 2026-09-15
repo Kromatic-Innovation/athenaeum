@@ -203,15 +203,121 @@ class PendingMerge:
 WRITE_KINDS = ("create-merged", "fold-into-existing")
 
 
+def identity_slug(path: Path, meta: object) -> str | None:
+    """The slug *path* resolves to BY IDENTITY, or ``None``.
+
+    A wiki page identity-resolves to ``slugify(name)`` when its filename is
+    either the bare-slug form (``<slug>.md``) or the corpus's real convention,
+    ``<uid>-<slug>.md``, where ``<uid>`` is that SAME page's own ``uid:``
+    frontmatter (issue athenaeum#1635) — not just any uid-shaped prefix. A
+    filename carrying some other prefix (e.g. the ``auto-`` case reported in
+    that issue) matches neither form and is deliberately left unresolved:
+    widening this to arbitrary prefixes was explicitly out of scope there and
+    remains so here.
+
+    This is the SHARED rule (issue athenaeum#1642). It was introduced for
+    ``merges propose-fold``'s proposal-time canonical-target check and now
+    also backs :func:`find_identity_pages`, so the propose-time check,
+    :func:`classify_write_kind` and :func:`resolve_merge`'s approve-time
+    target path cannot drift apart. ``meta`` is typed ``object`` (not
+    ``dict``) because it is whatever :func:`athenaeum.models.parse_frontmatter`
+    returned, which is not guaranteed to be a mapping for a malformed page.
+    """
+    p_name = meta.get("name") if isinstance(meta, dict) else None
+    if not p_name or not str(p_name).strip():
+        return None
+    slug = slugify(str(p_name))
+    if not slug:
+        return None
+    if path.name == f"{slug}.md":
+        return slug
+    p_uid = meta.get("uid") if isinstance(meta, dict) else None
+    if p_uid and str(p_uid).strip() and path.name == f"{p_uid}-{slug}.md":
+        return slug
+    return None
+
+
+def find_identity_pages(merge_target_name: str, wiki_root: Path) -> list[Path]:
+    """Every live page under *wiki_root* that owns ``merge_target_name``'s slug.
+
+    Ordered: the bare-slug page (``<slug>.md``) first when it exists, then any
+    ``<uid>-<slug>.md`` page that identity-resolves to the same slug per
+    :func:`identity_slug`, sorted by filename. Usually 0 or 1 entries — a
+    second entry means the slug is genuinely ambiguous (both a bare-slug and a
+    uid-prefixed page exist for one name, or two uid-prefixed pages share a
+    name), which ``merges propose-fold`` refuses at proposal time.
+
+    **The bare-slug page is matched on filename alone, deliberately.** That is
+    exactly what :func:`classify_write_kind` / :func:`resolve_merge` did before
+    issue athenaeum#1642, so every pre-existing corpus shape classifies and
+    approves byte-identically; the uid-prefixed form is a pure ADDITION,
+    reached only when no bare-slug file owns the slug. Pages whose filename
+    starts with ``_`` (``_pending_merges.md`` and friends) are never corpus
+    pages and are skipped.
+
+    Cost: one ``exists()`` plus a ``glob("*-<slug>.md")`` whose matches are the
+    only files whose frontmatter is read — never a full-corpus scan.
+    """
+    target_slug = slugify(merge_target_name)
+    if not target_slug:
+        return []
+    found: list[Path] = []
+    bare = wiki_root / f"{target_slug}.md"
+    if bare.is_file():
+        found.append(bare)
+    try:
+        candidates = sorted(wiki_root.glob(f"*-{target_slug}.md"))
+    except OSError:
+        candidates = []
+    for fpath in candidates:
+        if fpath.name.startswith("_") or not fpath.is_file():
+            continue
+        try:
+            f_text = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        f_meta, _ = parse_frontmatter(f_text)
+        if identity_slug(fpath, f_meta) == target_slug:
+            found.append(fpath)
+    return found
+
+
+def resolve_target_page(merge_target_name: str, wiki_root: Path) -> Path | None:
+    """The single page a merge into *merge_target_name* folds INTO, or ``None``.
+
+    The one target-resolution entry point shared by :func:`classify_write_kind`
+    (proposal time) and :func:`resolve_merge` (approve time), so the two can
+    never disagree — issue athenaeum#1642's whole point. ``None`` means no
+    page owns the slug, i.e. the merge must CREATE the target.
+
+    When :func:`find_identity_pages` returns more than one candidate the first
+    is taken, deterministically (bare-slug form, else lowest filename). That
+    tie-break is arbitrary but it is the SAME arbitrary choice on both sides,
+    which is what preserves the invariant; ``merges propose-fold`` refuses to
+    queue an ambiguous fold in the first place.
+    """
+    pages = find_identity_pages(merge_target_name, wiki_root)
+    return pages[0] if pages else None
+
+
 def classify_write_kind(merge_target_name: str, wiki_root: Path) -> str:
-    """Classify a merge proposal by whether its target slug already exists.
+    """Classify a merge proposal by whether its target already exists.
 
     Returns ``"fold-into-existing"`` when a wiki page already owns the derived
     target slug, else ``"create-merged"`` (issue athenaeum#421). The existence
-    check MUST mirror :func:`resolve_merge`'s approve-time target path EXACTLY
-    (``wiki_root / f"{slugify(name)}.md"``) so a ``create-merged`` proposal can
-    never later fail ``target_exists`` at approve, and a derived
-    ``fold-into-existing`` proposal can never later fail ``fold_target_missing``.
+    check MUST mirror :func:`resolve_merge`'s approve-time target resolution
+    EXACTLY so a ``create-merged`` proposal can never later fail
+    ``target_exists`` at approve, and a derived ``fold-into-existing``
+    proposal can never later fail ``fold_target_missing``. Issue
+    athenaeum#1642 makes that mirroring structural rather than a convention
+    two call sites have to keep in step by hand: both sides now call
+    :func:`resolve_target_page`, so "does a page own this slug" and "which
+    file is it" are answered once, by identity (bare-slug **or**
+    ``<uid>-<slug>.md`` keyed on the page's own ``uid:``) rather than by
+    filename shape alone. Before that fix this side tested only
+    ``wiki_root / f"{slugify(name)}.md"``, so a fold into a real
+    ``<uid>-<slug>.md`` corpus page classified as ``create-merged`` and, on
+    approve, created a duplicate page instead of folding.
 
     This is the single source of truth for the classification (issue
     athenaeum#748): :func:`write_pending_merge` derives ``write_kind`` from it so
@@ -222,8 +328,7 @@ def classify_write_kind(merge_target_name: str, wiki_root: Path) -> str:
     it without reintroducing the ``pending_merges`` -> ``merge`` back-edge that
     issue athenaeum#640 dissolved.
     """
-    target_slug = slugify(merge_target_name)
-    if (wiki_root / f"{target_slug}.md").exists():
+    if resolve_target_page(merge_target_name, wiki_root) is not None:
         return "fold-into-existing"
     return "create-merged"
 
@@ -1249,11 +1354,29 @@ def _apply_fold_into_existing(
     # ahead of step 1 (the numbering above is the SEMANTIC step order, not
     # this function's statement order) because Commit A below needs the
     # full set of about-to-change paths before any of them are touched.
+    # Issue athenaeum#1642: the canonical page is excluded from the folded
+    # set by PATH IDENTITY as well as by slug. The slug test alone assumes
+    # the target lives at ``<target_slug>.md``; for the real corpus shape
+    # ``<uid>-<slug>.md`` the stem slugifies to ``<uid>-<slug>``, so the
+    # canonical page fell THROUGH the filter — into the delete list (caught
+    # only by step 5's ``_same_file`` defense-in-depth guard), into
+    # ``folded_slugs`` as a self-alias, and into the wikilink rewrite, which
+    # would have repointed real inbound ``[[<uid>-<slug>]]`` links at a slug
+    # no file owns. Both tests are kept: the slug one is still the primary
+    # guard for a bare-slug target, and it is the only one that works for a
+    # source path that no longer exists on disk.
+    def _is_canonical(src: str) -> bool:
+        return slugify(Path(src).stem) == target_slug or _same_file(
+            Path(src), target_path
+        )
+
     all_source_slugs = _source_slugs(pm.sources)
-    folded_slugs = [s for s in all_source_slugs if s != target_slug]
-    folded_sources = [
-        src for src in pm.sources if slugify(Path(src).stem) != target_slug
-    ]
+    canonical_slugs = {
+        slugify(Path(src).stem) for src in pm.sources if _is_canonical(src)
+    }
+    canonical_slugs.add(target_slug)
+    folded_slugs = [s for s in all_source_slugs if s not in canonical_slugs]
+    folded_sources = [src for src in pm.sources if not _is_canonical(src)]
 
     # --- Commit A: provenance snapshot, BEFORE any write below (issue
     # athenaeum#947). Stages exactly the target page (about to be
@@ -1597,7 +1720,26 @@ def resolve_merge(
         root = wiki_root or merges_path.parent
         root.mkdir(parents=True, exist_ok=True)
         target_slug = slugify(target_pm.merge_target_name)
-        target_path = root / f"{target_slug}.md"
+        # Issue athenaeum#1642: resolve the target by IDENTITY, through the
+        # same :func:`resolve_target_page` the proposal-time
+        # :func:`classify_write_kind` uses — never by filename shape alone.
+        # A real corpus page lives at ``<uid>-<slug>.md``, so the old
+        # ``root / f"{target_slug}.md"`` derivation found nothing for it:
+        # the proposal classified ``create-merged`` and this branch then
+        # wrote a duplicate page rather than folding. Sharing the resolver
+        # is what makes the docstring invariant on ``classify_write_kind``
+        # structural — a ``fold-into-existing`` proposal cannot later fail
+        # ``fold_target_missing``, and a ``create-merged`` one cannot later
+        # fail ``target_exists``, because both questions are now answered by
+        # the same function over the same corpus.
+        resolved_target = resolve_target_page(target_pm.merge_target_name, root)
+        # ``None`` means no page owns the slug: the create path writes the
+        # new page at the bare-slug filename, exactly as before.
+        target_path = (
+            resolved_target
+            if resolved_target is not None
+            else root / f"{target_slug}.md"
+        )
         write_kind = target_pm.write_kind
 
         if write_kind == "fold-into-existing":
@@ -1611,7 +1753,7 @@ def resolve_merge(
             # meant to fold INTO (the 2026-08-02 incident). Fail closed with a
             # distinct error code instead of proceeding to the delete; do NOT
             # flip the checkbox (return before flushing ``rewritten``).
-            if not target_path.exists():
+            if resolved_target is None:
                 return {
                     "ok": False,
                     "error_code": "fold_target_missing",
@@ -1679,7 +1821,7 @@ def resolve_merge(
             # closed here (defense in depth): the athenaeum#421 precheck should have
             # classified it fold-into-existing, but a stale/hand-edited
             # block's write_kind is not trusted blindly.
-            if target_path.exists():
+            if resolved_target is not None:
                 # Fail closed: do NOT flip the checkbox; the human must
                 # rename the merge_target_name or resolve the existing
                 # wiki entry.

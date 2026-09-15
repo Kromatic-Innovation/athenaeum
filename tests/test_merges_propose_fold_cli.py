@@ -419,3 +419,69 @@ def test_queued_proposal_folds_correctly_via_resolve_merge(tmp_path: Path) -> No
     assert set(result["folded_sources"]) == {str(src_b), str(src_c)}
     # The canonical body prose is preserved (a fold does not rewrite it).
     assert "RICH canonical body" in canonical.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1642 — the APPROVE-time half. athenaeum#1635 taught
+# propose-fold to accept a `<uid>-<slug>.md` canonical page, but
+# ``classify_write_kind`` / ``resolve_merge`` still resolved the target by
+# filename shape, so the proposal queued and then did not fold.
+# ---------------------------------------------------------------------------
+
+
+def test_queued_uid_prefixed_fold_actually_folds_on_approve(tmp_path: Path) -> None:
+    """End-to-end reproduction: propose-fold --apply into a `<uid>-<slug>.md`
+    canonical page, then approve. The proposal must derive
+    ``write_kind="fold-into-existing"`` and the approve must DELETE the source
+    pages into the existing canonical file -- not create a second page beside
+    it and leave every source in place."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    canonical = wiki / "f351b6a1-learn-s-i-m-p-l-e.md"
+    _uid_wiki_page(
+        canonical,
+        uid="f351b6a1",
+        name="Learn S.I.M.P.L.E.",
+        body="RICH canonical body\n",
+    )
+    src_b = wiki / "learn-simple.md"
+    src_c = wiki / "simple-method.md"
+    _wiki_page(src_b, name="Learn Simple", body="thin dup b\n")
+    _wiki_page(src_c, name="Simple Method", body="thin dup c\n")
+    init_git_repo(wiki)
+
+    rc, _out = _run(
+        [
+            "merges",
+            "propose-fold",
+            "--path",
+            str(tmp_path),
+            "--into",
+            "f351b6a1-learn-s-i-m-p-l-e",
+            "--source",
+            "learn-simple",
+            "--source",
+            "simple-method",
+            "--apply",
+        ]
+    )
+    assert rc == 0
+    merges_path = wiki / "_pending_merges.md"
+    queued = parse_pending_merges(merges_path)[0]
+    # The classification itself -- create-merged here was the bug.
+    assert queued.write_kind == "fold-into-existing"
+
+    result = resolve_merge(merges_path, queued.id, "approve", wiki_root=wiki)
+
+    assert result["ok"] is True
+    # Folded INTO the existing uid-prefixed page: sources gone, canonical kept.
+    assert canonical.exists()
+    assert not src_b.exists()
+    assert not src_c.exists()
+    assert set(result["folded_sources"]) == {str(src_b), str(src_c)}
+    # No 29th page beside it -- the bare-slug file must never be created.
+    assert not (wiki / "learn-s-i-m-p-l-e.md").exists()
+    # Aliases pick up the folded-away slugs, and NOT the canonical's own stem
+    # (which is what the slug-only exclusion used to let through).
+    assert set(result["aliases_added"]) == {"learn-simple", "simple-method"}
+    assert "f351b6a1-learn-s-i-m-p-l-e" not in set(result["aliases_added"])

@@ -28,9 +28,11 @@ import pytest
 from athenaeum.models import slugify
 from athenaeum.pending_merges import (
     classify_write_kind,
+    find_identity_pages,
     parse_pending_merges,
     render_block,
     resolve_merge,
+    resolve_target_page,
     write_pending_merge,
 )
 from tests.conftest import init_git_repo
@@ -39,6 +41,22 @@ from tests.conftest import init_git_repo
 def _write_wiki_page(path: Path, *, name: str, body: str = "body\n") -> None:
     path.write_text(
         "---\n" f"name: {name}\n" "type: concept\n" "---\n" f"{body}",
+        encoding="utf-8",
+    )
+
+
+def _write_uid_wiki_page(
+    path: Path, *, uid: str, name: str, body: str = "body\n"
+) -> None:
+    """A page in the corpus's REAL filename convention, ``<uid>-<slug>.md``.
+
+    ``_write_wiki_page`` writes no ``uid:``, which is what makes the
+    athenaeum#748 regression fixture above a valid negative control: a
+    uid-SHAPED filename prefix that the page's own frontmatter does not back
+    still resolves to nothing (issue athenaeum#1635's deliberate scoping).
+    """
+    path.write_text(
+        "---\n" f"uid: {uid}\n" f"name: {name}\n" "type: concept\n" "---\n" f"{body}",
         encoding="utf-8",
     )
 
@@ -301,3 +319,155 @@ class TestAugust2Regression:
         assert dup_b.exists()
         # No new page was created for the wrong slug.
         assert not (wiki / "maria-springer.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1642 — the approve-time target check resolves by IDENTITY,
+# through the same helper the proposal-time check uses.
+# ---------------------------------------------------------------------------
+
+
+class TestIdentityTargetResolution:
+    def test_uid_prefixed_page_classifies_as_fold(self, tmp_path: Path) -> None:
+        """The corpus's real shape. Before athenaeum#1642 this derived
+        ``create-merged`` because ``learn-s-i-m-p-l-e.md`` does not exist."""
+        canonical = tmp_path / "f351b6a1-learn-s-i-m-p-l-e.md"
+        _write_uid_wiki_page(canonical, uid="f351b6a1", name="Learn S.I.M.P.L.E.")
+        assert classify_write_kind("Learn S.I.M.P.L.E.", tmp_path) == "fold-into-existing"
+        assert resolve_target_page("Learn S.I.M.P.L.E.", tmp_path) == canonical
+
+    def test_absent_target_still_classifies_create_merged(
+        self, tmp_path: Path
+    ) -> None:
+        """Counter-example (athenaeum#1642 AC4): widening the rule must not
+        make every fold look foldable. Nothing owns the slug -> create."""
+        _write_uid_wiki_page(
+            tmp_path / "f351b6a1-learn-s-i-m-p-l-e.md",
+            uid="f351b6a1",
+            name="Learn S.I.M.P.L.E.",
+        )
+        assert classify_write_kind("Something Else Entirely", tmp_path) == "create-merged"
+        assert resolve_target_page("Something Else Entirely", tmp_path) is None
+
+    def test_uid_shaped_prefix_without_matching_uid_does_not_resolve(
+        self, tmp_path: Path
+    ) -> None:
+        """The scoping athenaeum#1635 chose, restated at approve time: the
+        prefix must be the page's OWN ``uid:``, not merely uid-shaped, and an
+        arbitrary prefix (the ``auto-`` case) never resolves."""
+        _write_uid_wiki_page(
+            tmp_path / "4c7946d3-maria-springer.md",
+            uid="somethingelse",
+            name="Maria Springer",
+        )
+        # The ``auto-`` case from athenaeum#1635: a librarian-minted prefix that
+        # is not this page's ``uid:`` at all.
+        _write_uid_wiki_page(
+            tmp_path / "auto-maria-springer.md", uid="bbbb2222", name="Maria Springer"
+        )
+        # And a page carrying no ``uid:`` whatsoever behind a uid-shaped prefix
+        # -- the athenaeum#748 regression fixture's shape.
+        _write_wiki_page(
+            tmp_path / "cccc3333-maria-springer.md", name="Maria Springer"
+        )
+        assert classify_write_kind("Maria Springer", tmp_path) == "create-merged"
+        assert find_identity_pages("Maria Springer", tmp_path) == []
+
+    def test_bare_slug_page_still_wins_and_needs_no_frontmatter(
+        self, tmp_path: Path
+    ) -> None:
+        """Backward compatibility: the bare-slug form is matched on filename
+        alone, exactly as before athenaeum#1642, and is preferred when both
+        forms exist so pre-existing corpora resolve identically."""
+        bare = tmp_path / "maria-springer.md"
+        bare.write_text("no frontmatter at all\n", encoding="utf-8")
+        uid_page = tmp_path / "aaaa1111-maria-springer.md"
+        _write_uid_wiki_page(uid_page, uid="aaaa1111", name="Maria Springer")
+        assert classify_write_kind("Maria Springer", tmp_path) == "fold-into-existing"
+        assert resolve_target_page("Maria Springer", tmp_path) == bare
+        assert find_identity_pages("Maria Springer", tmp_path) == [bare, uid_page]
+
+    def test_sidecar_files_are_never_fold_targets(self, tmp_path: Path) -> None:
+        """``_``-prefixed files are machinery, not corpus pages."""
+        (tmp_path / "_pending-merges.md").write_text(
+            "---\nuid: _pending\nname: Pending Merges\n---\nx\n", encoding="utf-8"
+        )
+        assert find_identity_pages("Pending Merges", tmp_path) == []
+
+    def test_classify_and_approve_agree_for_uid_prefixed_target(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#1642 AC2, the invariant end to end: a derived
+        ``fold-into-existing`` can never later fail ``fold_target_missing``,
+        and the fold writes into the EXISTING uid-prefixed file."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        canonical = wiki / "f351b6a1-learn-s-i-m-p-l-e.md"
+        _write_uid_wiki_page(
+            canonical,
+            uid="f351b6a1",
+            name="Learn S.I.M.P.L.E.",
+            body="canonical prose\n",
+        )
+        dup = wiki / "learn-simple.md"
+        _write_wiki_page(dup, name="Learn Simple", body="dup\n")
+        init_git_repo(wiki)
+
+        merges = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges,
+            merge_target_name="Learn S.I.M.P.L.E.",
+            sources=[str(canonical), str(dup)],
+            rationale="consolidate",
+            draft_merged_body="---\nuid: f351b6a1\nname: Learn S.I.M.P.L.E.\n---\nmerged prose\n",
+            confidence=0.9,
+        )
+        pm = parse_pending_merges(merges)[0]
+        assert pm.write_kind == "fold-into-existing"
+
+        result = resolve_merge(merges, pm.id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True
+        assert canonical.exists()
+        assert "merged prose" in canonical.read_text(encoding="utf-8")
+        assert not dup.exists()
+        assert result["folded_sources"] == [str(dup)]
+        assert not (wiki / "learn-s-i-m-p-l-e.md").exists()
+
+    def test_create_merged_into_identity_resolved_target_fails_closed(
+        self, tmp_path: Path
+    ) -> None:
+        """The other direction of the same invariant: a legacy/hand-edited
+        ``create-merged`` block whose target DOES identity-resolve must be
+        refused with ``target_exists`` rather than clobbering the page."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        canonical = wiki / "f351b6a1-learn-s-i-m-p-l-e.md"
+        _write_uid_wiki_page(
+            canonical,
+            uid="f351b6a1",
+            name="Learn S.I.M.P.L.E.",
+            body="canonical prose\n",
+        )
+        dup = wiki / "learn-simple.md"
+        _write_wiki_page(dup, name="Learn Simple", body="dup\n")
+
+        merges = wiki / "_pending_merges.md"
+        pm_id = _hand_write_block(
+            merges,
+            merge_target_name="Learn S.I.M.P.L.E.",
+            sources=[str(dup)],
+            rationale="legacy block",
+            draft_merged_body="would have clobbered\n",
+            confidence=0.9,
+            write_kind="create-merged",
+        )
+
+        result = resolve_merge(merges, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is False
+        assert result["error_code"] == "target_exists"
+        assert "f351b6a1-learn-s-i-m-p-l-e.md" in result["message"]
+        assert "canonical prose" in canonical.read_text(encoding="utf-8")
+        assert dup.exists()
+        assert not (wiki / "learn-s-i-m-p-l-e.md").exists()

@@ -404,8 +404,11 @@ def fold_target_resolves(wiki_root: Path, bare_path: Path) -> bool:
 
     :func:`athenaeum.pending_merges.classify_write_kind` and
     :func:`~athenaeum.pending_merges.resolve_merge` both derive the fold
-    target as ``wiki_root / f"{slugify(merge_target_name)}.md"``, and
-    :func:`athenaeum.models.slugify` **caps its output at 60 characters**.
+    target via :func:`athenaeum.pending_merges.resolve_target_page`, whose
+    first and — for a bare page like this one — only candidate is
+    ``wiki_root / f"{slugify(merge_target_name)}.md"`` (issue athenaeum#1642
+    added a ``<uid>-<slug>.md`` fallback that a bare page can never match),
+    and :func:`athenaeum.models.slugify` **caps its output at 60 characters**.
     A bare page whose filename stem is longer than that — or whose stem is
     not already a valid slug (mixed case, spaces, punctuation) — therefore
     slugifies to something no file owns. ``write_kind`` is then derived as
