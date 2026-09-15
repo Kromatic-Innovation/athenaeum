@@ -10,7 +10,7 @@ and push telemetry included, so this adapter can never independently drift
 from that CLI's output or side effects — and prints one line of Claude
 Code hook-output JSON wrapping the envelope's rendered text.
 
-**Shell-hook parity (issue athenaeum#1661).** The #1361 cutover was refused
+**Shell-hook parity (issue athenaeum#1661).** The athenaeum#1361 cutover was refused
 because this adapter drifted from the live shell hook
 (``examples/claude-code/user-prompt-recall.sh``) on five points, closed
 here:
@@ -20,7 +20,7 @@ here:
    hook's ``source config.env`` under ``set -a``
    (``user-prompt-recall.sh:127-145``) — most importantly ``ANTHROPIC_API_KEY``,
    without which LLM topic extraction silently degrades to the regex
-   fallback (the query-10 regression the #1361 lane observed). Per the
+   fallback (the query-10 regression the athenaeum#1361 lane observed). Per the
    issue's explicit Plan item 1, **existing process env always wins over
    the file** — a key already set is never overwritten, the opposite of
    plain ``source``'s last-write-wins, and duplicated (not shared) from
