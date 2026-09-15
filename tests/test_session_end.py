@@ -1585,7 +1585,12 @@ class TestSessionEndReferencesOnly:
         cache = tmp_path / "cache"
         push_metrics.record_push(
             push_metrics.build_push_record(
-                session_id=session, query="q", backend="fts5", hits=[("f.md", {"uid": uid}, "b")]
+                session_id=session,
+                query="q",
+                backend="fts5",
+                hits=[
+                    ("f.md", {"uid": uid}, push_metrics.estimate_tokens("b")),
+                ]
             ),
             cache_dir=cache,
         )
@@ -1806,7 +1811,7 @@ class TestSessionEndLiveness:
                     session_id=f"s{i}",
                     query="q",
                     backend="fts5",
-                    hits=[("f.md", {"uid": f"u{i}"}, "b")],
+                    hits=[("f.md", {"uid": f"u{i}"}, push_metrics.estimate_tokens("b"))],
                 ),
                 cache_dir=cache,
             )
@@ -1839,12 +1844,17 @@ class TestSessionEndLiveness:
                     session_id=f"s{i}",
                     query="q",
                     backend="fts5",
-                    hits=[("f.md", {"uid": f"u{i}"}, "b")],
+                    hits=[("f.md", {"uid": f"u{i}"}, push_metrics.estimate_tokens("b"))],
                 ),
                 cache_dir=cache,
             )
         sidecar_record = push_metrics.build_push_record(
-            session_id="s-sidecar", query="q", backend="fts5", hits=[("f.md", {"uid": "u-sc"}, "b")]
+            session_id="s-sidecar",
+            query="q",
+            backend="fts5",
+            hits=[
+                ("f.md", {"uid": "u-sc"}, push_metrics.estimate_tokens("b")),
+            ]
         )
         sidecar_record.source = "sidecar"
         push_metrics.record_push(sidecar_record, cache_dir=cache)

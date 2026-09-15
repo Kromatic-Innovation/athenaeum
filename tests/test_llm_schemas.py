@@ -754,7 +754,7 @@ class TestObservationsPathIsolation:
                         query="probe query",
                         backend="fts5",
                         hits=[
-                            ("probe.md", {"uid": "probe0001"}, "probe snippet text"),
+                            ("probe.md", {"uid": "probe0001"}, 4),
                         ],
                     )
                     assert record_push(record) is True
