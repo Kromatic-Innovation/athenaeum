@@ -556,3 +556,117 @@ unchanged.
   if it comes back `0` with `armed: true`, the specific "ARMED BUT SILENT"
   line to hand to the operator as the next diagnostic step) — this is a
   reportable follow-up, not something decided here.
+
+---
+
+## Window 2 — T1 readout, 2026-09-15 (T1 armed 23 days; T2 held off by operator decision)
+
+Recorded for athenaeum#787. Every command below is read-only; nothing took
+`.athenaeum.lock` and no config, wiki page, or ledger was changed.
+
+### Provenance
+
+| | |
+|---|---|
+| Measured | 2026-09-15 (~19:10Z) |
+| Store | `~/knowledge` (live) |
+| athenaeum version | `0.21.0` |
+| Deploy checkout git SHA | `70f7e70f4a601a1af46b4e9bb65cc3c38da74d99` (fast-forwarded 2026-09-15 02:16 -0400; contains PR athenaeum#1633 merge `72cd82b`) |
+| `librarian.reasoning_tier_auditing_enabled` (T1) | `true` (`athenaeum.yaml:310`), armed 2026-08-23 19:30 -0400 in `~/knowledge` commit `a0a710036`. **Runtime-confirmed** via `resolve_reasoning_tier_auditing_enabled(load_config(...))` → `True` |
+| `librarian.reasoning_tier_t2_auto_apply_enabled` (T2) | absent → runtime-resolves `False`. **Held off by operator decision 2026-09-15: T2 auto-apply is exercised on the eval corpus only, never live.** |
+| Tiers armed | **T1 only** |
+| Window | 2026-08-23 → 2026-09-15 (23 days), split at the PR athenaeum#1633 deploy (2026-09-15 06:16Z): **pre** = 23 days, **post** = 2 librarian runs (06:51Z, 11:32Z) |
+| Confounders | `max_merge_sources` 5 → 8 and reasoning-trigger cadence changed the same day T1 was armed (see the 2026-08-23 arming comment on athenaeum#787) |
+
+Revert (unchanged): set `librarian.reasoning_tier_auditing_enabled: false` or remove
+the key.
+
+### Measurement rows
+
+| Row | Pre-athenaeum#1633 (08-23 → 09-15 06:16Z) | Post-athenaeum#1633 (2 runs) | Baseline 0 |
+|---|---|---|---|
+| T1 proposals seen / rejected / passed up | **0 / 0 / 0** | **0 / 0 / 0** | n/a (off) |
+| `wiki/_reasoning_tier_decisions.jsonl` | absent | absent (also none under `~/.cache/athenaeum/`) | absent |
+| `athenaeum calibration summary --json` T1 | — | `armed=true, decisions_logged=0, last_decision_at=null, armed_but_silent=true` | — |
+| T1 census (`t1-screen` phase, PR athenaeum#1633) | not instrumented | `screened=0 unscreened=251` in **both** runs; reasons only `deliberate-name-collision:212`, `deliberate-name-structure:39`; zero `disabled` / `no-client` / `dry-run` / `no-members` / `ceiling` | — |
+| T2 approve / amend / draft / escalate / auto-applied | not armed live; held by operator decision 2026-09-15 | same | — |
+| Human merge-queue depth | 752 unresolved at Window 1 (09-03) | **838 unresolved, 0 resolved** | 405 unresolved, 0 resolved |
+| **Sampled review of T1 rejects** | **sample size 0** — reject population is empty | **sample size 0** | — |
+| Sampled review of T2 auto-applies | not armed live; held by operator decision 2026-09-15 | same | — |
+| `reasoning_t1` / `reasoning_t2` spend | **$0.00 — no ledger line** (`--since 2026-08-23`: API $286.96 total, all under classify/write/resolve/topic) | **$0.00 — no ledger line** (`--since 2026-09-15`: API $1.08) | $0.00 |
+
+The `t1-screen` census figures are **call counts, not new proposals**: every run
+re-evaluates the same standing 212 name collisions and 39 qualified-name splits,
+deduped on write. Actual inflow, as distinct unresolved proposal ids by
+`created_at`, is 416 proposals dated 2026-08-23 onward (08-25: 22, 09-01: 283,
+09-10: 35, 09-14: 22, others single digits to 19); the one proposal dated
+2026-09-15 (`4d45da14c6a7`) is a name-collision proposal. athenaeum#1557 attributed the
+417 proposals as of 09-14 to `name_collisions` 348, `name_structure` 39, and the
+`merge.py` cluster path 30.
+
+### Findings
+
+1. **T1 has made zero decisions in 23 days, so the sampled-reject review cannot
+   be performed.** There is no reject to sample — not a small sample, an empty
+   population — confirmed three independent ways: the unsampled decision reader
+   (`decisions_logged=0`), the absent log file, and a spend ledger with no
+   `reasoning_t1` attribution at all. No proxy sample was substituted.
+2. **PR athenaeum#1633 did not widen T1's reach; it made the zero legible.** athenaeum#1620's
+   AC1 decision keeps `name_collisions` and `name_structure` deliberately
+   unscreened, so T1's ceiling is the cluster path alone. Post-deploy that path
+   wrote nothing (`merge pass: delta scope matched no cluster rows — nothing to
+   merge`), so T1 reach in the post window is **0%**, down from a ≤7% ceiling.
+3. **athenaeum#1620's closing inference ("by elimination, `enabled=False`") is
+   contradicted live** for the post window: the flag runtime-resolves `True`
+   from the live config. Why the ~30 pre-deploy
+   cluster-path proposals produced no T1 call remains unexplained; the census
+   will name the reason on the next cluster-path proposal.
+4. No wrongly rejected merge was found — because none was rejected. This is
+   "unexercised", not "safe".
+
+### Recommendation
+
+**Keep T1 armed, stop the measurement clock.** T1 costs a hard $0.00, holds no
+write authority, and currently screens nothing, so turning it off buys nothing
+and leaving it on costs nothing. The blocker has moved from T1 wiring to
+**cluster-path inflow**: 387 of 417 recent proposals come from writers that are
+unscreened by design, and the one screened writer produced zero proposals since
+the census shipped. A future window should start only once the `t1-screen`
+census shows `screened > 0`; until then a longer window measures the same zero.
+Whether T1 should cover the name-based writers at all is a scope question for
+athenaeum#1620's decision, not for this readout.
+
+### Exact commands (delta from Window 1)
+
+```sh
+PY=~/local-deploys/athenaeum/.venv/bin/python
+BIN=~/local-deploys/athenaeum/.venv/bin/athenaeum
+
+cd ~/knowledge
+"$BIN" calibration summary --json
+"$BIN" spend --by-knob --since 2026-08-23
+"$BIN" spend --by-knob --since 2026-09-15
+"$BIN" merges count
+ls -la ~/knowledge/wiki/_reasoning_tier_decisions.jsonl ~/.cache/athenaeum/
+git -C ~/local-deploys/athenaeum reflog -3 --date=iso
+
+# runtime flag resolution
+"$PY" -c 'from pathlib import Path; from athenaeum.config import load_config, resolve_reasoning_tier_auditing_enabled as t1, resolve_reasoning_tier_t2_auto_apply_enabled as t2; c=load_config(Path.home()/"knowledge"); print(t1(c), t2(c))'
+
+# T1 census per run (PR athenaeum#1633)
+"$PY" -c 'import json,os; [print(r["ts"], r["phases"]["t1-screen"]) for r in map(json.loads, open(os.path.expanduser("~/.cache/athenaeum/run_summary.jsonl"))) if "t1-screen" in r.get("phases", {})]'
+
+# cluster-path activity and T1 skip lines since the deploy
+grep -h -E 'merge pass|T1 reasoning screen not run' \
+  ~/Library/Logs/pre-dawn-sweep.out.log ~/Library/Logs/athenaeum-reasoning-triggers.err.log
+
+# inflow as distinct unresolved proposals by created_at
+"$PY" - <<'EOF'
+import collections
+from pathlib import Path
+from athenaeum.pending_merges import parse_pending_merges
+un = [p for p in parse_pending_merges(Path.home() / "knowledge/wiki/_pending_merges.md") if not p.resolved]
+print(len(un), len({p.id for p in un}))
+print(sorted(collections.Counter(p.created_at[:10] for p in un).items()))
+EOF
+```

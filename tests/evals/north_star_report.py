@@ -335,12 +335,20 @@ def weak_probes(rows: Sequence[RolloutRow]) -> tuple[str, ...]:
     knowledge (or a guessable token) already covers the ground truth -- not
     evidence that any retrieval arm helped. Sorted, deduplicated, empty when
     no such probe was observed in *rows*.
+
+    Abstention probes are excluded by construction. Their "correct" NONE
+    answer is the model declining to answer with no context at all, which is
+    the expected null result, not prior knowledge leaking through the floor.
+    Listing them here would put every abstention probe in the weak list on
+    every run and drown the signal this list exists to carry.
     """
     ids: set[str] = set()
     for row in rows:
         if row.record.arm is not Arm.NONE:
             continue
         probe = _probe_for_row(row)
+        if probe.probe_class == "abstention":
+            continue
         corpus = _corpus_for_scale(row.record.corpus_scale)
         if grade_correctness(row.record, probe, corpus):
             ids.add(probe.id)

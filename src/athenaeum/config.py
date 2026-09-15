@@ -2438,13 +2438,23 @@ def resolve_recall_relevance_floor(
               fts5: -3.0
               keyword: 20.0
 
-    An unrecognized ``backend_name`` (e.g. ``"vector"``, not named in
-    athenaeum#1492's acceptance criteria) always resolves to ``None``: no
-    floor is applied regardless of config. A malformed env value WARNs and
-    falls through to yaml/default (see :func:`_env_number`); a non-numeric
-    yaml value is ignored the same way.
+    ``"vector"`` (athenaeum#1571) is in the allowlist too, YAML-only: unlike
+    ``fts5``/``keyword``, it has no corresponding entry in
+    ``_RECALL_FLOOR_ENV`` (adding a vector-suffixed env var pair is not in
+    athenaeum#1571's scope), so a vector floor can only be set via
+    ``recall.relevance_floor.vector`` / ``...push.vector`` in yaml -- the
+    env-var precedence step below is simply a no-op for it. gate 2, the
+    comparison DIRECTION for a vector floor once resolved, is
+    :func:`athenaeum.search.meets_relevance_floor`,
+    not this function.
+
+    A genuinely unrecognized ``backend_name`` (anything other than
+    ``"fts5"``, ``"keyword"``, or ``"vector"``) always resolves to ``None``:
+    no floor is applied regardless of config. A malformed env value WARNs
+    and falls through to yaml/default (see :func:`_env_number`); a
+    non-numeric yaml value is ignored the same way.
     """
-    if backend_name not in ("fts5", "keyword"):
+    if backend_name not in ("fts5", "keyword", "vector"):
         return None
     env_name = _RECALL_FLOOR_ENV.get((backend_name, unprompted))
     if env_name is not None:
