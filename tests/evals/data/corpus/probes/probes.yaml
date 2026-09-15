@@ -13,6 +13,11 @@
 #                     near-miss pages for this probe. Without these the
 #                     generated tier would not compete for rank and the
 #                     confusability axis would measure nothing.
+#   answer_tokens     (issue athenaeum#1573) a unique, invented token planted
+#                     in the body of one of `expected_uids`'s pages, graded by
+#                     normalized substring match against a rollout's answer
+#                     text. EMPTY for abstention probes, which are graded by a
+#                     separate rule (see `tests.evals.north_star_report`).
 
 # --- single hop -------------------------------------------------------------
 
@@ -21,18 +26,21 @@
   query: "what is the firm's PTO allowance?"
   expected_uids: [policy-pto]
   distractor_terms: ["PTO", "annual leave", "holiday allowance"]
+  answer_tokens: ["Cinderquill"]
 
 - id: confidentiality_rule
   probe_class: single_hop
   query: "can we share one client's engagement details with another client?"
   expected_uids: [policy-confidentiality]
   distractor_terms: ["confidentiality", "client disclosure"]
+  answer_tokens: ["Harrowvex"]
 
 - id: bluewater_terms
   probe_class: single_hop
   query: "quote the Bluewater retainer terms verbatim"
   expected_uids: [client-bluewater]
   distractor_terms: ["Bluewater", "retainer terms"]
+  answer_tokens: ["Thornmere"]
   note: >-
     Topic extraction is what rescues the proper noun "Bluewater" from the meta
     instruction "quote ... verbatim". A purely lexical extractor drops it.
@@ -42,6 +50,7 @@
   query: "how long does onboarding a new retainer client take?"
   expected_uids: [policy-onboarding]
   distractor_terms: ["onboarding", "kickoff"]
+  answer_tokens: ["Larkspindle"]
 
 # --- multi hop --------------------------------------------------------------
 
@@ -50,6 +59,7 @@
   query: "who personally signs off discretionary spend over 500 GBP?"
   expected_uids: [policy-budget-approval, person-amir-osei]
   distractor_terms: ["discretionary spend", "approval threshold", "500 GBP"]
+  answer_tokens: ["Voltmere"]
   note: >-
     The threshold lives on the policy page and the identity of the finance
     partner on the person page. Retrieving either alone yields a confidently
@@ -60,12 +70,14 @@
   query: "who reviews client-facing surfaces on the portal project?"
   expected_uids: [project-portal-refresh, person-hana-lindqvist]
   distractor_terms: ["portal", "design review"]
+  answer_tokens: ["Greywisp"]
 
 - id: ratecard_tooling_owner
   probe_class: multi_hop
   query: "which repository generates the rate card, and who maintains its build?"
   expected_uids: [repo-rowanwrenfield, tool-buildpipe]
   distractor_terms: ["rate card", "build pipeline"]
+  answer_tokens: ["Fennorack"]
 
 # --- temporal / knowledge update --------------------------------------------
 
@@ -75,6 +87,7 @@
   expected_uids: [office-address-current]
   must_not_rank: [office-address-superseded]
   distractor_terms: ["office address", "Thornlea Wharf", "Alderway Row"]
+  answer_tokens: ["Driftwick"]
 
 - id: standup_time_current
   probe_class: temporal
@@ -82,6 +95,7 @@
   expected_uids: [standup-time-current]
   must_not_rank: [standup-time-superseded]
   distractor_terms: ["standup", "9:00", "9:30"]
+  answer_tokens: ["Emberlyn"]
 
 - id: budget_threshold_current
   probe_class: temporal
@@ -89,6 +103,7 @@
   expected_uids: [budget-threshold-current]
   must_not_rank: [budget-threshold-superseded]
   distractor_terms: ["approval ceiling", "250 GBP", "500 GBP"]
+  answer_tokens: ["Quorlinth"]
 
 # --- disambiguation ---------------------------------------------------------
 # The class this corpus exists for. Each of these guards a person-vs-artifact
@@ -100,6 +115,7 @@
   expected_uids: [person-rowan-wrenfield, project-pricing-review]
   must_not_rank: [repo-rowanwrenfield]
   distractor_terms: ["Rowan Wrenfield", "rowanwrenfield", "pricing"]
+  answer_tokens: ["Ashcaldera"]
   note: >-
     A decision is made by a PERSON. The eponymous repository shares almost all
     of the query's vocabulary and must not outrank the person page.
@@ -110,6 +126,7 @@
   expected_uids: [repo-rowanwrenfield]
   must_not_rank: [person-rowan-wrenfield]
   distractor_terms: ["rowanwrenfield", "maintainers", "repository"]
+  answer_tokens: ["Brindlewake"]
   note: The inverse direction -- the guard must not simply always prefer people.
 
 - id: surname_is_ambiguous
@@ -117,6 +134,7 @@
   query: "tell me about Wrenfield"
   expected_uids: [person-rowan-wrenfield, person-ilva-wrenfield, person-tovah-wrenfield]
   distractor_terms: ["Wrenfield", "Wrenfield Associates"]
+  answer_tokens: ["Hollowmarsh"]
   note: >-
     A bare surname is genuinely ambiguous across several people plus an org.
     The correct behaviour is to surface the ambiguity, not to answer
@@ -127,6 +145,7 @@
   query: "who is Rowan?"
   expected_uids: [person-rowan-wrenfield, person-rowan-deverell]
   distractor_terms: ["Rowan"]
+  answer_tokens: ["Sablethorn"]
 
 # --- abstention -------------------------------------------------------------
 # Nothing in the corpus answers these. Returning a confident wrong page is the
@@ -160,6 +179,7 @@
   expected_uids: [client-acme]
   must_not_rank: [policy-invoice-cadence]
   distractor_terms: ["invoice", "billing", "milestone"]
+  answer_tokens: ["Kestrelgate"]
   note: >-
     The general cadence policy is a strong lexical match and the WRONG answer:
     Acme is a documented exception to it.
@@ -170,6 +190,7 @@
   expected_uids: [client-alderway, client-bluewater, client-atlas]
   must_not_rank: [client-verity, client-solent]
   distractor_terms: ["retainer", "client"]
+  answer_tokens: ["Trevanquil"]
   note: Verity is a former client and Solent only a prospect.
 
 # --- redundancy -------------------------------------------------------------
@@ -191,6 +212,7 @@
   expected_uids: [project-keelbridge, project-keelbridge-rollout]
   must_not_rank: [team-keelbridge-desk]
   distractor_terms: ["Keelbridge", "programme", "berth scheduling"]
+  answer_tokens: ["Vulmarsh"]
   note: >-
     Redundancy probe. Both expected pages are the SAME entity written down
     twice; retrieving only one is the measurable cost of the entity split,

@@ -199,7 +199,7 @@ def test_synthetic_eval_uses_the_real_heuristic(tmp_path: Path) -> None:
 
 def _push_record(probe_class: str, delivered_uid: str, body: str, answer: str) -> RolloutRecord:
     return RolloutRecord(
-        arm=Arm.PUSH,
+        arm=Arm.PUSH_PAGES_UPPER_BOUND,
         probe_id=f"probe-{delivered_uid}",
         probe_class=probe_class,
         corpus_scale="core",

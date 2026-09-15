@@ -2,7 +2,7 @@
 """Thin driver for the north-star rollout grid (issue athenaeum#1523).
 
 ``python -m tests.evals.north_star_cli`` builds a grid over every probe in
-the core corpus x all four arms x the requested corpus scales x replicates
+the core corpus x every rollout arm x the requested corpus scales x replicates
 (:func:`tests.evals.containment.build_grid`), prices it through the SAME
 pre-flight spend gate ``tests/evals/containment_cli.py`` uses
 (:func:`tests.evals.containment.price_grid` — issue athenaeum#1523's
@@ -14,9 +14,9 @@ through :func:`tests.evals.rollout.run_probe_all_arms`, persists every arm's
 writes the markdown report under ``measurements/``.
 
 **Resume granularity is the (probe, corpus_scale, replicate) SUPER-group,
-not the individual arm cell.** ``run_probe_all_arms`` produces all four
-arms' records in one call — there is no "run just this one arm" entry
-point — so a group is treated as done only when EVERY one of its four arm
+not the individual arm cell.** ``run_probe_all_arms`` produces every
+arm's records in one call — there is no "run just this one arm" entry
+point — so a group is treated as done only when EVERY one of its arm
 cell-keys is already present in the store; otherwise the whole group reruns
 and every one of its four rows is appended fresh. This is a deliberate
 simplification over ``tests.evals.containment.run_grid``'s per-cell resume
@@ -72,8 +72,9 @@ from tests.evals.rollout_session import assert_rollout_ceiling
 #: core scale is enough to enumerate the full probe id list.
 DEFAULT_PROBES: tuple[str, ...] = tuple(p.id for p in build_corpus("core").probes)
 
-#: All four arms, always -- the report's dimensions inherently compare
-#: across NONE/PUSH/ORACLE/PULL, so this driver does not expose an --arms
+#: Every rollout arm, always -- the report's dimensions inherently compare
+#: across every arm in ``tests.evals.rollout.ALL_ARMS`` (issue athenaeum#1574
+#: grew this from four to six), so this driver does not expose an --arms
 #: knob to run a subset.
 DEFAULT_ARMS: tuple[str, ...] = tuple(arm.value for arm in ALL_ARMS)
 
@@ -154,15 +155,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 #: A single-value placeholder for the arms axis of ``build_grid``'s cap.
-#: This driver's groups always need ALL FOUR real arms at once
+#: This driver's groups always need ALL real arms at once
 #: (``run_probe_all_arms`` has no "just this one arm" entry point -- see
 #: the module docstring's "Resume granularity" note), so letting
 #: ``SCALE_BUDGETS`` cap the arms axis the way ``containment_cli.py`` caps
-#: it would silently pay for all four arms per selected group while
+#: it would silently pay for all arms per selected group while
 #: persisting only the capped subset. Grid SELECTION therefore runs over
 #: this one-value placeholder (so probes/corpus_scales/replicates are still
 #: capped per ``--scale`` exactly like ``containment_cli.py`` does), and
-#: every selected cell is expanded to its real four arm cells in
+#: every selected cell is expanded to its real arm cells in
 #: :func:`_build_cells`, AFTER selection.
 _ARM_AXIS_PLACEHOLDER: tuple[str, ...] = ("_all_arms",)
 
