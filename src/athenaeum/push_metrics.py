@@ -797,7 +797,7 @@ def build_push_record(
     session_id: str,
     query: str,
     backend: str,
-    hits: list[tuple[str, dict[str, object], str]],
+    hits: list[tuple[str, dict[str, object], int]],
     session_attribution: str = "",
 ) -> PushRecord:
     """Build a :class:`PushRecord` from rendered recall hits.
@@ -810,11 +810,17 @@ def build_push_record(
         query: the raw recall query text. Only its hash is retained.
         backend: the search backend name actually used (``keyword`` /
             ``fts5`` / ``vector``) — the retrieval mechanism tier.
-        hits: ``(filename, fm, snippet_text)`` for each hit actually
-            RENDERED into the response (post Layer-C authorization / policy
-            filtering — a hit dropped before rendering was never pushed).
-            ``snippet_text`` is used ONLY to size the token-cost estimate; it
-            is never retained on the record.
+        hits: ``(filename, fm, tokens)`` for each hit actually RENDERED into
+            the response (post Layer-C authorization / policy filtering — a
+            hit dropped before rendering was never pushed). ``tokens`` is the
+            CALLER's already-computed token estimate of the fully rendered
+            recall block (issue athenaeum#1567) — this function does not
+            re-estimate from text, so a caller that only has the 400-char
+            snippet must size ``tokens`` from whatever it actually renders,
+            never from the snippet alone (that undercounts and was the bug
+            issue athenaeum#1567 fixed: the ledger used to saturate at 100
+            tokens, one estimate_tokens(400-char snippet) away from the
+            budget path's own number for the same hit).
         session_attribution: issue athenaeum#1541 — how *session_id* was
             determined (:data:`ATTRIBUTION_TRANSCRIPT` /
             :data:`ATTRIBUTION_ENV_UNRESOLVED`), normally
@@ -824,7 +830,7 @@ def build_push_record(
             attribution must write — never a guessed value.
     """
     items: list[PushedItem] = []
-    for filename, fm, snippet_text in hits:
+    for filename, fm, tokens in hits:
         pid = opaque_push_id(filename, fm)
         access = fm.get("access") if fm else None
         tier = str(access).strip() if isinstance(access, str) and access.strip() else "internal"
@@ -839,7 +845,7 @@ def build_push_record(
                 id=pid,
                 tier=tier,
                 scope=scope,
-                token_cost=estimate_tokens(snippet_text),
+                token_cost=tokens,
             )
         )
     return PushRecord(
