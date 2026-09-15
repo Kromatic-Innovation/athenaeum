@@ -23,7 +23,17 @@ name: Embedding Regression Guard
 #   - tests/test_eval_corpus_consolidation.py      carries @pytest.mark.embedding
 #   - tests/test_eval_recall_floor.py              parametrizes a `vector` case marked embedding
 #   - tests/evals/test_recall_eval.py              parametrizes a `vector` case marked embedding
-#   - .github/workflows/embedding-pr.yml           editing this guard should exercise itself
+#
+# Deliberately NOT self-referential (no entry for this workflow file's own
+# path): while an edit to this guard genuinely deserves a self-test, path
+# filters are evaluated over the WHOLE PR diff against the base branch, not
+# the top commit alone — a self-entry would mean any PR built on a branch
+# that had not yet merged this file (i.e. every PR during this file's own
+# introduction, including a docs-only one stacked on the same branch) would
+# spuriously trigger the job just because the file itself was "new" in the
+# diff. Once merged to develop, an intentional edit to this file can still be
+# smoke-tested with `workflow_dispatch` or by touching one of the paths above
+# in the same PR.
 #
 # Status: ADVISORY, not a required status context (out of scope per
 # athenaeum#1609) — it is not named in any branch-protection required-checks
@@ -53,7 +63,6 @@ on:
       - 'tests/test_eval_corpus_consolidation.py'
       - 'tests/test_eval_recall_floor.py'
       - 'tests/evals/test_recall_eval.py'
-      - '.github/workflows/embedding-pr.yml'
   push:
     branches: [develop]
     paths:
@@ -65,7 +74,6 @@ on:
       - 'tests/test_eval_corpus_consolidation.py'
       - 'tests/test_eval_recall_floor.py'
       - 'tests/evals/test_recall_eval.py'
-      - '.github/workflows/embedding-pr.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
