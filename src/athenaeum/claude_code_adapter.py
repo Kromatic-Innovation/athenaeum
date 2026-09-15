@@ -10,6 +10,44 @@ and push telemetry included, so this adapter can never independently drift
 from that CLI's output or side effects — and prints one line of Claude
 Code hook-output JSON wrapping the envelope's rendered text.
 
+**Shell-hook parity (issue athenaeum#1661).** The athenaeum#1361 cutover was refused
+because this adapter drifted from the live shell hook
+(``examples/claude-code/user-prompt-recall.sh``) on five points, closed
+here:
+
+1. **``config.env`` loading.** :func:`_load_config_env` loads
+   ``<cache_dir>/config.env`` into the process env, mirroring the shell
+   hook's ``source config.env`` under ``set -a``
+   (``user-prompt-recall.sh:127-145``) — most importantly ``ANTHROPIC_API_KEY``,
+   without which LLM topic extraction silently degrades to the regex
+   fallback (the query-10 regression the athenaeum#1361 lane observed). Per the
+   issue's explicit Plan item 1, **existing process env always wins over
+   the file** — a key already set is never overwritten, the opposite of
+   plain ``source``'s last-write-wins, and duplicated (not shared) from
+   :func:`athenaeum._cmd_audit._load_cache_config_env`'s identical
+   ``athenaeum#1667`` counterpart, since this module deliberately never
+   imports a ``_cmd_*.py`` sibling (see "Entry-point form" below).
+2. **``AUTO_RECALL`` kill switch.** :func:`_auto_recall_enabled` mirrors
+   ``AUTO_RECALL="${AUTO_RECALL:-true}"`` plus
+   ``[ "$AUTO_RECALL" = "true" ] || exit 0``
+   (``user-prompt-recall.sh:146,698``): unset defaults to enabled, any
+   value other than the exact string ``"true"`` disables — no output, exit
+   0.
+3. **``SEARCH_BACKEND`` pass-through.** Read from the (now config.env-aware)
+   process env and forwarded to :func:`~athenaeum.context.build_context_for_turn`
+   as its ``search_backend`` argument, mirroring the shell default/override
+   at ``user-prompt-recall.sh:147``. The adapter previously always used the
+   function's ``"fts5"`` default, ignoring the knob entirely.
+4. **Minimum prompt length.** A prompt shorter than 8 characters produces no
+   output, mirroring ``user-prompt-recall.sh:711``
+   (``[ -z "$PROMPT" ] || [ ${#PROMPT} -lt 8 ]``).
+5. **Preamble.** The rendered ``additionalContext`` is now
+   ``f"{envelope['render']['preamble']}\\n{envelope['render']['text']}"``,
+   matching the shell hook's final ``printf`` at
+   ``user-prompt-recall.sh:1213`` byte-for-byte (the preamble text itself is
+   single-sourced from :data:`athenaeum.context.PREAMBLE`, so the two
+   callers of that constant can never drift independently).
+
 **No SQL, no ranking, no budget arithmetic lives here** (issue athenaeum#1621
 AC2; enforced by ``tests/test_claude_code_adapter.py``'s source-level scan).
 Every ranking/dedup/budget decision already happened inside
@@ -59,10 +97,63 @@ through ``athenaeum.cli``.
 from __future__ import annotations
 
 import json
+import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from athenaeum.config import resolve_cache_dir
+
+
+def _load_config_env(cache_dir: Path) -> None:
+    """Load ``<cache_dir>/config.env`` into the process env (issue athenaeum#1661;
+    mirrors the shell hook's ``source config.env`` under ``set -a`` at
+    ``examples/claude-code/user-prompt-recall.sh:127-145``, and duplicates
+    :func:`athenaeum._cmd_audit._load_cache_config_env`'s identical
+    ``athenaeum#1667`` counterpart — see the module docstring's "Shell-hook
+    parity" section for why this is a duplication, not a shared helper).
+
+    ``KEY=VALUE`` lines only; blank lines and ``#``-comments are skipped.
+    **Existing process env always wins** — a key already set (by the
+    launcher's environment, or earlier this same process) is never
+    overwritten by the file. A missing or unreadable file is a silent
+    no-op. Values are NEVER printed or logged (issue athenaeum#1661 AC6) —
+    this function has no ``print``/``log`` call on any path, by
+    construction.
+    """
+    # `.joinpath(...)`, not `cache_dir / "config.env"`: the `/` operator
+    # parses to an `ast.BinOp`, which this module's own AC2 guard
+    # (`tests/test_claude_code_adapter.py::TestAC2NoRetrievalLogic`) forbids
+    # wholesale as a clean proxy for "no budget arithmetic" — a false
+    # positive for path-joining specifically, sidestepped here rather than
+    # loosening the guard.
+    config_env_path = cache_dir.joinpath("config.env")
+    try:
+        if not config_env_path.is_file():
+            return
+        lines = config_env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip()
+
+
+def _auto_recall_enabled() -> bool:
+    """Mirrors the shell hook's ``AUTO_RECALL`` default-and-gate
+    (``examples/claude-code/user-prompt-recall.sh:146,698``): unset defaults
+    to enabled; any value other than the exact string ``"true"`` disables.
+    Must run AFTER :func:`_load_config_env`, so a kill switch cached in
+    ``config.env`` is honoured the same as one set directly in the
+    launcher's environment.
+    """
+    return os.environ.get("AUTO_RECALL", "true") == "true"
 
 
 def _read_hook_input(raw: str) -> tuple[str, str]:
@@ -106,8 +197,14 @@ def main(argv: list[str] | None = None) -> int:
     input is read from stdin, per the ``UserPromptSubmit`` contract.
     """
     try:
+        cache_dir = resolve_cache_dir(None)
+        _load_config_env(cache_dir)
+
+        if not _auto_recall_enabled():
+            return 0
+
         prompt, session_id = _read_hook_input(sys.stdin.read())
-        if not prompt:
+        if len(prompt) < 8:
             return 0
 
         from athenaeum.context import build_context_for_turn
@@ -115,11 +212,13 @@ def main(argv: list[str] | None = None) -> int:
         envelope = build_context_for_turn(
             prompt,
             session_id,
-            cache_dir=resolve_cache_dir(None),
+            cache_dir=cache_dir,
+            search_backend=os.environ.get("SEARCH_BACKEND", "fts5"),
         )
         text = envelope["render"]["text"]
         if text:
-            print(_hook_output(text))
+            preamble = envelope["render"]["preamble"]
+            print(_hook_output(f"{preamble}\n{text}"))
     except Exception:  # noqa: BLE001 — a recall failure must never block a prompt (AC3)
         pass
     return 0
