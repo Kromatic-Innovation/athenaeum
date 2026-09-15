@@ -120,6 +120,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "claims": ("athenaeum._cmd_curate", "add_curate_subparsers"),
     "auto-memory": ("athenaeum._cmd_curate", "add_curate_subparsers"),
     "decay-sweep": ("athenaeum._cmd_decay", "add_decay_subparser"),
+    "retire-pages": ("athenaeum._cmd_retire", "add_retire_subparser"),
     "reconcile": ("athenaeum._cmd_reconcile", "add_reconcile_subparser"),
     "repair": ("athenaeum._cmd_repair", "add_repair_subparser"),
     "recovery-yield": (
@@ -200,6 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_reconcile import add_reconcile_subparser
     from athenaeum._cmd_recovery_yield import add_recovery_yield_subparser
     from athenaeum._cmd_repair import add_repair_subparser
+    from athenaeum._cmd_retire import add_retire_subparser
     from athenaeum._cmd_run import add_run_subparser
     from athenaeum._cmd_serve import add_serve_subparser
     from athenaeum._cmd_storage import add_storage_subparser
@@ -228,6 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_pending_subparsers(subparsers)
     add_curate_subparsers(subparsers)  # dedupe, claims, auto-memory
     add_decay_subparser(subparsers)  # decay-sweep
+    add_retire_subparser(subparsers)  # retire-pages (issue athenaeum#1625)
     add_reconcile_subparser(subparsers)  # reconcile (issue athenaeum#1143)
     add_recovery_yield_subparser(subparsers)  # recovery-yield (issue athenaeum#1453)
     add_repair_subparser(subparsers)  # repair

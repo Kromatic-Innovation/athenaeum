@@ -98,7 +98,7 @@ class TestLiveTreeParity:
         """Guard against a derivation that degenerates to an empty set (which
         would make the equality check above vacuous)."""
         derived_from_src = _modules_calling_acquire_or_exit(SRC_DIR)
-        assert len(derived_from_src) == 10
+        assert len(derived_from_src) == 11
         assert derived_from_src == {
             "_cmd_curate.py",
             "_cmd_decay.py",
@@ -108,6 +108,7 @@ class TestLiveTreeParity:
             "_cmd_pii_restore.py",
             "_cmd_reconcile.py",
             "_cmd_repair.py",
+            "_cmd_retire.py",
             "_cmd_run.py",
             "_cmd_storage.py",
         }
