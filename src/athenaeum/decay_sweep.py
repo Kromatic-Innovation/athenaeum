@@ -82,6 +82,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -401,6 +402,119 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+@dataclass
+class TwoCommitArchiveResult:
+    """Outcome of :func:`archive_via_two_commit_git_rm`."""
+
+    committed: bool = False
+    recovering_commit: str | None = None
+    errors: list[str] = field(default_factory=list)
+
+
+def archive_via_two_commit_git_rm(
+    knowledge_root: Path,
+    rel_paths: list[str],
+    *,
+    snapshot_message: str,
+    archive_message: str,
+    before_remove: Callable[[str], str | None] | None = None,
+    after_remove: Callable[[], tuple[list[str], str | None]] | None = None,
+) -> TwoCommitArchiveResult:
+    """Shared two-commit git-archive mechanics (issue athenaeum#1625): Commit A
+    snapshots *rel_paths*' current on-disk content, then Commit B removes
+    them via ``git rm``. Refuses when *knowledge_root* is not a git
+    repository (archival is git-only for recoverability, issue athenaeum#904
+    AC7) and is a no-op when *rel_paths* is empty.
+
+    Factored out of :func:`apply_sweep`'s kill-list archive (issue
+    athenaeum#1625) so ``athenaeum retire-pages``
+    (:mod:`athenaeum.retire_pages`) reuses the EXACT same two-commit
+    convention instead of re-implementing it — see the module docstring's
+    "Archive (git-rm), not tombstone" note for why this is the one archive
+    mechanism in the codebase. :func:`apply_sweep` below calls this
+    unchanged in behavior from before this factoring.
+
+    *before_remove*, when given, is called with the recovering commit's SHA
+    AFTER Commit A (or its legitimate no-op) and BEFORE ``git rm`` — it may
+    return an error message to ABORT before any removal (used by
+    :func:`apply_sweep` to write the sweep ledger fail-closed, issue
+    athenaeum#969 AC1, before Commit B ever runs).
+
+    *after_remove*, when given, is called AFTER ``git rm`` stages the
+    removal and BEFORE Commit B — it may perform additional on-disk
+    mutations (and its own ``git add``), returning the extra relative
+    paths it changed (folded into Commit B's pathspec alongside
+    *rel_paths*, so the whole operation still lands in exactly one commit)
+    or an error message to abort before Commit B ever runs.
+    """
+    result = TwoCommitArchiveResult()
+    if not rel_paths:
+        return result
+
+    if not (knowledge_root / ".git").exists():
+        msg = (
+            f"no .git in {knowledge_root} - refusing to archive (archival is "
+            "git-only for recoverability, issue athenaeum#904 AC7)"
+        )
+        log.warning("archive: %s", msg)
+        result.errors.append(msg)
+        return result
+
+    add_result = _git(knowledge_root, "add", "--", *rel_paths)
+    if add_result.returncode != 0:
+        msg = f"git add failed during archive: {add_result.stderr.strip()}"
+        log.error("archive: %s", msg)
+        result.errors.append(msg)
+        return result
+    staged = _git(knowledge_root, "diff", "--cached", "--quiet", "--", *rel_paths)
+    if staged.returncode != 0:
+        commit_a = _git(knowledge_root, "commit", "-m", snapshot_message, "--", *rel_paths)
+        if commit_a.returncode != 0:
+            msg = f"provenance-snapshot commit failed: {commit_a.stderr.strip()}"
+            log.error("archive: %s", msg)
+            result.errors.append(msg)
+            return result
+
+    head_result = _git(knowledge_root, "rev-parse", "HEAD")
+    if head_result.returncode != 0:
+        msg = f"could not resolve recovering commit SHA: {head_result.stderr.strip()}"
+        log.error("archive: %s", msg)
+        result.errors.append(msg)
+        return result
+    recovering_sha = head_result.stdout.strip()
+    result.recovering_commit = recovering_sha
+
+    if before_remove is not None:
+        err = before_remove(recovering_sha)
+        if err is not None:
+            result.errors.append(err)
+            return result
+
+    rm_result = _git(knowledge_root, "rm", "--quiet", "--", *rel_paths)
+    if rm_result.returncode != 0:
+        msg = f"git rm failed during archive: {rm_result.stderr.strip()}"
+        log.error("archive: %s", msg)
+        result.errors.append(msg)
+        return result
+
+    commit_paths = list(rel_paths)
+    if after_remove is not None:
+        extra_paths, err = after_remove()
+        if err is not None:
+            result.errors.append(err)
+            return result
+        commit_paths.extend(extra_paths)
+
+    commit_b = _git(knowledge_root, "commit", "-m", archive_message, "--", *commit_paths)
+    if commit_b.returncode != 0:
+        msg = f"archive commit failed: {commit_b.stderr.strip()}"
+        log.error("archive: %s", msg)
+        result.errors.append(msg)
+        return result
+    result.committed = True
+    return result
+
+
 def _apply_off_corpus_routing(
     knowledge_root: Path,
     report: SweepReport,
@@ -629,102 +743,53 @@ def apply_sweep(
         return report
     rel_paths = [rel for _, rel in pairs]
 
-    # Commit A — provenance snapshot BEFORE any removal (issue athenaeum#947
-    # convention): stages exactly the kill-list paths (never `git add -A`, so
-    # an operator's unrelated pre-staged work is never swept in under this
-    # commit's message) and commits only if something is actually staged —
-    # the common case, a page already fully committed from a prior run, is a
-    # legitimate no-op here, not an error.
-    add_result = _git(knowledge_root, "add", "--", *rel_paths)
-    if add_result.returncode != 0:
-        msg = f"git add failed during decay sweep: {add_result.stderr.strip()}"
-        log.error("decay-sweep: %s", msg)
-        report.errors.append(msg)
-        return report
-    staged = _git(knowledge_root, "diff", "--cached", "--quiet", "--", *rel_paths)
-    if staged.returncode != 0:
-        commit_a = _git(
-            knowledge_root,
-            "commit",
-            "-m",
-            f"chore(decay-sweep): provenance snapshot before archiving "
-            f"{len(rel_paths)} expired daily-bucket page(s) (athenaeum#904)",
-            "--",
-            *rel_paths,
-        )
-        if commit_a.returncode != 0:
-            msg = f"provenance-snapshot commit failed: {commit_a.stderr.strip()}"
+    def _write_ledger_before_remove(recovering_sha: str) -> str | None:
+        # Ledger write BEFORE archival (issue athenaeum#969 AC1, fail-closed
+        # ordering): a ledger-write failure aborts HERE, before `git rm` ever
+        # runs, so a page can never be archived without a durable record of
+        # why. Deliberately not try/except-and-continue past this — see
+        # `write_sweep_ledger`'s docstring.
+        swept_at = now_iso()
+        ledger_records = [
+            SweepLedgerRecord(
+                page=rel,
+                bucket=cand.bucket,
+                valid_until=cand.valid_until,
+                swept_at=swept_at,
+                recovering_commit=recovering_sha,
+            )
+            for cand, rel in pairs
+        ]
+        try:
+            write_sweep_ledger(ledger_records, cache_dir=cache_dir)
+        except Exception as exc:  # noqa: BLE001 — must abort archival, never proceed past it
+            msg = (
+                f"sweep-ledger write failed ({type(exc).__name__}): {exc} - "
+                "refusing to archive (issue athenaeum#969 AC1)"
+            )
             log.error("decay-sweep: %s", msg)
-            report.errors.append(msg)
-            return report
+            return msg
+        return None
 
-    # The recovering commit SHA (issue athenaeum#969): the commit whose tree
-    # still holds every kill-list page's full content. This is HEAD at this
-    # exact point — either Commit A just made it so (a page edited since its
-    # last commit), or Commit A was a legitimate no-op because HEAD already
-    # carries the page byte-for-byte (the common case). Either way, `git show
-    # <this-sha>:<rel_path>` recovers the page; Commit B (below) is what
-    # makes that necessary.
-    head_result = _git(knowledge_root, "rev-parse", "HEAD")
-    if head_result.returncode != 0:
-        msg = f"could not resolve recovering commit SHA: {head_result.stderr.strip()}"
-        log.error("decay-sweep: %s", msg)
-        report.errors.append(msg)
-        return report
-    recovering_sha = head_result.stdout.strip()
-
-    # Ledger write BEFORE archival (issue athenaeum#969 AC1, fail-closed
-    # ordering): a ledger-write failure aborts HERE, before `git rm` ever
-    # runs, so a page can never be archived without a durable record of why.
-    # Deliberately not try/except-and-continue past this — see
-    # `write_sweep_ledger`'s docstring.
-    swept_at = now_iso()
-    ledger_records = [
-        SweepLedgerRecord(
-            page=rel,
-            bucket=cand.bucket,
-            valid_until=cand.valid_until,
-            swept_at=swept_at,
-            recovering_commit=recovering_sha,
-        )
-        for cand, rel in pairs
-    ]
-    try:
-        write_sweep_ledger(ledger_records, cache_dir=cache_dir)
-    except Exception as exc:  # noqa: BLE001 — must abort archival, never proceed past it
-        msg = (
-            f"sweep-ledger write failed ({type(exc).__name__}): {exc} - "
-            "refusing to archive (issue athenaeum#969 AC1)"
-        )
-        log.error("decay-sweep: %s", msg)
-        report.errors.append(msg)
-        return report
-
-    # Commit B — the archival itself.
-    rm_result = _git(knowledge_root, "rm", "--quiet", "--", *rel_paths)
-    if rm_result.returncode != 0:
-        msg = f"git rm failed during decay sweep: {rm_result.stderr.strip()}"
-        log.error("decay-sweep: %s", msg)
-        report.errors.append(msg)
-        return report
-    commit_b = _git(
+    archive_result = archive_via_two_commit_git_rm(
         knowledge_root,
-        "commit",
-        "-m",
-        f"chore(decay-sweep): archive {len(rel_paths)} expired "
-        f"daily-bucket page(s) (athenaeum#904)",
-        "--",
-        *rel_paths,
+        rel_paths,
+        snapshot_message=(
+            f"chore(decay-sweep): provenance snapshot before archiving "
+            f"{len(rel_paths)} expired daily-bucket page(s) (athenaeum#904)"
+        ),
+        archive_message=(
+            f"chore(decay-sweep): archive {len(rel_paths)} expired "
+            f"daily-bucket page(s) (athenaeum#904)"
+        ),
+        before_remove=_write_ledger_before_remove,
     )
-    if commit_b.returncode != 0:
-        msg = f"archive commit failed: {commit_b.stderr.strip()}"
-        log.error("decay-sweep: %s", msg)
-        report.errors.append(msg)
-        return report
-    report.applied = True
-    report.committed = True
-    log.info(
-        "decay-sweep: git-archived %d expired daily-bucket page(s); committed",
-        len(rel_paths),
-    )
+    report.errors.extend(archive_result.errors)
+    if archive_result.committed:
+        report.applied = True
+        report.committed = True
+        log.info(
+            "decay-sweep: git-archived %d expired daily-bucket page(s); committed",
+            len(rel_paths),
+        )
     return report

@@ -7935,6 +7935,27 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         if ctx.usage.preamble_rejected
                         else {}
                     ),
+                    # athenaeum#1463: Tier-3 merge decisions — a response that
+                    # said "this observation adds no new claim" (body left
+                    # otherwise unchanged, only the source citation added)
+                    # vs. one that resulted in an actual body rewrite. Same
+                    # ``ctx.usage``-direct convention as
+                    # preamble_stripped/preamble_rejected immediately above:
+                    # both counters accumulate across the synchronous AND
+                    # Batch API merge paths (patch-mode and full-echo alike),
+                    # so no separate ``ctx.total_*`` accumulator is needed.
+                    # Rendered only when non-zero, matching the
+                    # degraded/truncated convention.
+                    **(
+                        {"citation_only_merges": ctx.usage.citation_only_merges}
+                        if ctx.usage.citation_only_merges
+                        else {}
+                    ),
+                    **(
+                        {"full_merges": ctx.usage.full_merges}
+                        if ctx.usage.full_merges
+                        else {}
+                    ),
                     # athenaeum#1196: NEW entity writes the write-boundary type guard
                     # refused (type outside declared ∪ KNOWN_TYPES). Only
                     # rendered when non-zero, mirroring degraded/truncated —

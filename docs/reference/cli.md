@@ -93,6 +93,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum reindex`](#athenaeum-reindex) (command) — Rebuild the search index (FTS5 or vector, per config). --incremental (default) applies only the hash-diff delta; --full rebuilds from scratch.
 - [`athenaeum repair`](#athenaeum-repair) (command) — Repair YAML-frontmatter corruption in wiki files. Default is dry-run; pass --apply to write fixes.
 - [`athenaeum reresolve-questions`](#athenaeum-reresolve-questions) (command) — Re-resolve open proposal-less pending questions (self-heal transient cap/offline escalations)
+- [`athenaeum retire-pages`](#athenaeum-retire-pages) (command) — Retire explicit wiki pages by uid. Default is dry-run (prints the kill-list, affected pending-merge proposals, and index entries); --apply git-archives the kill-list in a two-commit pair, withdraws referencing pending-merge proposals, rebuilds wiki/_index.md, and rebuilds the recall index. Unknown or ambiguous uids abort before any commit. Recovery is git-only: the retired page's content lives in the provenance-snapshot commit (HEAD~1 immediately after this run's archive commit) — run `git show <that-commit-sha>:<page-path>` to recover it, or `git log --diff-filter=D -- <page-path>` first if you need to find the commit.
 - [`athenaeum run`](#athenaeum-run) (command) — Run the librarian pipeline
 - [`athenaeum serve`](#athenaeum-serve) (command) — Start the MCP memory server
 - [`athenaeum session-end`](#athenaeum-session-end) (command) — Change-gated ingest + reindex for SessionEnd: compile this session's new raw intake, then refresh the index — a fast no-op (no LLM, no reindex) when nothing changed.
@@ -820,7 +821,7 @@ Propose folding one or more source pages INTO a named canonical page. Derives me
 |---|---|---|---|
 | `--apply` | `False` | — | Queue the proposal. Default: dry-run — print the plan, write nothing. |
 | `--draft-file` | — | — | Override the merged draft body with this file's contents (for a genuine content merge). Default: the canonical page's current text VERBATIM. |
-| `--into` | — | — | The canonical page to fold sources into (a slug, a `<slug>.md` filename, or a path). Must be an existing wiki page whose filename matches its `name:` slug. |
+| `--into` | — | — | The canonical page to fold sources into (a slug, a `<slug>.md` filename, or a path). Must be an existing wiki page whose filename identity-resolves to its `name:` slug: either `<slug>.md`, or `<uid>-<slug>.md` where `<uid>` is that page's own `uid:` frontmatter. |
 | `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--rationale` | — | — | Optional human rationale recorded on the proposal. |
@@ -1138,6 +1139,21 @@ Re-resolve open proposal-less pending questions (self-heal transient cap/offline
 |---|---|---|---|
 | `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
+
+## `athenaeum retire-pages`
+
+Retire explicit wiki pages by uid. Default is dry-run (prints the kill-list, affected pending-merge proposals, and index entries); --apply git-archives the kill-list in a two-commit pair, withdraws referencing pending-merge proposals, rebuilds wiki/_index.md, and rebuilds the recall index. Unknown or ambiguous uids abort before any commit. Recovery is git-only: the retired page's content lives in the provenance-snapshot commit (HEAD~1 immediately after this run's archive commit) — run `git show <that-commit-sha>:<page-path>` to recover it, or `git log --diff-filter=D -- <page-path>` first if you need to find the commit.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | `False` | — | Git-archive the kill-list (two-commit: provenance snapshot, then git rm + index rebuild + pending-merge withdrawal) and rebuild the recall index. Without this flag the command is a dry-run. Recovery is git-only: the retired page's content lives in the provenance-snapshot commit (HEAD~1 immediately after this run's archive commit) — run `git show <that-commit-sha>:<page-path>` to recover it, or `git log --diff-filter=D -- <page-path>` first if you need to find the commit. |
+| `--backend` | — | fts5, vector | Override the recall index backend for the rebuild (default: read from athenaeum.yaml). --apply only. |
+| `--cache-dir` | — | — | Cache directory for the recall index rebuild (default: ~/.cache/athenaeum). --apply only. |
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--reason` | — | — | Why these pages are being retired. Recorded verbatim in both commit messages (--apply only) and in every withdrawn pending-merge proposal's archive note. |
+| `--uids` | — | — | Either a single path to a file listing one uid per line (blank lines and lines starting with '#' are ignored), or one or more literal uids. Every uid must resolve to exactly one wiki page; an unknown or ambiguous uid aborts the whole run before any commit. |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum run`
