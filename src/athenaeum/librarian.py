@@ -164,6 +164,7 @@ from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE
     check_raw_retention,
     discover_auto_memory_files,
     discover_raw_files,
+    is_structured_jsonl_raw_file,
     round_robin_by_source,
     tier0_passthrough,
 )
@@ -2126,7 +2127,13 @@ def process_one(
     # shapes) is that any OTHER, non-person entity also mentioned in the
     # SAME raw file is not tier1/2/3-processed on this run -- a raw file
     # this deterministic path claims is claimed whole.
-    if person_registry is not None:
+    # Issue athenaeum#1684: a `.jsonl` shaped as structured machine records
+    # (the contact-sync `semantic.jsonl` shape that polluted 950 person
+    # pages) is excluded from person attribution ENTIRELY, before
+    # `match_person_mentions` ever scans its content — see
+    # `athenaeum.intake.is_structured_jsonl_raw_file`'s docstring for the
+    # exact shape test and its conservative failure defaults.
+    if person_registry is not None and not is_structured_jsonl_raw_file(raw):
         person_hits = match_person_mentions(raw, wiki_root, index, person_registry)
         attributed_uids = [
             hit.uid
