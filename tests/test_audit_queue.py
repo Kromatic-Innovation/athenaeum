@@ -126,7 +126,12 @@ class TestComputeStalePages:
         # a1 referenced twice, b1 referenced once.
         push_metrics.record_push(
             push_metrics.build_push_record(
-                session_id="s1", query="q", backend="fts5", hits=[("a.md", {"uid": "a1"}, "x")]
+                session_id="s1",
+                query="q",
+                backend="fts5",
+                hits=[
+                    ("a.md", {"uid": "a1"}, push_metrics.estimate_tokens("x")),
+                ]
             ),
             cache_dir=cache_dir,
         )

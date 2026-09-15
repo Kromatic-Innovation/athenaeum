@@ -1374,6 +1374,109 @@ class TestRecallPushMetricsInstrumentation:
         )
         assert "Acme Corp" in result
 
+    # -------------------------------------------------------------------
+    # Issue athenaeum#1567: the ledger token_cost must meter the FULLY
+    # RENDERED recall block (the same `_RecallRow.tokens` the push-token
+    # budget already used, per athenaeum#718) -- not the 400-char `_snippet`
+    # clamp, which saturated every sufficiently long page at exactly
+    # `estimate_tokens` of 400 chars (100 tokens).
+    # -------------------------------------------------------------------
+
+    def test_ledger_token_cost_is_the_full_block_estimate_not_the_snippet(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Counter-example fixture (issue athenaeum#1567's plan step 3): one
+        page under the 400-char snippet clamp and one page well over 2000
+        chars, each recalled through `recall_search`. Before this fix, the
+        long page's ledger `token_cost` was pinned at exactly 100 (the
+        400-char snippet's `estimate_tokens`), regardless of the page's real
+        rendered size -- this assertion set fails on that code (the `> 100`
+        check below never holds, and it never differs from the ceiling other
+        long pages would also hit). After the fix each ledger `token_cost`
+        must equal `estimate_tokens` of the ACTUAL rendered block
+        `recall_search` returned (the same quantity
+        `test_unprompted_enforces_token_budget_at_the_boundary` pins for the
+        budget path), so the short and long page's costs differ and the long
+        one exceeds the old snippet-only ceiling.
+        """
+        from athenaeum import push_metrics
+        from athenaeum.push_metrics import estimate_tokens
+
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "test-session-1567")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.delenv("ATHENAEUM_PUSH_METRICS_ENABLED", raising=False)
+
+        wiki = tmp_path / "wiki-1567"
+        wiki.mkdir()
+        short_body = "Widgetronic1567short is a brief note about a widget.\n"
+        long_body = "Widgetronic1567long " + (
+            "padding prose to blow well past the four hundred character "
+            "snippet clamp so the old snippet-only ceiling would bite. " * 25
+        )
+        assert len(short_body) < 400
+        assert len(long_body) > 2000
+
+        (wiki / "aaaa1111-short-page.md").write_text(
+            f"---\nuid: aaaa1111\nname: Short widgetronic1567short page\ntype: concept\n"
+            f"---\n\n{short_body}\n"
+        )
+        (wiki / "bbbb2222-long-page.md").write_text(
+            f"---\nuid: bbbb2222\nname: Long widgetronic1567long page\ntype: concept\n"
+            f"---\n\n{long_body}\n"
+        )
+
+        cache_short = tmp_path / "cache-short"
+        short_result = recall_search(
+            wiki, "widgetronic1567short", search_backend="keyword", cache_dir=cache_short
+        )
+        cache_long = tmp_path / "cache-long"
+        long_result = recall_search(
+            wiki, "widgetronic1567long", search_backend="keyword", cache_dir=cache_long
+        )
+
+        short_block = TestRecallTierAndPushBudget._extract_single_block(short_result)
+        long_block = TestRecallTierAndPushBudget._extract_single_block(long_result)
+        expected_short_tokens = estimate_tokens(short_block)
+        expected_long_tokens = estimate_tokens(long_block)
+
+        short_rows = push_metrics.read_push_records(cache_dir=cache_short, wiki_root=wiki)
+        long_rows = push_metrics.read_push_records(cache_dir=cache_long, wiki_root=wiki)
+        assert len(short_rows) == 1
+        assert len(long_rows) == 1
+        short_cost = short_rows[0]["items"][0]["token_cost"]
+        long_cost = long_rows[0]["items"][0]["token_cost"]
+
+        # AC1: the ledger's token_cost is EXACTLY `estimate_tokens(block)` for
+        # the fully rendered block -- the same quantity the budget path uses
+        # -- never a re-estimate of the snippet alone.
+        assert short_cost == expected_short_tokens
+        assert long_cost == expected_long_tokens
+
+        # Counter-example: the long page must exceed the 400-char snippet's
+        # 100-token ceiling, and the short page's cost must be lower than the
+        # long page's -- both fail under the pre-fix
+        # `token_cost=estimate_tokens(snippet_text)` behaviour, which pins
+        # the long page at exactly 100.
+        assert long_cost > 100
+        assert short_cost < long_cost
+
+    def test_ledger_token_cost_no_longer_derived_from_snippet_text(self) -> None:
+        """AC2 (grep-verifiable): `build_push_record` must not call
+        `estimate_tokens` on hit-supplied text at all -- the caller now
+        supplies the token count directly. A regression that reintroduced
+        `estimate_tokens(snippet_text)` inside the function body would
+        silently reproduce the athenaeum#1567 bug even if every other test
+        here still passed with a fixture whose snippet happens to match the
+        real block size.
+        """
+        import inspect
+
+        from athenaeum import push_metrics
+
+        source = inspect.getsource(push_metrics.build_push_record)
+        assert "token_cost=estimate_tokens(" not in source
+        assert "token_cost=tokens" in source
+
 
 # ---------------------------------------------------------------------------
 # CLI integration
