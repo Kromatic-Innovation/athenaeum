@@ -603,6 +603,80 @@ class TestEF10UnderdeterminedCoordinateRequest:
 
 
 # ---------------------------------------------------------------------------
+# EF10b — athenaeum#1679 §3.2: CompareOutcome.conflict_type threads into the
+# EscalationItem written at every queueing branch, falling back to the
+# pre-existing hardcoded value when the comparator didn't classify.
+# ---------------------------------------------------------------------------
+
+
+class TestEF10bConflictTypeThreading:
+    def test_specialization_no_side_uses_outcome_conflict_type(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        outcome = _outcome(
+            VERDICT_SPECIALIZATION, separator=["scope"], specific_side=None, conflict_type="stance"
+        )
+        apply_verdict_effect(_page("a"), _page("b"), outcome, wiki_root=wiki_root)
+        decisions = list_pending_decisions(wiki_root)
+        assert decisions[0]["payload"]["conflict_type"] == "stance"
+
+    def test_specialization_missing_path_uses_outcome_conflict_type(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        outcome = _outcome(
+            VERDICT_SPECIALIZATION,
+            separator=["scope"],
+            specific_side="a",
+            conflict_type="prescriptive",
+        )
+        apply_verdict_effect(_page("a"), _page("b"), outcome, wiki_root=wiki_root, path_a=None)
+        decisions = list_pending_decisions(wiki_root)
+        assert decisions[0]["payload"]["conflict_type"] == "prescriptive"
+
+    def test_underdetermined_uses_outcome_conflict_type(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        outcome = _outcome(VERDICT_UNDERDETERMINED, missing=["scope"], conflict_type="factual")
+        apply_verdict_effect(_page("a"), _page("b"), outcome, wiki_root=wiki_root)
+        decisions = list_pending_decisions(wiki_root)
+        assert decisions[0]["payload"]["conflict_type"] == "factual"
+
+    def test_contradiction_uses_outcome_conflict_type(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _uninstall_supersession(monkeypatch)
+        wiki_root = tmp_path / "wiki"
+        outcome = _outcome(
+            VERDICT_CONTRADICTION,
+            conflicting_passages=["p1", "p2"],
+            conflict_type="stance",
+        )
+        apply_verdict_effect(_page("a"), _page("b"), outcome, wiki_root=wiki_root)
+        decisions = list_pending_decisions(wiki_root)
+        assert decisions[0]["payload"]["conflict_type"] == "stance"
+
+    def test_unset_conflict_type_falls_back_to_pre_existing_values(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No caller populates ``CompareOutcome.conflict_type`` yet (the field is
+        additive, athenaeum#1679 §3.2) -- confirm the four sites keep their
+        pre-existing literal so this is a pure addition, not a behavior change."""
+        _uninstall_supersession(monkeypatch)
+
+        wiki_root = tmp_path / "wiki"
+        outcome = _outcome(VERDICT_SPECIALIZATION, separator=["scope"], specific_side=None)
+        apply_verdict_effect(_page("a"), _page("b"), outcome, wiki_root=wiki_root)
+        assert list_pending_decisions(wiki_root)[0]["payload"]["conflict_type"] == "ambiguous"
+
+        wiki_root2 = tmp_path / "wiki2"
+        outcome2 = _outcome(VERDICT_UNDERDETERMINED, missing=["scope"])
+        apply_verdict_effect(_page("a"), _page("b"), outcome2, wiki_root=wiki_root2)
+        assert list_pending_decisions(wiki_root2)[0]["payload"]["conflict_type"] == "ambiguous"
+
+        wiki_root3 = tmp_path / "wiki3"
+        outcome3 = _outcome(VERDICT_CONTRADICTION, conflicting_passages=["p1", "p2"])
+        apply_verdict_effect(_page("a"), _page("b"), outcome3, wiki_root=wiki_root3)
+        assert list_pending_decisions(wiki_root3)[0]["payload"]["conflict_type"] == "principled"
+
+
+# ---------------------------------------------------------------------------
 # EF11 — contradiction: supersession routing (applied / queue / unavailable)
 # ---------------------------------------------------------------------------
 

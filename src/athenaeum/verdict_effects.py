@@ -514,7 +514,7 @@ def _apply_specialization(
             wiki_root,
             config=config,
             entity_name=f'"{title_a}" / "{title_b}"',
-            conflict_type="ambiguous",
+            conflict_type=outcome.conflict_type or "ambiguous",
             raw_ref=f"comparator:{pair_key}",
             description=(
                 "Which side is the more specific claim? The comparator found "
@@ -541,7 +541,7 @@ def _apply_specialization(
             wiki_root,
             config=config,
             entity_name=f'"{title_a}" / "{title_b}"',
-            conflict_type="ambiguous",
+            conflict_type=outcome.conflict_type or "ambiguous",
             raw_ref=f"comparator:{pair_key}",
             description=(
                 f"Side {outcome.specific_side} is the more specific claim "
@@ -651,7 +651,7 @@ def _apply_underdetermined(
         wiki_root,
         config=config,
         entity_name=f'"{_title(page_a)}" / "{_title(page_b)}"',
-        conflict_type="ambiguous",
+        conflict_type=outcome.conflict_type or "ambiguous",
         raw_ref=f"comparator:{pair_key}",
         description=description,
     )
@@ -696,7 +696,7 @@ def _queue_contradiction(
         wiki_root,
         config=config,
         entity_name=f'"{_title(page_a)}" / "{_title(page_b)}"',
-        conflict_type="principled",
+        conflict_type=outcome.conflict_type or "principled",
         raw_ref=f"comparator:{pair_key}",
         description="\n".join(lines),
     )

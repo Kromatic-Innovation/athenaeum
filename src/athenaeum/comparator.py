@@ -187,7 +187,7 @@ from athenaeum.dimensions import (
 )
 from athenaeum.dimensions import compare_dimension as _compare_dimension
 from athenaeum.json_utils import extract_json_object
-from athenaeum.models import TokenUsage, cache_usage_counts, parse_frontmatter
+from athenaeum.models import ConflictType, TokenUsage, cache_usage_counts, parse_frontmatter
 from athenaeum.pii import is_pii_flagged
 from athenaeum.prompt_safety import fence_untrusted
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
@@ -823,6 +823,19 @@ class CompareOutcome:
     comparator_version: str = ""
     route: str | None = None
     reason: str = ""
+    # Issue athenaeum#1679 (§3.2): the comparator's own classification of the
+    # conflict, when it has one to give -- ``None`` for every verdict that
+    # isn't a genuine content conflict, and for any caller (including the
+    # current ``compare_pages`` body) that doesn't populate it yet. Additive:
+    # defaults to ``None`` so existing callers/tests are unaffected. Consumers
+    # (:mod:`athenaeum.verdict_effects`) fall back to their pre-existing
+    # hardcoded :class:`~athenaeum.models.EscalationItem.conflict_type` value
+    # when this is unset, matching the precedent at
+    # :func:`athenaeum.merge._emit_escalation`
+    # (``conflict_type=result.conflict_type or "factual"``) of writing a
+    # :data:`~athenaeum.models.ConflictType` value straight into that
+    # differently-shaped free-form field.
+    conflict_type: ConflictType | None = None
 
 
 def compare_pages(
