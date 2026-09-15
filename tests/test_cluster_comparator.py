@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 from athenaeum.cluster_comparator import (
     ClusterComparatorResult,
+    auto_memory_root,
     candidate_pairs,
     page_from_auto_memory_file,
     planned_pair_count,
@@ -90,7 +91,7 @@ class TestPageFromAutoMemoryFile:
         am = _write_am(scope_dir, "feedback_probe.md", "hello world")
         page = page_from_auto_memory_file(am)
 
-        assert page.id == page_id_for_path(am.path)
+        assert page.id == page_id_for_path(am.path, root=auto_memory_root(am))
         assert page.text == am.content
         assert page.meta.get("name") == "feedback_probe.md"
         assert page.meta.get("type") == "feedback"
@@ -102,11 +103,74 @@ class TestPageFromAutoMemoryFile:
         pages -- not a second, cluster-domain-only id space -- so a future
         wiring step's verdict-ledger pair keys line up with wiki-domain
         pairs keyed the same way.
+
+        Root-relative, not bare-stem (athenaeum#1677): the id folds in the
+        member's ``origin_scope`` path segment via
+        :func:`~athenaeum.cluster_comparator.auto_memory_root`, rather than
+        being just the bare filename stem -- the bare-stem shape is exactly
+        the collision athenaeum#1677 fixed (see
+        ``test_distinct_origin_scopes_get_distinct_ids`` below).
         """
-        am = _write_am(tmp_path, "project_widget.md", "some claim")
+        root = tmp_path / "raw" / "auto-memory"
+        am = _write_am(root / "scope-x", "project_widget.md", "some claim")
         page = page_from_auto_memory_file(am)
-        assert page.id == "project-widget"
-        assert page.id == page_id_for_path(am.path)
+        assert page.id == "scope-x-project-widget"
+        assert page.id == page_id_for_path(am.path, root=root)
+        # Not the bare-stem id -- that's the shape this test used to pin.
+        assert page.id != page_id_for_path(am.path)
+
+    def test_distinct_origin_scopes_get_distinct_ids(self, tmp_path: Path) -> None:
+        """athenaeum#1677: two members with the SAME filename stem but
+        DIFFERENT ``origin_scope`` under one corpus root must resolve to
+        DIFFERENT page ids. Before the fix, both adapted to the bare stem
+        ``"project-widget"`` and collided onto one
+        :func:`~athenaeum.verdicts.make_pair_key` pairing -- the exact
+        hazard the issue's downstream retire-lane read depends on this
+        module NOT reproducing.
+        """
+        root = tmp_path / "raw" / "auto-memory"
+        am_a = _write_am(
+            root / "scope-a", "project_widget.md", "claim a", origin_scope="scope-a"
+        )
+        am_b = _write_am(
+            root / "scope-b", "project_widget.md", "claim b", origin_scope="scope-b"
+        )
+
+        page_a = page_from_auto_memory_file(am_a)
+        page_b = page_from_auto_memory_file(am_b)
+
+        assert page_a.id != page_b.id
+        assert page_a.id == page_id_for_path(am_a.path, root=root)
+        assert page_b.id == page_id_for_path(am_b.path, root=root)
+
+    def test_same_long_scope_different_stems_get_different_ids(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#1677 follow-up: on the live corpus, ``origin_scope`` is
+        frequently a full path-hash identifier 45-60+ characters long --
+        long enough on its own to hit :func:`~athenaeum.models.slugify`'s
+        60-char cap, truncating away the stem entirely and silently
+        re-colliding two DIFFERENT members of the SAME scope onto one id.
+        End-to-end via the real adapter (not :func:`page_id_for_path`
+        directly): two members sharing one long ``origin_scope`` but
+        different filename stems must resolve to different page ids.
+        """
+        long_scope = "users-tristankromer-code-kromatic-project-good-reads-newslet"
+        root = tmp_path / "raw" / "auto-memory"
+        am_a = _write_am(
+            root / long_scope,
+            "hestia_lock_drops_silently.md",
+            "claim a",
+            origin_scope=long_scope,
+        )
+        am_b = _write_am(
+            root / long_scope, "MEMORY.md", "claim b", origin_scope=long_scope
+        )
+
+        page_a = page_from_auto_memory_file(am_a)
+        page_b = page_from_auto_memory_file(am_b)
+
+        assert page_a.id != page_b.id
 
     def test_reads_content_only_once(self, tmp_path: Path) -> None:
         """``AutoMemoryFile.content`` caches after first read; adapting twice
