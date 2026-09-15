@@ -90,6 +90,51 @@ proves this offline: the real (cached) pattern's call count equals probes
 graded, and a deliberately reconstructed "once per backend" variant fails
 that same assertion.
 
+**Token totals, before and after (AC4).** BEFORE is MEASURED, read
+directly from the ``eval-summary.json`` artifact of main-push run
+`34934473115 <https://github.com/Kromatic-Innovation/athenaeum/actions/
+runs/34934473115>`_ — the run this issue's own body cites — relayed
+through a throwaway Actions branch and sha256-verified (the artifact's
+``*.blob.core.windows.net`` host is unreachable from a lane container).
+That run's ``layer_scores.recall`` is ``{"passed": 6, "total": 6}``
+(6 keyword-backend cases, the pre-athenaeum#1572 layout) and its
+``token_usage`` is::
+
+    input_tokens=76964 output_tokens=19423
+    cache_creation_input_tokens=4390 cache_read_input_tokens=30730
+
+A same-day rerun, run 34981842660 (2026-09-15T14:32Z, also main-push),
+shows the same ``recall`` 6/6 with ``input_tokens=74765
+output_tokens=15945`` — close to run 34934473115, confirming the figures
+above are not a one-off outlier.
+
+**This total is WHOLE-RUN, not per-layer** — ``EvalSession.emit_summary``
+(``tests/evals/harness.py``) accumulates ``token_usage`` across every eval
+layer in the session (``attachment``, ``classify``, ``decomposition``,
+``detector``, ``merge``, ``recall``, ``resolver``, ``underdetermined``,
+``write_tier_compare``), so the 76,964/19,423 figures above are NOT
+recall's own cost. The ``per_model`` breakdown in the same artifact does
+not separate it either: ``query_topics.extract_topics``'s
+``DEFAULT_TOPIC_MODEL`` is ``athenaeum.query_topics.DEFAULT_TOPIC_MODEL ==
+athenaeum.config.DEFAULT_CLASSIFY_MODEL == "claude-haiku-4-5-20251001"``
+— the SAME model id ``tiers.tier2_classify`` (the ``classify`` layer,
+6 cases in this run) defaults to — so the ``claude-haiku-4-5-20251001``
+per-model bucket (``input_tokens=17722 output_tokens=3650``) is the SUM of
+both layers' calls, not recall's alone. Isolating recall's own share would
+require a live run of ONLY this module, which no container here can make
+(``ANTHROPIC_API_KEY`` is empty). This limitation is real and stated
+rather than papered over with a computed-looking split.
+
+AFTER is DERIVED, not measured: extraction runs once per probe (the
+call-count invariant above), so a full run of this module makes 20 calls
+(one per probe in ``probes.yaml``, shared across both backend
+parametrizations by :class:`_TopicCallTracker`) versus the 6 the old
+keyword-only layout made — call count rises ~3.33×. Per-call cost is
+capped by ``query_topics.py``'s fixed system prompt and
+``_TOPIC_MAX_TOKENS=256``, so total extraction tokens should scale
+roughly with call count, but no live run has produced an actual AFTER
+number from this container; do not read the ~3.33× figure as measured.
+
 **Vector cases carry ``pytest.mark.embedding`` (issue athenaeum#1572 plan
 step 2)** — same convention as ``tests/test_search.py`` /
 ``tests/evals/test_recall_eval.py``'s neighbours: the real MiniLM ONNX
