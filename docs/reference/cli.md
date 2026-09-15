@@ -95,6 +95,8 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum reresolve-questions`](#athenaeum-reresolve-questions) (command) — Re-resolve open proposal-less pending questions (self-heal transient cap/offline escalations)
 - [`athenaeum retire-pages`](#athenaeum-retire-pages) (command) — Retire explicit wiki pages by uid. Default is dry-run (prints the kill-list, affected pending-merge proposals, and index entries); --apply git-archives the kill-list in a two-commit pair, withdraws referencing pending-merge proposals, rebuilds wiki/_index.md, and rebuilds the recall index. Unknown or ambiguous uids abort before any commit. Recovery is git-only: the retired page's content lives in the provenance-snapshot commit (HEAD~1 immediately after this run's archive commit) — run `git show <that-commit-sha>:<page-path>` to recover it, or `git log --diff-filter=D -- <page-path>` first if you need to find the commit.
 - [`athenaeum run`](#athenaeum-run) (command) — Run the librarian pipeline
+- [`athenaeum schema`](#athenaeum-schema) (group) — Page schema-version maintenance: apply pending EAGER rule-based kernel migrations corpus-wide.
+- [`athenaeum schema migrate`](#athenaeum-schema-migrate) (command) — Apply pending rule-based/eager schema migrations (athenaeum.schema_migrations.MIGRATIONS) — dry-run unless --apply. Never touches a model-derivation migration (those advance only via 'athenaeum audit') and never overwrites an already-populated field.
 - [`athenaeum serve`](#athenaeum-serve) (command) — Start the MCP memory server
 - [`athenaeum session-end`](#athenaeum-session-end) (command) — Change-gated ingest + reindex for SessionEnd: compile this session's new raw intake, then refresh the index — a fast no-op (no LLM, no reindex) when nothing changed.
 - [`athenaeum spend`](#athenaeum-spend) (command) — Report LLM spend from the durable ledger ($ for API, tokens for subscription — never blended)
@@ -1183,6 +1185,25 @@ Run the librarian pipeline
 | `--verbose`, `-v` | `False` | — | Enable debug logging |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 | `--wiki-root` | — | — | Wiki output directory (default: ~/knowledge/wiki) |
+
+## `athenaeum schema`
+
+Page schema-version maintenance: apply pending EAGER rule-based kernel migrations corpus-wide.
+
+Subcommands:
+
+- `athenaeum schema migrate` — Apply pending rule-based/eager schema migrations (athenaeum.schema_migrations.MIGRATIONS) — dry-run unless --apply. Never touches a model-derivation migration (those advance only via 'athenaeum audit') and never overwrites an already-populated field.
+
+## `athenaeum schema migrate`
+
+Apply pending rule-based/eager schema migrations (athenaeum.schema_migrations.MIGRATIONS) — dry-run unless --apply. Never touches a model-derivation migration (those advance only via 'athenaeum audit') and never overwrites an already-populated field.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | `False` | — | Write the pending migrations. Without this flag the command reports and writes nothing. |
+| `--dry-run` | `False` | — | Report without writing. This is already the default; the flag exists so a caller can state it, and it OVERRIDES --apply when both are given (safe mode wins). |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum serve`
 

@@ -163,6 +163,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "ingest": ("athenaeum._cmd_index", "add_index_subparsers"),
     "session-end": ("athenaeum._cmd_index", "add_index_subparsers"),
     "audit": ("athenaeum._cmd_audit", "add_audit_subparser"),
+    "schema": ("athenaeum._cmd_schema", "add_schema_subparser"),
 }
 
 
@@ -205,6 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_repair import add_repair_subparser
     from athenaeum._cmd_retire import add_retire_subparser
     from athenaeum._cmd_run import add_run_subparser
+    from athenaeum._cmd_schema import add_schema_subparser
     from athenaeum._cmd_serve import add_serve_subparser
     from athenaeum._cmd_storage import add_storage_subparser
     from athenaeum._cmd_subject import add_subject_subparser
@@ -241,6 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_merges_subparser(subparsers)  # merges
     add_decisions_subparser(subparsers)  # decisions
     add_audit_subparser(subparsers)  # audit (issue athenaeum#1624)
+    add_schema_subparser(subparsers)  # schema migrate (issue athenaeum#1628)
     add_authority_subparser(subparsers)  # authority
     add_axiom_subparser(subparsers)  # axiom
     add_calibration_subparser(subparsers)  # calibration
