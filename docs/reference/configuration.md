@@ -258,6 +258,77 @@ sync sets both ``pull_before_run: true`` and ``push_after_run: true`` in
 ``athenaeum.yaml``. Non-bool yaml values fall through to the default
 (off).
 
+## `audit`
+
+### `resolve_audit_nightly_max_pages`
+
+- **YAML path:** `audit.nightly_max_pages`
+- **Environment variable:** `ATHENAEUM_AUDIT_NIGHTLY_MAX_PAGES`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the nightly re-audit drain's per-run page cap.
+
+Strictly opt-in, like the spend ceilings this module already resolves
+(`_resolve_optional_positive_number`): unset means ``None``, and
+`athenaeum.audit_queue.run_nightly_drain` treats ``None`` as "the
+phase does not run at all" — the librarian's nightly re-audit phase
+(``athenaeum.librarian._run_audit_nightly_drain_phase``) is OFF by
+default and only wires in once an operator sets this key. Precedence:
+``ATHENAEUM_AUDIT_NIGHTLY_MAX_PAGES`` env > ``audit.nightly_max_pages``
+yaml > ``None`` (disabled).
+
+### `resolve_audit_nightly_spend_share`
+
+- **YAML path:** `audit.nightly_spend_share`
+- **Environment variable:** `ATHENAEUM_AUDIT_NIGHTLY_SPEND_SHARE`
+- **CLI flag:** —
+- **Default:** `0.5`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the nightly drain's share of the daily spend ceiling.
+
+The fraction of `resolve_spend_max_usd_per_day` the nightly
+re-audit drain may spend before it stops
+submitting further pages this run and records the remainder of its
+page window as skipped for budget — see
+`athenaeum.audit_queue.run_nightly_drain`. This knob NEVER changes
+the underlying daily USD ceiling itself, via yaml or otherwise (out of
+scope for); it only narrows how much of that
+ALREADY-configured ceiling the nightly drain, specifically, may claim
+on top of whatever else has already spent today. When no daily ceiling
+is configured at all, this knob does
+nothing (mirrors every other share/percent-of-an-unset-ceiling knob in
+this module) — the drain is then bounded only by
+`resolve_audit_nightly_max_pages`. NOT opt-in itself — always
+resolves to a usable fraction (`DEFAULT_AUDIT_NIGHTLY_SPEND_SHARE`
+when unset). Precedence: ``ATHENAEUM_AUDIT_NIGHTLY_SPEND_SHARE`` env >
+``audit.nightly_spend_share`` yaml > ``0.5``. A ``bool`` / non-numeric /
+value outside ``(0, 1]`` (env or yaml) falls through to the default.
+
+### `resolve_audit_stale_after_days`
+
+- **YAML path:** `audit.stale_after_days`
+- **Environment variable:** `ATHENAEUM_AUDIT_STALE_AFTER_DAYS`
+- **CLI flag:** —
+- **Default:** `90`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the stale-page age threshold, in days.
+
+A page whose ``last_audited`` is missing, or older than this many days,
+is stale (see `athenaeum.audit_queue`). NOT opt-in — always
+resolves to a usable value (`DEFAULT_AUDIT_STALE_AFTER_DAYS` when
+unset), mirroring `resolve_spend_warning_threshold_pct`'s "always
+resolves" shape rather than the ceilings' "unset means off" shape,
+because the stale-page REPORT itself is always on (only the nightly
+drain phase is opt-in — see `resolve_audit_nightly_max_pages`).
+Precedence: ``ATHENAEUM_AUDIT_STALE_AFTER_DAYS`` env > ``audit.stale_after_days``
+yaml > ``90``. A ``bool`` / non-int / ``<= 0`` value (env or yaml) falls
+through to the default — a zero/negative age would mark every page
+stale unconditionally.
+
 ## `audit_on_touch`
 
 ### `resolve_audit_on_touch_freshness_hours`

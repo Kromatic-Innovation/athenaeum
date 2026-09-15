@@ -43,6 +43,9 @@ def cmd_audit(args: argparse.Namespace) -> int:
         print(f"error: no wiki directory at {wiki_root}", file=sys.stderr)
         return 1
 
+    if args.stale:
+        return _cmd_audit_stale(args, wiki_root)
+
     uids: list[str] | None = None
     if args.uids is not None:
         uids_path = Path(args.uids)
@@ -115,6 +118,46 @@ def cmd_audit(args: argparse.Namespace) -> int:
             lock.release()
 
 
+def _cmd_audit_stale(args: argparse.Namespace, wiki_root: Path) -> int:
+    """``athenaeum audit --stale`` — the read-only stale-page review report
+    (issue athenaeum#1630 Plan item 1).
+
+    A flag on the existing ``audit`` command rather than a nested ``audit
+    stale`` subcommand: this CLI's own factoring rule (``cli.py``'s module
+    docstring) is one ``add_*_subparser`` per command with NO precedent for
+    nested/verb subcommands anywhere in the tree (every related-command
+    group — e.g. ``_cmd_lifecycle``'s init/status/disable/enable/spend —
+    registers each as its own FLAT top-level command, never nested under a
+    shared parent token). A flag on ``audit`` also lets this report reuse
+    ``--path``/``--json``/``--limit`` verbatim rather than re-declaring
+    them on a second parser.
+
+    Read-only: never builds an LLM client, never acquires the run lock,
+    never touches ``--apply``/``--batch``/``--sample``/``--seed``/``--uids``.
+    """
+    from athenaeum.audit_queue import compute_stale_pages, render_stale_table
+    from athenaeum.config import load_config, resolve_audit_stale_after_days
+
+    config = load_config(_resolve_knowledge_root(args))
+    stale_after_days = resolve_audit_stale_after_days(config)
+    entries = compute_stale_pages(wiki_root, stale_after_days=stale_after_days)
+    if args.limit is not None:
+        entries = entries[: args.limit]
+
+    if args.json:
+        payload = {
+            "stale_after_days": stale_after_days,
+            "count": len(entries),
+            "pages": [e.to_dict() for e in entries],
+        }
+        sys.stdout.write(json.dumps(payload) + "\n")
+        return 0
+
+    print(f"=== athenaeum audit --stale (stale_after_days={stale_after_days}) ===")
+    print(render_stale_table(entries))
+    return 0
+
+
 def add_audit_subparser(subparsers: argparse._SubParsersAction) -> None:
     """Register ``audit``."""
     parser = subparsers.add_parser(
@@ -184,6 +227,15 @@ def add_audit_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--json",
         action="store_true",
         help="Emit machine-readable JSON instead of plain text.",
+    )
+    parser.add_argument(
+        "--stale",
+        action="store_true",
+        help="Report mode (issue athenaeum#1630): list pages whose last_audited "
+        "is missing/older than audit.stale_after_days, or whose audit_version "
+        "is behind the current version, oldest/never-audited first. Read-only "
+        "-- ignores --apply/--batch/--sample/--seed/--uids/--mechanical-dry-run; "
+        "honors --path/--json/--limit.",
     )
     _add_lock_args(parser)
     parser.set_defaults(func=cmd_audit)

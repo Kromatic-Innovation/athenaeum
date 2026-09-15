@@ -4418,6 +4418,13 @@ class RunContext:
     # when the config gate is off -- a disabled phase never touches this
     # field, distinguishing "didn't run" from "ran and saw nothing").
     rule_proposals_summary: dict[str, Any] | None = None
+    # Issue athenaeum#1630: run-summary counts from
+    # ``_run_audit_nightly_drain_phase`` (``None`` until that phase runs,
+    # including when its config gate -- ``audit.nightly_max_pages`` unset,
+    # see ``athenaeum.config.resolve_audit_nightly_max_pages`` -- is off,
+    # mirroring ``rule_proposals_summary``'s "disabled phase never touches
+    # this field" contract immediately above).
+    audit_nightly_drain_summary: dict[str, Any] | None = None
     # Issue athenaeum#968: run-summary counts from the never-ingest gate applied
     # in ``_run_auto_memory_phase`` (``None`` until that phase runs) -- how
     # many auto-memory candidates were excluded this run because they
@@ -6003,6 +6010,100 @@ def _run_rule_proposal_phase(ctx: RunContext) -> None:
             summary["skipped_draft_invalid"],
             summary["skipped_no_client"],
             summary["skipped_deadline"],
+        )
+
+
+def _run_audit_nightly_drain_phase(ctx: RunContext) -> None:
+    """Bounded nightly stale-page re-audit drain (issue athenaeum#1630).
+
+    Delegates entirely to :func:`athenaeum.audit_queue.run_nightly_drain` —
+    the stale-page scan, the per-run page cap, the spend-share budget check,
+    the Batch-transport re-audit call and the write-back all live there (see
+    that module's docstring); this function is only the librarian wiring,
+    modelled on :func:`_run_rule_proposal_phase`'s own shape immediately
+    above (a REAL, opt-in, unattended LLM-spend phase run last, right
+    before finalize).
+
+    **Config-gated OFF by default**
+    (:func:`~athenaeum.config.resolve_audit_nightly_max_pages`,
+    ``audit.nightly_max_pages`` absent -> ``None``): with the key unset,
+    ``run_nightly_drain`` returns ``None`` immediately -- no wiki scan, no
+    client touched -- and this phase records ``{"reason": "disabled"}`` and
+    leaves ``ctx.audit_nightly_drain_summary`` untouched (``None``),
+    distinguishing "didn't run" from "ran and drained zero pages", the same
+    contract ``rule_proposals_summary`` documents for itself.
+
+    Reuses the SAME per-knob client/model ``_arm_run_deadline`` already
+    resolved for ``"classify"`` (``ctx.classify_client`` /
+    ``ctx.knob_models["classify"]``) -- the exact knob
+    ``athenaeum audit``'s own CLI path resolves via
+    ``resolve_model("classify", ...)`` -- rather than building a second
+    client. Tokens land in ``ctx.usage`` (passed as ``run_usage``); per
+    ``athenaeum.audit_queue``'s own docstring, this phase deliberately never
+    writes a spend-ledger row itself -- the finalize phase's
+    ``spend.record_spend_per_knob_provider`` call is the ONE ledger write
+    for the whole run, covering this phase's tokens along with every other
+    phase's.
+
+    Called from ``run()`` immediately after ``_run_rule_proposal_phase`` --
+    same deterministic-phase family (last, after entity/auto-memory have
+    already spent whatever ``ctx.run_deadline`` allowed), same
+    ``ctx.deadline_tripped`` guard as the auto-memory block above it: a run
+    that already blew its wall-clock budget must not open a brand-new LLM
+    knob afterward.
+    """
+    if ctx.deadline_tripped:
+        ctx.run_profile.append(
+            ("audit-nightly-drain", 0.0, {"reason": "deadline-tripped"})
+        )
+        return
+
+    _start = time.monotonic()
+    try:
+        from athenaeum.audit_queue import run_nightly_drain
+
+        summary = run_nightly_drain(
+            ctx.wiki_root,
+            client=ctx.classify_client,
+            model=ctx.knob_models.get("classify", ""),
+            config=ctx.config,
+            now=ctx.now,
+            run_usage=ctx.usage,
+        )
+    except Exception:
+        log.exception("audit nightly-drain phase failed; continuing run")
+        ctx.run_profile.append(
+            ("audit-nightly-drain", time.monotonic() - _start, {"reason": "failed"})
+        )
+        return
+
+    if summary is None:
+        ctx.run_profile.append(
+            ("audit-nightly-drain", time.monotonic() - _start, {"reason": "disabled"})
+        )
+        return
+
+    ctx.audit_nightly_drain_summary = summary.to_dict()
+    ctx.run_profile.append(
+        (
+            "audit-nightly-drain",
+            time.monotonic() - _start,
+            {
+                "reason": summary.reason,
+                "reaudited": summary.reaudited,
+                "skipped_budget": summary.skipped_budget,
+                "stale_remaining": summary.stale_remaining,
+            },
+        )
+    )
+    if summary.reaudited or summary.skipped_budget:
+        log.info(
+            "audit-nightly-drain: %d page(s) re-audited, %d skipped for budget, "
+            "%d stale page(s) remaining ($%.4f)",
+            summary.reaudited,
+            summary.skipped_budget,
+            summary.stale_remaining,
+            summary.cost_usd,
         )
 
 
@@ -9445,6 +9546,15 @@ def run(
     # phases earlier in the run — see `_run_rule_proposal_phase`'s docstring
     # for the full ordering + deadline rationale.
     _run_rule_proposal_phase(ctx)
+
+    # Phase: bounded nightly stale-page re-audit drain (issue athenaeum#1630) —
+    # config-gated OFF by default (`audit.nightly_max_pages` unset), same
+    # "no-op until an operator opts in" contract as rule-proposals directly
+    # above, and run right after it for the identical reason: both are
+    # opt-in, unattended LLM-spend phases that must run LAST, after
+    # entity/auto-memory have already spent whatever `ctx.run_deadline`
+    # allowed — see `_run_audit_nightly_drain_phase`'s own docstring.
+    _run_audit_nightly_drain_phase(ctx)
 
     # Phase: finalize (spend summary + ledger, post-run push, page-size
     # guardrail, pending-merge revalidation advisor, summary emit, drain
