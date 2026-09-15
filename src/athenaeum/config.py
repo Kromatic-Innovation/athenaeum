@@ -2791,6 +2791,37 @@ def resolve_audit_stale_after_days(config: dict[str, Any] | None) -> int:
     return DEFAULT_AUDIT_STALE_AFTER_DAYS
 
 
+#: Default date-fill mode for :func:`resolve_audit_date_fill` (issue athenaeum#1667
+#: Decision 1, option A): only a stated role/event/effective date may fill
+#: ``valid_from``/``valid_until``; contact/ingestion metadata is excluded
+#: in code (see :func:`athenaeum.audit._excluded_date_values`). ``off`` is
+#: the documented fallback (option B): date filling is disabled entirely.
+DEFAULT_AUDIT_DATE_FILL = "constrained"
+
+
+def resolve_audit_date_fill(config: dict[str, Any] | None) -> str:
+    """Resolve the audit date-fill mode (issue athenaeum#1667 Decision 1).
+
+    Precedence: ``ATHENAEUM_AUDIT_DATE_FILL`` env > ``audit.date_fill`` yaml
+    > ``"constrained"``. Only ``"constrained"`` and ``"off"`` are valid
+    values (case-insensitive); anything else -- malformed env override,
+    unrecognised yaml value, missing config -- falls back to
+    :data:`DEFAULT_AUDIT_DATE_FILL`, the safer default that still routes
+    every fill through :func:`athenaeum.audit._excluded_date_values`
+    rather than silently accepting every model-proposed date.
+    """
+    env = os.environ.get("ATHENAEUM_AUDIT_DATE_FILL")
+    if isinstance(env, str) and env.strip().lower() in ("constrained", "off"):
+        return env.strip().lower()
+    if isinstance(config, dict):
+        cfg = config.get("audit")
+        if isinstance(cfg, dict):
+            raw = cfg.get("date_fill")
+            if isinstance(raw, str) and raw.strip().lower() in ("constrained", "off"):
+                return raw.strip().lower()
+    return DEFAULT_AUDIT_DATE_FILL
+
+
 def resolve_audit_nightly_max_pages(config: dict[str, Any] | None) -> int | None:
     """Resolve the nightly re-audit drain's per-run page cap (issue athenaeum#1630).
 

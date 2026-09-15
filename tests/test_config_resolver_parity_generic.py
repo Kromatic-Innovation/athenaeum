@@ -171,7 +171,15 @@ _STRUCTURED_CONTAINER_VALUE = frozenset({"resolve_model_rates"})
 # so every out-of-vocabulary sentinel correctly returns the default. Covered
 # directly by TestClosedVocabularyResolversDirect (see module docstring).
 _CLOSED_VOCABULARY_VALUE = frozenset(
-    {"resolve_standing_state_claim_kinds", "resolve_sibling_widening_classes"}
+    {
+        "resolve_standing_state_claim_kinds",
+        "resolve_sibling_widening_classes",
+        # Issue athenaeum#1667: only "constrained"/"off" are valid; every generic
+        # sentinel is out-of-vocabulary and correctly returns the default,
+        # reading identically to "never read the key". Covered directly by
+        # TestClosedVocabularyResolversDirect below.
+        "resolve_audit_date_fill",
+    }
 )
 
 _ENV_VAR_RE = re.compile(r"^ATHENAEUM_[A-Z0-9_]+$")
@@ -699,6 +707,25 @@ class TestClosedVocabularyResolversDirect:
         assert config_mod.resolve_standing_state_claim_kinds(None) == frozenset(
             {"fact", "decision", "policy"}
         )
+
+    def test_audit_date_fill_reads_its_yaml_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_AUDIT_DATE_FILL", raising=False)
+        assert config_mod.resolve_audit_date_fill({"audit": {"date_fill": "off"}}) == "off"
+
+    def test_audit_date_fill_reads_its_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_AUDIT_DATE_FILL", "off")
+        assert config_mod.resolve_audit_date_fill(None) == "off"
+
+    def test_audit_date_fill_env_beats_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_AUDIT_DATE_FILL", "constrained")
+        resolved = config_mod.resolve_audit_date_fill({"audit": {"date_fill": "off"}})
+        assert resolved == "constrained"
+
+    def test_audit_date_fill_drops_out_of_vocabulary_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_AUDIT_DATE_FILL", "bogus")
+        assert config_mod.resolve_audit_date_fill(None) == "constrained"
 
     def test_sibling_widening_classes_reads_its_yaml_key(
         self, monkeypatch: pytest.MonkeyPatch
