@@ -116,6 +116,8 @@ Evidence, kept out of the reading path.
 - [`used` column heuristic accuracy (synthetic)](measurements/used-column-heuristic-accuracy-2026-09-15.md)
 - [`used` column heuristic accuracy — original substring rule](measurements/used-column-heuristic-accuracy-2026-09-10.md)
 - [Decomposition baseline](measurements/decomposition-baseline-2026-09-10.md)
+- [Attachment baseline](measurements/attachment-baseline-2026-09-15.md)
+- [Relatedness baseline](measurements/relatedness-baseline-2026-09-15.md)
 - [Deploy SHA stamp](measurements/deploy-sha-stamp.md)
 - [LLM provider cost audit](measurements/audits/2026-08-06-llm-provider-cost-audit.md)
 

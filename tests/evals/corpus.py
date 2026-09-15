@@ -201,6 +201,14 @@ class Probe:
     the assertion, not a missing value. ``must_not_rank`` names pages that a
     correct system keeps OUT of the top-k, which is how a disambiguation
     probe states the failure it is guarding against.
+
+    ``answer_tokens`` (issue athenaeum#1573) is the probe's ANSWER ground
+    truth, distinct from ``expected_uids``'s RETRIEVAL ground truth: a
+    unique, invented token planted in the body of one of the probe's own
+    ``expected_uids`` pages, used for a normalized substring match against a
+    rollout's final answer text (``tests.evals.north_star_report.grade_correctness``).
+    Empty for abstention probes -- there, correctness is graded by a
+    separate rule (no token to plant when nothing answers the probe).
     """
 
     id: str
@@ -209,6 +217,7 @@ class Probe:
     expected_uids: tuple[str, ...] = ()
     must_not_rank: tuple[str, ...] = ()
     distractor_terms: tuple[str, ...] = ()
+    answer_tokens: tuple[str, ...] = ()
     note: str = ""
 
 
@@ -348,6 +357,7 @@ def load_probes() -> list[Probe]:
             expected_uids=tuple(raw.get("expected_uids", ())),
             must_not_rank=tuple(raw.get("must_not_rank", ())),
             distractor_terms=tuple(raw.get("distractor_terms", ())),
+            answer_tokens=tuple(raw.get("answer_tokens", ())),
             note=raw.get("note", ""),
         )
         for raw in _load_yaml(PROBES_PATH)
@@ -361,8 +371,15 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
     names a page that does not exist does not fail loudly -- it silently scores
     as a retrieval MISS, which reads as a model regression. A dangling
     ground-truth reference must be a corpus error, never an eval result.
+
+    ``answer_tokens`` is checked the same way (issue athenaeum#1573): a
+    non-abstention probe with no planted token, or a token that does not
+    actually occur in any of its own ``expected_uids`` pages' bodies, would
+    silently score as an un-gradable "n/a" correctness cell -- indistinguishable
+    from a real floor/ceiling of zero -- rather than a corpus authoring error.
     """
     uids = {p.uid for p in pages}
+    pages_by_uid = {p.uid: p for p in pages}
     problems: list[str] = []
     for probe in probes:
         for uid in probe.expected_uids:
@@ -375,6 +392,18 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
             problems.append(f"probe {probe.id!r}: abstention probes must have no expected_uids")
         if probe.probe_class != "abstention" and not probe.expected_uids:
             problems.append(f"probe {probe.id!r}: no expected_uids and not abstention")
+        if probe.probe_class == "abstention" and probe.answer_tokens:
+            problems.append(f"probe {probe.id!r}: abstention probes must have no answer_tokens")
+        if probe.probe_class != "abstention" and not probe.answer_tokens:
+            problems.append(f"probe {probe.id!r}: no answer_tokens and not abstention")
+        elif probe.probe_class != "abstention":
+            answer_text = "\n".join(
+                pages_by_uid[uid].body for uid in probe.expected_uids if uid in pages_by_uid
+            )
+            if not any(token in answer_text for token in probe.answer_tokens):
+                problems.append(
+                    f"probe {probe.id!r}: no answer_tokens value found in its answer page body"
+                )
     for page in pages:
         for edge in page.related:
             if edge.uid not in uids:

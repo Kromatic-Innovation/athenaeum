@@ -18,8 +18,9 @@ Two test classes, two different things pinned:
 * :class:`TestAbstentionProbesAbstainOnlyWhenFloorIsActive` -- the AC4 test
   named by the issue. Runs the real ``recall_search`` entry point against
   the three ``abstention``-class probes in
-  ``tests/evals/data/corpus/probes/probes.yaml``, on both FTS5 and keyword,
-  and asserts BOTH directions:
+  ``tests/evals/data/corpus/probes/probes.yaml``, on FTS5, keyword, and
+  (athenaeum#1571, ``embedding``-marked only) vector, and asserts BOTH
+  directions:
 
   1. with the floor set high enough, the probe returns an explicitly empty
      result (AC2, AC4 direction 1);
@@ -32,6 +33,7 @@ Two test classes, two different things pinned:
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 
 import pytest
@@ -75,10 +77,24 @@ class TestRelevanceFloorResolver:
         assert resolve_recall_relevance_floor(None, backend, unprompted=unprompted) is None
 
     def test_unrecognized_backend_never_gets_a_floor(self) -> None:
-        """``vector`` is not named in athenaeum#1492's acceptance criteria; even
-        an explicit config value for it must not produce a floor."""
+        """A genuinely unrecognized backend name (not ``fts5``/``keyword``/
+        ``vector``) is not in the resolver's allowlist; even an explicit
+        config value for it must not produce a floor. Rewritten for
+        athenaeum#1571, which moved ``vector`` OUT of this category -- see
+        ``test_vector_floor_is_read`` for its new, opposite behavior."""
+        config = {"recall": {"relevance_floor": {"made-up-backend": 0.5}}}
+        assert (
+            resolve_recall_relevance_floor(config, "made-up-backend", unprompted=False)
+            is None
+        )
+
+    def test_vector_floor_is_read(self) -> None:
+        """athenaeum#1571 gate 1: ``vector`` is now in the resolver's allowlist,
+        so an explicit config value for it resolves like ``fts5``/``keyword``
+        (YAML only -- there is no env-var entry for it, see
+        ``resolve_recall_relevance_floor``'s docstring)."""
         config = {"recall": {"relevance_floor": {"vector": 0.5}}}
-        assert resolve_recall_relevance_floor(config, "vector", unprompted=False) is None
+        assert resolve_recall_relevance_floor(config, "vector", unprompted=False) == 0.5
 
     def test_yaml_floor_is_read_per_backend(self) -> None:
         config = {"recall": {"relevance_floor": {"fts5": -6.0, "keyword": 12.0}}}
@@ -129,18 +145,39 @@ class TestRelevanceFloorResolver:
     def test_meets_relevance_floor_is_a_noop_when_inactive(self) -> None:
         assert meets_relevance_floor("fts5", -1000.0, None) is True
         assert meets_relevance_floor("keyword", -1000.0, None) is True
+        assert meets_relevance_floor("vector", 1000.0, None) is True
+        # Even an unrecognized backend name is a no-op when the floor is
+        # inactive -- the ValueError below only fires for a non-None floor
+        # (see ``test_unrecognized_backend_raises``).
+        assert meets_relevance_floor("made-up-backend", 1000.0, None) is True
 
     def test_meets_relevance_floor_directions_differ_by_backend(self) -> None:
-        """FTS5's rank is lower-is-better; keyword's score is higher-is-better.
-        A floor comparator that used one direction for both would silently
-        invert one backend's behavior."""
+        """FTS5's rank and vector's distance are lower-is-better; keyword's
+        score is higher-is-better. A floor comparator that used one
+        direction for all backends would silently invert the others.
+        athenaeum#1571: this used to be true of ``vector``, which fell through
+        the old higher-is-better fallback -- these two assertions fail on
+        pre-athenaeum#1571 code (0.2 was rejected, 0.8 was accepted -- both
+        backwards)."""
         # FTS5: more negative is better, so a MORE negative score clears a
         # LESS negative floor, and vice versa.
         assert meets_relevance_floor("fts5", -10.0, -5.0) is True
         assert meets_relevance_floor("fts5", -1.0, -5.0) is False
+        # vector (athenaeum#1571): chromadb cosine DISTANCE, lower is better --
+        # same direction as fts5, opposite of keyword.
+        assert meets_relevance_floor("vector", 0.2, 0.5) is True
+        assert meets_relevance_floor("vector", 0.8, 0.5) is False
         # keyword: higher is better.
         assert meets_relevance_floor("keyword", 40.0, 10.0) is True
         assert meets_relevance_floor("keyword", 5.0, 10.0) is False
+
+    def test_unrecognized_backend_raises(self) -> None:
+        """athenaeum#1571 AC2: an unrecognized backend name with a non-None
+        floor must raise rather than silently fall through to a direction
+        that may be wrong -- the exact failure mode ``vector`` had before
+        this issue opened gate 2 for it."""
+        with pytest.raises(ValueError):
+            meets_relevance_floor("made-up-backend", 5.0, 0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -153,18 +190,30 @@ class TestRelevanceFloorResolver:
 # floor-INACTIVE assertion vacuous for that probe. "small" adds the
 # distractor tier (built from each probe's own ``distractor_terms``), which
 # is what makes all three probes reproduce athenaeum#1492's defect --
-# confidently wrong, non-empty -- on BOTH backends. Measured this dispatch:
-# FTS5 ranks land in [-9.9, -4.0]; keyword scores land in [12.0, 49.0].
+# confidently wrong, non-empty -- on ALL THREE backends. Measured this
+# dispatch: FTS5 ranks land in [-9.9, -4.0]; keyword scores land in
+# [12.0, 49.0]; vector (athenaeum#1571) cosine distances land in
+# [0.740, 1.606] for the abstention probes specifically ([0.416, 1.606]
+# across every probe class).
 _CORPUS_SCALE = "small"
 
 # Chosen far outside the observed ranges above -- excludes every hit at this
-# scale without hand-tuning to a fragile boundary value.
+# scale without hand-tuning to a fragile boundary value. vector's floor is
+# very NEGATIVE (like fts5, not like keyword) because it is lower-is-better:
+# a distance floor of -1000.0 means no observed (positive) distance ever
+# clears it (``score <= floor``).
 _ACTIVE_FLOOR_CONFIG = {
-    "recall": {"relevance_floor": {"fts5": -1000.0, "keyword": 1_000_000.0}}
+    "recall": {
+        "relevance_floor": {"fts5": -1000.0, "keyword": 1_000_000.0, "vector": -1000.0}
+    }
 }
 _INACTIVE_FLOOR_CONFIG: dict[str, object] | None = None
 
-_BACKENDS = ("fts5", "keyword")
+# vector (athenaeum#1571) runs only under the ``embedding`` marker (real
+# MiniLM, deselected from the default suite by ``pyproject.toml``'s
+# addopts) -- see ``_ensure_vector_index`` for why the fts5/keyword-only
+# default suite never pays its chromadb/MiniLM cost.
+_BACKENDS = ("fts5", "keyword", pytest.param("vector", marks=pytest.mark.embedding))
 
 
 def _abstention_probe_ids() -> list[str]:
@@ -190,7 +239,12 @@ def abstention_wiki(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
     Shared read-only across every test below -- neither backend mutates the
     wiki tree or the index at query time, so one build serves the whole
-    (probe x backend x floor-state) matrix cheaply.
+    (probe x backend x floor-state) matrix cheaply. FTS5's index is built
+    eagerly here because fts5/keyword tests are always selected (default
+    suite); vector's index is deliberately NOT built here -- see
+    ``_ensure_vector_index``, called lazily only by the ``embedding``-marked
+    vector parametrization, so a default (``-m 'not embedding'``) run of
+    this module never imports chromadb or loads MiniLM.
     """
     corpus = build_corpus(scale=_CORPUS_SCALE)
     root = tmp_path_factory.mktemp("athenaeum-1492-corpus")
@@ -199,7 +253,23 @@ def abstention_wiki(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return wiki_root
 
 
+@functools.lru_cache(maxsize=None)
+def _ensure_vector_index(wiki_root: Path) -> None:
+    """Build ``wiki_root``'s chromadb vector index, once, on first use.
+
+    athenaeum#1571: kept OUT of the ``abstention_wiki`` fixture body (which
+    every fts5/keyword test also depends on) so the chromadb/MiniLM cost is
+    paid only when a vector-parametrized (``embedding``-marked) test
+    actually runs. ``lru_cache`` makes repeat calls for the same
+    module-scoped ``wiki_root`` free, the same idempotency the fixture
+    above gets from ``scope="module"``.
+    """
+    get_backend("vector").build_index(wiki_root, wiki_root.parent / "cache")
+
+
 def _run(wiki_root: Path, query: str, backend: str, config: dict[str, object] | None) -> str:
+    if backend == "vector":
+        _ensure_vector_index(wiki_root)
     return recall_search(
         wiki_root,
         query,
