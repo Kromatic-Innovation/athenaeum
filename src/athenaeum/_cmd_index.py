@@ -46,7 +46,16 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
         aliases=["rebuild-index"],
         help="Rebuild the search index (FTS5 or vector, per config). "
         "--incremental (default) applies only the athenaeum#348 hash-diff delta; "
-        "--full rebuilds from scratch.",
+        "--full rebuilds from scratch. The incremental delta is keyed off each "
+        "file's whole-content hash, not off how its frontmatter is parsed, so a "
+        "page whose on-disk text has not changed since it was last indexed is "
+        "hash-matched and skipped even after a parser fix lands -- an index "
+        "built before the block-list aliases:/tags: parser fix (commit "
+        "324bb3c4) keeps stale, empty aliases/tags columns for any page an "
+        "--incremental run does not otherwise touch. Only --full re-parses "
+        "every page from scratch and refills them. To check the result, run "
+        "`SELECT COUNT(*) FROM wiki WHERE aliases != ''` against "
+        "cache-dir/wiki-index.db (swap in tags for the other column).",
     )
     rebuild_parser.add_argument(
         "--path",
