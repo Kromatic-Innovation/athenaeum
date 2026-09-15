@@ -199,6 +199,39 @@ class TestRenderRunSummary:
         line = _render_run_summary(profile)
         assert "degraded" not in line
 
+    def test_citation_only_and_full_merge_counts_rendered_separately(self) -> None:
+        # Issue athenaeum#1463: a merge response reporting adds_new_claim=false
+        # is a citation-only merge (source recorded, body untouched);
+        # anything else is a full merge (today's behaviour). Both counters
+        # ride the entity segment, generic key=value tokens like
+        # created=/updated=/degraded= above -- a fixture run with one of
+        # each records 1 and 1.
+        profile = [
+            (
+                "entity",
+                4.2,
+                {
+                    "calls": 2,
+                    "updated": 2,
+                    "files": 1,
+                    "citation_only_merges": 1,
+                    "full_merges": 1,
+                },
+            ),
+        ]
+        line = _render_run_summary(profile)
+        assert "citation_only_merges=1" in line
+        assert "full_merges=1" in line
+
+    def test_citation_only_and_full_merge_counts_absent_on_clean_run(self) -> None:
+        # Mirrors test_degraded_absent_on_clean_run: the run loop omits both
+        # tokens when their TokenUsage counter is 0, so a run with no
+        # merges at all renders a byte-unchanged summary line.
+        profile = [("entity", 4.2, {"calls": 6, "created": 2, "files": 5})]
+        line = _render_run_summary(profile)
+        assert "citation_only_merges" not in line
+        assert "full_merges" not in line
+
     def test_out_tok_per_call_rendered_in_entity_segment(self) -> None:
         # Issue athenaeum#490 (slice A): output-tokens-per-call rides the entity
         # segment so the silent full-page-echo fallback's ~10x output-cost

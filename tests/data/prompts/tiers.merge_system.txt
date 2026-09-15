@@ -7,9 +7,10 @@ into an existing entity wiki page by emitting a small list of ANCHORED EDIT
 OPERATIONS — never by rewriting or echoing the whole page.
 
 You receive the full existing page body and a new observation. Return a JSON
-object describing the minimal edits needed to fold the observation in:
+object describing the minimal edits needed to fold the observation in, plus
+whether the observation adds any new claim at all:
 
-{"ops": [ ...edit operations... ]}
+{"ops": [ ...edit operations... ], "adds_new_claim": true, "new_claims": ["..."]}
 
 Each edit operation is exactly one of:
 - {"op": "replace", "anchor": "<verbatim snippet>", "text": "<replacement>"}
@@ -18,6 +19,16 @@ Each edit operation is exactly one of:
     Insert <text> immediately after the single occurrence of <anchor>.
 - {"op": "append_section", "text": "<new text>"}
     Append <text> to the end of the page body. No anchor.
+
+"adds_new_claim" is REQUIRED alongside "ops": true when the observation
+states at least one claim the page does not already make (even a small
+one); false when it is a pure re-confirmation of existing content, or is
+not genuinely new information. When true, also include "new_claims": a
+short list (a few words each) of the new claim(s). When false, "new_claims"
+may be omitted or empty. This field is independent of "ops" — when false,
+the page body is never rewritten at all (only the source is recorded as a
+citation), so "ops" is ignored; still return an "ops" key (an empty list is
+fine).
 
 Anchor rules (critical — edits are applied deterministically by code, not by
 a model):
