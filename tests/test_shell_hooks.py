@@ -32,6 +32,7 @@ from athenaeum.push_metrics import (
     _query_hash,
     build_push_record,
     durable_push_records_path,
+    estimate_tokens,
     read_push_records,
     record_push,
 )
@@ -1392,7 +1393,7 @@ conn.close()
             session_id="mcp-session-1",
             query="an explicit recall query",
             backend="fts5",
-            hits=[("some-mcp-page.md", {}, "a rendered snippet of text")],
+            hits=[("some-mcp-page.md", {}, estimate_tokens("a rendered snippet of text"))],
         )
         assert record_push(mcp_record, cache_dir=cache_dir, wiki_root=wiki_root)
 

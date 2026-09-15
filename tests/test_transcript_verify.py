@@ -492,7 +492,13 @@ class TestDefaultProjectsRootHonorsClaudeConfigDir:
             session_id="pmref-session",
             query="q",
             backend="keyword",
-            hits=[("thing-uid-1.md", {"uid": "pushed-uid-1"}, "some body text")],
+            hits=[
+                (
+                    "thing-uid-1.md",
+                    {"uid": "pushed-uid-1"},
+                    push_metrics.estimate_tokens("some body text"),
+                ),
+            ],
         )
         push_metrics.record_push(record, cache_dir=cache_dir)
         pushed_id = record.items[0].id  # the opaque id that must be referenced

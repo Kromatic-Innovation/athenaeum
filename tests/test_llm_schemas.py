@@ -754,7 +754,7 @@ class TestObservationsPathIsolation:
                         query="probe query",
                         backend="fts5",
                         hits=[
-                            ("probe.md", {"uid": "probe0001"}, "probe snippet text"),
+                            ("probe.md", {"uid": "probe0001"}, 4),
                         ],
                     )
                     assert record_push(record) is True
@@ -871,37 +871,143 @@ class TestObservationsPathIsolation:
 
 
 # ---------------------------------------------------------------------------
-# durable_observations_path — issue athenaeum#980 AC4: the R3
-# operational/store-durable relocation seam. NOT wired to observe()'s
-# scattered call sites in this slice (see athenaeum.store.ARTIFACT_REGISTRY's
-# "llm-schema-observations-ledger" entry) — this test covers the resolver
-# capability itself.
+# durable_observations_path — issue athenaeum#1601: the ledger resolves to
+# the cache dir, ALWAYS, and never into wiki_root. This withdraws issue
+# athenaeum#980 AC4's relocation of this artifact (the same withdrawal issue
+# athenaeum#1591 already made for `_push_records.jsonl`) and closes issue
+# athenaeum#1512 defect 2's bare-``exists()`` flip at this call site. See the
+# function's own docstring for the archaeology, and
+# athenaeum.store.ARTIFACT_REGISTRY's "llm-schema-observations-ledger" entry
+# for the (unchanged) R3 class/scope declaration.
+#
+# The four-way resolution matrix below is exhaustive over the two files'
+# populated/absent states — the point being that the answer is now the same
+# in every cell, so no state of the disk can migrate a deployment.
 # ---------------------------------------------------------------------------
 
 
 class TestDurableObservationsPath:
-    def test_fresh_store_resolves_to_wiki_root(self, tmp_path: Path) -> None:
-        wiki_root = tmp_path / "wiki"
-        wiki_root.mkdir()
-        cache_dir = tmp_path / "cache"
-        resolved = llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
-        assert resolved == wiki_root / llm_schemas.OBSERVATIONS_FILENAME
-
-    def test_legacy_store_falls_back_to_cache_dir(self, tmp_path: Path) -> None:
+    @staticmethod
+    def _roots(tmp_path: Path) -> tuple[Path, Path]:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
+        return wiki_root, cache_dir
+
+    def test_matrix_neither_populated(self, tmp_path: Path) -> None:
+        wiki_root, cache_dir = self._roots(tmp_path)
+        assert (
+            llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
+            == cache_dir / llm_schemas.OBSERVATIONS_FILENAME
+        )
+
+    def test_matrix_legacy_populated(self, tmp_path: Path) -> None:
+        wiki_root, cache_dir = self._roots(tmp_path)
         legacy = cache_dir / llm_schemas.OBSERVATIONS_FILENAME
         legacy.write_text('{"v":1}\n', encoding="utf-8")
-        resolved = llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
-        assert resolved == legacy
+        assert llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir) == legacy
+
+    def test_matrix_wiki_path_populated(self, tmp_path: Path) -> None:
+        """The cell that used to migrate a deployment. A populated
+        ``<wiki_root>/_llm_schema_observations.jsonl`` no longer captures
+        resolution."""
+        wiki_root, cache_dir = self._roots(tmp_path)
+        (wiki_root / llm_schemas.OBSERVATIONS_FILENAME).write_text(
+            '{"v":1}\n', encoding="utf-8"
+        )
+        assert (
+            llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
+            == cache_dir / llm_schemas.OBSERVATIONS_FILENAME
+        )
+
+    def test_matrix_both_populated(self, tmp_path: Path) -> None:
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = cache_dir / llm_schemas.OBSERVATIONS_FILENAME
+        legacy.write_text('{"v":1}\n', encoding="utf-8")
+        (wiki_root / llm_schemas.OBSERVATIONS_FILENAME).write_text(
+            '{"v":1}\n', encoding="utf-8"
+        )
+        assert llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir) == legacy
+
+    def test_empty_wiki_path_never_captures_resolution(self, tmp_path: Path) -> None:
+        """Regression test for issue athenaeum#1512 defect 2, which was still
+        live in THIS resolver (a bare ``new_path.exists()``) until issue
+        athenaeum#1601: an EMPTY
+        ``<wiki_root>/_llm_schema_observations.jsonl`` — a stray ``touch``, a
+        partially written file from a crashed run — must not look "already
+        migrated" and permanently flip resolution away from a populated
+        legacy ledger."""
+        wiki_root, cache_dir = self._roots(tmp_path)
+        legacy = cache_dir / llm_schemas.OBSERVATIONS_FILENAME
+        legacy.write_text('{"v":1}\n', encoding="utf-8")
+        (wiki_root / llm_schemas.OBSERVATIONS_FILENAME).touch()
+
+        assert llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir) == legacy
+
+    def test_populated_wiki_path_warns_once_naming_both_paths(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """AC3: a deployment already carrying the misrouted file is left in a
+        DELIBERATE state — nothing is auto-migrated or auto-deleted, and the
+        operator is told the rows are stranded. Warned once per path per
+        process, mirroring push_metrics.durable_push_records_path exactly."""
+        wiki_root, cache_dir = self._roots(tmp_path)
+        misrouted = wiki_root / llm_schemas.OBSERVATIONS_FILENAME
+        misrouted.write_text('{"v":1}\n', encoding="utf-8")
+        llm_schemas._MISROUTED_WARNED.discard(str(misrouted))
+
+        with caplog.at_level(logging.WARNING, logger=llm_schemas.log.name):
+            llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
+            llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, "must warn once per path, not once per observation"
+        message = warnings[0].getMessage()
+        assert str(misrouted) in message
+        assert str(cache_dir / llm_schemas.OBSERVATIONS_FILENAME) in message
+
+    def test_absent_wiki_path_is_silent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Counter-example: the healthy case must not warn."""
+        wiki_root, cache_dir = self._roots(tmp_path)
+        with caplog.at_level(logging.WARNING, logger=llm_schemas.log.name):
+            llm_schemas.durable_observations_path(wiki_root, cache_dir=cache_dir)
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+    def test_artifact_registry_declares_the_cache_dir(self) -> None:
+        """Issue athenaeum#1601 AC5: the resolver and the R3 declaration must
+        agree, or the contradiction this issue was filed about simply moves
+        to a different pair of files."""
+        from athenaeum.store import ARTIFACT_REGISTRY
+
+        decl = next(a for a in ARTIFACT_REGISTRY if a.name == "llm-schema-observations-ledger")
+        assert decl.persistence_class == "operational"
+        assert decl.operational_scope == "store-durable"
+        assert decl.location == "cache dir"
+
+    def test_explicit_cache_dir_now_does_isolate_this_function(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1512 defect 1 at the function level. Before issue
+        athenaeum#1601 this function could not isolate ``cache_dir``: a
+        populated live ``wiki_root`` won over an empty scratch cache dir. It
+        is now isolated by construction — ``cache_dir`` is the only input
+        that can affect the answer."""
+        would_be_live_wiki_root = tmp_path / "wiki"
+        would_be_live_wiki_root.mkdir()
+        scratch_cache_dir = tmp_path / "scratch-cache"  # deliberately not created
+
+        resolved = llm_schemas.durable_observations_path(
+            would_be_live_wiki_root, cache_dir=scratch_cache_dir
+        )
+
+        assert resolved == scratch_cache_dir / llm_schemas.OBSERVATIONS_FILENAME
 
     def test_no_split_brain_on_a_fresh_store(self, tmp_path: Path) -> None:
         """The production WRITE path (record_observation, as observe()/
         observe_parse_failure() call it) and the production READ path
         (read_observations) must agree on where a fresh store's ledger
-        lives — issue athenaeum#980 AC4."""
+        lives, and neither may put it under wiki_root (issue athenaeum#1601)."""
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         cache_dir = tmp_path / "cache"
@@ -914,10 +1020,14 @@ class TestDurableObservationsPath:
             wiki_root=wiki_root,
         )
 
+        # The write must have landed in the CACHE DIR, never under wiki_root.
+        assert (cache_dir / llm_schemas.OBSERVATIONS_FILENAME).exists()
+        assert not (wiki_root / llm_schemas.OBSERVATIONS_FILENAME).exists()
+
         rows = llm_schemas.read_observations(cache_dir, wiki_root=wiki_root)
         assert any(r.get("contract") == "split-brain-probe" for r in rows)
 
-        # A read that forgets wiki_root= must not silently see the same
-        # records via the old cache-dir default.
-        stale = llm_schemas.read_observations(cache_dir)
-        assert stale == []
+        # A read that omits wiki_root= must agree — there is no longer a
+        # wiki-root branch for it to diverge on.
+        same_rows = llm_schemas.read_observations(cache_dir)
+        assert same_rows == rows

@@ -878,36 +878,48 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         name="llm-schema-observations-ledger",
         persistence_class="operational",
         operational_scope="store-durable",
-        location="wiki root, with a legacy-store cache-dir fallback (see source_ref)",
+        location="cache dir",
         source_ref=(
-            "llm_schemas.py:134 OBSERVATIONS_FILENAME (design note §5.2 table row 8 "
-            "'observations.jsonl'). Issue athenaeum#980 AC4: "
-            "llm_schemas.durable_observations_path() resolves behind the seam with "
-            "the same legacy-store fallback as the spend ledger. observe()/"
-            "observe_parse_failure() and all five wrapper functions "
-            "(observe_query_topics/observe_claim_kind/observe_contradictions/"
-            "observe_resolutions/observe_tier2_classify/observe_tier3_merge_ops) now "
-            "accept wiki_root=, threaded from every call chain up to its available "
-            "root (query_topics.py, claim_kind.py -> librarian.py's ctx.wiki_root, "
-            "contradictions.py/resolutions.py -> merge.py's wiki_root, tiers.py -> "
-            "batch.py/merge.py's wiki_root)"
+            "llm_schemas.py OBSERVATIONS_FILENAME '_llm_schema_observations.jsonl' "
+            "(design note §5.2 table row 8 'observations.jsonl'). Issue athenaeum#980 "
+            "AC4 relocated this ledger to wiki root; issue athenaeum#1601 (operator "
+            "decision, 2026-09-15) WITHDREW that relocation and returned it to the "
+            "cache dir, the same fix issue athenaeum#1591 made for "
+            "push-records-ledger. R3's class/scope declaration is unchanged — "
+            "'store-durable' never implied 'wiki root'. "
+            "llm_schemas.durable_observations_path() now always resolves to the "
+            "cache dir and uses its wiki_root argument only to warn about a ledger "
+            "stranded at the withdrawn location; that same call also fixes issue "
+            "athenaeum#1512 defect 2 (a bare exists() check on the withdrawn path could "
+            "let a stray empty file flip resolution — closed by "
+            "_has_migrated_content()). observe()/observe_parse_failure() and all five "
+            "wrapper functions (observe_query_topics/observe_claim_kind/"
+            "observe_contradictions/observe_resolutions/observe_tier2_classify/"
+            "observe_tier3_merge_ops) still accept wiki_root=, threaded from every "
+            "call chain up to its available root, for that warning only — see "
+            "tests/test_llm_schemas.py::TestDurableObservationsPath"
         ),
     ),
     ArtifactDeclaration(
         name="spend-ledger",
         persistence_class="operational",
         operational_scope="store-durable",
-        location="wiki root, with a legacy-store cache-dir fallback (see source_ref)",
+        location="cache dir",
         source_ref=(
-            "spend.py:129 LEDGER_FILENAME (design note §5.2 table row 8 'spend.jsonl'). "
-            "Issue athenaeum#980 AC4: spend.durable_ledger_path() resolves behind the "
-            "seam (an existing installation's populated cache-dir ledger keeps "
-            "resolving there until migrated; a fresh or already-migrated store resolves "
-            "to wiki_root). Every production write AND read call site now passes "
-            "wiki_root= (librarian.py x3, drain.py, _cmd_drain.py, _cmd_lifecycle.py, "
-            "status.py, backlog_price_sheet.py, ordinary_night_table.py, answers.py, "
-            "query_topics.py + _cmd_query.py, memory_class_backfill.py) — see "
-            "tests/test_spend.py::TestDurableLedgerPath::test_no_split_brain_on_a_fresh_store"
+            "spend.py LEDGER_FILENAME 'spend.jsonl' (design note §5.2 table row 8 "
+            "'spend.jsonl'). Issue athenaeum#980 AC4 relocated this ledger to wiki "
+            "root; issue athenaeum#1601 (operator decision, 2026-09-15) WITHDREW that "
+            "relocation and returned it to the cache dir, the same fix issue "
+            "athenaeum#1591 made for push-records-ledger. R3's class/scope declaration "
+            "is unchanged — 'store-durable' never implied 'wiki root'. "
+            "spend.durable_ledger_path() now always resolves to the cache dir and uses "
+            "its wiki_root argument only to warn about a ledger stranded at the "
+            "withdrawn location. Every production write AND read call site still "
+            "passes wiki_root= (librarian.py x3, drain.py, _cmd_drain.py, "
+            "_cmd_lifecycle.py, status.py, backlog_price_sheet.py, "
+            "ordinary_night_table.py, answers.py, query_topics.py + _cmd_query.py, "
+            "memory_class_backfill.py) for that warning only — see "
+            "tests/test_spend.py::TestDurableLedgerPath::test_matrix_wiki_path_populated"
         ),
     ),
     ArtifactDeclaration(
