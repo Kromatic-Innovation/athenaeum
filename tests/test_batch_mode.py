@@ -2505,6 +2505,95 @@ class TestCollectPendingBatches:
         assert "Merged note from" in body
         assert batch_state.load(cache_dir) == {}
 
+    def test_collected_merge_citation_only_skips_body_rewrite(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#1463: the batch transport makes the SAME
+        citation-only decision as the synchronous transport on a response
+        that reports ``adds_new_claim: false`` — the collected merge must
+        leave the body untouched apart from the appended source citation,
+        never apply ``ops``, and count on the shared ``usage`` instance
+        (``parse_merge_ops_response`` is the ONE function both transports
+        call for a batched patch-mode merge response, so this is really
+        proving that choke point is actually reached from here).
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path,
+            "c4b",
+            ["Acme Corp shipped a thing.\n"],
+            with_acme=True,
+        )
+        cache_dir = tmp_path / "c4b-cache"
+        cache_dir.mkdir()
+
+        def _citation_only_responder(params: dict[str, Any]) -> str:
+            user_msg = params["messages"][0]["content"]
+            if "## Existing page content" in user_msg:
+                src = re.search(
+                    r"## New observation \(source: (.+)\)", user_msg
+                ).group(1)
+                return json.dumps(
+                    {
+                        "ops": [
+                            {"op": "append_section", "text": f"Merged note from {src}."}
+                        ],
+                        "adds_new_claim": False,
+                    }
+                )
+            return _scripted_responder(params)
+
+        classify_client = _FakeClient(_citation_only_responder, allow_sync=False)
+        write_client = _FakeClient(
+            _citation_only_responder, allow_sync=False, never_end=True
+        )
+        raw_files = discover_raw_files(root / "raw")
+        usage = TokenUsage()
+        page = root / "wiki" / "acme1234-acme-corp.md"
+
+        process_batch_run(
+            raw_files,
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            deadline=time.monotonic() - 1.0,
+            cache_dir=cache_dir,
+        )
+        write_client.batches._never_end = False
+        out = collect_pending_batches(
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=usage,
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+            sleep=lambda s: None,
+            cache_dir=cache_dir,
+        )
+
+        assert out.updated == 1
+        body = page.read_text(encoding="utf-8")
+        assert "Original body line." in body
+        # The whole point: ops (which WOULD have appended "Merged note
+        # from...") must never apply when adds_new_claim is false.
+        assert "Merged note from" not in body
+        assert "sessions/20240410T120000Z-aabbccd0.md" in body
+        assert usage.citation_only_merges == 1
+        assert usage.full_merges == 0
+        assert batch_state.load(cache_dir) == {}
+
     def test_a_batch_that_has_not_ended_keeps_its_handle(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

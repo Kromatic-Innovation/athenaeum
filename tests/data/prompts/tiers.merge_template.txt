@@ -11,10 +11,13 @@
 ## Instructions
 {scoping_note}Return a JSON object of anchored edit operations that fold the new
 observation into the existing page body, per the system instructions, e.g.:
-{{"ops": [{{"op": "insert_after", "anchor": "<verbatim snippet>", "text": "..."}}]}}
+{{"ops": [{{"op": "insert_after", "anchor": "<snippet>", "text": "..."}}],
+"adds_new_claim": true, "new_claims": ["..."]}}
 Copy every anchor VERBATIM from the existing body above; each anchor must
 occur exactly once. Cite the source in new footnotes as [^n]: {source_ref}.
-If the observation adds nothing new, return {{"ops": []}}.
+Always include "adds_new_claim" (true/false, see system instructions); when
+false, the body will not be rewritten regardless of "ops", so return
+{{"ops": [], "adds_new_claim": false}}.
 If you detect a principled contradiction that needs human review, do NOT
 return JSON — start your response with exactly `ESCALATE:` followed by a
 description of the conflict.

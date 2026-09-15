@@ -2796,9 +2796,10 @@ into an existing entity wiki page by emitting a small list of ANCHORED EDIT
 OPERATIONS — never by rewriting or echoing the whole page.
 
 You receive the full existing page body and a new observation. Return a JSON
-object describing the minimal edits needed to fold the observation in:
+object describing the minimal edits needed to fold the observation in, plus
+whether the observation adds any new claim at all:
 
-{"ops": [ ...edit operations... ]}
+{"ops": [ ...edit operations... ], "adds_new_claim": true, "new_claims": ["..."]}
 
 Each edit operation is exactly one of:
 - {"op": "replace", "anchor": "<verbatim snippet>", "text": "<replacement>"}
@@ -2807,6 +2808,16 @@ Each edit operation is exactly one of:
     Insert <text> immediately after the single occurrence of <anchor>.
 - {"op": "append_section", "text": "<new text>"}
     Append <text> to the end of the page body. No anchor.
+
+"adds_new_claim" is REQUIRED alongside "ops": true when the observation
+states at least one claim the page does not already make (even a small
+one); false when it is a pure re-confirmation of existing content, or is
+not genuinely new information. When true, also include "new_claims": a
+short list (a few words each) of the new claim(s). When false, "new_claims"
+may be omitted or empty. This field is independent of "ops" — when false,
+the page body is never rewritten at all (only the source is recorded as a
+citation), so "ops" is ignored; still return an "ops" key (an empty list is
+fine).
 
 Anchor rules (critical — edits are applied deterministically by code, not by
 a model):
@@ -2861,6 +2872,18 @@ Contradictions and escalation:
 MERGE_SYSTEM_FULL = (
     """You are a knowledge librarian. You merge new observations into
 existing entity wiki pages.
+
+Before anything else, always begin your ENTIRE response with exactly one
+line reporting whether the observation adds any new claim at all:
+`ADDS_NEW_CLAIM: true` or `ADDS_NEW_CLAIM: false` — true when the
+observation states at least one claim the page does not already make (even
+a small one), false when it is a pure re-confirmation of existing content
+or is not genuinely new information. Put the rest of your response
+(including NO_MERGE:/ESCALATE: below, or the merged page) on the following
+line(s), unchanged by this requirement. When false, the page body will not
+be rewritten at all — only the source is recorded as a citation — so
+anything you write after that first line is ignored; a brief reason may
+follow on the same line.
 
 Rules:
 - Preserve all existing content
@@ -3012,10 +3035,13 @@ MERGE_TEMPLATE = """## Existing page content
 ## Instructions
 {scoping_note}Return a JSON object of anchored edit operations that fold the new
 observation into the existing page body, per the system instructions, e.g.:
-{{"ops": [{{"op": "insert_after", "anchor": "<verbatim snippet>", "text": "..."}}]}}
+{{"ops": [{{"op": "insert_after", "anchor": "<snippet>", "text": "..."}}],
+"adds_new_claim": true, "new_claims": ["..."]}}
 Copy every anchor VERBATIM from the existing body above; each anchor must
 occur exactly once. Cite the source in new footnotes as [^n]: {source_ref}.
-If the observation adds nothing new, return {{"ops": []}}.
+Always include "adds_new_claim" (true/false, see system instructions); when
+false, the body will not be rewritten regardless of "ops", so return
+{{"ops": [], "adds_new_claim": false}}.
 If you detect a principled contradiction that needs human review, do NOT
 return JSON — start your response with exactly `ESCALATE:` followed by a
 description of the conflict.
@@ -3030,10 +3056,13 @@ MERGE_TEMPLATE_FULL = """## Existing page content
 {observations}
 
 ## Instructions
-Return the updated body content (no frontmatter). Merge the new observation
-into the existing page. If you detect a principled contradiction that needs
-human review, start your response with exactly `ESCALATE:` followed by a
-description of the conflict, then provide the merged body below a `---` separator.
+Begin your response with exactly `ADDS_NEW_CLAIM: true` or
+`ADDS_NEW_CLAIM: false` on its own line (see system instructions), then
+return the updated body content (no frontmatter) on the following line(s).
+Merge the new observation into the existing page. If you detect a
+principled contradiction that needs human review, follow the
+`ADDS_NEW_CLAIM:` line with exactly `ESCALATE:` followed by a description of
+the conflict, then provide the merged body below a `---` separator.
 """ + data_only_clause(
     "user_document", "existing_page"
 )
@@ -4029,6 +4058,45 @@ def apply_merge_ops(existing_body: str, ops: list[dict[str, Any]]) -> str:
     return body
 
 
+#: Matches a footnote DEFINITION line (``[^1]: ...``), not a reference
+#: (``[^1]`` inline in prose) — mirrors the template's own numbering
+#: convention (``_entity-template.md``: ``[^1]: [[src-uid|Name]] context,
+#: date``). Used only to pick the next unused footnote number for
+#: :func:`_append_source_citation`; non-numeric footnote labels (not used by
+#: anything athenaeum itself writes) are simply not counted, so numbering
+#: still starts after the highest NUMERIC label present.
+_FOOTNOTE_DEF_RE = re.compile(r"^\[\^(\d+)\]:", re.MULTILINE)
+
+
+def _append_source_citation(existing_body: str, source_ref: str) -> str:
+    """Deterministically append ONE source-citation footnote (issue athenaeum#1463).
+
+    The citation-only merge path: when the model reports
+    ``adds_new_claim: false``, the page body must stay byte-identical apart
+    from recording *source_ref* as a citation — so this is built by code,
+    never by the model, exactly like :func:`apply_merge_ops`'s own
+    ``append_section`` handling. Picks the lowest unused footnote number
+    (highest existing ``[^N]:`` definition + 1, or ``1`` on a page with
+    none) so a repeated citation-only merge never collides with an existing
+    footnote.
+    """
+    next_num = max(
+        (int(m.group(1)) for m in _FOOTNOTE_DEF_RE.finditer(existing_body)),
+        default=0,
+    ) + 1
+    citation = f"[^{next_num}]: {source_ref}"
+    trimmed = existing_body.rstrip("\n")
+    return f"{trimmed}\n\n{citation}" if existing_body else citation
+
+
+#: Stable, greppable log prefix for the citation-only merge decision (issue
+#: athenaeum#1463): the model reported ``adds_new_claim: false`` (patch-mode
+#: JSON field, or the full-echo ``ADDS_NEW_CLAIM:`` sentinel) so the body
+#: rewrite was skipped and only the source citation was recorded. Generic —
+#: this fires for any source, never gated on adapter name, source type, or
+#: page title.
+MERGE_CITATION_ONLY_LOG_PREFIX = "tier3-merge-citation-only"
+
 #: Stable, greppable prefix for the WARNING each patch-mode → full-echo
 #: fallback emits (issue athenaeum#490, slice A). The full-page-echo fallback is a
 #: ~10x output-token cost multiplier that until now degraded silently; every
@@ -4090,10 +4158,26 @@ def parse_merge_ops_response(
     *,
     stop_reason: str | None = None,
     wiki_root: Path | None = None,
+    usage: TokenUsage | None = None,
 ) -> tuple[str | None, EscalationItem | None, bool]:
     """Parse a patch-mode merge response and apply it to ``existing_body``.
 
     Issue athenaeum#469. Returns ``(updated_body, escalation_item, needs_fallback)``.
+
+    Issue athenaeum#1463: before ``ops`` is even inspected, a bare-boolean
+    ``adds_new_claim: false`` in the parsed JSON object short-circuits to
+    the citation-only path — :func:`_append_source_citation` deterministically
+    appends *source_ref* as a footnote, ``ops`` is ignored entirely, and
+    *usage* (when supplied) has ``citation_only_merges`` incremented so a run
+    summary can count it (see :func:`athenaeum.librarian._render_run_summary`).
+    Anything OTHER than an exact ``False`` — missing, ``true``, or any other
+    type — is the "fall back to today's behaviour" case and falls straight
+    through to the existing ``ops``-based handling below, unmodified, so a
+    normal merge that happens to omit or misuse the field is never worse
+    than it was before this field existed. Shared by the synchronous
+    (:func:`tier3_merge`) AND batch (:mod:`athenaeum.batch`) transports —
+    both call this function directly — so the decision is identical on
+    either.
 
     ``needs_fallback`` is True when the response cannot be applied
     deterministically and the caller should retry once via the full-echo
@@ -4170,6 +4254,24 @@ def parse_merge_ops_response(
             sub_cause = MERGE_PARSE_FAIL_AMBIGUOUS
 
     if obj is not None:
+        # Issue athenaeum#1463: read BEFORE ops shape validation — when the
+        # model says false, ops are never applied, so they need not even
+        # parse cleanly. Only an exact JSON `false` (Python `False`) takes
+        # this path; anything else (missing, `true`, a string, ...) falls
+        # through to the ops-based handling below unchanged.
+        if obj.get("adds_new_claim") is False:
+            if usage is not None:
+                usage.citation_only_merges += 1
+            log.info(
+                "%s page=%s source=%s — model reported no new claim; "
+                "recording only the source citation, body otherwise "
+                "unchanged",
+                MERGE_CITATION_ONLY_LOG_PREFIX,
+                action.name,
+                source_ref,
+            )
+            return _append_source_citation(existing_body, source_ref), None, False
+
         # Fix (b): normalize a non-list ops field (dict-valued, or the alternate
         # `operations` key) before declaring failure.
         ops = _coerce_merge_ops(obj)
@@ -4185,7 +4287,10 @@ def parse_merge_ops_response(
                 ops, call_site="tiers.parse_merge_ops_response", wiki_root=wiki_root
             )
             try:
-                return apply_merge_ops(existing_body, ops), None, False
+                applied = apply_merge_ops(existing_body, ops)
+                if usage is not None:
+                    usage.full_merges += 1
+                return applied, None, False
             except MergeOpsError as exc:
                 log.warning(
                     "%s page=%s source=%s cause=anchor-miss — patch-mode ops "
@@ -4300,6 +4405,7 @@ def tier3_merge(
         # spurious value — the fallback would itself be a no-op there.
         stop_reason=reported_stop_reason(response, _capabilities(config)),
         wiki_root=wiki_root,
+        usage=usage,
     )
     if not needs_fallback:
         return body, escalation
@@ -4412,6 +4518,7 @@ def tier3_merge_full(
         # so the truncation-refusal escalation does not fire on a spurious
         # value; a genuinely short body still degrades through the normal path.
         stop_reason=reported_stop_reason(response, _capabilities(config)),
+        usage=usage,
     )
 
 
@@ -4531,8 +4638,19 @@ def parse_tier3_merge(
     existing_body: str,
     *,
     stop_reason: str | None = None,
+    usage: TokenUsage | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
     """Parse a full-echo Tier-3 merge response into (updated_body, escalation).
+
+    Issue athenaeum#1463: the REQUIRED leading ``ADDS_NEW_CLAIM: true|false``
+    line (see :data:`MERGE_SYSTEM_FULL`) is stripped off FIRST, before any of
+    the existing ``NO_MERGE:``/``ESCALATE:``/plausible-echo logic below ever
+    sees the remainder — so this field composes with every existing full-echo
+    outcome unmodified. Only an exact, case-insensitive ``false`` short-
+    circuits to the citation-only path (:func:`_append_source_citation`);
+    a missing line, an unparseable value, or ``true`` all fall straight
+    through to the unchanged logic below (today's behaviour), per the
+    issue's "never worse than now" contract.
 
     Issue athenaeum#469: this is the FULL-ECHO parser, used by the fallback path
     (:func:`tier3_merge_full`). The primary patch-mode responses are handled
@@ -4583,6 +4701,33 @@ def parse_tier3_merge(
             ),
         )
 
+    # Issue athenaeum#1463: strip the required ADDS_NEW_CLAIM: sentinel off the
+    # FIRST line, unconditionally, before any sentinel/guard logic below sees
+    # the rest. Only an exact "false" verdict is actionable; everything else
+    # (absent, "true", malformed) leaves `text` as the ORIGINAL response —
+    # today's behaviour, unchanged.
+    first_line, _sep, rest = text.partition("\n")
+    if first_line.strip().upper().startswith("ADDS_NEW_CLAIM:"):
+        verdict = first_line.split(":", 1)[1].strip().lower()
+        # Strip the sentinel line regardless of verdict — even an
+        # unparseable value must not leave "ADDS_NEW_CLAIM: ..." glued onto
+        # what the NO_MERGE:/ESCALATE:/plausible-echo checks below treat as
+        # the response, or a malformed-but-otherwise-fine merge would be
+        # refused for a reason unrelated to its actual content.
+        text = rest.strip()
+        if verdict == "false":
+            if usage is not None:
+                usage.citation_only_merges += 1
+            log.info(
+                "%s page=%s source=%s — model reported no new claim; "
+                "recording only the source citation, body otherwise "
+                "unchanged",
+                MERGE_CITATION_ONLY_LOG_PREFIX,
+                action.name,
+                source_ref,
+            )
+            return _append_source_citation(existing_body, source_ref), None
+
     if text.startswith("NO_MERGE:"):
         reason = text[len("NO_MERGE:"):].strip()
         log.info(
@@ -4632,6 +4777,8 @@ def parse_tier3_merge(
         )
         return None, escalation
 
+    if usage is not None:
+        usage.full_merges += 1
     return text, escalation
 
 

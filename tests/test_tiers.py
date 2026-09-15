@@ -26,18 +26,21 @@ from athenaeum.tiers import (
     _TIER2_CLASSIFY_RETRY_MAX_TOKENS,
     _TIER3_CREATE_MAX_TOKENS,
     ENTITY_LLM_CALL_MARKER,
+    MERGE_CITATION_ONLY_LOG_PREFIX,
     MERGE_FALLBACK_LOG_PREFIX,
     MERGE_FULL_GUARD_REFUSED_LOG_PREFIX,
     MERGE_FULL_NOOP_LOG_PREFIX,
     MERGE_PARSE_FAIL_AMBIGUOUS,
     MERGE_PARSE_FAIL_NO_JSON,
     MERGE_PARSE_FAIL_SHAPE,
+    MERGE_SYSTEM,
     MERGE_SYSTEM_FULL,
     TIER2_DEGRADED_MARKER,
     TIER2_TRUNCATED_MARKER,
     MergeOpsError,
     PreambleOnlyResponseError,
     Tier2ParseStats,
+    _append_source_citation,
     _merge_full_response_is_plausible_echo,
     _timed_llm_call,
     apply_merge_ops,
@@ -2742,6 +2745,275 @@ class TestHeadinglessSectionScopedMerge:
         assert updated_body is not None
         assert "Reconfirmed this quarter" in updated_body
         assert untouched_marker in updated_body, "untargeted content was altered"
+
+
+class TestTier3MergeAddsNewClaim:
+    """Issue athenaeum#1463: the merge call also reports ``adds_new_claim``.
+
+    When the model reports ``adds_new_claim: false`` (patch-mode JSON field,
+    or the full-echo ``ADDS_NEW_CLAIM:`` sentinel), the body rewrite is
+    skipped entirely — only the source citation is recorded — regardless of
+    what ``ops``/body content the response also carries. Anything else
+    (``true``, missing, unparseable) falls back to today's behaviour: a
+    normal merge. The GENERIC contract: nothing here inspects source type,
+    adapter name, or page title.
+    """
+
+    _ACTION = EntityAction(
+        kind="update",
+        name="Acme Corp",
+        entity_type="company",
+        tags=[],
+        access="",
+        existing_uid="a1b2c3d4",
+        observations="Acme is, once again, a fintech startup.",
+    )
+    _EXISTING_BODY = "# Acme Corp\n\nFintech startup.[^1]\n\n[^1]: sessions/old.md"
+
+    # -- patch-mode (parse_merge_ops_response) ----------------------------
+
+    def test_patch_mode_false_skips_rewrite_and_records_citation(self) -> None:
+        """AC1: body is byte-identical apart from the appended citation, and
+        the new source_ref appears among the page's sources."""
+        response = json.dumps(
+            {
+                "ops": [
+                    {
+                        "op": "append_section",
+                        "text": "This would have rewritten the body.",
+                    }
+                ],
+                "adds_new_claim": False,
+            }
+        )
+        usage = TokenUsage()
+
+        body, esc, needs_fallback = parse_merge_ops_response(
+            response,
+            self._ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+
+        assert needs_fallback is False
+        assert esc is None
+        assert body is not None
+        assert "This would have rewritten the body." not in body
+        # Byte-identical apart from the appended citation line.
+        assert body == self._EXISTING_BODY + "\n\n[^2]: sessions/new.md"
+        assert "sessions/new.md" in body
+        assert usage.citation_only_merges == 1
+        assert usage.full_merges == 0
+
+    def test_patch_mode_true_applies_ops_as_today(self) -> None:
+        """AC2 (counter-example): true → the model's body edits apply, exactly
+        as they did before this field existed."""
+        response = json.dumps(
+            {
+                "ops": [
+                    {
+                        "op": "append_section",
+                        "text": "New Series C claim.[^2]",
+                    }
+                ],
+                "adds_new_claim": True,
+                "new_claims": ["Raised Series C"],
+            }
+        )
+        usage = TokenUsage()
+
+        body, esc, needs_fallback = parse_merge_ops_response(
+            response,
+            self._ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+
+        assert needs_fallback is False
+        assert esc is None
+        assert body is not None
+        assert "New Series C claim." in body
+        assert usage.citation_only_merges == 0
+        assert usage.full_merges == 1
+
+    def test_patch_mode_missing_field_behaves_as_today(self) -> None:
+        """AC3: a response with no ``adds_new_claim`` key merges normally."""
+        response = json.dumps(
+            {"ops": [{"op": "append_section", "text": "New Series C claim.[^2]"}]}
+        )
+        usage = TokenUsage()
+
+        body, esc, needs_fallback = parse_merge_ops_response(
+            response,
+            self._ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+
+        assert needs_fallback is False
+        assert body is not None
+        assert "New Series C claim." in body, "a normal body merge must still happen"
+        assert usage.citation_only_merges == 0
+        assert usage.full_merges == 1
+
+    def test_patch_mode_false_wins_even_with_empty_ops(self) -> None:
+        """A false verdict short-circuits before ``ops`` is even inspected —
+        missing/empty ``ops`` alongside it must not be treated as a parse
+        failure needing full-echo fallback."""
+        response = json.dumps({"adds_new_claim": False})
+        usage = TokenUsage()
+
+        body, esc, needs_fallback = parse_merge_ops_response(
+            response,
+            self._ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+
+        assert needs_fallback is False
+        assert body == self._EXISTING_BODY + "\n\n[^2]: sessions/new.md"
+        assert usage.citation_only_merges == 1
+
+    def test_patch_mode_citation_only_is_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Plan step 2: the citation-only decision is recorded in the run log."""
+        response = json.dumps({"ops": [], "adds_new_claim": False})
+        with caplog.at_level(logging.INFO):
+            parse_merge_ops_response(
+                response, self._ACTION, "sessions/new.md", self._EXISTING_BODY
+            )
+        assert MERGE_CITATION_ONLY_LOG_PREFIX in caplog.text
+
+    # -- full-echo (parse_tier3_merge) ------------------------------------
+
+    def test_full_echo_false_skips_rewrite_and_records_citation(self) -> None:
+        response = (
+            "ADDS_NEW_CLAIM: false\n"
+            "# Acme Corp\n\nSomething the model would have rewritten."
+        )
+        usage = TokenUsage()
+
+        body, esc = parse_tier3_merge(
+            response,
+            self._ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+
+        assert esc is None
+        assert body == self._EXISTING_BODY + "\n\n[^2]: sessions/new.md"
+        assert usage.citation_only_merges == 1
+        assert usage.full_merges == 0
+
+    def test_full_echo_true_merges_as_today(self) -> None:
+        response = "ADDS_NEW_CLAIM: true\n" + self._EXISTING_BODY + " New info.[^2]"
+        usage = TokenUsage()
+
+        body, esc = parse_tier3_merge(
+            response,
+            self._ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+
+        assert esc is None
+        assert body is not None
+        assert "New info." in body
+        assert usage.citation_only_merges == 0
+        assert usage.full_merges == 1
+
+    def test_full_echo_missing_sentinel_behaves_as_today(self) -> None:
+        """AC3 on the full-echo transport: no sentinel line at all still
+        merges normally (today's pre-athenaeum#1463 behaviour)."""
+        response = self._EXISTING_BODY + " New info.[^2]"
+        usage = TokenUsage()
+
+        body, esc = parse_tier3_merge(
+            response,
+            self._ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+
+        assert esc is None
+        assert body is not None
+        assert "New info." in body, "a normal body merge must still happen"
+        assert usage.citation_only_merges == 0
+        assert usage.full_merges == 1
+
+    def test_full_echo_end_to_end_via_tier3_merge_full(self) -> None:
+        """Same decision, exercised through the public entry point a real
+        run calls, not just the parser."""
+        client = _mock_client(
+            "ADDS_NEW_CLAIM: false\nreason: pure re-confirmation"
+        )
+        usage = TokenUsage()
+
+        body, esc = tier3_merge_full(
+            self._ACTION,
+            self._EXISTING_BODY,
+            "sessions/new.md",
+            client,
+            usage=usage,
+        )
+
+        assert esc is None
+        assert body == self._EXISTING_BODY + "\n\n[^2]: sessions/new.md"
+        assert usage.citation_only_merges == 1
+
+    # -- footnote numbering helper -----------------------------------------
+
+    def test_append_source_citation_numbers_past_existing_footnotes(self) -> None:
+        assert (
+            _append_source_citation(self._EXISTING_BODY, "sessions/new.md")
+            == self._EXISTING_BODY + "\n\n[^2]: sessions/new.md"
+        )
+
+    def test_append_source_citation_starts_at_one_on_a_bare_page(self) -> None:
+        assert (
+            _append_source_citation("# Empty Page\n\nNothing yet.", "sessions/x.md")
+            == "# Empty Page\n\nNothing yet.\n\n[^1]: sessions/x.md"
+        )
+
+    # -- prompt/schema wording ----------------------------------------------
+
+    def test_merge_system_documents_adds_new_claim(self) -> None:
+        assert "adds_new_claim" in MERGE_SYSTEM
+
+    def test_merge_system_full_documents_adds_new_claim_sentinel(self) -> None:
+        assert "ADDS_NEW_CLAIM" in MERGE_SYSTEM_FULL
+
+    # -- generic contract: no source-specific branch (AC6) ------------------
+
+    def test_new_check_carries_no_source_specific_branch(self) -> None:
+        """``git grep -n -i "mural|board"`` over the new check's own code
+        must return no hits — the decision is generic, gated ONLY on the
+        model-reported ``adds_new_claim`` field, never on source type,
+        adapter name, or page/board title."""
+        import inspect
+
+        from athenaeum import tiers as tiers_mod
+
+        new_code = "\n".join(
+            [
+                tiers_mod.MERGE_SYSTEM,
+                tiers_mod.MERGE_SYSTEM_FULL,
+                tiers_mod.MERGE_TEMPLATE,
+                tiers_mod.MERGE_TEMPLATE_FULL,
+                inspect.getsource(tiers_mod._append_source_citation),
+                inspect.getsource(tiers_mod.parse_merge_ops_response),
+                inspect.getsource(tiers_mod.parse_tier3_merge),
+            ]
+        )
+        assert not re.search(r"mural|board", new_code, re.IGNORECASE)
 
 
 class TestTier3MergePatchOps:
