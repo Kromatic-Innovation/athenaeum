@@ -154,7 +154,6 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "description": ("athenaeum._cmd_description", "add_description_subparser"),
     "verdicts": ("athenaeum._cmd_verdicts", "add_verdicts_subparser"),
     "dimensions": ("athenaeum._cmd_dimensions", "add_dimensions_subparser"),
-    "subject": ("athenaeum._cmd_subject", "add_subject_subparser"),
     "context": ("athenaeum._cmd_context", "add_context_subparser"),
     "reindex": ("athenaeum._cmd_index", "add_index_subparsers"),
     "rebuild-index": ("athenaeum._cmd_index", "add_index_subparsers"),
@@ -209,7 +208,6 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_schema import add_schema_subparser
     from athenaeum._cmd_serve import add_serve_subparser
     from athenaeum._cmd_storage import add_storage_subparser
-    from athenaeum._cmd_subject import add_subject_subparser
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
     from athenaeum._cmd_usage_report import add_usage_report_subparser
     from athenaeum._cmd_verdicts import add_verdicts_subparser
@@ -266,7 +264,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_description_subparser(subparsers)  # description backfill (issue athenaeum#1324)
     add_verdicts_subparser(subparsers)  # verdicts (issue athenaeum#712)
     add_dimensions_subparser(subparsers)  # dimensions show|compare (issue athenaeum#714)
-    add_subject_subparser(subparsers)  # subject backfill (issue athenaeum#1244)
+    # `subject` (subject backfill) removed (issue athenaeum#1656): the
+    # operator rejected deriving `subject:` from a page's own uid, as the
+    # parent issue's AC3 (athenaeum#1244 re-scope) — no code path may
+    # write that derivation any more. `subject` populated by meaning
+    # remains athenaeum#1244's open scope, blocked on athenaeum#1615.
     add_index_subparsers(
         subparsers
     )  # reindex/rebuild-index, compile, registry, ingest, session-end
