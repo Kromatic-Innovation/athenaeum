@@ -159,6 +159,7 @@ from athenaeum.ingestion_gate import check_ingestion_gate
 from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE re-exported for back-compat
     _AUTO_MEMORY_SKIP_NAMES,
     AUTO_MEMORY_FILE_RE,
+    PERSON_OBSERVATION_MAX_FANOUT,
     RAW_FILE_RE,
     attribute_person_observation,
     check_raw_retention,
@@ -2134,8 +2135,31 @@ def process_one(
     # `match_person_mentions` ever scans its content — see
     # `athenaeum.intake.is_structured_jsonl_raw_file`'s docstring for the
     # exact shape test and its conservative failure defaults.
+    # Issue athenaeum#1716: `match_person_mentions` can resolve one raw file
+    # against many person pages at once (e.g. a memo naming a whole team) —
+    # `PERSON_OBSERVATION_MAX_CHARS` (athenaeum#1684) bounds the SIZE of each
+    # resulting bullet but not how many pages receive one. Cap fan-out to
+    # the top `PERSON_OBSERVATION_MAX_FANOUT` hits, in the order
+    # `match_person_mentions` already returns them (its own registry-key
+    # order — no independent relevance ranking exists to prefer), and log
+    # the rest as skipped rather than silently dropping them. Chosen over
+    # skipping attribution for the whole file: it changes zero control flow
+    # in the existing attribute/log/return block below (only the input list
+    # is truncated before it), where a skip-the-whole-file alternative would
+    # need a new branch around that entire block.
     if person_registry is not None and not is_structured_jsonl_raw_file(raw):
         person_hits = match_person_mentions(raw, wiki_root, index, person_registry)
+        if len(person_hits) > PERSON_OBSERVATION_MAX_FANOUT:
+            skipped_hits = person_hits[PERSON_OBSERVATION_MAX_FANOUT:]
+            person_hits = person_hits[:PERSON_OBSERVATION_MAX_FANOUT]
+            log.warning(
+                "  T0 person-registry consult: fan-out cap %d reached for %s "
+                "— skipping %d additional match(es): %s",
+                PERSON_OBSERVATION_MAX_FANOUT,
+                raw.ref,
+                len(skipped_hits),
+                [hit.uid for hit in skipped_hits],
+            )
         attributed_uids = [
             hit.uid
             for hit in person_hits
