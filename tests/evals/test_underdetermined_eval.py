@@ -100,6 +100,93 @@ def _co_occurs_same_sentence(body: str, a: str, b: str) -> bool:
     return any(a_l in s.lower() and b_l in s.lower() for s in _sentences(body))
 
 
+# Affiliation-assertion proxy (athenaeum#1668).
+#
+# ``silent_affiliation_not_inferred`` originally scored "no affiliation
+# invented" as a blanket ban on the authoring org's name appearing anywhere
+# in the body (``must_not_include_substrings: ["Larkspur"]``), on the stated
+# premise that "the authoring org's name has no reason to appear in the
+# composed body at all". That premise is false: the observation's own first
+# line IS the source document's header ("Larkspur Site Audits — Walkthrough
+# Log, 2026-04-02"), so restating the document's provenance is a legitimate,
+# non-inferential use of the name. The ban could not tell the wrong
+# inference ("Devon Achebe (Larkspur Site Audits) flagged ...") apart from
+# correct provenance ("... as part of a Larkspur Site Audits log, Devon
+# Achebe flagged ..."), and the case consequently failed every run from the
+# day it landed. See tests/test_underdetermined_scoring.py for the
+# discriminator's own positive/negative table, which pins a recorded body
+# that exhibits the target behaviour and used to score as a miss.
+#
+# This predicate instead looks for the SYNTAX of an affiliation claim: the
+# org in an appositive, prepositional or possessive construction bound to
+# the person, within one sentence.
+
+# Closed list of role nouns that, placed between an org and a person, assert
+# affiliation ("Larkspur Site Audits consultant Devon Achebe"). Deliberately
+# closed: an open "any word" rule matches provenance phrasing such as
+# "a Larkspur Site Audits log, Devon Achebe", which is not a claim about the
+# person at all.
+_ROLE_NOUNS = (
+    "consultant|auditor|engineer|analyst|manager|director|lead|partner|"
+    "associate|employee|staffer|representative|rep|contractor|principal|"
+    "specialist|technician|inspector|surveyor|architect|coordinator|"
+    "officer|owner|founder|advisor|adviser"
+)
+
+# Optional article/determiner plus the org name's own trailing words and up
+# to a couple of modifiers ("Larkspur[ Site Audits senior] consultant"). The
+# closed role-noun list, not this word budget, is what keeps provenance
+# phrasing out: "a Larkspur Site Audits log, Devon Achebe" ends in "log",
+# which is not a role noun, so it never matches however wide the gap is.
+#
+# Horizontal whitespace only (``[^\S\n]``, not ``\s``): a sentence-ending
+# ``.!?`` already cannot appear inside ``\w+,?``, but a bare line break can,
+# and "... filed by Larkspur Site Audits\nLead Devon Achebe" is two separate
+# statements, not an affiliation claim. Every other pattern below is bounded
+# by _NO_STOP, which excludes newlines for the same reason.
+_HSPACE = r"[^\S\n]+"
+_MODS = rf"(?:(?:a|an|the|our|their|its|his|her){_HSPACE})?(?:\w+,?{_HSPACE}){{0,4}}"
+
+# No sentence terminator may fall inside a gap — the claim has to be made in
+# one sentence, matching _co_occurs_same_sentence's proxy for attribution.
+_NO_STOP = r"[^.!?\n]"
+
+
+def _affiliation_patterns(person: str, org: str) -> list[str]:
+    p, o = re.escape(person), re.escape(org)
+    return [
+        # "Devon Achebe (Larkspur ...)" — parenthetical affiliation
+        rf"{p}\s*,?\s*\({_NO_STOP}{{0,30}}?{o}",
+        # "Devon Achebe, a senior consultant at Larkspur ..." /
+        # "Devon Achebe of Larkspur ..." — prepositional affiliation
+        rf"{p}\s*(?:,\s*)?{_NO_STOP}{{0,40}}?\b(?:of|at|with|from)\s+"
+        rf"(?:(?:a|an|the)\s+)?{o}",
+        # "Devon Achebe, Larkspur Site Audits" — bare appositive
+        rf"{p}\s*,\s*(?:(?:a|an|the)\s+)?{o}",
+        # "Devon Achebe's Larkspur ..." — possessive on the person
+        rf"{p}['’]s\s+{_NO_STOP}{{0,20}}?{o}",
+        # "Larkspur's Devon Achebe" — possessive on the org
+        rf"{o}{_NO_STOP}{{0,20}}?['’]s\s+{_NO_STOP}{{0,20}}?{p}",
+        # "Larkspur Site Audits consultant Devon Achebe" — role-noun apposition
+        rf"{o}{_HSPACE}{_MODS}(?:{_ROLE_NOUNS})s?{_HSPACE}{p}",
+    ]
+
+
+def _asserts_affiliation(body: str, person: str, org: str) -> bool:
+    """Whether *body* claims *person* is affiliated with *org*.
+
+    True only for an affiliation CONSTRUCTION (appositive, prepositional or
+    possessive) inside a single sentence — not for a mere co-mention, and
+    not for provenance ("... as part of a Larkspur Site Audits log, Devon
+    Achebe flagged ..."), which names the source document rather than the
+    person's employer.
+    """
+    return any(
+        re.search(pattern, body or "", re.IGNORECASE)
+        for pattern in _affiliation_patterns(person, org)
+    )
+
+
 def _score_case(case: dict[str, Any], body: str | None) -> tuple[bool, str]:
     expected = case["expected"]
     reasons: list[str] = []
@@ -112,6 +199,14 @@ def _score_case(case: dict[str, Any], body: str | None) -> tuple[bool, str]:
     for substr in expected.get("must_not_include_substrings", []):
         if substr.lower() in haystack:
             reasons.append(f"unexpected substring {substr!r} present (invented fact?)")
+
+    for pair in expected.get("forbidden_affiliation", []):
+        person, org = pair[0], pair[1]
+        if _asserts_affiliation(body or "", person, org):
+            reasons.append(
+                f"body asserts {person!r} is affiliated with {org!r} — an "
+                "affiliation the source never states (invented fact?)"
+            )
 
     for pair in expected.get("forbidden_co_occurrence", []):
         a, b = pair[0], pair[1]
