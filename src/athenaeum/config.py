@@ -2867,6 +2867,47 @@ def resolve_audit_date_fill(config: dict[str, Any] | None) -> str:
     return DEFAULT_AUDIT_DATE_FILL
 
 
+#: Default decay horizon, in days, for a page the audit pass classifies
+#: into one of the operator-named transitory classes (issue athenaeum#1713 —
+#: decision recorded on athenaeum#1626, 2026-09-16: an incident record, a
+#: deployment-status page, an operational source note, or a reference page
+#: mirroring a GitHub issue) whose own body states no end date. Used as the
+#: horizon added to the page's ``last_audited`` date to produce
+#: ``valid_until`` — see :func:`athenaeum.audit._apply_transitory_class`.
+#: OPERATOR-ADJUSTABLE (env or yaml, see :func:`resolve_audit_transitory_horizon_days`)
+#: — 90 days is this issue's own recommendation: long enough that a
+#: normal-cadence status/source page is still current when read, short
+#: enough that it visibly decays within a quarter.
+DEFAULT_AUDIT_TRANSITORY_HORIZON_DAYS = 90
+
+
+def resolve_audit_transitory_horizon_days(config: dict[str, Any] | None) -> int:
+    """Resolve the transitory-class default decay horizon, in days (issue athenaeum#1713).
+
+    Precedence: ``ATHENAEUM_AUDIT_TRANSITORY_HORIZON_DAYS`` env >
+    ``audit.transitory_horizon_days`` yaml > :data:`DEFAULT_AUDIT_TRANSITORY_HORIZON_DAYS`
+    — mirrors :func:`resolve_audit_date_fill`'s precedence shape, placed
+    alongside it per this issue's own plan. A non-positive, non-numeric, or
+    ``bool`` override (env or yaml) falls back to the default rather than
+    producing a zero-or-negative (or immediately-expired) window.
+    """
+    env_value = _env_number("ATHENAEUM_AUDIT_TRANSITORY_HORIZON_DAYS", int)
+    if env_value is not None and env_value > 0:
+        return env_value
+    if isinstance(config, dict):
+        cfg = config.get("audit")
+        if isinstance(cfg, dict):
+            raw = cfg.get("transitory_horizon_days")
+            if raw is not None and not isinstance(raw, bool):
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError):
+                    value = None
+                if value is not None and value > 0:
+                    return value
+    return DEFAULT_AUDIT_TRANSITORY_HORIZON_DAYS
+
+
 def resolve_audit_nightly_max_pages(config: dict[str, Any] | None) -> int | None:
     """Resolve the nightly re-audit drain's per-run page cap (issue athenaeum#1630).
 
