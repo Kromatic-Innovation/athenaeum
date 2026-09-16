@@ -186,6 +186,7 @@ MODULE_LAYER: dict[str, int] = {
     "shadow_parity": 4,
     "status": 4,
     "storage_migrate": 4,
+    "subject_population": 4,
     "surface_divergence": 4,
     "tiers": 4,
     "verdict_effects": 4,
