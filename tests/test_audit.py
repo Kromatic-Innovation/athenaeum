@@ -8,13 +8,15 @@ last_audited/audit_version; coordinate fills vs. the undeterminable marker
 vs. "never overwrite a populated value"; the retirement-candidate flag and
 its generic (no source-type/adapter-name) flagging logic; the run report's
 per-page verdicts + tokens/cost + totals; and that every template scaffold
-documents the new fields. All fixtures — no test reads or writes a live
-knowledge store.
+documents the new fields. Also covers the transitory-class decay stamping
+(issue athenaeum#1713) — see ``TestTransitoryClassStamping`` below. All
+fixtures — no test reads or writes a live knowledge store.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -771,3 +773,250 @@ class TestSchemaVersionBump:
         meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
         assert meta["schema_version"] == 2
         assert meta["audit_version"] == AUDIT_VERSION
+
+
+# --------------------------------------------------------------------------- #
+# Issue athenaeum#1713: transitory-class decay stamping
+# --------------------------------------------------------------------------- #
+
+
+class TestTransitoryClassStamping:
+    """issue athenaeum#1713 (decision recorded on athenaeum#1626, 2026-09-16):
+    a page in one of the operator's four named transitory classes (incident
+    record, deployment-status page, operational source note, reference page
+    mirroring a GitHub issue) gets ``bucket: daily`` + ``valid_until`` from
+    the audit pass, via the SAME never-overwrite rule every other
+    coordinate field uses. Covers all 7 acceptance criteria on the issue.
+    """
+
+    @staticmethod
+    def _responder(params: dict[str, Any]) -> str:
+        prompt = params["messages"][0]["content"]
+        if "Deploy Status Thing" in prompt:
+            # AC2: the page states its own end date in its body.
+            return json.dumps(
+                {
+                    "valid_from": {"undeterminable": "no dated validity window stated"},
+                    "valid_until": {"value": "2026-05-01"},
+                    "claimed_scope": {"undeterminable": "no scope stated"},
+                    "retirement_candidate": False,
+                    "retirement_reason": "",
+                }
+            )
+        # Every other fixture page below: no dated validity window stated
+        # (AC3's "no stated end date" case).
+        return json.dumps(
+            {
+                "valid_from": {"undeterminable": "no dated validity window stated"},
+                "valid_until": {"undeterminable": "no dated validity window stated"},
+                "claimed_scope": {"undeterminable": "no scope stated"},
+                "retirement_candidate": False,
+                "retirement_reason": "",
+            }
+        )
+
+    def _client(self) -> FakeLLMClient:
+        def responder(**params: Any) -> Any:
+            return make_llm_response(self._responder(params), usage=make_llm_usage(10, 5))
+
+        return FakeLLMClient(responder=responder)
+
+    # --- AC1 + AC3: transitory classes with no stated end date ------------
+
+    def test_incident_record_gets_bucket_and_default_horizon_valid_until(
+        self, wiki: Path
+    ) -> None:
+        path = _page(
+            wiki,
+            "incident.md",
+            "uid: incident1\ntype: incident\nname: Incident Thing\n",
+            "A production incident occurred; no stated resolution window.\n",
+        )
+        fixed_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        report = build_audit_report(wiki, client=self._client(), model="m", now=lambda: fixed_now)
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["bucket"] == "daily"
+        # 2026-01-01 + the 90-day default horizon.
+        assert str(meta["valid_until"]) == "2026-04-01"
+
+    def test_operational_source_note_gets_bucket_and_valid_until(self, wiki: Path) -> None:
+        path = _page(
+            wiki,
+            "source_note.md",
+            "uid: source1\ntype: source\nname: Source Note Thing\n",
+            "An operational note citing an upstream status feed.\n",
+        )
+        report = build_audit_report(wiki, client=self._client(), model="m")
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["bucket"] == "daily"
+        assert "valid_until" in meta
+
+    def test_reference_page_mirroring_a_github_issue_gets_bucket_and_valid_until(
+        self, wiki: Path
+    ) -> None:
+        path = _page(
+            wiki,
+            "ref_mirror.md",
+            "uid: refmirror1\ntype: reference\nname: Reference Mirror Thing\n",
+            "Mirrors https://github.com/Kromatic-Innovation/athenaeum/issues/1713 "
+            "for local search convenience.\n",
+        )
+        report = build_audit_report(wiki, client=self._client(), model="m")
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["bucket"] == "daily"
+        assert "valid_until" in meta
+
+    # --- AC2: own stated end date wins over the default horizon ------------
+
+    def test_deployment_status_page_uses_its_own_stated_end_date(self, wiki: Path) -> None:
+        path = _page(
+            wiki,
+            "deploy.md",
+            "uid: deploy1\ntype: deployment-status\nname: Deploy Status Thing\n",
+            "This deployment is live and will be decommissioned by 2026-05-01.\n",
+        )
+        fixed_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        report = build_audit_report(wiki, client=self._client(), model="m", now=lambda: fixed_now)
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["bucket"] == "daily"
+        # The page's own stated date, NOT last_audited + the default horizon
+        # (which would have been 2026-04-01 here).
+        assert meta["valid_until"] == "2026-05-01"
+
+    # --- Narrower signal: not every `type: reference` page qualifies -------
+
+    def test_reference_page_without_a_github_link_is_not_transitory(self, wiki: Path) -> None:
+        path = _page(
+            wiki,
+            "ref_plain.md",
+            "uid: refplain1\ntype: reference\nname: Reference Plain Thing\n",
+            "A reference page with no GitHub issue citation at all.\n",
+        )
+        report = build_audit_report(wiki, client=self._client(), model="m")
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert "bucket" not in meta
+        assert "valid_until" not in meta
+
+    # --- AC4: durable pages are never touched -------------------------------
+
+    def test_durable_pages_never_receive_bucket_or_valid_until(self, wiki: Path) -> None:
+        durable_pages = [
+            _page(
+                wiki, "person.md", "uid: person1\ntype: person\nname: Person Thing\n", "Bio.\n"
+            ),
+            _page(
+                wiki,
+                "company.md",
+                "uid: company1\ntype: company\nname: Company Thing\n",
+                "About.\n",
+            ),
+            _page(
+                wiki,
+                "concept.md",
+                "uid: concept1\ntype: concept\nname: Concept Thing\n",
+                "Definition.\n",
+            ),
+            _page(
+                wiki,
+                "principle.md",
+                "uid: principle1\ntype: principle\nname: Principle Thing\n",
+                "Statement.\n",
+            ),
+        ]
+        report = build_audit_report(wiki, client=self._client(), model="m")
+        apply_audit_report(report, wiki)
+
+        for path in durable_pages:
+            meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+            assert "bucket" not in meta
+            assert "valid_until" not in meta
+
+    # --- AC5: never overwrite a populated bucket/valid_until ----------------
+
+    def test_preexisting_valid_until_is_never_overwritten(self, wiki: Path) -> None:
+        path = _page(
+            wiki,
+            "incident_dated.md",
+            "uid: incident2\ntype: incident\nname: Incident Dated Thing\n"
+            "valid_until: 2030-01-01\n",
+            "An incident with an operator-set expiry already.\n",
+        )
+        report = build_audit_report(wiki, client=self._client(), model="m")
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert str(meta["valid_until"]) == "2030-01-01"
+        # bucket was NOT pre-populated, so it is still stamped independently
+        # — the never-overwrite rule is per-field, not per-page.
+        assert meta["bucket"] == "daily"
+
+    def test_preexisting_bucket_is_never_overwritten(self, wiki: Path) -> None:
+        path = _page(
+            wiki,
+            "incident_bucketed.md",
+            "uid: incident3\ntype: incident\nname: Incident Bucketed Thing\nbucket: durable\n",
+            "An incident an operator already pinned durable.\n",
+        )
+        report = build_audit_report(wiki, client=self._client(), model="m")
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["bucket"] == "durable"
+        assert "valid_until" in meta
+
+    # --- AC6: the default horizon is a named, config-driven value ----------
+
+    def test_default_horizon_is_config_driven_not_hardcoded(
+        self, wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = _page(
+            wiki,
+            "incident_cfg.md",
+            "uid: incident4\ntype: incident\nname: Incident Cfg Thing\n",
+            "No stated end date.\n",
+        )
+        fixed_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        monkeypatch.setenv("ATHENAEUM_AUDIT_TRANSITORY_HORIZON_DAYS", "10")
+        report = build_audit_report(wiki, client=self._client(), model="m", now=lambda: fixed_now)
+        apply_audit_report(report, wiki)
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert str(meta["valid_until"]) == "2026-01-11"  # 2026-01-01 + 10 days
+
+    # --- AC7: the write plugs into the EXISTING decay-sweep selection ------
+
+    def test_apply_then_decay_sweep_selects_the_newly_classified_page(self, wiki: Path) -> None:
+        from athenaeum.decay_sweep import build_sweep_report, discover_daily_bucket_pages
+
+        path = _page(
+            wiki,
+            "incident_sweep.md",
+            "uid: incident5\ntype: incident\nname: Incident Sweep Thing\n",
+            "No stated end date.\n",
+        )
+        fixed_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        report = build_audit_report(wiki, client=self._client(), model="m", now=lambda: fixed_now)
+        apply_audit_report(report, wiki)
+
+        # Selected purely on `bucket: daily` — no decay-sweep code changes.
+        assert path in discover_daily_bucket_pages(wiki)
+
+        # Not yet expired the day after the audit ran.
+        not_yet = build_sweep_report(wiki, as_of=date(2026, 1, 2))
+        assert path not in [c.path for c in not_yet.kill]
+        assert path in [p for p, _reason in not_yet.retained]
+
+        # Once valid_until (2026-01-01 + 90 days = 2026-04-01) is in the
+        # past, the existing decay-sweep dry run's kill-list selects it.
+        expired = build_sweep_report(wiki, as_of=date(2026, 6, 1))
+        assert path in [c.path for c in expired.kill]
