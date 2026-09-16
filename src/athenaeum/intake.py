@@ -1370,6 +1370,21 @@ def tier0_passthrough(
 #: portion of it.
 PERSON_OBSERVATION_MAX_CHARS = 500
 
+#: Hard cap, per raw file per run, on how many DISTINCT person pages
+#: :func:`attribute_person_observation` may be invoked for (issue
+#: athenaeum#1716). athenaeum#1684 bounded the SIZE of one bullet; it left
+#: fan-out unbounded, so a single memo mentioning many people still fanned
+#: out to every matched page — the live sweep that filed this issue found
+#: the same duplicated-excerpt signature across thousands of pages, just at
+#: the smaller per-bullet size. The call site
+#: (``athenaeum.librarian.process_one``) attributes to the first N hits
+#: :func:`athenaeum.identity_resolution.match_person_mentions` returns (that
+#: function's own registry-key order — no independent relevance ranking
+#: exists to prefer) and logs the rest as skipped, rather than dropping them
+#: silently. A plain module constant, like :data:`PERSON_OBSERVATION_MAX_CHARS`
+#: beside it, so it stays trivially tunable.
+PERSON_OBSERVATION_MAX_FANOUT = 5
+
 #: How many characters of context :func:`_bounded_person_excerpt` keeps on
 #: EACH side of the matched mention (issue athenaeum#1684), before the
 #: :data:`PERSON_OBSERVATION_MAX_CHARS` hard cap (which also has to fit the
@@ -1378,6 +1393,16 @@ PERSON_OBSERVATION_MAX_CHARS = 500
 #: headroom for that suffix rather than relying on the safety net to do
 #: routine work.
 PERSON_OBSERVATION_EXCERPT_RADIUS_CHARS = 175
+
+#: Leading marker :func:`_bounded_person_excerpt` prepends when it could not
+#: locate *entry*'s name/alias verbatim in the raw body and fell back to the
+#: start-of-body anchor (issue athenaeum#1716). Without this, every page that
+#: hits the fallback in the same run gets the IDENTICAL opening excerpt,
+#: reading as if it were found near that person's name when it was not
+#: located at all. Kept as part of the excerpt text (not a separate return
+#: value) so the caller's existing char-budget trimming in
+#: :func:`attribute_person_observation` applies uniformly.
+PERSON_OBSERVATION_UNLOCATED_MARKER = "[name not located in excerpt] "
 
 
 def _bounded_person_excerpt(raw_body: str, entry: PersonRegistryEntry) -> str | None:
@@ -1391,7 +1416,10 @@ def _bounded_person_excerpt(raw_body: str, entry: PersonRegistryEntry) -> str | 
     match that resolved *entry* may have come from a regex word-boundary hit
     on a differently-cased form, or from content outside the stripped body
     entirely — e.g. frontmatter), falls back to the START of the body as the
-    anchor — still bounded by the same radius, never unbounded.
+    anchor — still bounded by the same radius, never unbounded — and the
+    returned excerpt is prefixed with :data:`PERSON_OBSERVATION_UNLOCATED_MARKER`
+    (issue athenaeum#1716) so it is never mistaken for text found near the
+    person's actual mention.
 
     Returns ``None`` when *raw_body* is empty/whitespace-only, preserving
     the pre-existing "no-op on empty raw" contract (issue athenaeum#1183).
@@ -1409,6 +1437,7 @@ def _bounded_person_excerpt(raw_body: str, entry: PersonRegistryEntry) -> str | 
         idx = lowered.find(candidate.lower())
         if idx != -1 and (match_start is None or idx < match_start):
             match_start, match_len = idx, len(candidate)
+    located = match_start is not None
     if match_start is None:
         match_start, match_len = 0, 0
 
@@ -1420,6 +1449,8 @@ def _bounded_person_excerpt(raw_body: str, entry: PersonRegistryEntry) -> str | 
         excerpt = "…" + excerpt
     if end < len(raw_body):
         excerpt = excerpt + "…"
+    if not located:
+        excerpt = PERSON_OBSERVATION_UNLOCATED_MARKER + excerpt
     return excerpt
 
 
@@ -1544,7 +1575,16 @@ def attribute_person_observation(
     else:
         new_body = body.rstrip("\n") + f"\n\n{heading}\n\n{bullet}\n"
 
-    meta["updated"] = today
+    # Issue athenaeum#1716: deliberately NOT stamping `meta["updated"]` here.
+    # This path only appends a dated Notes bullet pointing back to *raw* — it
+    # is not a substantive edit to the page's own claims. Before this fix,
+    # every attributed page got `updated` bumped to today regardless of
+    # fan-out, so a single wide memo mentioning many people could make
+    # hundreds of pages look freshly reviewed/edited to any staleness/decay
+    # logic that reads that field. Leaving `updated` untouched keeps it
+    # tracking genuine substantive edits (the intake/merge paths that do set
+    # it); the dated bullet itself already records exactly when this
+    # attribution happened, so no information is lost by omission.
     validate_wiki_meta(meta)
 
     if dry_run:
