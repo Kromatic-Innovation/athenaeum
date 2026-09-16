@@ -20,7 +20,7 @@ generator walks the actual parser tree instead of trusting that prose. A
 handful of top-level commands (``dedupe``, ``auto-memory``, ``questions``,
 ``merges``, ``decisions``, ``authority``, ``axiom``, ``calibration``,
 ``storage``, ``push-metrics``, ``measure``, ``memory-class``,
-``description``, ``verdicts``, ``dimensions``, ``subject``) DO have their own
+``description``, ``verdicts``, ``dimensions``) DO have their own
 nested sub-subparsers (e.g. ``athenaeum merges revalidate``) — the walk
 recurses into those.
 

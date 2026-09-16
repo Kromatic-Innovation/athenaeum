@@ -108,8 +108,6 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum storage lint-pii`](#athenaeum-storage-lint-pii) (command) — Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/archive/_-prefixed and.bak files included) for an inline email/phone; exit non-zero on any finding. Also reports raw/ retention as a separate, non-gating count.
 - [`athenaeum storage migrate-pii`](#athenaeum-storage-migrate-pii) (command) — Move archival contact data (emails/phones) off entity pages to the excluded surface, leaving durable identifiers only. Single page (--page) or bulk (--all / --glob).
 - [`athenaeum storage prune-dispositions`](#athenaeum-storage-prune-dispositions) (command) — One-time prune of wiki/_shape_rule_dispositions.jsonl to its positive-disposition records only (AC3/AC4). Dry-run by default: reports the disposition histogram and projected size. --apply writes.
-- [`athenaeum subject`](#athenaeum-subject) (group) — Subject-coordinate maintenance: backfill the subject: frontmatter axis.
-- [`athenaeum subject backfill`](#athenaeum-subject-backfill) (command) — Write subject: (= uid) onto comparator-relevant pages that lack it. Zero-LLM, deterministic. Dry-run unless --apply. Never overwrites an existing value. Read the module docstring before using --apply on a live store.
 - [`athenaeum surface-divergence`](#athenaeum-surface-divergence) (command) — Report the two-surface divergence for a REGISTERED field (wiki frontmatter vs. the contacts/excluded surface) and, by default, exit non-zero when it exceeds the field's declared allowance. Generalizes bounce-divergence / do-not-email-divergence into one per-field guard. Read-only; output is safe to paste publicly.
 - [`athenaeum test-mcp`](#athenaeum-test-mcp) (command) — Smoke-test MCP remember/recall against a synthetic knowledge dir
 - [`athenaeum usage-report`](#athenaeum-usage-report) (command) — Per-claim usage report (pushed / referenced / last-referenced) computed from the push-metrics ledgers — ids-only, no content.
@@ -1340,25 +1338,6 @@ One-time prune of wiki/_shape_rule_dispositions.jsonl to its positive-dispositio
 | `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
-
-## `athenaeum subject`
-
-Subject-coordinate maintenance: backfill the subject: frontmatter axis.
-
-Subcommands:
-
-- `athenaeum subject backfill` — Write subject: (= uid) onto comparator-relevant pages that lack it. Zero-LLM, deterministic. Dry-run unless --apply. Never overwrites an existing value. Read the module docstring before using --apply on a live store.
-
-## `athenaeum subject backfill`
-
-Write subject: (= uid) onto comparator-relevant pages that lack it. Zero-LLM, deterministic. Dry-run unless --apply. Never overwrites an existing value. Read the module docstring before using --apply on a live store.
-
-| Flag | Default | Choices | Help |
-|---|---|---|---|
-| `--apply` | `False` | — | Write the assignments. Without this flag the command reports and writes nothing. |
-| `--dry-run` | `False` | — | Report without writing. Already the default; OVERRIDES --apply when both are given (safe mode wins). |
-| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
-| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum surface-divergence`
 
