@@ -28,6 +28,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restarts a stale server, which would drop every live client connection.
   ([#1593](https://github.com/Kromatic-Innovation/athenaeum/issues/1593))
 
+### Removed
+
+- **`athenaeum subject backfill` is deleted, not disabled.** The command
+  derived `subject:` from a page's own `uid` and wrote it with `--apply` —
+  a derivation the operator rejected (parent issue's AC3 re-scope): `subject`
+  is meant to be the shared real-world thing two pages are about, so two
+  duplicate pages deriving it from their own distinct uids would get two
+  different values, defeating the field's purpose. The module carried its
+  own docstring warning that the write was safe only because nothing
+  ratified subjects yet — a live footgun once that changed. Removed:
+  `athenaeum.subject_backfill` (`derive_subject_for_page`,
+  `build_subject_report`, `apply_subject_backfill`) and its CLI
+  presentation, `athenaeum._cmd_subject`. `athenaeum subject backfill` is no
+  longer a recognized subcommand. Populating `subject` by resolved meaning
+  remains open, tracked separately and blocked on entity-resolution wiring.
+  ([#1656](https://github.com/Kromatic-Innovation/athenaeum/issues/1656))
+
 ### Changed
 
 - **The viewer's `used` column consults a content signal, and stops counting

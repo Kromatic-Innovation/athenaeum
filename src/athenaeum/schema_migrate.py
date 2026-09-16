@@ -29,8 +29,8 @@ for this same shape of sweep:
 Layering: L2 (domain logic over the wiki tree). Imports
 :mod:`athenaeum.schema_migrations` (L0) and :mod:`athenaeum.models` (L1);
 imported by ``_cmd_schema.py`` (L5). Holds no argparse and prints nothing —
-the CLI module owns presentation, matching ``memory_class_backfill.py`` /
-``subject_backfill.py``'s own factoring rule.
+the CLI module owns presentation, matching ``memory_class_backfill.py``'s
+own factoring rule.
 """
 
 from __future__ import annotations
