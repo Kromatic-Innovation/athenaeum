@@ -192,7 +192,7 @@ def bind_server(
 
 
 def _probe_rows(*, session_id: str | None, path: Path, cache_dir: Path | None) -> int | None:
-    """Row count for *session_id*, or ``None`` when the probe itself failed.
+    """Distinct-page count for *session_id*, or ``None`` when the probe itself failed.
 
     ``None`` is NOT zero and the caller must not treat it as such. Zero is a
     fact about the session ("nothing recorded — most likely the wrong id");
@@ -201,15 +201,22 @@ def _probe_rows(*, session_id: str | None, path: Path, cache_dir: Path | None) -
     confident wrong-session-id advice at an operator whose id was fine, and
     then a correctly-populated view paints underneath it with nothing on screen
     to adjudicate between the two.
+
+    Counts DISTINCT pages (issue athenaeum#1564): ``data["pages"]`` is the
+    exact list :func:`~athenaeum._cmd_viewer.enrich_payload` builds from the
+    union of pushed, pulled, and unknown-provenance ids, and is also what the
+    viewer's own "All pages this session" header counts. The previous
+    implementation summed the ``pushed_unbidden`` / ``pulled_deliberately`` /
+    ``overlap`` bucket lengths, which counted every pushed-and-pulled overlap
+    page three times over (once per bucket) and omitted unknown-provenance
+    pages entirely — reading ``data["pages"]`` reuses the one computation
+    instead of keeping a second copy that can drift from it again.
     """
     try:
         data = build_viewer_data(session_id=session_id, path=path, cache_dir=cache_dir)
     except (ViewerContractError, OSError, ValueError):
         return None
-    return sum(
-        len(data.get(bucket) or ())
-        for bucket in ("pushed_unbidden", "pulled_deliberately", "overlap")
-    )
+    return len(data["pages"])
 
 
 def _report_rows(rows: int | None, session_id: str) -> None:
@@ -232,19 +239,16 @@ def _report_rows(rows: int | None, session_id: str) -> None:
         )
     else:
         # Labelled for what it actually computes (issue athenaeum#1543 AC1).
-        # It is |pushed_unbidden| + |pulled_deliberately| + |overlap| -- BUCKET
-        # rows, which is a third quantity again: an id present in both the
-        # pushed and pulled buckets is counted in each of them AND in the
-        # overlap bucket, and unknown-provenance pages are in none of them. So
-        # it is neither the viewer's distinct-page count nor --list-sessions'
-        # items-pushed sum. AC3 forbids silently changing what it counts, so
-        # this labels the existing arithmetic rather than correcting it; the
-        # double-count is reported on athenaeum#1543 for a follow-up issue.
+        # Decision recorded on athenaeum#1543 AC3, operator 2026-09-15: this
+        # counts DISTINCT pages (issue athenaeum#1564) -- the same id set the
+        # viewer's "All pages this session" header counts, so the two numbers
+        # now match. The old wording ("bucket rows") described a third
+        # quantity that triple-counted a pushed-and-pulled overlap and
+        # omitted unknown-provenance pages, which is exactly why it never
+        # reconciled with the viewer.
         print(
-            f"session {session_id}: {rows} recall rows across the pushed / pulled / "
-            "overlap buckets. Bucket rows, NOT distinct pages -- the viewer's "
-            '"All pages this session" header counts distinct pages, so the two '
-            "normally differ (athenaeum#1543).",
+            f"session {session_id}: {rows} distinct pages -- matches the viewer's "
+            '"All pages this session" header (issue athenaeum#1564).',
             file=sys.stderr,
         )
 

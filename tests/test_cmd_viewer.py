@@ -335,8 +335,10 @@ def test_bucket_id_sets_are_disjoint_except_the_intended_overlap() -> None:
 
 
 def test_legacy_bucket_keys_still_present_alongside_the_new_one() -> None:
-    """`athenaeum demo`'s row probe (_cmd_demo.py) counts the original three
-    keys; athenaeum#1542 is additive and must not rename or remove any."""
+    """External readers of the payload that predate the unified `pages` list
+    still rely on the original three keys; athenaeum#1542 is additive and
+    must not rename or remove any. (`athenaeum demo`'s row probe moved off
+    these three keys onto `pages` as of issue athenaeum#1564.)"""
     payload = _cmd_viewer.shape_viewer_payload(
         session_id="s1", records=[_push_record("s1", [_ITEM_A], ts=_TS_BEFORE_SOURCE_FIELD)]
     )
@@ -647,8 +649,9 @@ def test_serve_html_and_data_json_end_to_end_no_reference_determination(tmp_path
         assert "All pages this session" in html
         # Issue athenaeum#1543 AC1: the header count says what it counts. It is
         # one entry per page uid regardless of how many turns pushed it, which
-        # is a different quantity from `--list-sessions`' "items pushed" and
-        # from athenaeum-demo's launcher probe (ledger records).
+        # is a different quantity from `--list-sessions`' "items pushed"
+        # (a sum over turns). It matches athenaeum-demo's launcher probe as of
+        # issue athenaeum#1564 -- both count the same distinct-page id set.
         assert '" distinct pages)"' in html
         assert "Last turn" in html
         assert "pushed then pulled" in html
