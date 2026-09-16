@@ -565,9 +565,12 @@ def shape_viewer_payload(
     return {
         "session_id": session_id or "",
         "has_reference_determination": has_reference_record,
-        # Retained verbatim (issue athenaeum#1528 AC7): `athenaeum demo`'s row
-        # probe counts these three, and any external reader of the payload
-        # predates the unified list below.
+        # Retained verbatim (issue athenaeum#1528 AC7): any external reader of
+        # the payload predates the unified list below. `athenaeum demo`'s row
+        # probe used to count these three (summed) but reads the unified
+        # `pages` list instead as of issue athenaeum#1564 -- summing them
+        # triple-counted a pushed-and-pulled overlap and omitted
+        # unknown-provenance pages.
         "pushed_unbidden": _rows(unbidden),
         "pulled_deliberately": _rows(deliberate),
         "overlap": overlap_rows,

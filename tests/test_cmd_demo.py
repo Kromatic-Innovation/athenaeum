@@ -38,9 +38,23 @@ from athenaeum._cmd_viewer import ViewerContractError
 
 
 def _seed_push(
-    cache_dir: Path, *, session_id: str, uid: str, ts: str = "2026-01-01T00:00:00Z"
+    cache_dir: Path,
+    *,
+    session_id: str,
+    uid: str,
+    ts: str = "2026-01-01T00:00:00Z",
+    source: str = "",
 ) -> None:
-    """Mirrors ``tests/test_cmd_viewer.py``'s helper of the same name."""
+    """Mirrors ``tests/test_cmd_viewer.py``'s helper of the same name.
+
+    *source* follows that mirror too: ``push_metrics.SOURCE_HOOK`` routes
+    through :func:`~athenaeum.push_metrics.record_hook_push` (unbidden,
+    regardless of *ts*); left blank, *ts* decides deliberate-pull vs
+    unknown-provenance against the ``source``-field cutover.
+    """
+    if source == push_metrics.SOURCE_HOOK:
+        push_metrics.record_hook_push(session_id, [uid], cache_dir=cache_dir)
+        return
     record = push_metrics.build_push_record(
         session_id=session_id,
         query="q",
@@ -54,6 +68,8 @@ def _seed_push(
         ],
     )
     record.ts = ts
+    if source:
+        record.source = source
     push_metrics.record_push(record, cache_dir=cache_dir)
 
 
@@ -187,17 +203,39 @@ def test_probe_failure_is_none_not_zero(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert _probe_rows(session_id="s", path=tmp_path, cache_dir=tmp_path) is None
 
 
-def test_probe_counts_all_three_buckets(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(
-        _cmd_demo,
-        "build_viewer_data",
-        lambda **_k: {
-            "pushed_unbidden": [{}, {}],
-            "pulled_deliberately": [{}],
-            "overlap": [],
-        },
+def test_probe_counts_distinct_pages_matching_the_viewer(tmp_path: Path) -> None:
+    """Issue athenaeum#1564: the probe must not count a pushed-and-pulled
+    overlap once per bucket, and must not drop unknown-provenance pages.
+
+    One shared fixture, seeded once into a real ledger, feeds both sides of
+    the comparison: the probe (via `_probe_rows` -> the real
+    `build_viewer_data`) and a second, independent real call to
+    `build_viewer_data` for the same session -- whose `pages` list is exactly
+    `enrich_payload`'s distinct-page id set, the same list the viewer's own
+    "All pages this session" header counts. A no-overlap fixture would not
+    catch the old triple-count; this one has both defects the old bucket-sum
+    had: `u1` is pushed-and-pulled (the old sum counted it 3 times) and `u4`
+    predates the `source` field (the old sum dropped it entirely). Old
+    bucket-sum on this fixture: 2 (unbidden: u1, u2) + 2 (deliberate: u1, u3)
+    + 1 (overlap: u1) = 5. Distinct pages: {u1, u2, u3, u4} = 4.
+    """
+    cache_dir = tmp_path / "cache"
+    knowledge_root = tmp_path / "knowledge"
+    session_id = "s1"
+
+    _seed_push(cache_dir, session_id=session_id, uid="u1", source=push_metrics.SOURCE_HOOK)
+    _seed_push(cache_dir, session_id=session_id, uid="u1", ts="2026-09-10T00:00:00Z")
+    _seed_push(cache_dir, session_id=session_id, uid="u2", source=push_metrics.SOURCE_HOOK)
+    _seed_push(cache_dir, session_id=session_id, uid="u3", ts="2026-09-10T00:00:01Z")
+    _seed_push(cache_dir, session_id=session_id, uid="u4", ts="2026-01-01T00:00:00Z")
+
+    expected = _cmd_demo.build_viewer_data(
+        session_id=session_id, path=knowledge_root, cache_dir=cache_dir
     )
-    assert _probe_rows(session_id="s", path=tmp_path, cache_dir=tmp_path) == 3
+    assert len(expected["pages"]) == 4  # sanity: proves the fixture, not just the code under test
+
+    probed = _probe_rows(session_id=session_id, path=knowledge_root, cache_dir=cache_dir)
+    assert probed == len(expected["pages"]) == 4
 
 
 def test_failed_probe_and_zero_rows_give_different_advice(
@@ -225,20 +263,18 @@ def test_failed_probe_and_zero_rows_give_different_advice(
 def test_nonzero_rows_reported_without_warning(capsys: pytest.CaptureFixture[str]) -> None:
     _report_rows(7, "sess-abc")
     err = capsys.readouterr().err
-    assert "7 recall rows" in err
+    assert "7 distinct pages" in err
     assert "warning" not in err
 
 
 def test_report_rows_says_what_it_counted(capsys: pytest.CaptureFixture[str]) -> None:
     """Issue athenaeum#1543 AC1: a bare count is what made three surfaces
-    unreconcilable. This one is BUCKET rows across pushed/pulled/overlap -- a
-    third quantity again, matching neither the viewer's distinct-page header
-    nor ``--list-sessions``' items-pushed sum -- so it must say so itself.
+    unreconcilable, so this one must say what it counts. Issue athenaeum#1564:
+    it now counts DISTINCT pages, matching the viewer's own header wording.
     """
     _report_rows(7, "sess-abc")
     err = capsys.readouterr().err
-    assert "pushed / pulled / overlap buckets" in err
-    assert "NOT distinct pages" in err
+    assert "distinct pages" in err
     assert "All pages this session" in err
 
 
