@@ -66,6 +66,9 @@ from tests.evals.harness import (
     replay_client,
     save_recorded,
 )
+from tests.evals.test_underdetermined_eval import (
+    _score_case as _score_underdetermined_case,
+)
 
 # ---------------------------------------------------------------------------
 # Fixture discovery — collect only what's on disk so an empty layer no-ops.
@@ -398,26 +401,15 @@ def _underdetermined_action(case: dict[str, Any]) -> EntityAction:
 
 
 def _underdetermined_score(case: dict[str, Any], body: str | None) -> tuple[bool, str]:
-    expected = case["expected"]
-    reasons: list[str] = []
-    haystack = (body or "").lower()
+    """Score a replayed body with the LIVE eval's own scorer.
 
-    for substr in expected.get("must_include_substrings", []):
-        if substr.lower() not in haystack:
-            reasons.append(f"missing expected substring {substr!r}")
-
-    for substr in expected.get("must_not_include_substrings", []):
-        if substr.lower() in haystack:
-            reasons.append(f"unexpected substring {substr!r} present (invented fact?)")
-
-    for pair in expected.get("forbidden_co_occurrence", []):
-        a, b = pair[0].lower(), pair[1].lower()
-        sentences = [s for s in (body or "").replace("\n", " ").split(". ")]
-        if any(a in s.lower() and b in s.lower() for s in sentences):
-            reasons.append(f"{pair[0]!r} and {pair[1]!r} co-occur in one sentence")
-
-    passed = not reasons
-    return passed, "; ".join(reasons) if reasons else "ok"
+    Delegated rather than reimplemented (athenaeum#1668): this function used
+    to be a hand-copied duplicate, and a copy silently ignores any scoring
+    key the eval later adds — a replay would then pass a body the live eval
+    fails. Importing the one implementation is what makes this module's
+    "the same scoring the live eval uses" claim true.
+    """
+    return _score_underdetermined_case(case, body)
 
 
 @pytest.mark.skipif(not _UNDERDETERMINED_IDS, reason=_EMPTY_LAYER_REASON)

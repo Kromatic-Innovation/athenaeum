@@ -54,12 +54,18 @@
   source_ref: "sessions/2026-04-02.md"
   expected:
     must_include_substrings: ["Devon Achebe"]
-    # The authoring org's name has no reason to appear in the composed body
-    # at all — the footnote cites via source_ref, not by restating the
-    # author's name — so its presence here is the signature of the
-    # wrong inference the case is built to tempt (Devon Achebe (Larkspur
-    # Site Audits) ...).
-    must_not_include_substrings: ["Larkspur"]
+    # The wrong inference this case is built to tempt is attributing the
+    # AUTHORING org to the named person — "Devon Achebe (Larkspur Site
+    # Audits) flagged ...". Scored as an affiliation CONSTRUCTION, not as a
+    # blanket ban on the org's name (athenaeum#1668): the observation's own
+    # first line is the source document's header, so the composed body may
+    # legitimately restate that provenance ("... as part of a Larkspur Site
+    # Audits log, Devon Achebe flagged ...") without claiming anything about
+    # Devon. The blanket ban could not tell those apart and scored every run
+    # from 2026-09-10 onward as a miss. See _asserts_affiliation in
+    # tests/evals/test_underdetermined_eval.py.
+    forbidden_affiliation:
+      - ["Devon Achebe", "Larkspur"]
 
 - id: adjacent_action_not_folded_into_role
   outcome_class: adjacent_fact_not_folded
