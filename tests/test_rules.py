@@ -669,6 +669,74 @@ class TestTransformInterpolation:
         assert resolve_value_expr(dangerous2, {}) == dangerous2
 
 
+# ---------------------------------------------------------------------------
+# athenaeum#1721: a whole-value field reference may take a DOTTED path, so the
+# transform half of a rule can read the same nested key the match half
+# (athenaeum#974) can already match on. Without it a rule could match a
+# `before`/`after`-nested producer record and then have no way to read it.
+# ---------------------------------------------------------------------------
+
+
+class TestDottedFieldReference:
+    def test_dotted_reference_reaches_a_nested_key(self) -> None:
+        record = {"before": {"emails": ["a@example.com", "old@example.com"]}}
+        assert resolve_value_expr("$before.emails", record) == [
+            "a@example.com",
+            "old@example.com",
+        ]
+
+    def test_dotted_reference_walks_more_than_one_level(self) -> None:
+        assert resolve_value_expr("$a.b.c", {"a": {"b": {"c": 7}}}) == 7
+
+    def test_an_exact_top_level_key_still_wins_over_the_path(self) -> None:
+        # The same backward-compatibility ordering `resolve_field_path`
+        # gives `match.fields`: a literal top-level key containing a dot is
+        # never reinterpreted as a path.
+        record = {"a.b": "literal-key", "a": {"b": "nested"}}
+        assert resolve_value_expr("$a.b", record) == "literal-key"
+
+    def test_undotted_reference_is_unchanged(self) -> None:
+        # The whole pre-athenaeum#1721 contract, restated as a guard.
+        assert resolve_value_expr("$email", {"email": "a@example.com"}) == (
+            "a@example.com"
+        )
+        with pytest.raises(ShapeRuleTransformError):
+            resolve_value_expr("$missing", {})
+
+    def test_a_missing_segment_is_a_transform_error_not_a_crash(self) -> None:
+        # "Absent from the record" -- the caller degrades the record to
+        # `transform-error`, exactly as for a missing top-level key.
+        with pytest.raises(ShapeRuleTransformError):
+            resolve_value_expr("$before.emails", {"before": {"name": "Alex"}})
+        with pytest.raises(ShapeRuleTransformError):
+            resolve_value_expr("$before.emails", {})
+
+    def test_a_non_mapping_partway_down_is_a_transform_error(self) -> None:
+        with pytest.raises(ShapeRuleTransformError):
+            resolve_value_expr("$before.emails", {"before": "not-a-mapping"})
+
+    def test_a_trailing_or_doubled_dot_is_a_literal_not_a_reference(self) -> None:
+        # Not the exact reference form, so it stays an opaque literal --
+        # the same posture `"cost is $5"` gets.
+        assert resolve_value_expr("$before.", {"before": {}}) == "$before."
+        assert resolve_value_expr("$before..emails", {}) == "$before..emails"
+
+    def test_composes_with_the_closed_function_vocabulary(self) -> None:
+        # The shape the packaged contact-sync example compiles: the set
+        # difference of two nested lists, narrowed to the one address.
+        expr = {
+            "fn": "first",
+            "args": [
+                {"fn": "set_diff", "args": ["$before.emails", "$after.emails"]}
+            ],
+        }
+        record = {
+            "before": {"emails": ["a@example.com", "old@example.com"]},
+            "after": {"emails": ["a@example.com"]},
+        }
+        assert resolve_value_expr(expr, record) == "old@example.com"
+
+
 class TestClosedFunctionVocabulary:
     def test_known_functions_are_exactly_three(self) -> None:
         assert KNOWN_FUNCTIONS == frozenset({"set_diff", "first", "date_of"})

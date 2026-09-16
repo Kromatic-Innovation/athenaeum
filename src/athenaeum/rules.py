@@ -159,7 +159,15 @@ _TARGET_KEY_SHAPES: tuple[frozenset[str], ...] = (
     frozenset({"type", "handle"}),
 )
 
-_FIELD_REF_RE = re.compile(r"^\$([A-Za-z_][A-Za-z0-9_]*)\Z")
+#: A whole-value field reference: `$name`, or `$a.b` for a nested key.
+#: The dotted form is resolved by :func:`resolve_field_path` -- the SAME
+#: walker `match.fields` uses (issue athenaeum#974), so the two halves of a
+#: rule address a record identically instead of drifting apart. Without it
+#: a rule can MATCH on a nested key it cannot then READ: the producer
+#: shapes that motivated athenaeum#974 nest their payload under
+#: `before`/`after`, so a correction over that payload was inexpressible
+#: (issue athenaeum#1721).
+_FIELD_REF_RE = re.compile(r"^\$([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\Z")
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +496,12 @@ def resolve_value_expr(expr: Any, record: dict[str, Any]) -> Any:
       returned structurally unchanged (containers are rebuilt, not shared,
       so a caller cannot mutate the rule's own parsed YAML through it);
     - a string of the EXACT form `"$name"` — whole-value substitution of
-      `record["name"]` (raises :class:`ShapeRuleTransformError` if absent);
+      `record["name"]` (raises :class:`ShapeRuleTransformError` if absent).
+      `name` may be a DOTTED path (`"$before.emails"`), resolved by
+      :func:`resolve_field_path` — the same walker, with the same
+      exact-top-level-key-wins-first backward compatibility, that
+      `match.fields` uses (issue athenaeum#974). A plain, undotted `"$name"`
+      therefore resolves exactly as it always did;
     - `{"fn": "<name>", "args": [...]}` — calls the closed-vocabulary
       function on the recursively-resolved args.
 
@@ -500,11 +513,12 @@ def resolve_value_expr(expr: Any, record: dict[str, Any]) -> Any:
         m = _FIELD_REF_RE.match(expr)
         if m:
             name = m.group(1)
-            if name not in record:
+            found, resolved = resolve_field_path(record, name)
+            if not found:
                 raise ShapeRuleTransformError(
                     f"referenced field {name!r} is absent from the record"
                 )
-            return record[name]
+            return resolved
         return expr
     if isinstance(expr, dict):
         if "fn" in expr:

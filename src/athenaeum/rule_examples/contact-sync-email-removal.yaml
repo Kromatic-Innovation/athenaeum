@@ -1,16 +1,115 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Example shape rule (issue athenaeum#902) -- NOT loaded automatically. Copy this
-# file (or a variant) into <knowledge-root>/rules/ to activate it;
-# `athenaeum init --with-rules` does that copy for you.
+# Example shape rule (issues athenaeum#902, athenaeum#1721) -- NOT loaded
+# automatically. Copy this file (or a variant) into <knowledge-root>/rules/ to
+# activate it; `athenaeum init --with-rules` does that copy for you.
 #
-# Recognises a contact-sync UPDATE that removed an email address, and compiles
-# it into a conformant field correction.
+# Recognises the contact-sync record that PROPAGATED AN EMAIL REMOVAL, and
+# compiles it into a conformant field correction that CLOSES the address
+# rather than deleting it.
 #
-# The removed address is the SET DIFFERENCE of the record's before and after
-# email lists -- computed by the closed-vocabulary `set_diff` function
-# (docs/design/shape-rules.md §4.1), never by a template or any evaluated
-# expression. Expressed as a `remove` operation on `alt_emails`.
+# ---------------------------------------------------------------------------
+# What the producer actually emits
+# ---------------------------------------------------------------------------
+#
+# The discriminator key is `action`, not `kind`, and the payload nests under
+# `before` / `after`:
+#
+#   {"ts": "...", "action": "update_emails_applied", "account": "2",
+#    "resource_name": "people/c...", "wiki_uid": "90892f54",
+#    "reason": "email_removal_propagated",
+#    "before": {"emails": [...]}, "after": {"emails": [...]}}
+#
+# Two match conditions, both load-bearing:
+#
+#   * `action: update_emails_applied` -- the `_applied` suffix is the
+#     producer's "the write went through" record. The bare `update_emails`
+#     variant is also emitted for a DEFERRED, quota-exhausted, dry-run or
+#     FAILED removal, where nothing was actually removed upstream; and its
+#     `before` is keyed by ACCOUNT (`before: {a1: [...], a2: [...]}`) on the
+#     cross-account decision path, so `before.emails` is not even present.
+#     Matching the glob `update_emails*` would compile a close for a removal
+#     that never happened.
+#
+#   * `reason: email_removal_propagated` -- `update_emails_applied` is ALSO
+#     emitted by the union path (`reason: patched`), where `after` is a
+#     SUPERSET of `before` and the set difference is empty. `first([])` is
+#     `null`, so without this predicate the union case would emit an entry
+#     with a null identifier. The removal path is the only one this rule is
+#     about, and `reason` is what tells them apart.
+#
+# The removed address is the SET DIFFERENCE of before and after -- computed by
+# the closed-vocabulary `set_diff` function (docs/design/shape-rules.md §4.1),
+# never by a template or any evaluated expression. The producer removes
+# exactly one address per record, so `first` over that difference is the
+# address, not an arbitrary pick.
+#
+# ---------------------------------------------------------------------------
+# Why a soft close, not a `remove`
+# ---------------------------------------------------------------------------
+#
+# An address the sync no longer sees has gone INVALID; it did not cease to
+# have existed. A `remove` on the address list throws away the fact that the
+# person ever had it -- so a later record mentioning the old address resolves
+# to nothing, and every future sync re-proposes and re-removes it. The
+# soft close is the shape `athenaeum.pii.mark_bounced` already writes for a
+# bounced address, and it is the shape `pii.is_bounced_identifier` -- the
+# predicate outreach eligibility already consults -- reads. Recording the
+# close here means contact-sync's verdict lands where that predicate is
+# already looking. See docs/design/field-corrections.md §4.1.
+#
+# `source` inside the entry names contact-sync distinctly from the mail
+# agent's bounce source, so the two producers of a close stay tellable apart
+# on the record. `bounce_diagnostic` carries contact-sync's reason rather
+# than an SMTP diagnostic, for the same reason.
+#
+# ---------------------------------------------------------------------------
+# Target resolution
+# ---------------------------------------------------------------------------
+#
+# Resolved by `wiki_uid`, which the producer already carries and populates on
+# every update record (it is empty only on `create`, which this rule does not
+# match). The earlier draft of this rule resolved through the
+# `google_resource_name` source handle; that key IS registered
+# (`athenaeum.registry.SCALAR_HANDLE_KEYS`) but has zero populated entries in
+# a live registry, because nothing seeds it onto person frontmatter yet --
+# the structural gap tracked by athenaeum#902. Do not restore the handle form
+# until that seeding exists; a `{type, handle}` target that resolves to zero
+# entities raises the correction's tier forever instead of applying.
+#
+# NOTE the deliberate absence: there is no create rule here. Contact-sync
+# records stay UPDATE-ONLY -- a sync record never auto-creates a person, on
+# the same volume argument as the email-handle create carve-out in
+# `docs/design/field-corrections.md` §8. A record whose person is unknown falls
+# through to the reasoning tiers rather than manufacturing an entity.
+#
+# ---------------------------------------------------------------------------
+# Operator configuration this rule depends on
+# ---------------------------------------------------------------------------
+#
+# `identifier_validity` must be on the §6.3 attribute allowlist as a LIST
+# attribute, with this rule's SUBMITTER among its `writers`, and mapped to a
+# sensitive surface so the close lands on the excluded record beside the
+# addresses themselves rather than on the public page. The submitter a shape
+# rule writes under is `shape-rule:<name>@<version>` (`rules.py`'s
+# `write_correction_batch` call sites), NOT the correction's own `source`:
+#
+#   librarian:
+#     corrections:
+#       fields:
+#         identifier_validity:
+#           shape: list
+#           writers: ["shape-rule:example-contact-sync-email-removal@1"]
+#       sensitive_fields:
+#         identifier_validity: pii
+#   storage:
+#     mapping: {pii: excluded}
+#
+# Without the allowlist entry every correction this rule emits is rejected
+# with "attribute not on the allowlist" and escalated forever -- the failure
+# mode athenaeum#862 measured across 1,369 corrections. Without the
+# `sensitive_fields` entry the close (which embeds an email address) would be
+# written to the public wiki page.
 #
 # ROUTING IS NOT THIS RULE'S DECISION. `docs/design/field-corrections.md` §7 is
 # explicit that a correction's target/field is a PROPOSAL: the librarian
@@ -19,12 +118,6 @@
 # surface regardless of what this file names. That routing is deployment
 # configuration and existing code -- this rule neither configures nor
 # bypasses it, and a submitter cannot opt out by being specific.
-#
-# NOTE the deliberate absence: there is no create rule here. Contact-sync
-# records stay UPDATE-ONLY -- a sync record never auto-creates a person, on
-# the same volume argument as the email-handle create carve-out in
-# `docs/design/field-corrections.md` §8. A record whose person is unknown falls
-# through to the reasoning tiers rather than manufacturing an entity.
 #
 # Ships in "observe" mode: review wiki/_shape_rules_applied.jsonl before
 # flipping this rule's own copy to `mode: live`.
@@ -37,25 +130,38 @@ match:
   source: contact-sync
   format: jsonl
   fields:
-    kind:
-      glob: "update_*"
+    action:
+      exact: update_emails_applied
+    reason:
+      exact: email_removal_propagated
 
 disposition: emit
 correction:
-  # Resolved deterministically through registry.json via the
-  # `google_resource_name` source handle (issue athenaeum#902) -- no reasoning
-  # needed to find the person this record is about.
   target:
-    type: person
-    handle:
-      google_resource_name: "$resource_name"
-  op: remove
-  field: alt_emails
+    uid: "$wiki_uid"
+  op: add
+  field: identifier_validity
   value:
-    fn: set_diff
-    args:
-      - "$emails_before"
-      - "$emails_after"
+    identifier:
+      fn: first
+      args:
+        - fn: set_diff
+          args:
+            - "$before.emails"
+            - "$after.emails"
+    bounce_diagnostic: "removed upstream by contact-sync"
+    observed_at:
+      fn: date_of
+      args:
+        - "$ts"
+    # Inclusive last-valid date, exactly as `pii.mark_bounced` writes it:
+    # `models.valid_until_expired` reads `as_of > valid_until`, so the
+    # address reads as closed from the day after the sync observed it.
+    valid_until:
+      fn: date_of
+      args:
+        - "$ts"
+    source: "script:contact-sync-email-removal"
   source: "script:example-contact-sync"
-  observed_at: "$observed_at"
-  note: "email removed upstream in contact-sync; compiled as a set difference"
+  observed_at: "$ts"
+  note: "address removed upstream in contact-sync; closed, not deleted"

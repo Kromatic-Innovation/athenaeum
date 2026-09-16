@@ -298,7 +298,16 @@ Every value in `target` / `value` / `observed_at` / `note` is exactly one of:
    and no `fn` key. Returned unchanged.
 2. **A whole-value field reference** — a string of the exact form `"$name"`,
    substituted with `record["name"]` verbatim (any type: string, number,
-   list, ...). This is deliberately **whole-value only** — you cannot embed
+   list, ...). `name` may be a DOTTED path (`"$before.emails"`), resolved by
+   `athenaeum.rules.resolve_field_path` — the same walker, with the same
+   exact-top-level-key-wins-first ordering, that §3.2's `match.fields` keys
+   use. The two halves of a rule therefore address a record identically:
+   without it a rule could MATCH on a nested key it had no way to READ, which
+   is exactly what made a correction over a `before`/`after`-nested payload
+   inexpressible (issue athenaeum#1721). A plain, undotted `"$name"` resolves
+   exactly as it always did.
+
+   This is deliberately **whole-value only** — you cannot embed
    a field inside a larger literal string (`"prefix $name suffix"` is a
    literal string containing a dollar sign, not a substitution). Partial
    in-string interpolation is one step from a templating language; whole-
@@ -755,6 +764,34 @@ any file that already exists, unless `--force`), mirroring
 packaged example ships `mode: observe` — installing them changes nothing
 about what gets written until an operator reviews the ledger and edits a
 copy to `mode: live`.
+
+### 7.1 A rule must match the shape the producer actually emits
+
+An example rule is an onboarding artifact, so a rule that cannot fire is worse
+than no rule: it reads as a working reference and silently compiles nothing.
+`contact-sync-email-removal.yaml` was written against a record shape the
+producer never emitted — a `kind` discriminator where the producer writes
+`action`, and a target list (`alt_emails`) with no populated entries anywhere
+in the corpus — and so never fired, on either ground, from the day it shipped
+(issue athenaeum#1721).
+
+Two habits follow, and the packaged examples are expected to hold to both:
+
+- **Write the match against a recorded record, not against the field names the
+  issue prose used.** A producer's own emit sites are the specification; a
+  paraphrase of them is not.
+- **Discriminate on the variant that means what you think it means.** The
+  contact-sync producer emits `update_emails` for a DEFERRED, dry-run or FAILED
+  removal as well as `update_emails_applied` for one that went through, and
+  emits `update_emails_applied` for a union (where nothing was removed) as well
+  as for a removal. A glob over the family would compile a correction for three
+  cases that are not the case the rule is about. See that file's header for how
+  it narrows to the one.
+
+That is why the packaged contact-sync example additionally asserts its
+`reason`, and resolves its target by the `wiki_uid` the producer populates
+rather than by the `google_resource_name` source handle, which is registered
+but has nothing seeding it onto person frontmatter yet (athenaeum#902).
 
 ---
 
