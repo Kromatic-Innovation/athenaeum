@@ -503,7 +503,13 @@ def test_staleness_contract(tmp_path: Path) -> None:
 
 # Every layer that could hold recorded fixtures, so the guard can look up the
 # on-disk state of any name the manifest might list.
-_ALL_KNOWN_LAYERS = (LAYER_DETECTOR, LAYER_RESOLVER, LAYER_RECALL, LAYER_BACKFILL)
+_ALL_KNOWN_LAYERS = (
+    LAYER_DETECTOR,
+    LAYER_RESOLVER,
+    LAYER_RECALL,
+    LAYER_BACKFILL,
+    LAYER_UNDERDETERMINED,
+)
 
 
 def test_seeded_manifest_layers_are_populated() -> None:

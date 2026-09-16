@@ -2,8 +2,9 @@ name: Evals
 
 # Live-API eval suite (issue athenaeum#331). Triggers:
 #   * workflow_dispatch — on-demand, optionally with `record=true` to
-#     persist raw response bodies to tests/fixtures/recorded/ (a follow-up
-#     PR then commits the drift).
+#     persist raw response bodies to tests/fixtures/recorded/, uploaded as
+#     a `recorded-fixtures` artifact (someone must download it and commit
+#     the drift themselves).
 #   * push to `main` only — the release path; a red eval here is visible
 #     without blocking the develop-CI flow.
 #
@@ -31,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       record:
-        description: "Persist responses to tests/fixtures/recorded/ (opens a follow-up PR to commit)"
+        description: "Persist responses to tests/fixtures/recorded/ (uploads a recorded-fixtures artifact to download and commit)"
         required: false
         default: "false"
         type: choice
@@ -135,7 +136,7 @@ jobs:
           retention-days: 30
 
       - name: Upload recorded fixtures (record mode only)
-        if: ${{ github.event.inputs.record == 'true' }}
+        if: ${{ always() && github.event.inputs.record == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: recorded-fixtures
