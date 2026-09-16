@@ -96,6 +96,21 @@ DOES_NOT_ASSERT_AFFILIATION = [
     ),
     ("person_only", "Devon Achebe flagged a load-bearing wall near the east entrance."),
     ("org_only", "The walkthrough log was filed by Larkspur Site Audits."),
+    # The role-noun apposition must not reach across a line break: these are
+    # two separate statements, not "Larkspur's lead, Devon Achebe". The first
+    # is a real positive control — it MATCHED before the horizontal-whitespace
+    # fix. The second did not (the list marker already blocked it), so it
+    # guards against a future widening rather than demonstrating the bug;
+    # noted so a reader does not take it for evidence it never supplied.
+    (
+        "role_noun_across_a_line_break",
+        "The walkthrough log was filed by Larkspur Site Audits\nLead Devon "
+        "Achebe flagged a load-bearing wall.",
+    ),
+    (
+        "role_noun_across_a_list_item",
+        "- Source: Larkspur Site Audits\n- Engineer: Devon Achebe",
+    ),
 ]
 
 

@@ -138,7 +138,14 @@ _ROLE_NOUNS = (
 # closed role-noun list, not this word budget, is what keeps provenance
 # phrasing out: "a Larkspur Site Audits log, Devon Achebe" ends in "log",
 # which is not a role noun, so it never matches however wide the gap is.
-_MODS = r"(?:(?:a|an|the|our|their|its|his|her)\s+)?(?:\w+,?\s+){0,4}"
+#
+# Horizontal whitespace only (``[^\S\n]``, not ``\s``): a sentence-ending
+# ``.!?`` already cannot appear inside ``\w+,?``, but a bare line break can,
+# and "... filed by Larkspur Site Audits\nLead Devon Achebe" is two separate
+# statements, not an affiliation claim. Every other pattern below is bounded
+# by _NO_STOP, which excludes newlines for the same reason.
+_HSPACE = r"[^\S\n]+"
+_MODS = rf"(?:(?:a|an|the|our|their|its|his|her){_HSPACE})?(?:\w+,?{_HSPACE}){{0,4}}"
 
 # No sentence terminator may fall inside a gap — the claim has to be made in
 # one sentence, matching _co_occurs_same_sentence's proxy for attribution.
@@ -161,7 +168,7 @@ def _affiliation_patterns(person: str, org: str) -> list[str]:
         # "Larkspur's Devon Achebe" — possessive on the org
         rf"{o}{_NO_STOP}{{0,20}}?['’]s\s+{_NO_STOP}{{0,20}}?{p}",
         # "Larkspur Site Audits consultant Devon Achebe" — role-noun apposition
-        rf"{o}\s+{_MODS}(?:{_ROLE_NOUNS})s?\s+{p}",
+        rf"{o}{_HSPACE}{_MODS}(?:{_ROLE_NOUNS})s?{_HSPACE}{p}",
     ]
 
 
