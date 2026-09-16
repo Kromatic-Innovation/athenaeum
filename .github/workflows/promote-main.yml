@@ -282,6 +282,30 @@ jobs:
           # gated commit hestia read). When absent, this block is skipped and the
           # source SHA stays the branch tip: behavior is unchanged.
           if [ -n "${PROMOTE_SHA:-}" ]; then
+            # cwc#3349: normalize and validate BEFORE any gate spends time.
+            # The refs API write at the end of this workflow requires a full
+            # 40-character SHA and 422s on anything shorter — an abbreviated
+            # SHA (a perfectly ordinary paste) used to sail through every
+            # gate (branch validation, reachability, the CI Required check on
+            # that short SHA) and fail only at the final fast-forward, the
+            # worst place to learn the input was malformed. Expand it here,
+            # once, and use the expanded value everywhere downstream.
+            if ! [[ "$PROMOTE_SHA" =~ ^[0-9a-fA-F]{4,40}$ ]]; then
+              echo "::error::Pinned sha '${PROMOTE_SHA}' is not a valid hex commit SHA (expected 4-40 hex characters). Refusing to promote."
+              exit 1
+            fi
+            if ! EXPANDED_SHA="$(git rev-parse --verify --quiet "${PROMOTE_SHA}^{commit}")"; then
+              echo "::error::Pinned sha '${PROMOTE_SHA}' does not resolve to a commit in this checkout (unknown or ambiguous abbreviation). Refusing to promote."
+              exit 1
+            fi
+            if [ "${#EXPANDED_SHA}" -ne 40 ]; then
+              echo "::error::Pinned sha '${PROMOTE_SHA}' expanded to '${EXPANDED_SHA}', which is not a full 40-character SHA. Refusing to promote."
+              exit 1
+            fi
+            if [ "$EXPANDED_SHA" != "$PROMOTE_SHA" ]; then
+              echo "Expanded pinned sha '${PROMOTE_SHA}' to full sha ${EXPANDED_SHA}."
+            fi
+            PROMOTE_SHA="$EXPANDED_SHA"
             if ! git merge-base --is-ancestor "$PROMOTE_SHA" "$SOURCE_SHA"; then
               echo "::error::Pinned sha ${PROMOTE_SHA} is not reachable from origin/${SOURCE_BRANCH} (tip ${SOURCE_SHA}). Promote only a commit that is on ${SOURCE_BRANCH}."
               exit 1
