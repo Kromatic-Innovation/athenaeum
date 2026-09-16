@@ -58,6 +58,35 @@ source-type, adapter-name, or board-title string anywhere — see this module's 
 retires a page, and never fills ``subject`` (athenaeum#1244 / athenaeum#1615 own
 that field).
 
+**Transitory-class decay stamping (issue athenaeum#1713).** A page whose
+``type:`` (and, for one class, body content) matches one of four
+operator-named transitory classes — an incident record, a
+deployment-status page, an operational source note, or a reference page
+mirroring a GitHub issue (operator decision recorded 2026-09-16 on
+athenaeum#1626) — gets ``bucket: daily`` plus a ``valid_until`` written
+alongside the ordinary coordinate fills, via the SAME never-overwrite rule
+:func:`apply_verdict_to_meta` already enforces for every other coordinate
+(see :func:`_transitory_page_class` / :data:`TRANSITORY_PAGE_CLASSES`).
+When the page's own body states its own end date, the EXISTING
+model-driven ``valid_until`` fill (the same one every other page gets
+asked about — :func:`audit_page` / :func:`parse_audit_response`) is used
+as-is; otherwise a configurable default horizon
+(:func:`athenaeum.config.resolve_audit_transitory_horizon_days`,
+recommended 90 days) measured from the page's own ``last_audited`` stamp
+is used instead. **This is not a second decay mechanism** — it is one
+write into fields athenaeum#904 already built the read and sweep sides
+for: recall's currency ranking
+(:func:`athenaeum.mcp_server._is_deprioritized_for_currency`)
+deprioritizes the page once ``valid_until`` passes, and a later
+``athenaeum decay-sweep --apply`` run (:mod:`athenaeum.decay_sweep`, a
+separate, manually-invoked command this module never calls or schedules)
+will eventually ARCHIVE the page out of the live tree via the existing
+two-commit ``git rm`` (recoverable via git history). Giving a page an
+expiry here and it eventually being removed from the live tree are the
+SAME operator decision, not two: there is no narrower value that opts a
+page into read-time deprioritization alone without also making it
+eligible for that eventual archival.
+
 ``subject`` is deliberately never touched here (issue athenaeum#1624 explicitly
 excludes it; athenaeum#1244/athenaeum#1615 own subject resolution by meaning).
 
@@ -88,7 +117,7 @@ import logging
 import random
 import re
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -888,6 +917,118 @@ def _find_duplicate_reasons(
     return reasons
 
 
+# --------------------------------------------------------------------------- #
+# Transitory-class decay stamping (issue athenaeum#1713)
+# --------------------------------------------------------------------------- #
+
+#: The operator's four named transitory page classes (decision recorded
+#: 2026-09-16 on athenaeum#1626), each mapped to the frontmatter ``type:``
+#: value(s) that identify it in this corpus today. OPERATOR-ADJUSTABLE: this
+#: is exactly the four classes the operator named, no additions — but WHICH
+#: ``type:`` value(s) fall under each class is this module's own call, and
+#: is meant to be edited here (not the matching logic in
+#: :func:`_transitory_page_class`) as the corpus's actual type usage becomes
+#: clearer. Keys are the class names verbatim from the operator's decision,
+#: used as :attr:`AuditVerdict`-adjacent bookkeeping only (never written to
+#: a page).
+TRANSITORY_PAGE_CLASSES: dict[str, frozenset[str]] = {
+    "incident record": frozenset({"incident"}),
+    "deployment-status page": frozenset({"deployment-status"}),
+    "operational source note": frozenset({"source"}),
+    # "reference page mirroring a GitHub issue" is intentionally NOT a
+    # blanket ``type: reference`` match — see _transitory_page_class below,
+    # which additionally requires _mirrors_github_issue: not every
+    # reference page duplicates the system of record.
+    "reference page mirroring a GitHub issue": frozenset({"reference"}),
+}
+
+#: A GitHub issue URL, matched against a candidate ``type: reference``
+#: page's ``source_ref`` frontmatter value or its body — the narrow signal
+#: for "mirrors a GitHub issue" (issue athenaeum#1713): a reference page
+#: that duplicates a GitHub issue as its system of record, not any
+#: reference page.
+_GITHUB_ISSUE_URL_RE = re.compile(r"https?://github\.com/[\w.-]+/[\w.-]+/issues/\d+")
+
+
+def _mirrors_github_issue(meta: dict[str, Any], body: str) -> bool:
+    """Whether *meta*/*body* cite a GitHub issue URL directly."""
+    source_ref = meta.get("source_ref")
+    if isinstance(source_ref, str) and _GITHUB_ISSUE_URL_RE.search(source_ref):
+        return True
+    return bool(_GITHUB_ISSUE_URL_RE.search(body or ""))
+
+
+def _transitory_page_class(meta: dict[str, Any], body: str) -> str | None:
+    """Return the operator-named transitory class *meta*/*body* match, or
+    ``None`` when the page is durable (issue athenaeum#1713).
+
+    Deterministic, in code — like :func:`_find_duplicate_reasons` above,
+    never a model judgment, so AC4 (a durable page never receives a
+    ``bucket``/``valid_until`` write from this pass) holds regardless of
+    what an LLM might guess.
+    """
+    page_type = meta.get("type")
+    if not isinstance(page_type, str):
+        return None
+    normalized = page_type.strip()
+    for class_name, types in TRANSITORY_PAGE_CLASSES.items():
+        if normalized not in types:
+            continue
+        if class_name == "reference page mirroring a GitHub issue" and not _mirrors_github_issue(
+            meta, body
+        ):
+            continue
+        return class_name
+    return None
+
+
+def _default_transitory_valid_until(audited_at: str, horizon_days: int) -> str:
+    """*audited_at* (:func:`_now_iso`'s ``YYYY-MM-DDTHH:MM:SSZ`` shape) plus
+    *horizon_days*, as a bare ``YYYY-MM-DD`` date string — the same shape
+    :func:`parse_audit_response` writes for a model-derived ``valid_until``
+    fill, so both land through :func:`apply_verdict_to_meta` identically.
+    """
+    dt = datetime.strptime(audited_at, "%Y-%m-%dT%H:%M:%SZ")
+    return (dt.date() + timedelta(days=horizon_days)).isoformat()
+
+
+def _apply_transitory_class(
+    verdict: AuditVerdict, meta: dict[str, Any], body: str, config: dict[str, Any] | None
+) -> AuditVerdict:
+    """Add ``bucket``/``valid_until`` to *verdict*'s coordinate fills when
+    *meta*/*body* match one of :data:`TRANSITORY_PAGE_CLASSES` (issue
+    athenaeum#1713) — additively, never overwriting a coordinate value
+    already populated at SCAN time (*meta*, as read for this pass; the
+    write-time re-check against a possibly-newer on-disk value still
+    happens in :func:`apply_verdict_to_meta`, same as every other
+    coordinate). A page that already carries its own end date from the
+    ordinary model-driven ``valid_from``/``valid_until`` fill (the SAME
+    fill every other page gets asked about) keeps that date rather than
+    the default horizon — the default only applies when the page states no
+    end date of its own.
+    """
+    if _transitory_page_class(meta, body) is None:
+        return verdict
+
+    fills = dict(verdict.coordinate_fills)
+    changed = False
+
+    if not _is_populated(meta.get("bucket")) and "bucket" not in fills:
+        fills["bucket"] = "daily"
+        changed = True
+
+    if not _is_populated(meta.get("valid_until")) and not fills.get("valid_until"):
+        from athenaeum.config import resolve_audit_transitory_horizon_days
+
+        horizon_days = resolve_audit_transitory_horizon_days(config)
+        fills["valid_until"] = _default_transitory_valid_until(verdict.audited_at, horizon_days)
+        changed = True
+
+    if not changed:
+        return verdict
+    return replace(verdict, coordinate_fills=fills)
+
+
 def select_audit_pages(
     wiki_root: Path,
     *,
@@ -1047,7 +1188,7 @@ def build_audit_report(
     all_eligible = _collect_eligible_pages(wiki_root)
     duplicate_reasons = _find_duplicate_reasons(candidates, all_eligible, wiki_root)
 
-    def _finalize(verdict: AuditVerdict, meta: dict[str, Any]) -> AuditVerdict:
+    def _finalize(verdict: AuditVerdict, meta: dict[str, Any], body: str) -> AuditVerdict:
         uid_value = meta.get("uid")
         has_uid = isinstance(uid_value, str) and bool(uid_value.strip())
         if not has_uid:
@@ -1062,6 +1203,7 @@ def build_audit_report(
         dup_reason = duplicate_reasons.get(verdict.uid)
         if dup_reason is not None:
             verdict = replace(verdict, retirement_candidate=True, retirement_reason=dup_reason)
+        verdict = _apply_transitory_class(verdict, meta, body, config)
         return verdict
 
     if client is None:
@@ -1077,7 +1219,7 @@ def build_audit_report(
             (identity_key(path, meta, wiki_root), path, meta, body)
             for path, meta, body in candidates
         ]
-        meta_by_identity = {identity: meta for identity, _p, meta, _b in pages}
+        meta_by_identity = {identity: (meta, body) for identity, _p, meta, body in pages}
         if pages:
             verdicts = audit_pages_via_batch(
                 client,
@@ -1089,7 +1231,7 @@ def build_audit_report(
                 usage=usage,
                 date_fill=date_fill,
             )
-            verdicts = [_finalize(v, meta_by_identity[v.uid]) for v in verdicts]
+            verdicts = [_finalize(v, *meta_by_identity[v.uid]) for v in verdicts]
             report.verdicts.extend(verdicts)
             report.llm_calls += len(pages)
     else:
@@ -1106,7 +1248,7 @@ def build_audit_report(
                 now=now,
                 date_fill=date_fill,
             )
-            verdict = _finalize(verdict, meta)
+            verdict = _finalize(verdict, meta, body)
             report.verdicts.append(verdict)
             report.llm_calls += 1
             usage.add(
@@ -1287,6 +1429,7 @@ __all__ = [
     "AUDIT_USER_TEMPLATE",
     "AUDIT_VERSION",
     "COORDINATE_FIELDS",
+    "TRANSITORY_PAGE_CLASSES",
     "AuditReport",
     "AuditVerdict",
     "apply_audit_report",

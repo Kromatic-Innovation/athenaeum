@@ -347,6 +347,23 @@ yaml > ``90``. A ``bool`` / non-int / ``<= 0`` value (env or yaml) falls
 through to the default — a zero/negative age would mark every page
 stale unconditionally.
 
+### `resolve_audit_transitory_horizon_days`
+
+- **YAML path:** `audit.transitory_horizon_days`
+- **Environment variable:** `ATHENAEUM_AUDIT_TRANSITORY_HORIZON_DAYS`
+- **CLI flag:** —
+- **Default:** `90`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the transitory-class default decay horizon, in days.
+
+Precedence: ``ATHENAEUM_AUDIT_TRANSITORY_HORIZON_DAYS`` env >
+``audit.transitory_horizon_days`` yaml > `DEFAULT_AUDIT_TRANSITORY_HORIZON_DAYS`
+— mirrors `resolve_audit_date_fill`'s precedence shape, placed
+alongside it per this issue's own plan. A non-positive, non-numeric, or
+``bool`` override (env or yaml) falls back to the default rather than
+producing a zero-or-negative (or immediately-expired) window.
+
 ## `audit_on_touch`
 
 ### `resolve_audit_on_touch_freshness_hours`
