@@ -47,9 +47,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from athenaeum.identity_resolution import resolve_person_mention
-from athenaeum.intake import attribute_person_observation, tier0_passthrough
+from athenaeum.intake import (
+    PERSON_OBSERVATION_MAX_FANOUT,
+    PERSON_OBSERVATION_UNLOCATED_MARKER,
+    attribute_person_observation,
+    tier0_passthrough,
+)
 from athenaeum.librarian import process_one, tier0_handle_upsert
-from athenaeum.models import EntityIndex, RawFile
+from athenaeum.models import EntityIndex, RawFile, parse_frontmatter
 from athenaeum.person_registry import (
     PersonRegistry,
     PersonRegistryEntry,
@@ -292,6 +297,108 @@ class TestAC2RegistryConsult:
         entry = PersonRegistryEntry(uid="person1a", path=page, name="Alice Zhang")
         raw = _make_raw("---\nsource: manual\n---\n\n   \n")
         assert attribute_person_observation(raw, entry) is False
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1716 — fan-out cap, unlocated-excerpt marker, no `updated` stamp
+# ---------------------------------------------------------------------------
+
+
+class TestAthenaeum1716FanOutAndMarking:
+    def test_attribute_person_observation_does_not_stamp_updated(
+        self, tmp_path: Path
+    ) -> None:
+        """AC3: an attribution-only edit must not make the page look
+        freshly, substantively edited to staleness/decay logic reading
+        `updated`."""
+        registry_root = tmp_path / "registry"
+        page = _write_person(
+            registry_root,
+            uid="person1a",
+            name="Alice Zhang",
+            extra_fm="updated: 2020-01-01\n",
+        )
+        entry = PersonRegistryEntry(uid="person1a", path=page, name="Alice Zhang")
+        raw = _make_raw("Alice mentioned she's now leading the platform team.")
+
+        assert attribute_person_observation(raw, entry) is True
+        meta, _ = parse_frontmatter(page.read_text(encoding="utf-8"))
+        assert str(meta["updated"]) == "2020-01-01"  # unchanged, not bumped to today
+
+    def test_attribute_person_observation_marks_unlocated_fallback_excerpt(
+        self, tmp_path: Path
+    ) -> None:
+        """AC2: when the resolved name/alias is not found verbatim in the
+        raw body (the match came from elsewhere, e.g. frontmatter that
+        `parse_frontmatter` already stripped), the excerpt must not read as
+        if it were found near the person's mention."""
+        registry_root = tmp_path / "registry"
+        page = _write_person(registry_root, uid="person1a", name="Alice Zhang")
+        # "Alice Zhang" appears nowhere in the stripped body below, so
+        # `_bounded_person_excerpt` cannot locate it and falls back to the
+        # start-of-body anchor.
+        entry = PersonRegistryEntry(uid="person1a", path=page, name="Alice Zhang")
+        raw = _make_raw("This body never mentions the resolved person by name.")
+
+        assert attribute_person_observation(raw, entry) is True
+        text = page.read_text(encoding="utf-8")
+        assert PERSON_OBSERVATION_UNLOCATED_MARKER.strip() in text
+
+    def test_attribute_person_observation_no_marker_when_name_located(
+        self, tmp_path: Path
+    ) -> None:
+        """Sanity converse of the marker test: an ordinary, located mention
+        must NOT carry the unlocated marker."""
+        registry_root = tmp_path / "registry"
+        page = _write_person(registry_root, uid="person1a", name="Alice Zhang")
+        entry = PersonRegistryEntry(uid="person1a", path=page, name="Alice Zhang")
+        raw = _make_raw("Alice Zhang shipped the new onboarding flow this week.")
+
+        assert attribute_person_observation(raw, entry) is True
+        text = page.read_text(encoding="utf-8")
+        assert PERSON_OBSERVATION_UNLOCATED_MARKER.strip() not in text
+
+    def test_process_one_caps_person_attribution_fanout_and_logs_skips(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """AC1: a raw file resolving more person matches than the fan-out
+        cap attributes to no more than the cap, with the rest logged as
+        skipped rather than silently dropped."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        registry_root = tmp_path / "registry"
+        index = EntityIndex(wiki)
+
+        fanout_plus_one = PERSON_OBSERVATION_MAX_FANOUT + 1
+        pages = {}
+        mentions = []
+        for i in range(fanout_plus_one):
+            uid = f"person{i:02d}"
+            name = f"Zeta Testperson{i:02d}"
+            pages[uid] = _write_person(registry_root, uid=uid, name=name)
+            mentions.append(f"{name} joined the call.")
+        registry = PersonRegistry(registry_root)
+
+        raw_dir = tmp_path / "raw" / "sessions"
+        raw_dir.mkdir(parents=True)
+        raw_path = raw_dir / "20240410T120000Z-aabbccdd.md"
+        raw_path.write_text(" ".join(mentions) + "\n", encoding="utf-8")
+        raw = RawFile(path=raw_path, source="sessions", timestamp="", uuid8="")
+
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        client = _FakeClient()
+        process_one(
+            raw, index, wiki, client, ["person"], [], ["internal"], person_registry=registry
+        )
+
+        attributed = [
+            uid for uid, page in pages.items() if "joined the call" in page.read_text()
+        ]
+        assert len(attributed) == PERSON_OBSERVATION_MAX_FANOUT
+        assert any(
+            "fan-out cap" in rec.message and str(PERSON_OBSERVATION_MAX_FANOUT) in rec.message
+            for rec in caplog.records
+        )
 
 
 # ---------------------------------------------------------------------------
