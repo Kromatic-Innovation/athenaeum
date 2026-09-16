@@ -33,14 +33,49 @@ must fail today on at least one of B/C/E while passing D. Tuning the floor to
 observed behaviour would turn the layer into a rubber stamp. This is safe:
 ``-m eval`` is deselected from ordinary CI (``pyproject.toml``) and
 ``evals.yml`` is dispatch/main-push only, so a red layer here never blocks
-develop. The red is now carried explicitly by a strict
-``pytest.mark.xfail(strict=True, raises=AssertionError)`` on
+develop. The red is carried explicitly by a
+``pytest.mark.xfail(raises=AssertionError)`` on
 :func:`test_attachment_aggregate_floor` (athenaeum#1654) rather than by an
 uncontrolled job failure: it keeps the Live-API eval job green while the
-floor is unmet, turns the job red (XPASS) the day a fix pushes the score to
-or past the floor, and does not swallow an infrastructure error, such as a
-crashed tier call, as an "expected" failure. Remove the marker in the same
-change that clears the floor.
+floor is unmet, and ``raises=AssertionError`` stops it swallowing an
+infrastructure error, such as a crashed tier call, as an "expected" failure.
+
+**Why the marker is NOT strict (athenaeum#1686).** athenaeum#1654 set
+``strict=True`` so that an unexpected pass would red the job and force the
+marker's removal "the day a fix pushes the score to or past the floor". That
+rests on the score being a property of the librarian alone. It is not: it is
+a live-API measurement, and it moves run to run without any routing change.
+The reading that settles it, taken over every main-push Evals run carrying
+the marker between 2026-09-15T17:49Z and 2026-09-16T01:09Z:
+
+=======================  ====================================
+run                      ``test_attachment_aggregate_floor``
+=======================  ====================================
+35003616401 ``279e6eb6``  XFAIL
+35004869331 ``fbda7820``  XFAIL
+35006866272 ``5d478844``  XFAIL
+35009922756 ``a010d301``  XFAIL
+35027458483 ``0e7dc088``  XFAIL
+35037261767 ``5aaedfed``  XFAIL
+35042967267 ``c7ddf318``  **FAILED — [XPASS(strict)]**
+=======================  ====================================
+
+Six SHAs below the floor, one at or above it, and the only ``librarian.py``
+change anywhere in that window was athenaeum#1653's stuck-ledger error
+detail, which cannot touch attach-vs-mint routing. The two runs immediately
+before the marker landed scored 3/5 and 2/5 against a floor of 4. So the one
+XPASS is variance, not a fix — and under ``strict=True`` that variance alone
+reds a main-push job and files a maintenance issue (athenaeum#1686). A strict
+marker cannot express "usually below the floor, occasionally at it", which is
+what this layer actually does.
+
+Non-strict keeps everything the marker was for — the job stays green while
+the floor is unmet, the aggregate assertion still runs on every eval run, and
+its message is still the layer's product — and drops only the self-removal
+trigger, which was firing on noise. The score remains recorded per run in
+``eval-summary.json``. Removing the marker needs a reading that variance
+cannot produce (several consecutive runs at or above the floor, alongside a
+routing change that explains them), not one lucky run.
 
 **AC4 is an invariant, not a score.** ``docs/north-star.md`` §2.8: anything
 irreversible — a merge, a demotion to source document — is a PROPOSAL reaching
@@ -363,12 +398,16 @@ def test_attachment_case(
 
 
 @pytest.mark.xfail(
-    strict=True,
+    strict=False,
     raises=AssertionError,
     reason=(
         "athenaeum#1580 AC3: the attachment layer is aspirationally RED "
-        "until the librarian's routing crosses ATTACHMENT_FLOOR. Delete "
-        "this marker in the same change that clears the floor (athenaeum#1654)."
+        "until the librarian's routing crosses ATTACHMENT_FLOOR. NON-strict "
+        "on purpose (athenaeum#1686): the score is a live-API measurement "
+        "that varies run to run around the floor, so a strict marker reds "
+        "the job on a lucky run rather than on a fix. Do not delete this "
+        "marker on the strength of a single at-or-above-floor run; see the "
+        "module docstring for the reading that has to justify removal."
     ),
 )
 def test_attachment_aggregate_floor(eval_session: Any, _live_ready: None) -> None:
