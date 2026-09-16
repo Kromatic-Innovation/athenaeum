@@ -47,6 +47,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The attachment eval's aggregate-floor xfail is no longer strict, because
+  an unexpected pass turned out to mean variance rather than a fix.**
+  athenaeum#1654 marked `test_attachment_aggregate_floor`
+  `xfail(strict=True, raises=AssertionError)` on the premise that the test
+  "fails every main-push Evals run", so an XPASS could only mean the
+  librarian had started clearing `ATTACHMENT_FLOOR` and the marker was due
+  for removal. The premise did not hold for a day: the test read `XFAIL` on
+  six consecutive main-push Evals runs and then `FAILED — [XPASS(strict)]`
+  on the seventh, across six different SHAs whose only `librarian.py` change
+  was an unrelated stuck-ledger error-detail field. The score is a live-API
+  measurement that moves around the floor on its own (3/5 and 2/5 in the two
+  runs immediately before the marker landed), so `strict=True` reds a
+  main-push job — and files a maintenance issue — on a lucky run. The marker
+  is now `strict=False`; `raises=AssertionError` is kept, so an
+  infrastructure error still surfaces instead of being absorbed, and
+  `ATTACHMENT_FLOOR` is still 4, still aspirational, still untuned. The
+  default-selection guard erected by athenaeum#1654 is kept and inverted to
+  pin `strict=False`, so the marker cannot be re-strictened without a
+  noise-robust signal to replace the self-removal trigger.
+  ([#1686](https://github.com/Kromatic-Innovation/athenaeum/issues/1686))
+
 - **The viewer's `used` column consults a content signal, and stops counting
   echoes and hex collisions.** `determine_references` marked a pushed page used
   iff its recorded push id appeared anywhere in the transcript as a bare
