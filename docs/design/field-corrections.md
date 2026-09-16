@@ -330,6 +330,46 @@ There is deliberately no `clear`, `increment`, or `set_if_absent`. A writer need
 either composes it from `set` — it knows the value it wants — or is doing something that
 warrants prose (§9).
 
+### 4.1 A contact identifier that went away is CLOSED, not removed
+
+`remove` is the wrong op for an email address (or any other contact identifier)
+that an upstream source has stopped reporting. Use `add` on `identifier_validity`
+instead, writing the per-identifier close `athenaeum.pii.mark_bounced` already
+writes for a bounced address — `identifier`, `bounce_diagnostic`, `observed_at`,
+`valid_until`, `source`.
+
+The reasoning is the same one §12 gives for keeping events off the entity record,
+run in the other direction. Three things a `remove` destroys and a close keeps:
+
+- **That the address ever existed.** A later record, an archived thread, or a
+  months-old export still naming the old address resolves to the person with a
+  close on file, and to nothing at all after a `remove`.
+- **Convergence.** `remove` is idempotent per the table above only while the value
+  stays absent. An upstream source that still carries the address re-proposes it on
+  the next run, the correction removes it again, and the pair oscillates forever
+  with no record that anything is contested. A close is a durable statement about
+  the address, so the second observation is a no-op.
+- **The answer the readers are already asking for.** Deliverability is read through
+  `pii.is_bounced_identifier(meta, address)`, which consults exactly this field.
+  A close therefore reaches outreach eligibility with no new wiring; a `remove`
+  reaches it only as an absence, which the predicate cannot tell apart from an
+  address it has simply never seen.
+
+`valid_until` is the INCLUSIVE last-valid date (`models.valid_until_expired` reads
+`as_of > valid_until`), so a close observed today reads as closed from tomorrow —
+`mark_bounced`'s own semantics, unchanged. Set the entry's own `source` to a token
+that names the producer, so a close written by a contact sync stays tellable apart
+from one written by the mail agent.
+
+Two operator-configuration consequences, both of which bite silently if missed.
+`identifier_validity` must be on §6.3's attribute allowlist as a `list` attribute
+with the submitter among its `writers`, or every such correction is rejected with
+"attribute not on the allowlist" and escalated forever. And it must carry a §7.1
+`sensitive_fields` mapping, or the close — which embeds an address — is written to
+the public entity page instead of the excluded surface where the addresses live.
+
+`src/athenaeum/rule_examples/contact-sync-email-removal.yaml` is the worked example.
+
 **Provenance is maintained on every op.** `add` appends the co-indexed `{value, source}`
 entry to `field_sources.<field>` in the per-value shape locked in `provenance-shape.md`
 §2.1, upgrading a legacy field-keyed entry per §2.3's writer rule. `set` writes the
