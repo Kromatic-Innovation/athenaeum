@@ -28,8 +28,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
+
+# Detail cap (athenaeum#1653): a stuck-ledger entry lives in the wiki tree, so
+# ``last_error_detail`` must never grow into a de-facto second copy of a raw
+# file's content or a request payload — see :func:`error_detail`'s docstring.
+_ERROR_DETAIL_MAX_CHARS = 500
 
 # Filename of the persistent stuck-file ledger, written beside the wiki root
 # (issue athenaeum#663). Kept ``_``-prefixed + ``.json`` so it stays out of
@@ -69,6 +75,65 @@ def stuck_content_hash(raw: Any) -> str:
     except Exception:  # noqa: BLE001 — a raw we cannot read is never held stuck
         payload = ""
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def error_detail(exc: BaseException) -> str:
+    """Bounded, human-readable detail for a stuck-ledger entry's exception (athenaeum#1653).
+
+    ``last_error`` (see :data:`_RETIRED_LAST_ERRORS` and
+    :func:`held_stuck_summary` above) must stay the bare exception class
+    name forever -- this is the sibling field that carries everything else
+    a human needs to root-cause a stuck file without grepping a rotated log.
+
+    Returns ``str(exc)`` plus, when present on the exception: ``status_code``,
+    ``request_id``, and the response body's ``error.type`` / ``error.message``
+    -- the shape the ``anthropic`` SDK's ``APIStatusError`` (and its
+    subclasses, e.g. ``BadRequestError``) populates. Read via ``getattr``/
+    dict access rather than an ``isinstance`` check against the SDK's actual
+    classes, so this module never needs to import ``anthropic`` -- the same
+    duck-typed, SDK-optional stance :mod:`athenaeum._retry` takes for its own
+    transient-type registry.
+
+    A :class:`~athenaeum._retry.TransientAPIError` is unwrapped to its
+    ``last_error`` first (detected the same way, via ``getattr`` -- not an
+    import of ``_retry``, for the identical layering reason): the wrapper
+    itself carries no provider detail, only the underlying exception it gave
+    up on does. This mirrors what the transient branch's own log line
+    already unwraps (``librarian.py``'s ``TransientAPIError`` handler logs
+    ``exc.last_error``, not ``exc``).
+
+    Never includes the request payload or a raw file's content -- neither is
+    ever an attribute this function reads. All whitespace (including
+    newlines from a multi-line provider message) collapses to single spaces,
+    then the result is capped at :data:`_ERROR_DETAIL_MAX_CHARS` characters,
+    because the ledger lives in the wiki tree and a stray multi-KB provider
+    body must never turn a stuck-file entry into a second copy of it.
+    """
+    last_error = getattr(exc, "last_error", None)
+    unwrapped: BaseException = last_error if isinstance(last_error, BaseException) else exc
+
+    parts = [str(unwrapped)]
+
+    status_code = getattr(unwrapped, "status_code", None)
+    if status_code is not None:
+        parts.append(f"status_code={status_code}")
+
+    request_id = getattr(unwrapped, "request_id", None)
+    if isinstance(request_id, str) and request_id:
+        parts.append(f"request_id={request_id}")
+
+    body = getattr(unwrapped, "body", None)
+    error_body = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error_body, dict):
+        error_type = error_body.get("type")
+        if isinstance(error_type, str) and error_type:
+            parts.append(f"error.type={error_type}")
+        error_message = error_body.get("message")
+        if isinstance(error_message, str) and error_message:
+            parts.append(f"error.message={error_message}")
+
+    detail = re.sub(r"\s+", " ", " ".join(parts)).strip()
+    return detail[:_ERROR_DETAIL_MAX_CHARS]
 
 
 def load_stuck_ledger(wiki_root: Path) -> dict[str, dict[str, Any]]:

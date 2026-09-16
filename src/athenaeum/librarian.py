@@ -3567,6 +3567,7 @@ def _record_stuck_failure(
     action: str | None,
     threshold: int,
     now: datetime | None = None,
+    error_detail: str | None = None,
 ) -> dict[str, Any] | None:
     """Increment a raw file's consecutive-failure count in the ledger (athenaeum#663).
 
@@ -3583,6 +3584,18 @@ def _record_stuck_failure(
     clock :func:`_stuck_backoff_window_open` reads it back with later.
     ``None`` (every pre-athenaeum#1185 caller) falls back to real wall-clock,
     byte-identical to before.
+
+    *error_detail* (issue athenaeum#1653) is the bounded, human-readable detail
+    from :func:`athenaeum.stuck_ledger.error_detail` — kept a SEPARATE field
+    (``last_error_detail``) from *error* (``last_error``) on purpose:
+    ``last_error`` must stay the bare exception class name forever, because
+    :func:`athenaeum.stuck_ledger.held_stuck_summary` groups on it and
+    ``_RETIRED_LAST_ERRORS`` matches it exactly. When given (non-``None``),
+    ``entry["last_error_detail"]`` is set to it. When ``None`` (the default,
+    and every pre-athenaeum#1653 caller), any stale value from a prior
+    failure is removed so the detail never outlives the ``last_error`` it
+    described — a caller that stops passing a detail (or a failure that
+    genuinely has none) must not leave a mismatched leftover behind.
     """
     key = raw.ref
     content_hash = _stuck_content_hash(raw)
@@ -3599,6 +3612,10 @@ def _record_stuck_failure(
     entry["failures"] = int(entry.get("failures", 0)) + 1
     entry["last_failed"] = now_str
     entry["last_error"] = error
+    if error_detail is not None:
+        entry["last_error_detail"] = error_detail
+    else:
+        entry.pop("last_error_detail", None)
     if action:
         entry["last_action"] = action
     ledger[key] = entry
@@ -3622,17 +3639,21 @@ def _surface_newly_stuck(ctx: "RunContext", raw: Any, entry: dict[str, Any]) -> 
             "failures": int(entry.get("failures", 0)),
             "action": entry.get("last_action"),
             "error": entry.get("last_error"),
+            # Issue athenaeum#1653: bounded detail alongside the bare class
+            # name, so the run summary can root-cause without a log grep.
+            "error_detail": entry.get("last_error_detail"),
         }
     )
     log.warning(
         "%s: %s has now failed %d consecutive run(s) on action %s (%s) — STUCK; "
         "it will be skipped until its content changes or a human intervenes "
-        "(issue athenaeum#663)",
+        "(issue athenaeum#663)%s",
         STUCK_FILE_PREFIX,
         raw.ref,
         int(entry.get("failures", 0)),
         entry.get("last_action") or "unknown",
         entry.get("last_error") or "unknown",
+        f" detail={entry['last_error_detail']!r}" if entry.get("last_error_detail") else "",
     )
 
 
@@ -3977,17 +3998,22 @@ def _hold_out_unworkable_raw(ctx: "RunContext") -> tuple[int, int]:
                     "failures": failures,
                     "action": entry.get("last_action"),
                     "error": entry.get("last_error"),
+                    # Issue athenaeum#1653: same detail field _surface_newly_stuck
+                    # attaches, so a file held out on a LATER run (not just the
+                    # run it first crossed threshold on) still carries it.
+                    "error_detail": entry.get("last_error_detail"),
                 }
             )
             log.warning(
                 "%s: holding %s out of this run's intake window — failed %d "
                 "consecutive run(s) on action %s (%s); stuck, needs a human "
-                "(issues athenaeum#663, athenaeum#1322)",
+                "(issues athenaeum#663, athenaeum#1322)%s",
                 STUCK_FILE_PREFIX,
                 raw.ref,
                 failures,
                 entry.get("last_action") or "unknown",
                 entry.get("last_error") or "unknown",
+                f" detail={entry['last_error_detail']!r}" if entry.get("last_error_detail") else "",
             )
             n_stuck += 1
             continue
@@ -7331,16 +7357,24 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     "failures": int(_stuck.get("failures", 0)),
                                     "action": _stuck.get("last_action"),
                                     "error": _stuck.get("last_error"),
+                                    # Issue athenaeum#1653: same detail field the
+                                    # other two stuck-surfacing sites attach.
+                                    "error_detail": _stuck.get("last_error_detail"),
                                 }
                             )
                             log.warning(
                                 "%s: skipping %s — failed %d consecutive run(s) on "
-                                "action %s (%s); stuck, needs a human (issue athenaeum#663)",
+                                "action %s (%s); stuck, needs a human (issue athenaeum#663)%s",
                                 STUCK_FILE_PREFIX,
                                 raw.ref,
                                 int(_stuck.get("failures", 0)),
                                 _stuck.get("last_action") or "unknown",
                                 _stuck.get("last_error") or "unknown",
+                                (
+                                    f" detail={_stuck['last_error_detail']!r}"
+                                    if _stuck.get("last_error_detail")
+                                    else ""
+                                ),
                             )
                             continue
                         # Issue athenaeum#1185: a file that has already failed at
@@ -7662,6 +7696,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     ),
                                     threshold=stuck_threshold,
                                     now=ctx.now,
+                                    error_detail=stuck_ledger_mod.error_detail(exc),
                                 )
                                 if _crossed is not None:
                                     _surface_newly_stuck(ctx, raw, _crossed)
@@ -7702,6 +7737,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     ),
                                     threshold=stuck_threshold,
                                     now=ctx.now,
+                                    error_detail=stuck_ledger_mod.error_detail(exc),
                                 )
                                 if _crossed is not None:
                                     _surface_newly_stuck(ctx, raw, _crossed)
