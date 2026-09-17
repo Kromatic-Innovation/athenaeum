@@ -9,8 +9,12 @@ The four CLI runners (:func:`run_pull`, :func:`run_push_breadcrumb_pull`,
 ``shutil.which(claude_binary)`` and then ``subprocess.run(...)`` a real
 ``claude`` binary -- both are monkeypatched here to a fake, so these tests
 need no real CLI and no network, exactly like ``tests/evals/test_rollout.py``'s
-own offline suite (this module is ``rollout``-marked for the same reason:
-it imports ``tests.evals.rollout``, itself rollout-suite machinery).
+own offline suite.
+
+UNMARKED — it spends no token and spawns no real ``claude``, so it runs in
+``ci.yml``'s default job. Importing ``tests.evals.rollout`` is NOT itself a
+reason to carry ``pytest.mark.rollout``: that marker means token cost, not
+module family (issue athenaeum#1742).
 """
 
 from __future__ import annotations
@@ -34,8 +38,6 @@ from tests.evals.rollout import (
     run_push_breadcrumb_pull,
     run_push_breadcrumb_pull_api,
 )
-
-pytestmark = pytest.mark.rollout
 
 #: One line of valid ``claude -p --output-format stream-json`` output that
 #: parses to a real (if empty of tool calls) answer -- enough for

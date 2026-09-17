@@ -2,10 +2,10 @@
 """Offline tests for the six-arm rollout runner (issues athenaeum#1522,
 athenaeum#1574).
 
-Everything here is ``rollout``-marked (deselected by default, same as
-``eval``/``embedding`` — see ``pyproject.toml``) AND runs with no network
-call and no subprocess spawn: the stream-json parser tests replay a
-committed, redacted fixture
+NOT ``rollout``-marked (issue athenaeum#1742) — runs in the default
+selection, same as every other offline test under this directory: it makes
+no network call and spawns no subprocess. The stream-json parser tests
+replay a committed, redacted fixture
 (``tests/evals/data/rollout/pull_stream_spike.jsonl``), and the arm tests
 use ``tests.conftest.FakeLLMClient`` (the repo's canonical anthropic-shaped
 test double) instead of a live client, plus (for the two breadcrumb arms) an
@@ -21,8 +21,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-
-import pytest
 
 from tests.conftest import FakeLLMClient, make_llm_response, make_llm_usage
 from tests.evals.corpus import build_corpus
@@ -44,8 +42,6 @@ from tests.evals.rollout import (
     run_push_breadcrumb,
     run_push_pages_upper_bound,
 )
-
-pytestmark = pytest.mark.rollout
 
 FIXTURE_PATH = Path(__file__).parent / "data" / "rollout" / "pull_stream_spike.jsonl"
 FOLLOW_THROUGH_FIXTURE_PATH = (

@@ -70,3 +70,100 @@ def test_evals_yml_never_selects_rollout_marker() -> None:
     assert "-m rollout" not in evals_yml
     assert "rollout" not in evals_yml
     assert "containment" not in evals_yml
+
+
+# --- athenaeum#1742: the split cannot drift back together -----------------
+#
+# PR athenaeum#1740 shipped a regression in test_render_report_leads_with_pull_no_call_rate
+# (the athenaeum#1523 report-ordering contract) green, because the whole module
+# carried pytest.mark.rollout even though it makes no LLM call and spawns no
+# `claude` binary -- the marker deselected it from ci.yml's default job by
+# construction. The two tests below pin the fix and guard against it drifting
+# back: one proves every REMAINING rollout-marked module in this directory
+# actually spends tokens, the other pins the specific modules that must NOT
+# carry a deselecting marker.
+
+_EVALS_DIR = REPO_ROOT / "tests" / "evals"
+
+# A module carrying one of these markers is deselected by ci.yml's default
+# `pytest tests/` invocation (proven above). Matches this directory's own
+# convention -- a single module-level `pytestmark = pytest.mark.<name>` line,
+# with nothing else on it (per-test/per-param marks, e.g. test_recall_eval.py's
+# `pytest.param(..., marks=pytest.mark.embedding)`, are a second axis this
+# helper deliberately does not chase -- the module-level mark already governs
+# whether the file is reachable by default).
+_MODULE_MARKER_RE = re.compile(
+    r"^pytestmark\s*=\s*pytest\.mark\.(eval|embedding|rollout)\s*$", re.MULTILINE
+)
+
+# Textual proof a test file genuinely spends tokens or spawns the real
+# `claude` binary, rather than merely sharing a module family with one that
+# does. Kept narrow on purpose -- broadening it is how a future token-free
+# test could slip back under `rollout` unnoticed.
+_LIVE_SOURCE_SIGNALS = (
+    "ANTHROPIC_API_KEY",
+    "ATHENAEUM_LIVE_TESTS",
+    'shutil.which("claude")',
+    "anthropic.Anthropic(",
+)
+
+
+def test_rollout_deselected_tests_are_actually_live() -> None:
+    """Every module still carrying `pytest.mark.rollout` must show, in its
+    OWN source, that it constructs a live client, spawns the real `claude`
+    binary, or gates on a live-test env var -- not merely that it lives
+    beside a module that does. `eval`/`embedding` get no such per-source
+    check here: those markers are pre-existing and out of this issue's
+    scope, and their OWN pyproject.toml `markers` reason string already
+    documents the live/real-model cost they mean (see
+    test_rollout_marker_is_registered's sibling assertions above) -- exactly
+    the "marker reason string" escape the issue names. `rollout` gets no
+    such pass: a marker string alone, undischarged by the file's own
+    content, is exactly what let athenaeum#1740's regression ship deselected
+    without spending a token."""
+    offenders = []
+    for path in sorted(_EVALS_DIR.glob("test_*.py")):
+        source = path.read_text(encoding="utf-8")
+        match = _MODULE_MARKER_RE.search(source)
+        if match is None or match.group(1) != "rollout":
+            continue
+        if not any(signal in source for signal in _LIVE_SOURCE_SIGNALS):
+            offenders.append(path.name)
+    assert not offenders, (
+        f"rollout-marked with no live-client/claude-binary/live-env-gate "
+        f"signal found in source: {offenders} -- either the test genuinely "
+        f"spends no tokens (drop pytest.mark.rollout) or it needs a "
+        f"recognizable live signal added to _LIVE_SOURCE_SIGNALS"
+    )
+
+
+def test_token_free_report_modules_carry_no_deselecting_marker() -> None:
+    """Pins the athenaeum#1740 regression class directly: these modules render
+    reports, round-trip payloads, or drive a CLI or an api-mode tool loop
+    from synthetic fixtures and stub clients -- no LLM call, no `claude`
+    spawn -- so they run in ci.yml's default job and must never be silently
+    deselected again.
+
+    The last three landed `rollout`-marked with athenaeum#1743 while this
+    issue was in flight, each one token-free by its own docstring's account:
+    the drift this issue exists to stop recurred within a single PR, which
+    is why they are pinned by name here and not merely unmarked.
+    """
+    token_free_modules = [
+        "test_north_star_report.py",
+        "test_rollout.py",
+        "test_north_star_cli.py",
+        "test_rollout_payload.py",
+        "test_rollout_push_breadcrumb_spike.py",
+        "test_north_star_verdicts.py",
+        "test_rollout_api_mode.py",
+        "test_rollout_api_mode_hardening.py",
+        "test_rollout_mode_labelling.py",
+    ]
+    for name in token_free_modules:
+        source = (_EVALS_DIR / name).read_text(encoding="utf-8")
+        match = _MODULE_MARKER_RE.search(source)
+        assert match is None, (
+            f"{name} carries pytest.mark.{match.group(1) if match else '?'} -- "
+            "expected no deselecting marker"
+        )

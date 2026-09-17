@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The north-star report tests now run in `ci.yml`'s default job (issue
+  athenaeum#1742).** `tests/evals/test_north_star_report.py`,
+  `test_rollout.py`, `test_north_star_cli.py`, `test_rollout_payload.py`,
+  and `test_rollout_push_breadcrumb_spike.py` carried `pytest.mark.rollout`
+  even though none of them construct a live LLM client, spawn the real
+  `claude` binary, or spend a token — `rollout` is deselected by default, so
+  these tests never ran in CI, and PR athenaeum#1740 shipped a report-ordering
+  regression green as a result (only caught by a reviewer running
+  `-m rollout` by hand). The marker is now split by actual token cost, not
+  by file: those five modules — plus `test_rollout_api_mode.py`,
+  `test_rollout_api_mode_hardening.py`, and `test_rollout_mode_labelling.py`,
+  which landed `rollout`-marked with PR athenaeum#1743 while this fix was in
+  flight and are token-free by their own docstrings' account (stub clients
+  and a monkeypatched `subprocess.run`) — dropped `pytest.mark.rollout` and
+  run by default; `test_rollout_pull_spike.py`, `test_rollout_native_spike.py`,
+  and `test_rollout_native_writer_spike.py` (which spawn the real `claude`
+  binary) keep it. A new guard test,
+  `tests/evals/test_containment_ci_wiring.py::test_rollout_deselected_tests_are_actually_live`,
+  inspects the source of every remaining `rollout`-marked module for a
+  live-client / `claude`-binary / live-env-gate signal so the split cannot
+  silently drift back together; a sibling test pins those modules by
+  name. `evals.yml`'s dispatch-only job and its triggers are unchanged.
+
 ### Added
 
 - **`xlarge` corpus scale, 25,000 pages (issue athenaeum#1735).** `SCALES`

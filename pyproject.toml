@@ -244,20 +244,28 @@ testpaths = ["tests"]
 # `embedding-suite` job (workflow_dispatch or push:main), same non-required
 # cadence as the eval suite.
 #
-# athenaeum#1521: `rollout` is registered alongside `eval`/`embedding` for the
-# same reason — agent-rollout tests (the north-star arm comparison, not yet
-# built; Bradley-Terry fitting is out of this issue's scope) must never run
-# in the default contributor/CI selection either, and must never accumulate
-# into EVAL_TOKEN_CEILING (see tests/evals/rollout_session.py). No test in
-# this repo carries the marker yet; it is deselected here so a FUTURE
-# rollout-marked test is excluded by construction from the moment it lands,
-# rather than needing this line added in the same PR that adds the first
-# such test.
+# athenaeum#1521: `rollout` is registered alongside `eval`/`embedding` so a
+# test that constructs a live LLM client, spawns the real `claude` binary,
+# or otherwise spends tokens is excluded by construction from the default
+# contributor/CI selection, and never accumulates into EVAL_TOKEN_CEILING
+# (see tests/evals/rollout_session.py).
+#
+# athenaeum#1742: `rollout` is NOT "every test under tests/evals/rollout.py
+# and friends" — it is TOKEN-COST, not FILE. A test that spawns no `claude`
+# binary, constructs no API client, and gates on no ANTHROPIC_API_KEY /
+# ATHENAEUM_LIVE_TESTS runs by default even if it lives beside live-marked
+# siblings in the same module family (see tests/evals/test_north_star_report.py,
+# test_rollout.py, test_north_star_cli.py, test_rollout_payload.py,
+# test_rollout_push_breadcrumb_spike.py, test_rollout_api_mode.py,
+# test_rollout_api_mode_hardening.py, and test_rollout_mode_labelling.py,
+# none of which carry the marker).
+# tests/evals/test_containment_ci_wiring.py::test_rollout_deselected_tests_are_actually_live
+# enforces the split mechanically so it cannot drift back together.
 addopts = "--ignore=tests/benchmarks -m 'not eval and not embedding and not rollout'"
 markers = [
     "regression: contract regression tests pinning resolver outputs against canonical fixtures",
     "live: opt-in live-LLM tests; require ATHENAEUM_LIVE_TESTS=1 and ANTHROPIC_API_KEY",
     "eval: live-API eval suite under tests/evals/; deselected by default (see evals.yml)",
     "embedding: asserts on real MiniLM cosine values; deselected by default, runs in evals.yml's embedding-suite job (athenaeum#1091)",
-    "rollout: agent-rollout eval suite (north-star arm comparison); deselected by default (athenaeum#1521)",
+    "rollout: costs tokens — constructs a live LLM client, spawns the real claude binary, or is gated on ANTHROPIC_API_KEY/ATHENAEUM_LIVE_TESTS; deselected by default (athenaeum#1521, split from token-free siblings in athenaeum#1742)",
 ]

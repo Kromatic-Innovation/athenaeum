@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Offline tests for the API-backed tool-use mode (issue athenaeum#1733).
 
-Everything here is ``rollout``-marked (deselected by default, same as
-``eval``/``embedding`` — see ``pyproject.toml`` and ``tests/evals/test_rollout.py``'s
-own module docstring) AND runs with no network call and no subprocess spawn.
+UNMARKED — runs in ``ci.yml``'s default job. Every test here replays a
+stub client: no network call, no subprocess spawn, no token spent, so it
+carries no deselecting marker (issue athenaeum#1742 — ``rollout`` means
+token cost, not module family; see ``tests/evals/README.md``).
 
 Two of the three tests replay a pre-scripted (\"recorded\") sequence of
 Anthropic Messages API responses through a queued stub client
@@ -25,8 +26,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-
 from tests.evals.corpus import build_corpus
 from tests.evals.harness import EvalSession
 from tests.evals.rollout import (
@@ -38,9 +37,6 @@ from tests.evals.rollout import (
     run_pull_api,
     truncate_native_index,
 )
-
-pytestmark = pytest.mark.rollout
-
 
 # ---------------------------------------------------------------------------
 # Queued stub client -- a "recorded" turn-by-turn response sequence

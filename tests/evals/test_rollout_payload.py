@@ -4,8 +4,8 @@ athenaeum#1523's persistence bridge — the north-star report reads rollout
 rows back out of ``tests.evals.containment.ResultStore``, so every field the
 report consumes must survive a JSON round-trip losslessly).
 
-``rollout``-marked and fully offline: no network call, no subprocess spawn,
-no live client.
+NOT ``rollout``-marked (issue athenaeum#1742) — fully offline: no network
+call, no subprocess spawn, no live client.
 """
 
 from __future__ import annotations
@@ -15,8 +15,6 @@ import json
 import pytest
 
 from tests.evals.rollout import Arm, RolloutRecord, ToolCall, TurnTokenUsage
-
-pytestmark = pytest.mark.rollout
 
 
 def _full_record() -> RolloutRecord:

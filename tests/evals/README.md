@@ -242,6 +242,29 @@ provides the containment the real comparison will need:
   marker (`rollout`, deselected by default alongside `eval`/`embedding`) are
   registered now so the future rollout-eval work needs no wiring changes.
 
+### What `rollout` means (issue athenaeum#1742)
+
+`rollout` means **this test costs tokens** — it constructs a live LLM
+client, spawns the real `claude` binary, or is gated on
+`ANTHROPIC_API_KEY` / `ATHENAEUM_LIVE_TESTS`. It is NOT a blanket marker
+for every test under `tests/evals/rollout.py` and its sibling modules: a
+test that renders a report from synthetic fixtures, round-trips a payload,
+or drives a stub CLI runs offline and carries no marker at all, even when
+it lives in the same file family as a live one. `test_north_star_report.py`,
+`test_rollout.py`, `test_north_star_cli.py`, `test_rollout_payload.py`,
+`test_rollout_push_breadcrumb_spike.py`, `test_rollout_api_mode.py`,
+`test_rollout_api_mode_hardening.py`, and `test_rollout_mode_labelling.py`
+are all token-free and run in `ci.yml`'s default job;
+`test_rollout_pull_spike.py`,
+`test_rollout_native_spike.py`, and `test_rollout_native_writer_spike.py`
+spawn the real `claude` binary and stay `rollout`-marked.
+`tests/evals/test_containment_ci_wiring.py::test_rollout_deselected_tests_are_actually_live`
+enforces this mechanically for `rollout`: every module still carrying
+`pytest.mark.rollout` must reference a live client, the `claude` binary, or
+a live-test env gate in its own source. `eval`- and `embedding`-marked
+modules are out of that check's scope — their own `pyproject.toml` marker
+reason strings already document the live cost they mean.
+
 Try it locally: `python -m tests.evals.containment_cli` (defaults to
 `--scale smoke`, zero cost, zero flags needed). Offline, machine-checked in
 `tests/evals/test_containment_*.py` and `tests/evals/test_rollout_ceiling_separation.py`
@@ -287,11 +310,11 @@ and all four arms offline, against a committed redacted fixture
 (`tests/evals/data/rollout/pull_stream_spike.jsonl`) and
 `tests.conftest.FakeLLMClient` — no network, no subprocess.
 
-Every test in both files carries `pytest.mark.rollout` — deselected by
-default alongside `eval`/`embedding` (see `pyproject.toml`) — and rollout
-token usage is recorded on a caller-supplied `EvalSession` (typically the
-`rollout_session` fixture), never `harness.EVAL_TOKEN_CEILING`'s own
-accumulator.
+`test_rollout_pull_spike.py` carries `pytest.mark.rollout` (it spawns the
+real `claude` binary); `test_rollout.py` is token-free and unmarked (issue
+athenaeum#1742) — see "What `rollout` means" below. Rollout token usage is
+recorded on a caller-supplied `EvalSession` (typically the `rollout_session`
+fixture), never `harness.EVAL_TOKEN_CEILING`'s own accumulator.
 
 ## Build prerequisites
 

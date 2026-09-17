@@ -7,8 +7,9 @@ zero paid calls — no model client construction, no ``claude -p`` spawn.
 Group-granularity resume is exercised with a monkeypatched
 ``run_probe_all_arms`` stub so no live rollout is ever needed.
 
-``rollout``-marked (imports ``tests.evals.rollout``, which is itself
-rollout-suite machinery) and fully offline.
+Imports ``tests.evals.rollout`` (rollout-suite machinery) but makes no live
+call itself, so it is NOT ``rollout``-marked (issue athenaeum#1742) and runs
+in the default selection.
 """
 
 from __future__ import annotations
@@ -25,8 +26,6 @@ from tests.evals.containment import DEFAULT_CELL_TOKEN_ESTIMATE, price_grid
 from tests.evals.corpus import SCALES
 from tests.evals.north_star_report import DEFAULT_VERDICT_ARM, load_rollout_rows
 from tests.evals.rollout import ALL_ARMS, RolloutRecord, TurnTokenUsage
-
-pytestmark = pytest.mark.rollout
 
 
 def _stub_records(probe_id: str, corpus_scale: str) -> dict[str, RolloutRecord]:
