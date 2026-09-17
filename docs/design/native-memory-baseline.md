@@ -473,6 +473,11 @@ convention `measurements/README.md` documents: the runner ships in-tree and
 needs no credential to test; the live run is a separate operator task,
 because the PULL-style arms drive a logged-in `claude` CLI.
 
+A probe class new to this scale is `report_only` by default and excluded
+from conditions 2 and 3 (issue athenaeum#1776): promoting it into the
+decision rule is an explicit operator ruling recorded on athenaeum#1736's
+thread, never an automatic consequence of adding rows to `probes.yaml`.
+
 ## 8. Deliberately not done
 
 - **No separate benchmark repository.** The corpus, runner, probes and report
