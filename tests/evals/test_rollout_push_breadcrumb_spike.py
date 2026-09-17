@@ -28,9 +28,10 @@ which is not what "same query on the same corpus" means).
 
 Requires ``bash``, ``jq`` and a REAL ``sqlite3`` CLI **built with FTS5** —
 skips cleanly (never fails) when any is absent, same idiom
-``tests/test_shell_hooks.py`` uses throughout. Marked ``rollout`` like every
-other module under ``tests/evals/`` (deselected by default, never runs in
-``ci.yml``/``evals.yml`` — see ``pyproject.toml``).
+``tests/test_shell_hooks.py`` uses throughout (that module is unmarked and
+already runs in the default job, so this dependency is already CI-proven).
+No API client, no ``claude`` binary, no token spend — NOT ``rollout``-marked
+(issue athenaeum#1742); runs in the default selection.
 """
 
 from __future__ import annotations
@@ -51,8 +52,6 @@ from tests.evals.rollout import (
     USER_PROMPT_HOOK,
     build_push_breadcrumb_context,
 )
-
-pytestmark = pytest.mark.rollout
 
 
 def _require(tool: str) -> None:

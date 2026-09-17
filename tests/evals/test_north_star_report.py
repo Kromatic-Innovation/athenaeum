@@ -8,7 +8,9 @@ SYNTHETIC rollout rows (built by hand, grounded in the real ``core`` corpus
 so the target-page/query-quality machinery exercises real text) and asserts
 its structure — no live rollout, no model client, no spend.
 
-``rollout``-marked and fully offline.
+Token-free: no live rollout, no model client, no spend. Not ``rollout``-
+marked (issue athenaeum#1742) — runs in the default selection alongside
+every other offline test under this directory.
 """
 
 from __future__ import annotations
@@ -42,8 +44,6 @@ from tests.evals.north_star_report import (
     write_report,
 )
 from tests.evals.rollout import Arm, RolloutRecord, ToolCall, TurnTokenUsage
-
-pytestmark = pytest.mark.rollout
 
 # The real "core" corpus's pto_allowance probe/page, used verbatim so the
 # text-metric machinery (lexical overlap, n-gram overlap, uid extraction)
