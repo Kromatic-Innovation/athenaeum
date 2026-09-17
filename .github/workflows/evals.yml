@@ -12,6 +12,12 @@ name: Evals
 #   * push to `main` — runs ONLY the token-free `embedding-suite` job
 #     (real MiniLM cosines, no Anthropic key, athenaeum#1091). The `eval`
 #     job is gated off this trigger by its `if:` below.
+#   * workflow_dispatch with `north_star=true` — issue athenaeum#1733: runs
+#     the north-star grid (`tests/evals/north_star_cli.py`) in API
+#     mode (no logged-in `claude` CLI needed, just the same key `eval`
+#     already loads) and uploads the rendered markdown report as an
+#     artifact. **Also gated to workflow_dispatch only, same as `eval` —
+#     NEVER on push.** See docs/design/native-memory-baseline.md §4/§9.
 #
 # Regular CI (ci.yml) is on `develop` only, so this workflow does NOT
 # collide with it: they trigger on distinct refs.
@@ -44,6 +50,31 @@ on:
         options:
           - "false"
           - "true"
+      north_star:
+        description: "Also run the north-star grid (tests/evals/north_star_cli.py) in API mode and upload the report"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      north_star_scale:
+        description: "north_star_cli.py --scale (run-level budget tier)"
+        required: false
+        default: "smoke"
+        type: choice
+        options:
+          - "smoke"
+          - "small"
+          - "full"
+      north_star_corpus_scales:
+        description: "north_star_cli.py --corpus-scales (comma-separated; blank = every scale)"
+        required: false
+        default: ""
+      north_star_max_spend:
+        description: "north_star_cli.py --max-spend (refusal ceiling, USD)"
+        required: false
+        default: "1.0"
   push:
     branches: [main]
 
@@ -149,5 +180,68 @@ jobs:
         with:
           name: recorded-fixtures
           path: tests/fixtures/recorded/
+          if-no-files-found: warn
+          retention-days: 30
+
+  north-star:
+    name: North-star grid (API mode)
+    # Manual dispatch only, and only when explicitly requested via the
+    # north_star input -- issue athenaeum#1733. Never on push (there is no
+    # `push` branch on this job's `if:` at all, matching `eval`'s own gate).
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.north_star == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,vector]"
+          pip install pyyaml
+
+      - name: Load Anthropic API key from 1Password
+        # Same no-op-until-provisioned discipline as the `eval` job above --
+        # the grid's own single-shot arms and API-mode tool loops both go
+        # through this key; a missing key surfaces as build_live_client()
+        # raising inside north_star_cli.py, which the run step below reports
+        # as an aborted/PARTIAL report rather than a bare crash.
+        id: op-key
+        continue-on-error: true
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2  # v5.0.1
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          ANTHROPIC_API_KEY: op://Infrastructure/anthropic-api-key/credential
+
+      - name: Run north-star grid
+        env:
+          ATHENAEUM_EVAL_MODE: api
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::warning::ANTHROPIC_API_KEY not set (op item not provisioned) — north-star run will fail to construct a client"
+          fi
+          CORPUS_SCALES_FLAG=""
+          if [ -n "${{ github.event.inputs.north_star_corpus_scales }}" ]; then
+            CORPUS_SCALES_FLAG="--corpus-scales ${{ github.event.inputs.north_star_corpus_scales }}"
+          fi
+          python -m tests.evals.north_star_cli \
+            --mode api \
+            --scale "${{ github.event.inputs.north_star_scale }}" \
+            --max-spend "${{ github.event.inputs.north_star_max_spend }}" \
+            --out-dir measurements \
+            $CORPUS_SCALES_FLAG
+
+      - name: Upload north-star report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: north-star-report
+          path: measurements/north-star-*.md
           if-no-files-found: warn
           retention-days: 30

@@ -32,14 +32,19 @@ projection, and returns before constructing a client, spawning
 mirrors ``tests/test_shadow_parity.py``'s ``TestDryRunZeroCalls`` (issue
 athenaeum#1333 AC5) pattern.
 
-This module is NEVER invoked by ``ci.yml``/``evals.yml`` (manual/local tool
-only, same discipline as ``containment_cli.py`` —
-``tests/evals/test_containment_ci_wiring.py``).
+Issue athenaeum#1733: ``evals.yml`` gained a dedicated ``workflow_dispatch``
+input that DOES invoke this module (manually, never on push -- see that
+workflow's ``north-star`` job) to run the grid in api mode with the key the
+workflow already loads. ``ci.yml`` still never touches it, and neither
+workflow selects the ``rollout``/``containment`` pytest markers this module's
+own machinery carries -- ``tests/evals/test_containment_ci_wiring.py``
+asserts that half unchanged.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import tempfile
 from collections.abc import Sequence
@@ -115,6 +120,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--model",
         default=DEFAULT_ROLLOUT_MODEL,
         help="model for both the single-shot arms and PULL's claude -p spawn",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("api", "cli"),
+        default=os.environ.get("ATHENAEUM_EVAL_MODE", "api"),
+        help=(
+            "execution path for the four tool-using arms (issue athenaeum#1733): "
+            "'api' (default) drives an Anthropic Messages API tool-use loop and needs "
+            "no logged-in claude CLI; 'cli' spawns claude -p as the fidelity spot-check. "
+            "Falls back to the ATHENAEUM_EVAL_MODE env var, then 'api'."
+        ),
     )
     parser.add_argument(
         "--probes",
@@ -207,6 +223,7 @@ def _run_cells(
     model: str,
     search_backend: str,
     claude_binary: str,
+    mode: str,
 ) -> None:
     """Group *cells* by (probe, corpus_scale, replicate) and run each
     not-yet-complete group through :func:`run_probe_all_arms` exactly once
@@ -229,6 +246,7 @@ def _run_cells(
             search_backend=search_backend,
             claude_binary=claude_binary,
             replicate=replicate,
+            mode=mode,
         )
         for cell in group_cells:
             append_rollout_row(store, cell, records[cell.arm])
@@ -275,6 +293,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             model=args.model,
             search_backend=args.search_backend,
             claude_binary=args.claude_binary,
+            mode=args.mode,
         )
         assert_rollout_ceiling(session)
     except Exception as exc:  # noqa: BLE001 -- must still write a PARTIAL report, never crash bare

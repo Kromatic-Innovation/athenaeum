@@ -42,6 +42,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `prompt_registry.py`'s `PROMPTS`, or a `.md` file under
   `src/athenaeum/prompts/` is missing from the surface list. Documented in
   `tests/evals/README.md`.
+- **`tests/evals/rollout.py`: API-backed tool-use mode for the four
+  tool-using rollout arms (athenaeum#1733), selectable via `run_probe_all_arms(mode=...)`
+  or `tests/evals/north_star_cli.py --mode` (env `ATHENAEUM_EVAL_MODE`,
+  default `api`).** `run_pull_api` / `run_push_breadcrumb_pull_api` /
+  `run_native_index_api` / `run_native_grep_api` drive a genuine Anthropic
+  Messages API tool-use loop (`run_api_tool_loop`) with the harness itself
+  serving `recall` (in-process `recall_search`, for the PULL-style arms) or
+  `grep`/`read` (bounded by match count and total bytes, confined to the
+  materialized native-memory directory, for the native arms) — no logged-in
+  `claude` CLI needed, so the grid can run from a GitHub Actions runner with
+  just the Anthropic key `evals.yml` already loads. Each api-mode arm's
+  system prompt and tool description mirror what its real counterpart
+  actually gives the model (the `recall` tool schema shares the MCP server's
+  own description/parameters via `athenaeum.mcp_server.recall_tool_docstring`
+  / `RECALL_TOOL_INPUT_SCHEMA`; native arms are told their memory directory's
+  path and that `MEMORY.md` is an index). `NATIVE_INDEX` applies the
+  documented 200-line/25KB truncation itself (`truncate_native_index`),
+  injects the same `WARNING:` marker text a real truncated load ends with,
+  and records `truncated_by_harness` separately from `truncated_by_claude_code`
+  (always false for api rows). Every emitted transcript matches the CLI
+  path's own stream-json-derived shape byte-for-byte, so
+  `north_star_report.py` needs no mode branch to compute
+  delivered-text/utilization metrics. `RolloutRecord.mode` (`"api"`/`"cli"`)
+  is persisted on every row (every constructor in the module sets it
+  explicitly) and rendered per-cell in `north_star_report.py`'s new "Mode per
+  cell" section — a render-only section over `report.rows`, independent of
+  `GroupStats`/`compute_group_stats`/`grade_correctness`. `run_probe_all_arms`
+  and `north_star_cli.py` share ONE default (`"api"`); pass `mode="cli"`
+  explicitly for the `claude -p` fidelity spot-check. `evals.yml` gained a
+  `north_star` workflow_dispatch input that runs `north_star_cli.py` in API
+  mode and uploads the report — still workflow_dispatch-gated only, never on
+  push.
 - **`follow_through` synthetic-corpus probe class (issue athenaeum#1737).** A
   new probe class whose complete answer requires opening the page a query
   surfaces and following a body `[[wikilink]]` to a second page the query's
