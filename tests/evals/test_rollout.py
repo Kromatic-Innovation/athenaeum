@@ -589,6 +589,10 @@ def test_run_probe_all_arms_dispatches_all_eight_arms_offline(tmp_path: Path) ->
         assert record.arm.value == arm_value
         assert record.probe_id == "pto_allowance"
         assert record.corpus_scale == "core"
+        # Issue athenaeum#1764: stamped alongside retrieval_hit_scores on
+        # every arm's record, the SAME search_backend this call was made
+        # with -- north_star_cli.floor_scan_summary groups on this field.
+        assert record.search_backend == "keyword"
     assert records["pull"].answer == "stub pull answer"
     assert records["pull"].recall_called is False  # a legitimate, recorded choice
     assert records["push_breadcrumb_pull"].answer == "stub breadcrumb-pull answer"

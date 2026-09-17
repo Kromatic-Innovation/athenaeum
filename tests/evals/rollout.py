@@ -344,6 +344,16 @@ class RolloutRecord:
     #: backend query itself raised. See ``north_star_cli.py``'s
     #: ``--floor-scan`` for the reader.
     retrieval_hit_scores: list[float] | None = None
+    #: Issue athenaeum#1764: the search backend (``"fts5"``, ``"vector"``,
+    #: ``"keyword"``, ...) that produced ``retrieval_hit_scores`` for this
+    #: row, i.e. the SAME ``search_backend`` :func:`run_probe_all_arms` was
+    #: called with. ``None`` for any row persisted before this field
+    #: existed -- back-compat, not "no backend was used". Recorded so
+    #: ``north_star_cli.floor_scan_summary`` can group rows by backend
+    #: rather than pooling FTS5 bm25 scores (large negative, lower is
+    #: better) together with vector distances (0 to 2, lower is better)
+    #: into one meaningless blended percentile summary.
+    search_backend: str | None = None
 
     @property
     def total_input_tokens(self) -> int:
@@ -384,6 +394,7 @@ class RolloutRecord:
             "relevance_floor_vector": self.relevance_floor_vector,
             "relevance_floor_fts5": self.relevance_floor_fts5,
             "retrieval_hit_scores": self.retrieval_hit_scores,
+            "search_backend": self.search_backend,
         }
 
     @classmethod
@@ -417,6 +428,10 @@ class RolloutRecord:
             relevance_floor_vector=payload.get("relevance_floor_vector"),
             relevance_floor_fts5=payload.get("relevance_floor_fts5"),
             retrieval_hit_scores=payload.get("retrieval_hit_scores"),
+            # Issue athenaeum#1764: absent on every row persisted before this
+            # field existed -- ``None`` decodes as "unknown backend", the
+            # same meaning it carries for a freshly-constructed record.
+            search_backend=payload.get("search_backend"),
         )
 
 
@@ -2940,5 +2955,6 @@ def run_probe_all_arms(
                     model=model,
                 )
         record.retrieval_hit_scores = retrieval_hit_scores
+        record.search_backend = search_backend
         records[arm.value] = record
     return records

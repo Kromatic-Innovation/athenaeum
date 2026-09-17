@@ -1801,6 +1801,24 @@ class NorthStarReport:
     relevance_floor_fts5: float | None = None
 
 
+class MixedFloorError(ValueError):
+    """Raised by :func:`_pooled_floor_value` when *rows* carry more than one
+    distinct floor value for one attribute (issue athenaeum#1761).
+
+    A ``ValueError`` subclass, not a bare one (issue athenaeum#1764):
+    ``north_star_cli.main`` needs to catch EXACTLY this failure mode to run
+    its PARTIAL-report recovery path -- ``build_report`` also reaches
+    ``_corpus_for_scale``/``build_corpus``, which raises a plain
+    ``ValueError`` for an unknown corpus scale, and that is a different
+    failure the recovery path must NOT swallow (retrying with
+    ``pool_floor_values=False`` would hit the exact same unknown-scale
+    ``ValueError`` again, uncaught, the second time). Subclassing
+    ``ValueError`` rather than replacing it also keeps every existing
+    ``pytest.raises(ValueError, ...)`` assertion in
+    ``test_relevance_floor_input.py`` passing unchanged.
+    """
+
+
 def _pooled_floor_value(rows: Sequence[RolloutRow], attr: str) -> float | None:
     """The ONE value *attr* (``"relevance_floor_vector"`` or
     ``"relevance_floor_fts5"``) takes across every row's
@@ -1819,7 +1837,7 @@ def _pooled_floor_value(rows: Sequence[RolloutRow], attr: str) -> float | None:
         distinct = sorted(
             values, key=lambda v: (v is None, v if v is not None else 0.0)
         )
-        raise ValueError(
+        raise MixedFloorError(
             f"north_star_report.build_report: rows carry differing {attr} values "
             f"{distinct!r} -- refusing to pool a floor-on run together with a "
             "floor-off run (or two differently-configured floor-on runs) into one "
@@ -1840,6 +1858,7 @@ def build_report(
     planned_cells: int | None = None,
     torn_rows: int = 0,
     duplicate_rows: int = 0,
+    pool_floor_values: bool = True,
 ) -> NorthStarReport:
     """Assemble a :class:`NorthStarReport` from decoded result-store rows.
 
@@ -1855,9 +1874,25 @@ def build_report(
     value -- see :func:`_pooled_floor_value`. A store with every row at
     ``None`` (no operator ever set a floor) is the pre-athenaeum#1761
     behaviour and passes through unchanged.
+
+    *pool_floor_values* (issue athenaeum#1764) -- ``False`` skips
+    :func:`_pooled_floor_value` entirely and reports both floor fields as
+    ``None`` instead of raising. This exists ONLY for
+    ``north_star_cli.main``'s abort-recovery path: when the normal ``True``
+    call already raised once for a mixed-floor store, ``main`` needs a
+    SECOND, non-raising call to still produce a PARTIAL report over the
+    same rows (naming the mismatch in ``abort_reason`` instead) rather than
+    leaving the run with no report at all. No other caller should pass
+    ``False`` -- pooling is the correctness check this issue's predecessor
+    (athenaeum#1761) added, and skipping it silently is exactly what that
+    check exists to prevent.
     """
-    relevance_floor_vector = _pooled_floor_value(rows, "relevance_floor_vector")
-    relevance_floor_fts5 = _pooled_floor_value(rows, "relevance_floor_fts5")
+    if pool_floor_values:
+        relevance_floor_vector = _pooled_floor_value(rows, "relevance_floor_vector")
+        relevance_floor_fts5 = _pooled_floor_value(rows, "relevance_floor_fts5")
+    else:
+        relevance_floor_vector = None
+        relevance_floor_fts5 = None
     scales = sorted({row.record.corpus_scale for row in rows})
     digests = {scale: _corpus_for_scale(scale).fingerprint() for scale in scales}
     return NorthStarReport(
