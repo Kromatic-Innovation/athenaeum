@@ -330,6 +330,46 @@ class Page:
         return f"{self.uid}.md"
 
 
+#: Probe classes enrolled in design-doc §7 condition 2 today (issue
+#: athenaeum#1776, athenaeum#1791 §2.1's ``report_only`` ruling). A probe
+#: whose class is NOT in this set defaults ``report_only: True`` and stays
+#: excluded from condition 2 (and condition 3) until an explicit operator
+#: ruling, recorded on athenaeum#1736's thread, promotes it here -- by
+#: editing THIS constant in a reviewable diff, never by flipping a
+#: ``probes.yaml`` field alone. Fixed as of the wave-2 epic (athenaeum#1791);
+#: adding a class here is what athenaeum#1776's whole guard exists to gate.
+CONDITION_2_ENROLLED: frozenset[str] = frozenset(
+    {
+        "single_hop",
+        "multi_hop",
+        "disambiguation",
+        "temporal",
+        "abstention",
+        "distractor_robustness",
+        "redundancy",
+        "follow_through",
+    }
+)
+
+#: Probe classes introduced by eval wave 2 (issue athenaeum#1791) -- empty
+#: until the sibling issues that add them (items D/E/F/G: athenaeum#1778
+#: ``unprompted_push``, athenaeum#1780 ``aggregation``, athenaeum#1781
+#: ``contradiction``/``negative_knowledge``) land and add their own class
+#: name here. Which classes belong in this set is explicitly OUT OF SCOPE
+#: for athenaeum#1776 (the issue that introduces the constant itself) --
+#: decided by each class's own issue, not inferred from whatever is not
+#: yet in :data:`CONDITION_2_ENROLLED`.
+#:
+#: Forward-declared, not yet read by :func:`validate_core`: the guard
+#: implemented there is BLANKET (every probe's ``report_only`` must equal
+#: ``probe_class not in CONDITION_2_ENROLLED``, not only probes whose class
+#: is in this set) -- strictly stronger than scoping the check to this
+#: constant, and correct today because it is empty. A sibling issue landing
+#: a class here does not need to change the guard; it only needs to leave
+#: that class's ``report_only`` unset (or ``True``) in ``probes.yaml``.
+WAVE_2_PROBE_CLASSES: frozenset[str] = frozenset()
+
+
 @dataclass(frozen=True)
 class Probe:
     """A retrieval probe with its ground truth.
@@ -407,6 +447,19 @@ class Probe:
     check does not enforce, the same shape as the ``follow_through``
     completeness judgment call documented in
     ``docs/design/native-memory-baseline.md`` §5.
+
+    ``report_only`` (issue athenaeum#1776, athenaeum#1791 §2.1) excludes a
+    probe from design-doc §7 condition 2 (and condition 3) -- reported
+    alongside everything else, but never able to move the ratified kill
+    criterion on its own. Parsed from ``probes.yaml``; when the yaml is
+    silent, :func:`load_probes` defaults it to ``probe_class not in
+    CONDITION_2_ENROLLED``, so a brand-new probe class is report-only
+    unless the yaml says otherwise. :func:`validate_core` enforces the
+    invariant in BOTH directions -- an enrolled class flagged
+    ``report_only: True``, or a non-enrolled class left ``False`` -- so
+    promotion into condition 2 is only ever a reviewable edit to the
+    ``CONDITION_2_ENROLLED`` constant, never a ``probes.yaml`` field read
+    by nobody.
     """
 
     id: str
@@ -417,6 +470,7 @@ class Probe:
     distractor_terms: tuple[str, ...] = ()
     answer_tokens: tuple[str, ...] = ()
     note: str = ""
+    report_only: bool = False
 
 
 @dataclass
@@ -557,6 +611,9 @@ def load_probes() -> list[Probe]:
             distractor_terms=tuple(raw.get("distractor_terms", ())),
             answer_tokens=tuple(raw.get("answer_tokens", ())),
             note=raw.get("note", ""),
+            report_only=bool(
+                raw.get("report_only", raw["probe_class"] not in CONDITION_2_ENROLLED)
+            ),
         )
         for raw in _load_yaml(PROBES_PATH)
     ]
@@ -591,6 +648,14 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
     token (see the ``Probe`` docstring): unlike ``follow_through`` no
     breadcrumb/wikilink structure is required, since ``multi_hop``'s two
     pages are independently retrievable by design.
+
+    ``report_only`` (issue athenaeum#1776) is checked in BOTH directions
+    against :data:`CONDITION_2_ENROLLED`: an enrolled class flagged
+    ``report_only: True``, or a non-enrolled class left ``False``, is a
+    corpus error either way -- otherwise a class could be promoted into
+    (or quietly dropped from) design-doc §7 condition 2 by editing a
+    ``probes.yaml`` field nobody reads twice, instead of the reviewable
+    ``CONDITION_2_ENROLLED`` constant edit that ruling requires.
     """
     uids = {p.uid for p in pages}
     pages_by_uid = {p.uid: p for p in pages}
@@ -606,6 +671,20 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
             problems.append(f"probe {probe.id!r}: abstention probes must have no expected_uids")
         if probe.probe_class != "abstention" and not probe.expected_uids:
             problems.append(f"probe {probe.id!r}: no expected_uids and not abstention")
+        if probe.probe_class in CONDITION_2_ENROLLED and probe.report_only:
+            problems.append(
+                f"probe {probe.id!r}: probe_class {probe.probe_class!r} is in "
+                "CONDITION_2_ENROLLED but report_only is True -- demoting an enrolled class "
+                "out of condition 2 requires editing CONDITION_2_ENROLLED, not a probes.yaml "
+                "field alone"
+            )
+        if probe.probe_class not in CONDITION_2_ENROLLED and not probe.report_only:
+            problems.append(
+                f"probe {probe.id!r}: probe_class {probe.probe_class!r} is not in "
+                "CONDITION_2_ENROLLED but report_only is False -- promotion into condition 2 "
+                "is an explicit operator ruling (athenaeum#1736) recorded by adding the class "
+                "to CONDITION_2_ENROLLED, never a probes.yaml field alone"
+            )
         if probe.probe_class == "abstention" and probe.answer_tokens:
             problems.append(f"probe {probe.id!r}: abstention probes must have no answer_tokens")
         if probe.probe_class != "abstention" and not probe.answer_tokens:

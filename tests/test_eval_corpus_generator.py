@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from tests.evals.corpus import (
+    CONDITION_2_ENROLLED,
     SCALES,
     Page,
     Probe,
@@ -40,6 +41,104 @@ def test_core_corpus_is_internally_consistent() -> None:
     """
     problems = validate_core(load_core_pages(), load_probes())
     assert not problems, "corpus inconsistencies:\n  " + "\n  ".join(problems)
+
+
+def test_validate_core_rejects_enrolled_class_flagged_report_only() -> None:
+    """issue athenaeum#1776: an enrolled class (here ``single_hop``, which
+    is in ``CONDITION_2_ENROLLED``) flagged ``report_only: True`` is a
+    corpus error -- demoting an enrolled class out of §7 condition 2 must be
+    a ``CONDITION_2_ENROLLED`` edit, never a ``probes.yaml`` field.
+    """
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="TokenOne sits here.\n\nInternal reference tag: TokenOne.",
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="probe-demoted",
+        probe_class="single_hop",
+        query="what is on page a?",
+        expected_uids=("page-a",),
+        answer_tokens=("TokenOne",),
+        report_only=True,
+    )
+    problems = validate_core(pages, [probe])
+    assert any(
+        "probe-demoted" in p and "CONDITION_2_ENROLLED" in p and "report_only is True" in p
+        for p in problems
+    ), problems
+
+
+def test_validate_core_rejects_non_enrolled_class_with_report_only_false() -> None:
+    """issue athenaeum#1776, the mirror direction: a probe_class NOT in
+    ``CONDITION_2_ENROLLED`` left ``report_only: False`` is also a corpus
+    error -- promotion into §7 condition 2 is an operator ruling
+    (athenaeum#1736), never a side effect of a ``probes.yaml`` edit.
+    """
+    assert "unprompted_push" not in CONDITION_2_ENROLLED
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="TokenOne sits here.\n\nInternal reference tag: TokenOne.",
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="probe-promoted",
+        probe_class="unprompted_push",
+        query="what is on page a?",
+        expected_uids=("page-a",),
+        answer_tokens=("TokenOne",),
+        report_only=False,
+    )
+    problems = validate_core(pages, [probe])
+    assert any(
+        "probe-promoted" in p and "CONDITION_2_ENROLLED" in p and "report_only is False" in p
+        for p in problems
+    ), problems
+
+
+def test_load_probes_defaults_report_only_from_class_enrolment(monkeypatch, tmp_path) -> None:
+    """issue athenaeum#1776: when ``probes.yaml`` is silent on
+    ``report_only``, :func:`load_probes` defaults it to
+    ``probe_class not in CONDITION_2_ENROLLED`` -- an enrolled class stays
+    ``False``, a brand-new class defaults ``True``.
+    """
+    import tests.evals.corpus as corpus_module
+
+    probes_path = tmp_path / "probes.yaml"
+    probes_path.write_text(
+        """
+- id: probe-enrolled
+  probe_class: single_hop
+  query: q1
+  expected_uids: [page-a]
+  answer_tokens: [TokenOne]
+- id: probe-new-class
+  probe_class: some_new_wave2_class
+  query: q2
+  expected_uids: [page-a]
+  answer_tokens: [TokenTwo]
+- id: probe-explicit-override
+  probe_class: single_hop
+  query: q3
+  expected_uids: [page-a]
+  answer_tokens: [TokenThree]
+  report_only: true
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(corpus_module, "PROBES_PATH", probes_path)
+    probes = {p.id: p for p in load_probes()}
+    assert probes["probe-enrolled"].report_only is False
+    assert probes["probe-new-class"].report_only is True
+    assert probes["probe-explicit-override"].report_only is True
 
 
 def test_every_non_abstention_probe_answer_token_is_in_its_page_body() -> None:

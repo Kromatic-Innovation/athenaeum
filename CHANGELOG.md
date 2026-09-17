@@ -33,6 +33,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or the query path is tracked separately; see
   `docs/design/native-memory-baseline.md` §5 for the breadcrumb-cap
   measurement this module also produced.
+
+- **`Probe.report_only` guards §7 condition 2 against a silent kill-criterion
+  change from a new probe class (issue athenaeum#1776, athenaeum#1791
+  §2.1).** `tests.evals.corpus.Probe` gains `report_only: bool`, parsed
+  from `probes.yaml` and defaulting to `probe_class not in
+  CONDITION_2_ENROLLED` when the yaml is silent. Two new module constants
+  in `corpus.py` -- `CONDITION_2_ENROLLED` (the eight classes enrolled
+  today: `single_hop`, `multi_hop`, `disambiguation`, `temporal`,
+  `abstention`, `distractor_robustness`, `redundancy`, `follow_through`)
+  and `WAVE_2_PROBE_CLASSES` (empty, populated by the wave-2 issues that
+  add classes) -- make enrolment a reviewable constant edit rather than a
+  `probes.yaml` field nobody reads twice. `validate_core` fails in both
+  directions: an enrolled class flagged `report_only: True`, or a
+  non-enrolled class left `False`. `north_star_report.compute_verdicts`
+  excludes `report_only` classes from §7 conditions 2 and 3 entirely (as
+  if their rows were never in the store); condition 1's relationship
+  subset is unaffected. `render_decision_block` names the excluded classes
+  ("report-only classes excluded: ...", empty today). No existing probe's
+  class or fixture body changed -- the corpus fingerprint is unaffected.
+
 - **Hardening for the north-star grid's relevance-floor input (issue
   athenaeum#1764), found by Quine review of PR athenaeum#1763.** Three
   fixes: (1) a mixed-floor store's `north_star_report.build_report`
