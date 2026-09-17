@@ -21,17 +21,17 @@
 # page is tier core" default) -- so this is the one core fixture file whose
 # pages do not carry the implicit `core` tier.
 
-- uid: client-northgate-ridgeline
+- uid: client-bramfield-crestwood
   type: client
-  name: "Northgate Ridgeline"
+  name: "Bramfield Crestwood"
   tier: long
   tags: [client, retainer]
   source_ref: "session-2026-03-11"
   created: 2026-03-11
   body: |
-    # Northgate Ridgeline Retainer Renewal Timeline
+    # Bramfield Crestwood Retainer Renewal Timeline
 
-    Northgate Ridgeline has been a retainer client since the
+    Bramfield Crestwood has been a retainer client since the
     account moved off a project-basis engagement in early 2025. The
     retainer covers quarterly advisory sessions, a standing seat on their
     internal planning calls, and an annual scope review each January.
@@ -42,7 +42,7 @@
 
     The account has gone through two prior renewal cycles without incident.
     The first, in 2023, extended the original scope to include a second
-    business unit after Northgate Ridgeline's holding company folded a
+    business unit after Bramfield Crestwood's holding company folded a
     smaller subsidiary into the primary entity. The second, in 2024, was
     mostly administrative -- new signatories on both sides after a
     leadership change on the client's finance team, with no change to

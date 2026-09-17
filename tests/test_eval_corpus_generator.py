@@ -835,7 +835,14 @@ def test_xlarge_scale_is_pinned() -> None:
     # `long`) and four new single_hop probes -- new pages in `core/*.yaml`
     # always shift `Corpus.fingerprint()` since it hashes every page's
     # rendered markdown, same class of expected change as the entries above.
-    assert corpus.fingerprint() == "023d72e4ea0981b9"
+    # Quine review of PR athenaeum#1808 then found the new client page's
+    # name/uid ("Northgate Ridgeline") shared its distinctive `northgate`
+    # token with two unrelated pre-existing pages (`client-northgate`,
+    # `note-northgate-terms`), so a grep on the probe's own query hit both
+    # -- renamed to "Bramfield Crestwood" (verified against every existing
+    # page name/alias/uid via `_content_terms`), shifting the fingerprint
+    # once more.
+    assert corpus.fingerprint() == "091f41a0ce0fd2b8"
 
 
 def test_long_tier_tag_is_outside_the_recall_snippet() -> None:
