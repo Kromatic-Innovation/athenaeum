@@ -1,0 +1,268 @@
+# aggregation probe class (issue athenaeum#1780, athenaeum#1791 §2.1/§3.4).
+#
+# Many-correct-answer sets, self-contained in this file so the class's
+# fixture never touches a page another probe class's expected_uids/
+# must_not_rank already depends on. `grade_coverage` (issue athenaeum#1773)
+# grades these by MATCHED FRACTION of `answer_tokens`, not the all-or-nothing
+# `grade_correctness` rule -- an answer naming 5 of 6 correct pages here
+# scores 5/6, not 0.
+#
+# Every page below carries its own single planted `Internal reference tag:`
+# line, listed in its probe's `answer_tokens` -- `grade_coverage` counts
+# fractions of that list, so a probe whose tokens concentrated on one page
+# would make "coverage" indistinguishable from ordinary single-hop
+# correctness. `must_not_rank` on every probe names REAL, UNEDITED pages
+# elsewhere in the core corpus that already share the query's vocabulary
+# through their own pre-existing tags/body text (never a phrase invented and
+# planted just to manufacture a decoy) -- see each probe's note in
+# probes.yaml for the "grep-reachable via:" citation.
+#
+# report_only: True on all three (athenaeum#1791 §2.1's ruling) -- coverage
+# feeds no design-doc §7 condition until an explicit operator ruling on
+# athenaeum#1736 promotes the class into CONDITION_2_ENROLLED.
+
+# --- delivery-role people (probe: aggregation_delivery_roles) ---------------
+#
+# Six people newly authored here, each in a genuinely delivery-facing role.
+# The near-miss set (`meeting-standup`, `project-portal-refresh`,
+# `policy-onboarding` in probes.yaml) is left untouched: all three already
+# carry the literal `delivery` tag and vocabulary in `core/03-projects-tools.yaml`
+# and `core/02-policies.yaml`, which is exactly the false-positive shape this
+# probe measures -- a keyword search on "delivery" surfaces a meeting, a
+# project, and a policy, none of which is a PERSON the query asks for.
+
+- uid: person-mika-thorne
+  type: person
+  name: Mika Thorne
+  aliases: [Mika]
+  tags: [person, delivery]
+  source_ref: "session-2026-06-15"
+  created: 2026-06-15
+  body: |
+    # Mika Thorne
+
+    Mika Thorne runs delivery for the Castleford advisory engagement,
+    tracking milestones week to week against the agreed plan.
+
+    Internal reference tag: Mosswicket.
+
+- uid: person-callan-reeve
+  type: person
+  name: Callan Reeve
+  aliases: [Callan]
+  tags: [person, delivery]
+  source_ref: "session-2026-06-16"
+  created: 2026-06-16
+  body: |
+    # Callan Reeve
+
+    Callan Reeve is a delivery manager covering two concurrent client
+    engagements and reports weekly status to each client lead.
+
+    Internal reference tag: Thistlebourne.
+
+- uid: person-edda-solberg
+  type: person
+  name: Edda Solberg
+  aliases: [Edda]
+  tags: [person, delivery]
+  source_ref: "session-2026-06-17"
+  created: 2026-06-17
+  body: |
+    # Edda Solberg
+
+    Edda Solberg coordinates delivery scheduling across the firm's
+    project-based clients and flags slippage before it reaches a client
+    conversation.
+
+    Internal reference tag: Rivenglass.
+
+- uid: person-ravi-chand
+  type: person
+  name: Ravi Chand
+  aliases: [Ravi]
+  tags: [person, delivery]
+  source_ref: "session-2026-06-18"
+  created: 2026-06-18
+  body: |
+    # Ravi Chand
+
+    Ravi Chand is a delivery lead responsible for handing off completed
+    workstreams to each client's own operations team.
+
+    Internal reference tag: Aldermist.
+
+- uid: person-priyanka-sethi
+  type: person
+  name: Priyanka Sethi
+  aliases: [Priyanka]
+  tags: [person, delivery]
+  source_ref: "session-2026-06-19"
+  created: 2026-06-19
+  body: |
+    # Priyanka Sethi
+
+    Priyanka Sethi manages delivery risk registers across the retainer
+    book and escalates anything amber for more than two weeks.
+
+    Internal reference tag: Copperlark.
+
+- uid: person-owen-blackwell
+  type: person
+  name: Owen Blackwell
+  aliases: [Owen]
+  tags: [person, delivery]
+  source_ref: "session-2026-06-20"
+  created: 2026-06-20
+  body: |
+    # Owen Blackwell
+
+    Owen Blackwell is a delivery associate who staffs whichever engagement
+    is short-handed that month, rotating across accounts.
+
+    Internal reference tag: Duskhollow.
+
+# --- retainer clients (probe: aggregation_retainer_clients) -----------------
+#
+# Three new clients on a standing retainer, alongside three pre-existing
+# retainer clients (`client-alderway`/`client-bluewater`/`client-atlas` in
+# `core/01-clients.yaml`) whose OWN pre-existing `Internal reference tag:`
+# lines (Trevanquil/Thornmere/Ashfallow) are reused as-is in
+# `aggregation_retainer_clients`'s `answer_tokens` -- no edit to that file.
+# `client-castleford` is also a genuine retainer client by its own existing
+# tag and is deliberately left OUT of both `expected_uids` and
+# `must_not_rank`: it is not a near-miss (it really does qualify), and
+# including it in `expected_uids` would require adding it a tag line this
+# issue has no need to touch that file for.
+
+- uid: client-larchmoor
+  type: company
+  name: Larchmoor Textiles
+  aliases: [Larchmoor]
+  tags: [client, retainer]
+  source_ref: "session-2026-06-21"
+  created: 2026-06-21
+  body: |
+    # Larchmoor Textiles
+
+    Larchmoor Textiles is a fabric wholesaler on a monthly advisory
+    retainer, renewed automatically each January.
+
+    Internal reference tag: Glimmerfen.
+
+- uid: client-dunmere
+  type: company
+  name: Dunmere Analytics
+  aliases: [Dunmere]
+  tags: [client, retainer]
+  source_ref: "session-2026-06-22"
+  created: 2026-06-22
+  body: |
+    # Dunmere Analytics
+
+    Dunmere Analytics is a data-services firm on a standing quarterly
+    retainer covering ongoing advisory work.
+
+    Internal reference tag: Hazelcroft.
+
+- uid: client-hollowick
+  type: company
+  name: Hollowick Freight
+  aliases: [Hollowick]
+  tags: [client, retainer]
+  source_ref: "session-2026-06-23"
+  created: 2026-06-23
+  body: |
+    # Hollowick Freight
+
+    Hollowick Freight is a haulage operator on a monthly retainer,
+    structurally identical to Atlas Freight's arrangement.
+
+    Internal reference tag: Ironveil.
+
+# --- in-house tooling (probe: aggregation_inhouse_tools) --------------------
+#
+# Five new internally-built tools, alongside the pre-existing `tool-buildpipe`
+# (`core/03-projects-tools.yaml`), whose OWN pre-existing tag (Fennorack) is
+# reused in `aggregation_inhouse_tools`'s `answer_tokens` -- no edit to that
+# file. `tool-pagevault` and `tool-gridbook` are deliberately left OUT of
+# `expected_uids`: both are third-party SaaS by their own existing `tags:
+# [tooling, saas]`, not in-house software, which is exactly why they work as
+# untouched near-misses in `must_not_rank` instead -- a keyword search on
+# "tooling" or "internal" reaches them, but they are subscriptions, not
+# something the firm builds and runs itself.
+
+- uid: tool-ledgerscribe
+  type: project
+  name: Ledgerscribe
+  aliases: [the invoicing tool]
+  tags: [tooling, internal]
+  source_ref: "session-2026-06-24"
+  created: 2026-06-24
+  body: |
+    # Ledgerscribe
+
+    Ledgerscribe is the firm's in-house invoicing tool, built and maintained
+    internally rather than bought as a subscription.
+
+    Internal reference tag: Larkwhistle.
+
+- uid: tool-shiftboard
+  type: project
+  name: Shiftboard
+  aliases: [the scheduling tool]
+  tags: [tooling, internal]
+  source_ref: "session-2026-06-25"
+  created: 2026-06-25
+  body: |
+    # Shiftboard
+
+    Shiftboard is the firm's in-house staffing and scheduling tool, built
+    internally to replace a spreadsheet-based rota.
+
+    Internal reference tag: Nettlebriar.
+
+- uid: tool-formready
+  type: project
+  name: Formready
+  aliases: [the proposal generator]
+  tags: [tooling, internal]
+  source_ref: "session-2026-06-26"
+  created: 2026-06-26
+  body: |
+    # Formready
+
+    Formready is the firm's in-house proposal generator, assembling client
+    proposals from the firm's own templates.
+
+    Internal reference tag: Palewick.
+
+- uid: tool-auditline
+  type: project
+  name: Auditline
+  aliases: [the audit log tool]
+  tags: [tooling, internal]
+  source_ref: "session-2026-06-27"
+  created: 2026-06-27
+  body: |
+    # Auditline
+
+    Auditline is the firm's in-house audit-log tool, recording who accessed
+    which client record and when.
+
+    Internal reference tag: Quietmarrow.
+
+- uid: tool-rosterkeep
+  type: project
+  name: Rosterkeep
+  aliases: [the staffing tool]
+  tags: [tooling, internal]
+  source_ref: "session-2026-06-28"
+  created: 2026-06-28
+  body: |
+    # Rosterkeep
+
+    Rosterkeep is the firm's in-house staffing-history tool, tracking who has
+    worked which engagement over time.
+
+    Internal reference tag: Silvermoss.

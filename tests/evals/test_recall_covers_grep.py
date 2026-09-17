@@ -538,7 +538,22 @@ def _non_abstention_probes() -> tuple[Probe, ...]:
     return tuple(p for p in build_corpus("core").probes if p.expected_uids)
 
 
-_PROBE_IDS: tuple[str, ...] = tuple(p.id for p in _non_abstention_probes())
+#: The coverage-invariant tests below assert every grep-reachable
+#: `expected_uids` page appears in recall's top `_TOP_K` (5). `aggregation`
+#: probes (issue athenaeum#1780) are excluded: the class's correct sets are
+#: deliberately sized 5-8 pages, larger than `_TOP_K`, because a hard top-k
+#: cap's inability to return them all IS the property the class exists to
+#: measure (grade_coverage's fractional score, not a pass/fail top-k
+#: membership check) -- asserting every one of them lands in a 5-slot window
+#: would fail every aggregation probe by construction, regardless of
+#: retrieval quality, which is a different claim than the
+#: retrieval-side-miss debt `_FTS5_XFAIL`/`_VECTOR_XFAIL` track below.
+#: `test_print_per_probe_class_summary` still iterates every class,
+#: aggregation included, since it only prints and asserts nothing.
+_COVERAGE_INVARIANT_PROBES: tuple[Probe, ...] = tuple(
+    p for p in _non_abstention_probes() if p.probe_class != "aggregation"
+)
+_PROBE_IDS: tuple[str, ...] = tuple(p.id for p in _COVERAGE_INVARIANT_PROBES)
 
 
 def _probe_by_id(corpus: Corpus, probe_id: str) -> Probe:

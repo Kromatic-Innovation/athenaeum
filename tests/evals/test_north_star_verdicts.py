@@ -1334,8 +1334,11 @@ def test_condition2_and_3_report_only_class_excluded_matches_rows_removed() -> N
 
 def test_render_decision_block_prints_report_only_classes_excluded_line_empty_today() -> None:
     """issue athenaeum#1776: the decision block always names the excluded
-    report_only classes -- 'empty today' because every currently-shipped
-    probe class is enrolled (CONDITION_2_ENROLLED)."""
+    report_only classes -- 'empty today' (still true after athenaeum#1780)
+    because ``_minimal_report()`` has zero rows, so ``_report_only_probe_classes``
+    never examines any scale's corpus at all -- a different reason than
+    "every class is enrolled" now that ``aggregation`` exists, but the same
+    observable line."""
     rendered = "\n".join(render_decision_block(_minimal_report(), verdicts=[]))
     assert "report-only classes excluded: (none)" in rendered
 
@@ -1346,7 +1349,9 @@ def test_render_report_decision_block_pinned_with_report_only_line_added() -> No
     every pre-existing assertion from
     ``test_build_report_and_render_report_thread_a_non_default_verdict_arm``
     still holds, plus the new report-only line, so athenaeum#1776 adds
-    exactly one line to this report and changes nothing else."""
+    exactly one line to this report and changes nothing else. That line's
+    class list grew from '(none)' to 'aggregation' once athenaeum#1780
+    landed the corpus's first report_only-by-default class."""
     rows = [
         _row(
             _record(
@@ -1369,7 +1374,7 @@ def test_render_report_decision_block_pinned_with_report_only_line_added() -> No
     rendered = render_report(report)
     assert "**Verdict arm:** `pull`" in rendered
     assert "'pull'" in rendered
-    assert "report-only classes excluded: (none)" in rendered
+    assert "report-only classes excluded: aggregation" in rendered
     decision_idx = rendered.index("## Decision")
     report_only_idx = rendered.index("report-only classes excluded:")
     arms_idx = rendered.index("## Arms in this report")

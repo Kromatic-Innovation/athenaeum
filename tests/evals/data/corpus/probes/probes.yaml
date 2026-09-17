@@ -562,3 +562,114 @@
     must_not_rank (athenaeum#1777): the Gilcrest ticketing-vendor decision
     shares the stemmed "vendor"/"vendors" term but is an unrelated
     single-vendor selection, not the Triform consolidation.
+# =============================================================================
+# --- aggregation (issue athenaeum#1780) -------------------------------------
+#
+# The many-correct-answer class (eval-wave-2-spec.md §3.4): graded by
+# `grade_coverage` (matched fraction of `answer_tokens`), not the
+# all-or-nothing `grade_correctness` an answer naming all-but-one correct
+# page would otherwise fail outright. `report_only: true` on every probe
+# here (athenaeum#1791 §2.1) -- coverage feeds no design-doc §7 condition
+# until an explicit operator ruling on athenaeum#1736 adds "aggregation" to
+# `CONDITION_2_ENROLLED`. Fixture: `core/15-aggregation.yaml`, self-contained
+# -- no existing page's body was edited to build these sets; every
+# `must_not_rank` page is real and UNEDITED elsewhere in the corpus, cited by
+# its own pre-existing vocabulary, never a phrase planted to manufacture a
+# decoy. Each probe's correct set is sized 5-8 pages on purpose: a hard
+# top-k cap (the shape athenaeum#1783's ruling measures overflow on) cannot
+# return a set this size from a single retrieval call, which is the whole
+# point of the class -- see each probe's note for why.
+
+- id: aggregation_delivery_roles
+  probe_class: aggregation
+  query: "who on the team works in a delivery-facing role?"
+  expected_uids:
+    [
+      person-mika-thorne,
+      person-callan-reeve,
+      person-edda-solberg,
+      person-ravi-chand,
+      person-priyanka-sethi,
+      person-owen-blackwell,
+    ]
+  must_not_rank: [meeting-standup, project-portal-refresh, policy-onboarding]
+  distractor_terms: ["delivery", "delivery-facing", "delivery role"]
+  answer_tokens:
+    [Mosswicket, Thistlebourne, Rivenglass, Aldermist, Copperlark, Duskhollow]
+  report_only: true
+  note: >-
+    Correct set size: 6 people, each with their own planted token -- a
+    top-3-capped retrieval call can return at most half of them, so a
+    correct answer requires either a wider pull or several turns; a system
+    that stops after the first hit scores 3/6 here, not 0/6 and not 6/6,
+    which is exactly the partial-credit signal `grade_correctness`'s
+    all-or-nothing rule cannot produce for this class. must_not_rank
+    (athenaeum#1777, all three pages pre-existing and unedited by this
+    issue): meeting-standup and project-portal-refresh both already carry
+    the literal `delivery` tag in core/03-projects-tools.yaml, and
+    policy-onboarding carries it in core/02-policies.yaml -- a keyword
+    search on "delivery" plausibly surfaces a meeting, a project, and a
+    policy, none of which is the PERSON the query asks for. grep-reachable
+    via: delivery.
+
+- id: aggregation_retainer_clients
+  probe_class: aggregation
+  query: "which clients are on a standing retainer, not one-off project work?"
+  expected_uids:
+    [
+      client-alderway,
+      client-bluewater,
+      client-atlas,
+      client-larchmoor,
+      client-dunmere,
+      client-hollowick,
+    ]
+  must_not_rank: [client-verity, client-acme, client-northgate]
+  distractor_terms: ["retainer", "standing retainer", "monthly retainer"]
+  answer_tokens: [Trevanquil, Thornmere, Ashfallow, Glimmerfen, Hazelcroft, Ironveil]
+  report_only: true
+  note: >-
+    Correct set size: 6 clients. Three (Alderway, Bluewater, Atlas) are
+    pre-existing retainer clients in core/01-clients.yaml whose OWN
+    pre-existing tag lines are reused verbatim as this probe's tokens for
+    those pages -- no edit to that file. client-castleford is also a
+    genuine retainer client by its own existing tag and is deliberately
+    named in NEITHER expected_uids nor must_not_rank: it really does
+    qualify, so it is not a negative control, and listing it as correct
+    would need a tag line this issue has no cause to add. A hard top-3 cap
+    returns half this set at best. must_not_rank (all three pre-existing
+    and unedited): client-verity's own body literally states it "was a
+    retainer client through 2025" (past tense, no longer one) and
+    client-acme's own body states it is "not on retainer" -- both contain
+    the literal word "retainer" while answering the query in the negative.
+    client-northgate shares only the generic "client" vocabulary but is
+    explicitly project-based, engaged for a single operational review.
+    grep-reachable via: retainer (verity, acme); client (northgate).
+
+- id: aggregation_inhouse_tools
+  probe_class: aggregation
+  query: "what internal software tools does the firm build and run itself, as opposed to buying as a subscription?"
+  expected_uids:
+    [
+      tool-buildpipe,
+      tool-ledgerscribe,
+      tool-shiftboard,
+      tool-formready,
+      tool-auditline,
+      tool-rosterkeep,
+    ]
+  must_not_rank: [tool-pagevault, tool-gridbook, policy-tooling-procurement]
+  distractor_terms: ["internal tool", "in-house", "software"]
+  answer_tokens:
+    [Fennorack, Larkwhistle, Nettlebriar, Palewick, Quietmarrow, Silvermoss]
+  report_only: true
+  note: >-
+    Correct set size: 6 tools. tool-buildpipe is pre-existing
+    (core/03-projects-tools.yaml) and its OWN pre-existing tag line is
+    reused verbatim as this probe's token for that page -- no edit to that
+    file. A hard top-3 cap returns half this set at best. must_not_rank
+    (all three pre-existing and unedited): tool-pagevault and tool-gridbook
+    are both tagged `[tooling, saas]` in their own frontmatter -- third-party
+    subscriptions, not software the firm builds -- and
+    policy-tooling-procurement shares "tooling" heavily but is the approval
+    procedure, not a tool itself. grep-reachable via: tooling, internal.
