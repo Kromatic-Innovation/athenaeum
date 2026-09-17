@@ -1115,6 +1115,689 @@ conn.close()
         context = payload["hookSpecificOutput"]["additionalContext"]
         assert "Vectester Hot Page" in context
 
+    # -- issue athenaeum#1665: vector-half relevance floor -------------------
+    #
+    # Before this issue the vector half printed every hit
+    # `query_vector_index` returned, unfiltered -- `recall.relevance_floor.
+    # vector` (athenaeum#1571) had no effect on this hook even when an
+    # operator configured it, because the hook never called
+    # `meets_relevance_floor` / `resolve_recall_relevance_floor` at all.
+    # These tests pin the fix directly against the real hook and the real
+    # library floor functions (not a reimplementation): a below-floor hit is
+    # dropped, an above-floor hit is retained, and the unset-floor case is
+    # byte-for-byte the pre-existing unfiltered behaviour.
+
+    def _set_stub_hits(
+        self, fake_pkg: Path, hits: list[tuple[str, str, float]]
+    ) -> None:
+        """Fake `search.py`: `query_vector_index` returns fixed *hits*.
+
+        Same stubbing technique
+        `test_vector_backend_surfaces_every_page_and_records_no_tier` uses
+        (deterministic, no real chromadb/embedder needed to prove the
+        SHELL-SIDE floor filter works) -- widened to carry more than one hit
+        so a test can assert one is kept and one is dropped by score alone.
+        """
+        rows = ", ".join(
+            f"({fname!r}, {name!r}, {score!r})" for fname, name, score in hits
+        )
+        (fake_pkg / "search.py").write_text(
+            "def query_vector_index(query, cache_dir, n=3, exclude=None):\n"
+            "    exclude = exclude or set()\n"
+            f"    hits = [{rows}]\n"
+            "    return [h for h in hits if h[0] not in exclude][:n]\n"
+        )
+
+    def _vector_env(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> tuple[dict[str, str], Path]:
+        """Seed the index, flip to the vector backend, and return a fake-src env.
+
+        Shared setup lifted from
+        `test_vector_backend_surfaces_every_page_and_records_no_tier` so the
+        floor tests below don't re-derive it three times.
+        """
+        # Build the FTS5 index with the checkout's `src` on PYTHONPATH, the
+        # same convention `test_topics_trace_survives_bwk_awk_semantics`
+        # (elsewhere in this file) already established for this exact
+        # reason: `hook_env` isolates HOME, which hides per-user
+        # site-packages (PEP 370), so on a box where `athenaeum` is only
+        # importable via the user site, `session-start-recall.sh`'s own
+        # dev-path index build fails open and leaves NO `wiki-index.db` at
+        # all -- silently, since that build is wrapped in `|| true`. Every
+        # floor test below that asserts a REAL FTS5 hit is present or
+        # absent would then pass VACUOUSLY (an absent hit reads the same
+        # whether the floor dropped it or the index never existed to
+        # produce it in the first place) -- exactly the failure mode the
+        # MUST-1 positive-control test in this class exists to catch, so
+        # this helper must not reintroduce it via a missing index.
+        seed_env = dict(hook_env)
+        real_src = str(Path(hook_env["ATHENAEUM_SRC"]) / "src")
+        existing_seed_pythonpath = seed_env.get("PYTHONPATH", "")
+        seed_env["PYTHONPATH"] = (
+            f"{real_src}{os.pathsep}{existing_seed_pythonpath}"
+            if existing_seed_pythonpath
+            else real_src
+        )
+        self._seed_index(seed_env)
+        db_file = Path(hook_env["ATHENAEUM_CACHE_DIR"]) / "wiki-index.db"
+        assert db_file.exists(), (
+            "the FTS5 index did not build -- every floor test using this "
+            "helper would pass vacuously without it"
+        )
+
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        (cache_dir / "wiki-vectors").mkdir(parents=True, exist_ok=True)
+        config_env = cache_dir / "config.env"
+        config_env.write_text(
+            config_env.read_text().replace(
+                "SEARCH_BACKEND=fts5", "SEARCH_BACKEND=vector"
+            )
+        )
+        fake_pkg = tmp_path / "fake-vector-src" / "src" / "athenaeum"
+        fake_pkg.mkdir(parents=True)
+        vector_env = dict(hook_env)
+        vector_env["ATHENAEUM_SRC"] = str(fake_pkg.parent.parent)
+        # Issue athenaeum#1665: the hook's relevance-floor mechanism
+        # (`athenaeum.config`) is a PLAIN package import, deliberately not
+        # routed through the `ATHENAEUM_SRC` override above. `ATHENAEUM_SRC`
+        # is not test-only -- the LIVE hook sets it every turn too
+        # (`session-start-recall.sh` caches it from the deploy checkout),
+        # and it lets `query_vector_index` load from one known file by path
+        # without a full package install. `athenaeum.config` has a much
+        # wider transitive import surface than a single dev-path-loaded
+        # file provides for, so it goes through normal Python package
+        # resolution instead -- the same thing a real `pip install
+        # athenaeum` deployment already satisfies for free. This dev
+        # checkout is not installed as a package at all (see
+        # `_require_hook_python`'s own docstring for the parallel PEP 370
+        # isolation problem), so the checkout's real `src/` has to be put
+        # on `PYTHONPATH` here to stand in for that install -- the same
+        # convention this file already uses elsewhere to seed the FTS5
+        # index against the checkout's own code.
+        existing_pythonpath = vector_env.get("PYTHONPATH", "")
+        vector_env["PYTHONPATH"] = (
+            f"{real_src}{os.pathsep}{existing_pythonpath}"
+            if existing_pythonpath
+            else real_src
+        )
+        return vector_env, fake_pkg
+
+    def test_vector_relevance_floor_drops_below_floor_keeps_above_floor(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC: a below-floor hit is dropped, an above-floor hit is retained.
+
+        `meets_relevance_floor("vector", ...)` is lower-is-better (chromadb
+        cosine distance): a score AT OR BELOW the configured floor clears it.
+        `recall.relevance_floor.vector: 0.5` here means 0.1 clears it (kept)
+        and 0.9 does not (dropped) -- the direction this test would catch
+        inverted, since an inverted comparison would keep the wrong one of
+        the two, not just keep or drop both.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        _require_hook_python(hook_env, "athenaeum.config")
+
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        (knowledge / "athenaeum.yaml").write_text(
+            "auto_recall: true\n"
+            "search_backend: fts5\n"
+            "recall:\n"
+            "  relevance_floor:\n"
+            "    vector: 0.5\n"
+        )
+
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        self._set_stub_hits(
+            fake_pkg,
+            [
+                ("above-floor.md", "Above Floor Page", 0.1),
+                ("below-floor.md", "Below Floor Page", 0.9),
+            ],
+        )
+
+        probe_prompt = "zzznonmatchingzzz term completely unrelated content"
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "the above-floor hit must still surface"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Above Floor Page" in context, f"got: {context!r}"
+        assert "Below Floor Page" not in context, (
+            f"a below-floor vector hit was not filtered: {context!r}"
+        )
+
+    def test_vector_relevance_floor_unset_behavior_unchanged(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC: with no floor configured, behaviour is unchanged (unfiltered).
+
+        No `recall.relevance_floor` key at all in `athenaeum.yaml` (the
+        `hook_env` fixture's default) -- `resolve_recall_relevance_floor`
+        must resolve `None`, and a hit that would fail any plausible floor
+        (a large cosine distance) must still surface, exactly as before this
+        issue.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        _require_hook_python(hook_env, "athenaeum.config")
+
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        self._set_stub_hits(
+            fake_pkg, [("no-floor-set.md", "No Floor Set Page", 0.9)]
+        )
+
+        probe_prompt = "zzznonmatchingzzz term completely unrelated content"
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "no floor configured must not suppress the hit"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "No Floor Set Page" in context, f"got: {context!r}"
+
+    def test_fts5_rows_filtered_by_fts5_floor_on_vector_turn(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """MUST 1 (Quine review of athenaeum#1665): FTS5 is not a cold path.
+
+        The FTS5 sqlite3 query runs on EVERY turn regardless of
+        `SEARCH_BACKEND` -- its rows are merged with the vector rows
+        before `head -3`, so it is not a minority path a live deployment
+        can afford to leave unfiltered. On a turn where the vector half
+        runs (Python already paid), the FTS5 rows must be filtered by
+        `recall.relevance_floor.fts5` too, inside that SAME invocation.
+
+        `recall.relevance_floor.fts5: -999.0` is set deliberately extreme
+        (BM25 rank on this tiny fixture never approaches -999) so this
+        asserts the MECHANISM -- a real FTS5 hit dropped -- without
+        depending on the exact rank value the query happens to produce.
+        "Customer Development" is one of `hook_env`'s own default seeded
+        wiki pages (`memory_tier: hot`, matched by the same prompt
+        `test_returns_wiki_match_as_additional_context` already uses), so
+        no extra wiki page needs seeding here.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        _require_hook_python(hook_env, "athenaeum.config")
+
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        (knowledge / "athenaeum.yaml").write_text(
+            "auto_recall: true\n"
+            "search_backend: fts5\n"
+            "recall:\n"
+            "  relevance_floor:\n"
+            "    fts5: -999.0\n"
+        )
+
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        self._set_stub_hits(
+            fake_pkg, [("vector-stub.md", "Vector Stub Page", 0.1)]
+        )
+
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {
+                    "prompt": "Tell me about customer development frameworks",
+                    "session_id": f"test-{uuid.uuid4().hex}",
+                }
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "the vector hit must still surface"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Vector Stub Page" in context, f"got: {context!r}"
+        assert "Customer Development" not in context, (
+            f"an FTS5 hit below the fts5 floor was not filtered on a "
+            f"vector turn: {context!r}"
+        )
+
+    def test_fts5_and_vector_hits_both_surface_on_vector_turn_with_no_fts5_floor(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """MUST 1 (Quine RE-review of athenaeum#1665): positive control.
+
+        Every other test in this class is negative-only -- it asserts a
+        below-floor hit is ABSENT. A hook that dropped EVERY FTS5 row on a
+        vector turn unconditionally (a broken sentinel split, an inverted
+        guard, a stray `continue`) would pass that whole class vacuously,
+        because "the bad hit is gone" is also true when everything is gone.
+        The live deployment shape is `SEARCH_BACKEND=vector`, so that
+        regression would silently halve recall with a fully green suite.
+
+        No `recall.relevance_floor.fts5` is configured here (the default
+        `hook_env` fixture's plain `athenaeum.yaml`, untouched) -- both the
+        real FTS5 hit ("Customer Development", one of the fixture's own
+        default seeded wiki pages) and the stubbed vector hit must appear
+        TOGETHER in the same push.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        self._set_stub_hits(
+            fake_pkg, [("vector-positive.md", "Vector Positive Page", 0.1)]
+        )
+
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {
+                    "prompt": "Tell me about customer development frameworks",
+                    "session_id": f"test-{uuid.uuid4().hex}",
+                }
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "both hits must surface with no floor configured"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Customer Development" in context, (
+            f"the real FTS5 hit was dropped with no floor configured: {context!r}"
+        )
+        assert "Vector Positive Page" in context, (
+            f"the vector hit was dropped with no floor configured: {context!r}"
+        )
+
+    def test_relevance_floor_import_failure_logs_debug_line_and_fails_open(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """MUST 2 (Quine review of athenaeum#1665): the floor's except was silent.
+
+        A broken/unimportable `athenaeum.config` used to degrade to
+        `floor=None` with NO signal at any level -- indistinguishable from
+        "no floor configured". This forces that import to fail
+        deterministically (a fake `athenaeum` package on `PYTHONPATH`
+        whose `config.py` raises on import, taking priority over any
+        real installation via normal `sys.path` ordering) and asserts:
+        (1) the debug line appears under `ATHENAEUM_HOOK_DEBUG=1`, and
+        (2) the vector hit still surfaces -- a floor problem degrades to
+        unfiltered, never to a hard recall outage.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        self._set_stub_hits(
+            fake_pkg, [("failure-stub.md", "Failure Stub Page", 0.9)]
+        )
+
+        fake_broken_root = tmp_path / "fake-broken-config-src"
+        (fake_broken_root / "athenaeum").mkdir(parents=True)
+        (fake_broken_root / "athenaeum" / "__init__.py").write_text("")
+        (fake_broken_root / "athenaeum" / "config.py").write_text(
+            "raise RuntimeError('simulated config import failure for test')\n"
+        )
+        # Deliberately REPLACES (not prepends to) the real-checkout
+        # PYTHONPATH `_vector_env` set up -- this fake package must be the
+        # ONLY thing satisfying `import athenaeum.config`, or the real one
+        # could shadow it depending on path order.
+        vector_env["PYTHONPATH"] = str(fake_broken_root)
+        vector_env["ATHENAEUM_HOOK_DEBUG"] = "1"
+
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {
+                    "prompt": "zzznonmatchingzzz term completely unrelated content",
+                    "session_id": f"test-{uuid.uuid4().hex}",
+                }
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert "athenaeum recall: relevance floor inactive:" in result.stderr, (
+            f"expected the floor-inactive debug line, got stderr: "
+            f"{result.stderr!r}"
+        )
+        assert result.stdout, "a floor-resolution failure must not suppress the hit"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Failure Stub Page" in context, f"got: {context!r}"
+
+    def test_relevance_floor_respects_knowledge_root_env_override(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """SHOULD 3 (Quine review of athenaeum#1665): `load_config()` used to ignore
+        `KNOWLEDGE_ROOT` entirely and always read `Path.home() / "knowledge"`
+        -- invisible in every OTHER test in this file, because `hook_env`
+        happens to set `KNOWLEDGE_ROOT` to exactly `$HOME/knowledge`, so the
+        two coincide. This test deliberately points `KNOWLEDGE_ROOT` at a
+        SEPARATE directory whose `athenaeum.yaml` carries a floor the
+        default-location yaml does not, so the assertion can only pass if
+        the hook actually reads config from the overridden location.
+
+        SHOULD 4 (Quine RE-review): a second stub hit that CLEARS the
+        alt-root floor is asserted present, not just the failing hit
+        absent -- negative-only assertions can't distinguish "the floor
+        correctly dropped one hit" from "the hook silently dropped
+        everything" (e.g. died, or read `KNOWLEDGE_ROOT` but then failed to
+        parse it).
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        _require_hook_python(hook_env, "athenaeum.config")
+
+        # The default-location yaml (still $HOME/knowledge, used to seed the
+        # FTS5/vector index) carries NO floor at all.
+        default_knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        (default_knowledge / "athenaeum.yaml").write_text(
+            "auto_recall: true\nsearch_backend: fts5\n"
+        )
+
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        self._set_stub_hits(
+            fake_pkg,
+            [
+                ("alt-root-stub.md", "Alt Root Stub Page", 0.3),
+                ("alt-root-clears.md", "Alt Root Clears Page", 0.1),
+            ],
+        )
+
+        alt_knowledge = tmp_path / "alt-knowledge"
+        alt_knowledge.mkdir()
+        (alt_knowledge / "athenaeum.yaml").write_text(
+            "recall:\n  relevance_floor:\n    vector: 0.2\n"
+        )
+        vector_env["KNOWLEDGE_ROOT"] = str(alt_knowledge)
+
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {
+                    "prompt": "zzznonmatchingzzz term completely unrelated content",
+                    "session_id": f"test-{uuid.uuid4().hex}",
+                }
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "the clearing hit must still surface"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Alt Root Stub Page" not in context, (
+            f"KNOWLEDGE_ROOT override was ignored -- the hit should have "
+            f"been dropped by the alt-root yaml's floor: {context!r}"
+        )
+        assert "Alt Root Clears Page" in context, (
+            f"a hit that clears the alt-root floor was dropped too -- the "
+            f"hook may have failed open (or closed) rather than actually "
+            f"applying the override: {context!r}"
+        )
+
+    def test_vector_relevance_floor_prefers_push_scoped_over_base(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """SHOULD 4 (Quine review of athenaeum#1665): this hook IS the unprompted
+        push path, so `recall.relevance_floor.push.vector` must be resolved
+        BEFORE the plain `recall.relevance_floor.vector` -- never the
+        reverse. A hit at 0.3 clears the loose base floor (0.9) but not the
+        strict push floor (0.2); if the base floor won, the hit would
+        survive. The companion "unset floor" and "drops/keeps" tests above
+        already cover the fall-back-to-base case (no `push:` section at
+        all), so between the two, both orderings are exercised.
+
+        SHOULD 4 (Quine RE-review): a second stub hit that clears the
+        push-scoped floor too is asserted present -- proves the drop above
+        is the floor doing its job, not the hook failing outright.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        _require_hook_python(hook_env, "athenaeum.config")
+
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        (knowledge / "athenaeum.yaml").write_text(
+            "auto_recall: true\n"
+            "search_backend: fts5\n"
+            "recall:\n"
+            "  relevance_floor:\n"
+            "    vector: 0.9\n"
+            "    push:\n"
+            "      vector: 0.2\n"
+        )
+
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        self._set_stub_hits(
+            fake_pkg,
+            [
+                ("push-scoped.md", "Push Scoped Page", 0.3),
+                ("push-scoped-clears.md", "Push Scoped Clears Page", 0.1),
+            ],
+        )
+
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {
+                    "prompt": "zzznonmatchingzzz term completely unrelated content",
+                    "session_id": f"test-{uuid.uuid4().hex}",
+                }
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "the clearing hit must still surface"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Push Scoped Page" not in context, (
+            f"the push-scoped floor (0.2) should have been preferred over "
+            f"the looser base floor (0.9) and dropped this hit: {context!r}"
+        )
+        assert "Push Scoped Clears Page" in context, (
+            f"a hit that clears the push-scoped floor was dropped too -- "
+            f"the resolution order may be failing closed rather than just "
+            f"preferring push-scoped: {context!r}"
+        )
+
+    def test_vector_relevance_floor_boundary_score_equal_floor_is_kept(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """SHOULD 5 (Quine review of athenaeum#1665): `meets_relevance_floor` is an
+        inclusive `<=` comparison for `"vector"` -- a hit whose score is
+        EXACTLY the configured floor clears it and must be kept, not
+        dropped.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        _require_hook_python(hook_env, "athenaeum.config")
+
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        (knowledge / "athenaeum.yaml").write_text(
+            "auto_recall: true\n"
+            "search_backend: fts5\n"
+            "recall:\n"
+            "  relevance_floor:\n"
+            "    vector: 0.5\n"
+        )
+
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        self._set_stub_hits(
+            fake_pkg, [("boundary.md", "Boundary Page", 0.5)]
+        )
+
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {
+                    "prompt": "zzznonmatchingzzz term completely unrelated content",
+                    "session_id": f"test-{uuid.uuid4().hex}",
+                }
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "a hit at exactly the floor must be kept"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Boundary Page" in context, f"got: {context!r}"
+
+    def test_fts5_survives_unfiltered_when_search_py_import_raises(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """SHOULD 2a (Quine RE-review of athenaeum#1665): sentinel-absent path.
+
+        A fake `search.py` that raises at IMPORT time (before
+        `query_vector_index` is even defined, let alone called) crashes the
+        whole Python invocation before it prints anything at all -- no
+        floor-filtered FTS5 rows, no sentinel. `recall.relevance_floor.fts5:
+        -999.0` is configured (extreme enough to drop the real FTS5 hit if
+        it were ever applied) specifically so this test can tell "crashed,
+        fell back to the ORIGINAL raw fts5 rows" apart from "ran fine, floor
+        just didn't fire" -- the hit surviving here proves the fallback, not
+        a no-op floor.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        (knowledge / "athenaeum.yaml").write_text(
+            "auto_recall: true\n"
+            "search_backend: fts5\n"
+            "recall:\n"
+            "  relevance_floor:\n"
+            "    fts5: -999.0\n"
+        )
+
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        (fake_pkg / "search.py").write_text(
+            "raise RuntimeError('simulated search.py import failure for test')\n"
+        )
+
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {
+                    "prompt": "Tell me about customer development frameworks",
+                    "session_id": f"test-{uuid.uuid4().hex}",
+                }
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "an import crash must not suppress the FTS5 hit"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Customer Development" in context, (
+            f"a search.py import crash should fail open to the raw, "
+            f"unfiltered FTS5 rows, not drop them: {context!r}"
+        )
+
+    def test_fts5_stays_filtered_and_vector_is_empty_when_query_vector_index_raises_after_sentinel(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """SHOULD 2b (Quine RE-review of athenaeum#1665): sentinel-PRESENT
+        crash path.
+
+        Here `query_vector_index` raises when CALLED -- after the FTS5
+        filter-and-print-sentinel pass has already completed successfully
+        (CPython flushes stdout on an unhandled exception even when piped,
+        verified directly, so that pass's output is not lost). The
+        three-way guard must recognize the sentinel's presence as proof the
+        FTS5 pass finished and use its (floor-filtered) output rather than
+        falling all the way back to raw -- so with the same extreme
+        `recall.relevance_floor.fts5: -999.0`, the FTS5 hit must still be
+        DROPPED here (filtering genuinely ran), unlike the import-crash
+        case above where it survives. Distinguishes "correctly filtered,
+        then the vector half separately failed" from a guard that
+        over-corrects and discards the FTS5 filtering result too.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        (knowledge / "athenaeum.yaml").write_text(
+            "auto_recall: true\n"
+            "search_backend: fts5\n"
+            "recall:\n"
+            "  relevance_floor:\n"
+            "    fts5: -999.0\n"
+        )
+
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        (fake_pkg / "search.py").write_text(
+            "def query_vector_index(query, cache_dir, n=3, exclude=None):\n"
+            "    raise RuntimeError('simulated query_vector_index failure for test')\n"
+        )
+
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {
+                    "prompt": "Tell me about customer development frameworks",
+                    "session_id": f"test-{uuid.uuid4().hex}",
+                }
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        context = ""
+        if result.stdout:
+            context = json.loads(result.stdout)["hookSpecificOutput"][
+                "additionalContext"
+            ]
+        assert "Customer Development" not in context, (
+            f"the FTS5 pass completed and printed its sentinel before the "
+            f"vector crash -- its floor-filtered result should still be "
+            f"used, not reverted to raw: {context!r}"
+        )
+
     # -- issue athenaeum#1343: sidecar push telemetry -----------------------
 
     def _run_hook(

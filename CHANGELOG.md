@@ -458,6 +458,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `examples/claude-code/user-prompt-recall.sh` printed every FTS5 and vector
+  hit unfiltered, ignoring the configured
+  `recall.relevance_floor.{fts5,vector}` (athenaeum#1492/#1571). Both
+  backends are now filtered, through the same library functions
+  `mcp_server.py`'s own floor block uses, on a turn where the vector
+  backend runs (the FTS5 query runs every turn regardless of backend, so
+  it needed the same treatment); the push-scoped
+  `recall.relevance_floor.push.<backend>` knob is tried first, falling
+  back to the plain key. An unset floor is unchanged behaviour, and a
+  floor-resolution failure degrades to unfiltered while logging one line
+  under `ATHENAEUM_HOOK_DEBUG=1` instead of failing silently. A
+  vector-less/FTS5-only turn stays genuinely unfiltered, to preserve this
+  file's documented `<50ms` FTS5-only latency contract.
+  ([#1665](https://github.com/Kromatic-Innovation/athenaeum/issues/1665))
+
 - Rejecting a merge proposal recorded the rejection as a **fabricated
   directional claim**: `resolve_merge(decision="reject")` wrote a `refines:`
   declaration into one source naming the other, purely so the detector's
