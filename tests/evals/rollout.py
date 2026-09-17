@@ -2567,6 +2567,12 @@ class NativeWriterResult:
     sessions: list[NativeWriterSession]
     memory_dir: Path
     memory_files: dict[str, str]
+    #: Issue athenaeum#1774: which execution path produced this result --
+    #: ``"cli"`` (``claude -p``, :func:`run_native_writer`) or ``"api"``
+    #: (:func:`run_native_writer_api`), the same two values and the same
+    #: back-compat-default reasoning as :attr:`RolloutRecord.mode`. Every
+    #: constructor in this module sets it explicitly.
+    mode: str = "cli"
 
     @property
     def total_tool_calls(self) -> int:
@@ -2664,7 +2670,307 @@ def run_native_writer(
         for path in sorted(memory_dir.rglob("*"))
         if path.is_file()
     }
-    return NativeWriterResult(sessions=sessions, memory_dir=memory_dir, memory_files=memory_files)
+    return NativeWriterResult(
+        sessions=sessions, memory_dir=memory_dir, memory_files=memory_files, mode="cli"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Native WRITER, api mode (issue athenaeum#1774) — the Phase 2 blocking
+# prerequisite. run_native_writer above spawns `claude -p`, which requires a
+# logged-in CLI; the grid's default is `--mode api`
+# (docs/design/native-memory-baseline.md §4), so Phase 2 cannot run under
+# `workflow_dispatch` without this arm. Drives run_api_tool_loop the same
+# way run_native_index_api/run_native_grep_api do, one session per
+# Observation, all sharing the SAME memory directory across the stream --
+# the multi-day property run_native_writer's own docstring establishes.
+#
+# Tool surface: the read pair every native read arm already serves
+# (`read`/`grep`, `_native_read_executor`/`_native_grep_executor`) PLUS a
+# write pair this arm adds (`write`/`edit`) and a `list` tool -- the same
+# four-verb surface Claude Code's own file tools give its auto-memory
+# writer (create/overwrite a file, patch one in place, enumerate what
+# exists, read one back). Every one of the five is confined by
+# `_resolve_under_memory_dir`, exactly like the read arms: a writer must not
+# be able to escape the memory directory any more than a reader may.
+# ---------------------------------------------------------------------------
+
+WRITE_TOOL_NAME = "write"
+EDIT_TOOL_NAME = "edit"
+LIST_TOOL_NAME = "list"
+
+
+def _native_write_tool_schema() -> dict[str, Any]:
+    return {
+        "name": WRITE_TOOL_NAME,
+        "description": (
+            "Create or overwrite one file in the memory directory with the given "
+            "content. Creates parent directories as needed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "file path to write, relative to the memory directory",
+                },
+                "content": {"type": "string", "description": "full text to write"},
+            },
+            "required": ["path", "content"],
+        },
+    }
+
+
+def _native_edit_tool_schema() -> dict[str, Any]:
+    return {
+        "name": EDIT_TOOL_NAME,
+        "description": (
+            "Edit one existing file in the memory directory by replacing an exact, "
+            "unique occurrence of old_string with new_string."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "file path to edit, relative to the memory directory",
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "exact text to replace; must occur exactly once in the file",
+                },
+                "new_string": {"type": "string", "description": "replacement text"},
+            },
+            "required": ["path", "old_string", "new_string"],
+        },
+    }
+
+
+def _native_list_tool_schema() -> dict[str, Any]:
+    return {
+        "name": LIST_TOOL_NAME,
+        "description": "List every file currently saved in the memory directory, by path.",
+        "input_schema": {"type": "object", "properties": {}},
+    }
+
+
+def _native_write_executor(memory_dir: Path, tool_input: Mapping[str, Any]) -> str:
+    raw_path = str(tool_input.get("path", ""))
+    if not raw_path:
+        return "error: empty path"
+    content = str(tool_input.get("content", ""))
+    resolved = _resolve_under_memory_dir(memory_dir, raw_path)
+    if resolved is None:
+        return f"error: path outside the memory directory: {raw_path!r}"
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        return f"error: could not write {raw_path!r}: {exc}"
+    return f"wrote {len(content)} characters to {resolved.relative_to(memory_dir.resolve())}"
+
+
+def _native_edit_executor(memory_dir: Path, tool_input: Mapping[str, Any]) -> str:
+    raw_path = str(tool_input.get("path", ""))
+    if not raw_path:
+        return "error: empty path"
+    old_string = str(tool_input.get("old_string", ""))
+    if not old_string:
+        return "error: empty old_string"
+    new_string = str(tool_input.get("new_string", ""))
+    resolved = _resolve_under_memory_dir(memory_dir, raw_path)
+    if resolved is None or not resolved.is_file():
+        return f"error: path not found or outside the memory directory: {raw_path!r}"
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"error: could not read {raw_path!r}: {exc}"
+    occurrences = text.count(old_string)
+    if occurrences == 0:
+        return f"error: old_string not found in {raw_path!r}"
+    if occurrences > 1:
+        return f"error: old_string is not unique in {raw_path!r} ({occurrences} occurrences)"
+    try:
+        resolved.write_text(text.replace(old_string, new_string, 1), encoding="utf-8")
+    except OSError as exc:
+        return f"error: could not write {raw_path!r}: {exc}"
+    return f"edited {resolved.relative_to(memory_dir.resolve())}"
+
+
+def _native_list_executor(memory_dir: Path) -> str:
+    base = memory_dir.resolve()
+    paths = sorted(str(p.relative_to(base)) for p in base.rglob("*") if p.is_file())
+    return "\n".join(paths) if paths else "(empty)"
+
+
+#: Issue athenaeum#1774: mirrors Claude Code's DOCUMENTED auto-memory
+#: WRITING behaviour (design doc §2: "The model decides what to write, when,
+#: and how to keep the index short") the same way
+#: `_native_index_system_prompt`/`_native_grep_system_prompt` mirror its
+#: reading behaviour -- NOT a literal quote of Claude Code's own internal
+#: system-prompt text.
+#:
+#: That distinction is load-bearing here in a way it is not for those two:
+#: the truncation notice template those two arms reproduce was EXTRACTED
+#: from the 2.1.274 binary (design doc §4) and is byte-verified. No
+#: comparable extraction exists for the writing-side prompt -- CLI-mode
+#: `run_native_writer` sends NO explicit write-judgment instructions at all
+#: (`build_native_argv(..., append_system_prompt=None)`, that function's own
+#: docstring: "the WRITE path is deliberately outside the contract"), relying
+#: entirely on Claude Code's OWN closed-source auto-memory system prompt.
+#: This text is this harness's best-effort reproduction of the DOCUMENTED
+#: contract (<https://code.claude.com/docs/en/memory>, design doc §2), not a
+#: byte-exact copy, and that gap is exactly what the CLI-mode spot-check
+#: (`run_native_writer`) exists to catch (design doc §4: "the existing
+#: claude -p path stays as an optional fidelity spot-check").
+_NATIVE_WRITER_SYSTEM_PROMPT_TEMPLATE = (
+    "You are Claude Code working on a project whose memory directory is at "
+    "{memory_dir}. You maintain your own long-term memory there: markdown "
+    "topic files, plus an index file named MEMORY.md with one line per topic "
+    "in the form `- <name> — <description>`. When you learn something worth "
+    "remembering, decide for yourself whether it belongs in an existing topic "
+    "file (use `edit` to update it) or a new one (use `write` to create it), "
+    "and keep MEMORY.md's index line for that topic current and short -- "
+    "index lines are loaded in full at the start of every session, so keep "
+    "each one to about one line. Use `list` to see what is already saved and "
+    "`read`/`grep` to check a topic file's current content before editing it. "
+    "Use your own judgment about what is worth remembering -- not every note "
+    "needs to be saved. If nothing here is worth saving, do not write "
+    "anything."
+)
+
+
+def _native_writer_system_prompt(memory_dir: Path) -> str:
+    return _NATIVE_WRITER_SYSTEM_PROMPT_TEMPLATE.format(memory_dir=memory_dir)
+
+
+def run_native_writer_api(
+    observations: Sequence[Observation],
+    materialize_root: Path,
+    *,
+    client: Any,
+    session: EvalSession,
+    model: str = DEFAULT_ROLLOUT_MODEL,
+) -> NativeWriterResult:
+    """API-mode counterpart to :func:`run_native_writer` (issue
+    athenaeum#1774): drives :func:`run_api_tool_loop` once per entry in
+    *observations*, in order, all sharing the SAME fresh memory directory
+    under *materialize_root* -- the same multi-day-store property
+    :func:`run_native_writer`'s own docstring establishes, so a later
+    session can see (and choose to update) what an earlier one wrote.
+
+    Serves the harness's own `read`/`grep`/`write`/`edit`/`list` tools over
+    *memory_dir*, every one of them confined by
+    :func:`_resolve_under_memory_dir` -- see this section's own header
+    comment for why. System prompt mirrors Claude Code's DOCUMENTED
+    auto-memory writing behaviour (:func:`_native_writer_system_prompt`; see
+    its own docstring for the fidelity gap against Claude Code's actual,
+    closed-source prompt). Carries no :data:`REFERENCE_TAG_INSTRUCTION` --
+    this arm produces memory files, not a graded answer (design doc §5: "The
+    write-path sessions of Phase 2 are outside this contract").
+
+    Returns the same :class:`NativeWriterResult` shape :func:`run_native_writer`
+    returns (``mode="api"``), so
+    :func:`tests.evals.north_star_report.compute_write_path_stats` needs no
+    change to consume either.
+    """
+    memory_dir = materialize_root / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    loaded_files: dict[str, str] = {}
+
+    def _executor(name: str, tool_input: dict[str, Any]) -> str:
+        if name == READ_TOOL_NAME:
+            return _native_read_executor(memory_dir, tool_input, loaded=loaded_files)
+        if name == GREP_TOOL_NAME:
+            return _native_grep_executor(memory_dir, tool_input)
+        if name == WRITE_TOOL_NAME:
+            return _native_write_executor(memory_dir, tool_input)
+        if name == EDIT_TOOL_NAME:
+            return _native_edit_executor(memory_dir, tool_input)
+        if name == LIST_TOOL_NAME:
+            return _native_list_executor(memory_dir)
+        return f"error: unknown tool {name!r}"
+
+    tools = [
+        _native_read_tool_schema(),
+        _native_grep_tool_schema(),
+        _native_write_tool_schema(),
+        _native_edit_tool_schema(),
+        _native_list_tool_schema(),
+    ]
+    system = _native_writer_system_prompt(memory_dir)
+
+    sessions: list[NativeWriterSession] = []
+    for i, observation in enumerate(observations):
+        _answer, tool_calls, turn_tokens, turn_count, transcript = run_api_tool_loop(
+            user_prompt=f"{_WRITER_PROMPT_PREFIX}{observation.body}",
+            system=system,
+            tools=tools,
+            tool_executor=_executor,
+            client=client,
+            session=session,
+            model=model,
+        )
+        sessions.append(
+            NativeWriterSession(
+                session_index=i,
+                observation_uid=observation.uid,
+                tool_calls=tool_calls,
+                turn_tokens=turn_tokens,
+                turn_count=turn_count,
+                transcript=transcript,
+            )
+        )
+
+    memory_files = {
+        str(path.relative_to(memory_dir)): path.read_text(encoding="utf-8")
+        for path in sorted(memory_dir.rglob("*"))
+        if path.is_file()
+    }
+    return NativeWriterResult(
+        sessions=sessions, memory_dir=memory_dir, memory_files=memory_files, mode="api"
+    )
+
+
+def run_native_writer_dispatch(
+    observations: Sequence[Observation],
+    materialize_root: Path,
+    *,
+    mode: str = "api",
+    client: Any | None = None,
+    session: EvalSession | None = None,
+    model: str = DEFAULT_ROLLOUT_MODEL,
+    claude_binary: str = "claude",
+    timeout: float = 120.0,
+) -> NativeWriterResult:
+    """Mode-switched entry point for the Phase 2 write path (issue
+    athenaeum#1774), mirroring how :func:`run_probe_all_arms` resolves its
+    own *mode* (design doc §4): ``"api"`` (default, matching every other
+    arm's default in this module) drives :func:`run_native_writer_api` and
+    requires *client* and *session*; ``"cli"`` calls :func:`run_native_writer`
+    UNCHANGED -- byte-identical to calling it directly, no argument
+    reshaping in between.
+
+    This is the seam the CLI flags that will actually select Phase 2's write
+    path (item N, athenaeum#1785, out of this issue's scope) dispatch
+    through, the same way `north_star_cli.py`'s existing `--mode` flag
+    already resolves `run_probe_all_arms(mode=...)`.
+    """
+    if mode not in ("cli", "api"):
+        raise ValueError(f"unknown mode {mode!r}; expected 'cli' or 'api'")
+    if mode == "cli":
+        return run_native_writer(
+            observations,
+            materialize_root,
+            claude_binary=claude_binary,
+            model=model,
+            timeout=timeout,
+        )
+    if client is None or session is None:
+        raise ValueError("mode='api' requires both client and session")
+    return run_native_writer_api(
+        observations, materialize_root, client=client, session=session, model=model
+    )
 
 
 # ---------------------------------------------------------------------------
