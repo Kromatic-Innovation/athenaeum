@@ -135,9 +135,15 @@ server's own tool descriptions and parameters
 `uid`/`entity_class`/`include_excluded`/`usage_classes`) rather than a
 paraphrase. Those two, and nothing else, are what the real server serves a
 PULL arm, so API-mode and CLI-mode PULL measure the same tool surface —
-which matters because every `recall` hit's body is windowed to 400 characters
-and three of the core corpus's planted reference tags fall outside that window
-(athenaeum#1756). The native arms are told their memory directory's path and that `MEMORY.md` (when
+which matters in two distinct ways (athenaeum#1756, both measured by
+`tests/evals/test_reference_tag_contract.py`). Every `recall` hit's body is
+windowed to 400 characters and the corpus puts each page's reference tag on
+its last line, so on three probes the tag-bearing page is returned and the tag
+still is not (pages of 587/566/434 characters); `read_entity` returns the
+whole page. Separately, on nine probes the tag-bearing page does not rank into
+`top_k=5` at all — those pages are short, so no window cut them — and
+`read_entity` reaches them by uid from a first-hop page instead. The native
+arms are told their memory directory's path and that `MEMORY.md` (when
 present) is an index whose topic files are opened on demand with `grep`/
 `read`, mirroring Claude Code's own auto-memory instructions rather than the
 single-shot arms' "answer using only the context supplied" prompt.

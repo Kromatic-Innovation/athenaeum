@@ -59,7 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probes — `person_not_repo`, `repo_not_person`, `keelbridge_programme_scope`,
   two of them `disambiguation` probes the decision rule's condition 1 is
   computed over — the tag fell outside the window and API-mode PULL could not
-  cite it however good its retrieval was. `read_entity` is served with the
+  cite it however good its retrieval was. A further nine probes miss their tag
+  for a different reason — the tag-bearing page does not rank into `top_k=5`
+  at all, those pages being far shorter than the window — which `read_entity`
+  also rescues, by uid from a first-hop page rather than by widening a
+  snippet. Both counts are measured, not asserted, by
+  `tests/evals/test_reference_tag_contract.py`. `read_entity` is served with the
   server's own description and input schema, now extracted to the module-level
   `read_entity_tool_docstring()` / `READ_ENTITY_TOOL_INPUT_SCHEMA` exactly as
   athenaeum#1733 did for `recall` — behaviour-neutral, with
