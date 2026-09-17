@@ -231,7 +231,16 @@ provides the containment the real comparison will need:
 - **Append-only result store** (`ResultStore`, `run_grid`) — one JSONL line
   per completed cell, flushed and `fsync`'d immediately, keyed by
   `(probe, arm, corpus_scale, replicate)`. A resume reads the store once
-  and never re-executes a cell already present.
+  and never re-executes a cell already present. Appends serialise on a
+  per-store lock, so `run_grid(..., workers=N)` (and `north_star_cli.py`'s
+  own `--workers`, default 4) can run N cells at a time without two of them
+  interleaving a partial line. Above `workers=1` the row ORDER is completion
+  order, not grid order — the SET of rows is the contract.
+- **Planned-count sidecar** (`write_planned_cells` / `read_planned_cells`) —
+  `<store>.planned.json`, written before the first cell runs, is how a
+  report tells "all 1392 cells" from "the 300 that fit before the job timed
+  out" and renders a `partial: N of M cells` banner. Absent or unreadable
+  means "cannot tell", which renders no banner.
 - **`--scale` knob** (`build_grid`, `SCALE_BUDGETS`) — `smoke`/`small`/`full`
   cap the same four axes through the SAME function; `smoke` always
   collapses to a single cell, so it is runnable without thinking about cost.

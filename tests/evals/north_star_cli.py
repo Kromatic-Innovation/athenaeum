@@ -25,9 +25,17 @@ reason): re-running per individual arm cell here would either re-derive
 already-completed arms wastefully, or — worse — double-append a cell key
 that survived a partial group, which ``ResultStore`` never de-duplicates.
 
+Issue athenaeum#1751 made that group the unit of CONCURRENCY as well as of
+resume: ``--workers`` (default 4) groups run at a time on a thread pool,
+because a serial ``--scale full`` grid is 1392 cells and could never finish
+inside the workflow job's window. See :func:`_run_cells` for the three
+pieces of shared state that makes safe and how each is handled.
+
 ``--dry-run`` makes **zero paid calls**: it prices the grid, prints the
-projection, and returns before constructing a client, spawning
-``claude -p``, or running a single cell — see
+projection -- including the projected WALL CLOCK at the chosen worker
+count, so an operator can tell before dispatching whether a run fits the
+job's ``timeout-minutes`` -- and returns before constructing a client,
+spawning ``claude -p``, or running a single cell — see
 ``test_north_star_cli.py::test_dry_run_never_constructs_a_client``, which
 mirrors ``tests/test_shadow_parity.py``'s ``TestDryRunZeroCalls`` (issue
 athenaeum#1333 AC5) pattern.
@@ -45,19 +53,27 @@ from __future__ import annotations
 
 import argparse
 import os
+import queue
 import sys
 import tempfile
+import threading
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from tests.evals.containment import (
+    DEFAULT_CELL_SECONDS,
     DEFAULT_CELL_TOKEN_ESTIMATE,
     SCALE_BUDGETS,
     GridCell,
     ResultStore,
     SpendCeilingExceededError,
     build_grid,
+    format_duration,
     price_grid,
+    project_wall_clock_seconds,
+    read_planned_cells,
+    write_planned_cells,
 )
 from tests.evals.corpus import SCALES, build_corpus
 from tests.evals.harness import EvalSession
@@ -70,7 +86,7 @@ from tests.evals.north_star_report import (
     write_report,
 )
 from tests.evals.rollout import ALL_ARMS, DEFAULT_ROLLOUT_MODEL, run_probe_all_arms
-from tests.evals.rollout_session import assert_rollout_ceiling
+from tests.evals.rollout_session import ROLLOUT_TOKEN_CEILING, assert_rollout_ceiling
 
 #: Every probe in the hand-authored corpus -- probes are IDENTICAL across
 #: corpus scales (``tests.evals.corpus.build_corpus``'s own docstring: "every
@@ -91,6 +107,14 @@ DEFAULT_REPLICATES: tuple[int, ...] = (0,)
 #: (always exactly 1 cell) must never self-refuse at its own default; see
 #: ``test_north_star_cli.py::test_default_max_spend_covers_smoke_scale``.
 DEFAULT_MAX_SPEND_USD = 1.0
+
+#: Default concurrency for the cell loop (issue athenaeum#1751). Four, not
+#: "as many as there are cores": the work is network-bound on one Anthropic
+#: account, and each worker holds its own materialized corpus tree plus
+#: search index on disk (see :func:`_run_cells`), so the cost of another
+#: worker is real even though the CPU is idle. Four is the number the
+#: workflow's own dispatch input defaults to; raise both together.
+DEFAULT_WORKERS = 4
 
 
 def _default_store_path() -> Path:
@@ -164,6 +188,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="where corpus trees are materialized (default: a fresh system-temp dir)",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=(
+            "how many (probe, corpus_scale, replicate) groups run concurrently "
+            f"(default: {DEFAULT_WORKERS}). 1 restores the strictly-serial loop."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="price the grid and print the projection; makes zero paid calls",
@@ -224,37 +257,144 @@ def _run_cells(
     search_backend: str,
     claude_binary: str,
     mode: str,
+    workers: int = 1,
 ) -> None:
     """Group *cells* by (probe, corpus_scale, replicate) and run each
     not-yet-complete group through :func:`run_probe_all_arms` exactly once
-    -- see the module docstring's "Resume granularity" note."""
+    -- see the module docstring's "Resume granularity" note.
+
+    The group, not the individual arm cell, is also the unit of CONCURRENCY
+    (issue athenaeum#1751): *workers* groups run at a time on a thread pool.
+    Three pieces of shared state make that safe, and each is handled
+    deliberately rather than by hoping the GIL covers it:
+
+    * **The materialized corpus tree.** ``run_probe_all_arms`` writes a wiki
+      tree, a search index and a hook ``HOME`` under the ``materialize_root``
+      it is handed, and every one of those derives from that single path. Two
+      groups at the same ``(corpus_scale, replicate)`` used to share one
+      directory -- harmless serially (each call rewrites identical bytes),
+      a genuine data race in parallel, where one worker's index build can
+      read another's half-written page. Each worker therefore gets its OWN
+      ``w<slot>/`` prefix, taken from a slot pool for the duration of a
+      group and returned in a ``finally``. Slots are pooled rather than
+      derived from a thread id (which would collide) and bounded by
+      *workers*, so disk cost is ``workers`` trees, not one per group.
+    * **The result store.** One ``ResultStore`` INSTANCE is shared, so its
+      own append lock actually serialises writers; a second instance over
+      the same path would defeat it.
+    * **The token ledger and its ceiling.** ``EvalSession``'s counters are
+      lock-guarded (see ``harness.EvalSession.__init__``), and the ceiling
+      is re-checked under *ledger_lock* after every group. Once it trips,
+      ``stop`` is set and every group still queued returns without running
+      -- so the ceiling stops ALL workers, not just the one that noticed.
+      The authoritative refusal is still ``assert_rollout_ceiling`` in
+      :func:`main` after the pool drains; ``stop`` only prevents further
+      spend once the outcome is already decided.
+    """
+    if workers < 1:
+        raise ValueError(f"--workers must be >= 1, got {workers}")
     already_done = store.completed_keys()
     groups: dict[tuple[str, str, int], list[GridCell]] = {}
     for cell in cells:
         groups.setdefault((cell.probe, cell.corpus_scale, cell.replicate), []).append(cell)
 
-    for (probe_id, corpus_scale, replicate), group_cells in groups.items():
-        group_keys = {c.cell_key() for c in group_cells}
-        if group_keys <= already_done:
-            continue
-        records = run_probe_all_arms(
-            probe_id,
-            corpus_scale,
-            session=session,
-            materialize_root=materialize_root / f"{corpus_scale}-{replicate}",
-            model=model,
-            search_backend=search_backend,
-            claude_binary=claude_binary,
-            replicate=replicate,
-            mode=mode,
-        )
-        for cell in group_cells:
-            append_rollout_row(store, cell, records[cell.arm])
+    pending = [
+        (group_key, group_cells)
+        for group_key, group_cells in groups.items()
+        if not {c.cell_key() for c in group_cells} <= already_done
+    ]
+    if not pending:
+        return
+
+    effective_workers = min(workers, len(pending))
+    slots: queue.Queue[int] = queue.Queue()
+    for slot in range(effective_workers):
+        slots.put(slot)
+    ledger_lock = threading.Lock()
+    stop = threading.Event()
+
+    def _run_group(
+        group_key: tuple[str, str, int], group_cells: list[GridCell]
+    ) -> None:
+        if stop.is_set():
+            return
+        probe_id, corpus_scale, replicate = group_key
+        slot = slots.get()
+        try:
+            records = run_probe_all_arms(
+                probe_id,
+                corpus_scale,
+                session=session,
+                materialize_root=(
+                    materialize_root / f"w{slot}" / f"{corpus_scale}-{replicate}"
+                ),
+                model=model,
+                search_backend=search_backend,
+                claude_binary=claude_binary,
+                replicate=replicate,
+                mode=mode,
+            )
+        finally:
+            slots.put(slot)
+        with ledger_lock:
+            for cell in group_cells:
+                append_rollout_row(store, cell, records[cell.arm])
+            total_tokens = session.input_tokens + session.output_tokens
+            if total_tokens > ROLLOUT_TOKEN_CEILING:
+                # Set the flag BEFORE raising: every group still queued
+                # must see it and return without spending, which is what
+                # makes this stop ALL workers rather than only this one.
+                # ``SpendCeilingExceededError`` is reused rather than
+                # invented anew -- it already names "the run is refusing to
+                # spend more"; the only difference from its pre-flight use
+                # is that here some cells have already run, which is why
+                # main renders a PARTIAL report instead of exiting before
+                # the store exists.
+                stop.set()
+                raise SpendCeilingExceededError(
+                    f"rollout run exceeded token ceiling ({total_tokens} > "
+                    f"{ROLLOUT_TOKEN_CEILING}) mid-grid -- stopped every worker "
+                    "before any further cell could spend. Shrink the grid or the "
+                    "--scale tier, or raise ROLLOUT_TOKEN_CEILING deliberately."
+                )
+
+    if effective_workers == 1:
+        for group_key, group_cells in pending:
+            _run_group(group_key, group_cells)
+        return
+
+    with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+        futures = [pool.submit(_run_group, key, group) for key, group in pending]
+        for future in as_completed(futures):
+            # Re-raise the FIRST worker failure here rather than at pool
+            # teardown, so main's own handler renders the partial report
+            # with that exception's message as the abort reason. Groups
+            # still queued behind it are cancelled by the `stop` flag only
+            # when the ceiling tripped; an ordinary per-group failure lets
+            # the rest finish, which is what the store's resume contract
+            # wants (every group that CAN complete should).
+            future.result()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    if args.workers < 1:
+        print(f"--workers must be >= 1, got {args.workers}", file=sys.stderr)
+        return 1
     cells = _build_cells(args)
+
+    # Printed BEFORE pricing, and therefore on the refusal path too (issue
+    # athenaeum#1751): the operator question "does a full dispatch fit the
+    # job's timeout window?" is asked precisely when the grid is big enough
+    # to be refused at the default ceiling, and the projection needs only
+    # the cell count and the worker count -- never a successful price.
+    if args.dry_run:
+        projected = project_wall_clock_seconds(len(cells), workers=args.workers)
+        print(
+            f"projected wall clock: {format_duration(projected)} "
+            f"for {len(cells)} cells at {args.workers} workers "
+            f"(~{DEFAULT_CELL_SECONDS:.0f}s/cell estimate)"
+        )
 
     try:
         estimate = price_grid(
@@ -277,6 +417,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     store = ResultStore(args.store if args.store is not None else _default_store_path())
+    # Recorded BEFORE the first cell runs, so a run killed mid-grid by the
+    # job timeout still leaves the denominator the report's partial banner
+    # needs (issue athenaeum#1751).
+    write_planned_cells(store, len(cells))
     materialize_root = args.materialize_root or Path(
         tempfile.mkdtemp(prefix="athenaeum-north-star-")
     )
@@ -294,6 +438,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             search_backend=args.search_backend,
             claude_binary=args.claude_binary,
             mode=args.mode,
+            workers=args.workers,
         )
         assert_rollout_ceiling(session)
     except Exception as exc:  # noqa: BLE001 -- must still write a PARTIAL report, never crash bare
@@ -306,7 +451,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     rows = load_rollout_rows(store)
     report = build_report(
-        rows, aborted=aborted, abort_reason=abort_reason, verdict_arm=args.verdict_arm
+        rows,
+        aborted=aborted,
+        abort_reason=abort_reason,
+        verdict_arm=args.verdict_arm,
+        planned_cells=read_planned_cells(store),
     )
     path = write_report(report, out_dir=args.out_dir)
     print(f"report written: {path}")
