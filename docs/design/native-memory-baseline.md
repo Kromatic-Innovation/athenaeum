@@ -418,6 +418,26 @@ query path out of this module's scope) -- see the module's `_FTS5_XFAIL` /
 `_VECTOR_XFAIL` sets and the PR body that introduced them for the full list
 and a proposed follow-up issue.
 
+**The `long` page tier (issue athenaeum#1779).** Every core page before this
+tier rendered under ~600 characters, comfortably inside `_snippet`'s
+400-character window (`src/athenaeum/mcp_server.py`), so no probe could tell
+"answered from the `recall` snippet" apart from "answered after opening the
+page." The `long` tier plants four pages of 1,500-3,000 characters, tagged
+`tier: long` on `Page` (layered onto the existing `core` scale via
+`Corpus.tier_counts()`, not a new `SCALES` entry — see the tier reasoning at
+the top of `tests/evals/corpus.py`), each with its `Internal reference tag:`
+line past character offset 400. `validate_core` pins the offset against
+`_snippet`'s own `max_chars` default via `inspect`, so the two cannot drift
+apart, and a companion test in `tests/test_eval_corpus_generator.py` calls
+the real `_snippet` with each probe's tokenized query and asserts the tag
+word is absent from what it returns — proving the specific claim, not a
+proxy for it. **What a correct answer proves:** because the tag cannot
+appear in `recall`'s own snippet for these pages, an arm that produces the
+correct tag in its final answer must have called `read_entity` (or
+equivalent full-page read) rather than answering from the truncated
+`recall` hit alone — the same progressive-discovery cost claim §3.5 of the
+wave-2 spec names, now falsifiable in CI with zero model calls.
+
 The first measurement report under this design is
 [`../measurements/native-memory-baseline-2026-09-17.md`](../measurements/native-memory-baseline-2026-09-17.md)
 (issue athenaeum#1724, workflow run 35272748886, Phase 1 only, cutoff scale
