@@ -1516,6 +1516,32 @@ def render_cost_per_correct_table(costs: Sequence[CostPerCorrect]) -> list[str]:
     return lines
 
 
+def _partial_banner_lines(report: NorthStarReport) -> list[str]:
+    """The ``partial: N of M cells`` banner, or nothing (issue athenaeum#1751).
+
+    Rendered at the very top of the decision block -- inside
+    :func:`render_decision_block` rather than :func:`render_report`, so the
+    warning travels with the block for every caller that renders it
+    directly, and so the first thing a reader of the go/no-go answer sees
+    is whether the answer rests on the whole grid.
+
+    Distinct from the ``PARTIAL RUN`` banner :func:`render_report` prints
+    for ``report.aborted``: that one says the run RAISED; this one says the
+    store holds fewer rows than the run planned, which is also what a job
+    killed at its ``timeout-minutes`` leaves behind -- a case where nothing
+    ever raised because the process was never given the chance.
+    """
+    planned = report.planned_cells
+    if planned is None or len(report.rows) >= planned:
+        return []
+    return [
+        f"> **partial: {len(report.rows)} of {planned} cells** — the grid did not "
+        "finish, so every figure below is computed over the cells that did. Read "
+        "the verdicts as provisional.",
+        "",
+    ]
+
+
 def render_decision_block(
     report: NorthStarReport,
     verdicts: Sequence[ScaleVerdict] | None = None,
@@ -1538,6 +1564,7 @@ def render_decision_block(
     cutoff = compute_cutoff_scale(verdicts)
 
     lines: list[str] = []
+    lines.extend(_partial_banner_lines(report))
     lines.append("## Decision (design doc §7, athenaeum#1734)")
     lines.append("")
     lines.append(
@@ -1666,6 +1693,13 @@ class NorthStarReport:
     # arm the report was built with, without a caller having to thread it
     # through separately.
     verdict_arm: str = DEFAULT_VERDICT_ARM
+    # issue athenaeum#1751: how many cells the run INTENDED to complete, read
+    # from the store's planned-count sidecar. ``None`` means "unknowable"
+    # (a store written before that sidecar existed, or one whose sidecar was
+    # lost) and renders no partial banner -- absence of evidence is not
+    # evidence of a partial run. Appended last, per the convention the
+    # ``write_costs`` comment above states.
+    planned_cells: int | None = None
 
 
 def build_report(
@@ -1676,6 +1710,7 @@ def build_report(
     write_path_stats: Sequence[WritePathStats] = (),
     write_costs: Sequence[WriteCost] = (),
     verdict_arm: str = DEFAULT_VERDICT_ARM,
+    planned_cells: int | None = None,
 ) -> NorthStarReport:
     """Assemble a :class:`NorthStarReport` from decoded result-store rows.
 
@@ -1701,6 +1736,7 @@ def build_report(
         write_path_stats=tuple(write_path_stats),
         write_costs=tuple(write_costs),
         verdict_arm=verdict_arm,
+        planned_cells=planned_cells,
     )
 
 

@@ -39,7 +39,9 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import threading
 from collections.abc import Callable, Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -198,6 +200,47 @@ class CellTokenEstimate:
 #: estimate, not a measurement.
 DEFAULT_CELL_TOKEN_ESTIMATE = CellTokenEstimate(input_tokens=20_000, output_tokens=4_000)
 
+#: Declared (not measured) per-cell wall-clock estimate, the TIME sibling of
+#: :data:`DEFAULT_CELL_TOKEN_ESTIMATE`'s token estimate (issue athenaeum#1751).
+#: A tool-using cell is a multi-turn Messages API loop, so tens of seconds is
+#: the right order of magnitude; like the token estimate this is deliberately
+#: a round, clearly-a-guess number a first live batch should replace, not a
+#: false-precision figure. It exists so ``--dry-run`` can answer "does a
+#: dispatch at N workers fit the job's ``timeout-minutes`` window?" BEFORE the
+#: operator clicks, which is the only question a pre-flight can usefully
+#: answer about time.
+DEFAULT_CELL_SECONDS = 45.0
+
+
+def project_wall_clock_seconds(
+    cell_count: int,
+    *,
+    workers: int,
+    seconds_per_cell: float = DEFAULT_CELL_SECONDS,
+) -> float:
+    """Projected wall-clock seconds for *cell_count* cells at *workers* workers.
+
+    Flat ``cells * seconds / workers``. This is only honest because the
+    north-star driver's unit of concurrency is a (probe, corpus_scale,
+    replicate) GROUP of exactly ``len(ALL_ARMS)`` cells whose arms run
+    serially inside the group -- so cells-per-unit-time really does scale
+    with the worker count. A future partial-arm group (one that runs fewer
+    arms per call) would break that equality and make this number optimistic
+    by the ratio of the group sizes; anyone adding one must revisit this.
+    """
+    if workers < 1:
+        raise ValueError(f"workers must be >= 1, got {workers}")
+    return cell_count * seconds_per_cell / workers
+
+
+def format_duration(seconds: float) -> str:
+    """``h:mm:ss`` -- the shape an operator compares against a job's
+    ``timeout-minutes`` without doing arithmetic in their head."""
+    total = int(round(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}"
+
 
 class SpendCeilingExceededError(Exception):
     """Raised by :func:`price_grid` when the priced grid exceeds ``--max-spend``.
@@ -280,6 +323,16 @@ class ResultStore:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        # issue athenaeum#1751: the grid now runs cells on a bounded thread
+        # pool, so two workers can finish at the same moment. Without this
+        # lock their two ``write()`` calls could interleave mid-line and
+        # produce a corrupt JSONL row that ``load_rollout_rows`` would then
+        # fail to decode -- losing not just the in-flight cell but every row
+        # after it in the file. One lock per store INSTANCE is the right
+        # grain because a run shares exactly one instance (see
+        # ``north_star_cli._run_cells``); two instances over the same path
+        # would still race, which is why callers must not construct a second.
+        self._append_lock = threading.Lock()
 
     def completed_keys(self) -> set[str]:
         """Return every cell key already persisted, read once up front.
@@ -301,36 +354,119 @@ class ResultStore:
         return keys
 
     def append(self, cell_key: str, payload: dict[str, Any]) -> None:
-        """Append one completed cell's result, flushed and fsync'd."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        """Append one completed cell's result, flushed and fsync'd.
+
+        Serialised on :attr:`_append_lock` so concurrent workers never
+        interleave a partial line (issue athenaeum#1751). The JSON is
+        rendered BEFORE the lock is taken -- the critical section covers
+        only the file work, so a slow ``json.dumps`` on a big payload does
+        not stall every other worker.
+        """
         row = {"cell_key": cell_key, **payload}
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        line = json.dumps(row, sort_keys=True) + "\n"
+        with self._append_lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
 
 
 def run_grid(
     cells: Iterable[GridCell],
     cell_runner: Callable[[GridCell], dict[str, Any]],
     store: ResultStore,
+    *,
+    workers: int = 1,
 ) -> list[dict[str, Any]]:
-    """Run every cell in *cells* not already present in *store*, in order.
+    """Run every cell in *cells* not already present in *store*.
 
-    ``store.completed_keys()`` is read exactly ONCE, before the loop starts
+    ``store.completed_keys()`` is read exactly ONCE, before any cell runs
     — this is what makes a resume after a mid-grid kill cheap and correct:
     every cell already persisted (from before the kill) is skipped without
     calling *cell_runner* at all, and every remaining cell is executed and
     appended exactly once. Returns the payloads for cells executed on THIS
     call only (not the ones skipped as already-complete).
+
+    *workers* (issue athenaeum#1751) bounds how many cells run at a time.
+    ``1`` — the default, so no existing caller changes behaviour — keeps
+    the original strictly-serial loop, and both the store rows and the
+    returned list stay in *cells* order. Above ``1`` the cells are
+    independent units dispatched to a :class:`ThreadPoolExecutor`, and
+    **order is no longer defined**: rows land in completion order and the
+    returned list matches. The SET of executed cells is identical either
+    way, which is the property callers may rely on — anything needing a
+    stable ordering must sort by cell identity itself.
     """
+    if workers < 1:
+        raise ValueError(f"workers must be >= 1, got {workers}")
     already_done = store.completed_keys()
+    pending = [cell for cell in cells if cell.cell_key() not in already_done]
     results: list[dict[str, Any]] = []
-    for cell in cells:
-        key = cell.cell_key()
-        if key in already_done:
-            continue
-        payload = cell_runner(cell)
-        store.append(key, payload)
-        results.append(payload)
+    if workers == 1:
+        for cell in pending:
+            payload = cell_runner(cell)
+            store.append(cell.cell_key(), payload)
+            results.append(payload)
+        return results
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(cell_runner, cell): cell for cell in pending}
+        for future in as_completed(futures):
+            cell = futures[future]
+            payload = future.result()
+            store.append(cell.cell_key(), payload)
+            results.append(payload)
     return results
+
+
+# ---------------------------------------------------------------------------
+# Planned-cell-count sidecar (partial-run detection)
+# ---------------------------------------------------------------------------
+
+#: Suffix appended to a store's own filename for its planned-count sidecar.
+PLANNED_SIDECAR_SUFFIX = ".planned.json"
+
+
+def planned_sidecar_path(store: ResultStore) -> Path:
+    """Where *store*'s planned-cell-count sidecar lives.
+
+    A SIDECAR rather than a header line inside the JSONL (issue
+    athenaeum#1751): ``ResultStore`` is strictly append-only and every
+    reader — ``completed_keys``, ``load_rollout_rows`` — assumes every line
+    is a cell row. A header would have to be special-cased in both, and a
+    resumed run would have to decide whether to rewrite it. A separate file
+    written once at run start costs neither.
+    """
+    return store.path.with_name(store.path.name + PLANNED_SIDECAR_SUFFIX)
+
+
+def write_planned_cells(store: ResultStore, planned: int) -> None:
+    """Record how many cells the run that is STARTING intends to complete.
+
+    Written before the first cell runs, so a run killed mid-grid (the
+    60-minute job timeout this issue exists for) still leaves behind enough
+    to tell "all 1392 cells, complete" from "the 300 that fit". Rewritten on
+    a resume with the same planned total, which is by construction the full
+    grid's size, not the remaining count.
+    """
+    path = planned_sidecar_path(store)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"planned_cells": planned}) + "\n", encoding="utf-8")
+
+
+def read_planned_cells(store: ResultStore) -> int | None:
+    """The planned cell count for *store*, or ``None`` when unknowable.
+
+    ``None`` — a missing, empty or unparseable sidecar — means "cannot tell
+    whether this store is partial", which renders WITHOUT a partial banner.
+    That is deliberate: a store from before this issue, or one whose sidecar
+    was lost, must not be libelled as partial on no evidence.
+    """
+    path = planned_sidecar_path(store)
+    if not path.exists():
+        return None
+    try:
+        planned = json.loads(path.read_text(encoding="utf-8"))["planned_cells"]
+    except (json.JSONDecodeError, KeyError, OSError):
+        return None
+    return int(planned) if isinstance(planned, int) else None
