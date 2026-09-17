@@ -507,6 +507,7 @@
   tier: long
   query: "what is the renewal timeline for the Bramfield Crestwood retainer contract?"
   expected_uids: [client-bramfield-crestwood]
+  must_not_rank: [client-alderway]
   distractor_terms: ["Bramfield Crestwood", "retainer renewal", "renewal timeline"]
   answer_tokens: ["Glimmerhollow"]
   note: >-
@@ -514,34 +515,50 @@
     page's title and opening paragraph; the reference tag sits past
     character offset 400, outside `recall`'s 400-character snippet window,
     so a correct answer requires `read_entity` on the full page.
+    must_not_rank (athenaeum#1777): Alderway Advisory shares "retainer"
+    (both its own tag and body text call it "the firm's largest retainer
+    client") but is an unrelated engagement with no renewal-timeline
+    content at all.
 
 - id: remote_equipment_stipend_cap
   probe_class: single_hop
   tier: long
   query: "what is the equipment stipend policy for remote employees?"
   expected_uids: [policy-remote-equipment-stipend]
+  must_not_rank: [ops-equipment-refresh]
   distractor_terms: ["equipment stipend", "remote employees", "stipend cap"]
   answer_tokens: ["Pallowrift"]
   note: >-
     Long-page tier (athenaeum#1779). Same shape as the retainer probe above:
     the policy topic is in the title, the tag line is past offset 400.
+    must_not_rank (athenaeum#1777): the equipment refresh cycle shares
+    "equipment" but covers hardware replacement cadence, not the stipend
+    policy the query asks about.
 
 - id: lighthouse_migration_rollback
   probe_class: single_hop
   tier: long
   query: "what is the rollback plan for the Lighthouse platform migration project?"
   expected_uids: [project-lighthouse-migration]
+  must_not_rank: [project-portal-hosting]
   distractor_terms: ["Lighthouse migration", "rollback plan", "platform migration"]
   answer_tokens: ["Ambervost"]
   note: >-
     Long-page tier (athenaeum#1779). Same shape as the two probes above.
+    must_not_rank (athenaeum#1777): Portal hosting migration shares
+    "migration" and "project" (also aliased "hosting migration") but is an
+    unrelated workstream with no rollback content.
 
 - id: triform_vendor_consolidation
   probe_class: single_hop
   tier: long
   query: "why did we consolidate vendors under the Triform master agreement?"
   expected_uids: [decision-vendor-consolidation-triform]
+  must_not_rank: [decision-ticketing-vendor-gilcrest]
   distractor_terms: ["Triform", "vendor consolidation", "master agreement"]
   answer_tokens: ["Thistlemere"]
   note: >-
     Long-page tier (athenaeum#1779). Same shape as the three probes above.
+    must_not_rank (athenaeum#1777): the Gilcrest ticketing-vendor decision
+    shares the stemmed "vendor"/"vendors" term but is an unrelated
+    single-vendor selection, not the Triform consolidation.
