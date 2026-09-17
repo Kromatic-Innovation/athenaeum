@@ -475,35 +475,32 @@ def _probe_by_id(corpus: Corpus, probe_id: str) -> Probe:
 # which is the signal to remove it from this set.
 # ---------------------------------------------------------------------------
 
-#: fts5 backend -- 10 of 52 (scale, probe) cases, measured 2026-09-17.
+#: fts5 backend -- 6 of 52 (scale, probe) cases, measured 2026-09-17 against
+#: develop @ 5693c1c7 (post athenaeum#1768/#1769).
 _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
     {
         ("core", "confidentiality_rule"),
-        ("core", "portal_design_reviewer"),
         ("core", "budget_threshold_current"),
         ("medium", "confidentiality_rule"),
-        ("medium", "spend_approver_named"),
-        ("medium", "portal_design_reviewer"),
-        ("medium", "ratecard_tooling_owner"),
         ("medium", "budget_threshold_current"),
         ("medium", "surname_is_ambiguous"),
         ("medium", "former_client_not_current"),
     }
 )
 
-#: vector backend -- 51 of 52 (scale, probe) cases, measured 2026-09-17. Far
-#: larger than the fts5 set: a sentence-embedding model finds much less
-#: lexical/keyword recall than fts5 does for this corpus's proper-noun-heavy
-#: single/multi-hop probes (see the PR body's finding and the design-doc
-#: caveat). Kept as one explicit set, not a blanket "xfail everything for
-#: this backend", so a genuine per-case fix is visible one entry at a time.
+#: vector backend -- 49 of 52 (scale, probe) cases, measured 2026-09-17
+#: against develop @ 5693c1c7 (post athenaeum#1768/#1769). Far larger than
+#: the fts5 set: a sentence-embedding model finds much less lexical/keyword
+#: recall than fts5 does for this corpus's proper-noun-heavy single/
+#: multi-hop probes (see the PR body's finding and the design-doc caveat).
+#: Kept as one explicit set, not a blanket "xfail everything for this
+#: backend", so a genuine per-case fix is visible one entry at a time.
 _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
     {
         ("core", "pto_allowance"),
         ("core", "confidentiality_rule"),
         ("core", "bluewater_terms"),
         ("core", "onboarding_length"),
-        ("core", "spend_approver_named"),
         ("core", "portal_design_reviewer"),
         ("core", "ratecard_tooling_owner"),
         ("core", "office_address_current"),
@@ -528,7 +525,6 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         ("medium", "confidentiality_rule"),
         ("medium", "bluewater_terms"),
         ("medium", "onboarding_length"),
-        ("medium", "spend_approver_named"),
         ("medium", "portal_design_reviewer"),
         ("medium", "ratecard_tooling_owner"),
         ("medium", "office_address_current"),

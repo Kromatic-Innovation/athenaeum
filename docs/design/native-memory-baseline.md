@@ -322,13 +322,13 @@ shipped hook's top-3 breadcrumbs. Measured 2026-09-17 against `core` and
 
 | probe_class | probes | expected pages | reached by grep | reached by recall top-5 | reached by hook top-3 | irrelevant pages: grep / recall / hook |
 |---|---|---|---|---|---|---|
-| single_hop | 4 | 4 | 4 | 3 | 2 | 150 / 17 / 10 |
-| multi_hop | 3 | 6 | 6 | 5 | 3 | 77 / 10 / 6 |
+| single_hop | 4 | 4 | 4 | 3 | 2 | 148 / 17 / 10 |
+| multi_hop | 3 | 6 | 3 | 3 | 3 | 114 / 10 / 5 |
 | temporal | 6 | 6 | 6 | 5 | 5 | 88 / 18 / 12 |
-| disambiguation | 4 | 8 | 8 | 8 | 7 | 31 / 4 / 2 |
+| disambiguation | 4 | 8 | 8 | 8 | 7 | 30 / 4 / 2 |
 | distractor_robustness | 2 | 4 | 4 | 4 | 3 | 17 / 4 / 3 |
 | redundancy | 1 | 2 | 2 | 2 | 2 | 4 / 2 / 1 |
-| follow_through | 6 | 12 | 6 | 6 | 6 | 123 / 14 / 7 |
+| follow_through | 6 | 12 | 6 | 6 | 6 | 122 / 14 / 7 |
 
 (`core` scale; `medium` shows the same shape at larger irrelevant-page
 counts -- see the PR that added this module for the full table at both

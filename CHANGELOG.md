@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surfaced by grep, recall, or the hook (confirming, for example, that
   `recall` correctly excludes the `rowanwrenfield` repo page on a question
   about Rowan Wrenfield the person, where a bare grep does not) -- plus a
-  per-probe-class summary row. Ten (scale, probe) cases on `fts5` and 51 of
+  per-probe-class summary row. Six (scale, probe) cases on `fts5` and 49 of
   52 on `vector` are genuine retrieval-side misses, measured against the
   current corpus/index and marked `xfail(strict=True)` referencing
   athenaeum#1770 so CI stays green while a fix in `src/athenaeum/search.py`
