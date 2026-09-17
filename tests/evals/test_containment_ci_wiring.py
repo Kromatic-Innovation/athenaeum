@@ -159,6 +159,13 @@ def test_token_free_report_modules_carry_no_deselecting_marker() -> None:
         "test_rollout_api_mode.py",
         "test_rollout_api_mode_hardening.py",
         "test_rollout_mode_labelling.py",
+        # athenaeum#1751: the grid's concurrency and partial-run tests. Both
+        # drive `main()` through stub runners and `tests.conftest.FakeLLMClient`
+        # only -- the drift risk is identical (they import
+        # `tests.evals.rollout`, which reads like a reason to mark them), so
+        # they are pinned by name for the same reason the eight above are.
+        "test_north_star_concurrency.py",
+        "test_north_star_partial_safety.py",
     ]
     for name in token_free_modules:
         source = (_EVALS_DIR / name).read_text(encoding="utf-8")

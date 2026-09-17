@@ -19,8 +19,12 @@ ordinary exception:
 * The spend ceiling stops an in-flight group at its next ARM rather than
   running out all eight.
 
-``rollout``-marked and fully offline: every cell runs through a stub or
-``tests.conftest.FakeLLMClient``; no live client, no ``claude -p``.
+**Deliberately unmarked** (issue athenaeum#1742): every cell here runs
+through a stub or ``tests.conftest.FakeLLMClient``, no live LLM client is
+constructed, no ``claude`` binary is spawned and nothing gates on
+``ANTHROPIC_API_KEY`` -- so this module costs no tokens and must run in
+``ci.yml``'s default job. ``rollout`` is a TOKEN-COST marker, not a
+file-family one.
 """
 
 from __future__ import annotations
@@ -49,8 +53,6 @@ from tests.evals.north_star_report import (
     render_decision_block,
 )
 from tests.evals.rollout import ALL_ARMS, RolloutRecord, TurnTokenUsage, run_probe_all_arms
-
-pytestmark = pytest.mark.rollout
 
 #: ``--scale small`` with the default single replicate selects three
 #: (probe, corpus_scale, replicate) groups.

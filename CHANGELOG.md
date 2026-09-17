@@ -80,8 +80,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handler let it past and the operator got nothing over the cells already
   paid for) and cancels every group that had not started. When the token
   ceiling trips, a group already in flight stops at its next arm boundary,
-  so the overshoot is one cell per worker rather than up to eight. No
-  prompt, model or arm changed.
+  so the overshoot is one cell per worker rather than up to eight. Both new
+  test modules (`tests/evals/test_north_star_concurrency.py`,
+  `tests/evals/test_north_star_partial_safety.py`) are token-free and carry
+  NO deselecting marker, per athenaeum#1742's rule that `rollout` means
+  token cost rather than file family — they import `tests.evals.rollout`,
+  which is exactly the shape that invited the old blanket marking, so both
+  are pinned by name in
+  `test_containment_ci_wiring.py::test_token_free_report_modules_carry_no_deselecting_marker`.
+  No prompt, model or arm changed.
 - **`temporal` probes with person/company expected pages (issue
   athenaeum#1744).** The go/no-go rule's condition 1 relationship subset
   (`_relationship_probe_ids` in `tests/evals/north_star_report.py`) is

@@ -15,9 +15,12 @@ Four properties, one per acceptance criterion:
 4. A store holding fewer rows than its planned-count sidecar renders the
    ``partial: N of M cells`` banner; a complete one renders without it.
 
-``rollout``-marked (imports ``tests.evals.rollout``) and fully offline: every
-cell runs through a stub, no client is ever constructed and no ``claude -p``
-is ever spawned.
+**Deliberately unmarked** (issue athenaeum#1742): every cell here runs
+through a stub, no LLM client is constructed, no ``claude`` binary is
+spawned and nothing gates on ``ANTHROPIC_API_KEY`` -- so this module costs
+no tokens and must run in ``ci.yml``'s default job. ``rollout`` is a
+TOKEN-COST marker, not a file-family one; importing ``tests.evals.rollout``
+is not by itself a reason to carry it.
 """
 
 from __future__ import annotations
@@ -45,8 +48,6 @@ from tests.evals.containment import (
 from tests.evals.harness import EvalSession
 from tests.evals.north_star_report import build_report, render_decision_block
 from tests.evals.rollout import ALL_ARMS, RolloutRecord, TurnTokenUsage
-
-pytestmark = pytest.mark.rollout
 
 #: ``--scale small`` selects 3 probes x 1 corpus scale x 1 replicate (the
 #: ``--replicates`` default is the single index 0) = 3 groups, each expanding
