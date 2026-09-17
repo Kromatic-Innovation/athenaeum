@@ -312,6 +312,30 @@ def price_grid(
 # ---------------------------------------------------------------------------
 
 
+def _terminate_torn_tail(handle: Any) -> None:
+    """Close off an unterminated final line before appending after it.
+
+    A process killed mid-``write`` leaves a partial row with NO trailing
+    newline. Appending straight onto that fragment glues the next row's
+    JSON to it, and the result is a single line that decodes as neither:
+    the fragment is expected (a torn row is counted and tolerated), but the
+    NEW row -- a cell that just ran and was just paid for -- is destroyed
+    with it. Worse, it is destroyed the same way on every subsequent
+    resume, because each resume re-runs that cell and re-glues it to the
+    same unterminated tail, so the cell can never persist at all.
+
+    Writing the missing newline first keeps the fragment torn (it stays
+    counted, and its cell still reads as not-completed, so the resume
+    re-runs it) while letting every row appended after it decode normally.
+    """
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        return
+    handle.seek(-1, os.SEEK_END)
+    if handle.read(1) != b"\n":
+        handle.write(b"\n")
+
+
 class ResultStore:
     """Append-only JSONL store of completed grid-cell results.
 
@@ -417,10 +441,14 @@ class ResultStore:
         not stall every other worker.
         """
         row = {"cell_key": cell_key, **payload}
-        line = json.dumps(row, sort_keys=True) + "\n"
+        line = (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
         with self._append_lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as handle:
+            # "a+b", not "ab": the tail check below has to READ the last
+            # byte, and append-only mode is write-only. Writes still always
+            # land at the end regardless of where the read left the cursor.
+            with self.path.open("a+b") as handle:
+                _terminate_torn_tail(handle)
                 handle.write(line)
                 handle.flush()
                 os.fsync(handle.fileno())

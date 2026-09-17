@@ -82,7 +82,7 @@ from tests.evals.north_star_report import (
     DEFAULT_VERDICT_ARM,
     append_rollout_row,
     build_report,
-    load_rollout_rows_and_torn,
+    load_rollout_rows_and_diagnostics,
     write_report,
 )
 from tests.evals.rollout import ALL_ARMS, DEFAULT_ROLLOUT_MODEL, run_probe_all_arms
@@ -526,14 +526,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         aborted = True
         abort_reason = str(exc) or type(exc).__name__
 
-    rows, torn_rows = load_rollout_rows_and_torn(store)
+    diagnostics = load_rollout_rows_and_diagnostics(store)
     report = build_report(
-        rows,
+        list(diagnostics.rows),
         aborted=aborted,
         abort_reason=abort_reason,
         verdict_arm=args.verdict_arm,
         planned_cells=read_planned_cells(store),
-        torn_rows=torn_rows,
+        torn_rows=diagnostics.torn,
+        duplicate_rows=diagnostics.duplicates,
     )
     path = write_report(report, out_dir=args.out_dir)
     print(f"report written: {path}")

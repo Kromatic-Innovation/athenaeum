@@ -29,6 +29,7 @@ file-family one.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import threading
 import time
@@ -44,12 +45,13 @@ from tests.evals.containment import (
     ResultStore,
     SpendCeilingExceededError,
     read_planned_cells,
+    run_grid,
 )
 from tests.evals.harness import EvalSession
 from tests.evals.north_star_report import (
     append_rollout_row,
     build_report,
-    load_rollout_rows_and_torn,
+    load_rollout_rows_and_diagnostics,
     render_decision_block,
 )
 from tests.evals.rollout import ALL_ARMS, RolloutRecord, TurnTokenUsage, run_probe_all_arms
@@ -262,12 +264,19 @@ def test_a_torn_trailing_row_is_skipped_counted_and_reported(
     assert store.count_torn_rows() == 1
     assert len(store.completed_keys()) == len(intact) - 1
 
-    rows, torn = load_rollout_rows_and_torn(store)
-    assert torn == 1
-    assert len(rows) == len(intact) - 1
+    diagnostics = load_rollout_rows_and_diagnostics(store)
+    assert diagnostics.torn == 1
+    assert diagnostics.duplicates == 0
+    assert len(diagnostics.rows) == len(intact) - 1
 
     block = "\n".join(
-        render_decision_block(build_report(rows, planned_cells=len(intact), torn_rows=torn))
+        render_decision_block(
+            build_report(
+                list(diagnostics.rows),
+                planned_cells=len(intact),
+                torn_rows=diagnostics.torn,
+            )
+        )
     )
     assert "1 torn row" in block
 
@@ -297,9 +306,10 @@ def test_a_complete_store_reports_no_torn_rows(tmp_path: Path) -> None:
     append_rollout_row(store, cell, _stub_records("a", "core")["none"])
 
     assert store.count_torn_rows() == 0
-    rows, torn = load_rollout_rows_and_torn(store)
-    assert torn == 0
-    assert len(rows) == 1
+    diagnostics = load_rollout_rows_and_diagnostics(store)
+    assert diagnostics.torn == 0
+    assert diagnostics.duplicates == 0
+    assert len(diagnostics.rows) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -518,3 +528,207 @@ def test_per_turn_token_deltas_are_exact_under_concurrency() -> None:
     assert set(seen) == {(7, 11)}, "a turn was attributed another turn's tokens"
     assert session.input_tokens == 8 * 200 * 7
     assert session.output_tokens == 8 * 200 * 11
+
+
+# ---------------------------------------------------------------------------
+# A torn tail with NO trailing newline must not swallow the resumed row
+# ---------------------------------------------------------------------------
+
+
+def test_an_unterminated_torn_tail_does_not_glue_the_next_row_onto_it(
+    tmp_path: Path,
+) -> None:
+    """The nastier half of a mid-``write`` kill.
+
+    A process killed while writing leaves a fragment with NO trailing
+    newline. Appending straight onto it glues the next row's JSON to the
+    fragment, and the combined line decodes as neither: the fragment is
+    expected and tolerated, but the NEW row -- a cell that just ran and was
+    just paid for -- is destroyed with it. It is destroyed the same way on
+    every later resume too, because each resume re-runs that cell and
+    re-glues it to the same unterminated tail, so the cell can never
+    persist at all.
+    """
+    store = ResultStore(tmp_path / "s.jsonl")
+    store.append('["a","none","core",0]', {"probe_id": "a"})
+    with store.path.open("a", encoding="utf-8") as handle:
+        handle.write('{"cell_key": "torn", "probe_i')  # NO trailing newline
+
+    store.append('["b","none","core",0]', {"probe_id": "b"})
+
+    # The fragment stays torn; the row appended after it survives intact.
+    assert store.count_torn_rows() == 1
+    assert store.completed_keys() == {'["a","none","core",0]', '["b","none","core",0]'}
+    lines = store.path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3, lines
+
+
+def test_resuming_a_grid_over_an_unterminated_tail_leaves_no_duplicate_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end, at the shape a timeout kill actually leaves.
+
+    Before the newline guard this produced 31 raw lines, 30 decodable rows
+    and only 24 distinct cells -- six duplicates, one destroyed row, and no
+    partial banner, because the banner compared ROW count (30) against the
+    planned 24 and concluded the grid was complete.
+    """
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _plain_stub)
+    assert north_star_cli.main(_small_grid_args(tmp_path, workers=1)) == 0
+
+    store_path = tmp_path / "store-1.jsonl"
+    store = ResultStore(store_path)
+    planned = SMALL_SCALE_GROUPS * len(ALL_ARMS)
+    assert len(store.completed_keys()) == planned
+
+    # Tear the final row and drop its newline, exactly as a kill would.
+    lines = store_path.read_text(encoding="utf-8").splitlines()
+    store_path.write_text(
+        "\n".join(lines[:-1]) + "\n" + lines[-1][: len(lines[-1]) // 2], encoding="utf-8"
+    )
+
+    lines_before_resume = len(store_path.read_text(encoding="utf-8").splitlines())
+
+    # Resume with the same store: the torn cell's group re-runs in full.
+    assert north_star_cli.main(_small_grid_args(tmp_path, workers=1)) == 0
+
+    # Every re-run row got its OWN line. Without the newline guard the first
+    # of them fuses with the fragment and one line goes missing -- which is
+    # the assertion that holds regardless of which row happened to land
+    # first, unlike a distinct-cell count that the reader's de-duplication
+    # can make look correct by luck.
+    lines_after_resume = len(store_path.read_text(encoding="utf-8").splitlines())
+    assert lines_after_resume == lines_before_resume + len(ALL_ARMS)
+
+    diagnostics = load_rollout_rows_and_diagnostics(store)
+    assert diagnostics.torn == 1
+    assert len(store.completed_keys()) == planned
+    keys = [row.cell.cell_key() for row in diagnostics.rows]
+    assert len(keys) == len(set(keys)), "the reader returned duplicate cells"
+    assert len(keys) == planned
+
+
+def test_the_reader_collapses_a_resumed_group_to_one_row_per_cell(
+    tmp_path: Path,
+) -> None:
+    """Duplicate cell keys are NORMAL after a resume, not corruption: resume
+    granularity is the whole group, so a group that stopped part-way is
+    re-run in full and its already-landed rows are appended again. The
+    reader collapses them, last row winning, and counts what it collapsed."""
+    store = ResultStore(tmp_path / "s.jsonl")
+    # A REAL corpus probe id: ``build_report`` resolves every row's probe
+    # against the corpus, so an invented id raises rather than rendering.
+    probe_id = north_star_cli.DEFAULT_PROBES[0]
+    cell = GridCell(probe=probe_id, arm="none", corpus_scale="core", replicate=0)
+    first = _stub_records(probe_id, "core")["none"]
+    second = dataclasses.replace(first, answer="the re-run's answer")
+    append_rollout_row(store, cell, first)
+    append_rollout_row(store, cell, second)
+
+    diagnostics = load_rollout_rows_and_diagnostics(store)
+
+    assert len(diagnostics.rows) == 1
+    assert diagnostics.duplicates == 1
+    assert diagnostics.torn == 0
+    assert diagnostics.rows[0].record.answer == "the re-run's answer"
+
+    # Distinct cells, not rows, decide the banner: two rows for one cell of a
+    # planned two must still read as partial.
+    block = "\n".join(
+        render_decision_block(
+            build_report(list(diagnostics.rows), planned_cells=2, duplicate_rows=1)
+        )
+    )
+    assert "partial: 1 of 2 cells" in block
+    assert "superseded row" in block
+
+
+# ---------------------------------------------------------------------------
+# should_stop is actually wired from main() through to run_probe_all_arms
+# ---------------------------------------------------------------------------
+
+
+def test_main_passes_a_should_stop_that_flips_when_the_ceiling_trips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting `should_stop=stop.is_set` from ``_run_cells`` must fail here.
+
+    Every other ceiling test would still pass without it: the run still
+    aborts and still stops dispatching NEW groups. What is lost is the
+    bound on a group already in flight, which is only observable by holding
+    the callable the runner was handed and watching it flip.
+    """
+    seen: list[Any] = []
+    guard = threading.Lock()
+
+    def _capturing_stub(
+        probe_id: str,
+        corpus_scale: str,
+        *,
+        session: EvalSession,
+        materialize_root: Any,
+        model: str,
+        search_backend: str,
+        claude_binary: str,
+        replicate: int,
+        mode: str = "cli",
+        should_stop: Any = None,
+    ) -> dict[str, RolloutRecord]:
+        with guard:
+            seen.append(should_stop)
+        session.observe_response(
+            model,
+            make_llm_response("x", usage=make_llm_usage(input_tokens=1000, output_tokens=1000)),
+        )
+        return _stub_records(probe_id, corpus_scale)
+
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _capturing_stub)
+    # One group's usage already exceeds this.
+    monkeypatch.setattr(north_star_cli, "ROLLOUT_TOKEN_CEILING", 100)
+
+    assert north_star_cli.main(_small_grid_args(tmp_path, workers=1)) == 1
+
+    assert seen, "no group ever ran"
+    assert all(callable(cb) for cb in seen), (
+        "run_probe_all_arms was handed should_stop=None -- an in-flight group "
+        "would run out all its arms after the ceiling tripped"
+    )
+    # The callable is live, not a snapshot: it reads False before the trip
+    # and True after it.
+    assert all(cb() for cb in seen), "should_stop never flipped after the ceiling tripped"
+
+
+# ---------------------------------------------------------------------------
+# run_grid drains before it re-raises
+# ---------------------------------------------------------------------------
+
+
+def test_run_grid_appends_every_completed_cell_before_reraising(tmp_path: Path) -> None:
+    """One cell raises; the rest complete. Their rows must all be persisted.
+
+    Raising straight out of the ``as_completed`` loop would abandon every
+    future that had completed but not yet been pulled -- cells that ran and
+    were paid for, whose results never reach the store. That also breaks
+    resume: the next run re-pays for work that had already succeeded.
+    """
+    cells = [
+        GridCell(probe=f"p{i}", arm="none", corpus_scale="core", replicate=0) for i in range(12)
+    ]
+    doomed = "p7"
+
+    def _runner(cell: GridCell) -> dict[str, Any]:
+        if cell.probe == doomed:
+            # Let the others get well ahead, so several futures are sitting
+            # completed-but-unpulled when this one surfaces.
+            time.sleep(0.2)
+            raise RuntimeError("simulated cell failure")
+        return {"probe": cell.probe}
+
+    store = ResultStore(tmp_path / "s.jsonl")
+    with pytest.raises(RuntimeError, match="simulated cell failure"):
+        run_grid(cells, _runner, store, workers=4)
+
+    persisted = store.completed_keys()
+    expected = {cell.cell_key() for cell in cells if cell.probe != doomed}
+    assert persisted == expected, "a completed cell's row was dropped when another cell raised"
+    assert store.count_torn_rows() == 0

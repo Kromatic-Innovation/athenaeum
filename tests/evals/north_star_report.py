@@ -153,27 +153,54 @@ def load_rollout_rows(store: ResultStore) -> list[RolloutRow]:
     ``(GridCell, RolloutRecord)`` pairs. Empty list if the store has no
     file yet (a fresh, never-run store).
 
-    Torn rows are skipped rather than fatal (see
-    :meth:`ResultStore.count_torn_rows`). Use
-    :func:`load_rollout_rows_and_torn` when the count matters -- a report
-    should say how many rows it could not read, not merely not crash.
+    Torn and duplicate rows are handled rather than fatal (see
+    :func:`load_rollout_rows_and_diagnostics`). Use that function when the
+    counts matter -- a report should say how many rows it could not read,
+    not merely not crash.
     """
-    rows, _ = load_rollout_rows_and_torn(store)
-    return rows
+    # ``list``, not the diagnostics' tuple: this function's contract is a
+    # list and callers compare against one.
+    return list(load_rollout_rows_and_diagnostics(store).rows)
 
 
-def load_rollout_rows_and_torn(store: ResultStore) -> tuple[list[RolloutRow], int]:
-    """:func:`load_rollout_rows`, plus how many rows would not decode.
+@dataclasses.dataclass(frozen=True)
+class StoreDiagnostics:
+    """One read of a result store: its rows, and what was wrong with it."""
 
-    One pass, so the count costs nothing over the read the report already
-    does. A row that decodes as JSON but is missing a field this decoder
-    needs counts as torn too: a partial write can, rarely, leave something
-    that parses but is not a row.
+    #: One row per DISTINCT cell key, in first-seen order.
+    rows: tuple[RolloutRow, ...]
+    #: Lines that would not decode as a rollout row.
+    torn: int
+    #: Rows superseded by a later row for the same cell key.
+    duplicates: int
+
+
+def load_rollout_rows_and_diagnostics(store: ResultStore) -> StoreDiagnostics:
+    """Read *store* once, de-duplicated by cell key, last row winning.
+
+    **Why the reader de-duplicates at all.** ``ResultStore`` is append-only
+    and never de-duplicates on write, and this driver's resume granularity
+    is the whole (probe, corpus_scale, replicate) GROUP: a group that
+    stopped part-way is re-run in full, and every one of its rows is
+    appended fresh alongside the ones that had already landed. So duplicate
+    cell keys are a NORMAL consequence of resuming, not a corruption. Left
+    un-deduped they would inflate every count computed from ``rows`` --
+    including the partial banner's numerator, which could then exceed the
+    planned total and hide a partial run behind an apparently-complete one.
+
+    **Last wins**, because the later row is the one the re-run produced:
+    the earlier one belongs to an attempt that did not finish, and the
+    store's own ordering is append order.
+
+    A row that decodes as JSON but is missing a field this decoder needs
+    counts as torn too -- a partial write can, rarely, leave something that
+    parses but is not a row.
     """
     if not store.path.exists():
-        return [], 0
-    rows: list[RolloutRow] = []
+        return StoreDiagnostics(rows=(), torn=0, duplicates=0)
+    by_key: dict[str, RolloutRow] = {}
     torn = 0
+    duplicates = 0
     with store.path.open("r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
@@ -191,8 +218,11 @@ def load_rollout_rows_and_torn(store: ResultStore) -> tuple[list[RolloutRow], in
             except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                 torn += 1
                 continue
-            rows.append(RolloutRow(cell=cell, record=record))
-    return rows, torn
+            key = cell.cell_key()
+            if key in by_key:
+                duplicates += 1
+            by_key[key] = RolloutRow(cell=cell, record=record)
+    return StoreDiagnostics(rows=tuple(by_key.values()), torn=torn, duplicates=duplicates)
 
 
 # ---------------------------------------------------------------------------
@@ -1556,20 +1586,33 @@ def _partial_banner_lines(report: NorthStarReport) -> list[str]:
     """
     planned = report.planned_cells
     torn = report.torn_rows
-    if planned is None or len(report.rows) >= planned:
+    # DISTINCT cell keys, never ``len(report.rows)``: a resumed run re-runs
+    # a partly-completed group in full, so the store legitimately holds more
+    # rows than cells. Counting rows could exceed ``planned`` and hide a
+    # genuinely partial run behind an apparently-complete one. The loader
+    # already de-duplicates, but computing it here means the banner is right
+    # for any caller, including one that assembled rows itself.
+    completed = len({row.cell.cell_key() for row in report.rows})
+    if planned is None or completed >= planned:
         # Complete (or unknowable). A torn row is still worth saying out
         # loud even then -- it means a cell was paid for and its result is
         # unreadable, which is not something to leave only in a log.
         if torn:
             return [f"> **{_torn_phrase(torn)} ignored** — unreadable store rows.", ""]
         return []
+
     banner = (
-        f"> **partial: {len(report.rows)} of {planned} cells** — the grid did not "
+        f"> **partial: {completed} of {planned} cells** — the grid did not "
         "finish, so every figure below is computed over the cells that did. Read "
         "the verdicts as provisional."
     )
     if torn:
         banner += f" {_torn_phrase(torn).capitalize()} ignored (unreadable store rows)."
+    if report.duplicate_rows:
+        banner += (
+            f" {report.duplicate_rows} superseded row(s) from a resumed group "
+            "collapsed to their latest."
+        )
     return [banner, ""]
 
 
@@ -1740,6 +1783,12 @@ class NorthStarReport:
     # hundreds of KB. Surfaced in the banner so a paid-for-but-unreadable
     # cell is visible rather than merely survived.
     torn_rows: int = 0
+    # issue athenaeum#1751: rows superseded by a later row for the same cell,
+    # which a resumed group produces by design (see
+    # ``load_rollout_rows_and_diagnostics``). Reported alongside the torn
+    # count so a reader can tell "this store was resumed" from "this store
+    # is damaged".
+    duplicate_rows: int = 0
 
 
 def build_report(
@@ -1752,6 +1801,7 @@ def build_report(
     verdict_arm: str = DEFAULT_VERDICT_ARM,
     planned_cells: int | None = None,
     torn_rows: int = 0,
+    duplicate_rows: int = 0,
 ) -> NorthStarReport:
     """Assemble a :class:`NorthStarReport` from decoded result-store rows.
 
@@ -1779,6 +1829,7 @@ def build_report(
         verdict_arm=verdict_arm,
         planned_cells=planned_cells,
         torn_rows=torn_rows,
+        duplicate_rows=duplicate_rows,
     )
 
 

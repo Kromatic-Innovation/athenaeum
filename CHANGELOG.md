@@ -75,7 +75,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hundreds of KB — is skipped, counted and named in that banner rather than
   being fatal; it reads as not-completed, so a resume re-runs that cell. The
   tolerance deliberately is not narrowed to "the last line only", because a
-  resume appends after the torn tail and puts it mid-file. `Ctrl-C` now
+  resume appends after the torn tail and puts it mid-file. `ResultStore.append`
+  now closes off an unterminated final line before appending after it: a kill
+  mid-`write` leaves a fragment with no trailing newline, and appending onto
+  it fused the next row's JSON to the fragment, destroying a cell that had
+  just run and been paid for — and destroying it again on every later resume,
+  since each resume re-ran that cell and re-glued it to the same tail, so it
+  could never persist at all. The report's reader also collapses duplicate
+  cell keys (last row wins) and the partial banner counts DISTINCT cells:
+  resume granularity is the whole group, so a group re-run after a partial
+  stop legitimately appends rows it had already written, and counting rows
+  rather than cells could exceed the planned total and hide a partial run
+  behind an apparently-complete one. `Ctrl-C` now
   produces a PARTIAL report too (it is a `BaseException`, so the previous
   handler let it past and the operator got nothing over the cells already
   paid for) and cancels every group that had not started. When the token
