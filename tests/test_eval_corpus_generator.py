@@ -27,6 +27,7 @@ from tests.evals.corpus import (
     load_probes,
     validate_core,
 )
+from tests.evals.north_star_report import _relationship_probe_ids
 
 
 def test_core_corpus_is_internally_consistent() -> None:
@@ -525,6 +526,25 @@ def test_probe_taxonomy_is_complete() -> None:
         "distractor_robustness",
         "follow_through",
     } <= classes
+
+
+def test_relationship_probe_subset_has_all_four_classes_at_core() -> None:
+    """Issue athenaeum#1744: the go/no-go rule's condition 1
+    (``docs/design/native-memory-baseline.md`` §7) is evaluated over
+    ``_relationship_probe_ids`` -- ``single_hop``/``multi_hop``/
+    ``disambiguation``/``temporal`` probes whose ``expected_uids`` resolve
+    to a ``person`` or ``company`` page. Quine's mutation review of PR #1740
+    found that dropping ``temporal`` from that class list is an EQUIVALENT
+    mutant at ``core``: no ``temporal`` probe's expected pages were
+    person/company, so removing the class from the filter changed nothing.
+    Asserting every one of the four classes is represented in the subset --
+    not merely that the subset is non-empty -- is what makes that mutant
+    detectable again: dropping any single class from
+    ``_relationship_probe_ids``'s class filter must fail this test.
+    """
+    ids = _relationship_probe_ids({"core"})
+    classes_in_subset = {probe.probe_class for probe in load_probes() if probe.id in ids}
+    assert {"single_hop", "multi_hop", "disambiguation", "temporal"} <= classes_in_subset
 
 
 def test_frontmatter_scalars_survive_yaml_round_trip(tmp_path: Path) -> None:

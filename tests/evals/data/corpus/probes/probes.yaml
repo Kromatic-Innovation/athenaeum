@@ -105,6 +105,38 @@
   distractor_terms: ["approval ceiling", "250 GBP", "500 GBP"]
   answer_tokens: ["Quorlinth"]
 
+# --- temporal, person/company (issue athenaeum#1744) -------------------------
+# The three pairs above all target `note` pages, so none qualifies for the
+# relationship-use-case subset (`_relationship_probe_ids` in
+# north_star_report.py), which requires `expected_uids` to resolve to a
+# `person` or `company` page. These three plant the missing recency facts --
+# last-contact date, first-contact date, and a changed-role date -- directly
+# on a person/company page instead.
+
+- id: callum_drews_last_contact
+  probe_class: temporal
+  query: "when did we last speak with Callum Drews?"
+  expected_uids: [person-callum-drews]
+  must_not_rank: [contact-callum-drews-superseded]
+  distractor_terms: ["Callum Drews", "last contact", "last spoke", "2 May 2026"]
+  answer_tokens: ["Fenmoor"]
+
+- id: thorncastle_first_contact
+  probe_class: temporal
+  query: "when did we first start working with Thorncastle?"
+  expected_uids: [client-thorncastle]
+  must_not_rank: [contact-thorncastle-superseded]
+  distractor_terms: ["Thorncastle", "first contact", "became a client", "November 2025"]
+  answer_tokens: ["Ashgrove"]
+
+- id: tamsin_ferro_role_change
+  probe_class: temporal
+  query: "what is Tamsin Ferro's current role, and when did it change?"
+  expected_uids: [person-tamsin-ferro]
+  must_not_rank: [role-tamsin-ferro-superseded]
+  distractor_terms: ["Tamsin Ferro", "promoted", "engagement partner", "associate"]
+  answer_tokens: ["Cindervane"]
+
 # --- disambiguation ---------------------------------------------------------
 # The class this corpus exists for. Each of these guards a person-vs-artifact
 # or person-vs-namesake confusion.
