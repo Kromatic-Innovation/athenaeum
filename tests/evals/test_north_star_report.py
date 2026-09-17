@@ -435,7 +435,14 @@ def test_delivered_text_push_breadcrumb_pull_is_breadcrumb_only_when_not_called(
 # ---------------------------------------------------------------------------
 
 
-def _record(*, arm: Arm, probe_id: str, probe_class: str, answer: str) -> RolloutRecord:
+def _record(
+    *,
+    arm: Arm,
+    probe_id: str,
+    probe_class: str,
+    answer: str,
+    transcript: list[dict[str, Any]] | None = None,
+) -> RolloutRecord:
     return RolloutRecord(
         arm=arm,
         probe_id=probe_id,
@@ -444,6 +451,34 @@ def _record(*, arm: Arm, probe_id: str, probe_class: str, answer: str) -> Rollou
         answer=answer,
         turn_tokens=[TurnTokenUsage(turn=1, input_tokens=10, output_tokens=10)],
         turn_count=1,
+        transcript=transcript if transcript is not None else [],
+    )
+
+
+def _recall_output_record(
+    *, arm: Arm, probe_id: str, probe_class: str, answer: str, recall_text: str
+) -> RolloutRecord:
+    """A PULL/PUSH_BREADCRUMB_PULL-shaped record whose recall tool_result
+    carries *recall_text* -- the same ``type: user`` / ``tool_result``
+    transcript shape :func:`_pull_delivered_text` parses, minimal (no
+    surrounding assistant turns) since grading only reads the tool output.
+    """
+    transcript = [
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [{"type": "text", "text": recall_text}],
+                    }
+                ]
+            },
+        }
+    ]
+    return _record(
+        arm=arm, probe_id=probe_id, probe_class=probe_class, answer=answer, transcript=transcript
     )
 
 
@@ -504,6 +539,159 @@ def test_follow_through_grading_requires_every_planted_token() -> None:
         ),
     )
     assert grade_correctness(all_tokens_answer, probe, _CORPUS) is True
+
+
+# ---------------------------------------------------------------------------
+# Uid-citation correctness (issue athenaeum#1793, operator ruling option 1)
+# ---------------------------------------------------------------------------
+
+# **Uid:** marker text for both `fenwick_relationship_history` pages
+# (`client-fenwick-systems` plants "Quillbrook", `person-dara-holt` plants
+# "Marrowfen" -- tests/evals/data/corpus/probes/probes.yaml /
+# tests/evals/data/corpus/core/10-follow-through.yaml), in the same
+# ``recall_search`` rendering shape as ``PUSH_DELIVERED`` above.
+FENWICK_UID = "client-fenwick-systems"
+DARA_UID = "person-dara-holt"
+_FENWICK_RECALL_TEXT = (
+    "Fenwick Systems (score: 9.1)\n"
+    "**Path:** wiki/client-fenwick-systems.md\n"
+    f"**Uid:** {FENWICK_UID}\n"
+    "**Type:** client\n"
+)
+_DARA_RECALL_TEXT = (
+    "Dara Holt (score: 8.7)\n"
+    "**Path:** wiki/person-dara-holt.md\n"
+    f"**Uid:** {DARA_UID}\n"
+    "**Type:** person\n"
+)
+
+
+def test_uid_citation_counts_as_correct_when_delivered_in_recall_output() -> None:
+    """A uid in the probe's expected_uids, cited in the answer, AND present
+    in the cell's OWN recall tool output grades correct -- the answer never
+    mentions the planted tag at all."""
+    pto_probe = _probe("pto_allowance")  # expected_uids: [policy-pto], token: Cinderquill
+    uid_answer = _recall_output_record(
+        arm=Arm.PULL,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer="The PTO allowance is 25 days per year; see policy-pto for the source page.",
+        recall_text=PUSH_DELIVERED,  # carries **Uid:** policy-pto
+    )
+    assert grade_correctness(uid_answer, pto_probe, _CORPUS) is True
+
+
+def test_uid_citation_grades_wrong_when_uid_not_in_the_cells_recall_output() -> None:
+    """AC (negative test): the SAME uid citation, but the cell's own recall
+    output never surfaced that page -- the model could only have guessed or
+    leaked the uid, and must still grade wrong (the athenaeum#1753 leak
+    guard is unchanged)."""
+    pto_probe = _probe("pto_allowance")
+    other_recall_text = (
+        "Confidentiality policy (score: 7.0)\n"
+        "**Path:** wiki/policy-confidentiality.md\n"
+        "**Uid:** policy-confidentiality\n"
+        "**Type:** policy\n"
+    )
+    uid_answer_not_delivered = _recall_output_record(
+        arm=Arm.PULL,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer="The PTO allowance is 25 days per year; see policy-pto for the source page.",
+        recall_text=other_recall_text,
+    )
+    assert grade_correctness(uid_answer_not_delivered, pto_probe, _CORPUS) is False
+
+
+def test_uid_not_in_expected_uids_grades_wrong_even_if_delivered() -> None:
+    """A uid the answer cites that is NOT one of the probe's expected_uids
+    grades wrong, even though it really was delivered in the cell's own
+    recall output -- citing the right kind of thing about the wrong page is
+    not a correct answer to THIS probe."""
+    pto_probe = _probe("pto_allowance")
+    both_pages_recall_text = PUSH_DELIVERED + "\n" + (
+        "Confidentiality policy (score: 7.0)\n"
+        "**Path:** wiki/policy-confidentiality.md\n"
+        "**Uid:** policy-confidentiality\n"
+        "**Type:** policy\n"
+    )
+    wrong_uid_answer = _recall_output_record(
+        arm=Arm.PULL,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer="See policy-confidentiality for the relevant policy.",
+        recall_text=both_pages_recall_text,
+    )
+    assert grade_correctness(wrong_uid_answer, pto_probe, _CORPUS) is False
+
+
+def test_uid_citation_tag_path_unchanged_when_no_uid_present() -> None:
+    """Regression: a plain tag citation, with no recall output at all,
+    still grades correct -- the uid-citation rule is additive, never a
+    replacement for the athenaeum#1753 tag contract."""
+    pto_probe = _probe("pto_allowance")
+    tag_answer = _record(
+        arm=Arm.ORACLE,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer=f"25 days per year, per {pto_probe.answer_tokens[0]}.",
+    )
+    assert grade_correctness(tag_answer, pto_probe, _CORPUS) is True
+
+
+def test_breadcrumb_only_arm_citing_uid_grades_wrong() -> None:
+    """PUSH_BREADCRUMB delivers no uid-bearing text at all (issue
+    athenaeum#1574 AC4) -- a breadcrumb-only answer that cites a page's uid
+    string still grades wrong, since :func:`_delivered_uids` is structurally
+    ``()`` for this arm regardless of what the answer says."""
+    pto_probe = _probe("pto_allowance")
+    breadcrumb_answer = _record(
+        arm=Arm.PUSH_BREADCRUMB,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer="The PTO allowance is 25 days per year; see policy-pto.",
+        transcript=[{"pushed_context": BREADCRUMB_DELIVERED}],
+    )
+    assert grade_correctness(breadcrumb_answer, pto_probe, _CORPUS) is False
+
+
+def test_follow_through_multi_token_satisfied_by_mix_of_tag_and_uid() -> None:
+    """Each planted token independently takes either path: the first token
+    is satisfied by its tag, the second by a uid citation of ITS OWN page,
+    delivered in the same recall output -- the all-tokens requirement is
+    otherwise unchanged."""
+    probe = _probe("fenwick_relationship_history")
+    assert probe.answer_tokens == ("Quillbrook", "Marrowfen")
+    assert probe.expected_uids == (FENWICK_UID, DARA_UID)
+
+    mixed_answer = _recall_output_record(
+        arm=Arm.PULL,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer=(
+            f"Fenwick Systems' relationship is coordinated per {probe.answer_tokens[0]}, "
+            f"and the recurring checkpoint is covered on {DARA_UID}."
+        ),
+        recall_text=_FENWICK_RECALL_TEXT + "\n" + _DARA_RECALL_TEXT,
+    )
+    assert grade_correctness(mixed_answer, probe, _CORPUS) is True
+
+
+def test_follow_through_uid_citation_does_not_cross_pages() -> None:
+    """A uid citation only satisfies the token ITS OWN page plants: citing
+    the delivered `person-dara-holt` uid does nothing for the FIRST token
+    ("Quillbrook", planted on `client-fenwick-systems`) -- the per-page
+    binding in :func:`_answer_token_satisfied` must not let one delivered
+    uid satisfy every token in the probe."""
+    probe = _probe("fenwick_relationship_history")
+    only_second_uid_answer = _recall_output_record(
+        arm=Arm.PULL,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer=f"See {DARA_UID} for the relationship and checkpoint details.",
+        recall_text=_FENWICK_RECALL_TEXT + "\n" + _DARA_RECALL_TEXT,
+    )
+    assert grade_correctness(only_second_uid_answer, probe, _CORPUS) is False
 
 
 def test_weak_probes_lists_probe_the_none_arm_already_answers_correctly() -> None:

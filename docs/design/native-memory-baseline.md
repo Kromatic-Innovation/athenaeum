@@ -253,8 +253,24 @@ Because the text is byte-identical across arms it cannot bias the comparison;
 it turns “did you reach the page” into something a substring match can read,
 and it makes `oracle` a positive control that must score at or near 1.0 on
 every non-abstention class. Abstention grading is unaffected: `[ref: none]`
-carries no planted token, and the declining-language rule still applies. The
-write-path sessions of Phase 2 are outside this contract — they produce memory
+carries no planted token, and the declining-language rule still applies.
+
+**A page uid citation also counts, under conditions (athenaeum#1793, operator
+ruling 2026-09-18, option 1).** A snippet-only cell can legitimately never see
+the reference tag (it sits outside `recall`'s 400-character window), yet still
+correctly identify and cite the right page by its frontmatter `uid:` instead.
+`grade_correctness` therefore also accepts, per planted token, a citation of
+the `expected_uids` page that plants that token, when that page's uid was
+ACTUALLY DELIVERED in the arm's own tool output for that cell (recall/
+`read_entity` for PULL and PUSH_BREADCRUMB_PULL, `expected_uids` itself for
+ORACLE, file-read output for `native_grep`) — never merely because the uid is
+in `expected_uids`. This is additive to the tag rule above, never a
+replacement: it cannot turn a correct answer wrong, and a breadcrumb-only
+arm (no tool call, no uid-bearing text at all) still cannot satisfy it by
+construction. See `tests/evals/north_star_report.py`'s `grade_correctness`/
+`_answer_token_satisfied`/`_delivered_uids` and the re-graded addendum in
+[`../measurements/native-memory-baseline-2026-09-17.md`](../measurements/native-memory-baseline-2026-09-17.md).
+The write-path sessions of Phase 2 are outside this contract — they produce memory
 files, not graded answers.
 
 **The 2026-09-17 15:43Z run (workflow run 35239792240, develop `af0596bb`,
@@ -482,6 +498,13 @@ A probe class new to this scale is `report_only` by default and excluded
 from conditions 2 and 3 (issue athenaeum#1776): promoting it into the
 decision rule is an explicit operator ruling recorded on athenaeum#1736's
 thread, never an automatic consequence of adding rows to `probes.yaml`.
+
+The operator ruled on athenaeum#1793 (2026-09-18, option 1): a delivered-uid
+citation now counts toward correctness alongside the reference-tag citation
+(§5), which closed one of the two open medium-scale losses named in
+`native-memory-baseline-2026-09-17.md` §5/§6 without changing that report's
+cutoff scale (still `none`) -- see that report's addendum for the re-graded
+numbers.
 
 ## 8. Deliberately not done
 
