@@ -64,6 +64,7 @@ from athenaeum.config import (
     resolve_cache_dir,
     resolve_person_registry_root,
     resolve_push_token_budget,
+    resolve_recall_hybrid,
     resolve_recall_relevance_floor,
     resolve_scope_aware_recall_enabled,
 )
@@ -203,6 +204,20 @@ def _snippet(body: str, tokens: list[str], max_chars: int = 400) -> str:
 
 _MAX_TOP_K = 50
 _MAX_CONTENT_BYTES = 10 * 1024 * 1024  # 10 MB
+
+# Issue athenaeum#1792: candidate-pool size BOTH sides of the vector-backend
+# hybrid dispatch are re-queried at before fusion. Wider than `top_k` so a
+# page either backend ranks just outside the final result size still gets a
+# chance to surface via fusion -- the exact failure mode the issue's two
+# reproduced cases hit. Widening only the fts5 side (measured first) was a
+# no-op: reciprocal rank fusion sums `1/(k+rank)` across every list a hit
+# is in, so with the vector side left at native `top_k`, at most `top_k`
+# hits could ever be "present in both lists" and the fused top-k became
+# exactly that intersection once that many overlapped -- no fts5-only hit
+# could enter regardless of its fts5 rank. Both sides must widen together.
+# `top_k` itself already bounds the floor for very small explicit `top_k`
+# calls (`max(top_k, ...)` below).
+_HYBRID_CANDIDATE_POOL = 15
 
 
 def active_tool_use_id() -> str | None:
@@ -1153,9 +1168,11 @@ def _recall_via_backend(
     from athenaeum.push_metrics import estimate_tokens
     from athenaeum.search import (
         DegradedIndexError,
+        fts5_index_available,
         get_backend,
         meets_relevance_floor,
         normalize_type_filter,
+        reciprocal_rank_fusion,
     )
 
     try:
@@ -1267,6 +1284,106 @@ def _recall_via_backend(
             for hit in hits
             if meets_relevance_floor(backend_name, hit[2], relevance_floor)
         ]
+
+    # Issue athenaeum#1792: hybrid rank fusion, vector dispatch only. Gated so
+    # the fts5 and keyword paths execute zero code from this block and stay
+    # byte-identical to before this issue -- see ``resolve_recall_hybrid``'s
+    # docstring for why "default off for fts5" needs no stored default of
+    # its own.
+    #
+    # Reproduces the design the athenaeum#1792 issue proposed: fetch a WIDER
+    # candidate pool from EACH backend over the SAME index root, apply each
+    # backend's own relevance floor to its own list (never to the fused
+    # score -- the mechanism `resolve_recall_relevance_floor` /
+    # `meets_relevance_floor` already enforces per-backend direction for),
+    # then fuse via reciprocal rank fusion and truncate to `top_k`.
+    #
+    # BOTH sides are re-queried at `_HYBRID_CANDIDATE_POOL` width, not
+    # just fts5's: RRF sums `1/(k+rank)` across every list a hit appears in,
+    # so a hit present in BOTH lists always outranks one present in only
+    # one, however well that single list ranks it. With the vector side
+    # left at its native `top_k` (5), at most `top_k` hits can ever be
+    # "present in both" -- once that many overlap, the fused top-k IS that
+    # intersection and NO fts5-only hit can enter regardless of its fts5
+    # rank, which made an earlier version of this block's fts5-only
+    # widening a no-op (measured: 15->30 changed nothing). Widening the
+    # vector side too raises that ceiling.
+    #
+    # This SUPERSEDES ``hits`` (the off-corpus-federated, floor-filtered,
+    # `top_k`-sized vector list computed above) as the fusion's primary
+    # list when hybrid actually runs -- the widened vector-only requery
+    # below does NOT carry the athenaeum#984 off-corpus federation (a
+    # second, off-corpus-scoped widened query is out of this issue's
+    # scope). Rather than silently DISCARD the off-corpus hits
+    # ``merge_ranked_hits`` already folded into ``hits`` above (which a
+    # bare "fuse and overwrite" would do), hybrid is skipped entirely --
+    # same as the missing-fts5-index branch below -- with a logged warning,
+    # whenever this call actually federated an off-corpus root. The
+    # `top_k`-sized ``hits`` computed above (off-corpus hits included)
+    # remains the result. off_corpus is dark-by-default, so this only fires
+    # for a deployment that has explicitly configured BOTH off_corpus and
+    # vector hybrid.
+    if backend_name == "vector" and resolve_recall_hybrid(config):
+        if off_corpus_root is not None:
+            log.warning(
+                "recall: hybrid ranking skipped for this call -- off-corpus "
+                "federation (root %s) was applied and the hybrid dispatch "
+                "does not yet re-run it against the widened candidate pool; "
+                "falling back to vector-only ranking so the off-corpus hits "
+                "already folded into the result are not silently dropped.",
+                off_corpus_root,
+            )
+        elif not fts5_index_available(effective_cache):
+            log.warning(
+                "recall: hybrid ranking requested for the vector backend but "
+                "no FTS5 index exists at %s -- falling back to vector-only "
+                "ranking. Build one (e.g. `athenaeum reindex`) to enable "
+                "hybrid fusion.",
+                effective_cache,
+            )
+        else:
+            try:
+                wide_vector_hits = backend.query(
+                    query,
+                    effective_cache,
+                    n=max(top_k, _HYBRID_CANDIDATE_POOL),
+                    wiki_root=wiki_root,
+                    caller_audience=caller_audience,
+                    type_filter=type_filter,
+                )
+                fts5_hits = get_backend("fts5").query(
+                    query,
+                    effective_cache,
+                    n=max(top_k, _HYBRID_CANDIDATE_POOL),
+                    wiki_root=wiki_root,
+                    caller_audience=caller_audience,
+                    type_filter=type_filter,
+                )
+            except (NotImplementedError, DegradedIndexError) as exc:
+                log.warning(
+                    "recall: hybrid ranking's widened side query failed (%s) -- "
+                    "falling back to vector-only ranking.",
+                    exc,
+                )
+                wide_vector_hits = None
+                fts5_hits = None
+            if wide_vector_hits is not None and fts5_hits is not None:
+                if relevance_floor is not None:
+                    wide_vector_hits = [
+                        hit
+                        for hit in wide_vector_hits
+                        if meets_relevance_floor("vector", hit[2], relevance_floor)
+                    ]
+                fts5_floor = resolve_recall_relevance_floor(
+                    config, "fts5", unprompted=unprompted
+                )
+                if fts5_floor is not None:
+                    fts5_hits = [
+                        hit
+                        for hit in fts5_hits
+                        if meets_relevance_floor("fts5", hit[2], fts5_floor)
+                    ]
+                hits = reciprocal_rank_fusion(wide_vector_hits, fts5_hits, n=top_k)
 
     if not hits:
         return f"No wiki pages matched query: {query!r}{unrecognized_note}"

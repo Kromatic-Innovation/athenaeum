@@ -2667,6 +2667,80 @@ def meets_relevance_floor(backend_name: str, score: float, floor: float | None) 
     )
 
 
+# Issue athenaeum#1792: reciprocal rank fusion for the vector-backend hybrid
+# dispatch. Kept tiny and score-agnostic, matching ``meets_relevance_floor``'s
+# own "mechanism, not tuning" shape -- the CALLER (``athenaeum.mcp_server``'s
+# vector dispatch block) decides which two lists to fuse, applies each input
+# list's own relevance floor BEFORE calling this, and truncates the result to
+# ``top_k`` via this function's own ``n``. The floor is never applied to the
+# fused score this function returns.
+_DEFAULT_RRF_K = 60
+
+
+def fts5_index_available(cache_dir: Path) -> bool:
+    """Whether an FTS5 index exists at *cache_dir* (issue athenaeum#1792).
+
+    A cheap ``is_file`` check on the same DB file :class:`FTS5Backend` reads
+    and writes (``_DB_NAME``), exposed here rather than making a caller in
+    another module reach for that private constant directly. Used by the
+    vector-backend hybrid dispatch to decide whether an FTS5 side list can
+    be fetched at all -- a live deployment that opted a caller into the
+    vector backend may never have built an FTS5 index (the hook's own
+    comments note vector-only deployments are real, not hypothetical), and
+    hybrid fusion must degrade to vector-only ranking with a logged warning
+    in that case rather than raising or silently building one on a read path.
+    """
+    return (cache_dir / _DB_NAME).is_file()
+
+
+def reciprocal_rank_fusion(
+    primary: Sequence[tuple[str, str, float]],
+    secondary: Sequence[tuple[str, str, float]],
+    *,
+    n: int,
+    k: int = _DEFAULT_RRF_K,
+) -> list[tuple[str, str, float]]:
+    """Fuse two ranked ``(filename, name, score)`` hit lists (issue athenaeum#1792).
+
+    Reciprocal rank fusion: a hit's fused score is ``sum(1 / (k + rank))``
+    over every input list it appears in (1-indexed rank within that list; a
+    list a hit is absent from contributes 0 for that list). Chosen over any
+    cross-backend score normalisation because it needs none -- FTS5's bm25
+    ``rank`` and chromadb's cosine distance are different scales with
+    different "better" directions (see :func:`meets_relevance_floor`), and
+    RRF only ever looks at each hit's POSITION within a list, never its raw
+    score.
+
+    ``k=60`` is the standard RRF constant from the original paper (Cormack
+    et al. 2009) -- large enough that a hit's exact rank within the top few
+    matters less than simply appearing in both lists, which is the whole
+    point of fusing here: a proper-noun page FTS5 ranks #1 and vector ranks
+    outside its top 5 (or not at all) still surfaces, because it is present
+    in one full-weight list rather than diluted-to-absent in the other.
+
+    A hit present in both lists is deduplicated by ``filename`` (the search
+    backend's hit key); its rendered ``name`` is taken from whichever list
+    it first appears in, ``primary`` before ``secondary`` -- both backends
+    render the same page identically (issue athenaeum#1344's invariant), so
+    this is a tie-break with no observable effect, not a real choice.
+
+    Returns at most ``n`` hits, ordered by fused score descending; a tie in
+    fused score keeps insertion order (``primary`` hits before new
+    ``secondary``-only hits), which is Python's stable sort applied to a
+    dict built in that same order.
+    """
+    scores: dict[str, float] = {}
+    rendered: dict[str, str] = {}
+    for rank, (filename, name, _score) in enumerate(primary, start=1):
+        scores[filename] = scores.get(filename, 0.0) + 1.0 / (k + rank)
+        rendered.setdefault(filename, name)
+    for rank, (filename, name, _score) in enumerate(secondary, start=1):
+        scores[filename] = scores.get(filename, 0.0) + 1.0 / (k + rank)
+        rendered.setdefault(filename, name)
+    fused = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    return [(filename, rendered[filename], score) for filename, score in fused[:n]]
+
+
 # ---------------------------------------------------------------------------
 # Convenience functions for shell hook scripts
 # ---------------------------------------------------------------------------
