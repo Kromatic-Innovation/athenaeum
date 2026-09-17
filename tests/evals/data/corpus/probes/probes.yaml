@@ -490,3 +490,58 @@
     contact) and gap (no kickoff call) are unrelated to subsidiaries or
     payment-paperwork splitting. grep-reachable via: client, onboarding
     (stemmed, "onboarded" vs "onboarding").
+
+# --- long page (issue athenaeum#1779) ---------------------------------------
+#
+# Probe class stays `single_hop` -- the class is not new, so these enrol in
+# design-doc §7 condition 2 the same way every other single_hop probe does
+# (`report_only` is left unset here, defaulting to `False` via
+# `CONDITION_2_ENROLLED`, and `validate_core` would reject `True` on an
+# enrolled class as a corpus error). Each `tier: long` value is metadata for
+# filtering only -- parsed onto `Probe.tier`, unused by the grid dispatch --
+# an operator who wants to isolate the long-page slice can filter on it
+# without touching `probe_class`.
+
+- id: northgate_retainer_renewal
+  probe_class: single_hop
+  tier: long
+  query: "what is the renewal timeline for the Northgate Ridgeline retainer contract?"
+  expected_uids: [client-northgate-ridgeline]
+  distractor_terms: ["Northgate Ridgeline", "retainer renewal", "renewal timeline"]
+  answer_tokens: ["Glimmerhollow"]
+  note: >-
+    Long-page tier (athenaeum#1779). The renewal-cycle question sits in the
+    page's title and opening paragraph; the reference tag sits past
+    character offset 400, outside `recall`'s 400-character snippet window,
+    so a correct answer requires `read_entity` on the full page.
+
+- id: remote_equipment_stipend_cap
+  probe_class: single_hop
+  tier: long
+  query: "what is the equipment stipend policy for remote employees?"
+  expected_uids: [policy-remote-equipment-stipend]
+  distractor_terms: ["equipment stipend", "remote employees", "stipend cap"]
+  answer_tokens: ["Pallowrift"]
+  note: >-
+    Long-page tier (athenaeum#1779). Same shape as the retainer probe above:
+    the policy topic is in the title, the tag line is past offset 400.
+
+- id: lighthouse_migration_rollback
+  probe_class: single_hop
+  tier: long
+  query: "what is the rollback plan for the Lighthouse platform migration project?"
+  expected_uids: [project-lighthouse-migration]
+  distractor_terms: ["Lighthouse migration", "rollback plan", "platform migration"]
+  answer_tokens: ["Ambervost"]
+  note: >-
+    Long-page tier (athenaeum#1779). Same shape as the two probes above.
+
+- id: triform_vendor_consolidation
+  probe_class: single_hop
+  tier: long
+  query: "why did we consolidate vendors under the Triform master agreement?"
+  expected_uids: [decision-vendor-consolidation-triform]
+  distractor_terms: ["Triform", "vendor consolidation", "master agreement"]
+  answer_tokens: ["Thistlemere"]
+  note: >-
+    Long-page tier (athenaeum#1779). Same shape as the three probes above.

@@ -437,10 +437,14 @@ def test_the_full_grid_dry_run_prices_at_the_measured_mix(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Pins ``main``'s ``price_grid(per_cell=...)`` argument, which no other
-    test reaches: 1392 cells at 4,300 in / 850 out on Haiku 4.5 ($1/$5 per
-    MTok) is 1392 * $0.00855 = $11.90. Reverting to the shared
-    ``DEFAULT_CELL_TOKEN_ESTIMATE`` mix would price the same grid at $55.68
-    and fail this band (Quine review of PR athenaeum#1757)."""
+    test reaches: 1584 cells at 4,300 in / 850 out on Haiku 4.5 ($1/$5 per
+    MTok) is 1584 * $0.00855 = $13.54. Reverting to the shared
+    ``DEFAULT_CELL_TOKEN_ESTIMATE`` mix would price the same grid at a much
+    higher figure and fail this band (Quine review of PR athenaeum#1757).
+    Repinned from 1392 to 1584 cells by athenaeum#1779's four new
+    single_hop probes on the long-page tier -- the full grid's cell count
+    is `probes * scales * arms`, so a probe-count change always shifts it,
+    same class of expected repin as `Corpus.fingerprint()`."""
     assert (
         north_star_cli.main(
             [
@@ -460,9 +464,9 @@ def test_the_full_grid_dry_run_prices_at_the_measured_mix(
         == 0
     )
     out = capsys.readouterr().out
-    assert "cells=1392" in out
+    assert "cells=1584" in out
     priced = float(out.split("estimated=$")[1].split()[0])
-    assert 11.85 < priced < 11.95, out
+    assert 13.50 < priced < 13.60, out
 
 
 def test_the_estimate_names_its_source_run() -> None:
