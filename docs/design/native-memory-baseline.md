@@ -262,6 +262,36 @@ surfaced page — run as a genuine multi-turn tool-use loop in every arm that
 has tools. The existing `multi_hop` class is the starting point; the new
 requirement is that the second hop is a link, not a second query term.
 
+**`contradiction` and `negative_knowledge` (issue athenaeum#1781, item G;
+`report_only: True` pending an operator ruling on athenaeum#1736's
+thread).** Two small use cases with no probe class before this issue.
+`contradiction` (§3.2) measures whether recall ranks a superseded fact
+below its replacement: a keyword search on the query lands on a STALE page
+that carries a planted forbidden token, linked (same `superseded_by:`/body-
+`[[wikilink]]` convention as `05-temporal.yaml`) to the correct page, which
+carries the answer token. Two shapes ship: (a) supersession by an unfound
+page, where the superseding page is authored to share no content term with
+the query at all, so only the link reaches it; (b) an operator-added
+scenario (deprecated knowledge no longer relevant -- a workaround true when
+written, since overtaken by an external change) where a TASK-phrased query
+deliberately DOES reach the stale workaround page (grep and native find it
+-- the opposite of shape (a) and of `follow_through`), and a retraction page
+carrying the answer token links back to it. Correct means `grade_correctness`
+(issue athenaeum#1573) AND `grade_harm` (issue athenaeum#1772) both pass --
+the answer token cited and the forbidden token absent -- graded together,
+no new instrument. `negative_knowledge` (§3.3, use case 2.4 "what went
+wrong last time?") is checked the INVERSE of the `follow_through`
+lexical-unreachability rule: the retro/lesson page must share a content
+term with the query -- deliberately grep-reachable, so a probe whose target
+is unreachable is a `follow_through` probe filed under the wrong class --
+with a forbidden token planted on a separate "naive plan" decoy page that
+repeats the mistake the retro warns against. Oracle control for both
+classes: handed the ground-truth pages verbatim, the ceiling must emit the
+answer token and never the forbidden one -- a harmful oracle cell indicts
+the fixture, not the arm. Fixture:
+`tests/evals/data/corpus/core/14-contradiction-negative.yaml`, 6 probes (3
+per class) in `tests/evals/data/corpus/probes/probes.yaml`.
+
 **Every arm is told to cite the page's reference tag.** Correctness is a
 deterministic substring match against each probe's planted `answer_tokens`
 (§8 forbids an LLM judge), and those tokens are the invented words the corpus

@@ -766,6 +766,17 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         #: said otherwise and was wrong (Quine review of PR athenaeum#1807).
         ("medium", "bramfield_retainer_renewal"),
         ("medium", "lighthouse_migration_rollback"),
+        # athenaeum#1781 (item G): adding 12 core pages / 6 probes shifts
+        # the seeded PRNG stream that places every OTHER probe's distractor
+        # and ballast pages at this scale (fixed (seed, scale) -> byte-
+        # identical tree, per corpus.py's own docstring) -- `thorncastle_
+        # first_contact` measurably regressed at `medium`/vector with no
+        # change to its own fixture content, confirmed against origin/
+        # develop before this PR's corpus changes. `invoicing_api_
+        # pagination_workaround` (this PR's own contradiction shape (b)
+        # probe) is a fresh measured miss at the same scale/backend.
+        ("medium", "thorncastle_first_contact"),
+        ("medium", "invoicing_api_pagination_workaround"),
     }
 )
 

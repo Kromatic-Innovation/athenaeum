@@ -189,6 +189,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `north-star` job's `if:` gate is unchanged. The Phase 2 sibling JSONL
   is uploaded alongside the existing store/report artifact with
   `if: always()`.
+- **`contradiction` and `negative_knowledge` eval probe classes (issue
+  athenaeum#1781, wave-2 item G).** Two new `report_only: True` classes
+  (`tests.evals.corpus.WAVE_2_PROBE_CLASSES`), pending an operator ruling
+  on athenaeum#1736's thread before either is promoted into
+  `CONDITION_2_ENROLLED`. `contradiction` (§3.2) reuses `must_not_rank` to
+  name a stale page a keyword search plausibly reaches (carrying a planted
+  `forbidden_tokens` value) linked via the existing `superseded_by:`/body-
+  `[[wikilink]]` convention to the correct page (carrying the answer
+  token); two shapes ship, supersession by an unfound page and the
+  operator's deprecated-knowledge scenario (a stale workaround
+  deliberately grep-reachable, retracted by a linked-back notice).
+  `negative_knowledge` (§3.3, use case 2.4) is checked the INVERSE of the
+  `follow_through` lexical-unreachability rule -- the retro/lesson page
+  must be grep-reachable, with a forbidden token on a separate naive-plan
+  decoy page. Correct for both means `grade_correctness` AND `grade_harm`
+  both pass. `tests/evals/corpus.py`'s `validate_core` gains checks for
+  both classes; `tests/evals/data/corpus/core/14-contradiction-negative.yaml`
+  adds 12 pages, `tests/evals/data/corpus/probes/probes.yaml` adds 6 probes
+  (3 per class) in a delimited block. `xlarge`'s pinned fingerprint moves
+  to `83b1f336b151ee42` (35 probes); the full-grid dry-run cell count moves
+  from 1392 to 1680 (`tests/evals/test_north_star_max_tokens.py`).
+  `tests/evals/test_recall_covers_grep.py`'s `_VECTOR_XFAIL` gains two
+  `medium`-scale entries (issue athenaeum#1770): this PR's own
+  `invoicing_api_pagination_workaround` (a fresh measured vector-recall
+  miss) and `thorncastle_first_contact` (an existing probe that measurably
+  regressed at `medium`/vector with no change to its own fixture --
+  confirmed against `develop` before this PR's corpus changes -- because
+  the corpus generator's fixed-seed PRNG stream shifts for every OTHER
+  probe's distractor/ballast placement whenever core pages are added).
+  `docs/design/native-memory-baseline.md` §5 documents both classes.
 - **Precision/recall/contamination tables for the retrieval evals, and a
   cap-signal reading (issue athenaeum#1782).**
   `tests/evals/test_recall_covers_grep.py` gains a second printed-only
