@@ -1115,6 +1115,174 @@ conn.close()
         context = payload["hookSpecificOutput"]["additionalContext"]
         assert "Vectester Hot Page" in context
 
+    # -- issue athenaeum#1665: vector-half relevance floor -------------------
+    #
+    # Before this issue the vector half printed every hit
+    # `query_vector_index` returned, unfiltered -- `recall.relevance_floor.
+    # vector` (athenaeum#1571) had no effect on this hook even when an
+    # operator configured it, because the hook never called
+    # `meets_relevance_floor` / `resolve_recall_relevance_floor` at all.
+    # These tests pin the fix directly against the real hook and the real
+    # library floor functions (not a reimplementation): a below-floor hit is
+    # dropped, an above-floor hit is retained, and the unset-floor case is
+    # byte-for-byte the pre-existing unfiltered behaviour.
+
+    def _set_stub_hits(
+        self, fake_pkg: Path, hits: list[tuple[str, str, float]]
+    ) -> None:
+        """Fake `search.py`: `query_vector_index` returns fixed *hits*.
+
+        Same stubbing technique
+        `test_vector_backend_surfaces_every_page_and_records_no_tier` uses
+        (deterministic, no real chromadb/embedder needed to prove the
+        SHELL-SIDE floor filter works) -- widened to carry more than one hit
+        so a test can assert one is kept and one is dropped by score alone.
+        """
+        rows = ", ".join(
+            f"({fname!r}, {name!r}, {score!r})" for fname, name, score in hits
+        )
+        (fake_pkg / "search.py").write_text(
+            "def query_vector_index(query, cache_dir, n=3, exclude=None):\n"
+            "    exclude = exclude or set()\n"
+            f"    hits = [{rows}]\n"
+            "    return [h for h in hits if h[0] not in exclude][:n]\n"
+        )
+
+    def _vector_env(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> tuple[dict[str, str], Path]:
+        """Seed the index, flip to the vector backend, and return a fake-src env.
+
+        Shared setup lifted from
+        `test_vector_backend_surfaces_every_page_and_records_no_tier` so the
+        floor tests below don't re-derive it three times.
+        """
+        self._seed_index(hook_env)
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        (cache_dir / "wiki-vectors").mkdir(parents=True, exist_ok=True)
+        config_env = cache_dir / "config.env"
+        config_env.write_text(
+            config_env.read_text().replace(
+                "SEARCH_BACKEND=fts5", "SEARCH_BACKEND=vector"
+            )
+        )
+        fake_pkg = tmp_path / "fake-vector-src" / "src" / "athenaeum"
+        fake_pkg.mkdir(parents=True)
+        vector_env = dict(hook_env)
+        real_src = str(Path(hook_env["ATHENAEUM_SRC"]) / "src")
+        vector_env["ATHENAEUM_SRC"] = str(fake_pkg.parent.parent)
+        # Issue athenaeum#1665: the hook's relevance-floor mechanism
+        # (`athenaeum.config`) is a PLAIN package import, deliberately not
+        # routed through the `ATHENAEUM_SRC` override above (that override
+        # exists only to let `query_vector_index` be stubbed without a real
+        # chromadb/embedder). A real deployment resolves `athenaeum.config`
+        # for free via its normal `pip install athenaeum`; this dev checkout
+        # is not installed as a package at all (see `_require_hook_python`'s
+        # own docstring for the parallel PEP 370 isolation problem), so the
+        # checkout's real `src/` has to be put on `PYTHONPATH` here to stand
+        # in for that install -- the same convention this file already uses
+        # elsewhere to seed the FTS5 index against the checkout's own code.
+        existing_pythonpath = vector_env.get("PYTHONPATH", "")
+        vector_env["PYTHONPATH"] = (
+            f"{real_src}{os.pathsep}{existing_pythonpath}"
+            if existing_pythonpath
+            else real_src
+        )
+        return vector_env, fake_pkg
+
+    def test_vector_relevance_floor_drops_below_floor_keeps_above_floor(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC: a below-floor hit is dropped, an above-floor hit is retained.
+
+        `meets_relevance_floor("vector", ...)` is lower-is-better (chromadb
+        cosine distance): a score AT OR BELOW the configured floor clears it.
+        `recall.relevance_floor.vector: 0.5` here means 0.1 clears it (kept)
+        and 0.9 does not (dropped) -- the direction this test would catch
+        inverted, since an inverted comparison would keep the wrong one of
+        the two, not just keep or drop both.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        _require_hook_python(hook_env, "athenaeum.config")
+
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        (knowledge / "athenaeum.yaml").write_text(
+            "auto_recall: true\n"
+            "search_backend: fts5\n"
+            "recall:\n"
+            "  relevance_floor:\n"
+            "    vector: 0.5\n"
+        )
+
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        self._set_stub_hits(
+            fake_pkg,
+            [
+                ("above-floor.md", "Above Floor Page", 0.1),
+                ("below-floor.md", "Below Floor Page", 0.9),
+            ],
+        )
+
+        probe_prompt = "zzznonmatchingzzz term completely unrelated content"
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "the above-floor hit must still surface"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Above Floor Page" in context, f"got: {context!r}"
+        assert "Below Floor Page" not in context, (
+            f"a below-floor vector hit was not filtered: {context!r}"
+        )
+
+    def test_vector_relevance_floor_unset_behavior_unchanged(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC: with no floor configured, behaviour is unchanged (unfiltered).
+
+        No `recall.relevance_floor` key at all in `athenaeum.yaml` (the
+        `hook_env` fixture's default) -- `resolve_recall_relevance_floor`
+        must resolve `None`, and a hit that would fail any plausible floor
+        (a large cosine distance) must still surface, exactly as before this
+        issue.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        _require_hook_python(hook_env, "athenaeum.config")
+
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        self._set_stub_hits(
+            fake_pkg, [("no-floor-set.md", "No Floor Set Page", 0.9)]
+        )
+
+        probe_prompt = "zzznonmatchingzzz term completely unrelated content"
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "no floor configured must not suppress the hit"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "No Floor Set Page" in context, f"got: {context!r}"
+
     # -- issue athenaeum#1343: sidecar push telemetry -----------------------
 
     def _run_hook(

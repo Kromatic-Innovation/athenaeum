@@ -356,6 +356,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `examples/claude-code/user-prompt-recall.sh`'s vector half printed every
+  hit `query_vector_index` returned, unfiltered — the configured
+  `recall.relevance_floor.vector` (athenaeum#1571) had no effect on this
+  hook even when set, because the hook never called `meets_relevance_floor`
+  / `resolve_recall_relevance_floor` at all; it is a separate, hand-rolled
+  implementation of recall, not a caller of the library path. The vector
+  half now applies the floor inside the one Python invocation it already
+  pays for, through the same library functions `mcp_server.py`'s own floor
+  block uses, same lower-is-better direction, no reimplementation of the
+  comparison in shell/SQL. An unset floor is unchanged behaviour. The FTS5
+  half is untouched: it is a raw `sqlite3` call with no Python invocation to
+  filter inside, and this file's own header documents a `<50ms` FTS5-only
+  latency contract that adding one solely for this would break.
+  ([#1665](https://github.com/Kromatic-Innovation/athenaeum/issues/1665))
+
 - Rejecting a merge proposal recorded the rejection as a **fabricated
   directional claim**: `resolve_merge(decision="reject")` wrote a `refines:`
   declaration into one source naming the other, purely so the detector's

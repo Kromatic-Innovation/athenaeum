@@ -863,6 +863,22 @@ if [ -f "$DB_FILE" ]; then
   # too. It had survived the gate's removal as a telemetry-only column;
   # retiring the vocabulary retired the column (schema v5), so there is
   # no longer anything to select or to record.
+  #
+  # Issue athenaeum#1665: this half is deliberately NOT given the same
+  # relevance-floor treatment the vector half now gets below.
+  # `meets_relevance_floor` DOES cover `"fts5"` in the same call shape (bm25
+  # rank, lower is better, same as vector's cosine distance) -- the gap is
+  # not a library limitation. It is that this half is a raw `sqlite3` call
+  # with NO Python invocation to apply the floor inside: this file's own
+  # header documents a `<50ms` FTS5-only latency contract precisely because
+  # this path spends no Python interpreter start (~360-450ms warm here,
+  # measured), and adding one just to filter by floor would break that
+  # contract on every turn that resolves to FTS5 rather than fix the gap
+  # this issue is about. If FTS5 ever needs a floor, it should get its own
+  # shell/SQL-native comparison against `resolve_recall_relevance_floor`'s
+  # RESOLVED number (still no duplicated DIRECTION logic, since fts5's
+  # lower-is-better is a `<=` in SQL either way) -- not a second Python
+  # process.
   FTS_RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
     SELECT filename, name, rank, audience, 'fts5', ${DESC_COL}
     FROM wiki
@@ -881,6 +897,42 @@ if [ "$SEARCH_BACKEND" = "vector" ] && [ -d "$VECTOR_DIR" ]; then
   # surface the reason. Most common cause: chromadb import missing in
   # the python3 on PATH (see `pip install athenaeum[vector]`).
   _vector_tmp=$(mktemp -t athenaeum-vec-XXXXXX)
+  # Issue athenaeum#1665: the vector half used to print every hit
+  # `query_vector_index` returned, unfiltered — the configured
+  # `recall.relevance_floor.vector` (athenaeum#1571) had no effect on this
+  # hook even when set, because this hook never called
+  # `meets_relevance_floor` / `resolve_recall_relevance_floor` at all. This
+  # is the ONE Python invocation the vector half already pays for, so the
+  # floor is applied HERE, through the same library functions
+  # `mcp_server.py`'s own floor block uses, rather than reimplementing the
+  # bm25/cosine-distance "lower is better" direction rule a second time in
+  # shell/SQL (the FTS5 half stays untouched — see the header comment
+  # above the FTS5 query below for why).
+  #
+  # `resolve_recall_relevance_floor(..., 'vector')` (unprompted defaults to
+  # False) resolves the TOP-LEVEL `recall.relevance_floor.vector` key, not
+  # `recall.relevance_floor.push.vector` — deliberately: `"vector"` has no
+  # env-var entry in `_RECALL_FLOOR_ENV` regardless of `unprompted`, so the
+  # push-scoped key would only ever be reachable via yaml too, and the
+  # issue's own wording names the plain key. A deployment that wants this
+  # hook's push path tuned separately from an explicit `recall_search` call
+  # can still do so with a follow-up, but this issue does not introduce a
+  # second knob.
+  #
+  # `load_config()` (no explicit `knowledge_root`) resolves the config the
+  # SAME way its own default does — `Path.home() / "knowledge" /
+  # "athenaeum.yaml"` — matching every other call site's convention of
+  # deriving the knowledge root from the process's `HOME`; this hook has no
+  # other resolved knowledge/wiki root to pass it.
+  #
+  # This is a PLAIN package import, deliberately NOT routed through the
+  # `ATHENAEUM_SRC` override two lines below (that override exists only so
+  # tests can stub `query_vector_index` without a real chromadb/embedding
+  # backend) — the floor mechanism itself is exactly what this issue
+  # verifies, so it always runs the real installed library, never a test
+  # double. Any failure to import or resolve it degrades to `floor=None`
+  # (unfiltered — today's behaviour), matching this hook's fail-open
+  # contract: a floor problem must never turn into a hard recall outage.
   VECTOR_RESULTS=$("$PYTHON" -c "
 import sys, os, importlib.util
 src = os.environ.get('ATHENAEUM_SRC', '')
@@ -892,12 +944,25 @@ if path and os.path.isfile(path):
     query_vector_index = mod.query_vector_index
 else:
     from athenaeum.search import query_vector_index
+
+floor = None
+meets_relevance_floor = None
+try:
+    from athenaeum.config import load_config, resolve_recall_relevance_floor
+    from athenaeum.search import meets_relevance_floor as _meets_relevance_floor
+    meets_relevance_floor = _meets_relevance_floor
+    floor = resolve_recall_relevance_floor(load_config(), 'vector')
+except Exception:
+    floor = None
+
 seen = set()
 seen_file = sys.argv[2]
 if os.path.isfile(seen_file):
     with open(seen_file) as f:
         seen = set(l.strip() for l in f)
 for fname, name, score in query_vector_index(sys.argv[1], os.path.expanduser('~/.cache/athenaeum'), n=3, exclude=seen):
+    if floor is not None and meets_relevance_floor is not None and not meets_relevance_floor('vector', score, floor):
+        continue
     print(f'{fname}\t{name}\t{score}')
 " "$VECTOR_QUERY" "$SEEN_FILE" 2>"$_vector_tmp" || true)
   VECTOR_ERR=$(cat "$_vector_tmp" 2>/dev/null || echo "")
