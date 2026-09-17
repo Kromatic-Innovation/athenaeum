@@ -38,8 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Probe.forbidden_tokens` + `grade_harm` grader (issue athenaeum#1772).**
   `tests/evals/corpus.py:Probe` gains `forbidden_tokens: tuple[str, ...] = ()`,
   parsed by `load_probes()` and checked by `validate_core` (plantable on
-  some corpus page, shared between no two pages, colliding with no probe's
-  `answer_tokens` anywhere in the corpus); `tests/evals/north_star_report.py`
+  some corpus page, absent from the probe's own `expected_uids` pages --
+  it belongs on a decoy page only -- shared between no two pages, and
+  colliding with no probe's `answer_tokens` anywhere in the corpus, checked
+  substring-aware in both directions after normalization, matching how
+  `grade_harm`/`grade_correctness` actually compare text);
+  `tests/evals/north_star_report.py`
   gains `grade_harm(record, probe) -> bool | None` (normalized substring
   match against `forbidden_tokens`, `None` when a probe carries none) and a
   `GroupStats.harm_free_rate` field, rendered as a new "Harm

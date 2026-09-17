@@ -886,13 +886,31 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
 
     # forbidden_tokens (issue athenaeum#1772): a forbidden token must be
     # PLANTABLE (occur in the body of some corpus page -- otherwise
-    # `grade_harm` could never see it planted), must collide with no
-    # probe's `answer_tokens` value anywhere in the corpus (the same
+    # `grade_harm` could never see it planted), must NOT occur on any of
+    # its own probe's `expected_uids` pages (it belongs on a DECOY page,
+    # never the correct-answer page -- an answer that legitimately cites
+    # the right page would otherwise grade as harmful), must collide with
+    # no probe's `answer_tokens` value anywhere in the corpus (the same
     # collision the tag-collision loop above guards `answer_tokens`
     # against -- a shared value would let a legitimate answer grade as
     # harmful, or a harmful one grade as safe), and must be shared between
     # no two pages.
+    #
+    # The `answer_tokens` collision check is SUBSTRING-aware in both
+    # directions, after the same normalization `grade_harm`/
+    # `grade_correctness` apply (`_normalize_for_match` -- lowercasing
+    # only, duplicated here rather than imported for the same
+    # avoid-a-circular-import reason `_content_terms` is defined in this
+    # module and re-imported into `north_star_report`, not the reverse):
+    # a forbidden token that is merely a substring of an answer token (or
+    # vice versa) would still make `grade_harm` and `grade_correctness`
+    # disagree about the same normalized text, exactly like an exact
+    # match would -- checking set membership alone misses that.
+    def _normalized(text: str) -> str:
+        return text.lower()
+
     all_answer_tokens: set[str] = {token for p in probes for token in p.answer_tokens}
+    normalized_answer_tokens = {_normalized(token): token for token in all_answer_tokens}
     for probe in probes:
         for token in probe.forbidden_tokens:
             owner_uids = sorted({page.uid for page in pages if token in page.body})
@@ -906,11 +924,22 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                     f"probe {probe.id!r}: forbidden_tokens value {token!r} occurs on "
                     f"multiple pages {owner_uids} -- must be shared between no two pages"
                 )
-            if token in all_answer_tokens:
-                problems.append(
-                    f"probe {probe.id!r}: forbidden_tokens value {token!r} collides with a "
-                    "probe's answer_tokens value somewhere in the corpus"
-                )
+            for expected_uid in probe.expected_uids:
+                expected_page = pages_by_uid.get(expected_uid)
+                if expected_page is not None and token in expected_page.body:
+                    problems.append(
+                        f"probe {probe.id!r}: forbidden_tokens value {token!r} occurs on "
+                        f"its own expected_uids page {expected_uid!r} -- it belongs on a "
+                        "decoy page, not the correct-answer page"
+                    )
+            normalized_token = _normalized(token)
+            for normalized_answer, answer_token in normalized_answer_tokens.items():
+                if normalized_token in normalized_answer or normalized_answer in normalized_token:
+                    problems.append(
+                        f"probe {probe.id!r}: forbidden_tokens value {token!r} collides "
+                        f"(as a normalized substring, either direction) with answer_tokens "
+                        f"value {answer_token!r} somewhere in the corpus"
+                    )
 
     problems.extend(_validate_relatedness_ground_truth(uids, {p.id for p in probes}))
     return problems

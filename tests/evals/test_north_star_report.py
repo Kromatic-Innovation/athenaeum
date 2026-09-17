@@ -1365,6 +1365,30 @@ def test_all_answer_tokens_does_not_read_forbidden_tokens() -> None:
     assert harm_only_token not in _all_answer_tokens(patched_corpus)
 
 
+def test_grade_correctness_abstention_ignores_forbidden_tokens_of_other_probes() -> None:
+    """Behavioural companion to the structural isolation pin above: an
+    abstention record whose answer contains ANOTHER probe's forbidden_tokens
+    value must still grade as a correct abstention through
+    grade_correctness -- forbidden_tokens has no bearing on the
+    confabulation deny-list grade_correctness actually reads
+    (_all_answer_tokens), so naming a harm-mechanism decoy token is not
+    confabulation."""
+    abstention_probe = _probe("abstain_unknown_client")
+    pto_probe = _probe("pto_allowance")
+    harm_probe = dataclasses.replace(pto_probe, forbidden_tokens=("Ghostword",))
+    corpus = build_corpus(scale=CORPUS_SCALE)
+    patched_probes = [harm_probe if p.id == pto_probe.id else p for p in corpus.probes]
+    patched_corpus = dataclasses.replace(corpus, probes=patched_probes)
+
+    record = _record(
+        arm=Arm.NONE,
+        probe_id=abstention_probe.id,
+        probe_class=abstention_probe.probe_class,
+        answer="I don't know -- but note Ghostword just in case.",
+    )
+    assert grade_correctness(record, abstention_probe, patched_corpus) is True
+
+
 def test_grade_coverage_full_when_every_answer_token_present() -> None:
     probe = _probe("fenwick_relationship_history")
     assert len(probe.answer_tokens) >= 2
@@ -1474,6 +1498,74 @@ def test_render_report_harm_and_coverage_sections_are_na_on_current_corpus() -> 
     harm_section = text[text.index("## Harm (forbidden-token) rate") :]
     harm_section = harm_section[: harm_section.index("## Coverage")]
     assert "n/a" in harm_section
+
+
+def test_render_report_harm_and_coverage_values_land_in_the_right_section(monkeypatch) -> None:
+    """A swapped harm_free_rate/coverage_rate column in render_report would
+    put the wrong number under the wrong heading and no earlier test would
+    catch it (both were n/a-only, or checked separately). Build rows with
+    DISTINCT, non-n/a values for each -- harm_free_rate=0.25,
+    coverage_rate=0.75 -- and assert each value appears only in its own
+    section."""
+    import tests.evals.north_star_report as nsr
+
+    pto_probe = _probe("pto_allowance")
+    harm_probe = dataclasses.replace(pto_probe, forbidden_tokens=("Ghostword",))
+    patched_probes = [harm_probe if p.id == pto_probe.id else p for p in _CORPUS.probes]
+    patched_corpus = dataclasses.replace(_CORPUS, probes=patched_probes)
+    monkeypatch.setitem(nsr._CORPUS_CACHE, CORPUS_SCALE, patched_corpus)
+
+    # harm_free_rate = 1/4 = 0.25 -- one safe answer, three that name the
+    # forbidden token.
+    harm_rows = [
+        _row(
+            _record(
+                arm=Arm.ORACLE,
+                probe_id=harm_probe.id,
+                probe_class=harm_probe.probe_class,
+                answer="25 days." if i == 0 else "Governed by Ghostword.",
+            ),
+            replicate=i,
+        )
+        for i in range(4)
+    ]
+
+    # coverage_rate = (1.0 + 0.5) / 2 = 0.75 -- one full answer, one naming
+    # only the first of the probe's two answer_tokens.
+    coverage_probe = _probe("fenwick_relationship_history")
+    assert len(coverage_probe.answer_tokens) == 2
+    coverage_rows = [
+        _row(
+            _record(
+                arm=Arm.ORACLE,
+                probe_id=coverage_probe.id,
+                probe_class=coverage_probe.probe_class,
+                answer=" and ".join(coverage_probe.answer_tokens),
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.ORACLE,
+                probe_id=coverage_probe.id,
+                probe_class=coverage_probe.probe_class,
+                answer=f"Coordinated per {coverage_probe.answer_tokens[0]}.",
+            ),
+            replicate=1,
+        ),
+    ]
+
+    report = build_report(harm_rows + coverage_rows)
+    text = render_report(report)
+
+    harm_section = text[text.index("## Harm (forbidden-token) rate") :]
+    harm_section = harm_section[: harm_section.index("## Coverage")]
+    coverage_section = text[text.index("## Coverage (fraction of planted tokens)") :]
+    coverage_section = coverage_section[: coverage_section.index("### Weak probes")]
+
+    assert "0.250" in harm_section
+    assert "0.750" not in harm_section
+    assert "0.750" in coverage_section
+    assert "0.250" not in coverage_section
 
 
 _CORRECTNESS_SECTION_HEADER_AND_PROSE = (

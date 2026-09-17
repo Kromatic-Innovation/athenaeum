@@ -240,6 +240,106 @@ def test_validate_core_accepts_valid_forbidden_tokens() -> None:
     assert not forbidden_problems, forbidden_problems
 
 
+def test_validate_core_rejects_forbidden_token_on_its_own_expected_page() -> None:
+    """issue athenaeum#1772: a ``forbidden_tokens`` value must not occur on
+    the probe's OWN ``expected_uids`` (correct-answer) page -- it belongs
+    on a decoy page. An answer that legitimately cites the right page would
+    otherwise get flagged as harmful for citing content that was never
+    actually a decoy."""
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body=(
+                "TokenOne sits here, and so does Ghostword.\n\n"
+                "Internal reference tag: TokenOne."
+            ),
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="probe-harm",
+        probe_class="single_hop",
+        query="what is on page a?",
+        expected_uids=("page-a",),
+        answer_tokens=("TokenOne",),
+        forbidden_tokens=("Ghostword",),
+    )
+    problems = validate_core(pages, [probe])
+    assert any(
+        "probe-harm" in p and "Ghostword" in p and "expected_uids page" in p for p in problems
+    ), problems
+
+
+def test_validate_core_rejects_forbidden_token_colliding_with_answer_token_via_substring() -> None:
+    """issue athenaeum#1772: the collision guard is SUBSTRING-aware in both
+    directions after normalization -- ``grade_harm``/``grade_correctness``
+    match by normalized substring, not exact string equality, so a
+    forbidden token that is merely a substring of an answer token (or vice
+    versa) must still be flagged, in both directions ("Ash" vs
+    "Ashfallow")."""
+    # Direction 1: the forbidden token is a substring of the answer token.
+    pages_dir1 = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="Ashfallow sits here.\n\nInternal reference tag: Ashfallow.",
+            tier="core",
+        ),
+        Page(
+            uid="page-decoy",
+            type="note",
+            name="Decoy Page",
+            body="Ash appears on this decoy page.",
+            tier="core",
+        ),
+    ]
+    probe_dir1 = Probe(
+        id="probe-substr-1",
+        probe_class="single_hop",
+        query="what is on page a?",
+        expected_uids=("page-a",),
+        answer_tokens=("Ashfallow",),
+        forbidden_tokens=("Ash",),
+    )
+    problems_dir1 = validate_core(pages_dir1, [probe_dir1])
+    assert any(
+        "probe-substr-1" in p and "collides" in p and "Ashfallow" in p for p in problems_dir1
+    ), problems_dir1
+
+    # Direction 2: the answer token is a substring of the forbidden token.
+    pages_dir2 = [
+        Page(
+            uid="page-b",
+            type="note",
+            name="Page B",
+            body="Ash sits here.\n\nInternal reference tag: Ash.",
+            tier="core",
+        ),
+        Page(
+            uid="page-decoy-2",
+            type="note",
+            name="Decoy Page 2",
+            body="Ashfallow appears on this decoy page.",
+            tier="core",
+        ),
+    ]
+    probe_dir2 = Probe(
+        id="probe-substr-2",
+        probe_class="single_hop",
+        query="what is on page b?",
+        expected_uids=("page-b",),
+        answer_tokens=("Ash",),
+        forbidden_tokens=("Ashfallow",),
+    )
+    problems_dir2 = validate_core(pages_dir2, [probe_dir2])
+    assert any(
+        "probe-substr-2" in p and "collides" in p and "Ash" in p for p in problems_dir2
+    ), problems_dir2
+
+
 def test_load_probes_defaults_report_only_from_class_enrolment(monkeypatch, tmp_path) -> None:
     """issue athenaeum#1776: when ``probes.yaml`` is silent on
     ``report_only``, :func:`load_probes` defaults it to

@@ -540,8 +540,9 @@ def grade_coverage(record: RolloutRecord, probe: Probe) -> float | None:
     an all-or-nothing rule that measures nothing for that class.
 
     Returns ``None`` (never ``0.0``) when ``probe.answer_tokens`` is empty --
-    a corpus authoring gap :func:`tests.evals.corpus.validate_core` already
-    refuses to let ship for a non-abstention probe, not a graded zero.
+    the abstention probe class carries no ``answer_tokens`` by construction
+    (nothing in the corpus answers it), so this is "no tokens to cover", not
+    a graded zero.
     """
     if not probe.answer_tokens:
         return None
@@ -2462,7 +2463,8 @@ def render_report(report: NorthStarReport) -> str:
         "many-correct-answer probe (the `aggregation` class) can grade partial credit instead "
         "of a forced zero. `report_only` (issue athenaeum#1791 §2.1): this mechanism feeds no "
         "§7 condition and `compute_verdicts` is unchanged by it. `n/a` means no probe in that "
-        "group carries `answer_tokens` to grade against."
+        "group carries `answer_tokens` to grade against. For a single-`answer_tokens` probe, "
+        "`coverage_rate` and `correctness_rate` are the same number by construction."
     )
     lines.append("")
     lines.append("| probe_class | corpus_scale | arm | n | coverage_rate |")
