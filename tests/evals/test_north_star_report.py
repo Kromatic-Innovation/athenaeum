@@ -477,6 +477,34 @@ def test_correctness_grades_incorrect_on_distractor_token_without_probes_own_tok
     assert grade_correctness(right_answer, pto_probe, _CORPUS) is True
 
 
+def test_follow_through_grading_requires_every_planted_token() -> None:
+    """AC3 (issue athenaeum#1737): ``follow_through`` probes plant a token on
+    EACH of at least two pages -- an answer that surfaced the breadcrumb page
+    but never followed the edge to the second-hop page carries only one of
+    them, and must grade incorrect, never a partial credit."""
+    probe = _probe("fenwick_relationship_history")
+    assert len(probe.answer_tokens) >= 2
+
+    one_token_answer = _record(
+        arm=Arm.PULL,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer=f"Fenwick Systems' relationship is coordinated per {probe.answer_tokens[0]}.",
+    )
+    assert grade_correctness(one_token_answer, probe, _CORPUS) is False
+
+    all_tokens_answer = _record(
+        arm=Arm.ORACLE,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer=(
+            f"Fenwick Systems' relationship is coordinated per {probe.answer_tokens[0]}, "
+            f"and renegotiation timing is tracked per {probe.answer_tokens[1]}."
+        ),
+    )
+    assert grade_correctness(all_tokens_answer, probe, _CORPUS) is True
+
+
 def test_weak_probes_lists_probe_the_none_arm_already_answers_correctly() -> None:
     """AC4: a probe the NONE arm (no context delivered) answers correctly is
     a floor-leak signal and must be named in the weak-probe list."""

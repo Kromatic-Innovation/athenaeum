@@ -18,6 +18,10 @@ import pytest
 
 from tests.evals.corpus import (
     SCALES,
+    Page,
+    Probe,
+    RelatedEdge,
+    _content_terms,
     build_corpus,
     load_core_pages,
     load_probes,
@@ -64,6 +68,269 @@ def test_every_non_abstention_probe_answer_token_is_in_its_page_body() -> None:
 
     for probe in abstention:
         assert probe.answer_tokens == (), f"abstention probe {probe.id!r} must have no tokens"
+
+
+def _two_page_follow_through(
+    *,
+    second_hop_shares_query_term: bool,
+    edge_between_expected_pages: bool,
+    source_shares_query_term: bool = True,
+    body_wikilink: bool = True,
+    frontmatter_edge: bool = True,
+    second_hop_carries_token: bool = True,
+) -> tuple[list[Page], Probe]:
+    """Build the minimal two-page fixture ``validate_core``'s
+    ``follow_through`` checks operate on, with each check independently
+    toggleable so they can be tested in isolation.
+
+    ``body_wikilink``/``frontmatter_edge`` are separate knobs (issue
+    athenaeum#1737 Quine finding): the real corpus authors BOTH on every
+    first-hop page (the frontmatter edge feeds the relatedness ground
+    truth), but only the body ``[[wikilink]]`` is what a live ``recall`` hit
+    actually renders, so ``validate_core`` must accept only that one as the
+    qualifying edge.
+    """
+    edge_target = "page-b" if edge_between_expected_pages else "page-unrelated"
+    second_hop_body = (
+        "Alderquill covers galaxy formation in early cosmic history."
+        if second_hop_shares_query_term
+        else "Verdigrove is a quiet coastal harbour town."
+    )
+    token_two_clause = "TokenTwo sits here. " if second_hop_carries_token else ""
+    wikilink_clause = f" See [[{edge_target}]] for more." if body_wikilink else ""
+    source_body = (
+        f"TokenOne sits here, in a note about early galaxy history.{wikilink_clause}"
+        if source_shares_query_term
+        else f"TokenOne sits here.{wikilink_clause}"
+    )
+    related = (RelatedEdge(uid=edge_target, role="related"),) if frontmatter_edge else ()
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body=source_body,
+            tier="core",
+            related=related,
+        ),
+        Page(
+            uid="page-b",
+            type="note",
+            name="Page B",
+            body=f"{token_two_clause}{second_hop_body}",
+            tier="core",
+        ),
+        Page(
+            uid="page-unrelated",
+            type="note",
+            name="Unrelated",
+            body="Nothing planted.",
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="synthetic_follow_through",
+        probe_class="follow_through",
+        query="what is the history of galaxy formation?",
+        expected_uids=("page-a", "page-b"),
+        answer_tokens=("TokenOne", "TokenTwo"),
+    )
+    return pages, probe
+
+
+def test_follow_through_rejects_tokens_concentrated_on_one_page() -> None:
+    """AC (issue athenaeum#1737): a ``follow_through`` probe whose
+    ``answer_tokens`` all sit on a single ``expected_uids`` page has nothing
+    to follow through TO, and must be rejected at load."""
+    pages, probe = _two_page_follow_through(
+        second_hop_shares_query_term=False, edge_between_expected_pages=True
+    )
+    pages[1] = Page(
+        uid="page-b",
+        type="note",
+        name="Page B",
+        body="Verdigrove is a quiet coastal harbour town.",
+        tier="core",
+    )
+    # Both tokens now sit on page-a only.
+    pages[0] = Page(
+        uid="page-a",
+        type="note",
+        name="Page A",
+        body="TokenOne and TokenTwo both sit here.",
+        tier="core",
+        related=(RelatedEdge(uid="page-b", role="related"),),
+    )
+    problems = validate_core(pages, [probe])
+    assert any("split across at least two" in p for p in problems), problems
+
+
+def test_follow_through_rejects_second_hop_sharing_a_query_term() -> None:
+    """AC (issue athenaeum#1737): the second-hop page must share NO content
+    term with the query -- otherwise a plain lexical match on the query
+    would reach it directly, without ever following the edge."""
+    pages, probe = _two_page_follow_through(
+        second_hop_shares_query_term=True, edge_between_expected_pages=True
+    )
+    problems = validate_core(pages, [probe])
+    assert any("share no content term" in p for p in problems), problems
+
+
+def test_follow_through_rejects_source_page_sharing_no_query_term() -> None:
+    """AC (issue athenaeum#1737, Sentry finding): the SOURCE page of the
+    qualifying edge must itself share a content term with the query --
+    otherwise a probe could be authored where nothing in ``expected_uids``
+    is lexically reachable from the query at all, and the no-overlap check
+    on the second-hop page would pass on a technicality rather than because
+    a real breadcrumb was followed."""
+    pages, probe = _two_page_follow_through(
+        second_hop_shares_query_term=False,
+        edge_between_expected_pages=True,
+        source_shares_query_term=False,
+    )
+    problems = validate_core(pages, [probe])
+    assert any("shares a content term with the" in p for p in problems), problems
+
+
+def test_follow_through_rejects_no_edge_between_expected_pages() -> None:
+    """AC (issue athenaeum#1737): the second-hop page must be reachable from
+    another ``expected_uids`` page by a body ``[[wikilink]]``; a wikilink to
+    some other page in the corpus does not satisfy the assertion."""
+    pages, probe = _two_page_follow_through(
+        second_hop_shares_query_term=False, edge_between_expected_pages=False
+    )
+    problems = validate_core(pages, [probe])
+    assert any("related/links edge" in p for p in problems), problems
+
+
+def test_follow_through_rejects_frontmatter_only_edge() -> None:
+    """AC (issue athenaeum#1737, MUST finding): the qualifying edge must be a
+    body ``[[wikilink]]``, not merely a ``related``/``links`` frontmatter
+    entry. A live ``recall`` hit renders its ``**Links:**`` line from the
+    body only (``athenaeum.mcp_server._extract_outbound_links``) --
+    frontmatter-only edges reach an agent solely through a native arm's
+    raw-file grep, so a probe authored that way would be passable by grep
+    and structurally unpassable by Athenaeum, the exact asymmetry this class
+    exists to catch."""
+    pages, probe = _two_page_follow_through(
+        second_hop_shares_query_term=False,
+        edge_between_expected_pages=True,
+        body_wikilink=False,
+        frontmatter_edge=True,
+    )
+    problems = validate_core(pages, [probe])
+    assert any("body [[wikilink]]" in p for p in problems), problems
+
+
+def test_follow_through_rejects_hop_target_with_no_planted_token() -> None:
+    """AC (issue athenaeum#1737, SHOULD finding): the page reached by the
+    qualifying body edge must itself carry a planted answer token. Three
+    pages: A (token1, body-links to B), B (no token, clean of query terms),
+    C (token2, unlinked, shares a query term). The token-split check passes
+    trivially (token1 on A, token2 on C), and B is a clean, reachable
+    target -- but B carries no token, so following the edge to it would
+    never reach an answer."""
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="TokenOne sits here, about early galaxy history. See [[page-b]] for more.",
+            tier="core",
+        ),
+        Page(
+            uid="page-b",
+            type="note",
+            name="Page B",
+            body="Verdigrove is a quiet coastal harbour town.",
+            tier="core",
+        ),
+        Page(
+            uid="page-c",
+            type="note",
+            name="Page C",
+            body="TokenTwo sits here, also about galaxy formation history.",
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="synthetic_follow_through_no_token_hop",
+        probe_class="follow_through",
+        query="what is the history of galaxy formation?",
+        expected_uids=("page-a", "page-b", "page-c"),
+        answer_tokens=("TokenOne", "TokenTwo"),
+    )
+    problems = validate_core(pages, [probe])
+    assert any("carries a planted answer token" in p for p in problems), problems
+
+
+def test_follow_through_rejects_target_leaking_query_term_via_uid_or_name() -> None:
+    """AC (issue athenaeum#1737, SHOULD finding): the second-hop page's
+    ``uid``/``name``/``tags`` must also share no content term with the
+    query -- including a >=5-character stemmed-prefix match -- not just its
+    body. A native arm's topic file is named ``<uid>.md`` and a grep can
+    match on name/tags too, so a page whose BODY is clean but whose uid
+    leaks query vocabulary (here ``formative`` vs. the query's
+    ``formation`` -- both prefix ``forma``) is still grep-reachable and
+    must be rejected."""
+    pages, probe = _two_page_follow_through(
+        second_hop_shares_query_term=False, edge_between_expected_pages=True
+    )
+    pages[1] = Page(
+        uid="page-formative-notes",
+        type="note",
+        name="Page B",
+        body="TokenTwo sits here. Verdigrove is a quiet coastal harbour town.",
+        tier="core",
+    )
+    probe = Probe(
+        id=probe.id,
+        probe_class=probe.probe_class,
+        query=probe.query,
+        expected_uids=("page-a", "page-formative-notes"),
+        answer_tokens=probe.answer_tokens,
+    )
+    # page-a's body wikilink must point at the renamed uid to stay reachable.
+    pages[0] = Page(
+        uid="page-a",
+        type="note",
+        name="Page A",
+        body=(
+            "TokenOne sits here, in a note about early galaxy history. "
+            "See [[page-formative-notes]] for more."
+        ),
+        tier="core",
+    )
+    problems = validate_core(pages, [probe])
+    assert any("uid, name, and tags" in p for p in problems), problems
+
+
+def test_content_terms_strips_stopwords_and_tokens_under_three_chars() -> None:
+    """AC (issue athenaeum#1737, SHOULD finding): pins BOTH filters
+    ``_content_terms`` applies, so a future edit that drops either one fails
+    this test rather than silently loosening every ``follow_through``
+    overlap check that depends on it. ``the``/``what``/``and`` are
+    stopwords; ``ok``/``id``/``at`` are not stopwords but fall under the
+    ``len(w) >= 3`` floor -- only ``cats`` survives both filters."""
+    assert _content_terms("the what and to") == set()
+    assert _content_terms("ok id at cats") == {"cats"}
+
+
+def test_follow_through_passes_when_both_halves_hold() -> None:
+    """The positive control: split tokens plus a qualifying edge produces no
+    ``follow_through``-specific problem.
+
+    ``validate_core`` also runs the (unrelated) relatedness ground-truth
+    check over the full page set, which this minimal synthetic fixture does
+    not attempt to satisfy -- so the assertion is scoped to problems
+    mentioning THIS probe, not an empty list overall.
+    """
+    pages, probe = _two_page_follow_through(
+        second_hop_shares_query_term=False, edge_between_expected_pages=True
+    )
+    problems = validate_core(pages, [probe])
+    own_problems = [p for p in problems if probe.id in p]
+    assert own_problems == [], own_problems
 
 
 def test_generation_is_deterministic_within_a_process() -> None:
@@ -256,6 +523,7 @@ def test_probe_taxonomy_is_complete() -> None:
         "disambiguation",
         "abstention",
         "distractor_robustness",
+        "follow_through",
     } <= classes
 
 

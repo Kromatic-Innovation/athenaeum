@@ -58,12 +58,132 @@ from __future__ import annotations
 
 import hashlib
 import random
+import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+#: A short, deliberately conservative stopword list -- excluded so a
+#: lexical/n-gram overlap is not dominated by function words that would
+#: overlap between almost any two English passages regardless of topic.
+#: NOT a general-purpose NLP stopword list (no external dependency is
+#: pulled in for this); just enough to keep the free metrics meaningful.
+#:
+#: Lives here, not in ``tests.evals.north_star_report`` (issue athenaeum#1737),
+#: because ``validate_core``'s ``follow_through`` check needs the SAME content-
+#: term definition ``north_star_report.lexical_overlap`` uses, and
+#: ``north_star_report`` already imports from this module -- a definition
+#: living there would make the reverse import circular. Only
+#: :func:`_content_terms` (the public surface built on this list and
+#: :data:`_WORD_RE` below) is re-imported into ``north_star_report`` under
+#: its original name, so no external caller of THAT function needed to
+#: change; ``_STOPWORDS``/``_WORD_RE`` themselves are not re-exported and
+#: have exactly one definition, here.
+_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "to",
+        "in",
+        "on",
+        "for",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "with",
+        "as",
+        "at",
+        "by",
+        "it",
+        "this",
+        "that",
+        "these",
+        "those",
+        "from",
+        "not",
+        "no",
+        "do",
+        "does",
+        "did",
+        "what",
+        "which",
+        "who",
+        "how",
+        "when",
+        "where",
+        "why",
+    }
+)
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _content_terms(text: str) -> set[str]:
+    words = _WORD_RE.findall(text.lower())
+    return {w for w in words if len(w) >= 3 and w not in _STOPWORDS}
+
+
+def _shares_stemmed_term(a: set[str], b: set[str]) -> bool:
+    """True if some term in *a* and some term in *b* share a >=5-character
+    prefix -- a cheap stand-in for real stemming, used by ``validate_core``'s
+    ``follow_through`` check (issue athenaeum#1737) to catch a page whose
+    ``uid``/``name``/``tags`` leak the query's vocabulary through a simple
+    suffix variation an exact ``_content_terms`` intersection misses
+    (``subsidiary`` vs ``subsidiaries``), without pulling in a real stemming
+    dependency. Terms under 5 characters never match this way -- the exact
+    intersection already covers short exact matches.
+    """
+    prefixes_a = {t[:5] for t in a if len(t) >= 5}
+    return any(len(t) >= 5 and t[:5] in prefixes_a for t in b)
+
+
+#: Same wikilink grammar as ``athenaeum.mcp_server._WIKILINK_RE`` /
+#: ``athenaeum.inference_blocks._WIKILINK_RE`` / ``athenaeum.resolutions._WIKILINK_RE``
+#: (Obsidian-style ``[[slug]]`` / ``[[slug|alias]]``) -- duplicated rather
+#: than imported, matching this module's own precedent for this exact
+#: regex (see ``mcp_server.py``'s comment above its copy): this module is
+#: imported by nearly every eval test, and importing the full
+#: MCP-SDK-dependent ``athenaeum.mcp_server`` module just for one regex would
+#: drag that import graph into every one of them.
+_WIKILINK_RE = re.compile(r"\[\[([^\[\]|\n]+?)(?:\|[^\[\]\n]*)?\]\]")
+
+
+def _body_wikilink_targets(body: str) -> list[str]:
+    """Wikilink targets in a page BODY, order-preserved, deduped -- the same
+    shape ``athenaeum.mcp_server._extract_outbound_links`` reads to render a
+    live recall hit's ``**Links:**`` line.
+
+    ``validate_core``'s ``follow_through`` check (issue athenaeum#1737 Quine
+    finding) parses THIS, not the frontmatter ``related``/``links`` edges a
+    page also carries: the real recall snippet is rendered from the body
+    only -- frontmatter ``related``/``links`` never reaches an agent through
+    ``recall`` at all, only through a native arm's grep of the raw
+    materialized file. A probe whose qualifying edge sat only in
+    frontmatter would be passable by grep and structurally unpassable by
+    Athenaeum -- exactly the asymmetry this probe class exists to catch, not
+    exhibit. Frontmatter ``related``/``links`` stay on the page regardless
+    (the relatedness/redundancy ground truth in this module still reads
+    them), this check just does not accept them as the qualifying edge.
+    """
+    seen: set[str] = set()
+    targets: list[str] = []
+    for m in _WIKILINK_RE.finditer(body):
+        raw = m.group(1).strip()
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        targets.append(raw)
+    return targets
+
 
 # Bump when generation logic changes in a way that alters emitted bytes for a
 # fixed seed. Recorded alongside every result so a stored measurement names
@@ -196,7 +316,8 @@ class Probe:
     """A retrieval probe with its ground truth.
 
     ``probe_class`` follows the LongMemEval-style taxonomy: single_hop,
-    multi_hop, temporal, disambiguation, abstention, distractor_robustness.
+    multi_hop, temporal, disambiguation, abstention, distractor_robustness,
+    follow_through.
 
     ``expected_uids`` is empty for abstention probes -- and that emptiness is
     the assertion, not a missing value. ``must_not_rank`` names pages that a
@@ -210,6 +331,35 @@ class Probe:
     rollout's final answer text (``tests.evals.north_star_report.grade_correctness``).
     Empty for abstention probes -- there, correctness is graded by a
     separate rule (no token to plant when nothing answers the probe).
+
+    ``follow_through`` (issue athenaeum#1737) is the class a good grep cannot
+    pass by accident: the query surfaces one page (a breadcrumb) whose
+    complete answer requires following a wikilink to a SECOND page the
+    query's own terms never reach. Distinguished from ``multi_hop`` (which
+    is satisfied by two independently-retrievable pages) by every assertion
+    below, all checked by :func:`validate_core`:
+
+    * ``answer_tokens`` must be split across at least two ``expected_uids``
+      pages -- a probe whose tokens all sit on one page has nothing to
+      follow through TO.
+    * the SOURCE page of the qualifying edge must itself share a content
+      term with ``query`` -- otherwise nothing in ``expected_uids`` is
+      lexically reachable from the query at all, and the probe cannot be a
+      breadcrumb-then-follow shape by construction.
+    * the qualifying edge must be a body ``[[wikilink]]``, not merely a
+      frontmatter ``related``/``links`` entry: a live ``recall`` hit renders
+      its ``**Links:**`` line from the body only
+      (``athenaeum.mcp_server._extract_outbound_links``) -- frontmatter
+      edges reach an agent only through a native arm's raw-file grep, so a
+      frontmatter-only edge would make the class passable by grep and
+      unpassable by Athenaeum by construction, the exact asymmetry it exists
+      to catch.
+    * the target page must carry a planted answer token, and its body,
+      ``uid``, ``name``, and ``tags`` must share no content term (exact, or
+      a >=5-character stemmed prefix -- see :func:`_shares_stemmed_term`)
+      with ``query`` -- otherwise a plain BM25/lexical match, or a native
+      arm's grep over its topic file's own name, would reach it directly
+      without ever following the edge.
     """
 
     id: str
@@ -378,6 +528,16 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
     actually occur in any of its own ``expected_uids`` pages' bodies, would
     silently score as an un-gradable "n/a" correctness cell -- indistinguishable
     from a real floor/ceiling of zero -- rather than a corpus authoring error.
+
+    ``follow_through`` probes (issue athenaeum#1737) get ADDITIONAL checks
+    beyond the generic ones above (see the ``Probe`` docstring for the full
+    list), because the class exists to rule
+    out a shape a plain retrieval probe cannot detect: an answer that LOOKS
+    multi-page but is actually reachable from the query directly, with no
+    edge ever followed. Without the source-page half, a probe could be
+    authored where NOTHING in ``expected_uids`` is lexically reachable from
+    the query at all -- passing the no-overlap check on a technicality
+    rather than because a real breadcrumb was followed.
     """
     uids = {p.uid for p in pages}
     pages_by_uid = {p.uid: p for p in pages}
@@ -404,6 +564,63 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
             if not any(token in answer_text for token in probe.answer_tokens):
                 problems.append(
                     f"probe {probe.id!r}: no answer_tokens value found in its answer page body"
+                )
+        if probe.probe_class == "follow_through":
+            expected_pages = [
+                pages_by_uid[uid] for uid in probe.expected_uids if uid in pages_by_uid
+            ]
+            token_pages = {
+                page.uid
+                for page in expected_pages
+                if any(token in page.body for token in probe.answer_tokens)
+            }
+            if len(token_pages) < 2:
+                problems.append(
+                    f"probe {probe.id!r}: follow_through answer_tokens must be split across "
+                    "at least two expected_uids pages, not concentrated on one"
+                )
+            expected_uid_set = set(probe.expected_uids)
+            query_terms = _content_terms(probe.query)
+            has_qualifying_hop = False
+            for page in expected_pages:
+                if not (_content_terms(page.body) & query_terms):
+                    # This page shares no vocabulary with the query either --
+                    # it cannot be the breadcrumb a lexical match surfaces, so
+                    # an edge leaving it would not demonstrate a real hop.
+                    continue
+                for target_uid in _body_wikilink_targets(page.body):
+                    if target_uid == page.uid or target_uid not in expected_uid_set:
+                        continue
+                    target = pages_by_uid.get(target_uid)
+                    if target is None:
+                        continue
+                    if _content_terms(target.body) & query_terms:
+                        continue
+                    target_meta_terms = _content_terms(
+                        f"{target.uid.replace('-', ' ')} {target.name} {' '.join(target.tags)}"
+                    )
+                    if _shares_stemmed_term(target_meta_terms, query_terms):
+                        # The page itself is grep-reachable from the query via
+                        # its uid/name/tags (a native arm's topic file is named
+                        # `<uid>.md`) even though its body is clean -- the
+                        # no-overlap assertion must hold for the whole page a
+                        # native arm would land on, not only its body text.
+                        continue
+                    if not any(token in target.body for token in probe.answer_tokens):
+                        # The hop must land somewhere that actually carries a
+                        # planted token -- an edge to a clean-but-token-free
+                        # page would satisfy the shape without ever reaching
+                        # the answer.
+                        continue
+                    has_qualifying_hop = True
+            if not has_qualifying_hop:
+                problems.append(
+                    f"probe {probe.id!r}: follow_through probes need a body [[wikilink]] "
+                    "(not just a frontmatter related/links edge) from an expected_uids page "
+                    "that itself shares a content term with the query, to another "
+                    "expected_uids page that carries a planted answer token and whose body, "
+                    "uid, name, and tags share no content term (including a stemmed prefix) "
+                    "with the query"
                 )
     for page in pages:
         for edge in page.related:

@@ -27,6 +27,7 @@ import pytest
 from tests.conftest import FakeLLMClient, make_llm_response, make_llm_usage
 from tests.evals.corpus import build_corpus
 from tests.evals.harness import EVAL_TOKEN_CEILING, EvalSession
+from tests.evals.north_star_report import grade_correctness
 from tests.evals.rollout import (
     ALL_ARMS,
     RECALL_TOOL_NAME,
@@ -47,6 +48,9 @@ from tests.evals.rollout import (
 pytestmark = pytest.mark.rollout
 
 FIXTURE_PATH = Path(__file__).parent / "data" / "rollout" / "pull_stream_spike.jsonl"
+FOLLOW_THROUGH_FIXTURE_PATH = (
+    Path(__file__).parent / "data" / "rollout" / "follow_through_stream_spike.jsonl"
+)
 
 
 def _corpus():
@@ -134,6 +138,57 @@ def test_parse_pull_stream_from_recorded_fixture() -> None:
     assert parsed.turn_tokens[1].output_tokens == 22
     # Raw transcript is preserved event-for-event (5 lines in the fixture).
     assert len(parsed.transcript) == 5
+
+
+def test_parse_pull_stream_follow_through_fixture_shows_two_recalls_and_grades_correct() -> None:
+    """AC (issue athenaeum#1737): a PULL transcript for one
+    ``follow_through`` probe — ``fenwick_relationship_history`` — shows TWO
+    ``recall`` calls (the breadcrumb page, then the second-hop page reached
+    by following its link), and the resulting answer grades correct only
+    because it carries BOTH planted tokens (see
+    ``test_follow_through_grading_requires_every_planted_token`` in
+    ``tests/evals/test_north_star_report.py`` for the token-omission half of
+    this contract).
+
+    No live rollout was run to capture this transcript (the surrounding
+    ``system``/``assistant``/``result`` events are hand-authored), but both
+    ``tool_result`` bodies are the ACTUAL, unedited return value of
+    ``athenaeum.mcp_server.recall_search`` called against the real ``core``
+    corpus materialized to a temp dir and indexed with the real ``fts5``
+    backend — not a hand-typed approximation of the rendering shape. Byte
+    for byte: ``Found N matching pages:`` / ``### 1. {name} (score: N)`` /
+    ``**Path:**`` / ``**Tags:**`` / ``**Uid:**`` / ``**Type:**`` /
+    ``**Source:** ... · **Updated:** ...`` / ``**Links:**`` (present only on
+    the first hit, whose body carries the ``[[wikilink]]``; absent from the
+    second, which has none) / the page's own H1 / its body. Reuses the SAME
+    offline stream-json replay mechanism as
+    ``test_parse_pull_stream_from_recorded_fixture`` above (issue
+    athenaeum#1725/#1729) — no new replay machinery."""
+    lines = FOLLOW_THROUGH_FIXTURE_PATH.read_text(encoding="utf-8").splitlines()
+    parsed = parse_pull_stream(lines)
+
+    assert parsed.recall_called is True
+    assert len(parsed.tool_calls) == 2
+    assert [call.name for call in parsed.tool_calls] == [RECALL_TOOL_NAME, RECALL_TOOL_NAME]
+
+    corpus = build_corpus(scale="core")
+    probe = next(p for p in corpus.probes if p.id == "fenwick_relationship_history")
+    assert probe.probe_class == "follow_through"
+
+    record = RolloutRecord(
+        arm=Arm.PULL,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        corpus_scale="core",
+        answer=parsed.answer,
+        turn_tokens=parsed.turn_tokens,
+        tool_calls=parsed.tool_calls,
+        recall_called=parsed.recall_called,
+        injected_context_tokens=None,
+        turn_count=parsed.turn_count,
+        transcript=parsed.transcript,
+    )
+    assert grade_correctness(record, probe, corpus) is True
 
 
 def test_parse_pull_stream_choosing_not_to_call_recall_is_recorded_not_error() -> None:

@@ -182,6 +182,16 @@ _PROBE_CLASSES: tuple[str, ...] = tuple(sorted({p.probe_class for p in _ALL_PROB
 # already below 100%, and every size-1 class, are left at the measured
 # value. Abstention is fixed at 0 for both backends — see the module
 # docstring.
+#
+# ``follow_through`` (issue athenaeum#1737) is NOT measured against a live
+# backend yet -- this table only needs to exist so
+# ``test_floor_table_covers_every_probe_class_on_every_backend`` (regular
+# CI, no credentials) stays in sync with ``probes.yaml``; the live
+# ``test_recall_floors_by_backend_and_class`` this floor actually gates is
+# credential-gated (``-m eval``) and was not run to derive it. Set to the
+# same conservative 1-of-6 floor as ``distractor_robustness``/``redundancy``
+# rather than a measured value -- lower this further, or replace it with a
+# measured floor, the first time this class actually runs live.
 _FLOOR_BY_BACKEND_AND_CLASS: dict[tuple[str, str], int] = {
     ("fts5", "single_hop"): 3,
     ("fts5", "multi_hop"): 2,
@@ -189,6 +199,7 @@ _FLOOR_BY_BACKEND_AND_CLASS: dict[tuple[str, str], int] = {
     ("fts5", "disambiguation"): 3,
     ("fts5", "distractor_robustness"): 1,
     ("fts5", "redundancy"): 1,
+    ("fts5", "follow_through"): 1,
     ("fts5", "abstention"): 0,
     ("vector", "single_hop"): 3,
     ("vector", "multi_hop"): 2,
@@ -196,6 +207,7 @@ _FLOOR_BY_BACKEND_AND_CLASS: dict[tuple[str, str], int] = {
     ("vector", "disambiguation"): 3,
     ("vector", "distractor_robustness"): 1,
     ("vector", "redundancy"): 1,
+    ("vector", "follow_through"): 1,
     ("vector", "abstention"): 0,
 }
 
