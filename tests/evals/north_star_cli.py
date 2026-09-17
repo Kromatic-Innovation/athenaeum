@@ -58,6 +58,7 @@ from tests.evals.corpus import SCALES, build_corpus
 from tests.evals.harness import EvalSession
 from tests.evals.north_star_report import (
     DEFAULT_MEASUREMENTS_DIR,
+    DEFAULT_VERDICT_ARM,
     append_rollout_row,
     build_report,
     load_rollout_rows,
@@ -150,6 +151,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="price the grid and print the projection; makes zero paid calls",
+    )
+    parser.add_argument(
+        "--verdict-arm",
+        default=DEFAULT_VERDICT_ARM,
+        help=(
+            "the ONE Athenaeum arm the design-doc §7 decision block reads (ruling R1) -- "
+            f"default: {DEFAULT_VERDICT_ARM!r}, the shipped configuration. Other arms still "
+            "appear in the report's per-dimension tables, never in the verdicts."
+        ),
     )
     return parser
 
@@ -276,7 +286,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         abort_reason = str(exc)
 
     rows = load_rollout_rows(store)
-    report = build_report(rows, aborted=aborted, abort_reason=abort_reason)
+    report = build_report(
+        rows, aborted=aborted, abort_reason=abort_reason, verdict_arm=args.verdict_arm
+    )
     path = write_report(report, out_dir=args.out_dir)
     print(f"report written: {path}")
     return 0 if not aborted else 1

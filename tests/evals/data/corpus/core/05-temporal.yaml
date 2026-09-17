@@ -144,3 +144,116 @@
     The ceiling was 250 GBP through 2025.
 
     Historical note: raised to 500 GBP in January 2026.
+
+# --- person/company temporal (issue athenaeum#1744) -------------------------
+#
+# The three pairs above cover facts living on `note` pages. `condition 1`
+# (docs/design/native-memory-baseline.md §7)'s relationship subset is
+# `single_hop`/`multi_hop`/`disambiguation`/`temporal` probes whose
+# `expected_uids` resolve to a `person` or `company` page -- none of the
+# temporal pairs above qualify, so the subset had zero temporal probes.
+# These three plant the missing recency facts directly on a person/company
+# page: last-contact date, first-contact date, and a changed-role date.
+
+- uid: person-callum-drews
+  type: person
+  name: Callum Drews
+  tags: [person, client-contact, current]
+  source_ref: "session-2026-06-14"
+  created: 2026-01-15
+  updated: 2026-06-14
+  links: [contact-callum-drews-superseded]
+  body: |
+    # Callum Drews
+
+    Callum Drews is the day-to-day contact on his account. The most recent
+    call with him was on 14 June 2026, covering renewal terms.
+
+    This supersedes the earlier contact log entry.
+
+    Internal reference tag: Fenmoor.
+- uid: contact-callum-drews-superseded
+  type: note
+  name: Callum Drews contact log (former, 2 May 2026)
+  tags: [person, superseded]
+  source_ref: "session-2026-05-02"
+  created: 2026-05-02
+  updated: 2026-06-14
+  links: [person-callum-drews]
+  superseded_by: "Callum Drews"
+  body: |
+    # Callum Drews contact log (former, 2 May 2026)
+
+    The last recorded contact with Callum Drews was logged as 2 May 2026.
+
+    Historical note: superseded by a more recent call.
+
+- uid: client-thorncastle
+  type: company
+  name: Thorncastle
+  tags: [client, current]
+  source_ref: "session-2026-02-09"
+  created: 2026-02-09
+  updated: 2026-02-09
+  links: [contact-thorncastle-superseded]
+  body: |
+    # Thorncastle
+
+    Thorncastle is a retainer client, introduced to us the previous quarter
+    through an existing contact. The engagement's first-contact date was
+    logged as 9 February 2026.
+
+    This supersedes the earlier first-contact estimate.
+
+    Internal reference tag: Quenfrost.
+- uid: contact-thorncastle-superseded
+  type: note
+  name: Thorncastle first-contact log (former, 2025 estimate)
+  tags: [client, superseded]
+  source_ref: "session-2025-11-20"
+  created: 2025-11-20
+  updated: 2026-02-09
+  links: [client-thorncastle]
+  superseded_by: "Thorncastle"
+  body: |
+    # Thorncastle first-contact log (former, 2025 estimate)
+
+    An earlier note estimated first contact with Thorncastle in November
+    2025; that was a preliminary introduction, not the start of the
+    engagement.
+
+    Historical note: corrected after the engagement's actual start date
+    was confirmed.
+
+- uid: person-tamsin-ferro
+  type: person
+  name: Tamsin Ferro
+  tags: [person, delivery, current]
+  source_ref: "session-2026-03-01"
+  created: 2026-01-05
+  updated: 2026-03-01
+  links: [role-tamsin-ferro-superseded]
+  body: |
+    # Tamsin Ferro
+
+    Tamsin Ferro was promoted from associate to engagement partner on
+    1 March 2026 and now signs off her own client renewals.
+
+    This supersedes the earlier associate-role record.
+
+    Internal reference tag: Cindervane.
+- uid: role-tamsin-ferro-superseded
+  type: note
+  name: Tamsin Ferro role (former, associate)
+  tags: [person, superseded]
+  source_ref: "session-2026-01-05"
+  created: 2026-01-05
+  updated: 2026-03-01
+  links: [person-tamsin-ferro]
+  superseded_by: "Tamsin Ferro"
+  body: |
+    # Tamsin Ferro role (former, associate)
+
+    Tamsin Ferro previously held the associate title.
+
+    Historical note: superseded by a later promotion.

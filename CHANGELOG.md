@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`temporal` probes with person/company expected pages (issue
+  athenaeum#1744).** The go/no-go rule's condition 1 relationship subset
+  (`_relationship_probe_ids` in `tests/evals/north_star_report.py`) is
+  `single_hop`/`multi_hop`/`disambiguation`/`temporal` probes whose
+  `expected_uids` resolve to a `person` or `company` page. Every existing
+  `temporal` probe targeted a `note` page, so the subset carried zero
+  `temporal` probes — Quine's mutation review of PR athenaeum#1740 found that
+  dropping `temporal` from that class list was an equivalent mutant. Three
+  new `temporal` probes plant a last-contact date, a first-contact date,
+  and a changed-role date directly on a person/company page (each with its
+  own current/superseded pair and a distinct planted answer token), and
+  `tests/test_eval_corpus_generator.py` now asserts the relationship subset
+  at `core` contains at least one probe of each of the four classes, so the
+  class list cannot become an equivalent mutant again.
+- **Token-free eval-receipt check for LLM-surface PRs (issue athenaeum#1731).**
+  A new advisory workflow, `.github/workflows/eval-receipt-check.yml`,
+  intersects a PR's changed paths against the LLM surface list
+  (`.github/llm-surface.txt`) and, when non-empty, requires either an
+  `Evals: <run-url>` receipt pointing at a matching `evals.yml`
+  `workflow_dispatch` run or an `Evals: not needed — <reason>` line in the
+  PR body — closing the gap where `evals.yml`'s `eval` job (manual-dispatch
+  only since athenaeum#1727) could be silently skipped on a change that
+  should have prompted one. Zero network beyond `gh` reads against the
+  default `GITHUB_TOKEN`; no Anthropic key; `evals.yml`'s own triggers are
+  untouched. The receipt's run must belong to the `Evals` workflow and
+  conclude `success` — a dispatch of a different workflow (e.g. `ci.yml`)
+  at the right SHA, or a failed/cancelled `Evals` run, does not satisfy the
+  gate. The decision logic lives in `scripts/check_llm_surface_receipt.py`
+  (offline-testable via an injected run-lookup); `tests/test_llm_surface.py`
+  fails CI if a file importing `LLMBackend`, a module registered in
+  `prompt_registry.py`'s `PROMPTS`, or a `.md` file under
+  `src/athenaeum/prompts/` is missing from the surface list. Documented in
+  `tests/evals/README.md`.
 - **`follow_through` synthetic-corpus probe class (issue athenaeum#1737).** A
   new probe class whose complete answer requires opening the page a query
   surfaces and following a body `[[wikilink]]` to a second page the query's
@@ -32,6 +65,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `recall` calls answering one such probe; its two `tool_result` bodies are
   the real, unedited output of `recall_search` run against the materialized
   `core` corpus over a real `fts5` index, not a hand-typed approximation.
+- **`tests/evals/north_star_report.py`: cost per correct answer, the
+  cost-ratio decision reading, and the three go/no-go verdicts (athenaeum#1734,
+  design lock `docs/design/native-memory-baseline.md` §6/§7).** Adds
+  `compute_cost_per_correct` (total input+output tokens for a
+  (probe_class, corpus_scale, arm) cell divided by correct answers in the
+  cell -- read cost only in Phase 1, plus write cost amortised over the
+  full probe set at that scale once Phase 2 `WriteCost` rows exist, with
+  raw write spend printed alongside; undefined, never infinite or zero,
+  when a cell has zero correct answers), `compute_cost_ratios` (Athenaeum's
+  cost against the better native arm's, read as `>2.0x fail`, `<=2.0x
+  limit`, `<=1.0x target`, `<=0.5x aspirational`), `compute_verdicts` (the
+  three §7 conditions per scale over the relationship-use-case probe
+  subset -- single_hop/multi_hop/disambiguation/temporal probes whose
+  expected pages are person or company type), and `compute_cutoff_scale`
+  (the smallest scale at or above `medium` where all three hold, or
+  `"none"` with the failing condition named per scale). `render_decision_block`
+  renders the result at the top of the report, before any dimension table.
+  Post-review corrections (Quine review of PR#1740): all three conditions
+  now read the SAME pinned Athenaeum arm (`push_breadcrumb_pull` by
+  default, overridable via `--verdict-arm`) rather than a different,
+  most-favourable delivery arm per condition; condition 1 is a POOLED
+  correctness rate over the whole relationship-probe subset rather than a
+  max taken over per-class rates; condition 3 reads `native-zero` (a pass)
+  when the better native arm scored zero correct answers while the
+  verdict arm scored at least one, and `undefined` (a fail) only when both
+  sides scored zero; condition 2 skips (and names) any class where either
+  side has no gradable rows instead of silently treating it as a pass;
+  condition 3 gives a class with no native rows at a scale AT ALL the same
+  skip-and-name treatment, and fails the scale outright only when no class
+  at it has any native cost data to compare.
 - **`docs/use-cases.md`: the north star decomposed into the questions memory
   is actually asked, and a kill criterion.** "Surface the right information at
   the right time" is a quality bar with no customer attached, and nothing in
