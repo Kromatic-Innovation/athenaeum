@@ -46,8 +46,14 @@ from tests.evals.harness import EvalSession
 ROLLOUT_TOKEN_CEILING = 2_000_000
 
 
-def assert_rollout_ceiling(session: EvalSession) -> None:
-    """Assert *session*'s accumulated tokens are within :data:`ROLLOUT_TOKEN_CEILING`.
+def assert_rollout_ceiling(session: EvalSession, *, ceiling: int | None = None) -> None:
+    """Assert *session*'s accumulated tokens are within the rollout ceiling.
+
+    *ceiling* defaults to :data:`ROLLOUT_TOKEN_CEILING`. A caller that
+    resolved a per-run ceiling (``north_star_cli.py``'s ``--max-tokens``, or
+    the ceiling derived from its ``--max-spend`` — issue athenaeum#1754)
+    passes it here, so the teardown assert and the mid-grid check agree on
+    one number. The pytest fixture passes nothing and keeps the constant.
 
     Mirrors ``tests/evals/conftest.py``'s ``eval_session`` teardown shape
     exactly (same ``input_tokens + output_tokens`` total, same "fail loudly
@@ -55,9 +61,11 @@ def assert_rollout_ceiling(session: EvalSession) -> None:
     rollout ceiling and — critically — against whatever *session* instance
     the caller passes, never ``harness``'s own component-eval accumulator.
     """
+    effective = ROLLOUT_TOKEN_CEILING if ceiling is None else ceiling
     total_tokens = session.input_tokens + session.output_tokens
-    assert total_tokens <= ROLLOUT_TOKEN_CEILING, (
+    assert total_tokens <= effective, (
         f"rollout run exceeded token ceiling ({total_tokens} > "
-        f"{ROLLOUT_TOKEN_CEILING}) — shrink the grid, the --scale tier, or "
-        "raise ROLLOUT_TOKEN_CEILING deliberately"
+        f"{effective}) — shrink the grid, the --scale tier, or raise the "
+        "ceiling deliberately (--max-tokens / --max-spend, or "
+        "ROLLOUT_TOKEN_CEILING when neither is given)"
     )

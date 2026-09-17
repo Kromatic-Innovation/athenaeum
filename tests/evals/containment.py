@@ -191,6 +191,12 @@ class CellTokenEstimate:
     input_tokens: int
     output_tokens: int
 
+    @property
+    def total_tokens(self) -> int:
+        """Input + output — the shape a TOKEN ceiling is expressed in, as
+        opposed to the two-rate split pricing needs."""
+        return self.input_tokens + self.output_tokens
+
 
 #: An agent rollout cell is a multi-turn tool-using run, not a single
 #: completion — conservatively sized well above a single component-eval
@@ -199,6 +205,23 @@ class CellTokenEstimate:
 #: number rather than a false-precision figure: this is a PRE-FLIGHT
 #: estimate, not a measurement.
 DEFAULT_CELL_TOKEN_ESTIMATE = CellTokenEstimate(input_tokens=20_000, output_tokens=4_000)
+
+#: The north-star grid's own per-cell estimate, MEASURED rather than declared
+#: (issue athenaeum#1754). Source: GitHub Actions run 35200779015 — the first
+#: live full-grid dispatch — which accumulated 2,018,960 tokens over 392
+#: completed cells, i.e. about 5,150 tokens per cell, against the 24,000 the
+#: shared :data:`DEFAULT_CELL_TOKEN_ESTIMATE` guessed. Separate from that
+#: constant rather than replacing it: ``containment_cli.py`` prices a
+#: different driver's cells from it, and this provenance is a north-star
+#: measurement only.
+#:
+#: What is evidence and what is not: the 5,150 TOTAL is measured; the 5:1
+#: input/output split is inherited from ``DEFAULT_CELL_TOKEN_ESTIMATE`` (that
+#: run's summary recorded the accumulated total, not the two halves). The
+#: split matters because :func:`tokens_for_spend` derives a token ceiling
+#: from a USD ceiling at this mix — a wrong mix mis-sizes that ceiling even
+#: though the total is right.
+NORTH_STAR_CELL_TOKEN_ESTIMATE = CellTokenEstimate(input_tokens=4_300, output_tokens=850)
 
 #: Declared (not measured) per-cell wall-clock estimate, the TIME sibling of
 #: :data:`DEFAULT_CELL_TOKEN_ESTIMATE`'s token estimate (issue athenaeum#1751).
@@ -266,6 +289,40 @@ class SpendEstimate:
     estimated_usd: float
     max_spend_usd: float
     model: str
+
+
+def tokens_for_spend(
+    max_spend_usd: float,
+    *,
+    model: str,
+    per_cell: CellTokenEstimate = DEFAULT_CELL_TOKEN_ESTIMATE,
+) -> int:
+    """How many tokens *max_spend_usd* buys at *model*'s rate (athenaeum#1754).
+
+    The inverse of :func:`price_grid`'s arithmetic, and deliberately built
+    out of the same two pieces — ``athenaeum.models.TokenUsage``'s rate
+    table and *per_cell*'s input/output mix — so a USD ceiling and a token
+    ceiling derived from it can never disagree about what a cell costs.
+    Prices one cell, then scales: tokens = spend / cost_per_cell *
+    tokens_per_cell.
+
+    The mix is load-bearing, not incidental: input and output tokens are
+    priced differently (5x apart on the Haiku tier), so "tokens per dollar"
+    is only meaningful relative to an assumed split. Pass the same
+    *per_cell* the caller prices with.
+
+    Returns 0 for a zero-or-negative spend or an unpriced model, which the
+    caller should read as "no ceiling could be derived" and fall back to its
+    own constant rather than treating as a ceiling of zero.
+    """
+    if max_spend_usd <= 0:
+        return 0
+    usage = TokenUsage()
+    usage.add_tokens(per_cell.input_tokens, per_cell.output_tokens, model=model)
+    cost_per_cell = usage.estimated_cost_usd
+    if cost_per_cell <= 0:
+        return 0
+    return int(max_spend_usd / cost_per_cell * per_cell.total_tokens)
 
 
 def price_grid(

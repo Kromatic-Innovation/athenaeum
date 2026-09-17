@@ -75,6 +75,10 @@ on:
         description: "north_star_cli.py --max-spend (refusal ceiling, USD)"
         required: false
         default: "1.0"
+      north_star_max_tokens:
+        description: "north_star_cli.py --max-tokens (per-run token ceiling; blank = derived from --max-spend)"
+        required: false
+        default: ""
       north_star_workers:
         description: "north_star_cli.py --workers (cells run concurrently; 1 = serial)"
         required: false
@@ -243,6 +247,7 @@ jobs:
           NORTH_STAR_SCALE: ${{ github.event.inputs.north_star_scale }}
           NORTH_STAR_CORPUS_SCALES: ${{ github.event.inputs.north_star_corpus_scales }}
           NORTH_STAR_MAX_SPEND: ${{ github.event.inputs.north_star_max_spend }}
+          NORTH_STAR_MAX_TOKENS: ${{ github.event.inputs.north_star_max_tokens }}
           NORTH_STAR_WORKERS: ${{ github.event.inputs.north_star_workers }}
         run: |
           if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
@@ -251,6 +256,14 @@ jobs:
           CORPUS_SCALES_FLAG=()
           if [ -n "${NORTH_STAR_CORPUS_SCALES:-}" ]; then
             CORPUS_SCALES_FLAG=(--corpus-scales "$NORTH_STAR_CORPUS_SCALES")
+          fi
+          # Left off entirely when blank, so the CLI derives the token
+          # ceiling from --max-spend (issue athenaeum#1754) instead of this
+          # workflow hardcoding a second ceiling that could disagree with
+          # the dollar one.
+          MAX_TOKENS_FLAG=()
+          if [ -n "${NORTH_STAR_MAX_TOKENS:-}" ]; then
+            MAX_TOKENS_FLAG=(--max-tokens "$NORTH_STAR_MAX_TOKENS")
           fi
           # --store lands under measurements/ (not the system temp dir the
           # CLI defaults to) so a run killed at timeout-minutes still leaves
@@ -266,7 +279,8 @@ jobs:
             --workers "$NORTH_STAR_WORKERS" \
             --store measurements/north-star-store.jsonl \
             --out-dir measurements \
-            "${CORPUS_SCALES_FLAG[@]}"
+            "${CORPUS_SCALES_FLAG[@]}" \
+            "${MAX_TOKENS_FLAG[@]}"
 
       - name: Upload north-star report
         # `always()` so a failed, refused or TIMED-OUT run still ships what

@@ -683,10 +683,13 @@ def test_main_passes_a_should_stop_that_flips_when_the_ceiling_trips(
         return _stub_records(probe_id, corpus_scale)
 
     monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _capturing_stub)
-    # One group's usage already exceeds this.
-    monkeypatch.setattr(north_star_cli, "ROLLOUT_TOKEN_CEILING", 100)
 
-    assert north_star_cli.main(_small_grid_args(tmp_path, workers=1)) == 1
+    # One group's usage already exceeds this ceiling (issue athenaeum#1754:
+    # set via --max-tokens, the flag that now carries it).
+    assert (
+        north_star_cli.main([*_small_grid_args(tmp_path, workers=1), "--max-tokens", "100"])
+        == 1
+    )
 
     assert seen, "no group ever ran"
     assert all(callable(cb) for cb in seen), (

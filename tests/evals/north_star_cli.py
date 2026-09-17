@@ -34,7 +34,10 @@ pieces of shared state that makes safe and how each is handled.
 ``--dry-run`` makes **zero paid calls**: it prices the grid, prints the
 projection -- including the projected WALL CLOCK at the chosen worker
 count, so an operator can tell before dispatching whether a run fits the
-job's ``timeout-minutes`` -- and returns before constructing a client,
+job's ``timeout-minutes``, and (issue athenaeum#1754) the TOKEN CEILING
+that will apply beside the projected token total, REFUSING up front when
+the projection exceeds it rather than aborting mid-grid -- and returns
+before constructing a client,
 spawning ``claude -p``, or running a single cell — see
 ``test_north_star_cli.py::test_dry_run_never_constructs_a_client``, which
 mirrors ``tests/test_shadow_parity.py``'s ``TestDryRunZeroCalls`` (issue
@@ -63,7 +66,7 @@ from pathlib import Path
 
 from tests.evals.containment import (
     DEFAULT_CELL_SECONDS,
-    DEFAULT_CELL_TOKEN_ESTIMATE,
+    NORTH_STAR_CELL_TOKEN_ESTIMATE,
     SCALE_BUDGETS,
     GridCell,
     ResultStore,
@@ -73,6 +76,7 @@ from tests.evals.containment import (
     price_grid,
     project_wall_clock_seconds,
     read_planned_cells,
+    tokens_for_spend,
     write_planned_cells,
 )
 from tests.evals.corpus import SCALES, build_corpus
@@ -126,6 +130,52 @@ DEFAULT_MAX_SPEND_USD = 1.0
 DEFAULT_WORKERS = 4
 
 
+def resolve_max_spend(args: argparse.Namespace) -> float:
+    """``--max-spend``, or its default when the flag was omitted.
+
+    The flag parses to ``None`` rather than straight to
+    :data:`DEFAULT_MAX_SPEND_USD` so :func:`resolve_token_ceiling` can tell
+    "the operator authorized a dollar figure" from "nobody said anything" --
+    the two want different token ceilings.
+    """
+    return DEFAULT_MAX_SPEND_USD if args.max_spend is None else args.max_spend
+
+
+def resolve_token_ceiling(args: argparse.Namespace) -> tuple[int, str]:
+    """The token ceiling this run enforces, and where it came from (athenaeum#1754).
+
+    Precedence, most explicit first:
+
+    1. ``--max-tokens`` -- an operator naming the ceiling directly.
+    2. ``--max-spend`` -- the ceiling that many dollars buys at ``--model``'s
+       rate and :data:`NORTH_STAR_CELL_TOKEN_ESTIMATE`'s input/output mix.
+       This is the point of the issue: the USD knob the operator already
+       sets governs the token guard too, so a run dispatched with
+       ``--max-spend 75`` cannot die at a 2,000,000-token constant with $73
+       still authorized.
+    3. :data:`ROLLOUT_TOKEN_CEILING` -- the fallback when neither was given,
+       and now ONLY that.
+
+    The constant is read through the module global on purpose, so a test
+    monkeypatching ``north_star_cli.ROLLOUT_TOKEN_CEILING`` still moves the
+    fallback.
+    """
+    if args.max_tokens is not None:
+        return args.max_tokens, "--max-tokens"
+    if args.max_spend is not None:
+        derived = tokens_for_spend(
+            args.max_spend,
+            model=args.model,
+            per_cell=NORTH_STAR_CELL_TOKEN_ESTIMATE,
+        )
+        if derived > 0:
+            return derived, f"derived from --max-spend ${args.max_spend:.2f} at {args.model}"
+    return (
+        ROLLOUT_TOKEN_CEILING,
+        "ROLLOUT_TOKEN_CEILING default (neither --max-tokens nor --max-spend given)",
+    )
+
+
 def _default_store_path() -> Path:
     """System temp dir, never the repo tree -- a separate function (not a
     module constant) so tests can monkeypatch it for isolation."""
@@ -146,8 +196,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-spend",
         type=float,
-        default=DEFAULT_MAX_SPEND_USD,
+        default=None,
         help=f"refuse to start above this priced USD total (default: ${DEFAULT_MAX_SPEND_USD:.2f})",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help=(
+            "token ceiling for THIS run, overriding the compiled-in "
+            f"{ROLLOUT_TOKEN_CEILING} (issue athenaeum#1754). Omitted, the ceiling is "
+            "derived from --max-spend at --model's price, so one knob governs both; "
+            "the constant applies only when neither flag is given."
+        ),
     )
     parser.add_argument(
         "--model",
@@ -289,6 +350,7 @@ def _run_cells(
     claude_binary: str,
     mode: str,
     workers: int = 1,
+    token_ceiling: int | None = None,
 ) -> None:
     """Group *cells* by (probe, corpus_scale, replicate) and run each
     not-yet-complete group through :func:`run_probe_all_arms` exactly once
@@ -331,6 +393,10 @@ def _run_cells(
     """
     if workers < 1:
         raise ValueError(f"--workers must be >= 1, got {workers}")
+    # ``None`` means "nobody resolved one" -- the module constant, read here
+    # rather than captured at def time so a monkeypatched global still moves
+    # it (issue athenaeum#1754).
+    effective_ceiling = ROLLOUT_TOKEN_CEILING if token_ceiling is None else token_ceiling
     already_done = store.completed_keys()
     groups: dict[tuple[str, str, int], list[GridCell]] = {}
     for cell in cells:
@@ -379,7 +445,7 @@ def _run_cells(
             for cell in group_cells:
                 append_rollout_row(store, cell, records[cell.arm])
             total_tokens = session.input_tokens + session.output_tokens
-            if total_tokens > ROLLOUT_TOKEN_CEILING:
+            if total_tokens > effective_ceiling:
                 # Set the flag BEFORE raising: every group still queued
                 # must see it and return without spending, which is what
                 # makes this stop ALL workers rather than only this one.
@@ -392,11 +458,12 @@ def _run_cells(
                 stop.set()
                 raise SpendCeilingExceededError(
                     f"rollout run exceeded token ceiling ({total_tokens} > "
-                    f"{ROLLOUT_TOKEN_CEILING}) mid-grid -- stopped every worker. "
+                    f"{effective_ceiling}) mid-grid -- stopped every worker. "
                     "Groups not yet started never run, and a group already in "
                     "flight stops at its next arm boundary, so the overshoot is "
                     "at most one cell per worker. Shrink the grid or the --scale "
-                    "tier, or raise ROLLOUT_TOKEN_CEILING deliberately."
+                    "tier, or raise the ceiling deliberately with --max-tokens "
+                    "(or a larger --max-spend, which derives it)."
                 )
 
     if effective_workers == 1:
@@ -445,6 +512,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"--workers must be >= 1, got {args.workers}", file=sys.stderr)
         return 1
     cells = _build_cells(args)
+    max_spend = resolve_max_spend(args)
+    token_ceiling, ceiling_source = resolve_token_ceiling(args)
+    projected_tokens = len(cells) * NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens
 
     # Printed BEFORE pricing, and therefore on the refusal path too (issue
     # athenaeum#1751): the operator question "does a full dispatch fit the
@@ -463,13 +533,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"for {len(cells)} cells at {effective_workers} workers "
             f"(~{DEFAULT_CELL_SECONDS:.0f}s/cell estimate)"
         )
+        # Beside the wall clock and (below) the price, because those are the
+        # three numbers an operator sizing a dispatch compares -- and, like
+        # the wall clock, printed before pricing so the price-refusal path
+        # shows it too (issue athenaeum#1754).
+        print(
+            f"token ceiling: {token_ceiling} ({ceiling_source}); "
+            f"projected {projected_tokens} tokens for {len(cells)} cells "
+            f"(~{NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens} tokens/cell estimate)"
+        )
 
     try:
         estimate = price_grid(
             cells,
             model=args.model,
-            max_spend_usd=args.max_spend,
-            per_cell=DEFAULT_CELL_TOKEN_ESTIMATE,
+            max_spend_usd=max_spend,
+            per_cell=NORTH_STAR_CELL_TOKEN_ESTIMATE,
         )
     except SpendCeilingExceededError as exc:
         print(str(exc), file=sys.stderr)
@@ -481,6 +560,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     if args.dry_run:
+        # Refuse HERE, after all three projection lines have printed, so the
+        # operator sees the wall clock, the ceiling and the price before the
+        # refusal rather than instead of them. A grid that would trip the
+        # ceiling mid-run is refused up front -- the failure mode issue
+        # athenaeum#1754 exists to end is discovering it 392 cells in.
+        if projected_tokens > token_ceiling:
+            print(
+                f"projected tokens {projected_tokens} exceed the token ceiling "
+                f"{token_ceiling} ({ceiling_source}) -- refusing to start. "
+                "Shrink --scale or the probe/corpus-scale/replicate lists, or "
+                "raise --max-tokens (or --max-spend, which derives it).",
+                file=sys.stderr,
+            )
+            return 1
         print("dry run: zero cells executed, zero paid calls made")
         return 0
 
@@ -507,8 +600,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             claude_binary=args.claude_binary,
             mode=args.mode,
             workers=args.workers,
+            token_ceiling=token_ceiling,
         )
-        assert_rollout_ceiling(session)
+        assert_rollout_ceiling(session, ceiling=token_ceiling)
     except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 -- see below
         # A partial ResultStore (fsync'd per row -- see ResultStore.append)
         # survives even a hard failure mid-grid; report it as PARTIAL rather
