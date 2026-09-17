@@ -3,7 +3,10 @@
 
 Run 35200779015 was dispatched with ``--max-spend 75`` and died at 392 of
 1392 cells on ``rollout run exceeded token ceiling (2018960 > 2000000)`` --
-about $2 spent against $75 authorized. The USD ceiling the operator set had
+about $3.35 spent against $75 authorized (2,018,960 tokens priced on Haiku
+4.5 at the INHERITED 5:1 input/output split; that run recorded only the
+total, so the split, and therefore the dollar figure, is an assumption --
+see ``NORTH_STAR_CELL_TOKEN_ESTIMATE``). The USD ceiling the operator set had
 no bearing on the token ceiling that actually stopped the run, and the
 dry-run projection (24,000 tokens/cell) was nearly five times the measured
 figure, so nothing warned anyone beforehand.
@@ -46,6 +49,16 @@ from tests.evals.rollout_session import ROLLOUT_TOKEN_CEILING
 #: Comfortably above ``small``'s priced total, so a test that means to
 #: exercise the TOKEN ceiling is never actually stopped by the USD one.
 GENEROUS_MAX_SPEND = "100.0"
+
+#: ``--scale small`` is 24 cells, so main's pre-flight projects
+#: 24 * 5,150 = 123,600 tokens. Any test that wants to reach the MID-GRID
+#: ceiling must sit above that, or the pre-flight refuses first and the run
+#: never starts (which is a different property, tested separately below).
+SMALL_GRID_PROJECTION = 24 * NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens
+
+#: Above the projection, below one group's stub spend (200,000) -- so the
+#: run starts and then trips at the first group boundary.
+MID_GRID_CEILING = "150000"
 
 
 def _stub_records(probe_id: str, corpus_scale: str) -> dict[str, RolloutRecord]:
@@ -94,10 +107,36 @@ def _burning_stub(
     mode: str = "cli",
     should_stop: Any = None,
 ) -> dict[str, RolloutRecord]:
-    """Spends 2,000 tokens per group -- over a 1-token ceiling, under a large one."""
+    """Spends 200,000 tokens per group -- over :data:`MID_GRID_CEILING`, under a large one."""
     session.observe_response(
         model,
-        SimpleNamespace(usage=SimpleNamespace(input_tokens=1000, output_tokens=1000)),
+        SimpleNamespace(usage=SimpleNamespace(input_tokens=100_000, output_tokens=100_000)),
+    )
+    return _stub_records(probe_id, corpus_scale)
+
+
+def _heavy_stub(
+    probe_id: str,
+    corpus_scale: str,
+    *,
+    session: EvalSession,
+    materialize_root: Any,
+    model: str,
+    search_backend: str,
+    claude_binary: str,
+    replicate: int,
+    mode: str = "cli",
+    should_stop: Any = None,
+) -> dict[str, RolloutRecord]:
+    """Spends 700,000 tokens per group: 2.8M over the 4-group small grid.
+
+    Sized to straddle :data:`ROLLOUT_TOKEN_CEILING` -- above the 2,000,000
+    constant, below a 3,000,000 ``--max-tokens`` -- so a teardown assert that
+    forgot to pass the run's own ceiling fails loudly.
+    """
+    session.observe_response(
+        model,
+        SimpleNamespace(usage=SimpleNamespace(input_tokens=350_000, output_tokens=350_000)),
     )
     return _stub_records(probe_id, corpus_scale)
 
@@ -163,6 +202,50 @@ def test_tokens_for_spend_is_the_inverse_of_the_price_table() -> None:
     assert tokens_for_spend(0.0, model="claude-haiku-4-5") == 0
 
 
+def test_deriving_a_ceiling_for_an_unpriced_model_is_refused() -> None:
+    """``_rates_for_model`` falls back to a BLENDED rate for an unknown id,
+    so a derived ceiling would be an authoritative-looking number computed
+    from a guess. Refuse, and name the model (Quine review of PR
+    athenaeum#1757)."""
+    with pytest.raises(ValueError, match="totally-made-up-model"):
+        tokens_for_spend(75.0, model="totally-made-up-model")
+    with pytest.raises(ValueError, match="--max-tokens"):
+        north_star_cli.resolve_token_ceiling(
+            _parse(["--max-spend", "75", "--model", "totally-made-up-model"])
+        )
+    # Naming the ceiling outright still works on an unpriced model: only the
+    # DERIVATION is refused, not the run.
+    ceiling, _ = north_star_cli.resolve_token_ceiling(
+        _parse(["--model", "totally-made-up-model", "--max-tokens", "777"])
+    )
+    assert ceiling == 777
+
+
+def test_a_zero_max_spend_reports_its_provenance_honestly() -> None:
+    """``--max-spend 0`` authorizes nothing and so derives nothing -- but the
+    provenance must not then claim no spend flag was given, which is a
+    different situation an operator would debug differently."""
+    ceiling, source = north_star_cli.resolve_token_ceiling(_parse(["--max-spend", "0"]))
+    assert ceiling == ROLLOUT_TOKEN_CEILING
+    assert "--max-spend $0.00 derives no ceiling" in source
+    assert "neither" not in source
+
+
+def test_a_non_positive_max_tokens_is_rejected_at_parse_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Same shape as ``--workers 0`` (issue athenaeum#1751): told at parse
+    time, not discovered from a mid-grid abort."""
+
+    def _exploding(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("an invalid --max-tokens must never run a cell")
+
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _exploding)
+    monkeypatch.setattr(north_star_cli, "_default_store_path", lambda: tmp_path / "r.jsonl")
+    assert north_star_cli.main(["--max-tokens", "0"]) == 1
+    assert "--max-tokens must be >= 1" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # AC1b: the flag reaches a real run
 # ---------------------------------------------------------------------------
@@ -171,8 +254,56 @@ def test_tokens_for_spend_is_the_inverse_of_the_price_table() -> None:
 def test_a_one_token_ceiling_aborts_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _burning_stub)
+    """A 1-token ceiling never runs a cell: the pre-flight catches it."""
+    def _exploding(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a ceiling below the projection must never run a cell")
+
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _exploding)
     assert north_star_cli.main([*_small_grid_args(tmp_path, tag="tiny"), "--max-tokens", "1"]) == 1
+
+
+def test_a_live_run_refuses_before_the_first_paid_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Not a dry-run property (Quine review of PR athenaeum#1757).
+
+    A real run whose projection already exceeds its ceiling would otherwise
+    pay for every cell up to the mid-grid trip and then abort -- exactly the
+    athenaeum#1754 failure. The pre-flight knows before the first call, so it
+    refuses there, naming both numbers.
+    """
+    def _exploding(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the pre-flight must refuse before any cell runs")
+
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _exploding)
+    assert (
+        north_star_cli.main([*_small_grid_args(tmp_path, tag="live"), "--max-tokens", "1000"])
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert f"projected tokens {SMALL_GRID_PROJECTION}" in err
+    assert "token ceiling 1000" in err
+
+
+def test_the_teardown_assert_uses_the_runs_own_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting ``ceiling=token_ceiling`` from main's teardown
+    ``assert_rollout_ceiling`` must fail here.
+
+    The stub burns 2.8M tokens under a 3M ``--max-tokens``: legal for this
+    run, illegal against the 2,000,000 constant. Every mid-grid check passes
+    (each group's running total stays under 3M), so the ONLY thing that can
+    turn this run red is a teardown assert still measuring against the
+    constant -- which is what makes a green result here load-bearing.
+    """
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _heavy_stub)
+    assert (
+        north_star_cli.main(
+            [*_small_grid_args(tmp_path, tag="teardown"), "--max-tokens", "3000000"]
+        )
+        == 0
+    )
 
 
 def test_a_large_ceiling_does_not_abort_the_same_run(
@@ -195,12 +326,14 @@ def test_the_abort_message_names_the_flag_not_the_constant(
     Pointing them at a source constant when a flag governs the run is the
     advice that produced athenaeum#1754 in the first place."""
     monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _burning_stub)
-    north_star_cli.main([*_small_grid_args(tmp_path, tag="msg"), "--max-tokens", "1"])
+    north_star_cli.main(
+        [*_small_grid_args(tmp_path, tag="msg"), "--max-tokens", MID_GRID_CEILING]
+    )
     report = next((tmp_path / "measurements-msg").glob("north-star-*.md")).read_text(
         encoding="utf-8"
     )
     assert "--max-tokens" in report
-    assert "exceeded token ceiling (2000 > 1)" in report
+    assert f"exceeded token ceiling (200000 > {MID_GRID_CEILING})" in report
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +431,38 @@ def test_the_per_cell_estimate_is_the_measured_one() -> None:
     assert NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens == 5_150
     measured_per_cell = 2_018_960 / 392
     assert 0.5 < NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens / measured_per_cell < 2.0
+
+
+def test_the_full_grid_dry_run_prices_at_the_measured_mix(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Pins ``main``'s ``price_grid(per_cell=...)`` argument, which no other
+    test reaches: 1392 cells at 4,300 in / 850 out on Haiku 4.5 ($1/$5 per
+    MTok) is 1392 * $0.00855 = $11.90. Reverting to the shared
+    ``DEFAULT_CELL_TOKEN_ESTIMATE`` mix would price the same grid at $55.68
+    and fail this band (Quine review of PR athenaeum#1757)."""
+    assert (
+        north_star_cli.main(
+            [
+                "--scale",
+                "full",
+                "--dry-run",
+                "--max-spend",
+                "50",
+                "--max-tokens",
+                "10000000",
+                "--out-dir",
+                str(tmp_path / "m"),
+                "--store",
+                str(tmp_path / "s.jsonl"),
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "cells=1392" in out
+    priced = float(out.split("estimated=$")[1].split()[0])
+    assert 11.85 < priced < 11.95, out
 
 
 def test_the_estimate_names_its_source_run() -> None:

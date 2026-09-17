@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from tests.evals import north_star_cli
-from tests.evals.containment import DEFAULT_CELL_TOKEN_ESTIMATE, price_grid
+from tests.evals.containment import NORTH_STAR_CELL_TOKEN_ESTIMATE, price_grid
 from tests.evals.corpus import SCALES
 from tests.evals.north_star_report import DEFAULT_VERDICT_ARM, load_rollout_rows
 from tests.evals.rollout import ALL_ARMS, RolloutRecord, TurnTokenUsage
@@ -106,7 +106,10 @@ def test_default_max_spend_covers_smoke_scale() -> None:
         cells,
         model=north_star_cli.DEFAULT_ROLLOUT_MODEL,
         max_spend_usd=north_star_cli.DEFAULT_MAX_SPEND_USD,
-        per_cell=DEFAULT_CELL_TOKEN_ESTIMATE,
+        # The estimate THIS driver prices with (issue athenaeum#1754) -- not
+        # the shared default, which prices a different driver's cells and
+        # would let this test pass while main's own pricing changed.
+        per_cell=NORTH_STAR_CELL_TOKEN_ESTIMATE,
     )  # must not raise
     assert estimate.estimated_usd < north_star_cli.DEFAULT_MAX_SPEND_USD
     # smoke caps probe/corpus_scale/replicate to 1 each, but every selected

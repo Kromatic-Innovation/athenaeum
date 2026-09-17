@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from athenaeum.models import TokenUsage
+from athenaeum.models import TokenUsage, model_has_price
 
 # ---------------------------------------------------------------------------
 # Grid cells + the --scale knob
@@ -311,10 +311,25 @@ def tokens_for_spend(
     is only meaningful relative to an assumed split. Pass the same
     *per_cell* the caller prices with.
 
-    Returns 0 for a zero-or-negative spend or an unpriced model, which the
-    caller should read as "no ceiling could be derived" and fall back to its
-    own constant rather than treating as a ceiling of zero.
+    Returns 0 for a zero-or-negative spend, which the caller should read as
+    "no ceiling could be derived" and fall back to its own constant rather
+    than treating as a ceiling of zero.
+
+    REFUSES, by raising :class:`ValueError` naming the model, when *model*
+    has no real rate: ``_rates_for_model`` would silently fall back to the
+    BLENDED rate, and a ceiling derived from a blended guess is a number
+    that looks authoritative and is not. Refusing to derive one is the
+    honest answer -- an operator on an unpriced model can still name the
+    ceiling outright with ``--max-tokens``.
     """
+    if not model_has_price(model):
+        raise ValueError(
+            f"cannot derive a token ceiling for {model!r}: it has no rate in the "
+            "active price table, so any derived figure would come from the "
+            "blended fallback rate rather than the model's own. Pass "
+            "--max-tokens explicitly, or add the model to "
+            "athenaeum.models._MODEL_RATES_USD_PER_MTOK."
+        )
     if max_spend_usd <= 0:
         return 0
     usage = TokenUsage()

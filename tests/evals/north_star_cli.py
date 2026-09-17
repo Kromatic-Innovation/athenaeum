@@ -170,6 +170,15 @@ def resolve_token_ceiling(args: argparse.Namespace) -> tuple[int, str]:
         )
         if derived > 0:
             return derived, f"derived from --max-spend ${args.max_spend:.2f} at {args.model}"
+        # ``--max-spend 0`` (or negative) authorizes nothing, so it derives
+        # nothing -- but the provenance must SAY that rather than claim no
+        # spend flag was given, which is a different thing an operator would
+        # debug differently.
+        return (
+            ROLLOUT_TOKEN_CEILING,
+            f"ROLLOUT_TOKEN_CEILING default (--max-spend ${args.max_spend:.2f} "
+            "derives no ceiling)",
+        )
     return (
         ROLLOUT_TOKEN_CEILING,
         "ROLLOUT_TOKEN_CEILING default (neither --max-tokens nor --max-spend given)",
@@ -511,6 +520,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.workers < 1:
         print(f"--workers must be >= 1, got {args.workers}", file=sys.stderr)
         return 1
+    # Validated the same way and in the same place as --workers: a ceiling of
+    # zero or less is not a tighter budget, it is a grid that can never run a
+    # cell, and finding that out from a mid-grid abort message is strictly
+    # worse than being told at parse time.
+    if args.max_tokens is not None and args.max_tokens < 1:
+        print(f"--max-tokens must be >= 1, got {args.max_tokens}", file=sys.stderr)
+        return 1
     cells = _build_cells(args)
     max_spend = resolve_max_spend(args)
     token_ceiling, ceiling_source = resolve_token_ceiling(args)
@@ -559,21 +575,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"estimated=${estimate.estimated_usd:.4f} model={args.model}"
     )
 
+    # Deliberately NOT inside `if args.dry_run` (Quine review of PR
+    # athenaeum#1757): a LIVE run whose projection already exceeds its own
+    # ceiling is going to abort mid-grid having paid for every cell up to
+    # that point, which is precisely the athenaeum#1754 failure mode. The
+    # pre-flight knows that before the first paid call, so it refuses here
+    # for real runs and dry runs alike -- and after all three projection
+    # lines have printed on the dry-run path, so the operator sees the wall
+    # clock, the ceiling and the price rather than only the refusal.
+    if projected_tokens > token_ceiling:
+        print(
+            f"projected tokens {projected_tokens} exceed the token ceiling "
+            f"{token_ceiling} ({ceiling_source}) -- refusing to start. "
+            "Shrink --scale or the probe/corpus-scale/replicate lists, or "
+            "raise --max-tokens (or --max-spend, which derives it).",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.dry_run:
-        # Refuse HERE, after all three projection lines have printed, so the
-        # operator sees the wall clock, the ceiling and the price before the
-        # refusal rather than instead of them. A grid that would trip the
-        # ceiling mid-run is refused up front -- the failure mode issue
-        # athenaeum#1754 exists to end is discovering it 392 cells in.
-        if projected_tokens > token_ceiling:
-            print(
-                f"projected tokens {projected_tokens} exceed the token ceiling "
-                f"{token_ceiling} ({ceiling_source}) -- refusing to start. "
-                "Shrink --scale or the probe/corpus-scale/replicate lists, or "
-                "raise --max-tokens (or --max-spend, which derives it).",
-                file=sys.stderr,
-            )
-            return 1
         print("dry run: zero cells executed, zero paid calls made")
         return 0
 
