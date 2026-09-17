@@ -182,6 +182,11 @@ and a read-only comparison cannot see it.
 all probe classes. Answers: at each scale, does Athenaeum's delivery beat the
 model's own search over the same content?
 
+Every non-abstention probe's `must_not_rank` set is now audited (issue
+athenaeum#1777) -- authored where a plausible corpus false positive exists,
+or else marked `precision: n/a` with a reason -- as ground truth for the
+precision/contamination tables item I (athenaeum#1782) will consume.
+
 **Phase 2 — write path.** A raw-observation generator emits the same stream
 of observations to both systems. Native: a sequence of Claude Code sessions
 with auto memory enabled, fed the observations, writing whatever the model

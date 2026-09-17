@@ -25,32 +25,54 @@
   probe_class: single_hop
   query: "what is the firm's PTO allowance?"
   expected_uids: [policy-pto]
+  must_not_rank: [pto-allowance-superseded]
   distractor_terms: ["PTO", "annual leave", "holiday allowance"]
   answer_tokens: ["Cinderquill"]
+  note: >-
+    must_not_rank (athenaeum#1777): the superseded temporal note shares almost
+    all of "PTO allowance" vocabulary and titles itself with the current
+    figure's own former value -- a stale answer a keyword search plausibly
+    surfaces.
 
 - id: confidentiality_rule
   probe_class: single_hop
   query: "can we share one client's engagement details with another client?"
   expected_uids: [policy-confidentiality]
+  must_not_rank: [client-northgate]
   distractor_terms: ["confidentiality", "client disclosure"]
   answer_tokens: ["Harrowvex"]
+  note: >-
+    must_not_rank (athenaeum#1777): Northgate's own page states it "carries
+    additional confidentiality terms", a strong lexical match for
+    "confidentiality" that never states the firm-wide cross-client rule the
+    query asks for.
 
 - id: bluewater_terms
   probe_class: single_hop
   query: "quote the Bluewater retainer terms verbatim"
   expected_uids: [client-bluewater]
   distractor_terms: ["Bluewater", "retainer terms"]
+  must_not_rank: [obs-retainer-utilisation]
   answer_tokens: ["Thornmere"]
   note: >-
     Topic extraction is what rescues the proper noun "Bluewater" from the meta
     instruction "quote ... verbatim". A purely lexical extractor drops it.
+    must_not_rank (athenaeum#1777): the utilisation observation shares
+    "Bluewater" and "retainer" vocabulary but carries a usage statistic, not
+    the verbatim retainer terms the query asks to be quoted.
 
 - id: onboarding_length
   probe_class: single_hop
   query: "how long does onboarding a new retainer client take?"
   expected_uids: [policy-onboarding]
+  must_not_rank: [note-atlas-onboarding-review]
   distractor_terms: ["onboarding", "kickoff"]
   answer_tokens: ["Larkspindle"]
+  note: >-
+    must_not_rank (athenaeum#1777): the Atlas onboarding review shares
+    "onboarding" vocabulary heavily and reads like a plausible answer, but it
+    is the case study that prompted the policy change, not the duration
+    itself.
 
 # --- multi hop --------------------------------------------------------------
 
@@ -60,6 +82,7 @@
     who signs off discretionary spend over 500 GBP, and will he clear it by
     email alone or does he insist on a direct conversation first?
   expected_uids: [policy-budget-approval, person-amir-osei]
+  must_not_rank: [budget-threshold-current]
   distractor_terms: ["discretionary spend", "500 GBP", "direct conversation"]
   answer_tokens: ["Voltmere"]
   note: >-
@@ -68,6 +91,10 @@
     alone and insists on hearing the request in person before agreeing.
     Retrieving either page alone yields a confidently incomplete answer,
     which is why both uids are required.
+    must_not_rank (athenaeum#1777): the temporal "current threshold" note
+    restates the same 500 GBP ceiling with heavy vocabulary overlap but never
+    names who personally signs off -- half an answer to a probe that requires
+    the name.
 
 - id: portal_design_reviewer
   probe_class: multi_hop
@@ -76,12 +103,16 @@
     review happen only once before launch, or does the reviewer check back
     again after it ships?
   expected_uids: [project-portal-refresh, person-hana-lindqvist]
+  must_not_rank: [project-portal-hosting]
   distractor_terms: ["portal", "launch"]
   answer_tokens: ["Greywisp"]
   note: >-
     The project page names the design lead (athenaeum#1768); only her own
     page says the review is not a one-time launch gate -- she revisits every
     shipped screen a month afterward to confirm it still meets her bar.
+    must_not_rank (athenaeum#1777): the hosting-migration workstream shares
+    "portal" vocabulary strongly but is about infrastructure, not the
+    client-facing design review the query asks about.
 
 - id: ratecard_tooling_owner
   probe_class: multi_hop
@@ -89,6 +120,7 @@
     which repository generates the rate card, and who would need to be
     looped in if the system behind it stopped working?
   expected_uids: [repo-rowanwrenfield, tool-buildpipe]
+  must_not_rank: [tool-gridbook]
   distractor_terms: ["rate card", "stopped working"]
   answer_tokens: ["Fennorack"]
   note: >-
@@ -98,6 +130,10 @@
     which shared the literal words "rate", "card", and "build" with the
     buildpipe page and so was reachable by the query's own vocabulary
     without following the hop.
+    must_not_rank (athenaeum#1777): Gridbook's own page names both "rate
+    card" and the rowanwrenfield tooling, an almost-complete vocabulary
+    match, but Gridbook is the spreadsheet the rate card is generated INTO,
+    not the repository that generates it or its build owner.
 
 # --- temporal / knowledge update --------------------------------------------
 
@@ -185,19 +221,29 @@
   probe_class: disambiguation
   query: "tell me about Wrenfield"
   expected_uids: [person-rowan-wrenfield, person-ilva-wrenfield, person-tovah-wrenfield]
+  must_not_rank: [org-wrenfield-associates]
   distractor_terms: ["Wrenfield", "Wrenfield Associates"]
   answer_tokens: ["Hollowmarsh"]
   note: >-
     A bare surname is genuinely ambiguous across several people plus an org.
     The correct behaviour is to surface the ambiguity, not to answer
     confidently about one Wrenfield. Scored on distinct-page count, not a single hit.
+    must_not_rank (athenaeum#1777): the partnership entity is a literal-text
+    "Wrenfield" match but is a company, not one of the ambiguous people the
+    query is genuinely asking to disambiguate among.
 
 - id: given_name_is_ambiguous
   probe_class: disambiguation
   query: "who is Rowan?"
   expected_uids: [person-rowan-wrenfield, person-rowan-deverell]
+  must_not_rank: [project-pricing-review]
   distractor_terms: ["Rowan"]
   answer_tokens: ["Sablethorn"]
+  note: >-
+    must_not_rank (athenaeum#1777): the pricing review's body names "Rowan
+    Wrenfield" twice, so a keyword search on "Rowan" plausibly surfaces it --
+    but it is a project page describing an outcome, not a page that answers
+    who Rowan is.
 
 # --- abstention -------------------------------------------------------------
 # Nothing in the corpus answers these. Returning a confident wrong page is the
@@ -300,6 +346,11 @@
     own page (athenaeum#1766) says she reviews cost-escalation clauses each
     spring and flags renegotiation before the March budget cycle, reached by
     following the client page's link.
+    precision: n/a (athenaeum#1777) -- "Fenwick Systems" and "Dara Holt" are
+    invented names that share no meaningful vocabulary with any other core
+    page; the generic "retainer client" phrase alone is too broad to name a
+    single plausible false positive without inventing one, which this audit
+    is not permitted to do.
 
 - id: corvale_holdings_history
   probe_class: follow_through
@@ -307,6 +358,7 @@
     what is our history with Corvale Holdings, and how has any current work
     with them gone against plan?
   expected_uids: [client-corvale-holdings, project-platform-cutover-programme]
+  must_not_rank: [project-portal-hosting]
   distractor_terms: ["Corvale Holdings", "retainer client", "migration"]
   answer_tokens: ["Halvorwick", "Ossmarl"]
   note: >-
@@ -314,6 +366,10 @@
     migration programme but says nothing about it slipping; only the
     programme's own page (athenaeum#1766) carries the six-week cutover delay
     from the vendor's quarterly freeze.
+    must_not_rank (athenaeum#1777): the portal hosting workstream is aliased
+    "hosting migration" -- a keyword search on "migration" plausibly
+    surfaces it -- but it is unrelated infrastructure work, not Corvale
+    Holdings' platform cutover.
 
 - id: pinemarsh_goal_rationale
   probe_class: follow_through
@@ -328,6 +384,11 @@
     the goal but not the constraint; only the decision page (athenaeum#1766)
     carries the forty-engineer-day cap set after a prior consolidation effort
     ran three times over its original estimate.
+    precision: n/a (athenaeum#1777) -- "Pinemarsh" is an invented, unique
+    name. The only other page sharing "tooling" (policy-tooling-procurement)
+    covers software-purchase approval with no overlap on "goal",
+    "consolidation", or "constraint" -- too weak to be a plausible grep false
+    positive.
 
 - id: gilcrest_vendor_decision
   probe_class: follow_through
@@ -335,6 +396,7 @@
     why did we choose Gilcrest as the ticketing vendor, and did the
     arrangement guard against cost changes down the road?
   expected_uids: [decision-ticketing-vendor-gilcrest, person-mireille-santos]
+  must_not_rank: [decision-retire-anchorline]
   distractor_terms: ["Gilcrest", "ticketing vendor", "pricing"]
   answer_tokens: ["Oakenspire", "Brindlemoor"]
   note: >-
@@ -342,6 +404,10 @@
     decision page gives the pricing rationale but not the contract terms;
     only her own page (athenaeum#1766) carries the two-year price lock
     negotiated after the initial quote came in above budget.
+    must_not_rank (athenaeum#1777): the only other "Decision - ... vendor"
+    shaped page in the corpus, sharing the generic "vendor" term and the
+    "Decision -" title pattern, but it is about Anchorline's retirement, not
+    Gilcrest's selection or its price-lock terms.
 
 - id: anchorline_retirement_rationale
   probe_class: follow_through
@@ -350,6 +416,7 @@
     replacement expect anyone querying it to check back regularly instead
     of getting pushed updates?
   expected_uids: [decision-retire-anchorline, system-ledgerfax-successor]
+  must_not_rank: [ops-client-reporting]
   distractor_terms: ["Anchorline", "retire", "reporting tool"]
   answer_tokens: ["Verdantholt", "Sablecroft"]
   note: >-
@@ -357,6 +424,10 @@
     security rationale but not how the replacement is consumed; only the
     replacement's own page (athenaeum#1766) says it exports flat files on a
     nightly cadence for downstream polling rather than pushing updates.
+    must_not_rank (athenaeum#1777): "Client reporting rhythm" shares
+    "reporting" vocabulary with the query's "reporting tool" but describes
+    fortnightly client updates, not the Anchorline tool or its replacement's
+    poll-vs-push behaviour.
 
 - id: subsidiary_onboarding_lesson
   probe_class: follow_through
@@ -365,6 +436,7 @@
     subsidiaries, and did it expose any gap in how we handle payment
     paperwork for them?
   expected_uids: [note-subsidiary-onboarding-retro, policy-cost-center-billing-split]
+  must_not_rank: [note-atlas-onboarding-review]
   distractor_terms: ["subsidiaries", "onboarding", "retro"]
   answer_tokens: ["Wrenholt", "Copperfen"]
   note: >-
@@ -372,3 +444,8 @@
     contact-record requirement but not the billing rule; only the policy
     page (athenaeum#1766) says an unconfirmed cost-center split defaults to a
     single combined invoice unless confirmed in writing by finance.
+    must_not_rank (athenaeum#1777): the Atlas onboarding review is a
+    different client's onboarding retrospective, sharing "onboarding" and
+    review-of-a-past-engagement framing, but its lesson (late finance
+    contact) and gap (no kickoff call) are unrelated to subsidiaries or
+    payment-paperwork splitting.
