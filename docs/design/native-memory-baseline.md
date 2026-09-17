@@ -311,6 +311,33 @@ is known, which is a generator change, not a corpus rewrite: the hand-authored
 core pages already carry `source_ref`, so the generator inverts them into
 dated observations that would compile back to them.
 
+Phase 2's native write path can now run in api mode too: `run_native_writer_api`
+(issue athenaeum#1774) drives the same observation stream through
+`run_api_tool_loop` with harness-served `read`/`grep`/`write`/`edit`/`list`
+tools over the memory directory instead of a `claude -p` spawn, so the
+blocking prerequisite for the rest of Phase 2 (athenaeum#1785/#1786) no
+longer needs a logged-in CLI.
+
+**Fidelity caveat on the api-mode writer's system prompt.** Its writing
+instructions are a RECONSTRUCTION of the documented auto-memory contract
+above (`- <name> — <description>` index lines, the 200-line/25KB load cap),
+not Claude Code's own write-side system prompt -- that text is closed-source
+and not extractable the way the read-side truncation-notice template was
+(§4). It is known to diverge from the real prompt in at least two
+directions with OPPOSITE effect on measured native write cost: (1) handing
+the model the index-line FORMAT as an instruction, rather than letting it
+emerge from unprompted filing judgment, biases toward better, cheaper
+filing than reality (understating native write cost); (2) the explicit
+`list`-before-writing and check-before-`edit` instructions add tool calls a
+real writer is not documented to be told to make, biasing toward more
+turns and higher spend than reality (overstating native write cost). These
+do not cancel out by assumption. Every api-mode `NativeWriterResult` is
+stamped `prompt_fidelity="reconstructed"` (`None` for cli-mode) so a report
+can label Phase 2 write-path numbers produced this way as an
+APPROXIMATION, pending confirmation from the cli-mode spot-check
+(`run_native_writer`), rather than pooling them with a cli-mode row as
+equally faithful.
+
 **Caveat on the `push_breadcrumb*` arms: the hook's 3-breadcrumb cap misses
 many grep-reachable expected pages, at both corpus scales this offline
 check covers** (`tests/evals/test_recall_covers_grep.py`, issue
