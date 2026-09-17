@@ -191,8 +191,20 @@ def evaluate(
 
 
 def _git_changed_files(base_sha: str, head_sha: str) -> list[str]:
+    """Paths changed on this branch since it diverged from `base_sha`.
+
+    Three-dot (`base...head`), NOT two-dot: two-dot diffs `base_sha` against
+    `head_sha` directly, so once `develop` (the PR's base ref) advances past
+    the commit this branch was cut from, every commit that landed on
+    `develop` in the meantime — and isn't in this branch — shows up too
+    (as a reversal), spuriously widening the surface intersection for a PR
+    that never touched those files. Three-dot diffs `merge-base(base, head)`
+    against `head`, the same set GitHub's own path filters use. Requires
+    `fetch-depth: 0` (or enough history to reach the merge-base) in the
+    calling workflow's checkout step.
+    """
     result = subprocess.run(
-        ["git", "diff", "--name-only", base_sha, head_sha],
+        ["git", "diff", "--name-only", f"{base_sha}...{head_sha}"],
         capture_output=True,
         text=True,
         check=True,
