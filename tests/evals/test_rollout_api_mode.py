@@ -31,6 +31,7 @@ from tests.evals.harness import EvalSession
 from tests.evals.rollout import (
     NATIVE_INDEX_MAX_CHARS,
     NATIVE_INDEX_MAX_LINES,
+    READ_ENTITY_TOOL_NAME,
     RECALL_TOOL_NAME,
     materialize_native_memory,
     run_native_grep_api,
@@ -267,3 +268,109 @@ def test_pull_api_recorded_fixture_shows_recall_tool_call_with_query_captured(
     # discourages calling one).
     sent_system = client.calls[0]["system"]
     assert "recall" in sent_system
+
+
+# ---------------------------------------------------------------------------
+# 4. Recorded-fixture PULL rollout reaching a tag recall's snippet cannot show
+#    (issue athenaeum#1756)
+# ---------------------------------------------------------------------------
+
+
+def _tool_result_texts(record, tool_use_id: str) -> str:
+    """The delivered text of ONE tool_result block, read out of the transcript
+    by its ``tool_use_id`` -- so the assertions below are about what each tool
+    actually returned, not about what the scripted final answer happened to
+    say."""
+    for event in record.transcript:
+        if event.get("type") != "user":
+            continue
+        for block in event["message"]["content"]:
+            if block.get("type") == "tool_result" and block.get("tool_use_id") == tool_use_id:
+                return str(block["content"])
+    raise AssertionError(f"no tool_result for {tool_use_id!r} in transcript")
+
+
+def test_pull_api_reaches_a_reference_tag_recall_alone_cannot_show(tmp_path: Path) -> None:
+    """Issue athenaeum#1756, the whole point of serving ``read_entity``.
+
+    ``person_not_repo``'s planted tag (``Ashcaldera``) sits on the last line
+    of a 587-character page, outside the 400-character window
+    ``athenaeum.mcp_server._snippet`` gives every ``recall`` hit. Under the
+    reference-tag grading contract (issue athenaeum#1753) an arm can only
+    grade correct by citing that tag -- so before this issue, api-mode PULL
+    could not answer this probe correctly however good its retrieval was.
+
+    Every rendering here is the REAL one: the core corpus materialized to
+    disk, the real FTS5 index, the real ``recall_search``, and the real
+    ``entity_read``. Only the model's turns are scripted.
+    """
+    from athenaeum.search import get_backend
+    from tests.evals.north_star_report import grade_correctness
+
+    corpus = build_corpus("core")
+    probe = next(p for p in corpus.probes if p.id == "person_not_repo")
+    tag = probe.answer_tokens[0]
+    assert tag == "Ashcaldera"  # read off the corpus, not assumed
+
+    wiki_root = corpus.materialize(tmp_path)
+    cache_dir = tmp_path / "cache"
+    # Without this the fts5 backend has no index and returns "No wiki pages
+    # matched" for every query -- the shape assertions below would still pass
+    # and prove nothing.
+    get_backend("fts5").build_index(wiki_root, cache_dir)
+
+    turns = [
+        _RecordedTurn(
+            content=[
+                _tool_use_block(
+                    id="toolu_recall_1",
+                    name=RECALL_TOOL_NAME,
+                    input={"query": "Rowan Wrenfield pricing decision"},
+                )
+            ],
+            stop_reason="tool_use",
+        ),
+        _RecordedTurn(
+            content=[
+                _tool_use_block(
+                    id="toolu_read_1",
+                    name=READ_ENTITY_TOOL_NAME,
+                    input={"uid": "person-rowan-wrenfield", "entity_class": "person"},
+                )
+            ],
+            stop_reason="tool_use",
+        ),
+        _RecordedTurn(
+            content=[
+                _text_block(
+                    "Rowan Wrenfield decided to hold the day rate flat through FY2026 "
+                    f"and absorb the indirect cost increase.\n\n[ref: {tag}]"
+                )
+            ],
+            stop_reason="end_turn",
+        ),
+    ]
+    client = _QueuedApiClient(turns)
+
+    record = run_pull_api(
+        probe,
+        wiki_root,
+        cache_dir,
+        "core",
+        client=client,
+        session=EvalSession(),
+        model="test-model",
+        search_backend="fts5",
+    )
+
+    assert [c.name for c in record.tool_calls] == [RECALL_TOOL_NAME, READ_ENTITY_TOOL_NAME]
+
+    recall_result = _tool_result_texts(record, "toolu_recall_1")
+    read_entity_result = _tool_result_texts(record, "toolu_read_1")
+    # The premise: recall DID find the right page -- and still could not show
+    # the tag, because the snippet window cuts the page short.
+    assert "Rowan Wrenfield" in recall_result
+    assert tag not in recall_result
+    assert tag in read_entity_result
+
+    assert grade_correctness(record, probe, corpus) is True

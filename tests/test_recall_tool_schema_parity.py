@@ -36,11 +36,19 @@ def _build_server(tmp_path: Path):
     return create_server(raw_root=raw, wiki_root=wiki)
 
 
-def _recall_tool(server):
+def _tool(server, name: str):
+    """One served tool by its FastMCP name -- the BARE name (``recall``,
+    ``read_entity``), not the ``mcp__athenaeum__``-prefixed name a client sees
+    and the api-mode schemas use."""
+
     async def _list():
         return {t.name: t for t in await server.list_tools()}
 
-    return asyncio.run(_list())["recall"]
+    return asyncio.run(_list())[name]
+
+
+def _recall_tool(server):
+    return _tool(server, "recall")
 
 
 def test_api_mode_recall_description_matches_the_real_served_tool(tmp_path: Path) -> None:
@@ -123,3 +131,54 @@ def test_api_mode_recall_input_schema_matches_the_real_served_tool(
     real_required = set(real_schema.get("required") or [])
     api_mode_required = set(api_mode_schema.get("required") or [])
     assert api_mode_required == real_required
+
+
+# ---------------------------------------------------------------------------
+# The SAME two pins for ``read_entity`` (issue athenaeum#1756), now that the
+# api-mode PULL arms serve it alongside ``recall``.
+# ---------------------------------------------------------------------------
+
+
+def test_api_mode_read_entity_description_matches_the_real_served_tool(tmp_path: Path) -> None:
+    """``read_entity``'s served description is the SUMMARY portion of the
+    module-level :func:`read_entity_tool_docstring` -- everything before
+    ``Args:`` -- exactly as for ``recall``. Extracting that text to a module
+    constant must not change a byte of what the live server serves."""
+    from athenaeum.mcp_server import read_entity_tool_docstring
+    from tests.evals.rollout import _read_entity_tool_schema
+
+    server = _build_server(tmp_path)
+    real_tool = _tool(server, "read_entity")
+
+    full_doc = inspect.cleandoc(read_entity_tool_docstring())
+    expected_description = full_doc.split("\n\nArgs:")[0].strip()
+    assert real_tool.description == expected_description
+
+    assert _read_entity_tool_schema()["description"] == real_tool.description
+
+
+def test_api_mode_read_entity_input_schema_matches_the_real_served_tool(
+    tmp_path: Path,
+) -> None:
+    """A new parameter on the real ``read_entity(...)`` signature -- or one
+    whose TYPE changed -- must fail this test until the api-mode schema is
+    updated to match. Same ``{name: type-set}``-plus-``required`` comparison,
+    against what ``_read_entity_tool_schema`` actually SENDS, as the ``recall``
+    pair above."""
+    from tests.evals.rollout import _read_entity_tool_schema
+
+    server = _build_server(tmp_path)
+    real_tool = _tool(server, "read_entity")
+
+    real_schema = real_tool.parameters
+    api_mode_schema = _read_entity_tool_schema()["input_schema"]
+
+    real_types = {
+        name: _schema_property_types(prop) for name, prop in real_schema["properties"].items()
+    }
+    api_mode_types = {
+        name: _schema_property_types(prop) for name, prop in api_mode_schema["properties"].items()
+    }
+    assert api_mode_types == real_types
+
+    assert set(api_mode_schema.get("required") or []) == set(real_schema.get("required") or [])
