@@ -58,7 +58,7 @@ jobs:
           fetch-depth: 0
           # Nothing in this job pushes or needs an authenticated git remote
           # (the `gh` calls below use GH_TOKEN directly, not the checkout's
-          # credential helper) — least-privilege per Quine PR #1745 review.
+          # credential helper) — least-privilege per Quine's athenaeum#1745 review.
           persist-credentials: false
 
       - name: Set up Python 3.13

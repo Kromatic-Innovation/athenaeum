@@ -17,7 +17,7 @@ local read against the default ``GITHUB_TOKEN`` — no Anthropic key, no push
 trigger, matching the athenaeum#1731 AC2 constraint.
 
 Four independent checks gate a receipt URL, each with its own failure
-message (Quine PR #1745 review round): the run must be a
+message (Quine's athenaeum#1745 review round): the run must be a
 ``workflow_dispatch`` of the ``Evals`` workflow (``workflowName`` —
 otherwise a dispatch of e.g. ``ci.yml`` at the right SHA would satisfy the
 gate), its ``headSha`` must match the PR head, and its ``conclusion`` must

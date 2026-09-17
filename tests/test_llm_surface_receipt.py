@@ -75,7 +75,7 @@ def _stale_sha_lookup(repo: str, run_id: str) -> dict[str, str]:
 
 
 def _wrong_workflow_lookup(repo: str, run_id: str) -> dict[str, str]:
-    """A ci.yml dispatch at the right SHA — must still be rejected (Quine PR #1745 review)."""
+    """A ci.yml dispatch at the right SHA — must still be rejected (athenaeum#1745 review)."""
     return {
         "headSha": HEAD_SHA,
         "event": "workflow_dispatch",
