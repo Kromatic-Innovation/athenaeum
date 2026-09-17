@@ -368,7 +368,10 @@ CONDITION_2_ENROLLED: frozenset[str] = frozenset(
 #: constant, and correct today because it is empty. A sibling issue landing
 #: a class here does not need to change the guard; it only needs to leave
 #: that class's ``report_only`` unset (or ``True``) in ``probes.yaml``.
-WAVE_2_PROBE_CLASSES: frozenset[str] = frozenset()
+#: Grows to ``{"contradiction", "negative_knowledge"}`` with item G
+#: (athenaeum#1781); sibling items D/F land their own class names here in
+#: their own PRs, expect a rebase.
+WAVE_2_PROBE_CLASSES: frozenset[str] = frozenset({"contradiction", "negative_knowledge"})
 
 
 @dataclass(frozen=True)
@@ -475,6 +478,30 @@ class Probe:
     abstention confabulation check already guards ``answer_tokens`` against
     -- a shared value would let a legitimate answer grade as harmful, or a
     harmful one grade as safe), and to be shared between no two pages.
+
+    ``contradiction`` (issue athenaeum#1781, athenaeum#1791 §3.2) reuses
+    ``must_not_rank`` to name a single STALE page (same ``superseded_by:``/
+    body-``[[wikilink]]`` convention as ``05-temporal.yaml``) that a keyword
+    search on the query plausibly lands on and that carries one of
+    ``forbidden_tokens``; the page ``superseded_by`` resolves to must be in
+    ``expected_uids`` and carry its own ``answer_tokens`` value. Two shapes
+    share this mechanism: (a) supersession by an unfound page, where the
+    superseding page is authored to share no content term with the query,
+    so only the link reaches it; (b) the operator's deprecated-knowledge
+    scenario, a TASK-phrased query that reaches a stale workaround page
+    whose retraction links back to it. Correct means ``grade_correctness``
+    AND ``grade_harm`` both pass -- the answer token cited and the
+    forbidden token absent.
+
+    ``negative_knowledge`` (issue athenaeum#1781, athenaeum#1791 §3.3, use
+    case 2.4 "what went wrong last time?") is checked the INVERSE of the
+    ``follow_through`` lexical-unreachability rule: at least one
+    ``expected_uids`` page must share a content term (exact, or a stemmed
+    prefix via ``uid``/``name``/``tags``) with the query -- deliberately
+    grep-reachable, so a ``negative_knowledge`` probe whose retro page is
+    lexically unreachable is a ``follow_through`` probe filed under the
+    wrong class. ``forbidden_tokens`` sits on a separate "naive plan" decoy
+    page that repeats the mistake the retro warns against.
     """
 
     id: str
@@ -905,6 +932,124 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                         f"on multiple expected_uids pages {sorted(owners)} -- each token must "
                         "sit on a distinct page so coverage counts pages, not repeats"
                     )
+        if probe.probe_class == "contradiction":
+            # Issue athenaeum#1781, athenaeum#1791 §3.2. Both shapes -- (a)
+            # supersession by an unfound page, and (b) the operator's
+            # deprecated-knowledge scenario -- reuse `must_not_rank` to name
+            # the single STALE/workaround page a keyword search plausibly
+            # lands on, and the existing `superseded_by`/body-wikilink
+            # convention (`05-temporal.yaml`) to name the correct page it
+            # points at. The check is deliberately shape-agnostic: shape (a)
+            # additionally authors its superseding page to share no content
+            # term with the query (so the link is the ONLY way to reach it)
+            # and shape (b) additionally has the retraction page link back
+            # to the stale page -- neither is enforced generically here,
+            # the same "authoring discipline the check does not enforce"
+            # shape as the `multi_hop` answer-identity-uniqueness caveat
+            # above (see the `Probe` docstring).
+            if len(probe.must_not_rank) != 1:
+                problems.append(
+                    f"probe {probe.id!r}: contradiction probes must name exactly one "
+                    "must_not_rank page (the stale/superseded page a keyword search "
+                    "plausibly lands on)"
+                )
+            elif not probe.forbidden_tokens:
+                problems.append(
+                    f"probe {probe.id!r}: contradiction probes must carry forbidden_tokens "
+                    "(planted on the stale must_not_rank page)"
+                )
+            else:
+                stale_uid = probe.must_not_rank[0]
+                stale_page = pages_by_uid.get(stale_uid)
+                if stale_page is not None:
+                    query_terms = _content_terms(probe.query)
+                    stale_meta_terms = _content_terms(
+                        f"{stale_page.uid.replace('-', ' ')} {stale_page.name} "
+                        f"{' '.join(stale_page.tags)}"
+                    )
+                    if not (
+                        (_content_terms(stale_page.body) & query_terms)
+                        or _shares_stemmed_term(stale_meta_terms, query_terms)
+                    ):
+                        problems.append(
+                            f"probe {probe.id!r}: contradiction's must_not_rank (stale) page "
+                            f"{stale_uid!r} must be lexically reachable from the query -- a "
+                            "keyword search that cannot even find the stale page proves "
+                            "nothing about ranking it below the correct answer"
+                        )
+                    if not any(token in stale_page.body for token in probe.forbidden_tokens):
+                        problems.append(
+                            f"probe {probe.id!r}: contradiction's must_not_rank page "
+                            f"{stale_uid!r} does not carry any of the probe's forbidden_tokens"
+                        )
+                    if not stale_page.superseded_by:
+                        problems.append(
+                            f"probe {probe.id!r}: contradiction's stale page {stale_uid!r} "
+                            "must declare superseded_by"
+                        )
+                    else:
+                        target_page = next(
+                            (p for p in pages if p.name == stale_page.superseded_by), None
+                        )
+                        if target_page is None:
+                            problems.append(
+                                f"probe {probe.id!r}: contradiction's stale page {stale_uid!r} "
+                                f"superseded_by {stale_page.superseded_by!r} does not resolve "
+                                "to any page's name"
+                            )
+                        else:
+                            if target_page.uid not in probe.expected_uids:
+                                problems.append(
+                                    f"probe {probe.id!r}: contradiction's stale page "
+                                    f"{stale_uid!r} superseded_by resolves to "
+                                    f"{target_page.uid!r}, which is not in expected_uids"
+                                )
+                            if not _TAG_LINE_RE.search(target_page.body):
+                                problems.append(
+                                    f"probe {probe.id!r}: contradiction's superseding page "
+                                    f"{target_page.uid!r} carries no 'Internal reference tag:' "
+                                    "line of its own"
+                                )
+                            if target_page.uid not in _body_wikilink_targets(stale_page.body):
+                                problems.append(
+                                    f"probe {probe.id!r}: contradiction's stale page "
+                                    f"{stale_uid!r} must link to the superseding page "
+                                    f"{target_page.uid!r} via a body [[wikilink]], not only "
+                                    "superseded_by"
+                                )
+        if probe.probe_class == "negative_knowledge":
+            # Issue athenaeum#1781, athenaeum#1791 §3.3 (use case 2.4). The
+            # INVERSE of the `follow_through` lexical-unreachability check:
+            # a `negative_knowledge` probe's retro/lesson page must share a
+            # content term with the query (grep can find it) -- a probe
+            # whose target is lexically unreachable is a `follow_through`
+            # probe filed under the wrong class.
+            if not probe.forbidden_tokens:
+                problems.append(
+                    f"probe {probe.id!r}: negative_knowledge probes must carry "
+                    "forbidden_tokens (planted on a naive-plan decoy page)"
+                )
+            query_terms = _content_terms(probe.query)
+            reachable = False
+            for uid in probe.expected_uids:
+                page = pages_by_uid.get(uid)
+                if page is None:
+                    continue
+                page_meta_terms = _content_terms(
+                    f"{page.uid.replace('-', ' ')} {page.name} {' '.join(page.tags)}"
+                )
+                if (_content_terms(page.body) & query_terms) or _shares_stemmed_term(
+                    page_meta_terms, query_terms
+                ):
+                    reachable = True
+                    break
+            if not reachable:
+                problems.append(
+                    f"probe {probe.id!r}: negative_knowledge probes must have at least one "
+                    "expected_uids page lexically reachable from the query (the inverse of "
+                    "the follow_through check) -- otherwise this is a follow_through probe "
+                    "filed under the wrong class"
+                )
     for page in pages:
         for edge in page.related:
             if edge.uid not in uids:
