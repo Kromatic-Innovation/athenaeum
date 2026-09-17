@@ -1286,7 +1286,7 @@ conn.close()
     def test_fts5_rows_filtered_by_fts5_floor_on_vector_turn(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
-        """MUST 1 (Quine review, PR #1746): FTS5 is not a cold path.
+        """MUST 1 (Quine review of athenaeum#1665): FTS5 is not a cold path.
 
         The durable push ledger showed 1215 FTS5-sourced vs 1086
         vector-sourced items all-time (42% FTS5 in the last 300 records),
@@ -1350,7 +1350,7 @@ conn.close()
     def test_relevance_floor_import_failure_logs_debug_line_and_fails_open(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
-        """MUST 2 (Quine review, PR #1746): the floor's except was silent.
+        """MUST 2 (Quine review of athenaeum#1665): the floor's except was silent.
 
         A broken/unimportable `athenaeum.config` used to degrade to
         `floor=None` with NO signal at any level -- indistinguishable from
@@ -1410,7 +1410,7 @@ conn.close()
     def test_relevance_floor_respects_knowledge_root_env_override(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
-        """SHOULD 3 (Quine review, PR #1746): `load_config()` used to ignore
+        """SHOULD 3 (Quine review of athenaeum#1665): `load_config()` used to ignore
         `KNOWLEDGE_ROOT` entirely and always read `Path.home() / "knowledge"`
         -- invisible in every OTHER test in this file, because `hook_env`
         happens to set `KNOWLEDGE_ROOT` to exactly `$HOME/knowledge`, so the
@@ -1471,7 +1471,7 @@ conn.close()
     def test_vector_relevance_floor_prefers_push_scoped_over_base(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
-        """SHOULD 4 (Quine review, PR #1746): this hook IS the unprompted
+        """SHOULD 4 (Quine review of athenaeum#1665): this hook IS the unprompted
         push path, so `recall.relevance_floor.push.vector` must be resolved
         BEFORE the plain `recall.relevance_floor.vector` -- never the
         reverse. A hit at 0.3 clears the loose base floor (0.9) but not the
@@ -1529,7 +1529,7 @@ conn.close()
     def test_vector_relevance_floor_boundary_score_equal_floor_is_kept(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
-        """SHOULD 5 (Quine review, PR #1746): `meets_relevance_floor` is an
+        """SHOULD 5 (Quine review of athenaeum#1665): `meets_relevance_floor` is an
         inclusive `<=` comparison for `"vector"` -- a hit whose score is
         EXACTLY the configured floor clears it and must be kept, not
         dropped.
