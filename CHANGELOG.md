@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A relevance-floor input for the north-star grid's floor-active pass
+  (issue athenaeum#1761).** `docs/design/native-memory-baseline.md` §4
+  commits to reporting a floor-active pass alongside the as-shipped pass,
+  but `Corpus.materialize` writes only the `wiki/` tree and the harness had
+  no way to configure `recall.relevance_floor` on a materialized corpus.
+  `tests/evals/north_star_cli.py` now takes `--relevance-floor-vector` and
+  `--relevance-floor-fts5` (wired to `north_star_relevance_floor_vector` /
+  `_fts5` dispatch inputs on `evals.yml`'s manual-only north-star job,
+  blank = off): set, the CLI writes `recall.relevance_floor` (plain and
+  push-scoped) into an `athenaeum.yaml` under every materialized knowledge
+  root, and both the breadcrumb hook and the API-mode `recall` tool
+  executor now thread that config through so they apply it. `RolloutRecord`
+  gains `relevance_floor_vector`/`relevance_floor_fts5` (stamped by the
+  CLI) and `retrieval_hit_scores` (the backend's own scores for a probe's
+  query against the index the harness already built, populated by
+  `run_probe_all_arms`); the report header prints the floor values next to
+  `git_sha`, and `build_report` now refuses to pool rows carrying differing
+  floor values into one decision block. A new `--floor-scan <store.jsonl>`
+  CLI mode summarises an existing store's `retrieval_hit_scores` so an
+  operator can pick a threshold before dispatching a floor-on grid. Picking
+  the production threshold itself remains open (athenaeum#1492 AC5); this
+  issue is the input mechanism only.
 - **`--max-tokens` on the north-star grid, and a token ceiling derived from
   `--max-spend` (issue athenaeum#1754).** `ROLLOUT_TOKEN_CEILING = 2_000_000`
   was a compiled-in constant no operator flag could raise: run 35200779015,

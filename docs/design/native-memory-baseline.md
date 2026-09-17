@@ -153,6 +153,20 @@ it even when set (athenaeum#1665). The first run uses the floor **as
 shipped**, because that is what the deployment delivers today; a second pass
 with the floor active is reported alongside once the hook honours it.
 
+The harness input that dispatches that second pass is
+`north_star_cli.py --relevance-floor-vector` / `--relevance-floor-fts5`
+(athenaeum#1761): set, it writes `recall.relevance_floor` (plain and
+push-scoped) into an `athenaeum.yaml` under each materialized knowledge
+root, so both the breadcrumb hook and the API-mode `recall` tool apply the
+same threshold. This is the input mechanism only — it does not pick a
+threshold (athenaeum#1492's production number is still open) and does not
+change how the floor is applied inside `src/athenaeum/` (athenaeum#1665
+already did that). The floor-on pass this produces is reported **alongside,
+never in place of,** the as-shipped pass, and — the caveat already on
+athenaeum#1736 — a floor-on pass never rescues a fail: it is additional
+evidence, not a second chance for a configuration that lost on its own
+terms.
+
 ## 5. Two phases, because the corpus is compiled pages
 
 The synthetic corpus is compiled wiki pages plus probes. It has no raw
