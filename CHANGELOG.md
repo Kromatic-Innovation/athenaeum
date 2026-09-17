@@ -99,6 +99,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gradable rows) and a new "Coverage (fraction of planted tokens)" report
   section. Report-only wave-2 mechanism (athenaeum#1791 §2.1): feeds no §7
   condition, and `compute_verdicts` is unchanged.
+- **`long` corpus tier + four `single_hop` probes for the progressive-
+  discovery cost claim (issue athenaeum#1779).**
+  `tests/evals/data/corpus/core/12-long-pages.yaml` adds four core pages
+  (1,500-3,000 characters each, tier `long`) whose `Internal reference tag:`
+  line sits past character offset 400 -- outside `mcp_server._snippet`'s
+  400-character window -- so a correct answer to one of the four new
+  probes can only come from `read_entity`, not from `recall`'s own
+  snippet. `Page.tier` is now read from `core/*.yaml` (previously always
+  hardcoded to `"core"` by `load_core_pages`), and `Probe.tier` is a new
+  filtering-only field, both defaulting to `"core"`. `validate_core` gained
+  a check pinning the offset against `_snippet`'s own `max_chars` default
+  (via `inspect`, so it cannot drift), and a behavioral companion test
+  calls the real `_snippet` to confirm the tag is actually absent from the
+  snippet it returns. No new `SCALES` entry -- layered onto the existing
+  `core` scale, per design-doc §3.5/§7 R-C. Probes stay `probe_class:
+  single_hop` (not a new class), so `report_only` is left at its class
+  default (`False`, already enrolled in design-doc §7 condition 2).
 - **North-star measurement report for the native-memory baseline (issue
   athenaeum#1724).** `docs/measurements/native-memory-baseline-2026-09-17.md`
   reports the read-path (Phase 1) comparison against Claude Code auto memory,
