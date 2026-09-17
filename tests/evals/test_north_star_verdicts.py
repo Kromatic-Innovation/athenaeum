@@ -688,6 +688,21 @@ def test_cutoff_is_smallest_medium_or_above_passing_scale() -> None:
     assert compute_cutoff_scale(verdicts) == "medium"
 
 
+def test_cutoff_reaches_xlarge_when_it_is_the_only_passing_scale() -> None:
+    """Issue athenaeum#1735: pins ``xlarge`` as a real, reachable cutoff
+    result. Without ``xlarge`` in ``SIZE_SCALE_ORDER`` (and therefore in
+    ``_CUTOFF_ELIGIBLE_SCALES``), this verdict set would fall through
+    ``compute_cutoff_scale``'s walk and return ``"none"`` even though an
+    xlarge-only rollout actually passed every condition -- a silent data
+    loss a smaller-scales-only fixture set cannot detect."""
+    verdicts = [
+        _failing_verdict("medium"),
+        _failing_verdict("large"),
+        _all_pass_verdict("xlarge"),
+    ]
+    assert compute_cutoff_scale(verdicts) == "xlarge"
+
+
 def test_render_decision_block_names_failing_condition_per_scale_when_cutoff_is_none() -> None:
     verdicts = [
         _failing_verdict("medium", detail="condition 1: relationship use case not won (x)"),

@@ -34,6 +34,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`xlarge` corpus scale, 25,000 pages (issue athenaeum#1735).** `SCALES`
+  (`tests/evals/corpus.py`) gains `xlarge = 25,000 pages,
+  distractors_per_probe = 2` on the size axis only, so the north-star grid
+  can cover the page count a real single-operator deployment already runs
+  at. `build_corpus("xlarge")` is deterministic for `(GENERATOR_VERSION,
+  seed, scale)` and materializes in ~2s locally (well under the 60s CI
+  budget). Opt-in at the grid-dispatch level:
+  `tests/evals/north_star_cli.py`'s `DEFAULT_CORPUS_SCALES` excludes it (a
+  `NATIVE_GREP` cell over 25k files is the most expensive cell in the
+  grid), and `SIZE_SCALE_ORDER` (`tests/evals/north_star_report.py`) and
+  `tests/test_eval_corpus_leakage.py`'s native-memory materializer check
+  now include it. `docs/design/native-memory-baseline.md` §3 names the new
+  scale.
 - **`temporal` probes with person/company expected pages (issue
   athenaeum#1744).** The go/no-go rule's condition 1 relationship subset
   (`_relationship_probe_ids` in `tests/evals/north_star_report.py`) is

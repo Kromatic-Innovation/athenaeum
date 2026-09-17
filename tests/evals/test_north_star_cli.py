@@ -23,6 +23,7 @@ import pytest
 
 from tests.evals import north_star_cli
 from tests.evals.containment import DEFAULT_CELL_TOKEN_ESTIMATE, price_grid
+from tests.evals.corpus import SCALES
 from tests.evals.north_star_report import DEFAULT_VERDICT_ARM, load_rollout_rows
 from tests.evals.rollout import ALL_ARMS, RolloutRecord, TurnTokenUsage
 
@@ -69,6 +70,33 @@ def test_verdict_arm_flag_defaults_to_the_report_module_constant() -> None:
     literal."""
     args = north_star_cli.build_arg_parser().parse_args([])
     assert args.verdict_arm == DEFAULT_VERDICT_ARM
+
+
+def test_xlarge_is_a_known_scale_but_not_a_default_one() -> None:
+    """Issue athenaeum#1735's opt-in requirement, pinned so a future edit
+    that empties ``_OPT_IN_CORPUS_SCALES`` (or otherwise reverts
+    ``DEFAULT_CORPUS_SCALES`` to ``tuple(sorted(SCALES))``) fails loudly
+    instead of silently pulling the most expensive grid cell into every
+    blank ``--corpus-scales`` run.
+    """
+    assert "xlarge" in SCALES
+    assert "xlarge" not in north_star_cli.DEFAULT_CORPUS_SCALES
+
+
+def test_corpus_scales_flag_rejects_an_unknown_scale() -> None:
+    """AC3 ("evals.yml's grid dispatch input accepts xlarge") is only real
+    if a typo'd scale is caught before any spend -- see
+    :func:`north_star_cli._build_cells`'s validation, added alongside it."""
+    args = north_star_cli.build_arg_parser().parse_args(["--corpus-scales", "bogus"])
+    with pytest.raises(ValueError, match="unknown corpus scale"):
+        north_star_cli._build_cells(args)
+
+
+def test_corpus_scales_flag_accepts_xlarge_explicitly() -> None:
+    args = north_star_cli.build_arg_parser().parse_args(["--corpus-scales", "xlarge"])
+    cells = north_star_cli._build_cells(args)
+    assert cells
+    assert all(c.corpus_scale == "xlarge" for c in cells)
 
 
 def test_default_max_spend_covers_smoke_scale() -> None:

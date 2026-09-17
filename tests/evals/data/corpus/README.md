@@ -140,7 +140,10 @@ is too big"* from *"the corpus is too confusable"* -- different problems, with
 different fixes (a better index vs better disambiguation).
 
 `medium`, `medium_dense` and `medium_verydense` all hold 1,000 pages and vary
-only near-miss density; `small`/`medium`/`large` hold density and vary size.
+only near-miss density; `small`/`medium`/`large`/`xlarge` hold density and
+vary size. `xlarge` (25,000 pages, issue athenaeum#1735) is opt-in at the
+grid-dispatch level -- `tests/evals/north_star_cli.py`'s
+`DEFAULT_CORPUS_SCALES` excludes it by default.
 
 ## Reproducibility
 

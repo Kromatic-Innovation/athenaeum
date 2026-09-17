@@ -84,7 +84,16 @@ DEFAULT_PROBES: tuple[str, ...] = tuple(p.id for p in build_corpus("core").probe
 #: knob to run a subset.
 DEFAULT_ARMS: tuple[str, ...] = tuple(arm.value for arm in ALL_ARMS)
 
-DEFAULT_CORPUS_SCALES: tuple[str, ...] = tuple(sorted(SCALES))
+#: Scales a blank ``--corpus-scales`` must NOT silently pull in (issue
+#: athenaeum#1735). A ``NATIVE_GREP`` cell over ``xlarge`` (25,000 pages) is
+#: the most expensive cell in the grid, so the rollout treats it as opt-in --
+#: pass it explicitly via ``--corpus-scales xlarge`` (or the workflow's
+#: ``north_star_corpus_scales`` dispatch input) rather than by default.
+_OPT_IN_CORPUS_SCALES: frozenset[str] = frozenset({"xlarge"})
+
+DEFAULT_CORPUS_SCALES: tuple[str, ...] = tuple(
+    sorted(s for s in SCALES if s not in _OPT_IN_CORPUS_SCALES)
+)
 DEFAULT_REPLICATES: tuple[int, ...] = (0,)
 
 #: Mirrors ``containment_cli.DEFAULT_MAX_SPEND_USD`` -- the ``smoke`` scale
@@ -199,6 +208,18 @@ def _build_cells(args: argparse.Namespace) -> list[GridCell]:
     corpus_scales = (
         args.corpus_scales.split(",") if args.corpus_scales else list(DEFAULT_CORPUS_SCALES)
     )
+    # Validated HERE, at parse time, rather than left to fail deep inside a
+    # rollout once a cell for an unknown scale reaches build_corpus() --
+    # issue athenaeum#1735's AC3 ("evals.yml's grid dispatch input accepts
+    # xlarge") is only real if a typo'd scale is caught before any spend,
+    # not after. `--corpus-scales` (and the workflow's free-text
+    # `north_star_corpus_scales` input) accept an arbitrary string, so
+    # nothing upstream of this call validates membership in SCALES.
+    unknown = [s for s in corpus_scales if s not in SCALES]
+    if unknown:
+        raise ValueError(
+            f"unknown corpus scale(s) {unknown!r} in --corpus-scales; known: {sorted(SCALES)}"
+        )
     replicates = [int(r) for r in args.replicates.split(",")]
     placeholder_cells = build_grid(
         args.scale,
