@@ -349,11 +349,12 @@ def check_floor_mismatch(
     *,
     relevance_floor_vector: float | None,
     relevance_floor_fts5: float | None,
+    search_backend: str,
 ) -> str | None:
-    """Compare the floors THIS dispatch is about to write against the floor
-    values already recorded on *rows* read from ``--store`` (issue
-    athenaeum#1764 item 3). Returns a human-readable mismatch description,
-    or ``None`` when it is safe to proceed.
+    """Compare the floors AND the search backend THIS dispatch is about to
+    write against the values already recorded on *rows* read from
+    ``--store`` (issue athenaeum#1764 item 3). Returns a human-readable
+    mismatch description, or ``None`` when it is safe to proceed.
 
     *rows* is ``Sequence[tests.evals.north_star_report.RolloutRow]`` (typed
     loosely, as :func:`floor_scan_summary` above already is, to avoid a
@@ -361,7 +362,7 @@ def check_floor_mismatch(
 
     Passes (returns ``None``) for an empty store (no rows recorded at all --
     nothing to conflict with) and for a store whose rows all carry ``None``
-    for a backend when this dispatch ALSO requests ``None`` for that
+    for a floor backend when this dispatch ALSO requests ``None`` for that
     backend -- the ordinary "no floor, never has been" case every pre-
     athenaeum#1761 store is in. Refuses on any other disagreement: resuming
     a floor-off store with a floor now requested, a floor-on store with a
@@ -369,17 +370,34 @@ def check_floor_mismatch(
     more than one distinct value for a backend) a store that isn't uniform
     to begin with.
 
+    ``search_backend`` is checked the same way, with one deliberate
+    asymmetry from the floor checks: a row's ``search_backend`` is ``None``
+    only for a pre-athenaeum#1764 store (the field did not exist yet), NOT
+    for "no backend was used" -- every real dispatch always has SOME search
+    backend, ``--search-backend`` defaults to ``"fts5"`` rather than
+    parsing to ``None``. So a ``None``-backend row must never trip this
+    check on its own regardless of what THIS dispatch requests; it is
+    dropped from the recorded set entirely before comparing, rather than
+    compared against ``search_backend`` the way a floor's ``None`` is
+    compared against a requested ``None``. A store with only ``None``-
+    backend rows (or none at all) therefore always passes the backend half
+    of this check, and a store carrying a REAL recorded backend still
+    refuses on any dispatch that names a different one.
+
     The reason this matters BEFORE any cell runs, not merely at report time
     (``north_star_report.build_report`` already refuses to pool differing
-    values, issue athenaeum#1761): ``_run_cells``' resume contract keys a
-    group as done purely on its ``(probe, corpus_scale, replicate, arm)``
-    cell keys, which carry no floor value at all -- see this module's own
-    ``--relevance-floor-vector`` help text. Resuming a floor-off store with
-    a floor now requested would silently skip every already-done group
-    (spending nothing, producing nothing new) and then fail to render a
-    report until the mixed-floor ValueError surfaced downstream, long after
-    an operator would have wanted to know. Catching it here, before pricing
-    or a single cell, is strictly cheaper.
+    floor values, issue athenaeum#1761 -- it has no equivalent check for
+    backend at all, since ``RolloutRow``/``NorthStarReport`` carry no pooled
+    backend field): ``_run_cells``' resume contract keys a group as done
+    purely on its ``(probe, corpus_scale, replicate, arm)`` cell keys, which
+    carry no floor value AND no backend at all -- see this module's own
+    ``--relevance-floor-vector`` help text. Resuming an fts5-built store
+    under ``--search-backend vector`` would silently skip every already-done
+    group (spending nothing, producing nothing new) while reading floor
+    scores computed against a completely different index -- and, for a
+    floor mismatch, wouldn't even surface downstream until the mixed-floor
+    error, long after an operator would have wanted to know. Catching both
+    here, before pricing or a single cell, is strictly cheaper.
     """
     mismatches: list[str] = []
     for attr, requested, flag in (
@@ -395,6 +413,21 @@ def check_floor_mismatch(
         mismatches.append(
             f"{attr}: --store already has {distinct!r}, this dispatch requests "
             f"{requested!r} ({flag}) -- resuming would silently mix them"
+        )
+    # search_backend: None-backend rows (pre-athenaeum#1764 stores) are
+    # dropped before comparing -- see the docstring's "deliberate asymmetry"
+    # paragraph. Only a REAL recorded backend can trip this.
+    recorded_backends = {
+        row.record.search_backend  # type: ignore[attr-defined]
+        for row in rows
+        if row.record.search_backend is not None  # type: ignore[attr-defined]
+    }
+    if recorded_backends and recorded_backends != {search_backend}:
+        distinct_backends = sorted(recorded_backends)
+        mismatches.append(
+            f"search_backend: --store already has {distinct_backends!r}, this dispatch "
+            f"requests {search_backend!r} (--search-backend) -- resuming would read floor "
+            "scores computed against a different index"
         )
     if not mismatches:
         return None
@@ -526,9 +559,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "issue athenaeum#1764: proceed even when --relevance-floor-vector/"
-            "--relevance-floor-fts5 disagree with the floor values already recorded "
-            "in --store rows. Omitted (default): the CLI refuses before running any "
-            "cell rather than silently mixing floor configurations into one store."
+            "--relevance-floor-fts5/--search-backend disagree with the floor values or "
+            "backend already recorded in --store rows. Omitted (default): the CLI refuses "
+            "before running any cell rather than silently mixing floor configurations or "
+            "backends into one store."
         ),
     )
     parser.add_argument(
@@ -815,6 +849,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             list(existing_rows),
             relevance_floor_vector=args.relevance_floor_vector,
             relevance_floor_fts5=args.relevance_floor_fts5,
+            search_backend=args.search_backend,
         )
         if mismatch is not None:
             print(
@@ -938,6 +973,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         aborted = True
         abort_reason = str(exc) or type(exc).__name__
 
+    # Re-read rather than reusing *existing_rows* from the item-3 pre-flight
+    # check above (Quine review "optional" note): that read happened BEFORE
+    # a single cell ran, this one happens AFTER -- the store has new rows in
+    # between on any run that actually executed cells, so the two reads are
+    # of genuinely different store contents, not the same data decoded
+    # twice.
     diagnostics = load_rollout_rows_and_diagnostics(store)
     try:
         report = build_report(
@@ -969,16 +1010,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         # header fields are not asked to double as that explanation.
         aborted = True
         abort_reason = (f"{abort_reason}; {exc}" if abort_reason else str(exc))
-        report = build_report(
-            list(diagnostics.rows),
-            aborted=True,
-            abort_reason=abort_reason,
-            verdict_arm=args.verdict_arm,
-            planned_cells=read_planned_cells(store),
-            torn_rows=diagnostics.torn,
-            duplicate_rows=diagnostics.duplicates,
-            pool_floor_values=False,
-        )
+        try:
+            report = build_report(
+                list(diagnostics.rows),
+                aborted=True,
+                abort_reason=abort_reason,
+                verdict_arm=args.verdict_arm,
+                planned_cells=read_planned_cells(store),
+                torn_rows=diagnostics.torn,
+                duplicate_rows=diagnostics.duplicates,
+                pool_floor_values=False,
+            )
+        except Exception as recovery_exc:  # noqa: BLE001 -- see below
+            # Quine review "should": this recovery build_report call can
+            # ALSO raise -- for example an unknown corpus_scale reaching
+            # _corpus_for_scale/build_corpus inside build_report, a
+            # genuinely different failure this except clause has no special
+            # handling for. Left unguarded this crashed main() with a bare
+            # traceback a SECOND time, exactly the failure mode item 1
+            # exists to prevent. Fall back to build_report([]) -- rows=()
+            # is proven never to raise
+            # (test_build_report_empty_rows_does_not_raise) -- so a PARTIAL
+            # report stub still gets written, naming BOTH failures, rather
+            # than losing the report and the exit code together.
+            abort_reason = (
+                f"{abort_reason}; report construction also failed: {recovery_exc}"
+            )
+            report = build_report(
+                [],
+                aborted=True,
+                abort_reason=abort_reason,
+                verdict_arm=args.verdict_arm,
+                planned_cells=read_planned_cells(store),
+            )
     path = write_report(report, out_dir=args.out_dir)
     print(f"report written: {path}")
     return 0 if not aborted else 1

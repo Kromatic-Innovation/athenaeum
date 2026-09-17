@@ -16,9 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `try`/`except (Exception, KeyboardInterrupt)` block entirely -- it wraps
   only `_run_cells`, not `build_report` -- and crashed with a bare
   traceback instead of the `aborted=True` PARTIAL report every other
-  failure mode produces; `main` now catches that `ValueError` separately
-  and rebuilds the same report with pooling skipped, naming the mismatched
-  values in `abort_reason`. (2) `floor_scan_summary` (`--floor-scan`) used
+  failure mode produces; `north_star_report` now raises a dedicated
+  `MixedFloorError` (a `ValueError` subclass) for this case, and `main`
+  catches it separately, rebuilding the same report with pooling skipped
+  and naming the mismatched values in `abort_reason`. If that recovery
+  rebuild itself fails for any other reason, `main` falls back to an
+  empty-rows report naming both failures rather than crashing a second
+  time. (2) `floor_scan_summary` (`--floor-scan`) used
   to pool every row's `retrieval_hit_scores` into one percentile summary
   regardless of backend, blending FTS5 bm25 scores (large negative, lower
   is better) with vector distances (0 to 2, lower is better) into a
@@ -27,15 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   persisted before this field existed), and `floor_scan_summary` now prints
   one block per backend, each carrying a "lower is better" note and the
   backend's own name. (3) resuming a `--store` written under one floor
-  configuration with a different `--relevance-floor-vector`/
-  `--relevance-floor-fts5` used to silently skip already-done groups (the
-  resume contract's cell keys carry no floor value) and only surface the
-  mismatch downstream, after spend, via item 1's crash; `main` now compares
-  the requested floors against the floor values already recorded in
-  `--store` rows before running any cell and refuses (non-zero exit, zero
-  spend) on a disagreement, unless the new `--allow-floor-mismatch` flag is
-  passed. An empty store, or a store whose rows are all-`None` matched by
-  no floor flags, passes unchanged.
+  configuration or search backend with a different
+  `--relevance-floor-vector`/`--relevance-floor-fts5`/`--search-backend`
+  used to silently skip already-done groups (the resume contract's cell
+  keys carry no floor value and no backend) and only surface the mismatch
+  downstream, after spend, via item 1's crash; `main` now compares the
+  requested floors AND search backend against the values already recorded
+  in `--store` rows before running any cell and refuses (non-zero exit,
+  zero spend) on a disagreement, unless the new `--allow-floor-mismatch`
+  flag is passed. A `search_backend=None` row (a pre-athenaeum#1764 store)
+  never trips the backend half of this check on its own. An empty store,
+  or a store whose rows are all-`None` matched by no floor flags, passes
+  unchanged.
 - **A relevance-floor input for the north-star grid's floor-active pass
   (issue athenaeum#1761).** `docs/design/native-memory-baseline.md` §4
   commits to reporting a floor-active pass alongside the as-shipped pass,

@@ -52,7 +52,12 @@ def _stub_all_arm_records(probe_id: str, corpus_scale: str) -> dict[str, Rollout
     }
 
 
-def _pre_existing_row(store: ResultStore, *, relevance_floor_vector: float | None) -> None:
+def _pre_existing_row(
+    store: ResultStore,
+    *,
+    relevance_floor_vector: float | None,
+    search_backend: str | None = None,
+) -> None:
     append_rollout_row(
         store,
         GridCell(
@@ -68,6 +73,7 @@ def _pre_existing_row(store: ResultStore, *, relevance_floor_vector: float | Non
             corpus_scale="core",
             answer="a",
             relevance_floor_vector=relevance_floor_vector,
+            search_backend=search_backend,
         ),
     )
 
@@ -241,7 +247,9 @@ def test_floor_scan_summary_single_unlabeled_backend_stays_pre_1764_compatible()
 # ---------------------------------------------------------------------------
 
 
-def _floor_row(*, relevance_floor_vector: float | None) -> RolloutRow:
+def _floor_row(
+    *, relevance_floor_vector: float | None, search_backend: str | None = None
+) -> RolloutRow:
     return RolloutRow(
         cell=GridCell(probe=_PROBE_ID, arm=Arm.NONE.value, corpus_scale="core", replicate=0),
         record=RolloutRecord(
@@ -251,6 +259,7 @@ def _floor_row(*, relevance_floor_vector: float | None) -> RolloutRow:
             corpus_scale="core",
             answer="a",
             relevance_floor_vector=relevance_floor_vector,
+            search_backend=search_backend,
         ),
     )
 
@@ -258,7 +267,7 @@ def _floor_row(*, relevance_floor_vector: float | None) -> RolloutRow:
 def test_check_floor_mismatch_passes_on_empty_store() -> None:
     assert (
         north_star_cli.check_floor_mismatch(
-            [], relevance_floor_vector=0.3, relevance_floor_fts5=None
+            [], relevance_floor_vector=0.3, relevance_floor_fts5=None, search_backend="fts5"
         )
         is None
     )
@@ -268,7 +277,7 @@ def test_check_floor_mismatch_passes_when_all_none_matches_no_flags() -> None:
     rows = [_floor_row(relevance_floor_vector=None), _floor_row(relevance_floor_vector=None)]
     assert (
         north_star_cli.check_floor_mismatch(
-            rows, relevance_floor_vector=None, relevance_floor_fts5=None
+            rows, relevance_floor_vector=None, relevance_floor_fts5=None, search_backend="fts5"
         )
         is None
     )
@@ -278,7 +287,7 @@ def test_check_floor_mismatch_passes_when_values_agree() -> None:
     rows = [_floor_row(relevance_floor_vector=0.3), _floor_row(relevance_floor_vector=0.3)]
     assert (
         north_star_cli.check_floor_mismatch(
-            rows, relevance_floor_vector=0.3, relevance_floor_fts5=None
+            rows, relevance_floor_vector=0.3, relevance_floor_fts5=None, search_backend="fts5"
         )
         is None
     )
@@ -287,10 +296,50 @@ def test_check_floor_mismatch_passes_when_values_agree() -> None:
 def test_check_floor_mismatch_refuses_on_disagreement() -> None:
     rows = [_floor_row(relevance_floor_vector=None)]
     mismatch = north_star_cli.check_floor_mismatch(
-        rows, relevance_floor_vector=0.3, relevance_floor_fts5=None
+        rows, relevance_floor_vector=0.3, relevance_floor_fts5=None, search_backend="fts5"
     )
     assert mismatch is not None
     assert "relevance_floor_vector" in mismatch
+
+
+# ---------------------------------------------------------------------------
+# 3b. check_floor_mismatch: --search-backend (Quine must-fix on PR#1765)
+# ---------------------------------------------------------------------------
+
+
+def test_check_floor_mismatch_passes_when_backend_matches() -> None:
+    rows = [_floor_row(relevance_floor_vector=None, search_backend="fts5")]
+    assert (
+        north_star_cli.check_floor_mismatch(
+            rows, relevance_floor_vector=None, relevance_floor_fts5=None, search_backend="fts5"
+        )
+        is None
+    )
+
+
+def test_check_floor_mismatch_refuses_when_backend_disagrees() -> None:
+    rows = [_floor_row(relevance_floor_vector=None, search_backend="fts5")]
+    mismatch = north_star_cli.check_floor_mismatch(
+        rows, relevance_floor_vector=None, relevance_floor_fts5=None, search_backend="vector"
+    )
+    assert mismatch is not None
+    assert "search_backend" in mismatch
+
+
+def test_check_floor_mismatch_passes_when_stored_backend_is_none() -> None:
+    """A pre-athenaeum#1764 store's rows carry ``search_backend=None`` --
+    that must never trip the guard on its own, whatever backend this
+    dispatch requests."""
+    rows = [_floor_row(relevance_floor_vector=None, search_backend=None)]
+    assert (
+        north_star_cli.check_floor_mismatch(
+            rows,
+            relevance_floor_vector=None,
+            relevance_floor_fts5=None,
+            search_backend="vector",
+        )
+        is None
+    )
 
 
 def test_main_refuses_floor_mismatch_before_running_any_cell(
@@ -369,6 +418,188 @@ def test_main_allow_floor_mismatch_override_lets_cells_run(
     )
 
     assert called, "--allow-floor-mismatch must let the cell run"
+
+
+def test_main_refuses_search_backend_mismatch_before_running_any_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The must-fix from Quine review of PR#1765: a store built with one
+    search backend, resumed under a different one, is the same silent-mix
+    hazard as a floor mismatch and must refuse the same way."""
+    store_path = tmp_path / "store.jsonl"
+    store = ResultStore(store_path)
+    _pre_existing_row(store, relevance_floor_vector=None, search_backend="fts5")
+
+    called = False
+
+    def _spy(*_args: Any, **_kwargs: Any) -> dict[str, RolloutRecord]:
+        nonlocal called
+        called = True
+        raise AssertionError("run_probe_all_arms must not run on a backend-mismatch refusal")
+
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _spy)
+
+    exit_code = north_star_cli.main(
+        [
+            "--scale",
+            "smoke",
+            "--store",
+            str(store_path),
+            "--search-backend",
+            "vector",
+            "--materialize-root",
+            str(tmp_path / "mat"),
+            "--out-dir",
+            str(tmp_path / "measurements"),
+        ]
+    )
+
+    assert exit_code == 1
+    assert not called, "the run spent a cell despite the backend mismatch"
+    err = capsys.readouterr().err
+    assert "search_backend" in err
+    assert "--allow-floor-mismatch" in err
+
+
+def test_main_allow_floor_mismatch_override_also_covers_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One flag covers both hazards: --allow-floor-mismatch also bypasses a
+    --search-backend disagreement, not only a floor disagreement."""
+    store_path = tmp_path / "store.jsonl"
+    store = ResultStore(store_path)
+    _pre_existing_row(store, relevance_floor_vector=None, search_backend="fts5")
+
+    called = False
+
+    def _stub(probe_id: str, corpus_scale: str, **_kwargs: Any) -> dict[str, RolloutRecord]:
+        nonlocal called
+        called = True
+        return _stub_all_arm_records(probe_id, corpus_scale)
+
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _stub)
+
+    north_star_cli.main(
+        [
+            "--scale",
+            "smoke",
+            "--store",
+            str(store_path),
+            "--search-backend",
+            "vector",
+            "--allow-floor-mismatch",
+            "--materialize-root",
+            str(tmp_path / "mat"),
+            "--out-dir",
+            str(tmp_path / "measurements"),
+        ]
+    )
+
+    assert called, "--allow-floor-mismatch must also let a backend-mismatched run proceed"
+
+
+def test_main_none_backend_store_passes_regardless_of_requested_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-athenaeum#1764 store (search_backend=None on every row) must
+    never trip the backend half of the guard on its own."""
+    store_path = tmp_path / "store.jsonl"
+    store = ResultStore(store_path)
+    _pre_existing_row(store, relevance_floor_vector=None, search_backend=None)
+
+    called = False
+
+    def _stub(probe_id: str, corpus_scale: str, **_kwargs: Any) -> dict[str, RolloutRecord]:
+        nonlocal called
+        called = True
+        return _stub_all_arm_records(probe_id, corpus_scale)
+
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _stub)
+
+    exit_code = north_star_cli.main(
+        [
+            "--scale",
+            "smoke",
+            "--store",
+            str(store_path),
+            "--search-backend",
+            "vector",
+            "--materialize-root",
+            str(tmp_path / "mat"),
+            "--out-dir",
+            str(tmp_path / "measurements"),
+        ]
+    )
+
+    assert called, "a None-backend store must not trip the pre-flight guard on its own"
+    assert exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# 4. The mixed-floor recovery path itself must not crash main() a second
+#    time if IT also raises (Quine "should" on PR#1765)
+# ---------------------------------------------------------------------------
+
+
+def test_main_recovery_build_report_failure_still_writes_a_partial_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the recovery ``build_report(..., pool_floor_values=False)`` call
+    itself raises (a bug in this recovery path, or a store row otherwise
+    unparseable by ``build_report``), ``main()`` must still write a PARTIAL
+    report and exit non-zero, never crash with a bare traceback a second
+    time."""
+    store_path = tmp_path / "store.jsonl"
+    out_dir = tmp_path / "measurements"
+    store = ResultStore(store_path)
+    _pre_existing_row(store, relevance_floor_vector=None)
+
+    monkeypatch.setattr(
+        north_star_cli,
+        "run_probe_all_arms",
+        lambda probe_id, corpus_scale, **_kwargs: _stub_all_arm_records(probe_id, corpus_scale),
+    )
+
+    real_build_report = north_star_cli.build_report
+    call_count = 0
+
+    def _flaky_build_report(rows: Any, **kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        # 1st call: the normal attempt, raises MixedFloorError for real (the
+        # genuine mixed-floor rows this dispatch produces). 2nd call: the
+        # recovery attempt (pool_floor_values=False) -- fail IT too, to
+        # exercise the recovery path's own except clause. 3rd call: the
+        # recovery's own fallback (rows=()) -- let it through for real, so a
+        # report actually gets written.
+        if call_count == 2:
+            raise RuntimeError("synthetic recovery-path failure")
+        return real_build_report(rows, **kwargs)
+
+    monkeypatch.setattr(north_star_cli, "build_report", _flaky_build_report)
+
+    exit_code = north_star_cli.main(
+        [
+            "--scale",
+            "smoke",
+            "--store",
+            str(store_path),
+            "--relevance-floor-vector",
+            "0.3",
+            "--allow-floor-mismatch",
+            "--materialize-root",
+            str(tmp_path / "mat"),
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+
+    assert exit_code == 1
+    reports = list(out_dir.glob("north-star-*.md"))
+    assert len(reports) == 1, f"expected exactly one report, got {reports}"
+    report_text = reports[0].read_text(encoding="utf-8")
+    assert "PARTIAL RUN" in report_text
+    assert "synthetic recovery-path failure" in report_text
 
 
 def test_main_floor_mismatch_refusal_preempts_dry_run_projection(
