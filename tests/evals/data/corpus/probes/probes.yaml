@@ -127,7 +127,7 @@
   expected_uids: [client-thorncastle]
   must_not_rank: [contact-thorncastle-superseded]
   distractor_terms: ["Thorncastle", "first contact", "became a client", "November 2025"]
-  answer_tokens: ["Ashgrove"]
+  answer_tokens: ["Quenfrost"]
 
 - id: tamsin_ferro_role_change
   probe_class: temporal

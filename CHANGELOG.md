@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `single_hop`/`multi_hop`/`disambiguation`/`temporal` probes whose
   `expected_uids` resolve to a `person` or `company` page. Every existing
   `temporal` probe targeted a `note` page, so the subset carried zero
-  `temporal` probes — Quine's mutation review of PR #1740 found that
+  `temporal` probes — Quine's mutation review of PR athenaeum#1740 found that
   dropping `temporal` from that class list was an equivalent mutant. Three
   new `temporal` probes plant a last-contact date, a first-contact date,
   and a changed-role date directly on a person/company page (each with its

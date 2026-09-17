@@ -533,14 +533,15 @@ def test_relationship_probe_subset_has_all_four_classes_at_core() -> None:
     (``docs/design/native-memory-baseline.md`` §7) is evaluated over
     ``_relationship_probe_ids`` -- ``single_hop``/``multi_hop``/
     ``disambiguation``/``temporal`` probes whose ``expected_uids`` resolve
-    to a ``person`` or ``company`` page. Quine's mutation review of PR #1740
-    found that dropping ``temporal`` from that class list is an EQUIVALENT
-    mutant at ``core``: no ``temporal`` probe's expected pages were
-    person/company, so removing the class from the filter changed nothing.
-    Asserting every one of the four classes is represented in the subset --
-    not merely that the subset is non-empty -- is what makes that mutant
-    detectable again: dropping any single class from
-    ``_relationship_probe_ids``'s class filter must fail this test.
+    to a ``person`` or ``company`` page. Quine's mutation review of PR
+    athenaeum#1740 found that dropping ``temporal`` from that class list is
+    an EQUIVALENT mutant at ``core``: no ``temporal`` probe's expected
+    pages were person/company, so removing the class from the filter
+    changed nothing. Asserting every one of the four classes is
+    represented in the subset -- not merely that the subset is non-empty
+    -- is what makes that mutant detectable again: dropping any single
+    class from ``_relationship_probe_ids``'s class filter must fail this
+    test.
     """
     ids = _relationship_probe_ids({"core"})
     classes_in_subset = {probe.probe_class for probe in load_probes() if probe.id in ids}
