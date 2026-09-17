@@ -40,7 +40,7 @@ import itertools
 import json
 import os
 import threading
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -341,17 +341,71 @@ class ResultStore:
         per-cell mid-run — the file only grows monotonically during a run
         of :func:`run_grid`, so a snapshot taken at the start is exactly
         "what a resume must not repay for".
+
+        A row that will not decode is SKIPPED, not fatal — see
+        :func:`count_torn_rows` for why one can exist and why the tolerance
+        cannot be narrowed to "the last line only". Skipping is the safe
+        direction here: an unreadable row is treated as not-yet-completed,
+        so its cell is re-run and re-appended rather than silently
+        considered paid for.
         """
-        if not self.path.exists():
-            return set()
         keys: set[str] = set()
+        for row in self._iter_rows():
+            key = row.get("cell_key")
+            if isinstance(key, str):
+                keys.add(key)
+        return keys
+
+    def _iter_rows(self) -> Iterator[dict[str, Any]]:
+        """Yield every decodable row, skipping blank and torn ones."""
+        if not self.path.exists():
+            return
         with self.path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
                 if not line:
                     continue
-                keys.add(json.loads(line)["cell_key"])
-        return keys
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    yield row
+
+    def count_torn_rows(self) -> int:
+        """How many lines in the store will not decode as a JSON object.
+
+        A store is written append-only with an ``fsync`` per row, so within
+        ONE run only the final line can be torn — a process killed at its
+        job ``timeout-minutes`` mid-``write`` leaves a partial line, and a
+        rollout row is hundreds of KB, so that window is real rather than
+        theoretical.
+
+        The tolerance deliberately is NOT narrowed to "the last line only",
+        because this issue's own workflow change makes a resumed run the
+        expected recovery path: a resume appends AFTER the torn tail, which
+        puts the torn line in the MIDDLE of the file. A strict
+        last-line-only rule would start raising on exactly the store it was
+        written to rescue. Counting instead of raising keeps the audit
+        trail — the count reaches the report's partial banner, so a torn
+        row is visible rather than merely survived.
+        """
+        if not self.path.exists():
+            return 0
+        torn = 0
+        with self.path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    torn += 1
+                    continue
+                if not isinstance(row, dict):
+                    torn += 1
+        return torn
 
     def append(self, cell_key: str, payload: dict[str, Any]) -> None:
         """Append one completed cell's result, flushed and fsync'd.
@@ -397,6 +451,10 @@ def run_grid(
     returned list matches. The SET of executed cells is identical either
     way, which is the property callers may rely on — anything needing a
     stable ordering must sort by cell identity itself.
+
+    A failing cell does not cost the others their results: every cell that
+    completed is appended, and the first exception is re-raised only once
+    the pool has drained.
     """
     if workers < 1:
         raise ValueError(f"workers must be >= 1, got {workers}")
@@ -409,13 +467,31 @@ def run_grid(
             store.append(cell.cell_key(), payload)
             results.append(payload)
         return results
+    first_failure: BaseException | None = None
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(cell_runner, cell): cell for cell in pending}
         for future in as_completed(futures):
             cell = futures[future]
-            payload = future.result()
+            try:
+                payload = future.result()
+            except Exception as exc:  # noqa: BLE001 -- see below
+                # Drain, do not bail. Raising straight out of this loop
+                # would abandon every future that had ALREADY completed but
+                # was not yet pulled off ``as_completed`` -- their cells ran
+                # and were paid for, and their results would never reach the
+                # store. That is exactly the silent loss the append-only
+                # store exists to prevent, and it would also break resume:
+                # the next run would re-pay for work that had succeeded.
+                # So every completed cell is persisted, and the FIRST
+                # failure is re-raised below, once there is nothing left to
+                # lose by raising it.
+                if first_failure is None:
+                    first_failure = exc
+                continue
             store.append(cell.cell_key(), payload)
             results.append(payload)
+    if first_failure is not None:
+        raise first_failure
     return results
 
 
