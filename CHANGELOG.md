@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Offline retrieval-coverage test: every grep-reachable expected page
+  must also surface in `recall` (issue athenaeum#1770).**
+  `tests/evals/test_recall_covers_grep.py` materialises the `core` and
+  `medium` corpus scales, builds the same FTS5 index the north-star grid
+  builds by default, computes a grep baseline over each non-abstention
+  probe's content terms, and asserts every expected page that baseline
+  reaches is also present in a real `recall_search` call's top 5 -- at both
+  the `fts5` and `vector` backends (vector skipped cleanly when `chromadb`
+  is unavailable, mirroring every other vector-backed test in this repo).
+  The invariant is one-directional: `recall` is not required to return
+  everything grep returns. Alongside the assertion, the module prints (never
+  asserts on) a precision table -- irrelevant pages returned by grep/recall/
+  the shipped hook's top-3 breadcrumbs, each expected page's rank in
+  recall's ordering, and whether each probe's `must_not_rank` pages were
+  surfaced by grep, recall, or the hook (confirming, for example, that
+  `recall` correctly excludes the `rowanwrenfield` repo page on a question
+  about Rowan Wrenfield the person, where a bare grep does not) -- plus a
+  per-probe-class summary row. Six (scale, probe) cases on `fts5` and 49 of
+  52 on `vector` are genuine retrieval-side misses, measured against the
+  current corpus/index and marked `xfail(strict=True)` referencing
+  athenaeum#1770 so CI stays green while a fix in `src/athenaeum/search.py`
+  or the query path is tracked separately; see
+  `docs/design/native-memory-baseline.md` §5 for the breadcrumb-cap
+  measurement this module also produced.
 - **Hardening for the north-star grid's relevance-floor input (issue
   athenaeum#1764), found by Quine review of PR athenaeum#1763.** Three
   fixes: (1) a mixed-floor store's `north_star_report.build_report`

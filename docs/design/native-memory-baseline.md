@@ -309,6 +309,52 @@ is known, which is a generator change, not a corpus rewrite: the hand-authored
 core pages already carry `source_ref`, so the generator inverts them into
 dated observations that would compile back to them.
 
+**Caveat on the `push_breadcrumb*` arms: the hook's 3-breadcrumb cap misses
+many grep-reachable expected pages, at both corpus scales this offline
+check covers** (`tests/evals/test_recall_covers_grep.py`, issue
+athenaeum#1770). That module asserts a narrower, one-directional invariant
+offline and deterministically -- every expected page a simple grep baseline
+reaches must appear in a plain `recall_search` call's own top-5, at both the
+`fts5` and `vector` backends -- and separately measures, without asserting
+on it, how many of those grep-reachable expected pages fall outside the
+shipped hook's top-3 breadcrumbs. Measured 2026-09-17 against `core` and
+`medium`, fts5 backend (the grid's own default):
+
+| probe_class | probes | expected pages | reached by grep | reached by recall top-5 | reached by hook top-3 | irrelevant pages: grep / recall / hook |
+|---|---|---|---|---|---|---|
+| single_hop | 4 | 4 | 4 | 3 | 2 | 148 / 17 / 10 |
+| multi_hop | 3 | 6 | 3 | 3 | 3 | 114 / 10 / 5 |
+| temporal | 6 | 6 | 6 | 5 | 5 | 88 / 18 / 12 |
+| disambiguation | 4 | 8 | 8 | 8 | 7 | 30 / 4 / 2 |
+| distractor_robustness | 2 | 4 | 4 | 4 | 3 | 17 / 4 / 3 |
+| redundancy | 1 | 2 | 2 | 2 | 2 | 4 / 2 / 1 |
+| follow_through | 6 | 12 | 6 | 6 | 6 | 122 / 14 / 7 |
+
+(`core` scale; `medium` shows the same shape at larger irrelevant-page
+counts -- see the PR that added this module for the full table at both
+scales.) Reading the columns: "reached by hook top-3" is always ≤ "reached
+by recall top-5" by construction (the hook is recall's own top-3 subset in
+the common case), so every probe class loses SOME grep-reachable expected
+pages to the 3-breadcrumb cap even where the full recall call would have
+surfaced them -- this is the operator's own §7 decision-rule condition 3
+cost/coverage tradeoff made concrete, not a new finding about `recall`
+itself. `single_hop` and `multi_hop` lose the largest share proportionally.
+
+The SAME module also confirms the disambiguation win recall has over a bare
+grep: for probe `person_not_repo`, the `repo-rowanwrenfield` page is
+grep-reachable (the query shares terms with it) but is correctly absent from
+both recall's top-5 and the hook's top-3; symmetrically for probe
+`repo_not_person`, `person-rowan-wrenfield` is grep-reachable but absent from
+both. A bare keyword search cannot tell "Rowan Wrenfield the person" from
+"rowanwrenfield the repo"; `recall`'s ranking can.
+
+A genuine retrieval-side coverage gap was also found and is tracked as
+xfail(strict=True) cases in that test module rather than fixed here (issue
+athenaeum#1770 explicitly keeps a fix for `src/athenaeum/search.py` or the
+query path out of this module's scope) -- see the module's `_FTS5_XFAIL` /
+`_VECTOR_XFAIL` sets and the PR body that introduced them for the full list
+and a proposed follow-up issue.
+
 ## 6. What is measured
 
 The dimensions already defined for the north-star report
