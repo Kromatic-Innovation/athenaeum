@@ -97,12 +97,17 @@ def _two_page_follow_through(
         if second_hop_shares_query_term
         else "Verdigrove is a quiet coastal harbour town."
     )
-    token_two_clause = "TokenTwo sits here. " if second_hop_carries_token else ""
+    token_two_clause = (
+        "TokenTwo sits here.\n\nInternal reference tag: TokenTwo. "
+        if second_hop_carries_token
+        else ""
+    )
     wikilink_clause = f" See [[{edge_target}]] for more." if body_wikilink else ""
     source_body = (
-        f"TokenOne sits here, in a note about early galaxy history.{wikilink_clause}"
+        f"TokenOne sits here, in a note about early galaxy history.{wikilink_clause}\n\n"
+        "Internal reference tag: TokenOne."
         if source_shares_query_term
-        else f"TokenOne sits here.{wikilink_clause}"
+        else f"TokenOne sits here.{wikilink_clause}\n\nInternal reference tag: TokenOne."
     )
     related = (RelatedEdge(uid=edge_target, role="related"),) if frontmatter_edge else ()
     pages = [
@@ -394,7 +399,11 @@ def test_xlarge_scale_is_pinned() -> None:
     assert SCALES["xlarge"].distractors_per_probe == 2
     corpus = build_corpus(scale="xlarge")
     assert len(corpus.pages) >= 25_000
-    assert corpus.fingerprint() == "9b1de9056154b6c1"
+    # athenaeum#1759: Page.to_markdown() now bolds the `Internal reference
+    # tag:` line, which shifts every stored fingerprint that hashes rendered
+    # markdown -- same class of expected change as a GENERATOR_VERSION bump,
+    # per this test's own docstring.
+    assert corpus.fingerprint() == "8b6c1c37c967e324"
 
 
 def test_core_scale_generates_nothing() -> None:
