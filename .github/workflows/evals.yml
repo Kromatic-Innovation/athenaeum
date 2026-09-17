@@ -4,9 +4,14 @@ name: Evals
 #   * workflow_dispatch — on-demand, optionally with `record=true` to
 #     persist raw response bodies to tests/fixtures/recorded/, uploaded as
 #     a `recorded-fixtures` artifact (someone must download it and commit
-#     the drift themselves).
-#   * push to `main` only — the release path; a red eval here is visible
-#     without blocking the develop-CI flow.
+#     the drift themselves). **This is the ONLY trigger for the `eval`
+#     job.** Operator decision 2026-09-16: token-spending evals run
+#     manually, when a change to a prompt, a model tier, the compile
+#     pipeline, the recall path, or the sidecar could move a result — not
+#     on every release. See docs/design/native-memory-baseline.md §9.
+#   * push to `main` — runs ONLY the token-free `embedding-suite` job
+#     (real MiniLM cosines, no Anthropic key, athenaeum#1091). The `eval`
+#     job is gated off this trigger by its `if:` below.
 #
 # Regular CI (ci.yml) is on `develop` only, so this workflow does NOT
 # collide with it: they trigger on distinct refs.
@@ -85,6 +90,9 @@ jobs:
 
   eval:
     name: Live-API eval suite
+    # Manual dispatch only — a push to `main` runs `embedding-suite` above
+    # and nothing that spends tokens (operator decision 2026-09-16).
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -117,7 +125,7 @@ jobs:
         env:
           # ``ATHENAEUM_EVAL_RECORD`` toggles the `--record` mode inside the
           # harness so a workflow_dispatch with record=true seeds fixtures
-          # for the follow-up commit. Push-to-main runs do NOT record.
+          # for the follow-up commit. The default dispatch does NOT record.
           ATHENAEUM_EVAL_RECORD: ${{ github.event.inputs.record == 'true' && '1' || '0' }}
         run: |
           if [ -z "${ANTHROPIC_API_KEY:-}" ]; then

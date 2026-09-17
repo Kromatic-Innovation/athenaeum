@@ -18,6 +18,9 @@ Everything in `docs/` is reachable from this page.
   tool, RAG, and the agent-memory libraries.
 - [**North star**](north-star.md) — the purpose and operating principles every design
   decision is checked against, including what the project deliberately does not do.
+- [**Use cases**](use-cases.md) — the north star decomposed into the questions memory is
+  asked, current and aspirational, and the kill criterion: beat the host agent's native
+  memory or be shelved.
 
 ## Guides
 
@@ -97,6 +100,8 @@ does not answer.
 - [Auto-resolve](design/auto-resolve.md)
 - [Merge inflow restoration](design/merge-inflow-restoration.md)
 - [Recall architecture](design/recall-architecture.md)
+- [Native-memory baseline](design/native-memory-baseline.md) — the comparison against the
+  host agent's own memory that decides whether the project continues.
 - [Prompts](design/prompts.md)
 - [Sensitivity class vocabulary](design/sensitivity-class-vocabulary.md)
 - [Sensitivity value routing](design/sensitivity-value-routing.md)

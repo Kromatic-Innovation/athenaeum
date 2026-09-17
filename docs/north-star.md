@@ -9,7 +9,9 @@ reference this page rather than restating it. When a design dispute has no
 obvious winner, this page is the tie-breaker.
 
 Companion to [`docs/why-athenaeum.md`](why-athenaeum.md) (why this system
-exists at all, and what it replaces),
+exists at all, and what it replaces), [`docs/use-cases.md`](use-cases.md)
+(the concrete questions this bar is graded on, and the comparison against
+native memory that decides whether the project continues),
 [`docs/design/one-way-in-one-way-out.md`](design/one-way-in-one-way-out.md) (the two-path
 invariant), and [`docs/design/field-corrections.md`](design/field-corrections.md) (the
 conformance fast path and the tier ladder).

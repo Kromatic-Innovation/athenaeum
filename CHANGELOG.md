@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`docs/use-cases.md`: the north star decomposed into the questions memory
+  is actually asked, and a kill criterion.** "Surface the right information at
+  the right time" is a quality bar with no customer attached, and nothing in
+  the eval suite could falsify it. The new page turns the four questions from
+  `why-athenaeum.md` into concrete use cases, each mapped to the synthetic
+  corpus's probe classes, with the relationship question as the first-class
+  case; adds an **aspirational tier** (division-level roll-up of team wikis,
+  leadership decisions pushed down, private-to-shared contribution,
+  cross-team contradiction routing) that is not implemented and has no evals
+  but constrains today's architecture so the single-operator deployment does
+  not become the ceiling; and states the operator's 2026-09-16 decision that
+  the project is justified **only if it beats the host agent's native memory**
+  on those use cases.
+- **`docs/design/native-memory-baseline.md`: the comparison that decides
+  whether the project continues.** The existing six-arm rollout runner
+  compares ways of delivering *Athenaeum's* memory; no arm reads a native
+  store, so it cannot answer the shelving question. The record specifies two
+  new arms over Claude Code auto memory — `NATIVE_INDEX` (a `MEMORY.md`
+  index, truncated exactly as Claude Code truncates it at 200 lines / 25KB)
+  and `NATIVE_GREP` (no index, file tools only) — and establishes a priori
+  that the index cap is exhausted at roughly 200 pages, so the decisive
+  comparison is librarian-plus-search versus the model grepping flat files at
+  the `medium` scale and above. Two phases, because the synthetic corpus is
+  compiled pages with no raw observations: read path first (reuses every
+  existing arm, probe and scale), write path second (a raw-observation
+  generator feeding both systems). Decision rule with the cost factor set
+  before any run (2× limit, 1× target, 0.5× the positioning-changing
+  outcome), write cost compared against the native writer's inline
+  memory-saving spend rather than against zero, a required follow-through
+  probe class (answer two link-hops from the surfaced page), the corpus-size
+  cutoff below which the recommendation is the agent's own memory, dimensions
+  (adds crossover scale and index coverage), and the manual-dispatch cadence
+  are all stated.
+
 - **Stale-server detection: a running `athenaeum serve` reports when its own
   code is older than what is currently installed on disk.** The
   2026-09-10 session-attribution split traced back to a stale server, not an
@@ -27,6 +61,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   import). Detection only, by explicit operator decision — this never
   restarts a stale server, which would drop every live client connection.
   ([#1593](https://github.com/Kromatic-Innovation/athenaeum/issues/1593))
+
+### Changed
+
+- **README positioning now states three use cases in order of how well each is
+  established, instead of asserting a team market.** The former tagline
+  ("production-tested agentic memory for teams deploying multiple AI agents")
+  and its "is this for me?" gate claimed a validated team wedge that the
+  2026-09-16 purpose review found was never validated, and turned away the one
+  case that can be established a priori: an individual or small team whose
+  corpus has outgrown the host agent's native memory index. The README now
+  leads with that case, names provenance-carrying relationship memory second,
+  and states plainly that multi-writer team memory is the design goal, not a
+  confirmed market. Links to `docs/use-cases.md` for the kill criterion.
+- **Token-spending evals no longer run on push to `main`; `workflow_dispatch`
+  is the only trigger for `evals.yml`'s `eval` job.** Operator decision
+  2026-09-16: live-API evals run manually, when a change to a prompt, a model
+  tier, the compile pipeline, the recall path, or the sidecar could move a
+  result — not on every release. The `push: main` trigger stays on the
+  workflow so the token-free `embedding-suite` job (real MiniLM cosines, no
+  Anthropic key, athenaeum#1091) keeps running there as the release-path net
+  `embedding-pr.yml` relies on; the `eval` job is gated off that trigger with
+  an `if:`. `tests/evals/README.md` now says when to dispatch and when not
+  to.
 
 ### Removed
 

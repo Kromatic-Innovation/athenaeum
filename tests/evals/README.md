@@ -6,8 +6,12 @@ Two layers of test that share one recording pipeline.
 
 Deselected by default (see `pyproject.toml` `addopts = "... -m 'not eval'"`),
 so regular contributor test runs and the `develop` CI job never touch the
-network. The suite runs only from the `evals.yml` workflow — dispatch,
-or push to `main`.
+network. The suite runs only from the `evals.yml` workflow, and only on
+**manual `workflow_dispatch`** — never on push. Dispatch it when a change
+to a prompt, a model tier, the compile pipeline, the recall path, or the
+sidecar could move a result; a docs or tooling change does not warrant a
+run. (The same workflow's token-free `embedding-suite` job still runs on
+push to `main`; see the workflow header.)
 
 Layers exercised end-to-end against a real Claude API call:
 
