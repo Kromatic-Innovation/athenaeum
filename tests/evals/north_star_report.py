@@ -86,7 +86,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -107,6 +106,7 @@ from athenaeum.text_overlap import (
 )
 from tests.evals.containment import GridCell, ResultStore
 from tests.evals.corpus import Corpus, Observation, Probe, build_corpus
+from tests.evals.corpus import _content_terms as _content_terms
 from tests.evals.metrics import uids_from_recall_output
 from tests.evals.rollout import Arm, RolloutRecord
 
@@ -176,25 +176,12 @@ def load_rollout_rows(store: ResultStore) -> list[RolloutRow]:
 # Free-to-compute text metrics
 # ---------------------------------------------------------------------------
 
-#: A short, deliberately conservative stopword list -- excluded so a
-#: lexical/n-gram overlap is not dominated by function words that would
-#: overlap between almost any two English passages regardless of topic.
-#: NOT a general-purpose NLP stopword list (no external dependency is
-#: pulled in for this); just enough to keep the free metrics meaningful.
-_STOPWORDS = frozenset(
-    {
-        "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "is",
-        "are", "was", "were", "be", "been", "with", "as", "at", "by", "it",
-        "this", "that", "these", "those", "from", "not", "no", "do", "does",
-        "did", "what", "which", "who", "how", "when", "where", "why",
-    }
-)
-_WORD_RE = re.compile(r"[a-z0-9]+")
-
-
-def _content_terms(text: str) -> set[str]:
-    words = _WORD_RE.findall(text.lower())
-    return {w for w in words if len(w) >= 3 and w not in _STOPWORDS}
+#: ``_content_terms`` (and the stopword list / word regex behind it) moved to
+#: ``tests.evals.corpus`` (issue athenaeum#1737): ``validate_core``'s
+#: ``follow_through`` check needs the SAME content-term definition this
+#: module's Jaccard overlap uses, and this module already imports FROM
+#: ``tests.evals.corpus`` -- the reverse import would be circular. Re-imported
+#: above under this module's original name so no caller here needed to change.
 
 
 def lexical_overlap(a: str, b: str) -> float:

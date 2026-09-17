@@ -93,7 +93,8 @@ directions.
   behind it and follows its links. The realistic question is one whose full
   answer needs a technical detail two pages away from what was surfaced, so
   the comparison must include multi-turn probes of that shape
-  (`design/native-memory-baseline.md` §5). No such probe class exists yet.
+  (`design/native-memory-baseline.md` §5). Covered by the `follow_through`
+  probe class (issue athenaeum#1737).
 - **Currency.** Something reported today is recallable today, not after the
   next nightly run (north star §1, "too late"). No eval covers this yet; it is
   named here so its absence is visible.

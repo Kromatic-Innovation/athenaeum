@@ -1,0 +1,200 @@
+# follow_through probe pairs (issue athenaeum#1737). Invented; see
+# ../README.md for the content policy.
+#
+# Each pair below is a (surfaced page, second-hop page) linked by a
+# `links:`/`related:` edge. The surfaced page shares vocabulary with its
+# probe's query, same as any other class; the second-hop page deliberately
+# does NOT -- that is the property `validate_core`'s `follow_through` check
+# enforces, and it is what makes the class un-passable by a plain lexical
+# match on the query alone. Each pair plants one distinct answer token per
+# page, so a complete answer needs both.
+
+# --- relationship (docs/use-cases.md §2.1) ----------------------------------
+
+- uid: client-fenwick-systems
+  type: client
+  name: Fenwick Systems
+  tags: [client, retainer]
+  source_ref: "session-2026-04-02"
+  created: 2026-04-02
+  links: [person-dara-holt]
+  body: |
+    # Fenwick Systems
+
+    Fenwick Systems is a retainer client onboarded in 2026. The account
+    relationship is coordinated by the engagement lead, who tracks renewal
+    timing and scope changes.
+
+    Internal reference code: Quillbrook.
+
+- uid: person-dara-holt
+  type: person
+  name: Dara Holt
+  tags: [person, engagement-lead]
+  source_ref: "session-2026-04-02"
+  created: 2026-04-02
+  body: |
+    # Dara Holt
+
+    Dara reviews cost-escalation clauses each spring and flags any wording
+    needing renegotiation before the March budget cycle.
+
+    Internal reference code: Marrowfen.
+
+- uid: client-corvale-holdings
+  type: client
+  name: Corvale Holdings
+  tags: [client, retainer]
+  source_ref: "session-2026-04-10"
+  created: 2026-04-10
+  links: [project-corvale-migration]
+  body: |
+    # Corvale Holdings
+
+    Corvale Holdings has been a retainer client since 2023, with an active
+    platform migration underway this year.
+
+    Internal reference code: Halvorwick.
+
+- uid: project-corvale-migration
+  type: project
+  name: Platform Migration Programme
+  tags: [project, migration]
+  source_ref: "session-2026-04-10"
+  created: 2026-04-10
+  body: |
+    # Platform Migration Programme
+
+    The programme's cutover window was moved to avoid a vendor's quarterly
+    freeze, adding six weeks to the original schedule.
+
+    Internal reference code: Ossmarl.
+
+# --- rationale (docs/use-cases.md §2.2) -------------------------------------
+
+- uid: project-pinemarsh-initiative
+  type: project
+  name: Pinemarsh Initiative
+  tags: [project, goal]
+  source_ref: "session-2026-04-15"
+  created: 2026-04-15
+  links: [decision-pinemarsh-budget-cap]
+  body: |
+    # Pinemarsh Initiative
+
+    The Pinemarsh initiative exists to consolidate three legacy scheduling
+    tools into one, with the underlying goal of cutting cross-team handoff
+    delay.
+
+    Internal reference code: Tanglewrought.
+
+- uid: decision-pinemarsh-budget-cap
+  type: note
+  name: Decision - spending cap for tooling consolidation
+  tags: [decision, tooling]
+  source_ref: "session-2026-04-16"
+  created: 2026-04-16
+  body: |
+    # Decision - spending cap for tooling consolidation
+
+    A hard cap of forty engineer-days was set for the tooling consolidation
+    work, after a similar effort ran three times over its original estimate
+    last year.
+
+    Internal reference code: Fendrickal.
+
+# --- decision (docs/use-cases.md §2.3) --------------------------------------
+
+- uid: decision-ticketing-vendor-gilcrest
+  type: note
+  name: Decision - choose Gilcrest as the ticketing vendor
+  tags: [decision, tooling]
+  source_ref: "session-2026-05-01"
+  created: 2026-05-01
+  links: [person-mireille-santos]
+  body: |
+    # Decision - choose Gilcrest as the ticketing vendor
+
+    Gilcrest was chosen over two competitors because it was the only option
+    offering per-seat pricing rather than per-ticket pricing, which matched
+    the team's usage pattern.
+
+    Internal reference code: Oakenspire.
+
+- uid: person-mireille-santos
+  type: person
+  name: Mireille Santos
+  tags: [person, finance]
+  source_ref: "session-2026-05-01"
+  created: 2026-05-01
+  body: |
+    # Mireille Santos
+
+    Mireille signed off the final contract and negotiated a two-year price
+    lock after the initial quote came in above the approved budget line.
+
+    Internal reference code: Brindlemoor.
+
+- uid: decision-retire-anchorline
+  type: note
+  name: Decision - retire the Anchorline reporting tool
+  tags: [decision, tooling]
+  source_ref: "session-2026-05-06"
+  created: 2026-05-06
+  links: [tool-anchorline-successor]
+  body: |
+    # Decision - retire the Anchorline reporting tool
+
+    Anchorline was retired after its vendor stopped shipping security
+    patches, and the team judged the migration risk lower than the risk of
+    running unpatched software another quarter.
+
+    Internal reference code: Verdantholt.
+
+- uid: tool-anchorline-successor
+  type: note
+  name: Ledgerfax
+  tags: [tool]
+  source_ref: "session-2026-05-06"
+  created: 2026-05-06
+  body: |
+    # Ledgerfax
+
+    Ledgerfax exports its full dataset as flat files on a nightly cadence,
+    so any downstream consumer must poll for the finished file rather than
+    call an API.
+
+    Internal reference code: Sablecroft.
+
+# --- lesson (docs/use-cases.md §2.4) ----------------------------------------
+
+- uid: note-subsidiary-onboarding-retro
+  type: note
+  name: Subsidiary onboarding retro
+  tags: [retro, delivery]
+  source_ref: "session-2026-05-12"
+  created: 2026-05-12
+  links: [policy-subsidiary-billing-split]
+  body: |
+    # Subsidiary onboarding retro
+
+    Onboarding a client with several subsidiaries went long because each
+    subsidiary needed its own contact record, and that requirement was not
+    caught until week three.
+
+    Internal reference code: Wrenholt.
+
+- uid: policy-subsidiary-billing-split
+  type: policy
+  name: Billing split policy
+  tags: [policy, finance]
+  source_ref: "session-2026-05-12"
+  created: 2026-05-12
+  body: |
+    # Billing split policy
+
+    Invoices are split by cost center only when the split has been confirmed
+    in writing by the finance contact; an unconfirmed split defaults to a
+    single combined invoice.
+
+    Internal reference code: Copperfen.

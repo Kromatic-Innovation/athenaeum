@@ -219,3 +219,80 @@
     and `tests/test_eval_corpus_relatedness.py` pins that asymmetry as the
     corpus's current (wrong) state so a consolidation change has something to
     move.
+
+# --- follow-through ----------------------------------------------------------
+#
+# Issue athenaeum#1737. The class a plain grep cannot pass by accident: the
+# query surfaces one page, and the complete answer requires opening it and
+# following its `related`/`links` edge to a SECOND page the query's own terms
+# never reach. `validate_core` enforces both halves -- the tokens split
+# across the two pages, and the second-hop page's vocabulary disjoint from
+# `query` -- so a probe here cannot silently degrade into `multi_hop`.
+# Spans the four use cases in `docs/use-cases.md` §2: relationship (2.1),
+# rationale (2.2), decision (2.3), lesson (2.4).
+
+- id: fenwick_relationship_history
+  probe_class: follow_through
+  query: "what is our relationship with Fenwick Systems?"
+  expected_uids: [client-fenwick-systems, person-dara-holt]
+  distractor_terms: ["Fenwick Systems", "retainer client", "relationship"]
+  answer_tokens: ["Quillbrook", "Marrowfen"]
+  note: >-
+    Relationship use case (docs/use-cases.md §2.1). The client page names the
+    engagement lead; the renegotiation detail lives only on her own page,
+    reached by following the client page's link.
+
+- id: corvale_holdings_history
+  probe_class: follow_through
+  query: "what is our history with Corvale Holdings?"
+  expected_uids: [client-corvale-holdings, project-corvale-migration]
+  distractor_terms: ["Corvale Holdings", "retainer client", "migration"]
+  answer_tokens: ["Halvorwick", "Ossmarl"]
+  note: >-
+    Relationship use case (docs/use-cases.md §2.1). The client page names the
+    migration programme; the cutover-delay detail lives only on the
+    programme's own page.
+
+- id: pinemarsh_goal_rationale
+  probe_class: follow_through
+  query: "what is the goal behind the Pinemarsh initiative?"
+  expected_uids: [project-pinemarsh-initiative, decision-pinemarsh-budget-cap]
+  distractor_terms: ["Pinemarsh initiative", "goal", "tooling consolidation"]
+  answer_tokens: ["Tanglewrought", "Fendrickal"]
+  note: >-
+    Rationale use case (docs/use-cases.md §2.2). The initiative page states
+    the goal and links to the budget decision it forced; the cap figure
+    lives only on the decision page.
+
+- id: gilcrest_vendor_decision
+  probe_class: follow_through
+  query: "why did we choose Gilcrest as the ticketing vendor?"
+  expected_uids: [decision-ticketing-vendor-gilcrest, person-mireille-santos]
+  distractor_terms: ["Gilcrest", "ticketing vendor", "pricing"]
+  answer_tokens: ["Oakenspire", "Brindlemoor"]
+  note: >-
+    Decision use case (docs/use-cases.md §2.3, "who made this call?"). The
+    decision page gives the pricing rationale and links to who signed the
+    contract; the price-lock detail lives only on her own page.
+
+- id: anchorline_retirement_rationale
+  probe_class: follow_through
+  query: "why did we retire the Anchorline reporting tool?"
+  expected_uids: [decision-retire-anchorline, tool-anchorline-successor]
+  distractor_terms: ["Anchorline", "retire", "reporting tool"]
+  answer_tokens: ["Verdantholt", "Sablecroft"]
+  note: >-
+    Decision use case (docs/use-cases.md §2.3). The decision page gives the
+    security rationale and links to the replacement tool; its export-cadence
+    detail lives only on the replacement's own page.
+
+- id: subsidiary_onboarding_lesson
+  probe_class: follow_through
+  query: "what went wrong last time we onboarded a client with multiple subsidiaries?"
+  expected_uids: [note-subsidiary-onboarding-retro, policy-subsidiary-billing-split]
+  distractor_terms: ["subsidiaries", "onboarding", "retro"]
+  answer_tokens: ["Wrenholt", "Copperfen"]
+  note: >-
+    Lesson use case (docs/use-cases.md §2.4). The retro names the missed
+    contact-record requirement and links to the billing policy it exposed a
+    gap in; the confirmation rule lives only on the policy page.

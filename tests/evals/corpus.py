@@ -58,12 +58,76 @@ from __future__ import annotations
 
 import hashlib
 import random
+import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+#: A short, deliberately conservative stopword list -- excluded so a
+#: lexical/n-gram overlap is not dominated by function words that would
+#: overlap between almost any two English passages regardless of topic.
+#: NOT a general-purpose NLP stopword list (no external dependency is
+#: pulled in for this); just enough to keep the free metrics meaningful.
+#:
+#: Lives here, not in ``tests.evals.north_star_report`` (issue athenaeum#1737),
+#: because ``validate_core``'s ``follow_through`` check needs the SAME content-
+#: term definition ``north_star_report.grade_correctness``'s Jaccard overlap
+#: uses, and ``north_star_report`` already imports from this module -- a
+#: definition living there would make the reverse import circular. Re-exported
+#: from ``north_star_report`` under its original names so no external caller
+#: needed to change.
+_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "to",
+        "in",
+        "on",
+        "for",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "with",
+        "as",
+        "at",
+        "by",
+        "it",
+        "this",
+        "that",
+        "these",
+        "those",
+        "from",
+        "not",
+        "no",
+        "do",
+        "does",
+        "did",
+        "what",
+        "which",
+        "who",
+        "how",
+        "when",
+        "where",
+        "why",
+    }
+)
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _content_terms(text: str) -> set[str]:
+    words = _WORD_RE.findall(text.lower())
+    return {w for w in words if len(w) >= 3 and w not in _STOPWORDS}
+
 
 # Bump when generation logic changes in a way that alters emitted bytes for a
 # fixed seed. Recorded alongside every result so a stored measurement names
@@ -196,7 +260,8 @@ class Probe:
     """A retrieval probe with its ground truth.
 
     ``probe_class`` follows the LongMemEval-style taxonomy: single_hop,
-    multi_hop, temporal, disambiguation, abstention, distractor_robustness.
+    multi_hop, temporal, disambiguation, abstention, distractor_robustness,
+    follow_through.
 
     ``expected_uids`` is empty for abstention probes -- and that emptiness is
     the assertion, not a missing value. ``must_not_rank`` names pages that a
@@ -210,6 +275,24 @@ class Probe:
     rollout's final answer text (``tests.evals.north_star_report.grade_correctness``).
     Empty for abstention probes -- there, correctness is graded by a
     separate rule (no token to plant when nothing answers the probe).
+
+    ``follow_through`` (issue athenaeum#1737) is the class a good grep cannot
+    pass by accident: the query surfaces one page (a breadcrumb) whose
+    complete answer requires following a ``related``/``links`` edge to a
+    SECOND page the query's own terms never reach. Two assertions distinguish
+    it from ``multi_hop`` (which is satisfied by two independently-retrievable
+    pages) and both are checked by :func:`validate_core`:
+
+    * ``answer_tokens`` must be split across at least two ``expected_uids``
+      pages -- a probe whose tokens all sit on one page has nothing to
+      follow through TO.
+    * at least one ``expected_uids`` page must be reachable from another
+      ``expected_uids`` page via a ``related``/``links`` edge, and that
+      target page must share no content term with ``query`` (the same
+      ``_content_terms`` Jaccard-overlap vocabulary
+      ``tests.evals.north_star_report.lexical_overlap`` uses) -- otherwise a
+      plain BM25/lexical match on the query would reach it directly, without
+      ever following the edge.
     """
 
     id: str
@@ -378,6 +461,12 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
     actually occur in any of its own ``expected_uids`` pages' bodies, would
     silently score as an un-gradable "n/a" correctness cell -- indistinguishable
     from a real floor/ceiling of zero -- rather than a corpus authoring error.
+
+    ``follow_through`` probes (issue athenaeum#1737) get two ADDITIONAL
+    checks beyond the generic ones above, because the class exists to rule
+    out a shape a plain retrieval probe cannot detect: an answer that LOOKS
+    multi-page but is actually reachable from the query directly, with no
+    edge ever followed.
     """
     uids = {p.uid for p in pages}
     pages_by_uid = {p.uid: p for p in pages}
@@ -404,6 +493,36 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
             if not any(token in answer_text for token in probe.answer_tokens):
                 problems.append(
                     f"probe {probe.id!r}: no answer_tokens value found in its answer page body"
+                )
+        if probe.probe_class == "follow_through":
+            expected_pages = [
+                pages_by_uid[uid] for uid in probe.expected_uids if uid in pages_by_uid
+            ]
+            token_pages = {
+                page.uid
+                for page in expected_pages
+                if any(token in page.body for token in probe.answer_tokens)
+            }
+            if len(token_pages) < 2:
+                problems.append(
+                    f"probe {probe.id!r}: follow_through answer_tokens must be split across "
+                    "at least two expected_uids pages, not concentrated on one"
+                )
+            expected_uid_set = set(probe.expected_uids)
+            query_terms = _content_terms(probe.query)
+            has_qualifying_hop = False
+            for page in expected_pages:
+                for edge in page.related:
+                    if edge.uid == page.uid or edge.uid not in expected_uid_set:
+                        continue
+                    target = pages_by_uid.get(edge.uid)
+                    if target is not None and not (_content_terms(target.body) & query_terms):
+                        has_qualifying_hop = True
+            if not has_qualifying_hop:
+                problems.append(
+                    f"probe {probe.id!r}: follow_through probes need a related/links edge "
+                    "from one expected_uids page to another whose body shares no content "
+                    "term with the query"
                 )
     for page in pages:
         for edge in page.related:

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`follow_through` synthetic-corpus probe class (issue athenaeum#1737).** A
+  new probe class whose complete answer requires opening the page a query
+  surfaces and following its `related`/`links` edge to a second page the
+  query's own terms never reach — the shape a plain grep or lexical match
+  cannot pass by accident, and distinct from `multi_hop` (whose pages are
+  each independently retrievable). `validate_core` rejects a probe whose
+  planted `answer_tokens` sit on only one page, or whose second-hop page
+  shares vocabulary with the query. Six hand-authored probes span the four
+  use cases in `docs/use-cases.md` §2 (relationship, rationale, decision,
+  lesson); `grade_correctness` already required every planted token, so a
+  one-token answer to a `follow_through` probe grades incorrect. A recorded
+  PULL-transcript fixture (`tests/evals/data/rollout/follow_through_stream_spike.jsonl`)
+  shows two `recall` calls answering one such probe.
 - **`docs/use-cases.md`: the north star decomposed into the questions memory
   is actually asked, and a kill criterion.** "Surface the right information at
   the right time" is a quality bar with no customer attached, and nothing in

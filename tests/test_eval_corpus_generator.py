@@ -18,6 +18,9 @@ import pytest
 
 from tests.evals.corpus import (
     SCALES,
+    Page,
+    Probe,
+    RelatedEdge,
     build_corpus,
     load_core_pages,
     load_probes,
@@ -64,6 +67,118 @@ def test_every_non_abstention_probe_answer_token_is_in_its_page_body() -> None:
 
     for probe in abstention:
         assert probe.answer_tokens == (), f"abstention probe {probe.id!r} must have no tokens"
+
+
+def _two_page_follow_through(
+    *, second_hop_shares_query_term: bool, edge_between_expected_pages: bool
+) -> tuple[list[Page], Probe]:
+    """Build the minimal two-page fixture ``validate_core``'s
+    ``follow_through`` checks operate on, with each half independently
+    toggleable so the two checks can be tested in isolation."""
+    edge_target = "page-b" if edge_between_expected_pages else "page-unrelated"
+    second_hop_body = (
+        "Alderquill covers galaxy formation in early cosmic history."
+        if second_hop_shares_query_term
+        else "Verdigrove is a quiet coastal harbour town."
+    )
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="TokenOne sits here.",
+            tier="core",
+            related=(RelatedEdge(uid=edge_target, role="related"),),
+        ),
+        Page(
+            uid="page-b",
+            type="note",
+            name="Page B",
+            body=f"TokenTwo sits here. {second_hop_body}",
+            tier="core",
+        ),
+        Page(
+            uid="page-unrelated",
+            type="note",
+            name="Unrelated",
+            body="Nothing planted.",
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="synthetic_follow_through",
+        probe_class="follow_through",
+        query="what is the history of galaxy formation?",
+        expected_uids=("page-a", "page-b"),
+        answer_tokens=("TokenOne", "TokenTwo"),
+    )
+    return pages, probe
+
+
+def test_follow_through_rejects_tokens_concentrated_on_one_page() -> None:
+    """AC (issue athenaeum#1737): a ``follow_through`` probe whose
+    ``answer_tokens`` all sit on a single ``expected_uids`` page has nothing
+    to follow through TO, and must be rejected at load."""
+    pages, probe = _two_page_follow_through(
+        second_hop_shares_query_term=False, edge_between_expected_pages=True
+    )
+    pages[1] = Page(
+        uid="page-b",
+        type="note",
+        name="Page B",
+        body="Verdigrove is a quiet coastal harbour town.",
+        tier="core",
+    )
+    # Both tokens now sit on page-a only.
+    pages[0] = Page(
+        uid="page-a",
+        type="note",
+        name="Page A",
+        body="TokenOne and TokenTwo both sit here.",
+        tier="core",
+        related=(RelatedEdge(uid="page-b", role="related"),),
+    )
+    problems = validate_core(pages, [probe])
+    assert any("split across at least two" in p for p in problems), problems
+
+
+def test_follow_through_rejects_second_hop_sharing_a_query_term() -> None:
+    """AC (issue athenaeum#1737): the second-hop page must share NO content
+    term with the query -- otherwise a plain lexical match on the query
+    would reach it directly, without ever following the edge."""
+    pages, probe = _two_page_follow_through(
+        second_hop_shares_query_term=True, edge_between_expected_pages=True
+    )
+    problems = validate_core(pages, [probe])
+    assert any("shares no content term" in p for p in problems), problems
+
+
+def test_follow_through_rejects_no_edge_between_expected_pages() -> None:
+    """AC (issue athenaeum#1737): the second-hop page must be reachable from
+    another ``expected_uids`` page by a ``related``/``links`` edge; an edge
+    to some other page in the corpus does not satisfy the assertion."""
+    pages, probe = _two_page_follow_through(
+        second_hop_shares_query_term=False, edge_between_expected_pages=False
+    )
+    problems = validate_core(pages, [probe])
+    assert any("related/links edge" in p for p in problems), problems
+
+
+def test_follow_through_passes_when_both_halves_hold() -> None:
+    """The positive control: split tokens plus a qualifying edge produces no
+    ``follow_through``-specific problem.
+
+    ``validate_core`` also runs the (unrelated) relatedness ground-truth
+    check over the full page set, which this minimal synthetic fixture does
+    not attempt to satisfy -- so the assertion is scoped to problems
+    mentioning THIS probe, not an empty list overall.
+    """
+    pages, probe = _two_page_follow_through(
+        second_hop_shares_query_term=False, edge_between_expected_pages=True
+    )
+    problems = validate_core(pages, [probe])
+    own_problems = [p for p in problems if probe.id in p]
+    assert own_problems == [], own_problems
 
 
 def test_generation_is_deterministic_within_a_process() -> None:
@@ -256,6 +371,7 @@ def test_probe_taxonomy_is_complete() -> None:
         "disambiguation",
         "abstention",
         "distractor_robustness",
+        "follow_through",
     } <= classes
 
 
