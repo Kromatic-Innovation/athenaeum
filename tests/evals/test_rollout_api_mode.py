@@ -30,7 +30,7 @@ import pytest
 from tests.evals.corpus import build_corpus
 from tests.evals.harness import EvalSession
 from tests.evals.rollout import (
-    NATIVE_INDEX_MAX_BYTES,
+    NATIVE_INDEX_MAX_CHARS,
     NATIVE_INDEX_MAX_LINES,
     RECALL_TOOL_NAME,
     materialize_native_memory,
@@ -121,13 +121,13 @@ def test_truncate_native_index_pins_the_200_line_25kb_cap_at_medium_scale(
     # so a byte-encoded assertion here would test a DIFFERENT cap than the
     # one the function actually applies.
     assert written.count("\n- ") + (1 if written.startswith("- ") else 0) > NATIVE_INDEX_MAX_LINES
-    assert len(written) > NATIVE_INDEX_MAX_BYTES
+    assert len(written) > NATIVE_INDEX_MAX_CHARS
 
     truncated = truncate_native_index(written)
 
     bullet_lines = [line for line in truncated.splitlines() if line.startswith("- ")]
     assert len(bullet_lines) <= NATIVE_INDEX_MAX_LINES
-    assert len(truncated) <= NATIVE_INDEX_MAX_BYTES
+    assert len(truncated) <= NATIVE_INDEX_MAX_CHARS
     # Never a partial line: every line in the truncated text is a COMPLETE
     # line that also appears, verbatim, in the untruncated index.
     written_lines = set(written.splitlines())

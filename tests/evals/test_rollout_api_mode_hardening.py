@@ -23,10 +23,12 @@ from tests.conftest import FakeLLMClient, make_llm_response, make_llm_usage
 from tests.evals.corpus import build_corpus
 from tests.evals.harness import EvalSession
 from tests.evals.rollout import (
-    NATIVE_INDEX_MAX_BYTES,
+    NATIVE_INDEX_MAX_CHARS,
     NATIVE_INDEX_MAX_LINES,
     RECALL_TOOL_NAME,
     RolloutRecord,
+    _native_index_text_with_warning,
+    _native_index_warning_snippet,
     _native_read_executor,
     _resolve_under_memory_dir,
     run_api_tool_loop,
@@ -215,13 +217,13 @@ def test_truncate_native_index_char_cap_binds_before_line_cap_with_long_lines() 
     assertions below are written against ``len(str)``, the actual cap this
     module enforces, not a byte-encoding proxy for it."""
     long_line = "- " + ("x" * 300) + "\n"  # ~303 chars/line
-    text = long_line * 100  # 100 lines (< 200-line cap), ~30300 chars (> 25KB char cap)
-    assert len(text) > NATIVE_INDEX_MAX_BYTES
+    text = long_line * 100  # 100 lines (< 200-line cap), ~30300 chars (> 25000-char cap)
+    assert len(text) > NATIVE_INDEX_MAX_CHARS
     assert len(text.splitlines()) < NATIVE_INDEX_MAX_LINES
 
     truncated = truncate_native_index(text)
 
-    assert len(truncated) <= NATIVE_INDEX_MAX_BYTES
+    assert len(truncated) <= NATIVE_INDEX_MAX_CHARS
     truncated_lines = truncated.splitlines()
     assert len(truncated_lines) < 100  # the char cap bound it, not the (uncrossed) line cap
     for line in truncated_lines:
@@ -253,6 +255,105 @@ def test_native_index_api_injects_the_truncated_text_as_the_first_user_turn(
     assert injected_index_text in sent_first_message
     assert "> WARNING:" in injected_index_text
     assert "> WARNING:" in sent_first_message
+
+
+def test_native_index_api_warning_filled_values_at_medium_scale(tmp_path: Path) -> None:
+    """Pins the WARNING marker's N/M/L and size-clause values against an
+    INDEPENDENT, first-principles computation from the raw materialized
+    ``MEMORY.md`` -- not by re-calling the module's own private helpers --
+    so a zeroed count, an off-by-one, a forced literal "both", an empty
+    snippet, or a bytes-instead-of-chars regression in the real
+    implementation each fail this test (Quine review, issue athenaeum#1733).
+    """
+    from tests.evals.corpus import build_corpus
+    from tests.evals.rollout import materialize_native_memory
+
+    probe, _ = _pto_probe()
+    precompute_root = tmp_path / "precompute"
+    corpus = build_corpus("medium")
+    memory_dir = materialize_native_memory(corpus, precompute_root, write_index=True)
+    written = (memory_dir / "MEMORY.md").read_text(encoding="utf-8")
+
+    # Independent computation (first principles, no private helper reuse):
+    # the real loader counts lines on the STRIPPED text.
+    written_stripped = written.strip()
+    total = written_stripped.count("\n") + 1 if written_stripped else 0
+    truncated_reference = truncate_native_index(written)
+    truncated_stripped = truncated_reference.strip()
+    cutoff = truncated_stripped.count("\n") + 1 if truncated_stripped else 0
+    cut = total - cutoff
+
+    # medium (1,000 pages) overflows BOTH caps -- if either assumption below
+    # is false, the rest of this test would be pinning a scenario that
+    # never actually engages the "both" size-clause branch it exists to check.
+    assert total > NATIVE_INDEX_MAX_LINES
+    assert len(written) > NATIVE_INDEX_MAX_CHARS
+    assert cutoff > 0  # not the line-1-too-long edge case
+
+    turns = [_RecordedTurn(content=[_text_block("answer")], stop_reason="end_turn")]
+    client = _QueuedApiClient(turns)
+    session = EvalSession()
+    record = run_native_index_api(
+        probe, tmp_path, "medium", client=client, session=session, model="test-model"
+    )
+    warning_text = record.transcript[0]["native_memory"]["loaded_index_text"]
+
+    # The "both exceeded" size clause is "{N} lines and {X}" -- the bare
+    # word "both" must never appear IN THE SIZE CLAUSE (scoped to that
+    # segment, not the whole warning -- the corpus's own prose content can
+    # legitimately contain the word "both" elsewhere, unrelated to this
+    # check).
+    size_clause_start = warning_text.index("MEMORY.md is ") + len("MEMORY.md is ")
+    size_clause_end = warning_text.index(". Only part of it was loaded")
+    size_clause = warning_text[size_clause_start:size_clause_end]
+    assert size_clause.startswith(f"{total} lines and ")
+    assert "both" not in size_clause
+    # The exact M/N/L continuation clause, independently computed above.
+    assert f"{cut} of {total} lines were cut off, starting at line {cutoff + 1} (\"" in warning_text
+    # A non-empty quoted snippet (never the empty-snippet regression).
+    quoted_start = warning_text.index('lines were cut off, starting at line')
+    quote_open = warning_text.index('("', quoted_start) + 2
+    quote_close = warning_text.index('").', quote_open)
+    snippet = warning_text[quote_open:quote_close]
+    assert snippet != ""
+
+
+def test_native_index_warning_snippet_cuts_at_a_word_boundary_with_ellipsis() -> None:
+    """Reproduces the real loader's ``Nq(M, 80)`` (Quine review, issue
+    athenaeum#1733): 80 chars max, cut at the last space within that
+    window (never mid-word), suffixed with a single U+2026 ellipsis."""
+    line = "- " + " ".join("word" + str(i) for i in range(40))  # far over 80 chars
+    snippet = _native_index_warning_snippet(line)
+
+    assert len(snippet) <= 81  # 80 + the single ellipsis char
+    assert snippet.endswith("…")
+    assert not snippet.endswith(" …")  # trimmed at the space, not padded before it
+    body = snippet[:-1]
+    assert not body.endswith(" ")
+    assert " " not in line[: len(body)][len(body) :]  # body ends mid-window, not mid-word
+    assert line.strip().startswith(body)
+
+
+def test_native_index_warning_snippet_short_line_is_returned_verbatim() -> None:
+    short = "- a page — a short description"
+    assert _native_index_warning_snippet(short) == short
+
+
+def test_native_index_warning_line1_too_long_uses_the_partial_line_message() -> None:
+    """When even the FIRST line does not fit under the char cap (zero
+    complete lines survive truncation), the continuation clause names how
+    many characters of line 1 were kept -- there is no complete dropped
+    line left to quote (Quine review, issue athenaeum#1733, the ``L == 0``
+    branch)."""
+    written = ("x" * (NATIVE_INDEX_MAX_CHARS + 500)) + "\n" + "- second line\n"
+    truncated = truncate_native_index(written)
+    assert truncated == ""  # the oversized first line is dropped whole, never partially
+
+    injected, was_truncated = _native_index_text_with_warning(written, truncated)
+
+    assert was_truncated is True
+    assert f"everything after the first {NATIVE_INDEX_MAX_CHARS} characters of line 1" in injected
+    assert "starting at line" not in injected
 
 
 def test_native_index_api_no_warning_when_the_index_fits_under_the_cap(

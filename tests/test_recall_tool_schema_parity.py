@@ -69,25 +69,57 @@ def test_api_mode_recall_description_matches_the_real_served_tool(tmp_path: Path
     assert api_mode_schema["description"] == real_tool.description
 
 
-def test_api_mode_recall_input_schema_property_names_match_the_real_served_tool(
+def _schema_property_types(prop: dict) -> frozenset[str]:
+    """Normalizes a JSON-schema property's declared type(s) to a plain
+    ``frozenset`` of type-name strings, regardless of which of the three
+    equivalent shapes it's spelled in: a bare ``"type": "string"``, a list
+    ``"type": ["string", "null"]`` (this repo's own
+    ``RECALL_TOOL_INPUT_SCHEMA`` spelling for an Optional field), or
+    FastMCP's own ``"anyOf": [{"type": "string"}, {"type": "null"}]`` (what
+    a live server actually emits for the SAME Optional field) -- comparing
+    the raw dicts directly would report a false mismatch on ``type`` purely
+    from this spelling difference, never catching a REAL drift."""
+    if "type" in prop:
+        raw = prop["type"]
+        return frozenset(raw) if isinstance(raw, list) else frozenset({raw})
+    if "anyOf" in prop:
+        types: set[str] = set()
+        for sub in prop["anyOf"]:
+            types |= _schema_property_types(sub)
+        return frozenset(types)
+    return frozenset()
+
+
+def test_api_mode_recall_input_schema_matches_the_real_served_tool(
     tmp_path: Path,
 ) -> None:
-    """A new parameter on the real ``recall(...)`` signature changes what
-    FastMCP puts in ``inputSchema["properties"]``; this must fail until
-    ``RECALL_TOOL_INPUT_SCHEMA`` (and thus the api-mode tool) is updated to
-    match -- the whole point of pinning this against the LIVE server rather
-    than a second hand-written expectation of what the signature is."""
-    from tests.evals.rollout import RECALL_TOOL_INPUT_SCHEMA
+    """A new parameter on the real ``recall(...)`` signature -- or one whose
+    TYPE changed -- must fail this test until the api-mode schema is updated
+    to match. Compares what ``_recall_tool_schema`` actually SENDS
+    (``["input_schema"]``, not the bare ``RECALL_TOOL_INPUT_SCHEMA`` constant
+    in isolation) against the live server, as ``{name: type-set}`` pairs plus
+    ``required`` -- not names alone, so a parameter that exists under the
+    right name but the wrong type (e.g. ``top_k`` respelled as a string)
+    still fails (Quine review, issue athenaeum#1733 SHOULD item 5)."""
+    from tests.evals.rollout import _recall_tool_schema
 
     server = _build_server(tmp_path)
     real_tool = _recall_tool(server)
 
+    wiki_root = tmp_path / "wiki"
     # FastMCP's own generated JSON schema lives on `.parameters` (a
     # `FunctionTool` attribute), not `.inputSchema`.
-    real_properties = set(real_tool.parameters["properties"].keys())
-    api_mode_properties = set(RECALL_TOOL_INPUT_SCHEMA["properties"].keys())
-    assert api_mode_properties == real_properties
+    real_schema = real_tool.parameters
+    api_mode_schema = _recall_tool_schema(wiki_root)["input_schema"]
 
-    real_required = set(real_tool.parameters.get("required") or [])
-    api_mode_required = set(RECALL_TOOL_INPUT_SCHEMA.get("required") or [])
+    real_types = {
+        name: _schema_property_types(prop) for name, prop in real_schema["properties"].items()
+    }
+    api_mode_types = {
+        name: _schema_property_types(prop) for name, prop in api_mode_schema["properties"].items()
+    }
+    assert api_mode_types == real_types
+
+    real_required = set(real_schema.get("required") or [])
+    api_mode_required = set(api_mode_schema.get("required") or [])
     assert api_mode_required == real_required

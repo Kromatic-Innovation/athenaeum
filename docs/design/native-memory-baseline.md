@@ -99,14 +99,19 @@ memory becomes at that scale, so it runs at every scale; the truncation is
 the finding, not a confound. `NATIVE_GREP` isolates the no-index case so a
 result can say whether the index helped at all.
 
-In API mode the harness builds the index and applies the documented
-truncation itself (first 200 lines, then a further cut by STRING LENGTH --
-not UTF-8 bytes -- within that window, matching the real loader), pinned by
-a test, and injects it as the first user turn to mirror Claude Code's load,
-appending a reproduction of Claude Code 2.1.274's own truncation-notice
-template when the cap actually bound (N/X/M/L filled from the actual
-truncation performed; recorded as `truncated_by_harness`, since a harness
-truncation is a distinct fact from `truncated_by_claude_code`). In CLI mode
+In API mode the harness builds the index and applies the real cap itself
+(first 200 lines, then a further cut by STRING LENGTH past 25000 characters
+-- `NATIVE_INDEX_MAX_CHARS`, extracted from the 2.1.274 binary as `jW =
+25000`, not a `25 * 1024` approximation, and not UTF-8 bytes -- within that
+window, matching the real loader), pinned by a test, and injects it as the
+first user turn to mirror Claude Code's load, appending a reproduction of
+Claude Code 2.1.274's own truncation-notice template when the cap actually
+bound: a three-form size clause (lines-only, chars-only, or `"{N} lines and
+{X}"` when both are exceeded -- never the literal word "both"), the exact
+cut-count/start-line, and an 80-character word-boundary-cut snippet ending in
+a single `…`, all filled from the actual truncation performed (recorded as
+`truncated_by_harness`, since a harness truncation is a distinct fact from
+`truncated_by_claude_code`). In CLI mode
 the auto-memory directory is supplied through `autoMemoryDirectory`
 in a settings file passed to the subprocess, so Claude Code performs its own
 load and truncation.

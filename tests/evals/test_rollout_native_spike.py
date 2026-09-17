@@ -46,7 +46,7 @@ import pytest
 
 from tests.evals.corpus import build_corpus
 from tests.evals.rollout import (
-    NATIVE_INDEX_MAX_BYTES,
+    NATIVE_INDEX_MAX_CHARS,
     NATIVE_INDEX_MAX_LINES,
     run_native_grep,
     run_native_index,
@@ -135,7 +135,7 @@ def test_native_index_truncates_memory_md_at_medium_scale(tmp_path: Path) -> Non
     # past the cap, per the design doc's "truncation is the finding, not a
     # confound".
     assert (
-        native["index_bytes_written"] > NATIVE_INDEX_MAX_BYTES
+        native["index_bytes_written"] > NATIVE_INDEX_MAX_CHARS
         or native["index_lines_written"] > NATIVE_INDEX_MAX_LINES
     ), f"expected the written index to exceed the documented cap: {native!r}"
     assert native["index_bytes_loaded"] < native["index_bytes_written"], (

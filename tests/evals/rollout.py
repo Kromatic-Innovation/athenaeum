@@ -971,20 +971,23 @@ def run_push_breadcrumb_pull(
 # the session transcript rather than recomputing the cap.
 # ---------------------------------------------------------------------------
 
-#: Claude Code's documented auto-memory load cap (200 lines OR 25KB,
-#: whichever comes first — https://code.claude.com/docs/en/memory, verified
-#: against live Claude Code 2.1.273 on 2026-09-16, see the design doc's §2).
-#: Used for reporting/assertions in CLI mode and NEVER to pre-truncate
-#: anything :func:`materialize_native_memory` writes -- that function always
-#: writes the FULL index, and in CLI mode Claude Code performs the actual
-#: truncation; these constants exist there purely to interpret what came
-#: back afterward. Issue athenaeum#1733's api mode is the one deliberate
-#: exception: with no Claude Code process to perform the load, the harness
-#: applies these SAME constants itself via :func:`truncate_native_index`
-#: before injecting the index, so the truncation observed is identical
-#: either way.
+#: Claude Code's documented auto-memory load cap (200 lines OR 25000
+#: characters, whichever comes first — https://code.claude.com/docs/en/memory,
+#: verified against live Claude Code 2.1.273 on 2026-09-16, see the design
+#: doc's §2). ``NATIVE_INDEX_MAX_CHARS`` is 25000 exactly (Quine review,
+#: issue athenaeum#1733: extracted from the 2.1.274 binary as ``jW = 25000``),
+#: not a ``25 * 1024`` byte-budget approximation -- the two differ by 600
+#: and the real cap is the smaller number. Used for reporting/assertions in
+#: CLI mode and NEVER to pre-truncate anything :func:`materialize_native_memory`
+#: writes -- that function always writes the FULL index, and in CLI mode
+#: Claude Code performs the actual truncation; these constants exist there
+#: purely to interpret what came back afterward. Issue athenaeum#1733's api
+#: mode is the one deliberate exception: with no Claude Code process to
+#: perform the load, the harness applies these SAME constants itself via
+#: :func:`truncate_native_index` before injecting the index, so the
+#: truncation observed is identical either way.
 NATIVE_INDEX_MAX_LINES = 200
-NATIVE_INDEX_MAX_BYTES = 25 * 1024
+NATIVE_INDEX_MAX_CHARS = 25000
 
 #: Per-page index-line description length. A "sane length" clip (issue
 #: athenaeum#1725's own phrasing) so one wildly long page body cannot blow up
@@ -1566,22 +1569,47 @@ def _native_grep_system_prompt(memory_dir: Path) -> str:
 
 
 #: Max chars of the first cut-off line shown in the ``WARNING:`` marker's
-#: quoted preview -- long enough to be recognizable, short enough not to
-#: dominate the marker itself.
-_NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS = 40
+#: quoted preview -- matches the real loader's own ``Nq(M, 80)`` (Quine
+#: review, issue athenaeum#1733: extracted from the 2.1.274 binary).
+_NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS = 80
+
+#: The single-character ellipsis (U+2026) the real loader's ``Nq`` suffixes
+#: a cut preview with -- NOT three ASCII periods.
+_ELLIPSIS = "…"
 
 
 def _format_char_budget(n: int) -> str:
-    """*n* characters, formatted the way the real loader's own ``(limit:
-    25KB)`` clause renders a size -- one decimal place, ``KB`` suffix."""
+    """*n* characters, formatted the way the real loader's own size clause
+    renders a count -- one decimal place, ``KB`` suffix. Used for BOTH the
+    measured size and the limit itself (``_format_char_budget(NATIVE_INDEX_MAX_CHARS)``),
+    so the two numbers in a size clause are never rendered by two different
+    unit conventions."""
     return f"{n / 1024:.1f}KB"
 
 
+def _real_line_count(text: str) -> int:
+    """Line count the way the real loader counts it (Quine review, issue
+    athenaeum#1733): the STRIPPED text's newline count plus one, not
+    ``len(text.splitlines())`` -- these agree for ordinary content but not
+    for edge cases (trailing blank lines, no trailing newline), and the
+    ruling is explicit that the real loader strips first. ``0`` for an
+    empty/whitespace-only *text*."""
+    stripped = text.strip()
+    return stripped.count("\n") + 1 if stripped else 0
+
+
 def _native_index_warning_snippet(line: str) -> str:
+    """Reproduces the real loader's ``Nq(M, 80)``: at most 80 characters,
+    cut at a WORD boundary (never mid-word) when the line is longer, suffixed
+    with a single ``…`` (U+2026) when cut."""
     stripped = line.strip()
-    if len(stripped) > _NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS:
-        return stripped[:_NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS] + "..."
-    return stripped
+    if len(stripped) <= _NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS:
+        return stripped
+    window = stripped[:_NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS]
+    last_space = window.rfind(" ")
+    if last_space > 0:
+        window = window[:last_space]
+    return window + _ELLIPSIS
 
 
 def _native_index_text_with_warning(written: str, truncated: str) -> tuple[str, bool]:
@@ -1593,20 +1621,25 @@ def _native_index_text_with_warning(written: str, truncated: str) -> tuple[str, 
     (extracted from the binary, Quine review issue athenaeum#1733):
 
         (blank line)
-        > WARNING: MEMORY.md is {N lines (limit: 200) | X (limit: 25KB) --
-        index entries are too long | both}. Only part of it was loaded: {M
-        of N lines were cut off, starting at line L ("...")}. Keep index
-        entries to one line under ~200 chars; move detail into topic files.
+        > WARNING: MEMORY.md is {N lines (limit: 200) | X (limit: Y) --
+        index entries are too long | N lines and X}. Only part of it was
+        loaded: {M of N lines were cut off, starting at line L ("...…") |
+        everything after the first n characters of line 1 was cut off}.
+        Keep index entries to one line under ~200 chars; move detail into
+        topic files.
 
-    N/X/M/L are filled from THIS truncation (never hardcoded): N is the
-    total line count of *written*, X its total character length, M the
-    count of lines actually dropped, L the 1-indexed line number the drop
-    starts at, and the quoted preview is the first
-    :data:`_NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS` characters of that first
-    dropped line. The size clause names lines/chars/both based on which cap
-    *written* itself exceeds (a property of the file, independent of which
-    cap happened to bind the actual cut -- exactly what the real message
-    describes). The ``> WARNING:`` prefix is kept verbatim -- it is what
+    N/X/M/L are filled from THIS truncation (never hardcoded): N is
+    *written*'s real line count (:func:`_real_line_count`), X its total
+    character length rendered by the SAME formatter as the limit
+    (:func:`_format_char_budget`), M the count of real lines actually
+    dropped, L the 1-indexed line number the drop starts at, and the quoted
+    preview is :func:`_native_index_warning_snippet` of that first dropped
+    line. When even the FIRST line does not fit (``L`` would be 1 but ZERO
+    complete lines were included), the continuation clause switches to the
+    line-1-partial form instead -- there is no complete first line to quote.
+    The size clause has three forms (never a bare "both"): lines-only,
+    chars-only, or -- when both caps are exceeded -- ``"{N} lines and
+    {X}"``. The ``> WARNING:`` prefix is kept verbatim -- it is what
     :func:`_native_index_coverage`'s own CLI-mode detector keys on.
     """
     written_lines = written.splitlines(keepends=True)
@@ -1615,30 +1648,50 @@ def _native_index_text_with_warning(written: str, truncated: str) -> tuple[str, 
     if not was_truncated:
         return truncated, False
 
-    total_lines = len(written_lines)
+    total_lines = _real_line_count(written)
     total_chars = len(written)
     cutoff = len(truncated_lines)
-    cut_count = total_lines - cutoff
-    start_line = cutoff + 1
+    cutoff_real = _real_line_count(truncated)
+    cut_count = total_lines - cutoff_real
+    start_line = cutoff_real + 1
 
     exceeded_lines = total_lines > NATIVE_INDEX_MAX_LINES
-    exceeded_chars = total_chars > NATIVE_INDEX_MAX_BYTES
+    exceeded_chars = total_chars > NATIVE_INDEX_MAX_CHARS
+    char_clause = (
+        f"{_format_char_budget(total_chars)} (limit: {_format_char_budget(NATIVE_INDEX_MAX_CHARS)})"
+    )
     if exceeded_lines and exceeded_chars:
-        size_clause = "both"
+        size_clause = f"{total_lines} lines and {char_clause}"
     elif exceeded_lines:
-        size_clause = f"{total_lines} lines (limit: 200)"
+        size_clause = f"{total_lines} lines (limit: {NATIVE_INDEX_MAX_LINES})"
     else:
         # Em dash, matching the real template exactly (Quine review, issue
         # athenaeum#1733) -- no lint in this repo forbids it (it already
         # appears throughout this module's own docstrings).
-        char_budget = _format_char_budget(total_chars)
-        size_clause = f"{char_budget} (limit: 25KB) — index entries are too long"
+        size_clause = f"{char_clause} — index entries are too long"
 
-    snippet = _native_index_warning_snippet(written_lines[cutoff]) if cutoff < total_lines else ""
+    if cutoff_real == 0:
+        # Not even line 1 fit -- there is no complete dropped line to quote,
+        # so the continuation names how many characters of line 1 itself
+        # were kept before the cut, not a line range.
+        continuation = (
+            f"everything after the first {NATIVE_INDEX_MAX_CHARS} characters "
+            f"of line 1 was cut off"
+        )
+    else:
+        snippet = (
+            _native_index_warning_snippet(written_lines[cutoff])
+            if cutoff < len(written_lines)
+            else ""
+        )
+        continuation = (
+            f'{cut_count} of {total_lines} lines were cut off, starting at line '
+            f'{start_line} ("{snippet}")'
+        )
+
     warning = (
         f"\n> WARNING: MEMORY.md is {size_clause}. Only part of it was loaded: "
-        f'{cut_count} of {total_lines} lines were cut off, starting at line '
-        f'{start_line} ("{snippet}"). Keep index entries to one line under '
+        f"{continuation}. Keep index entries to one line under "
         f"~200 chars; move detail into topic files.\n"
     )
     return truncated + warning, True
@@ -1752,7 +1805,7 @@ def truncate_native_index(
     text: str,
     *,
     max_lines: int = NATIVE_INDEX_MAX_LINES,
-    max_chars: int = NATIVE_INDEX_MAX_BYTES,
+    max_chars: int = NATIVE_INDEX_MAX_CHARS,
 ) -> str:
     """Apply Claude Code's documented auto-memory load cap to *text* --
     the first *max_lines* lines, THEN (within that window) cut further by
