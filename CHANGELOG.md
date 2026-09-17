@@ -48,6 +48,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Oracle positive-control fixture and prompt defects that voided the second
+  live north-star grid (issue athenaeum#1759).** Run 35239792240
+  (2026-09-17 15:43Z, develop `af0596bb`) found `oracle` scoring
+  0.000–0.167 on `follow_through` and 0.333–0.667 on `multi_hop`, when the
+  positive control must grade at or near 1.0 on every gating class
+  (athenaeum#1753). Two distinct defects: `tests/evals/data/corpus/core/
+  10-follow-through.yaml` wrote `Internal reference code:` on all 12 of its
+  token lines instead of `Internal reference tag:`, the line
+  `REFERENCE_TAG_INSTRUCTION` names, so the class had nothing matching the
+  instruction to cite; and in 17 oracle cells outside `follow_through` the
+  model cited the page's frontmatter `uid:` instead of its tag, because the
+  `uid:` line rendered first and was the most identifier-shaped string on the
+  page. Fixed by renaming the 12 fixture lines, sharpening
+  `REFERENCE_TAG_INSTRUCTION` to state the tag is never the page's uid,
+  title, or filename, and rendering the tag line as its own bold final line
+  in `Page.to_markdown` while `Page.body` stays plain-text matchable for
+  `validate_core`, which now also checks that every `answer_tokens` value
+  occurs on an `Internal reference tag:` line of an expected page. See
+  `docs/design/native-memory-baseline.md` §5 for the void-run record; the
+  grid is re-dispatched manually after this lands, per athenaeum#1759 AC5.
+
 - **API-mode PULL arms now serve `read_entity` alongside `recall`, matching the
   tool surface the real MCP server gives a PULL session (issue
   athenaeum#1756).** The shipped server serves both; the eval harness's
